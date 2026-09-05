@@ -12,6 +12,8 @@ import { ProviderSessionRuntimeRepositoryLive } from "../persistence/Layers/Prov
 import { ProviderSupervisorRegistryLive } from "../providerSupervisor/ProviderSupervisorRegistry.ts";
 import { ServerConfig } from "../config.ts";
 import { ServerSettingsLive } from "../serverSettings.ts";
+import { ServerSecretStoreLive } from "../auth/Layers/ServerSecretStore.ts";
+import { SessionCredentialServiceLive } from "../auth/Layers/SessionCredentialService.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "../persistence/Layers/Sqlite.ts";
 import { RemoteProviderServiceLive } from "./RemoteProviderService.ts";
 import {
@@ -20,6 +22,11 @@ import {
 } from "./ProviderRuntimeInventory.ts";
 
 const PersistenceLayerLive = Layer.empty.pipe(Layer.provideMerge(SqlitePersistenceLayerLive));
+
+const ProviderMcpCredentialLayerLive = SessionCredentialServiceLive.pipe(
+  Layer.provide(PersistenceLayerLive),
+  Layer.provide(ServerSecretStoreLive),
+);
 
 const ProviderSessionDirectoryLayerLive = ProviderSessionDirectoryLive.pipe(
   Layer.provide(ProviderSessionRuntimeRepositoryLive),
@@ -60,6 +67,12 @@ export const ProviderDaemonRuntimeLive = Layer.unwrap(
 ).pipe(
   Layer.provideMerge(PersistenceLayerLive),
   Layer.provideMerge(ServerSettingsLive),
+  // Grok chat sessions need an owner bearer for Cafe's authenticated /mcp
+  // endpoint. Provider adapters normally live in this detached process, so it
+  // must issue/revoke credentials against the same SQLite + signing-secret
+  // stores as the main backend rather than relying on process-global backend
+  // state or sending a bearer through the provider command ledger.
+  Layer.provideMerge(ProviderMcpCredentialLayerLive),
   Layer.provideMerge(ProviderEventLoggersLive),
   Layer.provideMerge(OpenCodeRuntimeLive),
   Layer.provideMerge(FetchHttpClient.layer),

@@ -313,6 +313,111 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain("Work log");
   });
 
+  it("renders structured subagent identity, objective, live progress, status, and timing", async () => {
+    const { MessagesTimeline } = readMessagesTimelineModule();
+    const now = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-03-17T19:13:33.000Z"));
+
+    try {
+      const markup = renderToStaticMarkup(
+        <MessagesTimeline
+          {...buildProps()}
+          timelineEntries={[
+            {
+              id: "subagent-start",
+              kind: "work",
+              createdAt: "2026-03-17T19:12:28.000Z",
+              entry: {
+                id: "subagent-start",
+                createdAt: "2026-03-17T19:12:28.000Z",
+                label: "Locate footer label",
+                detail: "Find where the footer status label is assembled",
+                tone: "thinking",
+                itemType: "collab_agent_tool_call",
+                subagent: {
+                  id: "provider-child-locate-footer",
+                  label: "Locate footer label",
+                  objective: "Find where the footer status label is assembled",
+                  description: "Refining trigger label filtering",
+                  status: "active",
+                  startedAt: "2026-03-17T19:12:28.000Z",
+                },
+              },
+            },
+          ]}
+        />,
+      );
+
+      expect(markup).toContain('data-subagent-turn-group="true"');
+      expect(markup).not.toContain('data-work-log="true"');
+      expect(markup).toContain('data-subagent-work-row="true"');
+      expect(markup).toContain('data-subagent-description="true"');
+      expect(markup).toContain('<button type="button"');
+      expect(markup).toContain(
+        'aria-label="Locate footer label, Working. Refining trigger label filtering. Open details"',
+      );
+      expect(markup).toContain("Locate footer label");
+      // Both strings must be real row text. The provider's latest description
+      // is primary while the original objective remains visible beneath it;
+      // neither may regress into a hover-only title attribute.
+      expect(markup).toMatch(
+        /data-subagent-description="true"[^>]*>Refining trigger label filtering<\/p>[\s\S]*>Find where the footer status label is assembled<\/p>/,
+      );
+      expect(markup).not.toContain('title="Find where the footer status label is assembled"');
+      expect(markup).not.toContain('title="Refining trigger label filtering"');
+      expect(markup).toContain("Working");
+      expect(markup).toContain("1m 5s");
+      expect(markup).toContain("<svg");
+      expect(markup).toContain("data-palette=");
+      expect(markup).not.toContain('data-work-log-scroll="true"');
+      expect(markup).toContain("sm:size-8");
+      expect(markup).not.toContain("Subagent task");
+      expect(markup).not.toContain("provider-child-locate-footer");
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("renders a terminal subagent status with its frozen duration", async () => {
+    const { MessagesTimeline } = readMessagesTimelineModule();
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            id: "subagent-completed",
+            kind: "work",
+            createdAt: "2026-03-17T19:12:28.000Z",
+            entry: {
+              id: "subagent-completed",
+              createdAt: "2026-03-17T19:12:28.000Z",
+              label: "Audit chat pipeline",
+              detail: "Trace Codex child events",
+              tone: "info",
+              itemType: "collab_agent_tool_call",
+              subagent: {
+                id: "provider-child-audit-chat",
+                label: "Audit chat pipeline",
+                objective: "Trace Codex child events",
+                description: "Mapped the ingestion boundary",
+                status: "completed",
+                startedAt: "2026-03-17T19:12:28.000Z",
+                completedAt: "2026-03-17T19:13:33.000Z",
+              },
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(markup).toContain('<button type="button"');
+    expect(markup).toContain(
+      'aria-label="Audit chat pipeline, Done. Mapped the ingestion boundary. Open details"',
+    );
+    expect(markup).toContain("Mapped the ingestion boundary");
+    expect(markup).toContain("Done");
+    expect(markup).toContain("1m 5s");
+  });
+
   it("formats changed file paths from the workspace root", async () => {
     const { MessagesTimeline } = readMessagesTimelineModule();
     const markup = renderToStaticMarkup(

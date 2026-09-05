@@ -14,6 +14,7 @@ export const PROVIDER_PIPELINE_POLICY = {
   canonicalMaxDepth: 6,
   canonicalMaxObjectKeys: 64,
   canonicalMaxArrayItems: 64,
+  jsonResponseMaxBytes: 8 * 1024 * 1024,
   daemonReplayPageRecords: 128,
   daemonReplayPageBytes: 2 * 1024 * 1024,
   daemonWriterMaxRecords: 256,
@@ -47,6 +48,7 @@ export interface ProviderPipelinePolicy {
   readonly canonicalMaxDepth: number;
   readonly canonicalMaxObjectKeys: number;
   readonly canonicalMaxArrayItems: number;
+  readonly jsonResponseMaxBytes: number;
   readonly daemonReplayPageRecords: number;
   readonly daemonReplayPageBytes: number;
   readonly daemonWriterMaxRecords: number;

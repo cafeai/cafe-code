@@ -7,6 +7,7 @@ import * as Schema from "effect/Schema";
 
 import type { ProviderSessionRuntime } from "../../persistence/Services/ProviderSessionRuntime.ts";
 import { ProviderSessionRuntimeRepository } from "../../persistence/Services/ProviderSessionRuntime.ts";
+import { ProviderSubagentHistoryBindingConflictError } from "../../persistence/Errors.ts";
 import { ProviderSessionDirectoryPersistenceError, ProviderValidationError } from "../Errors.ts";
 import {
   ProviderSessionDirectory,
@@ -15,6 +16,9 @@ import {
   type ProviderSessionDirectoryShape,
 } from "../Services/ProviderSessionDirectory.ts";
 const decodeProviderDriverKindValue = Schema.decodeUnknownEffect(ProviderDriverKind);
+const isProviderSubagentHistoryBindingConflictError = Schema.is(
+  ProviderSubagentHistoryBindingConflictError,
+);
 
 function toPersistenceError(operation: string) {
   return (cause: unknown) =>
@@ -165,6 +169,13 @@ const makeProviderSessionDirectory = Effect.gen(function* () {
       ),
     );
 
+  const remove: ProviderSessionDirectoryShape["remove"] = (threadId) =>
+    repository
+      .deleteByThreadId({ threadId })
+      .pipe(
+        Effect.mapError(toPersistenceError("ProviderSessionDirectory.remove:deleteByThreadId")),
+      );
+
   const listThreadIds: ProviderSessionDirectoryShape["listThreadIds"] = () =>
     repository.list().pipe(
       Effect.mapError(toPersistenceError("ProviderSessionDirectory.listThreadIds:list")),
@@ -183,12 +194,40 @@ const makeProviderSessionDirectory = Effect.gen(function* () {
       ),
     );
 
+  const upsertSubagentHistoryBinding: ProviderSessionDirectoryShape["upsertSubagentHistoryBinding"] =
+    (binding) =>
+      repository
+        .upsertSubagentHistoryBinding(binding)
+        .pipe(
+          Effect.mapError((cause) =>
+            isProviderSubagentHistoryBindingConflictError(cause)
+              ? cause
+              : toPersistenceError("ProviderSessionDirectory.upsertSubagentHistoryBinding:upsert")(
+                  cause,
+                ),
+          ),
+        );
+
+  const getSubagentHistoryBinding: ProviderSessionDirectoryShape["getSubagentHistoryBinding"] = (
+    input,
+  ) =>
+    repository
+      .getSubagentHistoryBinding(input)
+      .pipe(
+        Effect.mapError(
+          toPersistenceError("ProviderSessionDirectory.getSubagentHistoryBinding:get"),
+        ),
+      );
+
   return {
     upsert,
+    remove,
     getProvider,
     getBinding,
     listThreadIds,
     listBindings,
+    upsertSubagentHistoryBinding,
+    getSubagentHistoryBinding,
   } satisfies ProviderSessionDirectoryShape;
 });
 

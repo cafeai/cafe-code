@@ -6,6 +6,7 @@ import {
   ProviderSendTurnInput,
   ProviderSession,
   ProviderSessionStartInput,
+  PROVIDER_SESSION_TITLE_MAX_CHARS,
 } from "./provider.ts";
 
 const decodeProviderSessionStartInput = Schema.decodeUnknownSync(ProviderSessionStartInput);
@@ -21,6 +22,24 @@ function getOptionValue(
 }
 
 describe("ProviderSessionStartInput", () => {
+  it("accepts optional native title metadata and rejects oversized labels", () => {
+    const input = {
+      threadId: "thread-1",
+      provider: "claudeAgent",
+      runtimeMode: "full-access",
+    };
+    expect(decodeProviderSessionStartInput(input).title).toBeUndefined();
+    expect(decodeProviderSessionStartInput({ ...input, title: "Cafe task" }).title).toBe(
+      "Cafe task",
+    );
+    expect(() =>
+      decodeProviderSessionStartInput({
+        ...input,
+        title: "x".repeat(PROVIDER_SESSION_TITLE_MAX_CHARS + 1),
+      }),
+    ).toThrow();
+  });
+
   it("accepts codex-compatible payloads", () => {
     const parsed = decodeProviderSessionStartInput({
       threadId: "thread-1",
@@ -136,6 +155,18 @@ describe("ProviderSendTurnInput", () => {
     expect(getOptionValue(parsed.modelSelection?.options, "fastMode")).toBe(true);
   });
 
+  it("accepts bounded send correlation and internal active-turn fallback policy", () => {
+    const parsed = decodeProviderSendTurnInput({
+      threadId: "thread-1",
+      messageId: "message-steer-1",
+      allowActiveTurnSteerFallback: false,
+      input: "recover this as a new turn only",
+    });
+
+    expect(parsed.messageId).toBe("message-steer-1");
+    expect(parsed.allowActiveTurnSteerFallback).toBe(false);
+  });
+
   it("accepts claude modelSelection including ultrathink", () => {
     const parsed = decodeProviderSendTurnInput({
       threadId: "thread-1",
@@ -186,6 +217,30 @@ describe("providerInstanceId routing key (slice-2 invariant)", () => {
       updatedAt: "2024-01-01T00:00:00Z",
     });
     expect(session.providerInstanceId).toBe("codex_work");
+  });
+
+  it("preserves the provider-owned effective model selection on a session", () => {
+    const session = decodeProviderSession({
+      provider: "grok",
+      providerInstanceId: "grok",
+      status: "ready",
+      runtimeMode: "full-access",
+      model: "grok-4.6",
+      modelSelection: {
+        instanceId: "grok",
+        model: "grok-4.6",
+        options: [{ id: "reasoningEffort", value: "low" }],
+      },
+      threadId: "thread-1",
+      createdAt: "2024-01-01T00:00:00Z",
+      updatedAt: "2024-01-01T00:00:00Z",
+    });
+
+    expect(session.modelSelection).toEqual({
+      instanceId: "grok",
+      model: "grok-4.6",
+      options: [{ id: "reasoningEffort", value: "low" }],
+    });
   });
 
   it("decodes ProviderSession for fork-provided driver kinds", () => {

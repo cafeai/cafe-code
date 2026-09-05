@@ -10,6 +10,7 @@ import * as NetService from "@cafecode/shared/Net";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Stream from "effect/Stream";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServer from "effect/unstable/http/HttpServer";
 import { FetchHttpClient } from "effect/unstable/http";
@@ -34,8 +35,30 @@ import {
 import { WorkspacePathsLive } from "./workspace/Layers/WorkspacePaths.ts";
 import { ServerSecretStoreLive } from "./auth/Layers/ServerSecretStore.ts";
 import { ServerAuthLive } from "./auth/Layers/ServerAuth.ts";
+import { ProviderService, type ProviderServiceShape } from "./provider/Services/ProviderService.ts";
 
 const CliRuntimeLayer = Layer.mergeAll(NodeServices.layer, NetService.layer, FetchHttpClient.layer);
+
+const cliTestProviderService = {
+  startSession: () => Effect.die("unexpected startSession"),
+  forkSession: () => Effect.die("unexpected forkSession"),
+  discardSessionFork: () => Effect.die("unexpected discardSessionFork"),
+  sendTurn: () => Effect.die("unexpected sendTurn"),
+  steerTurn: () => Effect.die("unexpected steerTurn"),
+  interruptTurn: () => Effect.die("unexpected interruptTurn"),
+  respondToRequest: () => Effect.die("unexpected respondToRequest"),
+  respondToUserInput: () => Effect.die("unexpected respondToUserInput"),
+  snoozeUserInput: () => Effect.die("unexpected snoozeUserInput"),
+  stopSession: () => Effect.die("unexpected stopSession"),
+  quiesceThreadForHardDelete: () => Effect.die("unexpected quiesceThreadForHardDelete"),
+  restartProviderRuntime: () => Effect.die("unexpected restartProviderRuntime"),
+  listSessions: () => Effect.succeed([]),
+  getCapabilities: () => Effect.die("unexpected getCapabilities"),
+  getInstanceInfo: () => Effect.die("unexpected getInstanceInfo"),
+  rollbackConversation: () => Effect.die("unexpected rollbackConversation"),
+  readSubagentDetail: () => Effect.die("unexpected readSubagentDetail"),
+  streamEvents: Stream.empty,
+} satisfies ProviderServiceShape;
 
 const runCli = (args: ReadonlyArray<string>) => Command.runWith(cli, { version: "0.0.0" })(args);
 const runCliWithRuntime = (args: ReadonlyArray<string>) =>
@@ -121,6 +144,7 @@ const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Ef
         ),
       ),
       Layer.provideMerge(makeProjectPersistenceLayer(config)),
+      Layer.provideMerge(Layer.succeed(ProviderService, cliTestProviderService)),
       Layer.provideMerge(
         NodeHttpServer.layer(NodeHttp.createServer, {
           host: "127.0.0.1",

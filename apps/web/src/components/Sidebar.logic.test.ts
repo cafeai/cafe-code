@@ -4,7 +4,6 @@ import { ProviderDriverKind } from "@cafecode/contracts";
 import {
   buildSidebarThreadContextMenuItems,
   createThreadJumpHintVisibilityController,
-  getSidebarThreadIdsToPrewarm,
   getVisibleSidebarThreadIds,
   isProjectDeleteRequiresForceError,
   resolveAdjacentThreadId,
@@ -19,6 +18,7 @@ import {
   resolveSidebarNewThreadEnvMode,
   resolveThreadStatusPill,
   shouldClearThreadSelectionOnMouseDown,
+  shouldInsetContentSidebarTrigger,
   sortProjectsForSidebar,
   THREAD_JUMP_HINT_SHOW_DELAY_MS,
 } from "./Sidebar.logic";
@@ -37,6 +37,39 @@ import {
 } from "../types";
 
 const localEnvironmentId = EnvironmentId.make("environment-local");
+
+describe("shouldInsetContentSidebarTrigger", () => {
+  it("reserves macOS traffic-light space only for desktop Electron", () => {
+    expect(
+      shouldInsetContentSidebarTrigger({
+        isElectronHost: true,
+        isMobile: false,
+        platform: "MacIntel",
+      }),
+    ).toBe(true);
+    expect(
+      shouldInsetContentSidebarTrigger({
+        isElectronHost: true,
+        isMobile: false,
+        platform: "Win32",
+      }),
+    ).toBe(false);
+    expect(
+      shouldInsetContentSidebarTrigger({
+        isElectronHost: false,
+        isMobile: false,
+        platform: "MacIntel",
+      }),
+    ).toBe(false);
+    expect(
+      shouldInsetContentSidebarTrigger({
+        isElectronHost: true,
+        isMobile: true,
+        platform: "MacIntel",
+      }),
+    ).toBe(false);
+  });
+});
 
 function makeLatestTurn(overrides?: {
   completedAt?: string | null;
@@ -127,20 +160,6 @@ describe("createThreadJumpHintVisibilityController", () => {
     vi.advanceTimersByTime(THREAD_JUMP_HINT_SHOW_DELAY_MS);
 
     expect(visibilityChanges).toEqual([]);
-  });
-});
-
-describe("getSidebarThreadIdsToPrewarm", () => {
-  it("returns only the first visible thread ids up to the prewarm limit", () => {
-    expect(getSidebarThreadIdsToPrewarm(["t1", "t2", "t3"], 2)).toEqual(["t1", "t2"]);
-  });
-
-  it("returns all visible thread ids when they fit within the limit", () => {
-    expect(getSidebarThreadIdsToPrewarm(["t1", "t2"], 10)).toEqual(["t1", "t2"]);
-  });
-
-  it("returns no thread ids when the limit is zero", () => {
-    expect(getSidebarThreadIdsToPrewarm(["t1", "t2"], 0)).toEqual([]);
   });
 });
 
@@ -487,7 +506,7 @@ describe("buildSidebarThreadContextMenuItems", () => {
     });
     expect(items.map((item) => item.id)).toEqual([
       "rename",
-      "duplicate",
+      "fork",
       "move",
       "copy-path",
       "copy-thread-id",
@@ -505,6 +524,19 @@ describe("buildSidebarThreadContextMenuItems", () => {
     expect(repairItem?.disabled).toBe(true);
   });
 
+  it("disables provider-native fork when the source is unsupported or unsettled", () => {
+    const forkItem = buildSidebarThreadContextMenuItems({
+      debugEnabled: false,
+      repairRunning: false,
+      forkDisabled: true,
+    }).find((item) => item.id === "fork");
+
+    expect(forkItem).toMatchObject({
+      label: "Fork thread",
+      disabled: true,
+    });
+  });
+
   it("hides thread repair outside debug mode", () => {
     const items = buildSidebarThreadContextMenuItems({
       debugEnabled: false,
@@ -514,7 +546,7 @@ describe("buildSidebarThreadContextMenuItems", () => {
     expect(items.some((item) => item.id === "repair-thread")).toBe(false);
     expect(items.map((item) => item.id)).toEqual([
       "rename",
-      "duplicate",
+      "fork",
       "move",
       "copy-path",
       "copy-thread-id",

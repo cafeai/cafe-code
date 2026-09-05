@@ -39,6 +39,7 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
@@ -78,6 +79,10 @@ import {
   ProviderJournalMessageRepair,
   type ProviderJournalMessageRepairShape,
 } from "./orchestration/Services/ProviderJournalMessageRepair.ts";
+import {
+  ProviderRuntimeIngestionService,
+  type ProviderRuntimeIngestionShape,
+} from "./orchestration/Services/ProviderRuntimeIngestion.ts";
 import { OrchestrationListenerCallbackError } from "./orchestration/Errors.ts";
 import {
   ProjectionSnapshotQuery,
@@ -456,6 +461,7 @@ const buildAppUnderTest = (options?: {
     vcsStatusBroadcaster?: Partial<VcsStatusBroadcaster.VcsStatusBroadcasterShape>;
     projectSetupScriptRunner?: Partial<ProjectSetupScriptRunnerShape>;
     orchestrationEngine?: Partial<OrchestrationEngineShape>;
+    providerRuntimeIngestion?: Partial<ProviderRuntimeIngestionShape>;
     providerJournalMessageRepair?: Partial<ProviderJournalMessageRepairShape>;
     projectionSnapshotQuery?: Partial<ProjectionSnapshotQueryShape>;
     checkpointStore?: Partial<CheckpointStoreShape>;
@@ -668,6 +674,7 @@ const buildAppUnderTest = (options?: {
           respondToRequest: () => Effect.die("unexpected respondToRequest"),
           respondToUserInput: () => Effect.die("unexpected respondToUserInput"),
           stopSession: () => Effect.die("unexpected stopSession"),
+          quiesceThreadForHardDelete: () => Effect.die("unexpected quiesceThreadForHardDelete"),
           restartProviderRuntime: (input) =>
             Effect.succeed({
               instanceId: input.instanceId,
@@ -688,6 +695,7 @@ const buildAppUnderTest = (options?: {
               },
             }),
           rollbackConversation: () => Effect.die("unexpected rollbackConversation"),
+          readSubagentDetail: () => Effect.die("unexpected readSubagentDetail"),
           streamEvents: Stream.empty,
           ...options?.layers?.providerService,
         }),
@@ -714,8 +722,25 @@ const buildAppUnderTest = (options?: {
           }),
           Layer.mock(UsageStatsService)({
             get: Effect.succeed({
-              totals: { generatingMs: 0, outputTokens: 0, userMessages: 0 },
-              today: { day: "1970-01-01", generatingMs: 0, outputTokens: 0, userMessages: 0 },
+              totals: {
+                generatingMs: 0,
+                outputTokens: 0,
+                userMessages: 0,
+                inputTokens: 0,
+                cachedInputTokens: 0,
+                cacheWriteInputTokens: 0,
+                reasoningOutputTokens: 0,
+              },
+              today: {
+                day: "1970-01-01",
+                generatingMs: 0,
+                outputTokens: 0,
+                userMessages: 0,
+                inputTokens: 0,
+                cachedInputTokens: 0,
+                cacheWriteInputTokens: 0,
+                reasoningOutputTokens: 0,
+              },
               activeSessionCount: 0,
               collectionEnabled: true,
               asOfMs: 0,
@@ -723,8 +748,25 @@ const buildAppUnderTest = (options?: {
               tokenBreakdown: [],
             }),
             snapshot: Effect.succeed({
-              totals: { generatingMs: 0, outputTokens: 0, userMessages: 0 },
-              today: { day: "1970-01-01", generatingMs: 0, outputTokens: 0, userMessages: 0 },
+              totals: {
+                generatingMs: 0,
+                outputTokens: 0,
+                userMessages: 0,
+                inputTokens: 0,
+                cachedInputTokens: 0,
+                cacheWriteInputTokens: 0,
+                reasoningOutputTokens: 0,
+              },
+              today: {
+                day: "1970-01-01",
+                generatingMs: 0,
+                outputTokens: 0,
+                userMessages: 0,
+                inputTokens: 0,
+                cachedInputTokens: 0,
+                cacheWriteInputTokens: 0,
+                reasoningOutputTokens: 0,
+              },
               activeSessionCount: 0,
               collectionEnabled: true,
               asOfMs: 0,
@@ -827,8 +869,17 @@ const buildAppUnderTest = (options?: {
           Layer.mock(OrchestrationEngineService)({
             readEvents: () => Stream.empty,
             dispatch: () => Effect.succeed({ sequence: 0 }),
+            retireThreadForHardDelete: () => Effect.void,
+            purgeHardDeletedThread: () => Effect.succeed({ deleted: true as const }),
             streamDomainEvents: Stream.empty,
             ...options?.layers?.orchestrationEngine,
+          }),
+          Layer.mock(ProviderRuntimeIngestionService)({
+            start: () => Effect.void,
+            drain: Effect.void,
+            retireThreadForHardDelete: () => Effect.void,
+            completeThreadHardDelete: () => Effect.void,
+            ...options?.layers?.providerRuntimeIngestion,
           }),
           Layer.mock(ProviderJournalMessageRepair)({
             repairAssistantMessage: (input) =>
@@ -890,9 +941,11 @@ const buildAppUnderTest = (options?: {
           getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 0 }),
           getProjectShellById: () => Effect.succeed(Option.none()),
           getThreadShellById: () => Effect.succeed(Option.none()),
+          getPostTerminalStaleSteerCandidates: () => Effect.succeed([]),
           getPostTerminalStaleSteerCandidateThreadIds: () => Effect.succeed([]),
           getThreadTurnActivityPage: () => Effect.die("unused"),
           getThreadTurnWorkLogPresence: () => Effect.die("unused"),
+          hasThreadTurnSubagentActivity: () => Effect.die("unused"),
           getThreadDetailById: () => Effect.succeed(Option.none()),
           getThreadDetailSnapshotById: () => Effect.succeed(Option.none()),
           getCounts: () => Effect.succeed({ projectCount: 0, threadCount: 0 }),
@@ -1328,6 +1381,7 @@ const assertBrowserApiCorsHeaders = (headers: HeaderBag) => {
     "authorization",
     "b3",
     "content-type",
+    "mcp-protocol-version",
     "traceparent",
   ]);
 };
@@ -1351,6 +1405,89 @@ const getWsServerUrl = (
   });
 
 it.layer(NodeServices.layer)("server router seam", (it) => {
+  it.effect("requires an authenticated owner session for POST /mcp", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+
+      const response = yield* HttpClient.post("/mcp", {
+        headers: {
+          accept: "application/json, text/event-stream",
+          "content-type": "application/json",
+        },
+        body: HttpBody.jsonUnsafe({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-06-18",
+            capabilities: {},
+            clientInfo: { name: "server-test", version: "1.0.0" },
+          },
+        }),
+      });
+
+      assert.equal(response.status, 401);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("serves the authenticated stateless Cafe Code MCP endpoint", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+      const bearerToken = yield* getAuthenticatedBearerSessionToken();
+
+      const response = yield* HttpClient.post("/mcp", {
+        headers: {
+          accept: "application/json, text/event-stream",
+          authorization: `Bearer ${bearerToken}`,
+          "content-type": "application/json",
+        },
+        body: HttpBody.jsonUnsafe({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-06-18",
+            capabilities: {},
+            clientInfo: { name: "server-test", version: "1.0.0" },
+          },
+        }),
+      });
+      const body = (yield* response.json) as {
+        readonly result?: { readonly serverInfo?: { readonly name?: string } };
+      };
+
+      assert.equal(response.status, 200);
+      assert.equal(body.result?.serverInfo?.name, "cafe-code");
+
+      // Stateless mode creates a fresh transport for every authenticated
+      // request, so verify a real follow-up MCP operation does not depend on
+      // in-memory initialization state from the first request.
+      const toolsResponse = yield* HttpClient.post("/mcp", {
+        headers: {
+          accept: "application/json, text/event-stream",
+          authorization: `Bearer ${bearerToken}`,
+          "content-type": "application/json",
+          "mcp-protocol-version": "2025-06-18",
+        },
+        body: HttpBody.jsonUnsafe({
+          jsonrpc: "2.0",
+          id: 2,
+          method: "tools/list",
+          params: {},
+        }),
+      });
+      const toolsBody = (yield* toolsResponse.json) as {
+        readonly result?: { readonly tools?: ReadonlyArray<{ readonly name?: string }> };
+      };
+
+      assert.equal(toolsResponse.status, 200);
+      assert.equal(
+        toolsBody.result?.tools?.some((tool) => tool.name === "send_message"),
+        true,
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("serves static index content for GET / when staticDir is configured", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -2468,6 +2605,254 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
   );
 
+  it.effect("manages dictation credentials without returning the permanent key", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+      const { cookie } = yield* bootstrapBrowserSession();
+      assert.isDefined(cookie);
+      const wsUrl = appendSessionCookieToWsUrl(
+        yield* getWsServerUrl("/ws", { authenticated: false }),
+        cookie?.split(";")[0] ?? "",
+      );
+      const permanentKey = "sk-websocket-secret-must-not-return";
+      const states = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.gen(function* () {
+            const initial = yield* client[WS_METHODS.dictationGetStatus]({});
+            const configured = yield* client[WS_METHODS.dictationSetApiKey]({
+              apiKey: permanentKey,
+            });
+            const reread = yield* client[WS_METHODS.dictationGetStatus]({});
+            const cleared = yield* client[WS_METHODS.dictationClearApiKey]({});
+            return { initial, configured, reread, cleared };
+          }),
+        ),
+      );
+
+      assert.deepStrictEqual(states.initial, { configured: false, canManage: true });
+      assert.deepStrictEqual(states.configured, { configured: true, canManage: true });
+      assert.deepStrictEqual(states.reread, { configured: true, canManage: true });
+      assert.deepStrictEqual(states.cleared, { configured: false, canManage: true });
+      assert.notInclude(JSON.stringify(states), permanentKey);
+    }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
+  );
+
+  it.effect("orders the hard-delete RPC across provider, ingestion, and engine barriers", () =>
+    Effect.gen(function* () {
+      const calls: string[] = [];
+      yield* buildAppUnderTest({
+        layers: {
+          providerService: {
+            quiesceThreadForHardDelete: () =>
+              Effect.sync(() => {
+                calls.push("provider-quiesced");
+              }),
+          },
+          providerRuntimeIngestion: {
+            retireThreadForHardDelete: () =>
+              Effect.sync(() => {
+                calls.push("ingestion-retired-and-drained");
+              }),
+            completeThreadHardDelete: () =>
+              Effect.sync(() => {
+                calls.push("ingestion-confirmed");
+              }),
+          },
+          orchestrationEngine: {
+            retireThreadForHardDelete: () =>
+              Effect.sync(() => {
+                calls.push("engine-tombstoned");
+              }),
+            purgeHardDeletedThread: () =>
+              Effect.sync(() => {
+                calls.push("engine-purged");
+                return { deleted: true as const };
+              }),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const result = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.hardDeleteThread]({
+            threadId: ThreadId.make("thread-hard-delete-order"),
+          }),
+        ),
+      );
+
+      assert.deepEqual(result, { deleted: true });
+      assert.deepEqual(calls, [
+        "provider-quiesced",
+        "ingestion-retired-and-drained",
+        "engine-tombstoned",
+        "engine-purged",
+        "ingestion-confirmed",
+      ]);
+    }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
+  );
+
+  it.effect(
+    "does not read provider subagent history without an exact durable activity binding",
+    () =>
+      Effect.gen(function* () {
+        const readSubagentDetail = vi.fn(
+          (_input: { threadId: ThreadId; turnId: TurnId; subagentId: string }) =>
+            Effect.succeed({
+              provider: ProviderDriverKind.make("codex"),
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              messages: [{ key: "m0", role: "assistant" as const, text: "must not be returned" }],
+              gaps: [],
+              truncated: false,
+            }),
+        );
+        yield* buildAppUnderTest({
+          layers: {
+            projectionSnapshotQuery: {
+              hasThreadTurnSubagentActivity: () => Effect.succeed(false),
+            },
+            providerService: { readSubagentDetail },
+          },
+        });
+
+        const wsUrl = yield* getWsServerUrl("/ws");
+        const result = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[ORCHESTRATION_WS_METHODS.getThreadTurnSubagentDetail]({
+              threadId: ThreadId.make("thread-1"),
+              turnId: TurnId.make("turn-1"),
+              subagentId: "provider-child-unbound",
+            }),
+          ).pipe(Effect.exit),
+        );
+
+        assert.equal(Exit.isFailure(result), true);
+        assert.equal(readSubagentDetail.mock.calls.length, 0);
+      }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
+  );
+
+  it.effect("returns only canonical verified subagent text over the authenticated RPC", () =>
+    Effect.gen(function* () {
+      const readSubagentDetail = vi.fn(
+        (_input: { threadId: ThreadId; turnId: TurnId; subagentId: string; historyId?: string }) =>
+          Effect.succeed({
+            provider: ProviderDriverKind.make("codex"),
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            messages: [
+              { key: "m0", role: "user" as const, text: "Audit the provider" },
+              { key: "m8", role: "assistant" as const, text: "## Result\n\nComplete." },
+            ],
+            gaps: [{ afterMessageKey: "m0", omittedMessages: 7, omittedUtf8Bytes: 1_024 }],
+            truncated: true,
+          }),
+      );
+      const hasThreadTurnSubagentActivity = vi.fn(
+        (input: {
+          threadId: ThreadId;
+          turnId: TurnId;
+          subagentId: string;
+          historyId?: string | undefined;
+        }) => Effect.succeed(input.historyId === "history-bound"),
+      );
+      yield* buildAppUnderTest({
+        layers: {
+          projectionSnapshotQuery: {
+            hasThreadTurnSubagentActivity,
+          },
+          providerService: { readSubagentDetail },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const detail = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.getThreadTurnSubagentDetail]({
+            threadId: ThreadId.make("thread-1"),
+            turnId: TurnId.make("turn-1"),
+            subagentId: "provider-child-bound",
+            historyId: "history-bound",
+          }),
+        ),
+      );
+
+      assert.deepEqual(detail, {
+        provider: ProviderDriverKind.make("codex"),
+        messages: [
+          { key: "m0", role: "user", text: "Audit the provider" },
+          { key: "m8", role: "assistant", text: "## Result\n\nComplete." },
+        ],
+        gaps: [{ afterMessageKey: "m0", omittedMessages: 7, omittedUtf8Bytes: 1_024 }],
+        truncated: true,
+      });
+      assert.deepEqual(hasThreadTurnSubagentActivity.mock.calls[0]?.[0], {
+        threadId: ThreadId.make("thread-1"),
+        turnId: TurnId.make("turn-1"),
+        subagentId: "provider-child-bound",
+        historyId: "history-bound",
+      });
+      assert.deepEqual(readSubagentDetail.mock.calls[0]?.[0], {
+        threadId: ThreadId.make("thread-1"),
+        turnId: TurnId.make("turn-1"),
+        subagentId: "provider-child-bound",
+        historyId: "history-bound",
+      });
+    }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
+  );
+
+  it.effect("returns canonical Claude subagent detail over the provider-neutral RPC", () =>
+    Effect.gen(function* () {
+      const readSubagentDetail = vi.fn(
+        (_input: { threadId: ThreadId; turnId: TurnId; subagentId: string; historyId?: string }) =>
+          Effect.succeed({
+            provider: ProviderDriverKind.make("claudeAgent"),
+            providerInstanceId: ProviderInstanceId.make("claude-primary"),
+            messages: [
+              { key: "m0", role: "user" as const, text: "Review the Claude child" },
+              { key: "m1", role: "assistant" as const, text: "Review complete." },
+            ],
+            gaps: [],
+            truncated: false,
+          }),
+      );
+      yield* buildAppUnderTest({
+        layers: {
+          projectionSnapshotQuery: {
+            hasThreadTurnSubagentActivity: () => Effect.succeed(true),
+          },
+          providerService: { readSubagentDetail },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const detail = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.getThreadTurnSubagentDetail]({
+            threadId: ThreadId.make("thread-claude"),
+            turnId: TurnId.make("turn-claude"),
+            subagentId: "claude-task-1",
+            historyId: "claude-agent-1",
+          }),
+        ),
+      );
+
+      assert.deepEqual(detail, {
+        provider: ProviderDriverKind.make("claudeAgent"),
+        messages: [
+          { key: "m0", role: "user", text: "Review the Claude child" },
+          { key: "m1", role: "assistant", text: "Review complete." },
+        ],
+        gaps: [],
+        truncated: false,
+      });
+      assert.deepEqual(readSubagentDetail.mock.calls[0]?.[0], {
+        threadId: ThreadId.make("thread-claude"),
+        turnId: TurnId.make("turn-claude"),
+        subagentId: "claude-task-1",
+        historyId: "claude-agent-1",
+      });
+    }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
+  );
+
   it.effect("negotiates websocket compression and carries a large RPC response", () =>
     Effect.gen(function* () {
       const largeEnvironmentLabel = `Production transport ${"payload-".repeat(768)}`;
@@ -2998,6 +3383,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         "authorization",
         "b3",
         "content-type",
+        "mcp-protocol-version",
         "traceparent",
       ]);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
@@ -4094,72 +4480,71 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
-  it.effect(
-    "refreshes Codex account usage without a full provider probe after prompt dispatch",
-    () =>
-      Effect.gen(function* () {
-        const usageRefresh = yield* Deferred.make<ProviderInstanceId>();
-        const fullRefreshCalls = yield* Ref.make(0);
-        const provider = {
-          instanceId: defaultModelSelection.instanceId,
-          driver: ProviderDriverKind.make("codex"),
-          enabled: true,
-          installed: true,
-          version: "0.145.0",
-          status: "ready" as const,
-          auth: { status: "authenticated" as const, type: "chatgpt" as const },
-          checkedAt: "2026-01-01T00:00:00.000Z",
-          models: [],
-          slashCommands: [],
-          skills: [],
-        };
+  for (const usageDriver of ["codex", "grok"] as const) {
+    it.effect(
+      `does not refresh ${usageDriver} account usage before a dispatched prompt settles`,
+      () =>
+        Effect.gen(function* () {
+          const usageRefreshCalls = yield* Ref.make(0);
+          const fullRefreshCalls = yield* Ref.make(0);
+          const provider = {
+            instanceId: defaultModelSelection.instanceId,
+            driver: ProviderDriverKind.make(usageDriver),
+            enabled: true,
+            installed: true,
+            version: "0.145.0",
+            status: "ready" as const,
+            auth: { status: "authenticated" as const, type: "chatgpt" as const },
+            checkedAt: "2026-01-01T00:00:00.000Z",
+            models: [],
+            slashCommands: [],
+            skills: [],
+          };
 
-        yield* buildAppUnderTest({
-          layers: {
-            providerRegistry: {
-              getProviders: Effect.succeed([provider]),
-              refreshInstance: () =>
-                Ref.update(fullRefreshCalls, (count) => count + 1).pipe(Effect.as([provider])),
-              refreshInstanceAccountUsage: (instanceId) =>
-                Deferred.succeed(usageRefresh, instanceId).pipe(
-                  Effect.ignore,
-                  Effect.as([provider]),
-                ),
-            },
-            orchestrationEngine: {
-              dispatch: () => Effect.succeed({ sequence: 8 }),
-              readEvents: () => Stream.empty,
-            },
-          },
-        });
-
-        const wsUrl = yield* getWsServerUrl("/ws");
-        const createdAt = "2026-01-01T00:00:00.000Z";
-        const result = yield* Effect.scoped(
-          withWsRpcClient(wsUrl, (client) =>
-            client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
-              type: "thread.turn.start",
-              commandId: CommandId.make("cmd-prompt-usage-refresh"),
-              threadId: defaultThreadId,
-              message: {
-                messageId: MessageId.make("msg-prompt-usage-refresh"),
-                role: "user",
-                text: "hello",
-                attachments: [],
+          yield* buildAppUnderTest({
+            layers: {
+              providerRegistry: {
+                getProviders: Effect.succeed([provider]),
+                refreshInstance: () =>
+                  Ref.update(fullRefreshCalls, (count) => count + 1).pipe(Effect.as([provider])),
+                refreshInstanceAccountUsage: () =>
+                  Ref.update(usageRefreshCalls, (count) => count + 1).pipe(Effect.as([provider])),
               },
-              modelSelection: defaultModelSelection,
-              runtimeMode: "full-access",
-              interactionMode: "default",
-              createdAt,
-            }),
-          ),
-        );
+              orchestrationEngine: {
+                dispatch: () => Effect.succeed({ sequence: 8 }),
+                readEvents: () => Stream.empty,
+              },
+            },
+          });
 
-        assert.equal(result.sequence, 8);
-        assert.equal(yield* Deferred.await(usageRefresh), defaultModelSelection.instanceId);
-        assert.equal(yield* Ref.get(fullRefreshCalls), 0);
-      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
-  );
+          const wsUrl = yield* getWsServerUrl("/ws");
+          const createdAt = "2026-01-01T00:00:00.000Z";
+          const result = yield* Effect.scoped(
+            withWsRpcClient(wsUrl, (client) =>
+              client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+                type: "thread.turn.start",
+                commandId: CommandId.make("cmd-prompt-usage-refresh"),
+                threadId: defaultThreadId,
+                message: {
+                  messageId: MessageId.make("msg-prompt-usage-refresh"),
+                  role: "user",
+                  text: "hello",
+                  attachments: [],
+                },
+                modelSelection: defaultModelSelection,
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                createdAt,
+              }),
+            ),
+          );
+
+          assert.equal(result.sequence, 8);
+          assert.equal(yield* Ref.get(usageRefreshCalls), 0);
+          assert.equal(yield* Ref.get(fullRefreshCalls), 0);
+        }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    );
+  }
 
   it.effect("filters thread subscription events already covered by the snapshot", () =>
     Effect.gen(function* () {

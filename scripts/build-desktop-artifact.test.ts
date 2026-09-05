@@ -14,6 +14,7 @@ import {
   resolveDesktopUpdateChannel,
   resolveGitHubPublishConfig,
   resolveLinuxDesktopBuildConfig,
+  resolveMacDesktopBuildConfig,
   resolveManagedWindowsNodeArchive,
   resolveMockUpdateServerPort,
   resolveMockUpdateServerUrl,
@@ -146,6 +147,22 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           "libasound2t64 | libasound2",
         ],
         recommends: [],
+      },
+    });
+  });
+
+  it("declares why packaged macOS builds request microphone access", () => {
+    assert.deepStrictEqual(resolveMacDesktopBuildConfig("dmg", false), {
+      mac: {
+        target: ["dmg", "zip"],
+        icon: "icon.icns",
+        category: "public.app-category.developer-tools",
+        extendInfo: {
+          NSMicrophoneUsageDescription:
+            "Cafe Code uses microphone audio only when you start dictation.",
+        },
+        identity: null,
+        hardenedRuntime: false,
       },
     });
   });

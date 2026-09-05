@@ -13,6 +13,7 @@ import type {
   MessageId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderThreadGoal,
   CheckpointRef,
   ProviderInteractionMode,
   RuntimeMode,
@@ -108,6 +109,7 @@ export interface Thread {
   worktreePath: string | null;
   turnDiffSummaries: TurnDiffSummary[];
   activities: OrchestrationThreadActivity[];
+  goal?: ProviderThreadGoal | null;
 }
 
 export interface ThreadShell {

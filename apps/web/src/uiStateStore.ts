@@ -24,7 +24,9 @@ export interface PersistedUiState {
   projectOrderCwds?: string[];
   defaultAdvertisedEndpointKey?: string | null;
   navigationSidebarOpen?: boolean;
+  threadLastVisitedAtById?: Record<string, string>;
   threadPlanSidebarOpenById?: Record<string, boolean>;
+  sessionRailDocked?: boolean;
 }
 
 export interface UiProjectState {
@@ -51,8 +53,18 @@ export interface UiNavigationState {
   navigationSidebarOpen: boolean;
 }
 
+export interface UiSessionRailState {
+  /**
+   * Global composer-vs-side placement for the current-turn checklist,
+   * active subagents, and context/quota details. This is a layout
+   * preference, not the authored-plan sidebar, and it must not be
+   * inferred from `autoOpenPlanSidebar` or per-thread plan state.
+   */
+  sessionRailDocked: boolean;
+}
+
 export interface UiState
-  extends UiProjectState, UiThreadState, UiEndpointState, UiNavigationState {}
+  extends UiProjectState, UiThreadState, UiEndpointState, UiNavigationState, UiSessionRailState {}
 
 export interface SyncProjectInput {
   /** Physical project key (env + cwd). Used for manual sort order. */
@@ -74,6 +86,7 @@ const initialState: UiState = {
   threadPlanSidebarOpenById: {},
   defaultAdvertisedEndpointKey: null,
   navigationSidebarOpen: true,
+  sessionRailDocked: false,
 };
 
 const persistedCollapsedProjectCwds = new Set<string>();
@@ -89,6 +102,15 @@ const currentProjectCwdsByLogicalKey = new Map<string, string[]>();
 const currentLogicalKeyByPhysicalKey = new Map<string, string>();
 let legacyKeysCleanedUp = false;
 
+// Renderer storage is user-controlled input. Keep the persisted read-cursor
+// map bounded so a corrupt profile cannot turn startup hydration into
+// unbounded allocation or timestamp parsing work. Normal scoped thread keys
+// are far below this limit, and syncThreads prunes records for deleted threads
+// after the authoritative shell snapshot arrives.
+const MAX_PERSISTED_THREAD_VISIT_ENTRIES = 10_000;
+const MAX_PERSISTED_THREAD_KEY_LENGTH = 512;
+const MAX_PERSISTED_TIMESTAMP_LENGTH = 64;
+
 function readPersistedState(): UiState {
   if (typeof window === "undefined") {
     return initialState;
@@ -101,27 +123,46 @@ function readPersistedState(): UiState {
         if (!legacyRaw) {
           continue;
         }
-        hydratePersistedProjectState(JSON.parse(legacyRaw) as PersistedUiState);
-        return initialState;
+        return hydratePersistedUiState(JSON.parse(legacyRaw) as PersistedUiState);
       }
       return initialState;
     }
     const parsed = JSON.parse(raw) as PersistedUiState;
-    hydratePersistedProjectState(parsed);
-    return {
-      ...initialState,
-      defaultAdvertisedEndpointKey:
-        typeof parsed.defaultAdvertisedEndpointKey === "string" &&
-        parsed.defaultAdvertisedEndpointKey.length > 0
-          ? parsed.defaultAdvertisedEndpointKey
-          : null,
-      navigationSidebarOpen:
-        typeof parsed.navigationSidebarOpen === "boolean" ? parsed.navigationSidebarOpen : true,
-      threadPlanSidebarOpenById: sanitizeBooleanRecord(parsed.threadPlanSidebarOpenById),
-    };
+    return hydratePersistedUiState(parsed);
   } catch {
     return initialState;
   }
+}
+
+function sanitizeThreadVisitRecord(input: unknown): Record<string, string> {
+  if (input === null || typeof input !== "object" || Array.isArray(input)) {
+    return {};
+  }
+
+  const sanitizedEntries: Array<[string, string]> = [];
+  let inspected = 0;
+  for (const threadKey in input as Record<string, unknown>) {
+    if (inspected >= MAX_PERSISTED_THREAD_VISIT_ENTRIES) {
+      break;
+    }
+    inspected += 1;
+    if (!Object.hasOwn(input, threadKey)) {
+      continue;
+    }
+    const visitedAt = (input as Record<string, unknown>)[threadKey];
+    if (
+      threadKey.length === 0 ||
+      threadKey.length > MAX_PERSISTED_THREAD_KEY_LENGTH ||
+      typeof visitedAt !== "string" ||
+      visitedAt.length === 0 ||
+      visitedAt.length > MAX_PERSISTED_TIMESTAMP_LENGTH ||
+      !Number.isFinite(Date.parse(visitedAt))
+    ) {
+      continue;
+    }
+    sanitizedEntries.push([threadKey, visitedAt]);
+  }
+  return Object.fromEntries(sanitizedEntries);
 }
 
 function sanitizeBooleanRecord(input: unknown): Record<string, boolean> {
@@ -133,6 +174,29 @@ function sanitizeBooleanRecord(input: unknown): Record<string, boolean> {
       (entry): entry is [string, boolean] => entry[0].length > 0 && typeof entry[1] === "boolean",
     ),
   );
+}
+
+/**
+ * Decode the durable renderer preferences used during a fresh application
+ * startup. In particular, completed-turn read cursors must be restored before
+ * sidebar status derivation runs; otherwise every completed turn appears new
+ * after each restart even though the user already opened it.
+ */
+export function hydratePersistedUiState(parsed: PersistedUiState): UiState {
+  hydratePersistedProjectState(parsed);
+  return {
+    ...initialState,
+    defaultAdvertisedEndpointKey:
+      typeof parsed.defaultAdvertisedEndpointKey === "string" &&
+      parsed.defaultAdvertisedEndpointKey.length > 0
+        ? parsed.defaultAdvertisedEndpointKey
+        : null,
+    navigationSidebarOpen:
+      typeof parsed.navigationSidebarOpen === "boolean" ? parsed.navigationSidebarOpen : true,
+    threadLastVisitedAtById: sanitizeThreadVisitRecord(parsed.threadLastVisitedAtById),
+    threadPlanSidebarOpenById: sanitizeBooleanRecord(parsed.threadPlanSidebarOpenById),
+    sessionRailDocked: parsed.sessionRailDocked === true,
+  };
 }
 
 export function hydratePersistedProjectState(parsed: PersistedUiState): void {
@@ -183,7 +247,9 @@ export function persistState(state: UiState): void {
         projectOrderCwds,
         defaultAdvertisedEndpointKey: state.defaultAdvertisedEndpointKey,
         navigationSidebarOpen: state.navigationSidebarOpen,
+        threadLastVisitedAtById: state.threadLastVisitedAtById,
         threadPlanSidebarOpenById: state.threadPlanSidebarOpenById,
+        sessionRailDocked: state.sessionRailDocked,
       } satisfies PersistedUiState),
     );
     if (!legacyKeysCleanedUp) {
@@ -511,6 +577,16 @@ export function setNavigationSidebarOpen(state: UiState, open: boolean): UiState
   };
 }
 
+export function setSessionRailDocked(state: UiState, docked: boolean): UiState {
+  if (state.sessionRailDocked === docked) {
+    return state;
+  }
+  return {
+    ...state,
+    sessionRailDocked: docked,
+  };
+}
+
 export function toggleProject(state: UiState, projectId: string): UiState {
   const expanded = state.projectExpandedById[projectId] ?? true;
   return {
@@ -587,6 +663,7 @@ interface UiStateStore extends UiState {
   setThreadPlanSidebarOpen: (threadId: string, open: boolean) => void;
   setDefaultAdvertisedEndpointKey: (key: string | null) => void;
   setNavigationSidebarOpen: (open: boolean) => void;
+  setSessionRailDocked: (docked: boolean) => void;
   toggleProject: (projectId: string) => void;
   setProjectExpanded: (projectId: string, expanded: boolean) => void;
   reorderProjects: (
@@ -609,6 +686,7 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
   setDefaultAdvertisedEndpointKey: (key) =>
     set((state) => setDefaultAdvertisedEndpointKey(state, key)),
   setNavigationSidebarOpen: (open) => set((state) => setNavigationSidebarOpen(state, open)),
+  setSessionRailDocked: (docked) => set((state) => setSessionRailDocked(state, docked)),
   toggleProject: (projectId) => set((state) => toggleProject(state, projectId)),
   setProjectExpanded: (projectId, expanded) =>
     set((state) => setProjectExpanded(state, projectId, expanded)),

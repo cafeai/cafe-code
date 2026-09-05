@@ -129,14 +129,18 @@ export type ModelCapabilities = typeof ModelCapabilities.Type;
 
 const CODEX_DRIVER_KIND = ProviderDriverKind.make("codex");
 const CLAUDE_DRIVER_KIND = ProviderDriverKind.make("claudeAgent");
+const GROK_DRIVER_KIND = ProviderDriverKind.make("grok");
 const OPENCODE_DRIVER_KIND = ProviderDriverKind.make("opencode");
 
-export const DEFAULT_MODEL = "gpt-5.6-sol";
+// Codex rust-v0.153.4's bundled catalog defaults to Astra. This is only the
+// missing-selection fallback; explicit project/thread model slugs are retained.
+export const DEFAULT_MODEL = "gpt-6-astra";
 export const DEFAULT_GIT_TEXT_GENERATION_MODEL = "gpt-5.4-mini";
 
 export const DEFAULT_MODEL_BY_PROVIDER: Partial<Record<ProviderDriverKind, string>> = {
   [CODEX_DRIVER_KIND]: DEFAULT_MODEL,
   [CLAUDE_DRIVER_KIND]: "claude-sonnet-5",
+  [GROK_DRIVER_KIND]: "grok-build",
   [OPENCODE_DRIVER_KIND]: "openai/gpt-5.4",
 };
 
@@ -146,6 +150,7 @@ export const DEFAULT_GIT_TEXT_GENERATION_MODEL_BY_PROVIDER: Partial<
 > = {
   [CODEX_DRIVER_KIND]: DEFAULT_GIT_TEXT_GENERATION_MODEL,
   [CLAUDE_DRIVER_KIND]: "claude-haiku-4-5",
+  [GROK_DRIVER_KIND]: "grok-build",
   [OPENCODE_DRIVER_KIND]: "openai/gpt-5.4-mini",
 };
 
@@ -166,13 +171,27 @@ export const MODEL_SLUG_ALIASES_BY_PROVIDER: Partial<
     "gpt-5.3-spark": "gpt-5.3-codex-spark",
   },
   [CLAUDE_DRIVER_KIND]: {
+    default: "claude-opus-5",
+    opus: "claude-opus-5",
+    opus5: "claude-opus-5",
+    "opus-5": "claude-opus-5",
+    opus_5: "claude-opus-5",
+    "claude-opus-5[1m]": "claude-opus-5",
+    "opus[1m]": "claude-opus-5",
+    "fable-5.1": "claude-fable-5-1",
+    "claude-fable-5.1": "claude-fable-5-1",
+    "fable-5-1": "claude-fable-5-1",
+    "fable5.1": "claude-fable-5-1",
+    fable51: "claude-fable-5-1",
+    fable_5_1: "claude-fable-5-1",
+    "claude-fable-5-1[1m]": "claude-fable-5-1",
+    "fable-5-1[1m]": "claude-fable-5-1",
     fable: "claude-fable-5",
     "fable-5": "claude-fable-5",
     fable5: "claude-fable-5",
     fable_5: "claude-fable-5",
     "claude-fable-5[1m]": "claude-fable-5",
     "fable[1m]": "claude-fable-5",
-    opus: "claude-opus-4-8",
     "opus-4.8": "claude-opus-4-8",
     "claude-opus-4.8": "claude-opus-4-8",
     "opus-4.7": "claude-opus-4-7",
@@ -200,5 +219,6 @@ export const MODEL_SLUG_ALIASES_BY_PROVIDER: Partial<
 export const PROVIDER_DISPLAY_NAMES: Partial<Record<ProviderDriverKind, string>> = {
   [CODEX_DRIVER_KIND]: "Codex",
   [CLAUDE_DRIVER_KIND]: "Claude",
+  [GROK_DRIVER_KIND]: "Grok Build",
   [OPENCODE_DRIVER_KIND]: "OpenCode",
 };

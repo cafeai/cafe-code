@@ -3,7 +3,7 @@ import {
   type ProviderDriverKind,
   type ResolvedKeybindingsConfig,
 } from "@cafecode/contracts";
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { VariantProps } from "class-variance-authority";
 import { ChevronDownIcon } from "lucide-react";
 import { Button, buttonVariants } from "../ui/button";
@@ -40,10 +40,14 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   triggerVariant?: VariantProps<typeof buttonVariants>["variant"];
   triggerClassName?: string;
   onOpenChange?: (open: boolean) => void;
+  onRequestModelsRefresh?: (instanceId: ProviderInstanceId) => void;
   onInstanceModelChange: (instanceId: ProviderInstanceId, model: string) => void;
 }) {
   const [uncontrolledIsMenuOpen, setUncontrolledIsMenuOpen] = useState(false);
   const isMenuOpen = props.open ?? uncontrolledIsMenuOpen;
+  const wasMenuOpenRef = useRef(false);
+  const isDisabled = props.disabled;
+  const requestModelsRefresh = props.onRequestModelsRefresh;
 
   // Resolve the active instance entry by exact routing key. The composer
   // resolves fallbacks before rendering this component; if the selected
@@ -85,6 +89,18 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
     };
   }, [isMenuOpen]);
 
+  useEffect(() => {
+    const wasOpen = wasMenuOpenRef.current;
+    wasMenuOpenRef.current = isMenuOpen;
+    if (!wasOpen && isMenuOpen && !isDisabled) {
+      // Match Codex 0.152's picker-open model/list refresh without holding the
+      // popover closed. Existing props remain rendered while the bounded
+      // server request runs, so selection, keyboard highlight, and stale
+      // options survive both latency and failure.
+      requestModelsRefresh?.(activeInstanceId);
+    }
+  }, [activeInstanceId, isDisabled, isMenuOpen, requestModelsRefresh]);
+
   const handleInstanceModelChange = (instanceId: ProviderInstanceId, model: string) => {
     if (props.disabled) return;
     props.onInstanceModelChange(instanceId, model);
@@ -110,7 +126,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
             data-chat-provider-model-picker="true"
             className={cn(
               "min-w-0 justify-start overflow-hidden whitespace-nowrap px-2 text-muted-foreground/70 hover:text-foreground/80 [&_svg]:mx-0",
-              props.compact ? "max-w-42 shrink-0" : "max-w-48 shrink sm:max-w-56 sm:px-3",
+              props.compact ? "max-w-64 flex-1 shrink" : "max-w-48 shrink sm:max-w-56 sm:px-3",
               props.triggerClassName,
             )}
             disabled={props.disabled}
@@ -120,7 +136,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
         <span
           className={cn(
             "flex min-w-0 w-full box-border items-center gap-2 overflow-hidden",
-            props.compact ? "max-w-36 sm:pl-1" : undefined,
+            props.compact ? "sm:pl-1" : undefined,
           )}
         >
           {activeEntry ? (
@@ -138,6 +154,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
             <TooltipTrigger
               render={
                 <span
+                  data-provider-model-trigger-title="true"
                   className={cn(
                     "min-w-0 flex-1 overflow-hidden",
                     triggerSubtitle

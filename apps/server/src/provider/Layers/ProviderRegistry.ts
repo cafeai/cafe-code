@@ -57,6 +57,19 @@ import {
 import type { ProviderInstance } from "../ProviderDriver.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
 import type { ProviderSnapshotSource } from "../builtInProviderCatalog.ts";
+import {
+  DEFAULT_PROVIDER_INCONCLUSIVE_FAILURE_THRESHOLD,
+  hasConclusiveProviderAuthState,
+  reconcileInconclusiveProviderProbeStreak,
+  retainConclusiveProviderState,
+} from "../providerProbePolicy.ts";
+
+/**
+ * Status probes spawn provider-owned subprocesses and may read shared auth
+ * homes. Bound startup/rebuild admission across the whole registry so a
+ * multi-instance configuration cannot create a CPU/I/O thundering herd.
+ */
+export const INITIAL_PROVIDER_REFRESH_CONCURRENCY = 2;
 
 const loadProviders = (
   providerSources: ReadonlyArray<ProviderSnapshotSource>,
@@ -80,6 +93,15 @@ const makeManualProviderMaintenanceCapabilities = (provider: ProviderDriverKind)
 
 const hasModelCapabilities = (model: ServerProvider["models"][number]): boolean =>
   (model.capabilities?.optionDescriptors?.length ?? 0) > 0;
+
+const isSameAuthenticatedProviderAccount = (
+  previousProvider: ServerProvider,
+  nextProvider: ServerProvider,
+): boolean =>
+  previousProvider.auth.status === "authenticated" &&
+  nextProvider.auth.status === "authenticated" &&
+  previousProvider.auth.type === nextProvider.auth.type &&
+  previousProvider.auth.email === nextProvider.auth.email;
 
 const mergeProviderModels = (
   previousModels: ReadonlyArray<ServerProvider["models"][number]>,
@@ -107,28 +129,53 @@ const mergeProviderModels = (
 export const mergeProviderSnapshot = (
   previousProvider: ServerProvider | undefined,
   nextProvider: ServerProvider,
-): ServerProvider =>
-  !previousProvider
-    ? nextProvider
-    : {
-        ...nextProvider,
-        models: mergeProviderModels(previousProvider.models, nextProvider.models),
-        // Carry forward event-sourced account rate limits when an incoming snapshot
-        // omits them. Claude's periodic probe never sends a prompt, so it produces no
-        // `accountRateLimits`; without this, each refresh would wipe the limits accrued
-        // from `rate_limit_event`s.
-        //
-        // Codex is different: its account-usage snapshots are account-bound probe
-        // results from upstream `account/rateLimits/read` or the equivalent usage
-        // endpoint. Upstream TUI clears account-derived reset/usage state on account
-        // changes, and an omitted Codex usage snapshot after auth churn should render
-        // as unknown instead of preserving stale percentages from a previous account.
-        ...(nextProvider.accountRateLimits === undefined &&
-        previousProvider.accountRateLimits !== undefined &&
-        nextProvider.driver !== ProviderDriverKind.make("codex")
-          ? { accountRateLimits: previousProvider.accountRateLimits }
-          : {}),
-      };
+): ServerProvider => {
+  if (!previousProvider) {
+    return nextProvider;
+  }
+
+  // A backend restart hydrates the last conclusive provider snapshot from the
+  // private status cache, while the newly-created managed provider begins its
+  // own consecutive-attempt counter at zero. Apply the same bounded retention
+  // rule at this merge boundary so one or two startup timeouts do not create a
+  // false auth-loss banner; the third timeout still becomes visible.
+  const streakReconciledProvider = reconcileInconclusiveProviderProbeStreak(
+    previousProvider,
+    nextProvider,
+  );
+  const reconciledProvider =
+    streakReconciledProvider.probeDiagnostics?.lastOutcome === "inconclusive" &&
+    streakReconciledProvider.probeDiagnostics.consecutiveInconclusiveCount <
+      DEFAULT_PROVIDER_INCONCLUSIVE_FAILURE_THRESHOLD &&
+    hasConclusiveProviderAuthState(previousProvider)
+      ? retainConclusiveProviderState(previousProvider, streakReconciledProvider)
+      : streakReconciledProvider;
+
+  return {
+    ...reconciledProvider,
+    models: mergeProviderModels(previousProvider.models, reconciledProvider.models),
+    // Carry forward event-sourced account rate limits when an incoming snapshot
+    // omits them. Claude's periodic probe never sends a prompt, so it produces no
+    // `accountRateLimits`; without this, each refresh would wipe the limits accrued
+    // from `rate_limit_event`s.
+    //
+    // Codex has both full probe snapshots and sparse live updates. Preserve the
+    // latest redacted usage when the same authenticated account suffers a transient
+    // probe failure, but clear it on auth/account churn so a percentage from one
+    // account can never be presented as another account's quota. Grok's ACP auth
+    // response does not currently expose a stable account identity, so an omitted
+    // full-probe usage result must clear instead of guessing that cached-token auth
+    // still represents the same person. Its usage-only prompt refresh independently
+    // preserves a known-good snapshot on transient endpoint failure.
+    ...(reconciledProvider.accountRateLimits === undefined &&
+    previousProvider.accountRateLimits !== undefined &&
+    reconciledProvider.driver !== ProviderDriverKind.make("grok") &&
+    (reconciledProvider.driver !== ProviderDriverKind.make("codex") ||
+      isSameAuthenticatedProviderAccount(previousProvider, reconciledProvider))
+      ? { accountRateLimits: previousProvider.accountRateLimits }
+      : {}),
+  };
+};
 
 export const mergeProviderSnapshots = (
   previousProviders: ReadonlyArray<ServerProvider>,
@@ -153,6 +200,43 @@ export const selectProvidersByKind = (
   providerKinds: ReadonlySet<ProviderDriverKind>,
 ): ReadonlyArray<ServerProvider> =>
   providers.filter((provider) => providerKinds.has(provider.driver));
+
+/**
+ * Merge one sparse, named rate-limit snapshot into a provider's most recent full
+ * account-usage read. Codex rolling notifications omit unavailable fields rather than
+ * clearing them, so top-level metadata and untouched windows must survive. The canonical
+ * `codex` bucket is mirrored into the backward-compatible single-bucket field consumed by
+ * older renderer code.
+ */
+export const mergeProviderAccountRateLimitSnapshot = (input: {
+  readonly previous: ServerProviderAccountRateLimits | undefined;
+  readonly limitId: string;
+  readonly snapshot: ServerProviderAccountRateLimitSnapshot;
+  readonly checkedAt: string;
+}): ServerProviderAccountRateLimits => {
+  const previousByLimitId = input.previous?.rateLimitsByLimitId ?? {};
+  const previousSnapshot =
+    previousByLimitId[input.limitId] ??
+    (input.limitId === "codex" ? input.previous?.rateLimits : undefined);
+  const mergedSnapshot: ServerProviderAccountRateLimitSnapshot = {
+    ...previousSnapshot,
+    ...input.snapshot,
+  };
+  const rateLimits =
+    input.limitId === "codex" ? mergedSnapshot : (input.previous?.rateLimits ?? mergedSnapshot);
+
+  return {
+    rateLimits,
+    rateLimitsByLimitId: {
+      ...previousByLimitId,
+      [input.limitId]: mergedSnapshot,
+    },
+    ...(input.previous?.rateLimitResetCredits !== undefined
+      ? { rateLimitResetCredits: input.previous.rateLimitResetCredits }
+      : {}),
+    checkedAt: input.checkedAt,
+  };
+};
 
 export const haveProvidersChanged = (
   previousProviders: ReadonlyArray<ServerProvider>,
@@ -200,6 +284,7 @@ const buildSnapshotSource = (instance: ProviderInstance): ProviderSnapshotSource
   getSnapshot: instance.snapshot.getSnapshot,
   refresh: instance.snapshot.refresh,
   refreshAccountUsage: instance.snapshot.refreshAccountUsage,
+  refreshModels: instance.snapshot.refreshModels,
   streamChanges: instance.snapshot.streamChanges,
 });
 
@@ -347,6 +432,7 @@ export const ProviderRegistryLive = Layer.effect(
         readonly publish?: boolean;
         readonly persist?: boolean;
         readonly replace?: boolean;
+        readonly replaceModels?: boolean;
       },
     ) {
       const nextProvidersWithUpdateState = yield* Effect.forEach(
@@ -367,11 +453,24 @@ export const ProviderRegistryLive = Layer.effect(
           for (const provider of nextProvidersWithUpdateState) {
             const key = snapshotInstanceKey(provider);
             updatedKeys.add(key);
-            mergedProviders.set(
-              key,
+            const previousProvider = mergedProviders.get(key);
+            const mergedProvider =
               options?.replace === true
                 ? provider
-                : mergeProviderSnapshot(mergedProviders.get(key), provider),
+                : mergeProviderSnapshot(previousProvider, provider);
+            mergedProviders.set(
+              key,
+              options?.replaceModels === true
+                ? {
+                    ...mergedProvider,
+                    // A successful provider-owned model/list response is the
+                    // authoritative catalogue. Do not let the generic sparse
+                    // snapshot merge resurrect retired fallback/static slugs.
+                    // Empty and failed reads never reach this path: the driver
+                    // retains its current snapshot for those inconclusive cases.
+                    models: provider.models,
+                  }
+                : mergedProvider,
             );
           }
 
@@ -402,67 +501,81 @@ export const ProviderRegistryLive = Layer.effect(
       provider: ServerProvider,
       options?: {
         readonly publish?: boolean;
+        readonly replaceModels?: boolean;
       },
     ) {
       return yield* upsertProviders([provider], options);
     });
 
-    const updateProviderAccountRateLimits = Effect.fn("updateProviderAccountRateLimits")(
-      function* (input: {
-        readonly instanceId: ProviderInstanceId;
-        readonly slot: "primary" | "secondary";
-        readonly window: ServerProviderAccountRateLimitWindow;
-        readonly checkedAt: string;
-      }) {
-        type RateLimitUpdateResult =
-          | { readonly changed: false }
-          | { readonly changed: true; readonly providers: ReadonlyArray<ServerProvider> };
-
-        const result = yield* Ref.modify(
-          providersRef,
-          (previousProviders): readonly [RateLimitUpdateResult, ReadonlyArray<ServerProvider>] => {
-            const provider = previousProviders.find(
-              (candidate) => candidate.instanceId === input.instanceId,
-            );
-            if (provider === undefined) {
-              // Event arrived for an instance the aggregator isn't tracking (e.g. a
-              // race at boot). Drop it — the next event will land once it's registered.
-              return [{ changed: false }, previousProviders];
-            }
-            const previousRateLimits = provider.accountRateLimits;
-            const baseSnapshot = previousRateLimits?.rateLimits ?? {};
-            const nextSnapshot: ServerProviderAccountRateLimitSnapshot =
-              input.slot === "primary"
-                ? { ...baseSnapshot, primary: input.window }
-                : { ...baseSnapshot, secondary: input.window };
-            const nextRateLimits: ServerProviderAccountRateLimits = {
-              rateLimits: nextSnapshot,
-              ...(previousRateLimits?.rateLimitsByLimitId != null
-                ? { rateLimitsByLimitId: previousRateLimits.rateLimitsByLimitId }
-                : {}),
-              ...(previousRateLimits?.rateLimitResetCredits !== undefined
-                ? { rateLimitResetCredits: previousRateLimits.rateLimitResetCredits }
-                : {}),
-              checkedAt: input.checkedAt,
-            };
-            const nextProvider: ServerProvider = {
-              ...provider,
-              accountRateLimits: nextRateLimits,
-            };
-            if (Equal.equals(provider, nextProvider)) {
-              return [{ changed: false }, previousProviders];
-            }
-            const nextProviders: ReadonlyArray<ServerProvider> = previousProviders.map(
-              (candidate) => (candidate.instanceId === input.instanceId ? nextProvider : candidate),
-            );
-            return [{ changed: true, providers: nextProviders }, nextProviders];
+    const updateProviderAccountRateLimits = Effect.fn("updateProviderAccountRateLimits")(function* (
+      input:
+        | {
+            readonly instanceId: ProviderInstanceId;
+            readonly slot: "primary" | "secondary";
+            readonly window: ServerProviderAccountRateLimitWindow;
+            readonly checkedAt: string;
+          }
+        | {
+            readonly instanceId: ProviderInstanceId;
+            readonly limitId: string;
+            readonly snapshot: ServerProviderAccountRateLimitSnapshot;
+            readonly checkedAt: string;
           },
-        );
-        if (result.changed) {
-          yield* PubSub.publish(changesPubSub, result.providers);
-        }
-      },
-    );
+    ) {
+      type RateLimitUpdateResult =
+        | { readonly changed: false }
+        | { readonly changed: true; readonly providers: ReadonlyArray<ServerProvider> };
+
+      const result = yield* Ref.modify(
+        providersRef,
+        (previousProviders): readonly [RateLimitUpdateResult, ReadonlyArray<ServerProvider>] => {
+          const provider = previousProviders.find(
+            (candidate) => candidate.instanceId === input.instanceId,
+          );
+          if (provider === undefined) {
+            // Event arrived for an instance the aggregator isn't tracking (e.g. a
+            // race at boot). Drop it — the next event will land once it's registered.
+            return [{ changed: false }, previousProviders];
+          }
+          const previousRateLimits = provider.accountRateLimits;
+          const nextRateLimits: ServerProviderAccountRateLimits =
+            "snapshot" in input
+              ? mergeProviderAccountRateLimitSnapshot({
+                  previous: previousRateLimits,
+                  limitId: input.limitId,
+                  snapshot: input.snapshot,
+                  checkedAt: input.checkedAt,
+                })
+              : {
+                  rateLimits:
+                    input.slot === "primary"
+                      ? { ...previousRateLimits?.rateLimits, primary: input.window }
+                      : { ...previousRateLimits?.rateLimits, secondary: input.window },
+                  ...(previousRateLimits?.rateLimitsByLimitId != null
+                    ? { rateLimitsByLimitId: previousRateLimits.rateLimitsByLimitId }
+                    : {}),
+                  ...(previousRateLimits?.rateLimitResetCredits !== undefined
+                    ? { rateLimitResetCredits: previousRateLimits.rateLimitResetCredits }
+                    : {}),
+                  checkedAt: input.checkedAt,
+                };
+          const nextProvider: ServerProvider = {
+            ...provider,
+            accountRateLimits: nextRateLimits,
+          };
+          if (Equal.equals(provider, nextProvider)) {
+            return [{ changed: false }, previousProviders];
+          }
+          const nextProviders: ReadonlyArray<ServerProvider> = previousProviders.map((candidate) =>
+            candidate.instanceId === input.instanceId ? nextProvider : candidate,
+          );
+          return [{ changed: true, providers: nextProviders }, nextProviders];
+        },
+      );
+      if (result.changed) {
+        yield* PubSub.publish(changesPubSub, result.providers);
+      }
+    });
 
     const setProviderMaintenanceActionState = Effect.fn("setProviderMaintenanceActionState")(
       function* (input: {
@@ -567,6 +680,44 @@ export const ProviderRegistryLive = Layer.effect(
       );
     });
 
+    const refreshInstanceModels = Effect.fn("refreshInstanceModels")(function* (
+      instanceId: ProviderInstanceId,
+    ) {
+      const instance = yield* instanceRegistry.getInstance(instanceId);
+      const refreshModels = instance?.snapshot.refreshModels;
+      if (!instance || !refreshModels) {
+        return yield* Ref.get(providersRef);
+      }
+
+      const providerSource = buildSnapshotSource(instance);
+      // The driver operation is independently bounded and owned by the
+      // provider scope. Once admitted, finish the authoritative sync even if a
+      // short-lived WebSocket caller disconnects; otherwise the provider's
+      // normal snapshot stream can land first and the generic merge can retain
+      // slugs that Codex just retired. Exact instance identity below prevents
+      // this bounded uninterruptible wait from writing through a rebuild.
+      return yield* Effect.uninterruptible(
+        refreshModels.pipe(
+          Effect.flatMap((nextProvider) =>
+            instanceRegistry.getInstance(instanceId).pipe(
+              Effect.flatMap((currentInstance) => {
+                if (currentInstance !== instance) {
+                  return Ref.get(providersRef);
+                }
+                return correlateSnapshotWithSource(providerSource, nextProvider).pipe(
+                  Effect.flatMap((provider) =>
+                    syncProvider(provider, {
+                      replaceModels: true,
+                    }),
+                  ),
+                );
+              }),
+            ),
+          ),
+        ),
+      );
+    });
+
     const getProviderMaintenanceCapabilitiesForInstance = Effect.fn(
       "getProviderMaintenanceCapabilitiesForInstance",
     )(function* (instanceId: ProviderInstanceId, provider: ProviderDriverKind) {
@@ -590,7 +741,8 @@ export const ProviderRegistryLive = Layer.effect(
      *     attachment race that otherwise drops the initial probe;
      *   - prune `providersRef` of instances that no longer exist.
      *
-     * Initial refreshes are awaited in parallel rather than forked, so
+     * Initial refreshes are awaited with bounded parallelism rather than
+     * forked, so
      * callers (layer build; `streamChanges` watcher) see fully-probed
      * state on return. This matters for layer build in particular:
      * consumers reading `getProviders` immediately after layer build
@@ -636,19 +788,31 @@ export const ProviderRegistryLive = Layer.effect(
         }
 
         // Fork long-lived subscriptions to each new/rebuilt instance's
-        // change stream BEFORE kicking off refreshes — if the driver's
-        // own initial probe (line 140 in `makeManagedServerProvider`)
-        // wins the refreshSemaphore race, its PubSub publish must land
-        // in an active subscriber or the result is dropped.
+        // change stream BEFORE kicking off refreshes. ProviderRegistry is the
+        // sole owner of production initial-refresh admission; managed Codex
+        // and Claude snapshots intentionally disable their old independent
+        // startup fibers so this global bound cannot be bypassed.
         for (const [, instance] of newlyAdded) {
           const source = buildSnapshotSource(instance);
           yield* Stream.runForEach(source.streamChanges, (provider) =>
-            correlateSnapshotWithSource(source, provider).pipe(Effect.flatMap(syncProvider)),
+            instanceRegistry.getInstance(instance.instanceId).pipe(
+              Effect.flatMap((currentInstance) => {
+                if (currentInstance !== instance) {
+                  // A closing provider scope can have one already-buffered
+                  // publication. Never let that stale generation overwrite
+                  // the replacement instance that now owns this routing key.
+                  return Effect.void;
+                }
+                return correlateSnapshotWithSource(source, provider).pipe(
+                  Effect.flatMap(syncProvider),
+                );
+              }),
+            ),
           ).pipe(Effect.forkScoped);
         }
 
-        // Force-refresh every new/rebuilt instance in parallel and wait
-        // for them all to complete. The refresh's result is piped
+        // Force-refresh every new/rebuilt instance with a small global
+        // concurrency bound and wait for them all to complete. The refresh's result is piped
         // directly into `syncProvider`, so `providersRef` is populated
         // deterministically by the time this block returns — regardless
         // of PubSub subscription timing. Failures are logged and
@@ -657,7 +821,7 @@ export const ProviderRegistryLive = Layer.effect(
           newlyAdded,
           ([, instance]) =>
             refreshOneSource(buildSnapshotSource(instance)).pipe(Effect.ignoreCause({ log: true })),
-          { concurrency: "unbounded", discard: true },
+          { concurrency: INITIAL_PROVIDER_REFRESH_CONCURRENCY, discard: true },
         );
         yield* upsertProviders(unavailableProviders, {
           persist: false,
@@ -780,6 +944,8 @@ export const ProviderRegistryLive = Layer.effect(
         refreshInstance(instanceId).pipe(Effect.catchCause(recoverRefreshFailure)),
       refreshInstanceAccountUsage: (instanceId: ProviderInstanceId) =>
         refreshInstanceAccountUsage(instanceId).pipe(Effect.catchCause(recoverRefreshFailure)),
+      refreshInstanceModels: (instanceId: ProviderInstanceId) =>
+        refreshInstanceModels(instanceId).pipe(Effect.catchCause(recoverRefreshFailure)),
       getProviderMaintenanceCapabilitiesForInstance,
       setProviderMaintenanceActionState,
       updateProviderAccountRateLimits,

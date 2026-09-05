@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { isLoopbackHostname, resolveDevRedirectUrl } from "./http.ts";
+import { isLoopbackHostname, isLoopbackRemoteAddress, resolveDevRedirectUrl } from "./http.ts";
 
 describe("http dev routing", () => {
   const hostnameScenarios = [
@@ -16,6 +16,23 @@ describe("http dev routing", () => {
   for (const [hostname, expected] of hostnameScenarios) {
     it(`${expected ? "accepts" : "rejects"} ${hostname} as loopback`, () => {
       expect(isLoopbackHostname(hostname)).toBe(expected);
+    });
+  }
+
+  const remoteAddressScenarios = [
+    ["127.0.0.1", true],
+    ["127.42.1.9", true],
+    ["::1", true],
+    ["[::1]", true],
+    ["::ffff:127.0.0.1", true],
+    ["::ffff:127.42.1.9", true],
+    ["192.168.86.35", false],
+    ["::ffff:192.168.86.35", false],
+  ] as const;
+
+  for (const [address, expected] of remoteAddressScenarios) {
+    it(`${expected ? "accepts" : "rejects"} ${address} as a same-machine peer`, () => {
+      expect(isLoopbackRemoteAddress(address)).toBe(expected);
     });
   }
 

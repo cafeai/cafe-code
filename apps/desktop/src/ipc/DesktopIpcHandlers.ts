@@ -26,6 +26,7 @@ import { checkSourceUpdate, getSourceUpdateState } from "./methods/sourceUpdates
 import { setPowerSaveBlockerState } from "./methods/powerSaveBlocker.ts";
 import { getDebugEndpointState, publishDebugSnapshot } from "./methods/debug.ts";
 import {
+  copyText,
   confirm,
   getAppBranding,
   getLocalEnvironmentBootstrap,
@@ -67,6 +68,7 @@ export const installDesktopIpcHandlers = Effect.gen(function* () {
   yield* ipc.handle(openExternal);
   yield* ipc.handle(openPath);
   yield* ipc.handle(revealPath);
+  yield* ipc.handle(copyText);
 
   yield* ipc.handle(getUpdateState);
   yield* ipc.handle(setUpdateChannel);

@@ -57,6 +57,7 @@ import {
   parseThreadSegmentFromAttachmentId,
   toSafeThreadAttachmentSegment,
 } from "../../attachmentStore.ts";
+import { isStaleProvisionalSessionReplay } from "../sessionLifecycle.ts";
 
 export const ORCHESTRATION_PROJECTOR_NAMES = {
   projects: "projection.projects",
@@ -65,6 +66,7 @@ export const ORCHESTRATION_PROJECTOR_NAMES = {
   threadProposedPlans: "projection.thread-proposed-plans",
   threadActivities: "projection.thread-activities",
   threadSessions: "projection.thread-sessions",
+  threadGoals: "projection.thread-goals",
   threadTurns: "projection.thread-turns",
   checkpoints: "projection.checkpoints",
   pendingApprovals: "projection.pending-approvals",
@@ -511,10 +513,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     }) {
       const copyPrefix = `copy:${input.targetThreadId}:`;
 
-      // A duplicated thread is a Cafe read-model fork, not a provider-runtime
-      // fork. Keep historical message/turn/plan/work-log context in bulk SQL,
-      // but do not copy sessions, pending approvals, or pending user-input
-      // accounting that would make the target look like live provider work.
+      // Both projection duplicates and native provider forks copy historical
+      // message/turn/plan/work-log context in bulk. Never copy live sessions,
+      // pending approvals, or pending user-input accounting; native forks bind
+      // their dormant target session through the following session-set event.
       yield* sql`
         INSERT INTO projection_thread_messages (
           message_id,
@@ -840,6 +842,19 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             sourceThreadId: event.payload.sourceThreadId,
             targetThreadId: event.payload.targetThreadId,
             duplicatedAt: event.payload.duplicatedAt,
+          }).pipe(
+            Effect.mapError(
+              toPersistenceSqlError("ProjectionPipeline.copyThreadContextProjectionRows:query"),
+            ),
+          );
+          yield* refreshThreadShellSummary(event.payload.targetThreadId);
+          return;
+
+        case "thread.forked":
+          yield* copyThreadContextProjectionRows({
+            sourceThreadId: event.payload.sourceThreadId,
+            targetThreadId: event.payload.targetThreadId,
+            duplicatedAt: event.payload.forkedAt,
           }).pipe(
             Effect.mapError(
               toPersistenceSqlError("ProjectionPipeline.copyThreadContextProjectionRows:query"),
@@ -1219,6 +1234,11 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             previousMessage !== undefined &&
             !previousMessage.isStreaming &&
             previousMessage.text.length > 0;
+          const canonicalCreatedAt =
+            terminalTurnCompletedAt !== null &&
+            (previousMessage?.createdAt ?? event.payload.createdAt) > terminalTurnCompletedAt
+              ? terminalTurnCompletedAt
+              : (previousMessage?.createdAt ?? event.payload.createdAt);
           const nextText = Option.match(existingMessage, {
             onNone: () => event.payload.text,
             onSome: (message) => {
@@ -1253,14 +1273,17 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             // events reopen renderer streaming/work indicators for a completed
             // turn; the CLI's terminal lifecycle is authoritative here.
             isStreaming: event.payload.streaming && terminalTurnCompletedAt === null,
-            createdAt: previousMessage?.createdAt ?? event.payload.createdAt,
+            // A replayed provider delta can be observed after Stop/restart even
+            // though it still belongs to the already-terminal turn. Clamp both
+            // message timestamps to the canonical terminal boundary: `updatedAt`
+            // doubles as the renderer's completed-at value, so advancing it with
+            // transport replay time makes a stopped response appear to keep
+            // working. The text may still repair an otherwise-empty snapshot.
+            createdAt: canonicalCreatedAt,
             updatedAt:
               terminalTurnCompletedAt === null
                 ? maxIso(previousMessage?.updatedAt ?? null, event.payload.updatedAt)
-                : maxIso(
-                    maxIso(previousMessage?.updatedAt ?? null, event.payload.updatedAt),
-                    terminalTurnCompletedAt,
-                  ),
+                : terminalTurnCompletedAt,
           });
           return;
         }
@@ -1491,6 +1514,71 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       }
     });
 
+    const applyThreadGoalsProjection: ProjectorDefinition["apply"] = Effect.fn(
+      "applyThreadGoalsProjection",
+    )(function* (event, _attachmentSideEffects) {
+      if (event.type !== "thread.goal-synced") {
+        return;
+      }
+      const goal = event.payload.goal;
+      if (goal === null) {
+        yield* sql`
+          DELETE FROM projection_thread_goals
+          WHERE thread_id = ${event.payload.threadId}
+        `.pipe(
+          Effect.catchTag("SqlError", (sqlError) =>
+            Effect.fail(
+              toPersistenceSqlError("ProjectionPipeline.applyThreadGoalsProjection:delete")(
+                sqlError,
+              ),
+            ),
+          ),
+        );
+        return;
+      }
+
+      // The decider cryptographically binds the canonical goal to the Cafe
+      // aggregate id before this projector runs. Persist only that canonical
+      // identity; provider-native thread ids never enter projection storage.
+      yield* sql`
+        INSERT INTO projection_thread_goals (
+          thread_id,
+          objective,
+          status,
+          token_budget,
+          tokens_used,
+          time_used_seconds,
+          created_at,
+          updated_at
+        )
+        VALUES (
+          ${event.payload.threadId},
+          ${goal.objective},
+          ${goal.status},
+          ${goal.tokenBudget},
+          ${goal.tokensUsed},
+          ${goal.timeUsedSeconds},
+          ${goal.createdAt},
+          ${goal.updatedAt}
+        )
+        ON CONFLICT (thread_id)
+        DO UPDATE SET
+          objective = excluded.objective,
+          status = excluded.status,
+          token_budget = excluded.token_budget,
+          tokens_used = excluded.tokens_used,
+          time_used_seconds = excluded.time_used_seconds,
+          created_at = excluded.created_at,
+          updated_at = excluded.updated_at
+      `.pipe(
+        Effect.catchTag("SqlError", (sqlError) =>
+          Effect.fail(
+            toPersistenceSqlError("ProjectionPipeline.applyThreadGoalsProjection:upsert")(sqlError),
+          ),
+        ),
+      );
+    });
+
     const applyThreadSessionsProjection: ProjectorDefinition["apply"] = Effect.fn(
       "applyThreadSessionsProjection",
     )(function* (event, _attachmentSideEffects) {
@@ -1582,6 +1670,19 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       const existingSession = yield* projectionThreadSessionRepository.getByThreadId({
         threadId: event.payload.threadId,
       });
+      if (
+        Option.isSome(existingSession) &&
+        isStaleProvisionalSessionReplay({
+          current: existingSession.value,
+          incoming: event.payload.session,
+        })
+      ) {
+        // Provider-daemon replay is at-least-once and can finish an old
+        // multi-command runtime event after startup reconciliation has already
+        // advanced the session. Preserve append-only audit history, but do not
+        // resurrect provisional startup intent that has no provider turn.
+        return;
+      }
       const runningActiveTurn =
         event.payload.session.status === "running" && event.payload.session.activeTurnId !== null
           ? yield* projectionTurnRepository.getByTurnId({
@@ -1910,7 +2011,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               assistantMessageId: event.payload.messageId,
               state: nextState,
               completedAt: isTerminalTurnState(nextState)
-                ? maxIso(existingTurn.value.completedAt, event.payload.updatedAt)
+                ? (existingTurn.value.completedAt ?? event.payload.updatedAt)
                 : existingTurn.value.completedAt,
               startedAt: existingTurn.value.startedAt ?? event.payload.createdAt,
               requestedAt: existingTurn.value.requestedAt ?? event.payload.createdAt,
@@ -2213,6 +2314,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       {
         name: ORCHESTRATION_PROJECTOR_NAMES.threadSessions,
         apply: applyThreadSessionsProjection,
+      },
+      {
+        name: ORCHESTRATION_PROJECTOR_NAMES.threadGoals,
+        apply: applyThreadGoalsProjection,
       },
       {
         name: ORCHESTRATION_PROJECTOR_NAMES.threadTurns,

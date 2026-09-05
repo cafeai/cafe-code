@@ -8,7 +8,6 @@ import {
   type OrchestrationThreadDetailSnapshot as OrchestrationThreadDetailSnapshotType,
   type OrchestrationThreadStreamItem,
 } from "@cafecode/contracts";
-import { PROVIDER_PIPELINE_POLICY } from "@cafecode/shared/providerPipelinePolicy";
 import * as Schema from "effect/Schema";
 
 const encodeThreadDetailSnapshotJson = Schema.encodeSync(
@@ -16,9 +15,11 @@ const encodeThreadDetailSnapshotJson = Schema.encodeSync(
 );
 
 // The object wrapper adds only a few dozen bytes. Keeping a full KiB of
-// headroom avoids coupling this decision to Effect RPC's current envelope while
-// the connection flow controller remains the final authority for frame size.
+// headroom ensures a single-frame snapshot remains below the raw chunk size
+// after the RPC item wrapper is encoded.
 const LEGACY_SNAPSHOT_FRAME_HEADROOM_BYTES = 1024;
+const SINGLE_FRAME_SNAPSHOT_MAX_RAW_BYTES =
+  THREAD_DETAIL_SNAPSHOT_CHUNK_RAW_BYTES - LEGACY_SNAPSHOT_FRAME_HEADROOM_BYTES;
 
 export class ThreadDetailSnapshotEncodingError extends Error {
   constructor(message: string) {
@@ -28,10 +29,14 @@ export class ThreadDetailSnapshotEncodingError extends Error {
 }
 
 /**
- * Encode one projection snapshot into the existing single-frame shape when it
- * fits, otherwise into fixed-size base64 chunks. The SHA-256 is calculated over
- * the exact UTF-8 JSON bytes so the renderer can reject missing, reordered, or
- * corrupted assemblies before any partial state reaches the store.
+ * Encode a small projection snapshot into the existing single-frame shape and
+ * use fixed-size base64 chunks for every larger history. Chunking well before
+ * the absolute WebSocket frame ceiling is intentional: several legitimate
+ * detail subscriptions can hydrate concurrently, and one multi-megabyte frame
+ * must not monopolize the connection-wide bulk budget or force sibling streams
+ * to resubscribe. The SHA-256 is calculated over the exact UTF-8 JSON bytes so
+ * the renderer can reject missing, reordered, or corrupted assemblies before
+ * any partial state reaches the store.
  */
 export function encodeThreadDetailSnapshotStreamItems(
   snapshot: OrchestrationThreadDetailSnapshotType,
@@ -39,10 +44,7 @@ export function encodeThreadDetailSnapshotStreamItems(
   const json = encodeThreadDetailSnapshotJson(snapshot);
   const bytes = Buffer.from(json, "utf8");
 
-  if (
-    bytes.byteLength + LEGACY_SNAPSHOT_FRAME_HEADROOM_BYTES <=
-    PROVIDER_PIPELINE_POLICY.webSocketMaxFrameBytes
-  ) {
+  if (bytes.byteLength <= SINGLE_FRAME_SNAPSHOT_MAX_RAW_BYTES) {
     return [{ kind: "snapshot", snapshot }];
   }
 

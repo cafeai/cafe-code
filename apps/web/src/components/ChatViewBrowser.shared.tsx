@@ -8,6 +8,7 @@ import {
   EnvironmentId,
   type DesktopSourceUpdateState,
   type MessageId,
+  OrchestrationDispatchCommandError,
   type OrchestrationReadModel,
   type ProjectId,
   ProviderDriverKind,
@@ -29,7 +30,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { HttpResponse, http, ws } from "msw";
 import { setupWorker } from "msw/browser";
-import { page } from "vitest/browser";
+import { page, userEvent } from "vitest/browser";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
@@ -45,8 +46,14 @@ import { getRouter } from "../router";
 import { deriveLogicalProjectKeyFromSettings } from "../logicalProject";
 import { selectBootstrapCompleteForActiveEnvironment, useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
+import { useTaskAtriumStore } from "./atrium/taskAtriumStore";
+import { toastManager } from "./ui/toast";
 import { createAuthenticatedSessionHandlers } from "../../test/authHttpHandlers";
-import { BrowserWsRpcHarness, type NormalizedWsRpcRequestBody } from "../../test/wsRpcHarness";
+import {
+  BrowserWsRpcHarness,
+  failBrowserWsRpc,
+  type NormalizedWsRpcRequestBody,
+} from "../../test/wsRpcHarness";
 
 import { DEFAULT_CLIENT_SETTINGS } from "@cafecode/contracts/settings";
 
@@ -681,6 +688,181 @@ function createSnapshotWithLongProposedPlan(): OrchestrationReadModel {
   };
 }
 
+const RUNTIME_TASK_TURN_ID = "turn-runtime-task-progress" as TurnId;
+const RUNTIME_TASK_DESCRIPTIONS = [
+  "Inspect the current orchestration projection and confirm the running turn owns the latest provider checklist snapshot.",
+  "Trace the composer footer layout across desktop and compact widths without moving provider controls out of their established order.",
+  "Preserve the exact provider-authored task descriptions so long instructions remain available instead of being shortened to a summary.",
+  "Verify completed task styling and progress accounting against the durable statuses supplied by the runtime event.",
+  "Render the current in-progress task in the composer pill and keep its full description available inside the task popover.",
+  "Keep every pending task mounted in document order so assistive technology and browser search can reach the complete checklist.",
+  "Constrain the task popover to the visual viewport while allowing deliberately long descriptions to wrap without horizontal overflow.",
+  "Provide an independently scrollable task list so a large provider checklist never pushes the composer beyond the available screen height.",
+  "Support fine-pointer hover without taking away the ordinary button press used by touch, keyboard, and browser automation clients.",
+  "Return focus to the task progress trigger after Escape closes the popup so keyboard users remain at a predictable composer position.",
+  "Keep runtime task snapshots out of the authored plan sidebar and do not expose a stale Tasks or Plan panel toggle during execution.",
+  "Confirm the task progress control disappears when the current turn settles or the latest provider checklist is explicitly empty.",
+] as const;
+
+type RuntimeTaskStep = {
+  readonly step: string;
+  readonly status: "completed" | "inProgress" | "pending";
+};
+
+const RUNTIME_TASK_STEPS: ReadonlyArray<RuntimeTaskStep> = RUNTIME_TASK_DESCRIPTIONS.map(
+  (step, index) => ({
+    step,
+    status: index < 4 ? "completed" : index === 4 ? "inProgress" : "pending",
+  }),
+);
+
+/**
+ * Build the provider-neutral shape produced after a real runtime `update_plan`
+ * event. Keeping latest-turn and session ownership aligned is important here:
+ * ChatView intentionally suppresses stale or terminal-turn checklists even when
+ * an older `turn.plan.updated` activity remains in the durable thread history.
+ */
+function createSnapshotWithRuntimeTaskProgress(options?: {
+  readonly steps?: ReadonlyArray<RuntimeTaskStep>;
+  readonly terminal?: boolean;
+  readonly withAuthoredPlan?: boolean;
+  readonly withContextWindow?: boolean;
+}): OrchestrationReadModel {
+  const snapshot = options?.withAuthoredPlan
+    ? createSnapshotWithPlanFollowUpPrompt()
+    : createSnapshotForTargetUser({
+        targetMessageId: "msg-user-runtime-task-progress" as MessageId,
+        targetText: "implement the runtime task checklist",
+      });
+  const terminal = options?.terminal ?? false;
+  const steps = options?.steps ?? RUNTIME_TASK_STEPS;
+
+  return {
+    ...snapshot,
+    threads: snapshot.threads.map((thread) =>
+      thread.id === THREAD_ID
+        ? Object.assign({}, thread, {
+            interactionMode: terminal ? thread.interactionMode : ("default" as const),
+            latestTurn: {
+              turnId: RUNTIME_TASK_TURN_ID,
+              state: terminal ? ("completed" as const) : ("running" as const),
+              requestedAt: isoAt(1_000),
+              startedAt: isoAt(1_001),
+              completedAt: terminal ? isoAt(1_020) : null,
+              assistantMessageId: null,
+              ...(options?.withAuthoredPlan
+                ? {
+                    sourceProposedPlan: {
+                      threadId: THREAD_ID,
+                      planId: "plan-follow-up-browser-test",
+                    },
+                  }
+                : {}),
+            },
+            activities: [
+              {
+                id: EventId.make("activity-runtime-task-progress"),
+                tone: "info" as const,
+                kind: "turn.plan.updated",
+                summary: "Runtime task plan updated",
+                payload: {
+                  explanation:
+                    "The provider is working through the complete implementation checklist for the current turn.",
+                  plan: [...steps],
+                },
+                turnId: RUNTIME_TASK_TURN_ID,
+                sequence: 1,
+                createdAt: isoAt(1_005),
+              },
+              ...(options?.withContextWindow
+                ? [
+                    {
+                      id: EventId.make("activity-runtime-context-window"),
+                      tone: "info" as const,
+                      kind: "context-window.updated",
+                      summary: "Context window updated",
+                      payload: {
+                        usedTokens: 213_000,
+                        maxTokens: 258_000,
+                        totalProcessedTokens: 6_600_000,
+                        compactsAutomatically: true,
+                      },
+                      turnId: RUNTIME_TASK_TURN_ID,
+                      sequence: 2,
+                      createdAt: isoAt(1_006),
+                    },
+                  ]
+                : []),
+            ],
+            session: {
+              ...thread.session,
+              status: terminal ? ("ready" as const) : ("running" as const),
+              activeTurnId: terminal ? null : RUNTIME_TASK_TURN_ID,
+              updatedAt: terminal ? isoAt(1_020) : isoAt(1_005),
+            },
+            updatedAt: terminal ? isoAt(1_020) : isoAt(1_005),
+          })
+        : thread,
+    ),
+  };
+}
+
+function createSnapshotWithActiveSubagent(): OrchestrationReadModel {
+  const snapshot = createSnapshotForTargetUser({
+    targetMessageId: "msg-user-active-subagent" as MessageId,
+    targetText: "verify subagent and Atrium navigation",
+    sessionStatus: "running",
+  });
+  const turnId = "turn-active-subagent" as TurnId;
+  return {
+    ...snapshot,
+    threads: snapshot.threads.map((thread) =>
+      thread.id === THREAD_ID
+        ? Object.assign({}, thread, {
+            latestTurn: {
+              turnId,
+              state: "running" as const,
+              requestedAt: isoAt(1_000),
+              startedAt: isoAt(1_001),
+              completedAt: null,
+              assistantMessageId: null,
+            },
+            activities: [
+              {
+                id: EventId.make("activity-active-subagent"),
+                tone: "info" as const,
+                kind: "task.started",
+                summary: "Subagent started",
+                payload: {
+                  taskId: "provider-child-browser-audit",
+                  taskType: "subagent",
+                  subagent: {
+                    threadId: "provider-child-browser-audit",
+                    label: "Browser lifecycle audit",
+                    path: "/root/browser_lifecycle_audit",
+                    objective: "Verify Atrium navigation",
+                    status: "active",
+                    startedAt: isoAt(1_001),
+                  },
+                },
+                turnId,
+                sequence: 1,
+                createdAt: isoAt(1_001),
+              },
+            ],
+            session: {
+              ...thread.session,
+              status: "running" as const,
+              activeTurnId: turnId,
+              updatedAt: isoAt(1_001),
+            },
+            updatedAt: isoAt(1_001),
+          })
+        : thread,
+    ),
+  };
+}
+
 function createSnapshotWithSecondaryProject(options?: {
   includeSecondaryThread?: boolean;
   includeArchivedSecondaryThread?: boolean;
@@ -905,6 +1087,9 @@ function resolveWsRpc(body: NormalizedWsRpcRequestBody): unknown {
   const tag = body._tag;
   if (tag === WS_METHODS.serverGetConfig) {
     return encodeServerConfig(fixture.serverConfig);
+  }
+  if (tag === WS_METHODS.dictationGetStatus) {
+    return { configured: false, canManage: true };
   }
   if (tag === WS_METHODS.serverDiscoverSourceControl) {
     return {
@@ -1318,6 +1503,34 @@ async function waitForSendButton(): Promise<HTMLButtonElement> {
   );
 }
 
+function findSendFailureToastTitle(): HTMLElement | null {
+  return (
+    Array.from(document.querySelectorAll<HTMLElement>('[data-slot="toast-title"]')).find(
+      (element) => element.textContent?.trim() === "Message was not sent",
+    ) ?? null
+  );
+}
+
+function findComposerTaskProgressTrigger(): HTMLButtonElement | null {
+  return document.querySelector<HTMLButtonElement>('[data-composer-task-progress-trigger="true"]');
+}
+
+function findComposerTaskProgressPopup(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('[data-composer-task-progress-popup="true"]');
+}
+
+function findComposerTaskProgressList(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('[data-composer-task-progress-list="true"]');
+}
+
+function findComposerTaskProgressScroller(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('[data-task-list-scroll="true"]');
+}
+
+function findSessionRail(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('[data-session-rail="true"]');
+}
+
 function findComposerProviderModelPicker(): HTMLButtonElement | null {
   return document.querySelector<HTMLButtonElement>('[data-chat-provider-model-picker="true"]');
 }
@@ -1345,13 +1558,13 @@ async function waitForButtonContainingText(text: string): Promise<HTMLButtonElem
   );
 }
 
-async function waitForSelectItemContainingText(text: string): Promise<HTMLElement> {
+async function waitForMenuRadioItemContainingText(text: string): Promise<HTMLElement> {
   return waitForElement(
     () =>
-      Array.from(document.querySelectorAll<HTMLElement>('[data-slot="select-item"]')).find((item) =>
-        item.textContent?.includes(text),
+      Array.from(document.querySelectorAll<HTMLElement>('[data-slot="menu-radio-item"]')).find(
+        (item) => item.textContent?.includes(text),
       ) ?? null,
-    `Unable to find select item containing "${text}".`,
+    `Unable to find menu radio item containing "${text}".`,
   );
 }
 
@@ -1385,7 +1598,7 @@ async function expectComposerActionsContained(): Promise<void> {
 }
 
 async function waitForInteractionModeButton(
-  expectedLabel: "Build" | "Plan" | "Manual" | "Accept edits" | "Auto",
+  expectedLabel: "Build" | "Plan",
 ): Promise<HTMLButtonElement> {
   return waitForElement(
     () =>
@@ -1556,6 +1769,7 @@ function createDesktopBridgeForChatViewTests(
     openExternal: async () => true,
     openPath: async () => true,
     revealPath: async () => true,
+    copyText: async () => undefined,
     onMenuAction: () => () => undefined,
     getUpdateState: async () => {
       throw new Error("getUpdateState not implemented in ChatView browser test");
@@ -1753,8 +1967,11 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
     useUiStateStore.setState({
       projectExpandedById: {},
       projectOrder: [],
+      threadPlanSidebarOpenById: {},
       threadLastVisitedAtById: {},
+      sessionRailDocked: false,
     });
+    useTaskAtriumStore.getState().setOpen(false);
   });
 
   afterEach(() => {
@@ -1763,6 +1980,501 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
   });
 
   if (chatViewBrowserPart === "composer") {
+    it("places configured dictation immediately before the send action", async () => {
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotForTargetUser({
+          targetMessageId: "msg-user-dictation-action" as MessageId,
+          targetText: "dictation action target",
+        }),
+        resolveRpc: (body) =>
+          body._tag === WS_METHODS.dictationGetStatus
+            ? { configured: true, canManage: true }
+            : undefined,
+      });
+
+      try {
+        const dictationButton = await waitForElement(
+          () => document.querySelector<HTMLButtonElement>('button[aria-label="Start dictation"]'),
+          "Unable to find configured dictation button.",
+        );
+        const sendButton = await waitForSendButton();
+        const actionButtons = Array.from(
+          dictationButton
+            .closest<HTMLElement>('[data-chat-composer-actions="right"]')
+            ?.querySelectorAll<HTMLButtonElement>("button") ?? [],
+        );
+        expect(actionButtons.indexOf(dictationButton)).toBe(actionButtons.indexOf(sendButton) - 1);
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it.each([80, 130] as const)(
+      "scales desktop composer typography and editor bounds at %i percent",
+      async (interfaceScalePercent) => {
+        const mounted = await mountChatView({
+          viewport: DEFAULT_VIEWPORT,
+          snapshot: createSnapshotForTargetUser({
+            targetMessageId: `msg-user-scaled-composer-${interfaceScalePercent}` as MessageId,
+            targetText: "scaled composer target",
+          }),
+          configureFixture: (nextFixture) => {
+            nextFixture.serverConfig = {
+              ...nextFixture.serverConfig,
+              clientSettings: {
+                ...nextFixture.serverConfig.clientSettings,
+                interfaceScalePercent,
+              },
+            };
+          },
+        });
+
+        try {
+          await waitForServerConfigToApply();
+          const editor = await waitForComposerEditor();
+
+          await vi.waitFor(() => {
+            const rootFontSize = Number.parseFloat(
+              window.getComputedStyle(document.documentElement).fontSize,
+            );
+            const editorStyle = window.getComputedStyle(editor);
+            const editorFontSize = Number.parseFloat(editorStyle.fontSize);
+            const editorMinHeight = Number.parseFloat(editorStyle.minHeight);
+            const editorMaxHeight = Number.parseFloat(editorStyle.maxHeight);
+
+            expect(rootFontSize).toBeGreaterThan(0);
+            expect(editorFontSize / rootFontSize).toBeCloseTo(0.875, 3);
+            expect(editorMinHeight / rootFontSize).toBeCloseTo(4.375, 3);
+            expect(editorMaxHeight / rootFontSize).toBeCloseTo(12.5, 3);
+          });
+        } finally {
+          await mounted.cleanup();
+        }
+      },
+    );
+
+    it("shows the current runtime step and exposes every full task on hover without a side panel", async () => {
+      // Even an old explicit "open" preference must not turn a runtime checklist
+      // into authored plan content. This catches the former Tasks-sidebar path,
+      // not just the default-closed presentation.
+      useUiStateStore.setState({
+        threadPlanSidebarOpenById: {
+          [THREAD_KEY]: true,
+        },
+      });
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotWithRuntimeTaskProgress({ withAuthoredPlan: true }),
+      });
+
+      try {
+        const trigger = page.getByRole("button", {
+          name: /^Task progress: step 5 of 12\b/i,
+        });
+        await expect.element(trigger).toHaveTextContent("Step 5 / 12");
+        expect(findComposerTaskProgressTrigger()).not.toBeNull();
+
+        expect(document.querySelector('button[aria-label="Close plan sidebar"]')).toBeNull();
+        expect(
+          document.querySelector(
+            'button[title="Show plan sidebar"], button[title="Hide plan sidebar"]',
+          ),
+        ).toBeNull();
+        expect(document.querySelector('[data-slot="sheet-popup"]:not([hidden])')).toBeNull();
+
+        await trigger.hover();
+        await vi.waitFor(
+          () => {
+            expect(findComposerTaskProgressPopup()).not.toBeNull();
+            expect(findComposerTaskProgressList()).not.toBeNull();
+            expect(findComposerTaskProgressScroller()).not.toBeNull();
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+
+        const popup = findComposerTaskProgressPopup();
+        const list = findComposerTaskProgressList();
+        const scroller = findComposerTaskProgressScroller();
+        expect(popup).not.toBeNull();
+        expect(list).not.toBeNull();
+        expect(scroller).not.toBeNull();
+        if (!popup || !list || !scroller) {
+          throw new Error("Task progress popup did not finish mounting.");
+        }
+
+        const rows = Array.from(
+          list.querySelectorAll<HTMLElement>("[data-composer-task-progress-step]"),
+        );
+        expect(rows).toHaveLength(RUNTIME_TASK_DESCRIPTIONS.length);
+        for (const description of RUNTIME_TASK_DESCRIPTIONS) {
+          expect(popup.textContent).toContain(description);
+        }
+        expect(popup.textContent).not.toContain("and more");
+
+        expect(getComputedStyle(scroller).overflowY).toBe("auto");
+        expect(scroller.scrollHeight).toBeGreaterThan(scroller.clientHeight);
+        scroller.scrollTop = scroller.scrollHeight;
+        await waitForLayout();
+        const lastRow = rows.at(-1);
+        expect(lastRow).toBeTruthy();
+        expect(lastRow!.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+          scroller.getBoundingClientRect().bottom + 1,
+        );
+
+        // Opening the task popover must not opportunistically open the removed
+        // runtime Tasks panel or make its authored-plan close control appear.
+        expect(document.querySelector('button[aria-label="Close plan sidebar"]')).toBeNull();
+        expect(document.querySelector('[data-slot="sheet-popup"]:not([hidden])')).toBeNull();
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("opens task progress with an ordinary press and restores trigger focus on Escape", async () => {
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotWithRuntimeTaskProgress(),
+      });
+
+      try {
+        const trigger = page.getByRole("button", {
+          name: /^Task progress: step 5 of 12\b/i,
+        });
+        const triggerElement = await waitForElement(
+          findComposerTaskProgressTrigger,
+          "Unable to find task progress trigger.",
+        );
+        triggerElement.focus();
+
+        // Base UI maps the same press interaction to mouse click, touch tap, and
+        // keyboard activation. Exercising the semantic button keeps this an
+        // integration test of that shared path rather than a hover-only check.
+        await trigger.click();
+        await vi.waitFor(() => {
+          expect(findComposerTaskProgressPopup()).not.toBeNull();
+          expect(triggerElement.getAttribute("aria-expanded")).toBe("true");
+        });
+
+        const scroller = findComposerTaskProgressScroller();
+        expect(scroller).not.toBeNull();
+        scroller?.focus();
+        expect(document.activeElement).toBe(scroller);
+
+        await userEvent.keyboard("{Escape}");
+        await vi.waitFor(() => {
+          expect(findComposerTaskProgressPopup()).toBeNull();
+          expect(triggerElement.getAttribute("aria-expanded")).toBe("false");
+          expect(document.activeElement).toBe(triggerElement);
+        });
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("keeps the pressed task popover contained at 430px and omits the compact plan-sidebar action", async () => {
+      useUiStateStore.setState({
+        threadPlanSidebarOpenById: {
+          [THREAD_KEY]: true,
+        },
+      });
+      const mounted = await mountChatView({
+        viewport: COMPACT_FOOTER_VIEWPORT,
+        snapshot: createSnapshotWithRuntimeTaskProgress(),
+      });
+
+      try {
+        const trigger = page.getByRole("button", {
+          name: /^Task progress: step 5 of 12\b/i,
+        });
+        await trigger.click();
+        await vi.waitFor(() => expect(findComposerTaskProgressPopup()).not.toBeNull());
+
+        const popup = findComposerTaskProgressPopup();
+        const scroller = findComposerTaskProgressScroller();
+        const outerViewport = popup?.querySelector<HTMLElement>('[data-slot="popover-viewport"]');
+        expect(popup).not.toBeNull();
+        expect(scroller).not.toBeNull();
+        expect(outerViewport).not.toBeNull();
+        if (!popup || !scroller) {
+          throw new Error("Compact task progress popup did not finish mounting.");
+        }
+
+        const popupBounds = popup.getBoundingClientRect();
+        expect(popupBounds.left).toBeGreaterThanOrEqual(-1);
+        expect(popupBounds.right).toBeLessThanOrEqual(window.innerWidth + 1);
+        expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(
+          document.documentElement.clientWidth,
+        );
+        expect(document.body.scrollWidth).toBeLessThanOrEqual(document.body.clientWidth);
+        expect(getComputedStyle(outerViewport!).overflowY).toBe("hidden");
+        expect(getComputedStyle(scroller).overflowY).toBe("auto");
+        expect(scroller.scrollHeight).toBeGreaterThan(scroller.clientHeight);
+        expect(scroller.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+          outerViewport!.getBoundingClientRect().bottom + 1,
+        );
+        expect(outerViewport!.scrollTop).toBe(0);
+
+        await userEvent.keyboard("{Escape}");
+        await vi.waitFor(() => expect(findComposerTaskProgressPopup()).toBeNull());
+
+        const moreControls = page.getByRole("button", { name: "More composer controls" });
+        await moreControls.click();
+        await vi.waitFor(() => {
+          expect(document.querySelector('[data-slot="menu-popup"]')).not.toBeNull();
+        });
+        const compactSidebarAction = Array.from(
+          document.querySelectorAll<HTMLElement>('[data-slot="menu-item"]'),
+        ).find((item) => /^(?:Show|Hide) plan sidebar$/i.test(item.textContent?.trim() ?? ""));
+        expect(compactSidebarAction).toBeUndefined();
+        expect(document.querySelector('button[aria-label="Close plan sidebar"]')).toBeNull();
+        expect(document.querySelector('[data-slot="sheet-popup"]:not([hidden])')).toBeNull();
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it.each([
+      ["the latest provider checklist is explicitly empty", { steps: [] }],
+      ["the latest turn is terminal", { terminal: true }],
+    ] as const)("hides task progress when %s", async (_reason, options) => {
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotWithRuntimeTaskProgress(options),
+      });
+
+      try {
+        await waitForLayout();
+        expect(findComposerTaskProgressTrigger()).toBeNull();
+        expect(findComposerTaskProgressPopup()).toBeNull();
+        expect(document.querySelector('button[aria-label^="Task progress: step"]')).toBeNull();
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("temporarily hides an authored plan during implementation without persisting a closed preference", async () => {
+      useUiStateStore.setState({
+        threadPlanSidebarOpenById: {},
+      });
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotWithPlanFollowUpPrompt(),
+        resolveRpc: (body) => {
+          if (body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand) {
+            return { sequence: fixture.snapshot.snapshotSequence + 1 };
+          }
+          return undefined;
+        },
+      });
+
+      const publishThreadSnapshot = (nextSnapshot: OrchestrationReadModel): void => {
+        const nextThread = nextSnapshot.threads.find((thread) => thread.id === THREAD_ID);
+        if (!nextThread) {
+          throw new Error("Sequential plan regression fixture is missing its active thread.");
+        }
+        const snapshotSequence = fixture.snapshot.snapshotSequence + 1;
+        fixture.snapshot = {
+          ...nextSnapshot,
+          snapshotSequence,
+        };
+        rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+          kind: "snapshot",
+          snapshot: {
+            snapshotSequence,
+            thread: nextThread,
+          },
+        });
+      };
+
+      try {
+        // The completed authored plan still follows the normal auto-open path.
+        await vi.waitFor(
+          () => {
+            expect(
+              document.querySelector('button[aria-label="Close plan sidebar"]'),
+            ).not.toBeNull();
+            expect(document.body.textContent).toContain("Follow-up plan");
+            expect(useUiStateStore.getState().threadPlanSidebarOpenById[THREAD_KEY]).toBe(true);
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+
+        const implementButton = await waitForButtonByText("Implement");
+        implementButton.click();
+        await vi.waitFor(
+          () => {
+            const implementationDispatch = wsRequests.find(
+              (request) =>
+                request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+                request.type === "thread.turn.start" &&
+                request.interactionMode === "default",
+            );
+            expect(implementationDispatch).toMatchObject({
+              _tag: ORCHESTRATION_WS_METHODS.dispatchCommand,
+              type: "thread.turn.start",
+              sourceProposedPlan: {
+                threadId: THREAD_ID,
+                planId: "plan-follow-up-browser-test",
+              },
+            });
+            // Local dispatch hides the panel immediately, but that suppression
+            // is not a user preference and must never overwrite the stored true.
+            expect(document.querySelector('button[aria-label="Close plan sidebar"]')).toBeNull();
+            expect(useUiStateStore.getState().threadPlanSidebarOpenById[THREAD_KEY]).toBe(true);
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+
+        publishThreadSnapshot(createSnapshotWithRuntimeTaskProgress({ withAuthoredPlan: true }));
+        await vi.waitFor(
+          () => {
+            expect(findComposerTaskProgressTrigger()).not.toBeNull();
+            expect(document.querySelector('button[aria-label="Close plan sidebar"]')).toBeNull();
+            expect(
+              document.querySelector(
+                'button[title="Show plan sidebar"], button[title="Hide plan sidebar"]',
+              ),
+            ).toBeNull();
+            expect(useUiStateStore.getState().threadPlanSidebarOpenById[THREAD_KEY]).toBe(true);
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+
+        // Once there is no active runtime turn, the next authored plan is
+        // visible again under the unchanged open preference.
+        publishThreadSnapshot(
+          createSnapshotWithPlanFollowUpPrompt({
+            planMarkdown: "# Future authored plan\n\n- Preserve plan auto-open behavior.",
+          }),
+        );
+        await vi.waitFor(
+          () => {
+            expect(
+              document.querySelector('button[aria-label="Close plan sidebar"]'),
+            ).not.toBeNull();
+            expect(document.body.textContent).toContain("Future authored plan");
+            expect(findComposerTaskProgressTrigger()).toBeNull();
+            expect(useUiStateStore.getState().threadPlanSidebarOpenById[THREAD_KEY]).toBe(true);
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("docks the runtime checklist and context usage into the session rail on a wide viewport", async () => {
+      const mounted = await mountChatView({
+        viewport: WIDE_FOOTER_VIEWPORT,
+        snapshot: createSnapshotWithRuntimeTaskProgress({ withContextWindow: true }),
+        configureFixture: (nextFixture) => {
+          const [codexProvider] = nextFixture.serverConfig.providers;
+          if (!codexProvider) return;
+          nextFixture.serverConfig = {
+            ...nextFixture.serverConfig,
+            providers: [
+              {
+                ...codexProvider,
+                accountRateLimits: {
+                  checkedAt: NOW_ISO,
+                  rateLimits: {
+                    limitId: "codex",
+                    primary: {
+                      usedPercent: 1,
+                      windowDurationMins: 10_080,
+                      resetsAt: 1_788_278_880,
+                    },
+                  },
+                },
+              },
+            ],
+          };
+        },
+      });
+
+      try {
+        const trigger = page.getByRole("button", {
+          name: /^Task progress: step 5 of 12\b/i,
+        });
+        await trigger.click();
+        await vi.waitFor(() => expect(findComposerTaskProgressPopup()).not.toBeNull());
+        await page.getByRole("button", { name: "Show on the side" }).click();
+
+        await vi.waitFor(() => {
+          expect(findSessionRail()).not.toBeNull();
+          expect(useUiStateStore.getState().sessionRailDocked).toBe(true);
+        });
+
+        const rail = findSessionRail();
+        expect(rail).not.toBeNull();
+        if (!rail) {
+          throw new Error("Session rail did not mount after docking.");
+        }
+        for (const description of RUNTIME_TASK_DESCRIPTIONS) {
+          expect(rail.textContent).toContain(description);
+        }
+        expect(rail.textContent).toContain("213k");
+        expect(rail.textContent).toContain("258k");
+        expect(rail.textContent).toContain("6.6m");
+        expect(rail.textContent).toContain("Primary window");
+        expect(findComposerTaskProgressPopup()).toBeNull();
+        expect(document.querySelector('button[aria-label^="Context window"]')).toBeNull();
+        expect(findComposerTaskProgressTrigger()).toBeNull();
+
+        await page.getByRole("button", { name: "Show in composer" }).click();
+        await vi.waitFor(() => {
+          expect(findSessionRail()).toBeNull();
+          expect(useUiStateStore.getState().sessionRailDocked).toBe(false);
+        });
+        expect(document.querySelector('button[aria-label^="Context window"]')).not.toBeNull();
+        await page.getByRole("button", { name: /^Task progress: step 5 of 12\b/i }).click();
+        await vi.waitFor(() => expect(findComposerTaskProgressPopup()).not.toBeNull());
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("keeps composer popovers when the session rail is preferred on a narrow viewport", async () => {
+      useUiStateStore.setState({ sessionRailDocked: true });
+      const mounted = await mountChatView({
+        viewport: COMPACT_FOOTER_VIEWPORT,
+        snapshot: createSnapshotWithRuntimeTaskProgress({ withContextWindow: true }),
+      });
+
+      try {
+        expect(findSessionRail()).toBeNull();
+        expect(document.querySelector('button[aria-label^="Context window"]')).not.toBeNull();
+        const trigger = page.getByRole("button", {
+          name: /^Task progress: step 5 of 12\b/i,
+        });
+        await trigger.click();
+        await vi.waitFor(() => expect(findComposerTaskProgressPopup()).not.toBeNull());
+        expect(document.querySelector('[data-session-rail-dock="true"]')).toBeNull();
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("stacks the session rail under an authored plan in the shared right column", async () => {
+      useUiStateStore.setState({ sessionRailDocked: true });
+      const mounted = await mountChatView({
+        viewport: WIDE_FOOTER_VIEWPORT,
+        snapshot: createSnapshotWithPlanFollowUpPrompt(),
+      });
+
+      try {
+        await vi.waitFor(() => {
+          expect(document.querySelector('button[aria-label="Close plan sidebar"]')).not.toBeNull();
+          expect(findSessionRail()).not.toBeNull();
+        });
+        expect(document.querySelector('[data-chat-right-column="true"]')).not.toBeNull();
+        expect(findSessionRail()?.textContent).toContain("No tasks yet.");
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
     it("renders locked single-environment mobile run context as a static workspace label", async () => {
       const mounted = await mountChatView({
         viewport: COMPACT_FOOTER_VIEWPORT,
@@ -2414,6 +3126,30 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       });
 
       try {
+        await mounted.setContainerSize(WIDE_FOOTER_VIEWPORT);
+        await vi.waitFor(() => {
+          const footer = document.querySelector<HTMLElement>('[data-chat-composer-footer="true"]');
+          const optionsButton = footer?.querySelector<HTMLButtonElement>(
+            'button[aria-label="More composer controls"]',
+          );
+          const traitsLabel = optionsButton?.querySelector<HTMLElement>(
+            '[data-compact-composer-controls-label="true"]',
+          );
+          expect(footer?.dataset.chatComposerFooterCompact).toBe("false");
+          expect(traitsLabel?.textContent).toBe("Ultra");
+          expect(optionsButton?.textContent).not.toContain("Full access");
+        });
+
+        await mounted.setContainerSize(COMPACT_FOOTER_VIEWPORT);
+        await vi.waitFor(() => {
+          const footer = document.querySelector<HTMLElement>('[data-chat-composer-footer="true"]');
+          const traitsLabel = document.querySelector<HTMLElement>(
+            '[data-compact-composer-controls-label="true"]',
+          );
+          expect(footer?.dataset.chatComposerFooterCompact).toBe("true");
+          expect(traitsLabel?.textContent).toBe("Ultra");
+        });
+
         useComposerDraftStore.getState().setPrompt(THREAD_REF, "Keep this turn on Ultra");
         await waitForLayout();
 
@@ -2802,6 +3538,134 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       }
     });
 
+    it("restores rejected direct sends and reports every delivery attempt before a successful retry", async () => {
+      const messageText = "Retry this exact direct message";
+      const repeatedFailure = "The message identity ledger is temporarily busy.";
+      let turnStartAttempts = 0;
+      const dispatchedMessageTexts: string[] = [];
+      const closeToastSpy = vi.spyOn(toastManager, "close");
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotForTargetUser({
+          targetMessageId: "msg-user-direct-send-retry" as MessageId,
+          targetText: "direct send retry target",
+        }),
+        resolveRpc: (body) => {
+          if (
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+            body.type === "thread.turn.start"
+          ) {
+            turnStartAttempts += 1;
+            const message = body.message as { text?: unknown } | undefined;
+            if (typeof message?.text === "string") {
+              dispatchedMessageTexts.push(message.text);
+            }
+            if (turnStartAttempts <= 2) {
+              return failBrowserWsRpc(
+                new OrchestrationDispatchCommandError({ message: repeatedFailure }),
+              );
+            }
+          }
+          if (body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand) {
+            return { sequence: fixture.snapshot.snapshotSequence + turnStartAttempts + 1 };
+          }
+          return undefined;
+        },
+      });
+
+      const findOptimisticMessage = () =>
+        Array.from(document.querySelectorAll<HTMLElement>('[data-message-role="user"]')).filter(
+          (element) => element.textContent?.includes(messageText),
+        );
+
+      try {
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, messageText);
+        await waitForLayout();
+
+        (await waitForSendButton()).click();
+        await vi.waitFor(
+          () => {
+            expect(turnStartAttempts).toBe(1);
+            expect(findOptimisticMessage()).toHaveLength(0);
+            expect(
+              document.querySelector<HTMLElement>('[data-testid="composer-editor"]')?.textContent,
+            ).toBe(messageText);
+            expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+              messageText,
+            );
+            expect(document.body.textContent).toContain("Failed to send message.");
+            expect(findSendFailureToastTitle()).not.toBeNull();
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+
+        // Dismiss both presentations from the first occurrence. The stable
+        // thread banner intentionally remembers this exact error, while the
+        // notification is occurrence-based and must return for the next press.
+        document.querySelector<HTMLButtonElement>('button[aria-label="Dismiss error"]')?.click();
+        document
+          .querySelector<HTMLButtonElement>('button[aria-label="Dismiss notification"]')
+          ?.click();
+        await vi.waitFor(
+          () => {
+            expect(document.querySelector('button[aria-label="Dismiss error"]')).toBeNull();
+            expect(findSendFailureToastTitle()).toBeNull();
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+
+        (await waitForSendButton()).click();
+        await vi.waitFor(
+          () => {
+            expect(turnStartAttempts).toBe(2);
+            expect(findSendFailureToastTitle()).not.toBeNull();
+            // The dismissed banner remains suppressed, proving the new toast
+            // is what makes an identical second rejection visible.
+            expect(document.querySelector('button[aria-label="Dismiss error"]')).toBeNull();
+            expect(findOptimisticMessage()).toHaveLength(0);
+            expect(
+              document.querySelector<HTMLElement>('[data-testid="composer-editor"]')?.textContent,
+            ).toBe(messageText);
+            expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+              messageText,
+            );
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+
+        // A third press succeeds. The restored draft is consumed exactly once
+        // and its optimistic row remains until the canonical snapshot arrives.
+        const closeCountBeforeSuccessfulRetry = closeToastSpy.mock.calls.length;
+        (await waitForSendButton()).click();
+        await vi.waitFor(
+          () => {
+            expect(turnStartAttempts).toBe(3);
+            expect(closeToastSpy.mock.calls).toHaveLength(closeCountBeforeSuccessfulRetry + 1);
+            expect(findOptimisticMessage()).toHaveLength(1);
+            expect(
+              document.querySelector<HTMLElement>('[data-testid="composer-editor"]')?.textContent ??
+                "",
+            ).toBe("");
+            expect(
+              useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt ?? "",
+            ).toBe("");
+            expect(dispatchedMessageTexts).toEqual([messageText, messageText, messageText]);
+            expect(findSendFailureToastTitle()).toBeNull();
+            expect(document.querySelector('button[aria-label="Dismiss error"]')).toBeNull();
+            expect(document.body.textContent).not.toContain("Failed to send message.");
+          },
+          // The toast manager's normal auto-dismiss is much longer than this
+          // bound. Passing here therefore proves the successful dispatch
+          // closed the stale failure notification instead of merely waiting
+          // for its timer to expire.
+          { timeout: 2_000, interval: 16 },
+        );
+      } finally {
+        closeToastSpy.mockRestore();
+        await mounted.cleanup();
+      }
+    });
+
     it("restores composer focus after a send completes", async () => {
       let resolveDispatch!: (value: { sequence: number }) => void;
       let dispatchResolved = false;
@@ -3170,7 +4034,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       }
     });
 
-    it("cycles Claude's four normal permission modes with Shift+Tab", async () => {
+    it("keeps Claude permission modes in options and cycles them with Shift+Tab", async () => {
       const mounted = await mountChatView({
         viewport: DEFAULT_VIEWPORT,
         snapshot: createSnapshotForTargetUser({
@@ -3210,11 +4074,60 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       });
 
       try {
-        await waitForInteractionModeButton("Manual");
-        const composerEditor = await waitForComposerEditor();
-        composerEditor.focus();
+        const footer = await waitForElement(
+          () => document.querySelector<HTMLElement>('[data-chat-composer-footer="true"]'),
+          "Unable to find composer footer.",
+        );
+        const optionsButton = await waitForElement(
+          () =>
+            footer.querySelector<HTMLButtonElement>('button[aria-label="More composer controls"]'),
+          "Unable to find the combined composer options button.",
+        );
+        expect(
+          Array.from(footer.querySelectorAll("button")).some((button) =>
+            ["Manual", "Accept edits", "Plan", "Auto", "Bypass permissions"].includes(
+              button.textContent?.trim() ?? "",
+            ),
+          ),
+        ).toBe(false);
 
-        for (const expectedLabel of ["Accept edits", "Plan", "Auto", "Manual"] as const) {
+        optionsButton.click();
+        expect((await waitForMenuRadioItemContainingText("Manual")).textContent).toContain(
+          "Ask before edits and commands",
+        );
+        expect((await waitForMenuRadioItemContainingText("Accept edits")).textContent).toContain(
+          "Apply edits automatically",
+        );
+        expect(
+          (await waitForMenuRadioItemContainingText("Bypass permissions")).textContent,
+        ).toContain("Run without permission checks");
+        await userEvent.keyboard("{Escape}");
+        await vi.waitFor(() => {
+          expect(document.querySelector('[data-slot="menu-popup"]')).toBeNull();
+        });
+
+        const composerEditor = await waitForComposerEditor();
+        const expectedModes = [
+          {
+            runtimeMode: "auto-accept-edits",
+            interactionMode: "default",
+          },
+          {
+            runtimeMode: "auto-accept-edits",
+            interactionMode: "plan",
+          },
+          {
+            runtimeMode: "auto-accept-edits",
+            interactionMode: "auto",
+          },
+          {
+            runtimeMode: "approval-required",
+            interactionMode: "default",
+          },
+        ] as const;
+
+        for (const expected of expectedModes) {
+          composerEditor.focus();
           composerEditor.dispatchEvent(
             new KeyboardEvent("keydown", {
               key: "Tab",
@@ -3223,7 +4136,11 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
               cancelable: true,
             }),
           );
-          await waitForInteractionModeButton(expectedLabel);
+          await vi.waitFor(() => {
+            const draft = useComposerDraftStore.getState().draftsByThreadKey[THREAD_KEY];
+            expect(draft?.runtimeMode ?? "approval-required").toBe(expected.runtimeMode);
+            expect(draft?.interactionMode ?? "default").toBe(expected.interactionMode);
+          });
         }
       } finally {
         await mounted.cleanup();
@@ -3640,10 +4557,812 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         await mounted.cleanup();
       }
     });
+
+    it("replaces Stop with Send while a running turn has a follow-up draft", async () => {
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotForTargetUser({
+          targetMessageId: "msg-user-running-follow-up-send" as MessageId,
+          targetText: "running follow-up send target",
+          sessionStatus: "running",
+        }),
+      });
+
+      try {
+        const initialStopButton = await waitForElement(
+          () => document.querySelector<HTMLButtonElement>('button[aria-label="Stop generation"]'),
+          "Unable to find the empty running composer Stop button.",
+        );
+        expect(initialStopButton.disabled).toBe(false);
+
+        useComposerDraftStore
+          .getState()
+          .setPrompt(THREAD_REF, "Queue this without interrupting the active turn");
+
+        const queueButton = await waitForElement(
+          () => document.querySelector<HTMLButtonElement>('button[aria-label="Queue message"]'),
+          "Unable to find the running composer Send button.",
+        );
+        expect(queueButton.disabled).toBe(false);
+        expect(
+          document.querySelector<HTMLButtonElement>('button[aria-label="Stop generation"]'),
+        ).toBeNull();
+
+        queueButton.click();
+
+        await vi.waitFor(
+          () => {
+            expect(document.querySelector('[data-cafe-followup-queue="true"]')).not.toBeNull();
+            expect(
+              useComposerDraftStore.getState().draftsByThreadKey[THREAD_KEY]?.prompt ?? "",
+            ).toBe("");
+            const queuedGuardButton = document.querySelector<HTMLButtonElement>(
+              'button[aria-label="Queue message"]',
+            );
+            expect(queuedGuardButton).not.toBeNull();
+            expect(queuedGuardButton?.disabled).toBe(true);
+            expect(
+              document.querySelector<HTMLButtonElement>('button[aria-label="Stop generation"]'),
+            ).toBeNull();
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+
+        // Exercise the control again during the double-click guard. A rapid
+        // second activation must remain harmless instead of landing on Stop.
+        document.querySelector<HTMLButtonElement>('button[aria-label="Queue message"]')?.click();
+        await waitForLayout();
+        expect(
+          wsRequests.some(
+            (request) =>
+              request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+              request.type === "thread.turn.interrupt",
+          ),
+        ).toBe(false);
+
+        await waitForElement(
+          () => document.querySelector<HTMLButtonElement>('button[aria-label="Stop generation"]'),
+          "Stop did not return after the post-send double-click guard elapsed.",
+        );
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("keeps a steer pending when another message starts processing on the same turn", async () => {
+      const activeTurnId = "turn-correlated-steer-processing" as TurnId;
+      const baseSnapshot = createSnapshotForTargetUser({
+        targetMessageId: "msg-user-correlated-steer-processing" as MessageId,
+        targetText: "correlated steer processing target",
+        sessionStatus: "running",
+      });
+      const runningSnapshot: OrchestrationReadModel = {
+        ...baseSnapshot,
+        threads: baseSnapshot.threads.map((thread) =>
+          Object.assign({}, thread, {
+            latestTurn: {
+              turnId: activeTurnId,
+              state: "running" as const,
+              requestedAt: isoAt(1_000),
+              startedAt: isoAt(1_001),
+              completedAt: null,
+              assistantMessageId: null,
+            },
+            session: {
+              ...thread.session!,
+              status: "running" as const,
+              activeTurnId,
+              updatedAt: isoAt(1_001),
+            },
+            updatedAt: isoAt(1_001),
+          }),
+        ),
+      };
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: runningSnapshot,
+        configureFixture: (testFixture) => {
+          testFixture.serverConfig = {
+            ...testFixture.serverConfig,
+            providers: testFixture.serverConfig.providers.map((provider) => ({
+              ...provider,
+              runtimeCapabilities: {
+                liveSteer: "supported" as const,
+                threadGoals: "unsupported" as const,
+              },
+            })),
+          };
+        },
+        resolveRpc: (body) => {
+          if (body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand) {
+            return { sequence: fixture.snapshot.snapshotSequence + 1 };
+          }
+          return undefined;
+        },
+      });
+
+      try {
+        useComposerDraftStore
+          .getState()
+          .setPrompt(THREAD_REF, "Keep this steer pending until its own marker arrives");
+
+        const queueButton = await waitForElement(
+          () => document.querySelector<HTMLButtonElement>('button[aria-label="Queue message"]'),
+          "Unable to find the running composer Send button.",
+        );
+        queueButton.click();
+
+        const steerButton = await waitForElement(
+          () =>
+            document.querySelector<HTMLButtonElement>(
+              '[data-cafe-followup-queue="true"] .cafe-followup-steer-button',
+            ),
+          "Unable to find the queued follow-up Send action.",
+        );
+        steerButton.click();
+
+        let dispatchedMessageId: MessageId | null = null;
+        await vi.waitFor(
+          () => {
+            const request = wsRequests.find(
+              (candidate) =>
+                candidate._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+                candidate.type === "thread.turn.steer",
+            ) as
+              | {
+                  readonly type: "thread.turn.steer";
+                  readonly message: { readonly messageId: MessageId };
+                }
+              | undefined;
+            dispatchedMessageId = request?.message.messageId ?? null;
+            expect(dispatchedMessageId).not.toBeNull();
+            expect(
+              document.querySelector('[aria-label="Follow-up steering into active turn"]'),
+            ).not.toBeNull();
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+
+        const emitProcessingActivity = (
+          messageId: MessageId,
+          eventId: string,
+          correlationLocation: "payload" | "usage",
+        ) => {
+          const currentThread = fixture.snapshot.threads[0]!;
+          const snapshotSequence = fixture.snapshot.snapshotSequence + 1;
+          const processingPayload = {
+            taskId: `codex-turn-steer-processing:${activeTurnId}`,
+            detail: "Codex app-server began processing turn/steer.",
+            ...(correlationLocation === "payload" ? { messageId } : { usage: { messageId } }),
+          };
+          const nextThread: OrchestrationReadModel["threads"][number] = {
+            ...currentThread,
+            activities: [
+              ...currentThread.activities,
+              {
+                id: EventId.make(eventId),
+                tone: "info",
+                kind: "task.progress",
+                summary: "Reasoning update",
+                payload: processingPayload,
+                turnId: activeTurnId,
+                sequence: currentThread.activities.length + 1,
+                createdAt: new Date(Date.now() + snapshotSequence * 1_000).toISOString(),
+              },
+            ],
+            updatedAt: new Date(Date.now() + snapshotSequence * 1_000).toISOString(),
+          };
+          fixture.snapshot = {
+            ...fixture.snapshot,
+            snapshotSequence,
+            threads: [nextThread],
+          };
+          rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+            kind: "snapshot",
+            snapshot: {
+              snapshotSequence,
+              thread: nextThread,
+            },
+          });
+        };
+
+        emitProcessingActivity(
+          "different-steer-message" as MessageId,
+          "activity-other-steer-processing",
+          "usage",
+        );
+        await waitForLayout();
+        expect(
+          document.querySelector('[aria-label="Follow-up steering into active turn"]'),
+        ).not.toBeNull();
+
+        emitProcessingActivity(
+          dispatchedMessageId!,
+          "activity-correlated-steer-processing",
+          "payload",
+        );
+        await vi.waitFor(
+          () => {
+            expect(
+              document.querySelector('[aria-label="Follow-up steering into active turn"]'),
+            ).toBeNull();
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+        expect(
+          wsRequests.filter(
+            (request) =>
+              request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+              request.type === "thread.turn.steer",
+          ),
+        ).toHaveLength(1);
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("settles a pending steer only from an exact successful delivery receipt", async () => {
+      const activeTurnId = "turn-steer-delivery-receipt" as TurnId;
+      const baseSnapshot = createSnapshotForTargetUser({
+        targetMessageId: "msg-user-steer-delivery-receipt" as MessageId,
+        targetText: "delivery receipt target",
+        sessionStatus: "running",
+      });
+      const runningSnapshot: OrchestrationReadModel = {
+        ...baseSnapshot,
+        threads: baseSnapshot.threads.map((thread) =>
+          Object.assign({}, thread, {
+            latestTurn: {
+              turnId: activeTurnId,
+              state: "running" as const,
+              requestedAt: isoAt(1_000),
+              startedAt: isoAt(1_001),
+              completedAt: null,
+              assistantMessageId: null,
+            },
+            session: {
+              ...thread.session!,
+              status: "running" as const,
+              activeTurnId,
+              updatedAt: isoAt(1_001),
+            },
+            updatedAt: isoAt(1_001),
+          }),
+        ),
+      };
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: runningSnapshot,
+        configureFixture: (testFixture) => {
+          testFixture.serverConfig = {
+            ...testFixture.serverConfig,
+            providers: testFixture.serverConfig.providers.map((provider) => ({
+              ...provider,
+              runtimeCapabilities: {
+                liveSteer: "supported" as const,
+                threadGoals: "unsupported" as const,
+              },
+            })),
+          };
+        },
+        resolveRpc: (body) => {
+          if (body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand) {
+            return { sequence: fixture.snapshot.snapshotSequence + 1 };
+          }
+          return undefined;
+        },
+      });
+
+      try {
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, "Deliver this steer exactly once");
+        const queueButton = await waitForElement(
+          () => document.querySelector<HTMLButtonElement>('button[aria-label="Queue message"]'),
+          "Unable to find the running composer Send button.",
+        );
+        queueButton.click();
+        const steerButton = await waitForElement(
+          () =>
+            document.querySelector<HTMLButtonElement>(
+              '[data-cafe-followup-queue="true"] .cafe-followup-steer-button',
+            ),
+          "Unable to find the queued follow-up Send action.",
+        );
+        steerButton.click();
+
+        let dispatchedMessageId: MessageId | null = null;
+        await vi.waitFor(
+          () => {
+            const request = wsRequests.find(
+              (candidate) =>
+                candidate._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+                candidate.type === "thread.turn.steer",
+            ) as
+              | {
+                  readonly type: "thread.turn.steer";
+                  readonly message: { readonly messageId: MessageId };
+                }
+              | undefined;
+            dispatchedMessageId = request?.message.messageId ?? null;
+            expect(dispatchedMessageId).not.toBeNull();
+            expect(
+              document.querySelector('[aria-label="Follow-up steering into active turn"]'),
+            ).not.toBeNull();
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+
+        const emitReceiptActivity = (input: {
+          readonly id: string;
+          readonly kind: string;
+          readonly payload: unknown;
+        }) => {
+          const currentThread = fixture.snapshot.threads[0]!;
+          const snapshotSequence = fixture.snapshot.snapshotSequence + 1;
+          const nextThread: OrchestrationReadModel["threads"][number] = {
+            ...currentThread,
+            activities: [
+              ...currentThread.activities,
+              {
+                id: EventId.make(input.id),
+                tone: "info",
+                kind: input.kind,
+                summary: "Steer delivery state changed",
+                payload: input.payload,
+                turnId: activeTurnId,
+                sequence: currentThread.activities.length + 1,
+                createdAt: isoAt(1_010 + snapshotSequence),
+              },
+            ],
+            updatedAt: isoAt(1_010 + snapshotSequence),
+          };
+          fixture.snapshot = {
+            ...fixture.snapshot,
+            snapshotSequence,
+            threads: [nextThread],
+          };
+          rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+            kind: "snapshot",
+            snapshot: { snapshotSequence, thread: nextThread },
+          });
+        };
+
+        emitReceiptActivity({
+          id: "activity-pre-io-steer-warning",
+          kind: "runtime.warning",
+          payload: {
+            provider: "codex",
+            messageId: dispatchedMessageId!,
+            delivery: "next-turn",
+          },
+        });
+        await waitForLayout();
+        expect(
+          document.querySelector('[aria-label="Follow-up steering into active turn"]'),
+        ).not.toBeNull();
+
+        emitReceiptActivity({
+          id: "activity-steer-delivered",
+          kind: "provider.turn.steer.delivered",
+          payload: {
+            provider: "codex",
+            messageId: dispatchedMessageId!,
+            deliveredTurnId: "turn-delivered-next",
+            delivery: "next-turn",
+            reason: "active-turn-ended-before-steer",
+          },
+        });
+        await vi.waitFor(
+          () => {
+            expect(
+              document.querySelector('[aria-label="Follow-up steering into active turn"]'),
+            ).toBeNull();
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("keeps a same-id retry pending until that retry generation fails", async () => {
+      const activeTurnId = "turn-same-id-steer-retry" as TurnId;
+      const messageId = "msg-same-id-steer-retry" as MessageId;
+      const baseSnapshot = createSnapshotForTargetUser({
+        targetMessageId: "msg-user-same-id-steer-target" as MessageId,
+        targetText: "same-id steer target",
+        sessionStatus: "running",
+      });
+      const retryMessage = {
+        ...createUserMessage({
+          id: messageId,
+          text: "Retry this exact message",
+          offsetSeconds: 2_000,
+        }),
+        turnId: activeTurnId,
+      };
+      const oldFailure = {
+        id: EventId.make("activity-old-same-id-steer-failure"),
+        tone: "error" as const,
+        kind: "provider.turn.steer.failed",
+        summary: "Codex could not steer the compact turn",
+        payload: {
+          provider: "codex",
+          messageId,
+          intentSequence: 41,
+          retryableFollowUp: true,
+          codexNonSteerableTurnKind: "compact",
+        },
+        turnId: activeTurnId,
+        sequence: 42,
+        createdAt: isoAt(2_002),
+      };
+      const runningSnapshot: OrchestrationReadModel = {
+        ...baseSnapshot,
+        threads: baseSnapshot.threads.map((thread) =>
+          Object.assign({}, thread, {
+            messages: [...thread.messages, retryMessage],
+            activities: [oldFailure],
+            latestTurn: {
+              turnId: activeTurnId,
+              state: "running" as const,
+              requestedAt: isoAt(1_900),
+              startedAt: isoAt(1_901),
+              completedAt: null,
+              assistantMessageId: null,
+            },
+            session: {
+              ...thread.session!,
+              status: "running" as const,
+              activeTurnId,
+              updatedAt: isoAt(2_003),
+            },
+            updatedAt: isoAt(2_003),
+          }),
+        ),
+      };
+      const currentIntentSequence = 77;
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: runningSnapshot,
+        configureFixture: (testFixture) => {
+          testFixture.serverConfig = {
+            ...testFixture.serverConfig,
+            providers: testFixture.serverConfig.providers.map((provider) => ({
+              ...provider,
+              runtimeCapabilities: {
+                liveSteer: "supported" as const,
+                threadGoals: "unsupported" as const,
+              },
+            })),
+          };
+        },
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+            ? { sequence: currentIntentSequence }
+            : undefined,
+      });
+
+      try {
+        await vi.waitFor(
+          () => {
+            const steerButton = document.querySelector<HTMLButtonElement>(
+              '[data-cafe-followup-queue="true"] .cafe-followup-steer-button',
+            );
+            const automaticallyDispatched = wsRequests.some(
+              (request) =>
+                request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+                request.type === "thread.turn.steer",
+            );
+            expect(steerButton !== null || automaticallyDispatched).toBe(true);
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+        // Compact-blocked retries can become immediately eligible and be
+        // auto-steered; click only when the visible shelf action won the race.
+        document
+          .querySelector<HTMLButtonElement>(
+            '[data-cafe-followup-queue="true"] .cafe-followup-steer-button',
+          )
+          ?.click();
+
+        await vi.waitFor(
+          () => {
+            expect(
+              wsRequests.some(
+                (request) =>
+                  request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+                  request.type === "thread.turn.steer" &&
+                  (
+                    request as unknown as {
+                      readonly message: { readonly messageId: MessageId };
+                    }
+                  ).message.messageId === messageId,
+              ),
+            ).toBe(true);
+            // The old generation-41 failure remains in the snapshot, but must
+            // not settle the generation-77 retry that reused its MessageId.
+            expect(
+              document.querySelector('[aria-label="Follow-up steering into active turn"]'),
+            ).not.toBeNull();
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+
+        const currentThread = fixture.snapshot.threads[0]!;
+        const snapshotSequence = fixture.snapshot.snapshotSequence + 1;
+        const nextThread: OrchestrationReadModel["threads"][number] = {
+          ...currentThread,
+          activities: [
+            ...currentThread.activities,
+            {
+              ...oldFailure,
+              id: EventId.make("activity-current-same-id-steer-failure"),
+              payload: { ...oldFailure.payload, intentSequence: currentIntentSequence },
+              sequence: 43,
+              createdAt: new Date().toISOString(),
+            },
+          ],
+          updatedAt: new Date().toISOString(),
+        };
+        fixture.snapshot = { ...fixture.snapshot, snapshotSequence, threads: [nextThread] };
+        rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+          kind: "snapshot",
+          snapshot: { snapshotSequence, thread: nextThread },
+        });
+        await vi.waitFor(
+          () => {
+            expect(
+              document.querySelector('[aria-label="Follow-up steering into active turn"]'),
+            ).toBeNull();
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("reconstructs more than 64 durable steer retries once after a reload", async () => {
+      const activeTurnId = "turn-reload-retry-review" as TurnId;
+      const baseSnapshot = createSnapshotForTargetUser({
+        targetMessageId: "msg-user-reload-retry-target" as MessageId,
+        targetText: "reload retry target",
+        sessionStatus: "running",
+      });
+      const retryMessages = Array.from({ length: 65 }, (_, index) => ({
+        ...createUserMessage({
+          id: `msg-reload-retry-${index}` as MessageId,
+          text: `Durable retry prompt ${index}`,
+          offsetSeconds: 2_000 + index * 2,
+        }),
+        turnId: activeTurnId,
+      }));
+      const retryActivities = retryMessages.map((message, index) => ({
+        id: EventId.make(`activity-reload-retry-${index}`),
+        tone: "error" as const,
+        kind: "provider.turn.steer.failed",
+        summary: "Codex could not steer the review turn",
+        payload: {
+          provider: "codex",
+          messageId: message.id,
+          retryableFollowUp: true,
+          codexNonSteerableTurnKind: "review",
+        },
+        turnId: activeTurnId,
+        sequence: index + 1,
+        createdAt: isoAt(2_001 + index * 2),
+      }));
+      const reloadSnapshot: OrchestrationReadModel = {
+        ...baseSnapshot,
+        threads: baseSnapshot.threads.map((thread) =>
+          Object.assign({}, thread, {
+            messages: [...thread.messages, ...retryMessages],
+            activities: retryActivities,
+            latestTurn: {
+              turnId: activeTurnId,
+              state: "running" as const,
+              requestedAt: isoAt(1_900),
+              startedAt: isoAt(1_901),
+              completedAt: null,
+              assistantMessageId: null,
+            },
+            session: {
+              ...thread.session!,
+              status: "running" as const,
+              activeTurnId,
+              updatedAt: isoAt(2_200),
+            },
+            updatedAt: isoAt(2_200),
+          }),
+        ),
+      };
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: reloadSnapshot,
+        configureFixture: (testFixture) => {
+          testFixture.serverConfig = {
+            ...testFixture.serverConfig,
+            providers: testFixture.serverConfig.providers.map((provider) => ({
+              ...provider,
+              runtimeCapabilities: {
+                liveSteer: "supported" as const,
+                threadGoals: "unsupported" as const,
+              },
+            })),
+          };
+        },
+      });
+
+      try {
+        await vi.waitFor(
+          () => {
+            expect(
+              document.querySelectorAll('button[aria-label="Remove queued message"]').length,
+            ).toBe(65);
+            expect(document.body.textContent).toContain("65 steers waiting");
+            expect(document.body.textContent).toContain("Durable retry prompt 0");
+            expect(document.body.textContent).toContain("Durable retry prompt 64");
+          },
+          { timeout: 12_000, interval: 16 },
+        );
+        expect(
+          wsRequests.some(
+            (request) =>
+              request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+              (request.type === "thread.turn.steer" || request.type === "thread.turn.start"),
+          ),
+        ).toBe(false);
+
+        // Replaying the same canonical snapshot models reconnect hydration.
+        // Every source MessageId must remain represented exactly once.
+        const currentThread = fixture.snapshot.threads[0]!;
+        const snapshotSequence = fixture.snapshot.snapshotSequence + 1;
+        fixture.snapshot = {
+          ...fixture.snapshot,
+          snapshotSequence,
+          threads: [{ ...currentThread, updatedAt: isoAt(2_201) }],
+        };
+        rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+          kind: "snapshot",
+          snapshot: {
+            snapshotSequence,
+            thread: fixture.snapshot.threads[0]!,
+          },
+        });
+        await waitForLayout();
+        expect(document.querySelectorAll('button[aria-label="Remove queued message"]').length).toBe(
+          65,
+        );
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("keeps Send guarded when a mobile follow-up collapses the keyboard overlay", async () => {
+      const restoreTouchMediaQuery = forceOnScreenKeyboardMediaQuery();
+      const mounted = await mountChatView({
+        viewport: COMPACT_FOOTER_VIEWPORT,
+        snapshot: createSnapshotForTargetUser({
+          targetMessageId: "msg-user-mobile-running-follow-up-send" as MessageId,
+          targetText: "mobile running follow-up send target",
+          sessionStatus: "running",
+        }),
+      });
+
+      try {
+        useComposerDraftStore
+          .getState()
+          .setPrompt(THREAD_REF, "Queue this mobile follow-up without interrupting");
+
+        const expandButton = await waitForElement(
+          () => document.querySelector<HTMLButtonElement>('button[aria-label="Expand composer"]'),
+          "Unable to find the compact running composer expand button.",
+        );
+        expandButton.click();
+
+        const overlayQueueButton = await waitForElement(
+          () =>
+            document.querySelector<HTMLButtonElement>(
+              '[data-chat-composer-mobile-pending-actions="true"] button[aria-label="Queue message"]',
+            ),
+          "Unable to find the mobile keyboard overlay Send button.",
+        );
+        expect(
+          document.querySelector<HTMLButtonElement>(
+            '[data-chat-composer-mobile-pending-actions="true"] button[aria-label="Stop generation"]',
+          ),
+        ).toBeNull();
+
+        // Let the synchronous expand gesture release before exercising the
+        // next touch gesture, matching a real user tap after the keyboard has
+        // opened rather than compressing both gestures into one animation frame.
+        await waitForLayout();
+        overlayQueueButton.click();
+
+        const guardedFooterQueueButton = await waitForElement(() => {
+          const button = document.querySelector<HTMLButtonElement>(
+            '[data-chat-composer-actions="right"] button[aria-label="Queue message"]',
+          );
+          return button?.disabled ? button : null;
+        }, "The mobile footer did not preserve the guarded Send action after hiding the keyboard.");
+        expect(document.querySelector('[data-cafe-followup-queue="true"]')).not.toBeNull();
+        expect(useComposerDraftStore.getState().draftsByThreadKey[THREAD_KEY]?.prompt ?? "").toBe(
+          "",
+        );
+        expect(
+          document.querySelector<HTMLButtonElement>('button[aria-label="Stop generation"]'),
+        ).toBeNull();
+
+        // A second activation at the same coordinates remains inert after the
+        // overlay-to-footer transition instead of interrupting the provider.
+        guardedFooterQueueButton.click();
+        await waitForLayout();
+        expect(
+          wsRequests.some(
+            (request) =>
+              request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+              request.type === "thread.turn.interrupt",
+          ),
+        ).toBe(false);
+
+        await waitForElement(
+          () => document.querySelector<HTMLButtonElement>('button[aria-label="Stop generation"]'),
+          "Stop did not return after the mobile post-send guard elapsed.",
+        );
+      } finally {
+        await mounted.cleanup();
+        restoreTouchMediaQuery();
+      }
+    });
   }
 
   if (chatViewBrowserPart === "navigation") {
-    it("shows runtime mode descriptions in the desktop composer access select", async () => {
+    it("replaces an open subagent detail with Atrium and does not restore it on close", async () => {
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotWithActiveSubagent(),
+        configureFixture: (nextFixture) => {
+          nextFixture.serverConfig = {
+            ...nextFixture.serverConfig,
+            clientSettings: {
+              ...nextFixture.serverConfig.clientSettings,
+              ambianceAtriumEnabled: true,
+            },
+          };
+        },
+      });
+
+      try {
+        await page.getByRole("button", { name: /^1 active subagent\. Show task list$/i }).click();
+        const subagentRow = page
+          .getByRole("region", { name: "Active subagents" })
+          .getByRole("button", {
+            name: /Browser lifecycle audit, Working\. Verify Atrium navigation\. Open details/i,
+          });
+        await expect.element(subagentRow).toBeInTheDocument();
+        await subagentRow.click();
+        await vi.waitFor(() => {
+          expect(document.querySelector('[data-subagent-detail-view="true"]')).not.toBeNull();
+        });
+
+        useTaskAtriumStore.getState().setOpen(true);
+        await vi.waitFor(() => {
+          expect(document.querySelector('[data-cafe-task-atrium-overlay="true"]')).not.toBeNull();
+          expect(document.querySelector('[data-subagent-detail-view="true"]')).toBeNull();
+        });
+
+        useTaskAtriumStore.getState().setOpen(false);
+        await vi.waitFor(() => {
+          expect(document.querySelector('[data-cafe-task-atrium-overlay="true"]')).toBeNull();
+          expect(document.querySelector('[data-subagent-detail-view="true"]')).toBeNull();
+        });
+      } finally {
+        useTaskAtriumStore.getState().setOpen(false);
+        await mounted.cleanup();
+      }
+    });
+
+    it("keeps runtime access in the desktop options menu without a footer mode label", async () => {
       setDraftThreadWithoutWorktree();
 
       const mounted = await mountChatView({
@@ -3652,18 +5371,51 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       });
 
       try {
-        const runtimeModeSelect = await waitForButtonByText("Full access");
-        runtimeModeSelect.click();
+        const footer = await waitForElement(
+          () => document.querySelector<HTMLElement>('[data-chat-composer-footer="true"]'),
+          "Unable to find composer footer.",
+        );
+        const optionsButton = await waitForElement(
+          () =>
+            footer.querySelector<HTMLButtonElement>('button[aria-label="More composer controls"]'),
+          "Unable to find the combined composer options button.",
+        );
+        const footerShowsAccessMode = () =>
+          Array.from(footer.querySelectorAll("button")).some((button) =>
+            ["Supervised", "Auto-accept edits", "Full access"].includes(
+              button.textContent?.trim() ?? "",
+            ),
+          );
 
-        expect((await waitForSelectItemContainingText("Supervised")).textContent).toContain(
+        // The provider fixture intentionally has no option descriptors. Access
+        // still needs a fallback options trigger, but the selected access label
+        // must not consume permanent footer space.
+        expect(optionsButton.textContent?.trim()).toBe("");
+        expect(footerShowsAccessMode()).toBe(false);
+        optionsButton.click();
+
+        expect((await waitForMenuRadioItemContainingText("Supervised")).textContent).toContain(
           "Ask before commands and file changes",
         );
 
-        const autoAcceptItem = await waitForSelectItemContainingText("Auto-accept edits");
+        const autoAcceptItem = await waitForMenuRadioItemContainingText("Auto-accept edits");
         expect(autoAcceptItem.textContent).toContain("Auto-approve edits");
-        expect((await waitForSelectItemContainingText("Full access")).textContent).toContain(
+        expect((await waitForMenuRadioItemContainingText("Full access")).textContent).toContain(
           "Allow commands and edits without prompts",
         );
+
+        autoAcceptItem.click();
+        await vi.waitFor(() => {
+          expect(useComposerDraftStore.getState().draftsByThreadKey[THREAD_KEY]?.runtimeMode).toBe(
+            "auto-accept-edits",
+          );
+          expect(
+            Array.from(
+              document.querySelectorAll<HTMLElement>('[data-slot="menu-radio-item"]'),
+            ).find((item) => item.textContent?.includes("Auto-accept edits")),
+          ).toHaveAttribute("aria-checked", "true");
+        });
+        expect(footerShowsAccessMode()).toBe(false);
       } finally {
         await mounted.cleanup();
       }
@@ -3716,7 +5468,12 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           archiveAction,
           "Archive button should render inside a visibility wrapper.",
         ).not.toBeNull();
-        expect(getComputedStyle(archiveAction!).opacity).toBe("0");
+        await vi.waitFor(
+          () => {
+            expect(getComputedStyle(archiveAction!).opacity).toBe("0");
+          },
+          { timeout: 4_000, interval: 16 },
+        );
 
         await threadRow.hover();
         await vi.waitFor(
@@ -5837,6 +7594,18 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           planMarkdown:
             "# Imaginary Long-Range Plan: Cafe Code Adaptive Orchestration and Safe-Delay Execution Initiative",
         }),
+        // This case isolates composer-width behavior. Authored plans are
+        // allowed to auto-open their document sidebar, which intentionally
+        // narrows the chat column and is covered by the plan-specific tests.
+        configureFixture: (nextFixture) => {
+          nextFixture.serverConfig = {
+            ...nextFixture.serverConfig,
+            clientSettings: {
+              ...nextFixture.serverConfig.clientSettings,
+              autoOpenPlanSidebar: false,
+            },
+          };
+        },
       });
 
       try {
@@ -5872,6 +7641,15 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           planMarkdown:
             "# Imaginary Long-Range Plan: Cafe Code Adaptive Orchestration and Safe-Delay Execution Initiative",
         }),
+        configureFixture: (nextFixture) => {
+          nextFixture.serverConfig = {
+            ...nextFixture.serverConfig,
+            clientSettings: {
+              ...nextFixture.serverConfig.clientSettings,
+              autoOpenPlanSidebar: false,
+            },
+          };
+        },
       });
 
       try {

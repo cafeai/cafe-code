@@ -13,6 +13,7 @@ import {
   TrimmedNonEmptyString,
   TurnId,
 } from "./baseSchemas.ts";
+import { ProviderThreadGoal } from "./providerGoal.ts";
 import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
 
 const TrimmedNonEmptyStringSchema = TrimmedNonEmptyString;
@@ -147,6 +148,7 @@ export type CanonicalItemType = typeof CanonicalItemType.Type;
 
 export const CanonicalRequestType = Schema.Literals([
   "command_execution_approval",
+  "terminal_input_approval",
   "file_read_approval",
   "file_change_approval",
   "apply_patch_approval",
@@ -166,7 +168,11 @@ const ProviderRuntimeEventType = Schema.Literals([
   "thread.started",
   "thread.state.changed",
   "thread.metadata.updated",
+  "vcs.state.changed",
   "thread.token-usage.updated",
+  "thread.usage-accounting.updated",
+  "thread.goal.updated",
+  "thread.goal.cleared",
   "thread.realtime.started",
   "thread.realtime.item-added",
   "thread.realtime.audio.delta",
@@ -216,7 +222,11 @@ const SessionExitedType = Schema.Literal("session.exited");
 const ThreadStartedType = Schema.Literal("thread.started");
 const ThreadStateChangedType = Schema.Literal("thread.state.changed");
 const ThreadMetadataUpdatedType = Schema.Literal("thread.metadata.updated");
+const VcsStateChangedType = Schema.Literal("vcs.state.changed");
 const ThreadTokenUsageUpdatedType = Schema.Literal("thread.token-usage.updated");
+const ThreadUsageAccountingUpdatedType = Schema.Literal("thread.usage-accounting.updated");
+const ThreadGoalUpdatedType = Schema.Literal("thread.goal.updated");
+const ThreadGoalClearedType = Schema.Literal("thread.goal.cleared");
 const ThreadRealtimeStartedType = Schema.Literal("thread.realtime.started");
 const ThreadRealtimeItemAddedType = Schema.Literal("thread.realtime.item-added");
 const ThreadRealtimeAudioDeltaType = Schema.Literal("thread.realtime.audio.delta");
@@ -317,6 +327,21 @@ const ThreadMetadataUpdatedPayload = Schema.Struct({
 });
 export type ThreadMetadataUpdatedPayload = typeof ThreadMetadataUpdatedPayload.Type;
 
+/**
+ * Provider-reported repository invalidation hint.
+ *
+ * `kind` is intentionally an open string. Provider CLIs can add mutation
+ * classes before Cafe updates its schemas, and every recognized or future
+ * value has the same safe meaning here: re-read repository state from Cafe's
+ * trusted session workspace. A provider-supplied cwd must never be copied into
+ * this payload or used as a filesystem target.
+ */
+const VcsStateChangedPayload = Schema.Struct({
+  kind: TrimmedNonEmptyStringSchema,
+  branch: Schema.optional(TrimmedNonEmptyStringSchema),
+});
+export type VcsStateChangedPayload = typeof VcsStateChangedPayload.Type;
+
 export const ThreadTokenUsageSnapshot = Schema.Struct({
   usedTokens: NonNegativeInt,
   totalProcessedTokens: Schema.optional(NonNegativeInt),
@@ -329,6 +354,13 @@ export const ThreadTokenUsageSnapshot = Schema.Struct({
   cachedInputTokens: Schema.optional(NonNegativeInt),
   cacheWriteInputTokens: Schema.optional(NonNegativeInt),
   totalCacheWriteInputTokens: Schema.optional(NonNegativeInt),
+  // Session-cumulative input counters, mirroring `totalOutputTokens`. Only
+  // adapters whose backends report running totals populate these; usage
+  // accounting needs a monotone counter because the per-request `last*` values
+  // neither grow nor reset predictably and cannot be summed safely.
+  totalInputTokens: Schema.optional(NonNegativeInt),
+  totalCachedInputTokens: Schema.optional(NonNegativeInt),
+  totalReasoningOutputTokens: Schema.optional(NonNegativeInt),
   outputTokens: Schema.optional(NonNegativeInt),
   reasoningOutputTokens: Schema.optional(NonNegativeInt),
   lastUsedTokens: Schema.optional(NonNegativeInt),
@@ -348,6 +380,85 @@ const ThreadTokenUsageUpdatedPayload = Schema.Struct({
   usage: ThreadTokenUsageSnapshot,
 });
 export type ThreadTokenUsageUpdatedPayload = typeof ThreadTokenUsageUpdatedPayload.Type;
+
+/**
+ * Billed-throughput observations are independent of current context occupancy.
+ * The host mints a fresh opaque scope for each provider counter epoch. Repeated
+ * snapshots replace that epoch's totals; consumers must never sum revisions.
+ * No provider session/account identifiers or request content belongs here.
+ */
+const UsageAccountingCount = NonNegativeInt.check(
+  Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+);
+export const UsageAccountingModel = Schema.Struct({
+  model: TrimmedNonEmptyString.check(
+    Schema.isMaxLength(256),
+    Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9._[\]-]*$/),
+  ),
+  inputTokens: UsageAccountingCount,
+  cachedInputTokens: UsageAccountingCount,
+  cacheWriteInputTokens: UsageAccountingCount,
+  outputTokens: UsageAccountingCount,
+  reasoningOutputTokens: UsageAccountingCount,
+}).check(
+  Schema.makeFilter(
+    (row) =>
+      row.cachedInputTokens <= row.inputTokens - row.cacheWriteInputTokens &&
+      row.reasoningOutputTokens <= row.outputTokens,
+    { expected: "cache and reasoning counters contained in their input/output totals" },
+  ),
+);
+export type UsageAccountingModel = typeof UsageAccountingModel.Type;
+export const UsageAccountingSnapshot = Schema.Struct({
+  scopeId: Schema.String.check(
+    Schema.isPattern(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/),
+  ),
+  revision: PositiveInt.check(Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER)),
+  models: Schema.Array(UsageAccountingModel).check(Schema.isMaxLength(64)),
+  completeness: Schema.Literals(["complete", "input-only"]),
+}).check(
+  Schema.makeFilter(
+    (snapshot) =>
+      new Set(snapshot.models.map((model) => model.model)).size === snapshot.models.length,
+    { expected: "one accounting entry per distinct model" },
+  ),
+  Schema.makeFilter(
+    (snapshot) => {
+      // Validate aggregate numeric capacity before any consumer adds model rows.
+      // Individually safe integers can still overflow when a fleet is aggregated.
+      const totals = {
+        inputTokens: 0,
+        cachedInputTokens: 0,
+        cacheWriteInputTokens: 0,
+        outputTokens: 0,
+        reasoningOutputTokens: 0,
+      };
+      for (const model of snapshot.models) {
+        for (const field of [
+          "inputTokens",
+          "cachedInputTokens",
+          "cacheWriteInputTokens",
+          "outputTokens",
+          "reasoningOutputTokens",
+        ] as const) {
+          totals[field] += model[field];
+          if (!Number.isSafeInteger(totals[field])) return false;
+        }
+      }
+      return true;
+    },
+    { expected: "safe integer token totals across all accounting models" },
+  ),
+);
+export type UsageAccountingSnapshot = typeof UsageAccountingSnapshot.Type;
+
+const ThreadGoalUpdatedPayload = Schema.Struct({
+  goal: ProviderThreadGoal,
+});
+export type ThreadGoalUpdatedPayload = typeof ThreadGoalUpdatedPayload.Type;
+
+const ThreadGoalClearedPayload = Schema.Struct({});
+export type ThreadGoalClearedPayload = typeof ThreadGoalClearedPayload.Type;
 
 const ThreadRealtimeStartedPayload = Schema.Struct({
   realtimeSessionId: Schema.optional(TrimmedNonEmptyStringSchema),
@@ -472,18 +583,112 @@ export type UserInputQuestion = typeof UserInputQuestion.Type;
 
 const UserInputRequestedPayload = Schema.Struct({
   questions: Schema.Array(UserInputQuestion),
+  // Codex 0.147 makes this explicit. Older providers and persisted events are
+  // blocking by default, preserving the pre-0.147 behavior on decode.
+  isBlocking: Schema.optional(Schema.Boolean).pipe(
+    Schema.withConstructorDefault(Effect.succeed(true)),
+  ),
 });
 export type UserInputRequestedPayload = typeof UserInputRequestedPayload.Type;
 
 const UserInputResolvedPayload = Schema.Struct({
   answers: UnknownRecordSchema,
+  autoResolved: Schema.optional(Schema.Boolean),
 });
 export type UserInputResolvedPayload = typeof UserInputResolvedPayload.Type;
+
+/**
+ * Hard safety ceiling for distinct nested-agent identities retained outside
+ * the ordinary bounded activity tail for one turn. Provider adapters use the
+ * same order of magnitude for their live identity maps. This limit protects
+ * snapshots and renderers from an adversarial stream of unique task ids; it is
+ * intentionally far above any legitimate simultaneously visible team.
+ */
+export const MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN = 4_096;
+
+const RuntimeSubagentThreadId = TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(512));
+const RuntimeSubagentHistoryId = TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(512));
+const RuntimeSubagentLabel = TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(96));
+const RuntimeSubagentPath = TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(256));
+const RuntimeSubagentRole = TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(80));
+const RuntimeSubagentObjective = TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(240));
+
+/**
+ * Provider-owned identity and display metadata for one nested agent task.
+ *
+ * The opaque child thread id is the durable coalescing key. All user-visible
+ * strings are normalized and bounded by the provider adapter before they enter
+ * this contract; keeping them structured prevents renderers from having to
+ * parse provider-specific prose such as `Started /root/audit_ui`.
+ */
+export const RuntimeSubagentPresentation = Schema.Struct({
+  threadId: RuntimeSubagentThreadId,
+  /**
+   * Provider-owned history identity for the nested agent transcript.
+   *
+   * This is deliberately separate from `threadId`: providers such as Claude
+   * expose a task id, spawning tool-use id, and transcript agent id as three
+   * distinct identities. Renderers must never display or interpret this value,
+   * and servers must still authorize the exact persisted thread/turn/activity
+   * tuple before using it. Keeping the binding structured prevents an unsafe
+   * assumption that any two of those provider identities are interchangeable.
+   */
+  historyId: Schema.optional(RuntimeSubagentHistoryId),
+  label: Schema.optional(RuntimeSubagentLabel),
+  path: Schema.optional(RuntimeSubagentPath),
+  role: Schema.optional(RuntimeSubagentRole),
+  objective: Schema.optional(RuntimeSubagentObjective),
+  status: Schema.optional(Schema.Literals(["waiting", "active", "completed", "failed", "stopped"])),
+  startedAt: Schema.optional(IsoDateTime),
+});
+export type RuntimeSubagentPresentation = typeof RuntimeSubagentPresentation.Type;
+
+/**
+ * Provider-authoritative user-surface visibility for one task lifecycle.
+ *
+ * Older providers omit this field and therefore remain visible. `ambient` is
+ * deliberately not a terminal state: Claude may move an already-announced
+ * background task out of the transcript while it continues running.
+ */
+export const RuntimeTaskVisibility = Schema.Literals(["visible", "ambient"]);
+export type RuntimeTaskVisibility = typeof RuntimeTaskVisibility.Type;
+
+/**
+ * Inert metadata for a provider resource returned by reference.
+ *
+ * `referenceId` is a host-generated, domain-separated digest of the provider
+ * URI. The URI itself is deliberately excluded from the runtime contract:
+ * provider resource identifiers may contain signed query strings, local paths,
+ * or other bearer material and Cafe does not yet have a trusted open/fetch UX.
+ */
+export const RuntimeResourceLink = Schema.Struct({
+  referenceId: TrimmedNonEmptyStringSchema.check(
+    Schema.isMaxLength(80),
+    Schema.isPattern(/^sha256:[a-f0-9]{64}$/),
+  ),
+  name: TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(512)),
+  title: Schema.optional(TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(512))),
+  description: Schema.optional(TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(2_048))),
+  mimeType: Schema.optional(TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(256))),
+  size: Schema.optional(NonNegativeInt),
+  scheme: Schema.optional(
+    TrimmedNonEmptyStringSchema.check(
+      Schema.isMaxLength(32),
+      Schema.isPattern(/^[a-z][a-z0-9+.-]{0,31}$/),
+    ),
+  ),
+});
+export type RuntimeResourceLink = typeof RuntimeResourceLink.Type;
+
+export const RuntimeResourceLinks = Schema.Array(RuntimeResourceLink).check(Schema.isMaxLength(50));
+export type RuntimeResourceLinks = typeof RuntimeResourceLinks.Type;
 
 const TaskStartedPayload = Schema.Struct({
   taskId: RuntimeTaskId,
   description: Schema.optional(TrimmedNonEmptyStringSchema),
   taskType: Schema.optional(TrimmedNonEmptyStringSchema),
+  visibility: Schema.optional(RuntimeTaskVisibility),
+  subagent: Schema.optional(RuntimeSubagentPresentation),
 });
 export type TaskStartedPayload = typeof TaskStartedPayload.Type;
 
@@ -493,6 +698,8 @@ const TaskProgressPayload = Schema.Struct({
   summary: Schema.optional(TrimmedNonEmptyStringSchema),
   usage: Schema.optional(Schema.Unknown),
   lastToolName: Schema.optional(TrimmedNonEmptyStringSchema),
+  visibility: Schema.optional(RuntimeTaskVisibility),
+  subagent: Schema.optional(RuntimeSubagentPresentation),
 });
 export type TaskProgressPayload = typeof TaskProgressPayload.Type;
 
@@ -501,6 +708,9 @@ const TaskCompletedPayload = Schema.Struct({
   status: Schema.Literals(["completed", "failed", "stopped"]),
   summary: Schema.optional(TrimmedNonEmptyStringSchema),
   usage: Schema.optional(Schema.Unknown),
+  visibility: Schema.optional(RuntimeTaskVisibility),
+  subagent: Schema.optional(RuntimeSubagentPresentation),
+  resourceLinks: Schema.optional(RuntimeResourceLinks),
 });
 export type TaskCompletedPayload = typeof TaskCompletedPayload.Type;
 
@@ -678,6 +888,13 @@ const ProviderRuntimeThreadMetadataUpdatedEvent = Schema.Struct({
 export type ProviderRuntimeThreadMetadataUpdatedEvent =
   typeof ProviderRuntimeThreadMetadataUpdatedEvent.Type;
 
+const ProviderRuntimeVcsStateChangedEvent = Schema.Struct({
+  ...ProviderRuntimeEventBase.fields,
+  type: VcsStateChangedType,
+  payload: VcsStateChangedPayload,
+});
+export type ProviderRuntimeVcsStateChangedEvent = typeof ProviderRuntimeVcsStateChangedEvent.Type;
+
 const ProviderRuntimeThreadTokenUsageUpdatedEvent = Schema.Struct({
   ...ProviderRuntimeEventBase.fields,
   type: ThreadTokenUsageUpdatedType,
@@ -685,6 +902,28 @@ const ProviderRuntimeThreadTokenUsageUpdatedEvent = Schema.Struct({
 });
 export type ProviderRuntimeThreadTokenUsageUpdatedEvent =
   typeof ProviderRuntimeThreadTokenUsageUpdatedEvent.Type;
+
+const ProviderRuntimeThreadUsageAccountingUpdatedEvent = Schema.Struct({
+  ...ProviderRuntimeEventBase.fields,
+  type: ThreadUsageAccountingUpdatedType,
+  payload: UsageAccountingSnapshot,
+});
+
+const ProviderRuntimeThreadGoalUpdatedEvent = Schema.Struct({
+  ...ProviderRuntimeEventBase.fields,
+  type: ThreadGoalUpdatedType,
+  payload: ThreadGoalUpdatedPayload,
+});
+export type ProviderRuntimeThreadGoalUpdatedEvent =
+  typeof ProviderRuntimeThreadGoalUpdatedEvent.Type;
+
+const ProviderRuntimeThreadGoalClearedEvent = Schema.Struct({
+  ...ProviderRuntimeEventBase.fields,
+  type: ThreadGoalClearedType,
+  payload: ThreadGoalClearedPayload,
+});
+export type ProviderRuntimeThreadGoalClearedEvent =
+  typeof ProviderRuntimeThreadGoalClearedEvent.Type;
 
 const ProviderRuntimeThreadRealtimeStartedEvent = Schema.Struct({
   ...ProviderRuntimeEventBase.fields,
@@ -979,7 +1218,11 @@ export const ProviderRuntimeEventV2 = Schema.Union([
   ProviderRuntimeThreadStartedEvent,
   ProviderRuntimeThreadStateChangedEvent,
   ProviderRuntimeThreadMetadataUpdatedEvent,
+  ProviderRuntimeVcsStateChangedEvent,
   ProviderRuntimeThreadTokenUsageUpdatedEvent,
+  ProviderRuntimeThreadUsageAccountingUpdatedEvent,
+  ProviderRuntimeThreadGoalUpdatedEvent,
+  ProviderRuntimeThreadGoalClearedEvent,
   ProviderRuntimeThreadRealtimeStartedEvent,
   ProviderRuntimeThreadRealtimeItemAddedEvent,
   ProviderRuntimeThreadRealtimeAudioDeltaEvent,

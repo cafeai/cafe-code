@@ -57,6 +57,8 @@ export const hydrateCachedProvider = (input: {
   }
 
   const { message: _fallbackMessage, ...fallbackWithoutMessage } = input.fallbackProvider;
+  const cachedProbeDiagnostics = input.cachedProvider.probeDiagnostics;
+  const fallbackProbeDiagnostics = input.fallbackProvider.probeDiagnostics;
   const hydratedProvider: ServerProvider = {
     ...fallbackWithoutMessage,
     models: mergeProviderModels(input.fallbackProvider.models, input.cachedProvider.models),
@@ -67,6 +69,22 @@ export const hydrateCachedProvider = (input: {
     checkedAt: input.cachedProvider.checkedAt,
     slashCommands: input.cachedProvider.slashCommands,
     skills: input.cachedProvider.skills,
+    // The observation history is durable so a backend restart cannot reset a
+    // bounded transient-failure streak indefinitely. Scheduling metadata,
+    // however, belongs to the newly-created provider scope: reviving an old
+    // wall-clock target or phase would make diagnostics lie and could launch a
+    // catch-up probe. Providers that no longer expose probe diagnostics must
+    // not inherit the retired cache shape at all.
+    ...(cachedProbeDiagnostics && fallbackProbeDiagnostics
+      ? {
+          probeDiagnostics: {
+            ...cachedProbeDiagnostics,
+            periodicIntervalMs: fallbackProbeDiagnostics.periodicIntervalMs,
+            periodicPhaseOffsetMs: fallbackProbeDiagnostics.periodicPhaseOffsetMs,
+            nextScheduledAt: fallbackProbeDiagnostics.nextScheduledAt,
+          },
+        }
+      : {}),
   };
 
   return input.cachedProvider.message

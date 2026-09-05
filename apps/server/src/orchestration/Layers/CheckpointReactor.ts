@@ -41,6 +41,7 @@ const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 const CHECKPOINT_REFS_RETAINED_PER_THREAD = 3;
 const CHECKPOINT_REF_PRUNE_WARNING_SAMPLE_SIZE = 20;
 const PROVIDER_TURN_INGESTION_QUIESCENCE_TIMEOUT = "30 seconds";
+const CHECKPOINT_REVERT_RECOVERY_TURN = Number.MAX_SAFE_INTEGER;
 
 export function computeCheckpointRefPrunePlan(input: {
   readonly threadId: ThreadId;
@@ -718,6 +719,35 @@ const make = Effect.gen(function* () {
     );
   });
 
+  const refreshGitStatusFromProviderInvalidation = Effect.fn(
+    "refreshGitStatusFromProviderInvalidation",
+  )(function* (event: Extract<ProviderRuntimeEvent, { type: "vcs.state.changed" }>) {
+    const sessionRuntime = yield* resolveSessionRuntimeForThread(event.threadId);
+    if (Option.isNone(sessionRuntime)) {
+      return;
+    }
+
+    // Claude's vcs_state_changed payload contains a cwd, but upstream defines
+    // the event as a cache-invalidation hint rather than authoritative state.
+    // Resolve the filesystem target exclusively from Cafe's established
+    // session binding. This prevents a compromised or malformed provider frame
+    // from making the server inspect an arbitrary repository.
+    const refresh =
+      event.payload.kind === "push"
+        ? vcsStatusBroadcaster.refreshStatus(sessionRuntime.value.cwd)
+        : vcsStatusBroadcaster.refreshLocalStatus(sessionRuntime.value.cwd);
+    yield* refresh.pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("failed to refresh git status after provider VCS invalidation", {
+          threadId: event.threadId,
+          turnId: event.turnId ?? null,
+          kind: event.payload.kind,
+          detail: error.message,
+        }),
+      ),
+    );
+  });
+
   const ensurePreTurnBaselineFromDomainTurnStart = Effect.fn(
     "ensurePreTurnBaselineFromDomainTurnStart",
   )(function* (
@@ -847,12 +877,31 @@ const make = Effect.gen(function* () {
       return;
     }
 
+    // Capture the exact pre-revert workspace/index state before touching the
+    // filesystem. Provider rewind is a second independent transaction; if it
+    // fails, restoring this private recovery ref prevents Cafe's workspace
+    // from moving behind a provider conversation that stayed ahead.
+    const recoveryCheckpointRef = checkpointRefForThreadTurn(
+      event.payload.threadId,
+      CHECKPOINT_REVERT_RECOVERY_TURN,
+    );
+    yield* checkpointStore.captureCheckpoint({
+      cwd: sessionRuntime.value.cwd,
+      checkpointRef: recoveryCheckpointRef,
+    });
+
     const restored = yield* checkpointStore.restoreCheckpoint({
       cwd: sessionRuntime.value.cwd,
       checkpointRef: targetCheckpointRef,
       fallbackToHead: event.payload.turnCount === 0,
     });
     if (!restored) {
+      yield* checkpointStore
+        .deleteCheckpointRefs({
+          cwd: sessionRuntime.value.cwd,
+          checkpointRefs: [recoveryCheckpointRef],
+        })
+        .pipe(Effect.ignore);
       yield* appendRevertFailureActivity({
         threadId: event.payload.threadId,
         turnCount: event.payload.turnCount,
@@ -868,11 +917,46 @@ const make = Effect.gen(function* () {
 
     const rolledBackTurns = Math.max(0, currentTurnCount - event.payload.turnCount);
     if (rolledBackTurns > 0) {
-      yield* providerService.rollbackConversation({
-        threadId: sessionRuntime.value.threadId,
-        numTurns: rolledBackTurns,
-      });
+      yield* providerService
+        .rollbackConversation({
+          threadId: sessionRuntime.value.threadId,
+          numTurns: rolledBackTurns,
+        })
+        .pipe(
+          Effect.tapError(() =>
+            checkpointStore
+              .restoreCheckpoint({
+                cwd: sessionRuntime.value.cwd,
+                checkpointRef: recoveryCheckpointRef,
+                fallbackToHead: false,
+              })
+              .pipe(
+                Effect.flatMap(() => workspaceEntries.invalidate(sessionRuntime.value.cwd)),
+                Effect.catchCause((cause) =>
+                  Effect.logError("failed to restore workspace after provider rewind failure", {
+                    threadId: event.payload.threadId,
+                    cause: Cause.pretty(cause),
+                  }),
+                ),
+                Effect.ensuring(
+                  checkpointStore
+                    .deleteCheckpointRefs({
+                      cwd: sessionRuntime.value.cwd,
+                      checkpointRefs: [recoveryCheckpointRef],
+                    })
+                    .pipe(Effect.ignore),
+                ),
+              ),
+          ),
+        );
     }
+
+    yield* checkpointStore
+      .deleteCheckpointRefs({
+        cwd: sessionRuntime.value.cwd,
+        checkpointRefs: [recoveryCheckpointRef],
+      })
+      .pipe(Effect.ignore);
 
     const staleCheckpointRefs = thread.checkpoints
       .filter((checkpoint) => checkpoint.checkpointTurnCount > event.payload.turnCount)
@@ -980,6 +1064,11 @@ const make = Effect.gen(function* () {
       return;
     }
 
+    if (event.type === "vcs.state.changed") {
+      yield* refreshGitStatusFromProviderInvalidation(event);
+      return;
+    }
+
     if (event.type === "turn.completed") {
       const turnId = toTurnId(event.turnId);
       if (turnId) {
@@ -1067,7 +1156,11 @@ const make = Effect.gen(function* () {
 
     yield* Effect.forkScoped(
       Stream.runForEach(providerService.streamEvents, (event) => {
-        if (event.type !== "turn.started" && event.type !== "turn.completed") {
+        if (
+          event.type !== "turn.started" &&
+          event.type !== "turn.completed" &&
+          event.type !== "vcs.state.changed"
+        ) {
           return Effect.void;
         }
         return worker.enqueue({ source: "runtime", event });

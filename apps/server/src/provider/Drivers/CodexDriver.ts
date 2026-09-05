@@ -21,7 +21,14 @@
  *
  * @module provider/Drivers/CodexDriver
  */
-import { CodexSettings, ProviderDriverKind, type ServerProvider } from "@cafecode/contracts";
+import {
+  CodexSettings,
+  ProviderDriverKind,
+  type ServerProvider,
+  type ServerProviderProbePhaseDiagnostics,
+} from "@cafecode/contracts";
+import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -38,8 +45,10 @@ import { ProviderDriverError } from "../Errors.ts";
 import { makeCodexAdapter } from "../Layers/CodexAdapter.ts";
 import {
   checkCodexCliProviderStatus,
+  isCodexCliLoginStatusProbeInconclusive,
   makePendingCodexProvider,
   readCodexAccountRateLimits,
+  readCodexAppServerModels,
 } from "../Layers/CodexProvider.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
@@ -62,10 +71,14 @@ const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 const DRIVER_KIND = ProviderDriverKind.make("codex");
 // Periodically refresh installation/authentication truth without using the
 // heavy app-server metadata path. Full refreshes are single-flight, while
-// prompt-triggered usage updates below use only the redacted HTTP request, so
+// terminal-turn usage updates below use only the redacted HTTP request, so
 // neither path creates hidden Codex app-server sessions or repeated CLI probe
 // queues.
 const PERIODIC_SNAPSHOT_REFRESH_INTERVAL = Duration.minutes(5);
+// Picker-open refreshes are user-facing and opportunistic. Keep their
+// disposable app-server lifetime bounded independently of the long-lived turn
+// runtime; timeout preserves the last known-good catalogue.
+const CODEX_MODEL_LIST_REFRESH_TIMEOUT = Duration.seconds(15);
 const UPDATE_DEFINITION = {
   provider: DRIVER_KIND,
   npmPackageName: "@openai/codex",
@@ -110,7 +123,11 @@ const withInstanceIdentity =
     ...(input.accentColor ? { accentColor: input.accentColor } : {}),
     ...(input.authActions ? { authActions: input.authActions } : {}),
     continuation: { groupKey: input.continuationGroupKey },
-    runtimeCapabilities: { ...snapshot.runtimeCapabilities, liveSteer: "supported" },
+    runtimeCapabilities: {
+      ...snapshot.runtimeCapabilities,
+      liveSteer: "supported",
+      threadGoals: "supported",
+    },
   });
 
 function sanitizeShadowHomeSegment(value: string): string {
@@ -147,6 +164,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const path = yield* Path.Path;
       const httpClient = yield* HttpClient.HttpClient;
       const eventLoggers = yield* ProviderEventLoggers;
+      const serverConfig = yield* ServerConfig;
       const processEnv = mergeProviderInstanceEnvironment(environment);
       const layoutConfig = withDefaultCodexShadowHome({ instanceId, config });
       const homeLayout = yield* resolveCodexHomeLayout(layoutConfig);
@@ -238,15 +256,32 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       // model/skill metadata requests and block for long enough to show a
       // false "provider unavailable" warning before the user has sent a
       // message. Real sessions still use the app-server lifecycle below.
-      const checkProvider = refreshCodexShadowHome.pipe(
-        Effect.catch((cause) =>
-          Effect.logWarning("codex.home.authRefreshBeforeStatusFailed", {
-            instanceId,
-            detail: cause.message,
+      const checkProvider = Effect.gen(function* () {
+        const prepareStartedAtMs = yield* Clock.currentTimeMillis;
+        let prepareOutcome: ServerProviderProbePhaseDiagnostics["outcome"] = "success";
+        yield* refreshCodexShadowHome.pipe(
+          Effect.catch((cause) => {
+            prepareOutcome = "error";
+            return Effect.logWarning("codex.home.authRefreshBeforeStatusFailed", {
+              instanceId,
+              detail: cause.message,
+            });
           }),
-        ),
-        Effect.andThen(checkCodexCliProviderStatus(effectiveConfig, effectiveEnvironment)),
-        Effect.map(stampIdentity),
+        );
+        const prepareFinishedAtMs = yield* Clock.currentTimeMillis;
+        const checked = yield* checkCodexCliProviderStatus(effectiveConfig, effectiveEnvironment);
+        return stampIdentity({
+          ...checked,
+          probePhases: [
+            {
+              phase: "prepare-runtime-home",
+              outcome: prepareOutcome,
+              durationMs: Math.max(0, Math.floor(prepareFinishedAtMs - prepareStartedAtMs)),
+            },
+            ...(checked.probePhases ?? []),
+          ],
+        });
+      }).pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
         Effect.provideService(FileSystem.FileSystem, fileSystem),
         Effect.provideService(Path.Path, path),
@@ -285,12 +320,65 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
             Effect.provideService(Path.Path, path),
           );
         },
+        refreshModels: ({ settings, snapshot }) => {
+          if (!settings.enabled || snapshot.auth.status !== "authenticated") {
+            return Effect.succeed(undefined);
+          }
+
+          return refreshCodexShadowHome.pipe(
+            Effect.catch(() =>
+              // Shadow-home diagnostics can include credential paths. Keep
+              // this picker-triggered warning fixed and instance-scoped.
+              Effect.logWarning("codex.home.refreshBeforeModelListFailed", { instanceId }),
+            ),
+            Effect.andThen(
+              readCodexAppServerModels({
+                binaryPath: settings.binaryPath,
+                homePath: settings.homePath,
+                cwd: serverConfig.stateDir,
+                customModels: settings.customModels,
+                environment: effectiveEnvironment,
+              }).pipe(
+                Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+                Effect.scoped,
+                Effect.timeoutOption(CODEX_MODEL_LIST_REFRESH_TIMEOUT),
+                Effect.map((result) => (result._tag === "Some" ? result.value : undefined)),
+              ),
+            ),
+            Effect.catchCause((cause) => {
+              // Rebuild/shutdown interrupts the old provider scope. Preserve
+              // that control signal so its detached single-flight cannot
+              // publish or synchronize a stale catalogue into the replacement
+              // instance. Ordinary provider failures remain inconclusive.
+              if (Cause.hasInterrupts(cause)) {
+                return Effect.interrupt;
+              }
+              // Provider errors can contain command lines or private home
+              // paths. The UI keeps stale models, so diagnostics only need a
+              // bounded phase marker rather than the raw cause.
+              return Effect.logWarning("codex.modelListRefreshFailed", { instanceId }).pipe(
+                Effect.as(undefined),
+              );
+            }),
+          );
+        },
         enrichSnapshot: ({ snapshot, publishSnapshot }) =>
           enrichProviderSnapshotWithVersionAdvisory(snapshot, maintenanceCapabilities).pipe(
             Effect.provideService(HttpClient.HttpClient, httpClient),
             Effect.flatMap((enrichedSnapshot) => publishSnapshot(enrichedSnapshot)),
           ),
         refreshInterval: PERIODIC_SNAPSHOT_REFRESH_INTERVAL,
+        probePolicy: {
+          // ProviderRegistry owns bounded initial admission across every
+          // configured provider. Avoid a second unbounded startup fiber here.
+          initialRefresh: "external",
+          // An isolated bounded `codex login status` timeout is not evidence
+          // that an already-authenticated session became unhealthy. Retain
+          // known-good state twice, then surface the third consecutive timeout
+          // so a persistently wedged CLI remains visible and diagnosable.
+          isInconclusiveSnapshot: isCodexCliLoginStatusProbeInconclusive,
+          inconclusiveFailureThreshold: 3,
+        },
       }).pipe(
         Effect.mapError(
           (cause) =>

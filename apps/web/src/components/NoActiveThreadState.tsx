@@ -1,6 +1,6 @@
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "./ui/empty";
 import { SidebarInset } from "./ui/sidebar";
-import { SidebarTriggerWithUnreadDot } from "./sidebar/unseenCompletions";
+import { ContentSidebarTriggerWithUnreadDot } from "./sidebar/unseenCompletions";
 import { isElectron } from "../env";
 import { cn } from "~/lib/utils";
 
@@ -17,12 +17,13 @@ export function NoActiveThreadState() {
           )}
         >
           {isElectron ? (
-            <span className="text-xs text-muted-foreground/50 wco:pr-[calc(100vw-env(titlebar-area-width)-env(titlebar-area-x)+1em)]">
-              No active thread
-            </span>
+            <div className="flex min-w-0 items-center gap-2 wco:pr-[calc(100vw-env(titlebar-area-width)-env(titlebar-area-x)+1em)]">
+              <ContentSidebarTriggerWithUnreadDot />
+              <span className="text-xs text-muted-foreground/50">No active thread</span>
+            </div>
           ) : (
             <div className="flex items-center gap-2">
-              <SidebarTriggerWithUnreadDot className="md:hidden" />
+              <ContentSidebarTriggerWithUnreadDot />
               <span className="text-sm font-medium text-foreground md:text-muted-foreground/60">
                 No active thread
               </span>

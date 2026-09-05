@@ -144,12 +144,16 @@ function createProviderServiceHarness(
       : Effect.succeed([] as ReadonlyArray<ProviderSession>);
   const service: ProviderServiceShape = {
     startSession: () => unsupported(),
+    forkSession: () => unsupported(),
+    discardSessionFork: () => unsupported(),
     sendTurn: () => unsupported(),
     steerTurn: () => unsupported(),
     interruptTurn: () => unsupported(),
     respondToRequest: () => unsupported(),
     respondToUserInput: () => unsupported(),
+    snoozeUserInput: () => unsupported(),
     stopSession: () => unsupported(),
+    quiesceThreadForHardDelete: () => unsupported(),
     restartProviderRuntime: () => unsupported(),
     listSessions,
     getCapabilities: () =>
@@ -166,6 +170,7 @@ function createProviderServiceHarness(
         },
       }),
     rollbackConversation,
+    readSubagentDetail: () => unsupported(),
     get streamEvents() {
       return Stream.fromPubSub(runtimeEventPubSub);
     },
@@ -340,6 +345,7 @@ describe("CheckpointReactor", () => {
     readonly providerSessionCwd?: string;
     readonly providerName?: ProviderDriverKind;
     readonly gitStatusRefreshCalls?: Array<string>;
+    readonly gitStatusFullRefreshCalls?: Array<string>;
     readonly autoPublishIngestionReceipt?: boolean;
     readonly runtimeReceiptBusLayer?: Layer.Layer<RuntimeReceiptBus>;
   }) {
@@ -367,6 +373,7 @@ describe("CheckpointReactor", () => {
     const ServerConfigLayer = ServerConfig.layerTest(process.cwd(), {
       prefix: "cafe-code-checkpoint-reactor-test-",
     });
+    const gitStatusFullRefreshCalls = options?.gitStatusFullRefreshCalls;
     const vcsStatusBroadcasterLayer = Layer.succeed(VcsStatusBroadcaster, {
       getStatus: () => Effect.die("getStatus should not be called in this test"),
       refreshLocalStatus: (cwd: string) =>
@@ -382,7 +389,25 @@ describe("CheckpointReactor", () => {
             workingTree: { files: [], insertions: 0, deletions: 0 },
           }),
         ),
-      refreshStatus: () => Effect.die("refreshStatus should not be called in this test"),
+      refreshStatus: (cwd: string) =>
+        gitStatusFullRefreshCalls
+          ? Effect.sync(() => {
+              gitStatusFullRefreshCalls.push(cwd);
+            }).pipe(
+              Effect.as({
+                isRepo: true,
+                hasPrimaryRemote: true,
+                isDefaultRef: true,
+                refName: "main",
+                hasWorkingTreeChanges: false,
+                workingTree: { files: [], insertions: 0, deletions: 0 },
+                hasUpstream: true,
+                aheadCount: 0,
+                behindCount: 0,
+                pr: null,
+              }),
+            )
+          : Effect.die("refreshStatus should not be called in this test"),
       streamStatus: () => Stream.empty,
     });
 
@@ -798,6 +823,57 @@ describe("CheckpointReactor", () => {
     await harness.drain();
 
     expect(gitStatusRefreshCalls).toEqual([harness.cwd]);
+  });
+
+  it("refreshes local git status on a provider VCS hint using only the session cwd", async () => {
+    const gitStatusRefreshCalls: string[] = [];
+    const harness = await createHarness({
+      seedFilesystemCheckpoints: false,
+      gitStatusRefreshCalls,
+    });
+
+    harness.provider.emit({
+      type: "vcs.state.changed",
+      eventId: EventId.make("evt-vcs-state-changed-commit"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: "2026-08-18T00:00:00.000Z",
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-vcs-state-changed"),
+      payload: {
+        kind: "commit",
+        branch: "main",
+        cwd: "/provider/controlled/path",
+      },
+    });
+
+    await harness.drain();
+
+    expect(gitStatusRefreshCalls).toEqual([harness.cwd]);
+  });
+
+  it("refreshes local and remote git status after a provider push hint", async () => {
+    const gitStatusFullRefreshCalls: string[] = [];
+    const harness = await createHarness({
+      seedFilesystemCheckpoints: false,
+      gitStatusFullRefreshCalls,
+    });
+
+    harness.provider.emit({
+      type: "vcs.state.changed",
+      eventId: EventId.make("evt-vcs-state-changed-push"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: "2026-08-18T00:00:00.000Z",
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-vcs-state-push"),
+      payload: {
+        kind: "push",
+        branch: "main",
+      },
+    });
+
+    await harness.drain();
+
+    expect(gitStatusFullRefreshCalls).toEqual([harness.cwd]);
   });
 
   it("ignores auxiliary thread turn completion while primary turn is active", async () => {

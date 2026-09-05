@@ -1,8 +1,18 @@
 import type {
+  ServerProvider,
   ServerProviderAccountRateLimitSnapshot,
   ServerProviderAccountRateLimitWindow,
   ServerProviderAccountRateLimits,
 } from "@cafecode/contracts";
+
+export function shouldSurfaceProviderAccountRateLimits(
+  provider: Pick<ServerProvider, "auth" | "driver"> | null | undefined,
+): boolean {
+  return (
+    provider?.auth.status === "authenticated" &&
+    (provider.driver === "codex" || provider.driver === "claudeAgent" || provider.driver === "grok")
+  );
+}
 
 export interface CodexRateLimitSummaryLine {
   readonly label: string;
@@ -115,6 +125,23 @@ export function selectCodexRateLimitSnapshot(
 ): ServerProviderAccountRateLimitSnapshot | null {
   if (!rateLimits) return null;
   return rateLimits.rateLimitsByLimitId?.codex ?? rateLimits.rateLimits ?? null;
+}
+
+export function formatCodexRateLimitResetAvailability(
+  rateLimits: ServerProviderAccountRateLimits | null | undefined,
+): string | null {
+  const availableCount = rateLimits?.rateLimitResetCredits?.availableCount;
+  if (
+    typeof availableCount !== "number" ||
+    !Number.isSafeInteger(availableCount) ||
+    availableCount < 0
+  ) {
+    return null;
+  }
+
+  // Upstream reports an authoritative aggregate because the optional credit list can be
+  // absent or redacted. Never infer availability by counting those detail rows.
+  return `Usage limit resets available: ${availableCount}`;
 }
 
 export function formatCodexRateLimitSummary(

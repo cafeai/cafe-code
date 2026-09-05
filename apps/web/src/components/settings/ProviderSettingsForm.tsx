@@ -32,6 +32,7 @@ export interface ProviderSettingsFieldModel {
   readonly defaultNumberValue?: number | undefined;
   readonly step?: number | undefined;
   readonly minimum?: number | undefined;
+  readonly maximum?: number | undefined;
   readonly integerOnly?: boolean | undefined;
 }
 
@@ -142,6 +143,9 @@ export function deriveProviderSettingsFields(
                 ...(formAnnotation.minimum !== undefined
                   ? { minimum: formAnnotation.minimum }
                   : {}),
+                ...(formAnnotation.maximum !== undefined
+                  ? { maximum: formAnnotation.maximum }
+                  : {}),
                 ...(formAnnotation.integerOnly !== undefined
                   ? { integerOnly: formAnnotation.integerOnly }
                   : {}),
@@ -178,6 +182,12 @@ export function readProviderConfigNumber(
   return typeof value === "number" && Number.isFinite(value) ? value : defaultValue;
 }
 
+function readOptionalProviderConfigNumber(config: unknown, key: string): number | undefined {
+  if (config === null || typeof config !== "object") return undefined;
+  const value = (config as Record<string, unknown>)[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
 export function nextProviderConfigWithFieldValue(
   config: unknown,
   field: ProviderSettingsFieldModel,
@@ -206,9 +216,18 @@ export function nextProviderConfigWithFieldValue(
     }
 
     const parsed = Number(trimmed);
-    const violatesIntegerConstraint = field.integerOnly === true && !Number.isInteger(parsed);
+    // Safe integers are required here, rather than merely integral numbers,
+    // so browser input cannot silently round an out-of-range integer setting
+    // before it crosses the settings persistence boundary.
+    const violatesIntegerConstraint = field.integerOnly === true && !Number.isSafeInteger(parsed);
     const violatesMinimum = field.minimum !== undefined && parsed < field.minimum;
-    if (!Number.isFinite(parsed) || violatesIntegerConstraint || violatesMinimum) {
+    const violatesMaximum = field.maximum !== undefined && parsed > field.maximum;
+    if (
+      !Number.isFinite(parsed) ||
+      violatesIntegerConstraint ||
+      violatesMinimum ||
+      violatesMaximum
+    ) {
       // Reject values that violate this field's schema-derived form
       // constraints; leave any prior stored value untouched.
       return Object.keys(base).length > 0 ? base : undefined;
@@ -295,13 +314,16 @@ function ProviderSettingsFieldRow({
   onChange,
 }: ProviderSettingsFieldRowProps) {
   const inputId = `${idPrefix}-${field.key}`;
+  const descriptionId = field.description ? `${inputId}-description` : undefined;
   const descriptionClassName =
     variant === "card"
       ? "mt-1 block text-xs text-muted-foreground"
       : "text-[11px] text-muted-foreground";
   const label = <span className="text-xs font-medium text-foreground">{field.label}</span>;
   const description = field.description ? (
-    <span className={descriptionClassName}>{field.description}</span>
+    <span id={descriptionId} className={descriptionClassName}>
+      {field.description}
+    </span>
   ) : null;
 
   if (field.control === "switch") {
@@ -347,7 +369,7 @@ function ProviderSettingsFieldRow({
 
   if (field.control === "number") {
     const currentValue = String(
-      readProviderConfigNumber(value, field.key, field.defaultNumberValue ?? 0),
+      readOptionalProviderConfigNumber(value, field.key) ?? field.defaultNumberValue ?? "",
     );
 
     return (
@@ -362,6 +384,8 @@ function ProviderSettingsFieldRow({
                 type="number"
                 step={field.step ?? 1}
                 min={field.minimum}
+                max={field.maximum}
+                aria-describedby={descriptionId}
                 value={currentValue}
                 onCommit={(next) => onChange(nextProviderConfigWithFieldValue(value, field, next))}
                 placeholder={field.placeholder}
@@ -373,6 +397,8 @@ function ProviderSettingsFieldRow({
                 type="number"
                 step={field.step ?? 1}
                 min={field.minimum}
+                max={field.maximum}
+                aria-describedby={descriptionId}
                 value={currentValue}
                 onChange={(event) =>
                   onChange(nextProviderConfigWithFieldValue(value, field, event.target.value))

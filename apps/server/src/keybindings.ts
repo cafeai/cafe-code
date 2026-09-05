@@ -205,6 +205,15 @@ function invalidEntryIssue(index: number, detail: string): ServerConfigIssue {
   };
 }
 
+function isRemovedDiffToggleEntry(entry: unknown): boolean {
+  return (
+    typeof entry === "object" &&
+    entry !== null &&
+    "command" in entry &&
+    entry.command === "diff.toggle"
+  );
+}
+
 function mergeWithDefaultKeybindings(custom: ResolvedKeybindingsConfig): ResolvedKeybindingsConfig {
   if (custom.length === 0) {
     return [...DEFAULT_RESOLVED_KEYBINDINGS];
@@ -348,6 +357,12 @@ const makeKeybindings = Effect.gen(function* () {
 
     return yield* Effect.forEach(rawConfig, (entry) =>
       Effect.gen(function* () {
+        // Cafe previously persisted this default command. Ignore it at the raw
+        // boundary so upgrades can rewrite the file without surfacing a false
+        // invalid-config warning after the diff viewer was removed.
+        if (isRemovedDiffToggleEntry(entry)) {
+          return null;
+        }
         const decodedRule = decodeKeybindingRuleExit(entry);
         if (decodedRule._tag === "Failure") {
           yield* Effect.logWarning("ignoring invalid keybinding entry", {
@@ -375,11 +390,12 @@ const makeKeybindings = Effect.gen(function* () {
     {
       readonly keybindings: readonly KeybindingRule[];
       readonly issues: readonly ServerConfigIssue[];
+      readonly removedLegacyEntries: boolean;
     },
     KeybindingsConfigError
   > {
     if (!(yield* readConfigExists)) {
-      return { keybindings: [], issues: [] };
+      return { keybindings: [], issues: [], removedLegacyEntries: false };
     }
 
     const rawConfig = yield* readRawConfig;
@@ -389,12 +405,18 @@ const makeKeybindings = Effect.gen(function* () {
       return {
         keybindings: [],
         issues: [malformedConfigIssue(detail)],
+        removedLegacyEntries: false,
       };
     }
 
     const keybindings: KeybindingRule[] = [];
     const issues: ServerConfigIssue[] = [];
+    let removedLegacyEntries = false;
     for (const [index, entry] of decodedEntries.value.entries()) {
+      if (isRemovedDiffToggleEntry(entry)) {
+        removedLegacyEntries = true;
+        continue;
+      }
       const decodedRule = decodeKeybindingRuleExit(entry);
       if (decodedRule._tag === "Failure") {
         const detail = Cause.pretty(decodedRule.cause);
@@ -423,7 +445,7 @@ const makeKeybindings = Effect.gen(function* () {
       keybindings.push(decodedRule.value);
     }
 
-    return { keybindings, issues };
+    return { keybindings, issues, removedLegacyEntries };
   });
 
   const writeConfigAtomically = (rules: readonly KeybindingRule[]) => {
@@ -497,6 +519,7 @@ const makeKeybindings = Effect.gen(function* () {
         return;
       }
       const customConfig = runtimeConfig.keybindings;
+      const removedLegacyEntries = runtimeConfig.removedLegacyEntries;
       const existingCommands = new Set(customConfig.map((entry) => entry.command));
       const missingDefaults: KeybindingRule[] = [];
       const shortcutConflictWarnings: Array<{
@@ -534,6 +557,9 @@ const makeKeybindings = Effect.gen(function* () {
         });
       }
       if (missingDefaults.length === 0) {
+        if (removedLegacyEntries) {
+          yield* writeConfigAtomically(customConfig);
+        }
         yield* Cache.invalidate(resolvedConfigCache, resolvedConfigCacheKey);
         return;
       }

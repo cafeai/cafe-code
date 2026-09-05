@@ -211,9 +211,21 @@ export function startServerStateSync(client: ServerStateClient): () => void {
         emitWelcome(event.payload);
       }
     }),
-    client.subscribeConfig((event) => {
-      applyServerConfigEvent(event);
-    }),
+    client.subscribeConfig(
+      (event) => {
+        applyServerConfigEvent(event);
+      },
+      {
+        // Provider maintenance state is projected through this stream. If a
+        // reconnect attempt encounters a transient decode or server-stream
+        // failure, abandoning the subscription would leave the keep-alive
+        // config atom displaying its last snapshot forever (for example,
+        // "Updating Claude" after the update already stopped). Every new
+        // subscription begins with an authoritative server snapshot, so keep
+        // retrying until that snapshot can reconcile the renderer cache.
+        retryNonTransportErrors: true,
+      },
+    ),
   ];
 
   if (getServerConfig() === null) {

@@ -22,6 +22,7 @@
  */
 import { ClaudeDriver, type ClaudeDriverEnv } from "./Drivers/ClaudeDriver.ts";
 import { CodexDriver, type CodexDriverEnv } from "./Drivers/CodexDriver.ts";
+import { GrokDriver, type GrokDriverEnv } from "./Drivers/GrokDriver.ts";
 import { OpenCodeDriver, type OpenCodeDriverEnv } from "./Drivers/OpenCodeDriver.ts";
 import type { AnyProviderDriver } from "./ProviderDriver.ts";
 
@@ -30,7 +31,11 @@ import type { AnyProviderDriver } from "./ProviderDriver.ts";
  * driver. The registry layer declares `R = BuiltInDriversEnv`; the runtime
  * layer must provide every service in this union.
  */
-export type BuiltInDriversEnv = ClaudeDriverEnv | CodexDriverEnv | OpenCodeDriverEnv;
+export type BuiltInDriversEnv =
+  | ClaudeDriverEnv
+  | CodexDriverEnv
+  | GrokDriverEnv
+  | OpenCodeDriverEnv;
 
 /**
  * Ordered list of built-in drivers. Order matters only for tie-breaking in
@@ -40,5 +45,6 @@ export type BuiltInDriversEnv = ClaudeDriverEnv | CodexDriverEnv | OpenCodeDrive
 export const BUILT_IN_DRIVERS: ReadonlyArray<AnyProviderDriver<BuiltInDriversEnv>> = [
   CodexDriver,
   ClaudeDriver,
+  GrokDriver,
   OpenCodeDriver,
 ];

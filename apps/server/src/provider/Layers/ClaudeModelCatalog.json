@@ -1,6 +1,91 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
+  "sharedOptionDescriptors": [
+    {
+      "id": "outputStyle",
+      "label": "Output Style",
+      "type": "select",
+      "options": [
+        { "id": "providerDefault", "label": "Provider Default", "isDefault": true },
+        { "id": "concise", "label": "Concise" }
+      ],
+      "currentValue": "providerDefault"
+    },
+    {
+      "id": "agentProgressSummaries",
+      "label": "Subagent Progress Summaries",
+      "type": "boolean",
+      "currentValue": true
+    }
+  ],
   "models": [
+    {
+      "slug": "claude-opus-5",
+      "name": "Claude Opus 5",
+      "isCustom": false,
+      "minimumClaudeCodeVersion": "2.1.219",
+      "capabilities": {
+        "optionDescriptors": [
+          {
+            "id": "effort",
+            "label": "Reasoning",
+            "type": "select",
+            "options": [
+              { "id": "low", "label": "Low" },
+              { "id": "medium", "label": "Medium" },
+              { "id": "high", "label": "High", "isDefault": true },
+              { "id": "xhigh", "label": "Extra High" },
+              { "id": "max", "label": "Max" },
+              { "id": "ultrathink", "label": "Ultrathink" }
+            ],
+            "currentValue": "high",
+            "promptInjectedValues": ["ultrathink"]
+          },
+          {
+            "id": "fastMode",
+            "label": "Fast Mode",
+            "type": "boolean"
+          },
+          {
+            "id": "contextWindow",
+            "label": "Context Window",
+            "type": "select",
+            "options": [{ "id": "1m", "label": "1M", "isDefault": true }],
+            "currentValue": "1m"
+          }
+        ]
+      }
+    },
+    {
+      "slug": "claude-fable-5-1",
+      "name": "Claude Fable 5.1",
+      "isCustom": false,
+      "minimumClaudeCodeVersion": "2.1.257",
+      "capabilities": {
+        "optionDescriptors": [
+          {
+            "id": "effort",
+            "label": "Reasoning",
+            "type": "select",
+            "options": [
+              { "id": "low", "label": "Low" },
+              { "id": "medium", "label": "Medium" },
+              { "id": "high", "label": "High", "isDefault": true },
+              { "id": "xhigh", "label": "Extra High" },
+              { "id": "max", "label": "Max" }
+            ],
+            "currentValue": "high"
+          },
+          {
+            "id": "contextWindow",
+            "label": "Context Window",
+            "type": "select",
+            "options": [{ "id": "1m", "label": "1M", "isDefault": true }],
+            "currentValue": "1m"
+          }
+        ]
+      }
+    },
     {
       "slug": "claude-fable-5",
       "name": "Claude Fable 5",
@@ -57,6 +142,11 @@
             ],
             "currentValue": "xhigh",
             "promptInjectedValues": ["ultrathink"]
+          },
+          {
+            "id": "fastMode",
+            "label": "Fast Mode",
+            "type": "boolean"
           },
           {
             "id": "contextWindow",
@@ -127,11 +217,6 @@
             "promptInjectedValues": ["ultrathink"]
           },
           {
-            "id": "fastMode",
-            "label": "Fast Mode",
-            "type": "boolean"
-          },
-          {
             "id": "contextWindow",
             "label": "Context Window",
             "type": "select",
@@ -161,11 +246,6 @@
               { "id": "max", "label": "Max" }
             ],
             "currentValue": "high"
-          },
-          {
-            "id": "fastMode",
-            "label": "Fast Mode",
-            "type": "boolean"
           }
         ]
       }

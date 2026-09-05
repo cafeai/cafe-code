@@ -153,3 +153,13 @@ export const revealPath = makeIpcMethod({
     return yield* shell.revealPath(path);
   }),
 });
+
+export const copyText = makeIpcMethod({
+  channel: IpcChannels.COPY_TEXT_CHANNEL,
+  payload: Schema.String,
+  result: Schema.Void,
+  handler: Effect.fn("desktop.ipc.window.copyText")(function* (text) {
+    const shell = yield* ElectronShell.ElectronShell;
+    yield* shell.copyText(text);
+  }),
+});

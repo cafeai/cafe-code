@@ -37,7 +37,7 @@ const DESKTOP_BACKEND_PORT_PROBE_HOSTS = ["127.0.0.1", "0.0.0.0", "::"] as const
 const DESKTOP_SHUTDOWN_BACKEND_STOP_TIMEOUT = Duration.seconds(5);
 const PROVIDER_DAEMON_STARTING_ENDPOINT_POLL_INTERVAL = Duration.millis(10);
 const PROVIDER_DAEMON_HEALTH_CHECK_INTERVAL = Duration.seconds(5);
-const PROVIDER_DAEMON_HEALTH_FAILURE_THRESHOLD = 3;
+const PROVIDER_DAEMON_LIVENESS_WARNING_THRESHOLD = 3;
 const PROVIDER_DAEMON_RECOVERY_BACKEND_STOP_TIMEOUT = Duration.seconds(10);
 
 const makeDesktopRunId = Random.nextUUIDv4.pipe(
@@ -231,13 +231,15 @@ export const runProviderDaemonHealthWatchdog = Effect.fn("desktop.providerDaemon
     readonly providerDaemonManager: DesktopProviderDaemonManager.DesktopProviderDaemonManagerShape;
     readonly quitting: Ref.Ref<boolean>;
     readonly checkInterval?: Duration.Duration;
-    readonly failureThreshold?: number;
+    readonly warningThreshold?: number;
+    readonly isDaemonProcessAlive?: (pid: number) => boolean;
   }) {
     const checkInterval = input.checkInterval ?? PROVIDER_DAEMON_HEALTH_CHECK_INTERVAL;
-    const failureThreshold = Math.max(
+    const warningThreshold = Math.max(
       1,
-      Math.trunc(input.failureThreshold ?? PROVIDER_DAEMON_HEALTH_FAILURE_THRESHOLD),
+      Math.trunc(input.warningThreshold ?? PROVIDER_DAEMON_LIVENESS_WARNING_THRESHOLD),
     );
+    const isDaemonProcessAlive = input.isDaemonProcessAlive ?? isPidAlive;
     let consecutiveFailures = 0;
 
     while (!(yield* Ref.get(input.quitting))) {
@@ -261,14 +263,29 @@ export const runProviderDaemonHealthWatchdog = Effect.fn("desktop.providerDaemon
       consecutiveFailures += 1;
       const daemonSnapshot = yield* input.providerDaemonManager.snapshot;
       const daemonPid = Option.getOrUndefined(daemonSnapshot.pid);
-      const processIsKnownDead = daemonPid !== undefined && !isPidAlive(daemonPid);
-      if (!processIsKnownDead && consecutiveFailures < failureThreshold) {
+      const processIsKnownDead = daemonPid !== undefined && !isDaemonProcessAlive(daemonPid);
+      if (!processIsKnownDead) {
+        // The liveness route is deliberately database-free, but it still runs
+        // on the provider daemon's Node.js event loop. Synchronous SQLite lock,
+        // commit, checkpoint, or filesystem waits can therefore delay this
+        // response even while the daemon and every provider child remain alive.
+        // Replacing that live process would destroy active turns, so probe
+        // failures are advisory until the OS confirms that the daemon PID died.
+        if (consecutiveFailures === warningThreshold) {
+          yield* logDaemonWatchdogWarning(
+            "provider daemon liveness unavailable; preserving unconfirmed process",
+            {
+              consecutiveFailures,
+              daemonPid: daemonPid ?? null,
+              processExitConfirmed: false,
+              lastError: Option.getOrNull(daemonSnapshot.lastError),
+            },
+          );
+        }
         continue;
       }
 
-      const reason = processIsKnownDead
-        ? `provider daemon process ${daemonPid} exited`
-        : `provider daemon failed ${consecutiveFailures} consecutive liveness probes`;
+      const reason = `provider daemon process ${daemonPid} exited`;
       yield* logDaemonWatchdogWarning("provider daemon recovery starting", {
         reason,
         consecutiveFailures,
@@ -303,7 +320,7 @@ export const runProviderDaemonHealthWatchdog = Effect.fn("desktop.providerDaemon
           }).pipe(Effect.as(false)),
         ),
       );
-      consecutiveFailures = recovered ? 0 : failureThreshold;
+      consecutiveFailures = recovered ? 0 : consecutiveFailures;
     }
   },
 );
@@ -364,6 +381,9 @@ const bootstrap = Effect.gen(function* () {
   yield* logBootstrapInfo("bootstrap resolved backend endpoint", {
     baseUrl: backendConfig.httpBaseUrl.href,
   });
+  if (providerDaemonManager.configureCafeMcpPort) {
+    yield* providerDaemonManager.configureCafeMcpPort(backendConfig.port);
+  }
   const providerDaemonReadyFiber = yield* Effect.forkScoped(providerDaemonManager.ensureRunning);
   const providerDaemonEndpoint = yield* waitForProviderDaemonStartingEndpoint(
     providerDaemonManager,

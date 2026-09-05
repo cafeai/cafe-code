@@ -134,6 +134,47 @@ it.layer(NodeServices.layer)("providerStatusCache", (it) => {
     );
   });
 
+  it("hydrates probe history without reviving the previous scope's schedule", () => {
+    const cachedCodex = makeProvider(CODEX_DRIVER, {
+      probeDiagnostics: {
+        attemptCount: 2,
+        consecutiveInconclusiveCount: 2,
+        lastOutcome: "inconclusive",
+        lastStartedAt: "2026-04-10T12:09:56.000Z",
+        lastFinishedAt: "2026-04-10T12:10:00.000Z",
+        lastDurationMs: 4_000,
+        periodicIntervalMs: 300_000,
+        periodicPhaseOffsetMs: 42_000,
+        nextScheduledAt: "2026-04-10T12:15:42.000Z",
+      },
+    });
+    const fallbackCodex = makeProvider(CODEX_DRIVER, {
+      probeDiagnostics: {
+        attemptCount: 0,
+        consecutiveInconclusiveCount: 0,
+        lastOutcome: "pending",
+        lastStartedAt: null,
+        lastFinishedAt: null,
+        lastDurationMs: null,
+        periodicIntervalMs: 600_000,
+        periodicPhaseOffsetMs: 73_000,
+        nextScheduledAt: null,
+      },
+    });
+
+    const hydrated = hydrateCachedProvider({
+      cachedProvider: cachedCodex,
+      fallbackProvider: fallbackCodex,
+    });
+
+    assert.deepStrictEqual(hydrated.probeDiagnostics, {
+      ...cachedCodex.probeDiagnostics!,
+      periodicIntervalMs: fallbackCodex.probeDiagnostics?.periodicIntervalMs ?? null,
+      periodicPhaseOffsetMs: fallbackCodex.probeDiagnostics?.periodicPhaseOffsetMs ?? null,
+      nextScheduledAt: null,
+    });
+  });
+
   it("ignores stale cached enabled state when the provider is now disabled", () => {
     const cachedCodex = makeProvider(CODEX_DRIVER, {
       checkedAt: "2026-04-10T12:00:00.000Z",

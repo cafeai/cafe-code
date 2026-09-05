@@ -1533,9 +1533,11 @@ function ComposerPromptEditorInner({
         contentEditable={
           <ContentEditable
             className={cn(
-              // 16px on touch devices prevents iOS from zooming the page when
-              // the editor gains focus; pointer devices keep the 14px text.
-              "block max-h-50 min-h-17.5 w-full overflow-y-auto whitespace-pre-wrap wrap-break-word bg-transparent text-[14px] leading-relaxed text-foreground focus:outline-none [@media(hover:none)_and_(pointer:coarse)]:text-[16px]",
+              // Pointer devices use rem-based text so the editor scales with
+              // Cafe's interface-size setting. The 16px touch override is
+              // intentionally absolute because smaller editable text causes
+              // iOS Safari to zoom the page when the editor gains focus.
+              "block max-h-50 min-h-17.5 w-full overflow-y-auto whitespace-pre-wrap wrap-break-word bg-transparent text-sm leading-relaxed text-foreground focus:outline-none [@media(hover:none)_and_(pointer:coarse)]:text-[16px]",
               className,
             )}
             contentEditable={!disabled}
@@ -1547,7 +1549,7 @@ function ComposerPromptEditorInner({
           />
         }
         placeholder={
-          <div className="pointer-events-none absolute inset-0 text-[14px] leading-relaxed text-muted-foreground/35 [@media(hover:none)_and_(pointer:coarse)]:text-[16px]">
+          <div className="pointer-events-none absolute inset-0 text-sm leading-relaxed text-muted-foreground/35 [@media(hover:none)_and_(pointer:coarse)]:text-[16px]">
             {placeholder}
           </div>
         }

@@ -37,15 +37,56 @@ export interface OutputCounter {
   readonly kind: "session-cumulative" | "per-message";
 }
 
-/** Pick the best available output-token counter from a usage snapshot. */
-export function selectOutputCounter(snapshot: ThreadTokenUsageSnapshot): OutputCounter | undefined {
-  if (snapshot.totalOutputTokens !== undefined) {
-    return { value: snapshot.totalOutputTokens, kind: "session-cumulative" };
+/**
+ * The counters usage accounting tracks. Cost is dominated by input on every
+ * provider we ship, and cached reads price differently from fresh input, so the
+ * ledger needs each of these separately rather than output alone.
+ *
+ * `cachedInputTokens` and `cacheWriteInputTokens` are subsets of
+ * `inputTokens`; `reasoningOutputTokens` is a subset of `outputTokens`.
+ * Consumers must not add subsets to their parent or they will double count.
+ */
+export const USAGE_TOKEN_FIELDS = [
+  "outputTokens",
+  "inputTokens",
+  "cachedInputTokens",
+  "cacheWriteInputTokens",
+  "reasoningOutputTokens",
+] as const;
+export type UsageTokenField = (typeof USAGE_TOKEN_FIELDS)[number];
+
+/**
+ * Session-cumulative counterpart for each field, when the adapter reports one.
+ * A cumulative counter is always preferred: the per-request values neither grow
+ * nor reset predictably, so they cannot be summed or watermarked safely.
+ */
+const CUMULATIVE_FIELD: Record<UsageTokenField, keyof ThreadTokenUsageSnapshot> = {
+  outputTokens: "totalOutputTokens",
+  inputTokens: "totalInputTokens",
+  cachedInputTokens: "totalCachedInputTokens",
+  cacheWriteInputTokens: "totalCacheWriteInputTokens",
+  reasoningOutputTokens: "totalReasoningOutputTokens",
+};
+
+/** Pick the best available counter for `field` from a usage snapshot. */
+export function selectCounter(
+  snapshot: ThreadTokenUsageSnapshot,
+  field: UsageTokenField,
+): OutputCounter | undefined {
+  const cumulative = snapshot[CUMULATIVE_FIELD[field]];
+  if (typeof cumulative === "number") {
+    return { value: cumulative, kind: "session-cumulative" };
   }
-  if (snapshot.outputTokens !== undefined) {
-    return { value: snapshot.outputTokens, kind: "per-message" };
+  const perMessage = snapshot[field];
+  if (typeof perMessage === "number") {
+    return { value: perMessage, kind: "per-message" };
   }
   return undefined;
+}
+
+/** Pick the best available output-token counter from a usage snapshot. */
+export function selectOutputCounter(snapshot: ThreadTokenUsageSnapshot): OutputCounter | undefined {
+  return selectCounter(snapshot, "outputTokens");
 }
 
 export interface TokenDeltaResult {

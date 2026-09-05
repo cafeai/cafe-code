@@ -1,10 +1,26 @@
 import * as Schema from "effect/Schema";
 
-import { IsoDateTime, NonNegativeInt, PortSchema, ThreadId } from "./baseSchemas.ts";
+import {
+  IsoDateTime,
+  NonNegativeInt,
+  PortSchema,
+  ThreadId,
+  TurnId,
+  TrimmedNonEmptyString,
+} from "./baseSchemas.ts";
+import {
+  OrchestrationThreadTurnSubagentDetailBodyFields,
+  THREAD_TURN_SUBAGENT_ID_MAX_LENGTH,
+  orchestrationThreadTurnSubagentDetailBodyIssues,
+} from "./orchestration.ts";
 import {
   ProviderInterruptTurnInput,
   ProviderRespondToRequestInput,
   ProviderRespondToUserInputInput,
+  ProviderSessionForkDiscardInput,
+  ProviderSessionForkInput,
+  ProviderSessionForkResult,
+  ProviderSnoozeUserInputInput,
   ProviderSendTurnInput,
   ProviderSession,
   ProviderSessionStartInput,
@@ -13,6 +29,13 @@ import {
   ProviderTurnSteerResult,
   ProviderTurnStartResult,
 } from "./provider.ts";
+import {
+  ProviderThreadGoal,
+  ProviderThreadGoalClearInput,
+  ProviderThreadGoalClearResult,
+  ProviderThreadGoalGetInput,
+  ProviderThreadGoalSetInput,
+} from "./providerGoal.ts";
 import { ProviderRuntimeEvent } from "./providerRuntime.ts";
 import { ProviderPipelineDiagnostics } from "./providerPipelineDiagnostics.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
@@ -75,6 +98,9 @@ export const ProviderDaemonBootstrap = Schema.Struct({
   host: Schema.optional(Schema.String),
   socketPath: Schema.optional(Schema.String),
   cafeCodeHome: Schema.String,
+  // Main backend loopback port used by provider-owned Cafe MCP clients. The
+  // provider daemon's own transport is not the Cafe application listener.
+  cafeMcpPort: Schema.optional(PortSchema),
   token: ProviderDaemonToken,
   runtimeBuildId: Schema.optional(Schema.String),
   otlpTracesUrl: Schema.optional(Schema.String),
@@ -105,6 +131,7 @@ export const ProviderDaemonMarker = Schema.Struct({
   updatedAt: IsoDateTime,
   appVersion: Schema.String,
   runtimeBuildId: Schema.optional(Schema.String),
+  cafeMcpPort: Schema.optional(PortSchema),
 });
 export type ProviderDaemonMarker = typeof ProviderDaemonMarker.Type;
 
@@ -367,8 +394,15 @@ export const ProviderDaemonLeaseResponse = Schema.Struct({
 export type ProviderDaemonLeaseResponse = typeof ProviderDaemonLeaseResponse.Type;
 
 export const ProviderDaemonAdapterCapabilities = Schema.Struct({
-  sessionModelSwitch: Schema.Literals(["in-session", "unsupported"]),
+  sessionModelSwitch: Schema.Literals(["in-session", "restart-resume", "unsupported"]),
   liveSteer: Schema.Literals(["supported", "unsupported"]),
+  // Optional on the wire so a newly built desktop can still interrogate an
+  // adopted daemon from before goal capability negotiation existed. Missing
+  // always means unsupported.
+  threadGoals: Schema.optional(Schema.Literals(["supported", "unsupported"])),
+  // Optional for compatibility with daemons built before provider-native
+  // thread/session branching was exposed through Cafe.
+  sessionFork: Schema.optional(Schema.Literals(["supported", "unsupported"])),
 });
 export type ProviderDaemonAdapterCapabilities = typeof ProviderDaemonAdapterCapabilities.Type;
 
@@ -438,6 +472,22 @@ const RollbackConversationPayload = Schema.Struct({
   numTurns: NonNegativeInt,
 });
 
+const ReadSubagentDetailPayload = Schema.Struct({
+  threadId: ThreadId,
+  turnId: TurnId,
+  subagentId: TrimmedNonEmptyString.check(Schema.isMaxLength(THREAD_TURN_SUBAGENT_ID_MAX_LENGTH)),
+  historyId: Schema.optional(
+    TrimmedNonEmptyString.check(Schema.isMaxLength(THREAD_TURN_SUBAGENT_ID_MAX_LENGTH)),
+  ),
+});
+
+export const ProviderDaemonSubagentDetail = Schema.Struct({
+  provider: ProviderDriverKind,
+  providerInstanceId: ProviderInstanceId,
+  ...OrchestrationThreadTurnSubagentDetailBodyFields,
+}).check(Schema.makeFilter(orchestrationThreadTurnSubagentDetailBodyIssues));
+export type ProviderDaemonSubagentDetail = typeof ProviderDaemonSubagentDetail.Type;
+
 export const ProviderDaemonRpcRequest = Schema.Union([
   Schema.Struct({
     method: Schema.Literal("startSession"),
@@ -448,6 +498,16 @@ export const ProviderDaemonRpcRequest = Schema.Union([
     method: Schema.Literal("sendTurn"),
     commandId: Schema.optional(ProviderDaemonCommandId),
     payload: ProviderSendTurnInput,
+  }),
+  Schema.Struct({
+    method: Schema.Literal("forkSession"),
+    commandId: Schema.optional(ProviderDaemonCommandId),
+    payload: ProviderSessionForkInput,
+  }),
+  Schema.Struct({
+    method: Schema.Literal("discardSessionFork"),
+    commandId: Schema.optional(ProviderDaemonCommandId),
+    payload: ProviderSessionForkDiscardInput,
   }),
   Schema.Struct({
     method: Schema.Literal("steerTurn"),
@@ -470,7 +530,17 @@ export const ProviderDaemonRpcRequest = Schema.Union([
     payload: ProviderRespondToUserInputInput,
   }),
   Schema.Struct({
+    method: Schema.Literal("snoozeUserInput"),
+    commandId: Schema.optional(ProviderDaemonCommandId),
+    payload: ProviderSnoozeUserInputInput,
+  }),
+  Schema.Struct({
     method: Schema.Literal("stopSession"),
+    commandId: Schema.optional(ProviderDaemonCommandId),
+    payload: ProviderStopSessionInput,
+  }),
+  Schema.Struct({
+    method: Schema.Literal("quiesceThreadForHardDelete"),
     commandId: Schema.optional(ProviderDaemonCommandId),
     payload: ProviderStopSessionInput,
   }),
@@ -492,24 +562,50 @@ export const ProviderDaemonRpcRequest = Schema.Union([
     payload: GetInstanceInfoPayload,
   }),
   Schema.Struct({
+    method: Schema.Literal("getGoal"),
+    payload: ProviderThreadGoalGetInput,
+  }),
+  Schema.Struct({
+    method: Schema.Literal("setGoal"),
+    commandId: Schema.optional(ProviderDaemonCommandId),
+    payload: ProviderThreadGoalSetInput,
+  }),
+  Schema.Struct({
+    method: Schema.Literal("clearGoal"),
+    commandId: Schema.optional(ProviderDaemonCommandId),
+    payload: ProviderThreadGoalClearInput,
+  }),
+  Schema.Struct({
     method: Schema.Literal("rollbackConversation"),
     commandId: Schema.optional(ProviderDaemonCommandId),
     payload: RollbackConversationPayload,
+  }),
+  Schema.Struct({
+    method: Schema.Literal("readSubagentDetail"),
+    payload: ReadSubagentDetailPayload,
   }),
 ]);
 export type ProviderDaemonRpcRequest = typeof ProviderDaemonRpcRequest.Type;
 
 export const ProviderDaemonRpcResultByMethod = {
   startSession: ProviderSession,
+  forkSession: ProviderSessionForkResult,
+  discardSessionFork: Schema.Void,
   sendTurn: ProviderTurnStartResult,
   steerTurn: ProviderTurnSteerResult,
   interruptTurn: Schema.Void,
   respondToRequest: Schema.Void,
   respondToUserInput: Schema.Void,
+  snoozeUserInput: Schema.Void,
   stopSession: Schema.Void,
+  quiesceThreadForHardDelete: Schema.Void,
   restartProviderRuntime: ProviderDaemonRuntimeRestartResult,
   listSessions: Schema.Array(ProviderSession),
   getCapabilities: ProviderDaemonAdapterCapabilities,
   getInstanceInfo: ProviderDaemonInstanceRoutingInfo,
+  getGoal: Schema.NullOr(ProviderThreadGoal),
+  setGoal: ProviderThreadGoal,
+  clearGoal: ProviderThreadGoalClearResult,
   rollbackConversation: Schema.Void,
+  readSubagentDetail: ProviderDaemonSubagentDetail,
 } as const;

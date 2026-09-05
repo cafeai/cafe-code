@@ -49,7 +49,11 @@ function booleanDescriptor(id: string, label: string) {
   };
 }
 
-async function mountMenu(props?: { modelSelection?: ModelSelection; prompt?: string }) {
+async function mountMenu(props?: {
+  modelSelection?: ModelSelection;
+  prompt?: string;
+  traitsTriggerLabel?: string;
+}) {
   const threadId = ThreadId.make("thread-compact-menu");
   const threadRef = scopeThreadRef(LOCAL_ENVIRONMENT_ID, threadId);
   const threadKey = scopedThreadKey(threadRef);
@@ -134,13 +138,16 @@ async function mountMenu(props?: { modelSelection?: ModelSelection; prompt?: str
   ];
   const screen = await render(
     <CompactComposerControlsMenu
-      activePlan={false}
+      showPlanSidebar={false}
       provider={provider}
       interactionMode="default"
       planSidebarLabel="Plan"
       planSidebarOpen={false}
       runtimeMode="approval-required"
       showInteractionModeToggle
+      {...(props?.traitsTriggerLabel !== undefined
+        ? { traitsTriggerLabel: props.traitsTriggerLabel }
+        : {})}
       traitsMenuContent={
         <TraitsMenuContent
           provider={provider}
@@ -153,7 +160,7 @@ async function mountMenu(props?: { modelSelection?: ModelSelection; prompt?: str
         />
       }
       onToggleInteractionMode={vi.fn()}
-      onClaudePermissionModeChange={vi.fn()}
+      onNativePermissionModeChange={vi.fn()}
       onTogglePlanSidebar={vi.fn()}
       onRuntimeModeChange={vi.fn()}
     />,
@@ -179,6 +186,23 @@ describe("CompactComposerControlsMenu", () => {
       draftThreadsByThreadKey: {},
       logicalProjectDraftThreadKeyByLogicalProjectKey: {},
       stickyModelSelectionByProvider: {},
+    });
+  });
+
+  it("keeps the selected reasoning visible on the closed compact trigger", async () => {
+    await using _ = await mountMenu({ traitsTriggerLabel: "Ultra · 1M" });
+
+    const trigger = document.querySelector<HTMLElement>('[aria-label="More composer controls"]');
+    const label = document.querySelector<HTMLElement>(
+      '[data-compact-composer-controls-label="true"]',
+    );
+
+    expect(trigger?.textContent).toContain("Ultra · 1M");
+    expect(label?.textContent).toBe("Ultra · 1M");
+
+    await page.getByLabelText("More composer controls").click();
+    await vi.waitFor(() => {
+      expect(document.body.textContent ?? "").toContain("Mode");
     });
   });
 
@@ -301,21 +325,24 @@ describe("CompactComposerControlsMenu", () => {
     await vi.waitFor(() => {
       const text = document.body.textContent ?? "";
       expect(text).toContain("Manual");
+      expect(text).toContain("Ask before edits and commands");
       expect(text).toContain("Accept edits");
       expect(text).toContain("Plan");
       expect(text).toContain("Auto");
       expect(text).toContain("Bypass permissions");
+      expect(text).toContain("Run without permission checks");
       expect(text).not.toContain("Access");
       expect(text).not.toContain("Supervised");
     });
   });
 
-  it("can hide the interaction mode section", async () => {
+  it("keeps access selectable without traits or an interaction-mode section", async () => {
     const host = document.createElement("div");
     document.body.append(host);
+    const onRuntimeModeChange = vi.fn();
     const screen = await render(
       <CompactComposerControlsMenu
-        activePlan={false}
+        showPlanSidebar={false}
         provider={ProviderDriverKind.make("codex")}
         interactionMode="default"
         planSidebarLabel="Plan"
@@ -323,9 +350,9 @@ describe("CompactComposerControlsMenu", () => {
         runtimeMode="approval-required"
         showInteractionModeToggle={false}
         onToggleInteractionMode={vi.fn()}
-        onClaudePermissionModeChange={vi.fn()}
+        onNativePermissionModeChange={vi.fn()}
         onTogglePlanSidebar={vi.fn()}
-        onRuntimeModeChange={vi.fn()}
+        onRuntimeModeChange={onRuntimeModeChange}
       />,
       { container: host },
     );
@@ -339,9 +366,50 @@ describe("CompactComposerControlsMenu", () => {
       expect(text).not.toContain("Plan");
       expect(text).toContain("Access");
       expect(text).toContain("Supervised");
+      expect(text).toContain("Ask before commands and file changes");
+      expect(text).toContain("Auto-approve edits");
       expect(text).toContain("Full access");
     });
 
+    const autoAcceptItem = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-slot="menu-radio-item"]'),
+    ).find((item) => item.textContent?.includes("Auto-accept edits"));
+    expect(autoAcceptItem).toBeDefined();
+    autoAcceptItem?.click();
+    expect(onRuntimeModeChange).toHaveBeenCalledExactlyOnceWith("auto-accept-edits");
+
+    await screen.unmount();
+    host.remove();
+  });
+
+  it("shows a human-readable Codex goal status and opens the goal control", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const onOpenGoal = vi.fn();
+    const screen = await render(
+      <CompactComposerControlsMenu
+        showPlanSidebar={false}
+        provider={ProviderDriverKind.make("codex")}
+        interactionMode="default"
+        planSidebarLabel="Plan"
+        planSidebarOpen={false}
+        runtimeMode="approval-required"
+        showInteractionModeToggle={false}
+        showGoalControl
+        goalStatus="usageLimited"
+        onToggleInteractionMode={vi.fn()}
+        onNativePermissionModeChange={vi.fn()}
+        onTogglePlanSidebar={vi.fn()}
+        onRuntimeModeChange={vi.fn()}
+        onOpenGoal={onOpenGoal}
+      />,
+      { container: host },
+    );
+
+    await page.getByLabelText("More composer controls").click();
+    await page.getByText("Goal: Usage limited").click();
+
+    expect(onOpenGoal).toHaveBeenCalledOnce();
     await screen.unmount();
     host.remove();
   });

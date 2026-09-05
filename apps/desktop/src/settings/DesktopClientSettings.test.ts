@@ -21,8 +21,6 @@ const clientSettings: ClientSettings = {
   confirmThreadArchive: true,
   confirmThreadDelete: false,
   dismissedProviderUpdateNotificationKeys: [],
-  diffIgnoreWhitespace: true,
-  diffWordWrap: true,
   continueBackgroundAnimations: false,
   showSidebarMascot: true,
   themeAccentColor: "",

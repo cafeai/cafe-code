@@ -31,6 +31,36 @@ export interface WsConnectionStatus {
   readonly socketUrl: string | null;
 }
 
+export interface WsConnectionDiagnosticEvent {
+  readonly at: string;
+  readonly kind: "attempt" | "closed" | "error" | "online-state" | "opened";
+  readonly phase: WsConnectionStatus["phase"];
+  readonly reconnectPhase: WsReconnectPhase;
+  readonly attemptCount: number;
+  readonly reconnectAttemptCount: number;
+  readonly closeCode: number | null;
+  readonly online: boolean;
+}
+
+export interface WsConnectionDiagnostics {
+  readonly phase: WsConnectionStatus["phase"];
+  readonly reconnectPhase: WsReconnectPhase;
+  readonly hasConnected: boolean;
+  readonly online: boolean;
+  readonly attemptCount: number;
+  readonly reconnectAttemptCount: number;
+  readonly reconnectMaxAttempts: number;
+  readonly closeCode: number | null;
+  readonly connectedAt: string | null;
+  readonly disconnectedAt: string | null;
+  readonly lastErrorAt: string | null;
+  readonly nextRetryAt: string | null;
+  readonly recentEvents: ReadonlyArray<WsConnectionDiagnosticEvent>;
+}
+
+const WS_CONNECTION_DIAGNOSTIC_EVENT_LIMIT = 32;
+const wsConnectionDiagnosticEvents: WsConnectionDiagnosticEvent[] = [];
+
 const INITIAL_WS_CONNECTION_STATUS = Object.freeze<WsConnectionStatus>({
   attemptCount: 0,
   closeCode: null,
@@ -67,6 +97,28 @@ function updateWsConnectionStatus(
   return nextStatus;
 }
 
+function recordDiagnosticEvent(
+  kind: WsConnectionDiagnosticEvent["kind"],
+  status: WsConnectionStatus,
+): void {
+  wsConnectionDiagnosticEvents.push({
+    at: isoNow(),
+    kind,
+    phase: status.phase,
+    reconnectPhase: status.reconnectPhase,
+    attemptCount: status.attemptCount,
+    reconnectAttemptCount: status.reconnectAttemptCount,
+    closeCode: status.closeCode,
+    online: status.online,
+  });
+  if (wsConnectionDiagnosticEvents.length > WS_CONNECTION_DIAGNOSTIC_EVENT_LIMIT) {
+    wsConnectionDiagnosticEvents.splice(
+      0,
+      wsConnectionDiagnosticEvents.length - WS_CONNECTION_DIAGNOSTIC_EVENT_LIMIT,
+    );
+  }
+}
+
 export interface WsConnectionMetadata {
   readonly connectionLabel?: string | null;
   readonly versionMismatchHint?: string | null;
@@ -79,6 +131,30 @@ function normalizeConnectionLabel(label: string | null | undefined): string | nu
 
 export function getWsConnectionStatus(): WsConnectionStatus {
   return appAtomRegistry.get(wsConnectionStatusAtom);
+}
+
+/**
+ * Safe renderer/debug view. It intentionally omits socket URLs, environment
+ * labels, close reasons, and error messages because remote servers and network
+ * intermediaries can place sensitive text in those fields.
+ */
+export function getWsConnectionDiagnostics(): WsConnectionDiagnostics {
+  const status = getWsConnectionStatus();
+  return {
+    phase: status.phase,
+    reconnectPhase: status.reconnectPhase,
+    hasConnected: status.hasConnected,
+    online: status.online,
+    attemptCount: status.attemptCount,
+    reconnectAttemptCount: status.reconnectAttemptCount,
+    reconnectMaxAttempts: status.reconnectMaxAttempts,
+    closeCode: status.closeCode,
+    connectedAt: status.connectedAt,
+    disconnectedAt: status.disconnectedAt,
+    lastErrorAt: status.lastErrorAt,
+    nextRetryAt: status.nextRetryAt,
+    recentEvents: wsConnectionDiagnosticEvents.map((event) => ({ ...event })),
+  };
 }
 
 export function getWsConnectionUiState(status: WsConnectionStatus): WsConnectionUiState {
@@ -102,7 +178,7 @@ export function recordWsConnectionAttempt(
   metadata?: WsConnectionMetadata,
 ): WsConnectionStatus {
   const connectionLabel = normalizeConnectionLabel(metadata?.connectionLabel);
-  return updateWsConnectionStatus((current) => ({
+  const status = updateWsConnectionStatus((current) => ({
     ...current,
     attemptCount: current.attemptCount + 1,
     connectionLabel: connectionLabel ?? current.connectionLabel,
@@ -112,11 +188,13 @@ export function recordWsConnectionAttempt(
     reconnectPhase: "attempting",
     socketUrl,
   }));
+  recordDiagnosticEvent("attempt", status);
+  return status;
 }
 
 export function recordWsConnectionOpened(metadata?: WsConnectionMetadata): WsConnectionStatus {
   const connectionLabel = normalizeConnectionLabel(metadata?.connectionLabel);
-  return updateWsConnectionStatus((current) => ({
+  const status = updateWsConnectionStatus((current) => ({
     ...current,
     closeCode: null,
     closeReason: null,
@@ -129,6 +207,8 @@ export function recordWsConnectionOpened(metadata?: WsConnectionMetadata): WsCon
     reconnectAttemptCount: 0,
     reconnectPhase: "idle",
   }));
+  recordDiagnosticEvent("opened", status);
+  return status;
 }
 
 function appendHint(message: string | null | undefined, hint: string | null | undefined) {
@@ -144,7 +224,7 @@ export function recordWsConnectionErrored(
   message?: string | null,
   metadata?: WsConnectionMetadata,
 ): WsConnectionStatus {
-  return updateWsConnectionStatus((current) =>
+  const status = updateWsConnectionStatus((current) =>
     applyDisconnectState(current, {
       lastError:
         appendHint(message, metadata?.versionMismatchHint) ??
@@ -152,6 +232,8 @@ export function recordWsConnectionErrored(
       lastErrorAt: isoNow(),
     }),
   );
+  recordDiagnosticEvent("error", status);
+  return status;
 }
 
 export function recordWsConnectionClosed(
@@ -162,7 +244,7 @@ export function recordWsConnectionClosed(
   metadata?: WsConnectionMetadata,
 ): WsConnectionStatus {
   const connectionLabel = normalizeConnectionLabel(metadata?.connectionLabel);
-  return updateWsConnectionStatus((current) =>
+  const status = updateWsConnectionStatus((current) =>
     applyDisconnectState(
       current,
       {
@@ -174,13 +256,17 @@ export function recordWsConnectionClosed(
       connectionLabel === null ? undefined : { connectionLabel },
     ),
   );
+  recordDiagnosticEvent("closed", status);
+  return status;
 }
 
 export function setBrowserOnlineStatus(online: boolean): WsConnectionStatus {
-  return updateWsConnectionStatus((current) => ({
+  const status = updateWsConnectionStatus((current) => ({
     ...current,
     online,
   }));
+  recordDiagnosticEvent("online-state", status);
+  return status;
 }
 
 export function resetWsReconnectBackoff(): WsConnectionStatus {
@@ -194,6 +280,7 @@ export function resetWsReconnectBackoff(): WsConnectionStatus {
 
 export function resetWsConnectionStateForTests(): void {
   appAtomRegistry.set(wsConnectionStatusAtom, INITIAL_WS_CONNECTION_STATUS);
+  wsConnectionDiagnosticEvents.length = 0;
 }
 
 export function useWsConnectionStatus(): WsConnectionStatus {

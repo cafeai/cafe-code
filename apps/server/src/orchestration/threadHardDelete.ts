@@ -11,6 +11,8 @@ import {
 } from "../attachmentStore.ts";
 import { CheckpointStore } from "../checkpointing/Services/CheckpointStore.ts";
 import { ServerConfig } from "../config.ts";
+import { purgeProviderDaemonThreadPersistence } from "../providerDaemon/ProviderDaemonThreadPurge.ts";
+import { OrchestrationEngineService } from "./Services/OrchestrationEngine.ts";
 
 export const deleteThreadAttachments = Effect.fn("deleteThreadAttachments")(function* (
   threadId: ThreadId,
@@ -109,76 +111,156 @@ const deleteThreadCheckpointRefs = Effect.fn("deleteThreadCheckpointRefs")(funct
     );
 });
 
-export const hardDeleteThreadLocalData = Effect.fn("hardDeleteThreadLocalData")(function* (input: {
-  readonly threadId: ThreadId;
-}) {
-  const sql = yield* SqlClient.SqlClient;
+/**
+ * Delete every durable row owned by a thread while deliberately retaining its
+ * `hard_deleted_threads` tombstone. This effect is exported for the
+ * OrchestrationEngine worker; production callers must use
+ * `hardDeleteThreadLocalData` so the deletion stays serialized with commands.
+ */
+export const purgeHardDeletedThreadPersistence = Effect.fn("purgeHardDeletedThreadPersistence")(
+  function* (input: { readonly threadId: ThreadId }) {
+    const sql = yield* SqlClient.SqlClient;
 
-  yield* deleteThreadCheckpointRefs(input.threadId);
-  yield* deleteThreadAttachments(input.threadId);
+    // Desktop and daemon usually share a database, but remote/supervisor
+    // deployments may not. The authenticated daemon RPC purges its own store;
+    // this second idempotent pass covers daemon rows in the orchestration DB
+    // without assuming both processes were configured with the same file.
+    yield* purgeProviderDaemonThreadPersistence(input);
 
-  yield* sql.withTransaction(
-    Effect.gen(function* () {
-      yield* sql`
+    yield* sql.withTransaction(
+      Effect.gen(function* () {
+        yield* sql`
+        DELETE FROM provider_subagent_history_bindings
+        WHERE thread_id = ${input.threadId}
+      `;
+        yield* sql`
+        DELETE FROM provider_subagent_history_roots
+        WHERE thread_id = ${input.threadId}
+      `;
+        yield* sql`
         DELETE FROM provider_session_runtime
         WHERE thread_id = ${input.threadId}
       `;
-      yield* sql`
+        yield* sql`
+        DELETE FROM provider_supervisor_sessions
+        WHERE thread_id = ${input.threadId}
+      `;
+        yield* sql`
         DELETE FROM projection_thread_sessions
         WHERE thread_id = ${input.threadId}
       `;
-      yield* sql`
+        yield* sql`
+        DELETE FROM projection_thread_goals
+        WHERE thread_id = ${input.threadId}
+      `;
+        yield* sql`
         DELETE FROM projection_pending_approvals
         WHERE thread_id = ${input.threadId}
       `;
-      yield* sql`
+        yield* sql`
         DELETE FROM projection_thread_activities
         WHERE thread_id = ${input.threadId}
       `;
-      yield* sql`
+        yield* sql`
         DELETE FROM projection_thread_messages
         WHERE thread_id = ${input.threadId}
       `;
-      yield* sql`
+        yield* sql`
         UPDATE projection_thread_proposed_plans
         SET implementation_thread_id = NULL
         WHERE implementation_thread_id = ${input.threadId}
+          AND thread_id <> ${input.threadId}
       `;
-      yield* sql`
+        yield* sql`
         DELETE FROM projection_thread_proposed_plans
         WHERE thread_id = ${input.threadId}
       `;
-      yield* sql`
+        yield* sql`
         UPDATE projection_turns
         SET
           source_proposed_plan_thread_id = NULL,
           source_proposed_plan_id = NULL
         WHERE source_proposed_plan_thread_id = ${input.threadId}
+          AND thread_id <> ${input.threadId}
       `;
-      yield* sql`
+        yield* sql`
         DELETE FROM projection_turns
         WHERE thread_id = ${input.threadId}
       `;
-      yield* sql`
+        yield* sql`
         DELETE FROM checkpoint_diff_blobs
         WHERE thread_id = ${input.threadId}
       `;
-      yield* sql`
+        yield* sql`
         DELETE FROM orchestration_command_receipts
         WHERE aggregate_kind = 'thread'
           AND aggregate_id = ${input.threadId}
       `;
-      yield* sql`
+        yield* sql`
+        DELETE FROM orchestration_message_identity_hydration
+        WHERE thread_id = ${input.threadId}
+      `;
+        yield* sql`
+        DELETE FROM orchestration_message_identities
+        WHERE thread_id = ${input.threadId}
+      `;
+        // The compact steer ledgers contain no prompt text, but their thread
+        // identities and recovery authority must still be erased explicitly.
+        // Candidate/barrier rows would also cascade from event deletion while
+        // foreign keys are enabled; explicit cleanup keeps hard delete correct
+        // for databases that were opened with FK enforcement disabled.
+        yield* sql`
+        DELETE FROM orchestration_unsettled_codex_steer_hydration
+        WHERE thread_id = ${input.threadId}
+      `;
+        yield* sql`
+        DELETE FROM orchestration_unsettled_codex_steer_intents
+        WHERE thread_id = ${input.threadId}
+      `;
+        yield* sql`
+        DELETE FROM orchestration_codex_steer_recovery_barriers
+        WHERE thread_id = ${input.threadId}
+      `;
+        yield* sql`
+        DELETE FROM orchestration_codex_steer_control_barriers
+        WHERE thread_id = ${input.threadId}
+      `;
+        yield* sql`
+        DELETE FROM orchestration_pending_codex_steer_acceptances
+        WHERE thread_id = ${input.threadId}
+      `;
+        yield* sql`
         DELETE FROM orchestration_events
         WHERE aggregate_kind = 'thread'
           AND stream_id = ${input.threadId}
       `;
-      yield* sql`
+        yield* sql`
         DELETE FROM projection_threads
         WHERE thread_id = ${input.threadId}
       `;
-    }),
-  );
+      }),
+    );
 
-  return { deleted: true };
+    return { deleted: true as const };
+  },
+);
+
+/**
+ * Permanently delete one Cafe thread using a two-phase engine barrier.
+ *
+ * The first engine envelope installs the durable identity tombstone and drops
+ * the thread from the command read model. File cleanup then runs without
+ * blocking unrelated command processing. The second engine envelope purges
+ * rows in FIFO order. Any command or stale provider writer arriving between
+ * the two phases is rejected by the read model or migration-65 SQL guards.
+ */
+export const hardDeleteThreadLocalData = Effect.fn("hardDeleteThreadLocalData")(function* (input: {
+  readonly threadId: ThreadId;
+}) {
+  const orchestrationEngine = yield* OrchestrationEngineService;
+
+  yield* orchestrationEngine.retireThreadForHardDelete(input);
+  yield* deleteThreadCheckpointRefs(input.threadId);
+  yield* deleteThreadAttachments(input.threadId);
+  return yield* orchestrationEngine.purgeHardDeletedThread(input);
 });

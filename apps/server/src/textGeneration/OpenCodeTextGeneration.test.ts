@@ -162,6 +162,33 @@ const advanceIdleClock = Effect.gen(function* () {
 });
 
 it.layer(OpenCodeTextGenerationTestLayer)("OpenCodeTextGeneration", (it) => {
+  it.effect("generates both first-turn labels with one OpenCode prompt", () =>
+    withOpenCodeTextGeneration(DEFAULT_OPENCODE_SETTINGS, (textGeneration) =>
+      Effect.gen(function* () {
+        runtimeMock.state.promptResult = {
+          data: {
+            parts: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  title: '  "Safer reconnect"  ',
+                  branch: "  Feat/Reconnect  ",
+                }),
+              },
+            ],
+          },
+        };
+        const generated = yield* textGeneration.generateThreadMetadata({
+          cwd: process.cwd(),
+          message: "Improve reconnect reliability",
+          modelSelection: DEFAULT_TEST_MODEL_SELECTION,
+        });
+        expect(generated).toEqual({ title: "Safer reconnect", branch: "feat/reconnect" });
+        expect(runtimeMock.state.promptUrls).toHaveLength(1);
+      }),
+    ),
+  );
+
   it.effect("reuses a warm server across back-to-back requests and closes it after idling", () =>
     withOpenCodeTextGeneration(DEFAULT_OPENCODE_SETTINGS, (textGeneration) =>
       Effect.gen(function* () {

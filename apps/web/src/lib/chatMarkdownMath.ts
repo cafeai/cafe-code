@@ -20,6 +20,20 @@ function isMathFence(info: string): boolean {
   return language === "math" || language === "latex" || language === "tex";
 }
 
+function isRenderableMathFenceBody(body: ReadonlyArray<string>): boolean {
+  const contentLines = trimBlankEdgeLines(body);
+  if (contentLines.length === 0) return false;
+
+  // `tex` and `latex` fences are ambiguous: providers use them both for a
+  // single formula and for copyable LaTeX document source. The latter can
+  // contain prose, nested math delimiters, labels, and theorem environments,
+  // none of which may be wrapped in one outer `$$...$$` block. Reuse the
+  // conservative standalone-math classifier so a false negative remains a
+  // readable code block, while a false positive would become a visible KaTeX
+  // parse failure and could consume subsequent prose.
+  return contentLines.every(isStandaloneMathLine);
+}
+
 function normalizeMathFences(text: string): string {
   const lines = text.split("\n");
   const output: string[] = [];
@@ -46,7 +60,11 @@ function normalizeMathFences(text: string): string {
       body.push(candidate);
     }
 
-    if (!isMathFence(fenceInfo)) {
+    // Do not speculate while a provider is still streaming an unterminated
+    // fence. Its first line can look equation-shaped before later LaTeX prose
+    // arrives. Waiting for the closing fence prevents the renderer from
+    // oscillating between KaTeX and source-code interpretations mid-stream.
+    if (!isMathFence(fenceInfo) || closeLine === undefined || !isRenderableMathFenceBody(body)) {
       output.push(line, ...body);
       if (closeLine !== undefined) {
         output.push(closeLine);

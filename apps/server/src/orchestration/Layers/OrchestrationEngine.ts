@@ -28,6 +28,7 @@ import {
   orchestrationCommandsTotal,
   orchestrationCommandDuration,
 } from "../../observability/Metrics.ts";
+import { haveSameAttachmentContent } from "../../attachmentContentCommitment.ts";
 import { toPersistenceSqlError } from "../../persistence/Errors.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepository } from "../../persistence/Services/OrchestrationCommandReceipts.ts";
@@ -36,9 +37,16 @@ import {
   OrchestrationCommandPreviouslyRejectedError,
   type OrchestrationDispatchError,
   type OrchestrationProjectorDecodeError,
+  OrchestrationThreadHardDeleteError,
 } from "../Errors.ts";
 import { decideOrchestrationCommand } from "../decider.ts";
+import {
+  hydrateLegacyMessageIdentitiesForThread,
+  readLatestMessageIdentity,
+  type PersistedMessageIdentity,
+} from "../messageIdentityLedger.ts";
 import { createEmptyReadModel, projectEvent } from "../projector.ts";
+import { purgeHardDeletedThreadPersistence } from "../threadHardDelete.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
@@ -51,10 +59,140 @@ const isOrchestrationCommandPreviouslyRejectedError = Schema.is(
 const isOrchestrationCommandInvariantError = Schema.is(OrchestrationCommandInvariantError);
 
 interface CommandEnvelope {
+  readonly kind: "command";
   command: OrchestrationCommand;
   result: Deferred.Deferred<{ sequence: number }, OrchestrationDispatchError>;
   startedAtMs: number;
 }
+
+type UserTurnMessageCommand =
+  | Extract<OrchestrationCommand, { readonly type: "thread.turn.start" }>
+  | Extract<OrchestrationCommand, { readonly type: "thread.turn.steer" }>;
+
+interface PersistedSequenceRow {
+  readonly sequence: number;
+}
+
+function isUserTurnMessageCommand(
+  command: OrchestrationCommand,
+): command is UserTurnMessageCommand {
+  return command.type === "thread.turn.start" || command.type === "thread.turn.steer";
+}
+
+function readRecord(value: unknown): Readonly<Record<string, unknown>> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Readonly<Record<string, unknown>>)
+    : null;
+}
+
+function parseRecordJson(value: string): Readonly<Record<string, unknown>> | null {
+  try {
+    return readRecord(JSON.parse(value));
+  } catch {
+    return null;
+  }
+}
+
+interface RetryAttachmentIdentity {
+  readonly type: "image";
+  readonly id: string;
+  readonly name: string;
+  readonly mimeType: string;
+  readonly sizeBytes: number;
+}
+
+function readRetryAttachmentIdentity(value: unknown): RetryAttachmentIdentity | null {
+  const record = readRecord(value);
+  if (
+    record?.type !== "image" ||
+    typeof record.id !== "string" ||
+    typeof record.name !== "string" ||
+    typeof record.mimeType !== "string" ||
+    typeof record.sizeBytes !== "number"
+  ) {
+    return null;
+  }
+  return {
+    type: "image",
+    id: record.id,
+    name: record.name,
+    mimeType: record.mimeType.toLowerCase(),
+    sizeBytes: record.sizeBytes,
+  };
+}
+
+/**
+ * Bind stable message fields and pair the old/new server attachment handles.
+ * Reload recovery intentionally assigns a fresh storage id, so the ids cannot
+ * be equal; the caller separately compares their private byte commitments.
+ */
+function readMatchingRetryAttachmentPairs(
+  command: UserTurnMessageCommand,
+  persistedPayloadJson: string,
+): ReadonlyArray<{
+  readonly original: RetryAttachmentIdentity;
+  readonly retry: RetryAttachmentIdentity;
+}> | null {
+  const payload = parseRecordJson(persistedPayloadJson);
+  if (payload?.role !== "user" || payload.text !== command.message.text) {
+    return null;
+  }
+
+  const persistedAttachmentsRaw = payload.attachments ?? [];
+  if (!Array.isArray(persistedAttachmentsRaw)) {
+    return null;
+  }
+  const persistedAttachments = persistedAttachmentsRaw.map(readRetryAttachmentIdentity);
+  if (persistedAttachments.some((attachment) => attachment === null)) {
+    return null;
+  }
+  if (persistedAttachments.length !== command.message.attachments.length) {
+    return null;
+  }
+
+  const pairs = command.message.attachments.map((attachment, index) => {
+    const persisted = persistedAttachments[index];
+    const retry = readRetryAttachmentIdentity(attachment);
+    if (
+      persisted === null ||
+      persisted === undefined ||
+      retry === null ||
+      persisted.type !== retry.type ||
+      persisted.name !== retry.name ||
+      persisted.mimeType !== retry.mimeType ||
+      persisted.sizeBytes !== retry.sizeBytes
+    ) {
+      return null;
+    }
+    return { original: persisted, retry } as const;
+  });
+  return pairs.some((pair) => pair === null)
+    ? null
+    : (pairs as ReadonlyArray<{
+        readonly original: RetryAttachmentIdentity;
+        readonly retry: RetryAttachmentIdentity;
+      }>);
+}
+
+interface RetireThreadForHardDeleteEnvelope {
+  readonly kind: "retire-thread-for-hard-delete";
+  readonly threadId: ThreadId;
+  readonly result: Deferred.Deferred<void, OrchestrationThreadHardDeleteError>;
+}
+
+interface PurgeHardDeletedThreadEnvelope {
+  readonly kind: "purge-hard-deleted-thread";
+  readonly threadId: ThreadId;
+  readonly result: Deferred.Deferred<
+    { readonly deleted: true },
+    OrchestrationThreadHardDeleteError
+  >;
+}
+
+type EngineEnvelope =
+  | CommandEnvelope
+  | RetireThreadForHardDeleteEnvelope
+  | PurgeHardDeletedThreadEnvelope;
 
 function commandToAggregateRef(command: OrchestrationCommand): {
   readonly aggregateKind: "project" | "thread";
@@ -69,6 +207,8 @@ function commandToAggregateRef(command: OrchestrationCommand): {
         aggregateId: command.projectId,
       };
     case "thread.duplicate":
+    case "thread.fork":
+    case "thread.fork.commit":
       return {
         aggregateKind: "thread",
         aggregateId: command.targetThreadId,
@@ -91,12 +231,143 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
   let commandReadModel = createEmptyReadModel(yield* nowIso);
 
-  const commandQueue = yield* Queue.unbounded<CommandEnvelope>();
+  const commandQueue = yield* Queue.unbounded<EngineEnvelope>();
   const eventPubSub = yield* PubSub.unbounded<OrchestrationEvent>();
+  // Contains only hard deletes whose projection rows have not yet been
+  // purged (including a crash between retire and purge). This bounded-by-live-
+  // projections set prevents receipt replay from reporting an old accepted
+  // command after the retirement envelope has linearized.
+  const hardDeleteRetiringThreadIds = new Set<string>();
   const commandCounters = yield* Ref.make({
     acceptedCommandCount: 0,
     rejectedCommandCount: 0,
     failedCommandCount: 0,
+  });
+
+  const assertUserMessageIdentityAvailable = Effect.fn(
+    "OrchestrationEngine.assertUserMessageIdentityAvailable",
+  )(function* (command: UserTurnMessageCommand) {
+    // A terminal steer recovery is server-authored and intentionally reuses
+    // the original canonical message. Client schemas cannot author this guard.
+    if (command.type === "thread.turn.steer" && command.terminalRecovery !== undefined) {
+      return;
+    }
+
+    // The command read model caps messages for memory safety and checkpoint
+    // revert can remove rows from the detail projection. The append-only event
+    // stream remains authoritative, while migration 68's compact sequence
+    // ledger keeps normal admission independent of total event-store size.
+    // Existing installations are hydrated one selected thread at a time only
+    // after readiness, never by a database-wide startup migration.
+    const readIdentity = readLatestMessageIdentity(sql, {
+      threadId: command.threadId,
+      messageId: command.message.messageId,
+    }).pipe(
+      Effect.mapError(
+        toPersistenceSqlError("OrchestrationEngine.assertUserMessageIdentityAvailable:read"),
+      ),
+    );
+    let existing: PersistedMessageIdentity | undefined = yield* readIdentity;
+    if (
+      existing === undefined &&
+      commandReadModel.threads.some((thread) => thread.id === command.threadId)
+    ) {
+      yield* hydrateLegacyMessageIdentitiesForThread(sql, command.threadId).pipe(
+        Effect.mapError(
+          toPersistenceSqlError("OrchestrationEngine.assertUserMessageIdentityAvailable:hydrate"),
+        ),
+      );
+      existing = yield* readIdentity;
+    }
+    if (existing === undefined) {
+      return;
+    }
+
+    const attachmentPairs = readMatchingRetryAttachmentPairs(command, existing.payloadJson);
+    if (attachmentPairs === null) {
+      return yield* new OrchestrationCommandInvariantError({
+        commandType: command.type,
+        detail: "Message identity is already bound to different content in this thread.",
+      });
+    }
+
+    // Metadata equality is insufficient: different files can share a name,
+    // MIME, and byte count. Both ids must have private commitments recorded by
+    // Cafe's authenticated upload normalizer, and every digest must match. Old
+    // rows intentionally have no backfilled commitment and therefore fail
+    // closed rather than trusting mutable files after the fact.
+    const attachmentContentMatches = yield* Effect.forEach(
+      attachmentPairs,
+      ({ original, retry }) =>
+        haveSameAttachmentContent(sql, {
+          threadId: command.threadId,
+          originalAttachmentId: original.id,
+          originalSizeBytes: original.sizeBytes,
+          retryAttachmentId: retry.id,
+          retrySizeBytes: retry.sizeBytes,
+        }),
+      { concurrency: 1 },
+    );
+    if (attachmentContentMatches.some((matches) => !matches)) {
+      return yield* new OrchestrationCommandInvariantError({
+        commandType: command.type,
+        detail: "Message identity is already bound to different content in this thread.",
+      });
+    }
+
+    // A new command id may reuse the canonical message only after Cafe itself
+    // records that the prior Codex steer is queued for retry. Requiring the
+    // marker to be newer than the latest message event consumes the authority
+    // exactly once: after a retry is accepted, an older failure cannot license
+    // another replay.
+    const retryableFailureRows = yield* sql<PersistedSequenceRow>`
+      SELECT sequence
+      FROM orchestration_events
+      WHERE aggregate_kind = 'thread'
+        AND stream_id = ${command.threadId}
+        AND event_type = 'thread.activity-appended'
+        AND actor_kind = 'server'
+        AND sequence > ${existing.sequence}
+        AND json_extract(payload_json, '$.activity.kind') = 'provider.turn.steer.failed'
+        AND json_extract(payload_json, '$.activity.payload.messageId') = ${command.message.messageId}
+        AND json_extract(payload_json, '$.activity.payload.retryableFollowUp') = 1
+      ORDER BY sequence DESC
+      LIMIT 1
+    `;
+    const retryableFailure = retryableFailureRows[0];
+    if (retryableFailure === undefined) {
+      return yield* new OrchestrationCommandInvariantError({
+        commandType: command.type,
+        detail: "Message identity has already been used in this thread.",
+      });
+    }
+
+    // Accepted is a provider ACK; recovered and delivered cover the two
+    // terminal-boundary completion paths. Any of them consumes the retryable
+    // failure and prevents an old marker from authorizing a duplicate send.
+    const successfulReceiptRows = yield* sql<PersistedSequenceRow>`
+      SELECT sequence
+      FROM orchestration_events
+      WHERE aggregate_kind = 'thread'
+        AND stream_id = ${command.threadId}
+        AND event_type = 'thread.activity-appended'
+        AND actor_kind = 'server'
+        AND sequence > ${retryableFailure.sequence}
+        AND json_extract(payload_json, '$.activity.payload.messageId') = ${command.message.messageId}
+        AND json_extract(payload_json, '$.activity.kind') IN (
+          'provider.turn.steer.accepted',
+          'provider.turn.steer.recovered',
+          'provider.turn.steer.delivered'
+        )
+      ORDER BY sequence ASC
+      LIMIT 1
+    `;
+    if (successfulReceiptRows.length > 0) {
+      return yield* new OrchestrationCommandInvariantError({
+        commandType: command.type,
+        detail: "Message identity was already delivered to the provider.",
+      });
+    }
   });
 
   const projectEventsOntoReadModel = (
@@ -144,6 +415,16 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           "orchestration.aggregate_id": aggregateRef.aggregateId,
         });
 
+        if (
+          aggregateRef.aggregateKind === "thread" &&
+          hardDeleteRetiringThreadIds.has(String(aggregateRef.aggregateId))
+        ) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: envelope.command.type,
+            detail: "Thread identity is permanently retired.",
+          });
+        }
+
         const existingReceipt = yield* commandReceiptRepository.getByCommandId({
           commandId: envelope.command.commandId,
         });
@@ -157,6 +438,10 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             commandId: envelope.command.commandId,
             detail: existingReceipt.value.error ?? "Previously rejected.",
           });
+        }
+
+        if (isUserTurnMessageCommand(envelope.command)) {
+          yield* assertUserMessageIdentityAvailable(envelope.command);
         }
 
         const eventBase = yield* decideOrchestrationCommand({
@@ -311,10 +596,102 @@ const makeOrchestrationEngine = Effect.gen(function* () {
     );
   };
 
+  const processRetireThreadForHardDeleteEnvelope = (
+    envelope: RetireThreadForHardDeleteEnvelope,
+  ): Effect.Effect<void> =>
+    Effect.exit(
+      Effect.gen(function* () {
+        const deletedAt = yield* nowIso;
+        yield* sql`
+          INSERT INTO hard_deleted_threads (thread_id, deleted_at)
+          VALUES (${envelope.threadId}, ${deletedAt})
+          ON CONFLICT (thread_id) DO NOTHING
+        `;
+        hardDeleteRetiringThreadIds.add(String(envelope.threadId));
+
+        // This mutation is deliberately performed by the same single worker
+        // that decides commands. Commands queued before this envelope see the
+        // old thread; commands queued after it see an absent, permanently
+        // retired identity. No timing assumption or external mutex is needed.
+        commandReadModel = {
+          ...commandReadModel,
+          threads: commandReadModel.threads.filter((thread) => thread.id !== envelope.threadId),
+          updatedAt: deletedAt,
+        };
+      }),
+    ).pipe(
+      Effect.flatMap((exit) => {
+        if (Exit.isSuccess(exit)) {
+          return Deferred.succeed(envelope.result, undefined).pipe(Effect.asVoid);
+        }
+        return Deferred.fail(
+          envelope.result,
+          new OrchestrationThreadHardDeleteError({
+            operation: "retire",
+            detail: "hard-delete-persistence-failed",
+          }),
+        ).pipe(Effect.asVoid);
+      }),
+    );
+
+  const processPurgeHardDeletedThreadEnvelope = (
+    envelope: PurgeHardDeletedThreadEnvelope,
+  ): Effect.Effect<void> =>
+    Effect.exit(
+      purgeHardDeletedThreadPersistence({ threadId: envelope.threadId }).pipe(
+        Effect.provideService(SqlClient.SqlClient, sql),
+      ),
+    ).pipe(
+      Effect.flatMap((exit) => {
+        if (Exit.isSuccess(exit)) {
+          hardDeleteRetiringThreadIds.delete(String(envelope.threadId));
+          return Deferred.succeed(envelope.result, exit.value).pipe(Effect.asVoid);
+        }
+        return Deferred.fail(
+          envelope.result,
+          new OrchestrationThreadHardDeleteError({
+            operation: "purge",
+            detail: "hard-delete-persistence-failed",
+          }),
+        ).pipe(Effect.asVoid);
+      }),
+    );
+
+  const processEngineEnvelope = (envelope: EngineEnvelope): Effect.Effect<void> => {
+    switch (envelope.kind) {
+      case "command":
+        return processEnvelope(envelope);
+      case "retire-thread-for-hard-delete":
+        return processRetireThreadForHardDeleteEnvelope(envelope);
+      case "purge-hard-deleted-thread":
+        return processPurgeHardDeletedThreadEnvelope(envelope);
+    }
+  };
+
   yield* projectionPipeline.bootstrap;
   commandReadModel = yield* projectionSnapshotQuery.getCommandReadModel();
+  const hardDeletedThreadRows = yield* sql<{ readonly threadId: string }>`
+    SELECT tombstone.thread_id AS "threadId"
+    FROM hard_deleted_threads AS tombstone
+    INNER JOIN projection_threads AS thread
+      ON thread.thread_id = tombstone.thread_id
+  `;
+  if (hardDeletedThreadRows.length > 0) {
+    const hardDeletedThreadIds = new Set(hardDeletedThreadRows.map((row) => row.threadId));
+    for (const threadId of hardDeletedThreadIds) {
+      hardDeleteRetiringThreadIds.add(threadId);
+    }
+    commandReadModel = {
+      ...commandReadModel,
+      threads: commandReadModel.threads.filter(
+        (thread) => !hardDeletedThreadIds.has(String(thread.id)),
+      ),
+    };
+  }
 
-  const worker = Effect.forever(Queue.take(commandQueue).pipe(Effect.flatMap(processEnvelope)));
+  const worker = Effect.forever(
+    Queue.take(commandQueue).pipe(Effect.flatMap(processEngineEnvelope)),
+  );
   yield* Effect.forkScoped(worker);
   yield* Effect.logDebug("orchestration engine started").pipe(
     Effect.annotateLogs({ sequence: commandReadModel.snapshotSequence }),
@@ -327,9 +704,37 @@ const makeOrchestrationEngine = Effect.gen(function* () {
     Effect.gen(function* () {
       const result = yield* Deferred.make<{ sequence: number }, OrchestrationDispatchError>();
       yield* Queue.offer(commandQueue, {
+        kind: "command",
         command,
         result,
         startedAtMs: yield* Clock.currentTimeMillis,
+      });
+      return yield* Deferred.await(result);
+    });
+
+  const retireThreadForHardDelete: OrchestrationEngineShape["retireThreadForHardDelete"] = (
+    input,
+  ) =>
+    Effect.gen(function* () {
+      const result = yield* Deferred.make<void, OrchestrationThreadHardDeleteError>();
+      yield* Queue.offer(commandQueue, {
+        kind: "retire-thread-for-hard-delete",
+        threadId: input.threadId,
+        result,
+      });
+      return yield* Deferred.await(result);
+    });
+
+  const purgeHardDeletedThread: OrchestrationEngineShape["purgeHardDeletedThread"] = (input) =>
+    Effect.gen(function* () {
+      const result = yield* Deferred.make<
+        { readonly deleted: true },
+        OrchestrationThreadHardDeleteError
+      >();
+      yield* Queue.offer(commandQueue, {
+        kind: "purge-hard-deleted-thread",
+        threadId: input.threadId,
+        result,
       });
       return yield* Deferred.await(result);
     });
@@ -349,6 +754,8 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   return {
     readEvents,
     dispatch,
+    retireThreadForHardDelete,
+    purgeHardDeletedThread,
     diagnosticsSnapshot,
     // Each access creates a fresh PubSub subscription so that multiple
     // consumers (wsServer, ProviderRuntimeIngestion, CheckpointReactor, etc.)

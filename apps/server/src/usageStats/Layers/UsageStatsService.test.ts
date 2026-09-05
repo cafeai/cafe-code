@@ -8,17 +8,22 @@ import {
   type ProviderRuntimeEvent,
   type ProviderSession,
   type ServerSettings,
+  type ThreadTokenUsageSnapshot,
+  type UsageAccountingSnapshot,
 } from "@cafecode/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
+import * as SqlError from "effect/unstable/sql/SqlError";
+import { PersistenceSqlError } from "../../persistence/Errors.ts";
 
 import {
   OrchestrationEngineService,
@@ -35,8 +40,10 @@ import {
 import { UsageStatsRepositoryLive } from "../../persistence/Layers/UsageStats.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "../../serverSettings.ts";
+import { localDayKey } from "../dayBuckets.ts";
 import { UsageStatsService, type UsageStatsServiceShape } from "../Services/UsageStatsService.ts";
 import { UsageStatsServiceLive } from "./UsageStatsService.ts";
+import { AuxiliaryUsage, AuxiliaryUsageLive } from "../Services/AuxiliaryUsage.ts";
 
 const THREAD_1 = ThreadId.make("thread-1");
 const THREAD_2 = ThreadId.make("thread-2");
@@ -58,6 +65,13 @@ interface Harness {
   readonly emitDomain: (event: Record<string, unknown>) => Effect.Effect<void>;
   readonly setSessions: (sessions: ReadonlyArray<ProviderSession>) => Effect.Effect<void>;
   readonly setEnabled: (usageStatsEnabled: boolean) => Effect.Effect<void>;
+  readonly failNextAccountingWrites: (count: number) => Effect.Effect<void>;
+  readonly closeService: Effect.Effect<void>;
+  readonly recordAuxiliary: (
+    provider: ProviderDriverKind,
+    snapshot: UsageAccountingSnapshot,
+    observedAtMs: number,
+  ) => Effect.Effect<void>;
   /** Build a second service instance sharing the same database. */
   readonly rebuildService: Effect.Effect<UsageStatsServiceShape, never, Scope.Scope>;
 }
@@ -70,6 +84,7 @@ const withHarness = <A, E>(body: (harness: Harness) => Effect.Effect<A, E, Scope
       const settingsPubSub = yield* PubSub.unbounded<ServerSettings>();
       const sessionsRef = yield* Ref.make<ReadonlyArray<ProviderSession>>([]);
       const enabledRef = yield* Ref.make(true);
+      const accountingFailuresRef = yield* Ref.make(0);
 
       const unsupported = <T>() =>
         Effect.die(new Error("Unsupported call in test")) as Effect.Effect<T, never>;
@@ -84,6 +99,8 @@ const withHarness = <A, E>(body: (harness: Harness) => Effect.Effect<A, E, Scope
       const engineService = {
         readEvents: () => Stream.empty,
         dispatch: () => unsupported(),
+        retireThreadForHardDelete: () => unsupported(),
+        purgeHardDeletedThread: () => unsupported(),
         diagnosticsSnapshot: unsupported(),
         get streamDomainEvents() {
           return Stream.fromPubSub(domainPubSub) as Stream.Stream<OrchestrationEvent>;
@@ -102,12 +119,39 @@ const withHarness = <A, E>(body: (harness: Harness) => Effect.Effect<A, E, Scope
       } as ServerSettingsShape;
 
       const infraContext = yield* Layer.build(
-        UsageStatsRepositoryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
+        UsageStatsRepositoryLive.pipe(
+          Layer.provideMerge(SqlitePersistenceMemory),
+          Layer.provideMerge(AuxiliaryUsageLive),
+        ),
       );
       const repository = Context.get(infraContext, UsageStatsRepository);
+      const auxiliaryUsage = Context.get(infraContext, AuxiliaryUsage);
+      const observedRepository: UsageStatsRepositoryShape = {
+        ...repository,
+        recordAccountingSnapshot: (input) =>
+          Effect.gen(function* () {
+            const failures = yield* Ref.get(accountingFailuresRef);
+            if (failures > 0) {
+              yield* Ref.set(accountingFailuresRef, failures - 1);
+              return yield* new PersistenceSqlError({
+                operation: "accounting-test",
+                detail: "transient test lock",
+                cause: new SqlError.SqlError({
+                  reason: new SqlError.LockTimeoutError({
+                    cause: new Error("locked"),
+                    operation: "execute",
+                  }),
+                }),
+              });
+            }
+            return yield* repository.recordAccountingSnapshot(input);
+          }),
+      };
 
       const serviceLayer = UsageStatsServiceLive.pipe(
-        Layer.provide(Layer.succeedContext(infraContext)),
+        Layer.provide(
+          Layer.succeedContext(Context.add(infraContext, UsageStatsRepository, observedRepository)),
+        ),
         Layer.provide(Layer.succeed(ProviderService, providerService)),
         Layer.provide(Layer.succeed(OrchestrationEngineService, engineService)),
         Layer.provide(Layer.succeed(ServerSettingsService, settingsService)),
@@ -118,7 +162,9 @@ const withHarness = <A, E>(body: (harness: Harness) => Effect.Effect<A, E, Scope
       const buildService = Effect.map(Layer.build(Layer.fresh(serviceLayer)), (context) =>
         Context.get(context, UsageStatsService),
       );
-      const service = yield* buildService;
+      const serviceScope = yield* Scope.make();
+      yield* Effect.addFinalizer((exit) => Scope.close(serviceScope, exit));
+      const service = yield* buildService.pipe(Scope.provide(serviceScope));
       yield* settle;
 
       return yield* body({
@@ -133,6 +179,9 @@ const withHarness = <A, E>(body: (harness: Harness) => Effect.Effect<A, E, Scope
             Effect.flatMap(() => settle),
           ),
         setSessions: (sessions) => Ref.set(sessionsRef, sessions),
+        failNextAccountingWrites: (count) => Ref.set(accountingFailuresRef, count),
+        closeService: Scope.close(serviceScope, Exit.void),
+        recordAuxiliary: auxiliaryUsage.record,
         setEnabled: (usageStatsEnabled) =>
           Ref.set(enabledRef, usageStatsEnabled).pipe(
             Effect.flatMap(() =>
@@ -177,7 +226,7 @@ function providerEventBase(
 function tokenUsageEvent(
   threadId: ThreadId,
   eventId: string,
-  usage: { outputTokens?: number; totalOutputTokens?: number },
+  usage: Partial<Omit<ThreadTokenUsageSnapshot, "usedTokens">>,
   provider: ProviderDriverKind = CODEX,
 ) {
   return {
@@ -204,7 +253,157 @@ function runningSession(
   };
 }
 
+function accountingEvent(
+  revision: number,
+  models: UsageAccountingSnapshot["models"],
+  scopeId = "10000000-0000-4000-8000-000000000000",
+) {
+  return {
+    ...providerEventBase(THREAD_1, `accounting-${scopeId}-${revision}`, CLAUDE),
+    createdAt: new Date(0).toISOString(),
+    type: "thread.usage-accounting.updated",
+    payload: { scopeId, revision, models, completeness: "complete" },
+  };
+}
+
+const accountingModel = (
+  inputTokens: number,
+  outputTokens: number,
+  reasoningOutputTokens = 0,
+  model = "claude-opus-5",
+) => ({
+  model,
+  inputTokens,
+  outputTokens,
+  reasoningOutputTokens,
+  cachedInputTokens: 0,
+  cacheWriteInputTokens: 0,
+});
+
 describe("UsageStatsService", () => {
+  it.effect("settles acknowledged auxiliary usage through the same durable model/day ledger", () =>
+    withHarness((harness) =>
+      Effect.gen(function* () {
+        const snapshot: UsageAccountingSnapshot = {
+          scopeId: "90000000-0000-4000-8000-000000000000",
+          revision: 1,
+          completeness: "complete",
+          models: [accountingModel(100, 10, 0, "gpt-5.4-mini")],
+        };
+        yield* harness.recordAuxiliary(CODEX, snapshot, 0);
+        yield* harness.recordAuxiliary(CODEX, snapshot, 0);
+        const result = yield* harness.service.get;
+        assert.equal(result.totals.inputTokens, 100);
+        assert.equal(result.totals.outputTokens, 10);
+        assert.equal(result.tokenBreakdownDays?.[0]?.provider, CODEX);
+        assert.equal(result.tokenBreakdownDays?.[0]?.model, "gpt-5.4-mini");
+        assert.equal((yield* harness.repository.listDays)[0]?.inputTokens, 100);
+      }),
+    ),
+  );
+  it.effect(
+    "keeps per-day billing models through delayed replay/rebuild and excludes them from hot snapshots",
+    () =>
+      withHarness((harness) =>
+        Effect.gen(function* () {
+          // The test clock starts at epoch zero. Use an earlier event instead of
+          // advancing a 5-second periodic service clock through decades of ticks.
+          const originalAt = -2 * 86_400_000;
+          const observedDay = localDayKey(originalAt);
+          const event = {
+            ...accountingEvent(1, [accountingModel(201000, 1234)]),
+            createdAt: new Date(originalAt).toISOString(),
+          };
+          // Receiver time is later; attribution remains on the event's canonical
+          // original observation day even after a daemon reconnect.
+          yield* harness.emitProvider(event);
+          const first = yield* harness.service.get;
+          assert.equal(first.tokenBreakdownDays?.[0]?.day, observedDay);
+          assert.equal(first.tokenBreakdownDays?.[0]?.inputTokens, 201000);
+          assert.equal("tokenBreakdownDays" in (yield* harness.service.snapshot), false);
+          const rebuilt = yield* harness.rebuildService;
+          assert.deepEqual((yield* rebuilt.get).tokenBreakdownDays, first.tokenBreakdownDays);
+          yield* harness.emitProvider(event);
+          assert.equal((yield* rebuilt.get).totals.inputTokens, 201000);
+          assert.equal((yield* harness.repository.listDays)[0]?.inputTokens, 201000);
+        }),
+      ),
+  );
+
+  it.effect(
+    "retains a terminal accounting snapshot across transient database failures without a later provider event",
+    () =>
+      withHarness((harness) =>
+        Effect.gen(function* () {
+          yield* harness.failNextAccountingWrites(2);
+          yield* harness.emitProvider(accountingEvent(1, [accountingModel(1000, 100)]));
+          assert.equal((yield* harness.service.snapshot).totals.inputTokens, 0);
+          yield* TestClock.adjust(100);
+          yield* settle;
+          yield* TestClock.adjust(200);
+          yield* settle;
+          assert.equal((yield* harness.service.snapshot).totals.inputTokens, 1000);
+          assert.equal((yield* harness.repository.listDays)[0]?.inputTokens, 1000);
+        }),
+      ),
+  );
+
+  it.effect(
+    "bounds shutdown drain during persistent lock contention and recovers an uncommitted snapshot by replay",
+    () =>
+      withHarness((harness) =>
+        Effect.gen(function* () {
+          yield* harness.failNextAccountingWrites(100);
+          const event = accountingEvent(1, [accountingModel(1000, 100)]);
+          yield* harness.emitProvider(event);
+          const closing = yield* harness.closeService.pipe(Effect.forkChild);
+          yield* settle;
+          yield* TestClock.adjust(2_000);
+          yield* Fiber.join(closing);
+          assert.deepEqual(yield* harness.repository.listDays, []);
+          yield* harness.failNextAccountingWrites(0);
+          const rebuilt = yield* harness.rebuildService;
+          yield* harness.emitProvider(event);
+          assert.equal((yield* rebuilt.get).totals.inputTokens, 1000);
+          yield* harness.emitProvider(event);
+          assert.equal((yield* rebuilt.get).totals.inputTokens, 1000);
+        }),
+      ),
+  );
+
+  it.effect("drains an admitted final snapshot before the accounting worker is stopped", () =>
+    withHarness((harness) =>
+      Effect.gen(function* () {
+        yield* harness.failNextAccountingWrites(1);
+        yield* harness.emitProvider(accountingEvent(1, [accountingModel(1000, 100)]));
+        const closing = yield* harness.closeService.pipe(Effect.forkChild);
+        yield* settle;
+        yield* TestClock.adjust(100);
+        yield* Fiber.join(closing);
+        assert.equal((yield* harness.repository.listDays)[0]?.inputTokens, 1000);
+      }),
+    ),
+  );
+
+  it.effect(
+    "preserves collection enablement at accounting admission while its transaction retries",
+    () =>
+      withHarness((harness) =>
+        Effect.gen(function* () {
+          yield* harness.failNextAccountingWrites(1);
+          yield* harness.emitProvider(accountingEvent(1, [accountingModel(100, 10)]));
+          yield* harness.setEnabled(false);
+          yield* TestClock.adjust(100);
+          yield* settle;
+          assert.equal((yield* harness.service.snapshot).totals.inputTokens, 100);
+          yield* harness.emitProvider(accountingEvent(2, [accountingModel(200, 20)]));
+          yield* harness.setEnabled(true);
+          yield* harness.emitProvider(accountingEvent(3, [accountingModel(250, 25)]));
+          assert.equal((yield* harness.service.snapshot).totals.inputTokens, 150);
+          assert.equal((yield* harness.service.get).tokenBreakdownDays?.[0]?.inputTokens, 150);
+        }),
+      ),
+  );
   it.effect("counts user chat messages and persists them on flush", () =>
     withHarness((harness) =>
       Effect.gen(function* () {
@@ -232,6 +431,72 @@ describe("UsageStatsService", () => {
         }
         const snapshot = yield* harness.service.snapshot;
         assert.equal(snapshot.totals.outputTokens, 650);
+      }),
+    ),
+  );
+
+  it.effect("excludes Claude context/request snapshots from billed throughput", () =>
+    withHarness((harness) =>
+      Effect.gen(function* () {
+        // message_start emits zeroes before each new message. Those explicit
+        // resets make a later message whose first/final count exceeds the
+        // previous watermark unambiguous instead of silently undercounting it.
+        const messages = [
+          { outputTokens: 0, reasoningOutputTokens: 0 },
+          { outputTokens: 100, reasoningOutputTokens: 40 },
+          { outputTokens: 0, reasoningOutputTokens: 0 },
+          { outputTokens: 150, reasoningOutputTokens: 60 },
+        ];
+        for (const [index, usage] of messages.entries()) {
+          yield* harness.emitProvider(
+            tokenUsageEvent(THREAD_1, `reasoning-reset-${index}`, usage, CLAUDE),
+          );
+        }
+
+        const snapshot = yield* harness.service.snapshot;
+        assert.equal(snapshot.totals.outputTokens, 0);
+        assert.equal(snapshot.totals.reasoningOutputTokens, 0);
+      }),
+    ),
+  );
+
+  it.effect("settles Claude query billing once independently of cumulative context reasoning", () =>
+    withHarness((harness) =>
+      Effect.gen(function* () {
+        yield* harness.emitProvider({
+          ...providerEventBase(THREAD_1, "reasoning-session-start", CLAUDE),
+          type: "session.started",
+          payload: {},
+        });
+        const snapshots: Array<Partial<Omit<ThreadTokenUsageSnapshot, "usedTokens">>> = [
+          // First message streams before a cumulative ModelUsage result exists.
+          { reasoningOutputTokens: 0 },
+          { reasoningOutputTokens: 40 },
+          // The terminal result includes 10 additional subagent/sidechain
+          // thinking tokens. UsageStats should count only that delta here.
+          { reasoningOutputTokens: 40, totalReasoningOutputTokens: 50 },
+          // The adapter carries the cumulative field through the next
+          // message's reset/growth so per-message thinking is not recounted.
+          { reasoningOutputTokens: 0, totalReasoningOutputTokens: 50 },
+          { reasoningOutputTokens: 60, totalReasoningOutputTokens: 50 },
+          // The next terminal cumulative total accounts for the complete
+          // query pipeline exactly once.
+          { reasoningOutputTokens: 60, totalReasoningOutputTokens: 120 },
+          { reasoningOutputTokens: 60, totalReasoningOutputTokens: 120 },
+        ];
+        for (const [index, usage] of snapshots.entries()) {
+          yield* harness.emitProvider(
+            tokenUsageEvent(THREAD_1, `reasoning-total-${index}`, usage, CLAUDE),
+          );
+        }
+
+        yield* harness.emitProvider(accountingEvent(1, [accountingModel(1000, 100, 50)]));
+        yield* harness.emitProvider(accountingEvent(2, [accountingModel(2200, 240, 120)]));
+        yield* harness.emitProvider(accountingEvent(2, [accountingModel(2200, 240, 120)]));
+        const snapshot = yield* harness.service.snapshot;
+        assert.equal(snapshot.totals.reasoningOutputTokens, 120);
+        assert.equal(snapshot.totals.outputTokens, 240);
+        assert.equal(snapshot.totals.inputTokens, 2200);
       }),
     ),
   );
@@ -339,7 +604,7 @@ describe("UsageStatsService", () => {
           type: "turn.started",
           payload: { model: "claude-opus-5" },
         });
-        yield* harness.emitProvider(tokenUsageEvent(THREAD_2, "p3", { outputTokens: 70 }, CLAUDE));
+        yield* harness.emitProvider(accountingEvent(1, [accountingModel(0, 70)]));
 
         // Subsequent deltas belong to the effective rerouted model.
         yield* harness.emitProvider({
@@ -356,22 +621,34 @@ describe("UsageStatsService", () => {
         yield* harness.service.flush;
         const expectedRows = [
           {
-            day: "1970-01-01",
+            day: localDayKey(0),
             provider: CLAUDE,
             model: "claude-opus-5",
             outputTokens: 70,
+            inputTokens: 0,
+            cachedInputTokens: 0,
+            cacheWriteInputTokens: 0,
+            reasoningOutputTokens: 0,
           },
           {
-            day: "1970-01-01",
+            day: localDayKey(0),
             provider: CODEX,
             model: "gpt-5.6-codex",
             outputTokens: 125,
+            inputTokens: 0,
+            cachedInputTokens: 0,
+            cacheWriteInputTokens: 0,
+            reasoningOutputTokens: 0,
           },
           {
-            day: "1970-01-01",
+            day: localDayKey(0),
             provider: CODEX,
             model: "gpt-5.6-codex-mini",
             outputTokens: 50,
+            inputTokens: 0,
+            cachedInputTokens: 0,
+            cacheWriteInputTokens: 0,
+            reasoningOutputTokens: 0,
           },
         ];
         assert.deepEqual(yield* harness.repository.listTokenBreakdownDays, expectedRows);
@@ -508,7 +785,18 @@ describe("UsageStatsService", () => {
     withHarness((harness) =>
       Effect.gen(function* () {
         yield* harness.repository.flushDeltas({
-          days: [{ day: "2020-01-01", generatingMs: 60_000, outputTokens: 5000, userMessages: 7 }],
+          days: [
+            {
+              day: "2020-01-01",
+              generatingMs: 60_000,
+              outputTokens: 5000,
+              userMessages: 7,
+              inputTokens: 0,
+              cachedInputTokens: 0,
+              cacheWriteInputTokens: 0,
+              reasoningOutputTokens: 0,
+            },
+          ],
           tokenBreakdowns: [],
         });
         const persisted = yield* harness.repository.listDays;

@@ -42,6 +42,33 @@ describe("normalizeChatMarkdownMath", () => {
     expect(normalizeChatMarkdownMath(markdown)).toBe(markdown);
   });
 
+  it("preserves mixed LaTeX document source instead of parsing it as one equation", () => {
+    const markdown = [
+      "Replace the source with:",
+      "",
+      "```latex",
+      "Equation \\eqref{eq:composition} is the compatibility condition for",
+      "\\eqref{eq:addition}. With the selected convention",
+      "\\[",
+      "q(x,y)=h(x+y)-h(x)-h(y)",
+      "\\]",
+      "from \\eqref{eq:prior-result}, the section satisfies $r=-q$.",
+      "",
+      "\\begin{proposition}[Compatibility]",
+      "Let $A$ and $D$ be additive groups.",
+      "\\end{proposition}",
+      "```",
+    ].join("\n");
+
+    expect(normalizeChatMarkdownMath(markdown)).toBe(markdown);
+  });
+
+  it("waits for a fenced equation to close before converting it to display math", () => {
+    const streamingMarkdown = ["```latex", "s_1=a_1+b_1+\\frac{a_0^p+b_0^p}{p}."].join("\n");
+
+    expect(normalizeChatMarkdownMath(streamingMarkdown)).toBe(streamingMarkdown);
+  });
+
   it("converts Claude-style slash delimiters to dollar delimiters", () => {
     expect(
       normalizeChatMarkdownMath(

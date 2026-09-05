@@ -1,7 +1,11 @@
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import { describe, expect, it, vi } from "vitest";
 
+import * as ElectronShell from "../electron/ElectronShell.ts";
+import { COPY_TEXT_CHANNEL } from "./channels.ts";
 import * as DesktopIpc from "./DesktopIpc.ts";
+import { copyText } from "./methods/window.ts";
 
 function makeTopFrame(url: string): DesktopIpc.DesktopIpcWebFrame {
   const frame = {
@@ -36,6 +40,15 @@ function makeIpcMainStub() {
       return syncListener;
     },
   };
+}
+
+function makeElectronShellLayer(onCopyText: (text: string) => void) {
+  return Layer.succeed(ElectronShell.ElectronShell, {
+    openExternal: () => Effect.succeed(false),
+    openPath: () => Effect.succeed(false),
+    revealPath: () => Effect.succeed(false),
+    copyText: (text) => Effect.sync(() => onCopyText(text)),
+  } satisfies ElectronShell.ElectronShellShape);
 }
 
 describe("DesktopIpc sender validation", () => {
@@ -161,5 +174,59 @@ describe("DesktopIpc sender validation", () => {
 
     expect(event.returnValue).toBeNull();
     expect(calls).toBe(0);
+  });
+
+  it("decodes trusted clipboard writes and rejects invalid payloads", async () => {
+    const ipcMain = makeIpcMainStub();
+    const ipc = DesktopIpc.make(ipcMain.ipcMain);
+    const sender = { id: 10, isDestroyed: () => false };
+    const copiedTexts: string[] = [];
+    const electronShellLayer = makeElectronShellLayer((text) => copiedTexts.push(text));
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* ipc.trustWebContents(sender);
+          yield* ipc.handle(copyText);
+
+          const listener = ipcMain.getInvokeListener();
+          const event = {
+            sender,
+            senderFrame: makeTopFrame("file:///Applications/CafeCode/index.html"),
+          };
+          yield* Effect.promise(() => Promise.resolve(listener(event, "clipboard text")));
+          yield* Effect.promise(() =>
+            expect(listener(event, { text: "not a string payload" })).rejects.toThrow(),
+          );
+        }),
+      ).pipe(Effect.provide(electronShellLayer)),
+    );
+
+    expect(ipcMain.ipcMain.handle).toHaveBeenCalledWith(COPY_TEXT_CHANNEL, expect.any(Function));
+    expect(copiedTexts).toEqual(["clipboard text"]);
+  });
+
+  it("rejects clipboard writes from untrusted renderer origins", async () => {
+    const ipcMain = makeIpcMainStub();
+    const ipc = DesktopIpc.make(ipcMain.ipcMain);
+    const sender = { id: 11, isDestroyed: () => false };
+    const copiedTexts: string[] = [];
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* ipc.trustWebContents(sender);
+          yield* ipc.handle(copyText);
+        }),
+      ).pipe(Effect.provide(makeElectronShellLayer((text) => copiedTexts.push(text)))),
+    );
+
+    await expect(
+      ipcMain.getInvokeListener()(
+        { sender, senderFrame: makeTopFrame("https://evil.example/") },
+        "sensitive clipboard text",
+      ),
+    ).rejects.toThrow(DesktopIpc.DesktopIpcSenderValidationError);
+    expect(copiedTexts).toEqual([]);
   });
 });

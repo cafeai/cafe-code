@@ -6,22 +6,27 @@ import {
   ProviderDaemonLeaseResponse,
   ProviderDaemonLiveness,
   ProviderDaemonRpcRequest,
+  ProviderDaemonRpcEnvelope,
   ProviderDriverKind,
   ProviderInstanceId,
+  type ProviderDaemonEventRecord,
   type ProviderRuntimeEvent,
   RuntimeTaskId,
   ThreadId,
   TurnId,
 } from "@cafecode/contracts";
-import { assert, describe, it } from "@effect/vitest";
+import { assert, describe, expect, it, vi } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { EventEmitter } from "node:events";
 
 import { ProviderAdapterRegistry } from "../provider/Services/ProviderAdapterRegistry.ts";
+import { ProviderAdapterRequestError } from "../provider/Errors.ts";
+import { ProviderValidationError } from "../provider/Errors.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import {
   ProviderService,
@@ -31,10 +36,12 @@ import { ServerSettingsService } from "../serverSettings.ts";
 import { ProviderSupervisorRegistryLive } from "../providerSupervisor/ProviderSupervisorRegistry.ts";
 import {
   captureProviderDaemonProcessDiagnostic,
+  handleProviderDaemonEventStream,
   runProviderDaemonServer,
   writeProviderDaemonStreamLine,
   type ProviderDaemonServerOptions,
 } from "./ProviderDaemonServer.ts";
+import type { ProviderDaemonPersistentEventJournal } from "./EventJournal.ts";
 import { ProviderRuntimeInventoryLocalLive } from "./ProviderRuntimeInventory.ts";
 
 const TEST_TOKEN = "provider-daemon-test-token-000000000000000000000000";
@@ -53,8 +60,27 @@ const decodeProviderDaemonLeaseResponseJson = Schema.decodeUnknownSync(
 const encodeProviderDaemonRpcRequestJson = Schema.encodeSync(
   Schema.fromJsonString(ProviderDaemonRpcRequest),
 );
+const decodeProviderDaemonRpcEnvelopeJson = Schema.decodeUnknownSync(
+  Schema.fromJsonString(ProviderDaemonRpcEnvelope),
+);
 
 const asEventId = (value: string): EventId => EventId.make(value);
+
+function makeDaemonRecord(cursor: number): ProviderDaemonEventRecord {
+  return {
+    cursor,
+    emittedAt: "2026-08-27T00:00:00.000Z",
+    event: {
+      eventId: asEventId(`stream-event-${cursor}`),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      threadId: ThreadId.make("thread-stream"),
+      createdAt: "2026-08-27T00:00:00.000Z",
+      type: "session.started",
+      payload: { message: `event-${cursor}` },
+    },
+  };
+}
 
 const startProviderDaemonServerOnEphemeralPort = (
   options: Omit<ProviderDaemonServerOptions, "port">,
@@ -70,17 +96,22 @@ const startProviderDaemonServerOnEphemeralPort = (
 
 const mockProviderService = {
   startSession: () => Effect.die("unexpected startSession"),
+  forkSession: () => Effect.die("unexpected forkSession"),
+  discardSessionFork: () => Effect.die("unexpected discardSessionFork"),
   sendTurn: () => Effect.die("unexpected sendTurn"),
   steerTurn: () => Effect.die("unexpected steerTurn"),
   interruptTurn: () => Effect.die("unexpected interruptTurn"),
   respondToRequest: () => Effect.die("unexpected respondToRequest"),
   respondToUserInput: () => Effect.die("unexpected respondToUserInput"),
+  snoozeUserInput: () => Effect.die("unexpected snoozeUserInput"),
   stopSession: () => Effect.die("unexpected stopSession"),
+  quiesceThreadForHardDelete: () => Effect.die("unexpected quiesceThreadForHardDelete"),
   restartProviderRuntime: () => Effect.die("unexpected restartProviderRuntime"),
   listSessions: () => Effect.succeed([]),
   getCapabilities: () => Effect.die("unexpected getCapabilities"),
   getInstanceInfo: () => Effect.die("unexpected getInstanceInfo"),
   rollbackConversation: () => Effect.die("unexpected rollbackConversation"),
+  readSubagentDetail: () => Effect.die("unexpected readSubagentDetail"),
   streamEvents: Stream.empty,
 } satisfies ProviderServiceShape;
 
@@ -155,6 +186,212 @@ describe("ProviderDaemonServer", () => {
     const closeError = await closeResult;
     assert.instanceOf(closeError, Error);
     assert.match(closeError.message, /closed before drain/u);
+  });
+
+  it("filters replay/live overlap before it can overflow the finite live queue", async () => {
+    class FakeRequest extends EventEmitter {}
+    class FakeResponse extends EventEmitter {
+      destroyed = false;
+      writableEnded = false;
+      readonly lines: string[] = [];
+      readonly destroyCauses: unknown[] = [];
+      writeHead(): void {}
+      write(line: string): boolean {
+        this.lines.push(line);
+        if (this.lines.length === 305) queueMicrotask(() => this.emit("close"));
+        return true;
+      }
+      end(): void {
+        this.writableEnded = true;
+      }
+      destroy(cause?: unknown): void {
+        this.destroyed = true;
+        this.destroyCauses.push(cause);
+        this.emit("close");
+      }
+    }
+
+    let liveListener: ((record: ProviderDaemonEventRecord) => void) | null = null;
+    let replayCallCount = 0;
+    const journal = {
+      publish: () => Effect.die("unexpected publish"),
+      replayAfter: () => Effect.die("unexpected replayAfter"),
+      replayPageAfter: () => Effect.die("unexpected replayPageAfter"),
+      replayPageThrough: () =>
+        Effect.sync(() => {
+          replayCallCount += 1;
+          if (replayCallCount > 1) return [];
+          // These 300 callbacks are the historical records the current replay
+          // page will also return. Before boundary filtering they exceeded the
+          // 256-record live queue and disconnected the stream.
+          for (let cursor = 1; cursor <= 305; cursor += 1) {
+            liveListener?.(makeDaemonRecord(cursor));
+          }
+          return Array.from({ length: 300 }, (_, index) => makeDaemonRecord(index + 1));
+        }),
+      subscribe: () => () => undefined,
+      subscribeWithReplayBoundary: (listener: (record: ProviderDaemonEventRecord) => void) =>
+        Effect.sync(() => {
+          liveListener = listener;
+          return {
+            replayBoundaryCursor: 300,
+            unsubscribe: () => {
+              liveListener = null;
+            },
+          };
+        }),
+      snapshot: Effect.succeed({
+        eventCursor: 300,
+        retainedEventCount: 300,
+        oldestCursor: 1,
+        newestCursor: 300,
+      }),
+      startupMaintenance: Effect.void,
+    } satisfies ProviderDaemonPersistentEventJournal;
+    const request = new FakeRequest();
+    const response = new FakeResponse();
+    let cleanupCount = 0;
+
+    await handleProviderDaemonEventStream(
+      request as unknown as Parameters<typeof handleProviderDaemonEventStream>[0],
+      response as unknown as Parameters<typeof handleProviderDaemonEventStream>[1],
+      journal,
+      0,
+      (effect) => Effect.runPromise(effect),
+      () => {
+        cleanupCount += 1;
+      },
+    );
+
+    expect(response.destroyCauses).toEqual([]);
+    expect(response.lines).toHaveLength(305);
+    expect(
+      response.lines.map((line) => (JSON.parse(line) as ProviderDaemonEventRecord).cursor),
+    ).toEqual(Array.from({ length: 305 }, (_, index) => index + 1));
+    expect(cleanupCount).toBe(1);
+    expect(liveListener).toBeNull();
+  });
+
+  it("cleans up the HTTP stream when replay-boundary acquisition fails", async () => {
+    class FakeRequest extends EventEmitter {}
+    class FakeResponse extends EventEmitter {
+      destroyed = false;
+      writableEnded = false;
+      readonly destroyCauses: unknown[] = [];
+      writeHead(): void {}
+      write(): boolean {
+        return true;
+      }
+      end(): void {
+        this.writableEnded = true;
+      }
+      destroy(cause?: unknown): void {
+        this.destroyed = true;
+        this.destroyCauses.push(cause);
+        this.emit("close");
+      }
+    }
+
+    const journal = {
+      publish: () => Effect.die("unexpected publish"),
+      replayAfter: () => Effect.die("unexpected replayAfter"),
+      replayPageAfter: () => Effect.die("unexpected replayPageAfter"),
+      replayPageThrough: () => Effect.die("unexpected replayPageThrough"),
+      subscribe: () => () => undefined,
+      subscribeWithReplayBoundary: () => Effect.die(new Error("boundary snapshot failed")),
+      snapshot: Effect.die("unexpected snapshot"),
+      startupMaintenance: Effect.void,
+    } satisfies ProviderDaemonPersistentEventJournal;
+    const response = new FakeResponse();
+    let cleanupCount = 0;
+
+    await handleProviderDaemonEventStream(
+      new FakeRequest() as unknown as Parameters<typeof handleProviderDaemonEventStream>[0],
+      response as unknown as Parameters<typeof handleProviderDaemonEventStream>[1],
+      journal,
+      0,
+      (effect) => Effect.runPromise(effect),
+      () => {
+        cleanupCount += 1;
+      },
+    );
+
+    expect(cleanupCount).toBe(1);
+    expect(response.destroyed).toBe(true);
+    expect(response.destroyCauses).toHaveLength(1);
+    expect(response.destroyCauses[0]).toBeInstanceOf(Error);
+  });
+
+  it("unsubscribes when the response closes during replay-boundary acquisition", async () => {
+    class FakeRequest extends EventEmitter {}
+    class FakeResponse extends EventEmitter {
+      destroyed = false;
+      writableEnded = false;
+      writeHead(): void {}
+      write(): boolean {
+        return true;
+      }
+      end(): void {
+        this.writableEnded = true;
+      }
+      destroy(): void {
+        this.destroyed = true;
+        this.emit("close");
+      }
+    }
+
+    let signalBoundaryStarted!: () => void;
+    const boundaryStarted = new Promise<void>((resolve) => {
+      signalBoundaryStarted = resolve;
+    });
+    let releaseBoundary!: () => void;
+    const boundaryGate = new Promise<void>((resolve) => {
+      releaseBoundary = resolve;
+    });
+    let unsubscribeCount = 0;
+    const journal = {
+      publish: () => Effect.die("unexpected publish"),
+      replayAfter: () => Effect.die("unexpected replayAfter"),
+      replayPageAfter: () => Effect.die("unexpected replayPageAfter"),
+      replayPageThrough: () => Effect.die("unexpected replayPageThrough"),
+      subscribe: () => () => undefined,
+      subscribeWithReplayBoundary: () =>
+        Effect.promise(async () => {
+          signalBoundaryStarted();
+          await boundaryGate;
+          return {
+            replayBoundaryCursor: 0,
+            unsubscribe: () => {
+              unsubscribeCount += 1;
+            },
+          };
+        }),
+      snapshot: Effect.die("unexpected snapshot"),
+      startupMaintenance: Effect.void,
+    } satisfies ProviderDaemonPersistentEventJournal;
+    const request = new FakeRequest();
+    const response = new FakeResponse();
+    let cleanupCount = 0;
+
+    const stream = handleProviderDaemonEventStream(
+      request as unknown as Parameters<typeof handleProviderDaemonEventStream>[0],
+      response as unknown as Parameters<typeof handleProviderDaemonEventStream>[1],
+      journal,
+      0,
+      (effect) => Effect.runPromise(effect),
+      () => {
+        cleanupCount += 1;
+      },
+    );
+
+    await boundaryStarted;
+    response.emit("close");
+    releaseBoundary();
+    await stream;
+
+    expect(cleanupCount).toBe(1);
+    expect(unsubscribeCount).toBe(1);
+    expect(response.writableEnded).toBe(true);
   });
 
   it.effect("serves authenticated liveness without reading provider diagnostics", () => {
@@ -382,6 +619,312 @@ describe("ProviderDaemonServer", () => {
       assert.equal(health.rpc?.recentFailures?.[0]?.tag, "ProviderDaemonCommandExecutionFailed");
     }).pipe(Effect.scoped, Effect.provide(providerDaemonServerTestLayer)),
   );
+
+  it.effect("forwards bounded subagent detail as a read-only daemon RPC", () => {
+    const rootToJsonSentinel = "provider-root-to-json-must-not-cross-daemon";
+    const nestedToJsonSentinel = "provider-message-to-json-must-not-cross-daemon";
+    const privateFieldSentinel = "provider-private-field-must-not-cross-daemon";
+    const readSubagentDetail = vi.fn(
+      (_input: { threadId: ThreadId; turnId: TurnId; subagentId: string }) =>
+        Effect.succeed({
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          messages: [
+            {
+              key: "m0",
+              role: "user" as const,
+              text: "Audit the provider",
+              privateProviderField: privateFieldSentinel,
+              toJSON: () => ({ leaked: nestedToJsonSentinel }),
+            },
+            { key: "m1", role: "assistant" as const, text: "## Result\n\nComplete." },
+          ],
+          gaps: [],
+          truncated: false,
+          privateProviderField: privateFieldSentinel,
+          toJSON: () => ({ leaked: rootToJsonSentinel }),
+        }),
+    );
+    const detailProviderServiceLayer = Layer.succeed(ProviderService, {
+      ...mockProviderService,
+      readSubagentDetail,
+    } satisfies ProviderServiceShape);
+    const layer = Layer.mergeAll(
+      detailProviderServiceLayer,
+      ProviderRuntimeInventoryLocalLive.pipe(Layer.provide(mockProviderAdapterRegistryLayer)),
+      mockServerSettingsLayer,
+      ProviderSupervisorRegistryLive,
+    ).pipe(Layer.provideMerge(SqlitePersistenceMemory));
+
+    return Effect.gen(function* () {
+      const port = yield* startProviderDaemonServerOnEphemeralPort({
+        host: "127.0.0.1",
+        token: TEST_TOKEN,
+        version: "0.0.0-test",
+      });
+      const response = yield* Effect.promise(() =>
+        fetch(`http://127.0.0.1:${port}/api/provider-daemon/rpc`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${TEST_TOKEN}`,
+            "content-type": "application/json",
+          },
+          body: encodeProviderDaemonRpcRequestJson({
+            method: "readSubagentDetail",
+            payload: {
+              threadId: ThreadId.make("thread-1"),
+              turnId: TurnId.make("turn-1"),
+              subagentId: "provider-child-1",
+            },
+          }),
+        }),
+      );
+      assert.equal(response.status, 200);
+      const responseText = yield* Effect.promise(() => response.text());
+      assert.notInclude(responseText, rootToJsonSentinel);
+      assert.notInclude(responseText, nestedToJsonSentinel);
+      assert.notInclude(responseText, privateFieldSentinel);
+      const envelope = decodeProviderDaemonRpcEnvelopeJson(responseText);
+      assert.equal(envelope.ok, true);
+      if (envelope.ok) {
+        assert.deepEqual(envelope.value, {
+          provider: "codex",
+          providerInstanceId: "codex",
+          messages: [
+            { key: "m0", role: "user", text: "Audit the provider" },
+            { key: "m1", role: "assistant", text: "## Result\n\nComplete." },
+          ],
+          gaps: [],
+          truncated: false,
+        });
+      }
+      assert.equal(readSubagentDetail.mock.calls.length, 1);
+      assert.deepEqual(readSubagentDetail.mock.calls[0]?.[0], {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        subagentId: "provider-child-1",
+      });
+
+      const healthResponse = yield* Effect.promise(() =>
+        fetch(`http://127.0.0.1:${port}/api/provider-daemon/health`, {
+          headers: { authorization: `Bearer ${TEST_TOKEN}` },
+        }),
+      );
+      const health = decodeProviderDaemonHealth(yield* Effect.promise(() => healthResponse.json()));
+      assert.equal(health.completedCommandCount, 0);
+    }).pipe(Effect.scoped, Effect.provide(layer));
+  });
+
+  it.effect("rejects noncanonical provider detail before it crosses the daemon boundary", () => {
+    const invalidDetailSentinel = "invalid-provider-detail-must-not-cross-daemon";
+    const providerService = {
+      ...mockProviderService,
+      readSubagentDetail: () =>
+        Effect.succeed({
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          messages: [
+            { key: "duplicate", role: "user" as const, text: invalidDetailSentinel },
+            { key: "duplicate", role: "assistant" as const, text: "invalid duplicate key" },
+          ],
+          gaps: [],
+          truncated: false,
+        }),
+    } satisfies ProviderServiceShape;
+
+    return Effect.gen(function* () {
+      const port = yield* startProviderDaemonServerOnEphemeralPort({
+        host: "127.0.0.1",
+        token: TEST_TOKEN,
+        version: "0.0.0-test",
+      });
+      const response = yield* Effect.promise(() =>
+        fetch(`http://127.0.0.1:${port}/api/provider-daemon/rpc`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${TEST_TOKEN}`,
+            "content-type": "application/json",
+          },
+          body: encodeProviderDaemonRpcRequestJson({
+            method: "readSubagentDetail",
+            payload: {
+              threadId: ThreadId.make("thread-invalid"),
+              turnId: TurnId.make("turn-invalid"),
+              subagentId: "provider-child-invalid",
+            },
+          }),
+        }),
+      );
+      assert.equal(response.status, 400);
+      const responseText = yield* Effect.promise(() => response.text());
+      assert.notInclude(responseText, invalidDetailSentinel);
+      const envelope = decodeProviderDaemonRpcEnvelopeJson(responseText);
+      assert.equal(envelope.ok, false);
+      if (!envelope.ok) {
+        assert.equal(envelope.error.tag, "ProviderSubagentDetailReadError");
+        assert.equal(
+          envelope.error.message,
+          "Subagent detail read failed: provider-request-failed",
+        );
+      }
+    }).pipe(Effect.scoped, Effect.provide(makeProviderDaemonServerTestLayer(providerService)));
+  });
+
+  it.effect("does not ledger a failed exact subagent-history recovery as a mutation", () => {
+    const readSubagentDetail = vi.fn((_input: { threadId: ThreadId; subagentId: string }) =>
+      Effect.fail(
+        new ProviderValidationError({
+          operation: "ProviderService.readSubagentDetail",
+          issue: "Exact provider history resume is unavailable.",
+        }),
+      ),
+    );
+    const detailProviderServiceLayer = Layer.succeed(ProviderService, {
+      ...mockProviderService,
+      readSubagentDetail,
+    } satisfies ProviderServiceShape);
+    const layer = Layer.mergeAll(
+      detailProviderServiceLayer,
+      ProviderRuntimeInventoryLocalLive.pipe(Layer.provide(mockProviderAdapterRegistryLayer)),
+      mockServerSettingsLayer,
+      ProviderSupervisorRegistryLive,
+    ).pipe(Layer.provideMerge(SqlitePersistenceMemory));
+
+    return Effect.gen(function* () {
+      const port = yield* startProviderDaemonServerOnEphemeralPort({
+        host: "127.0.0.1",
+        token: TEST_TOKEN,
+        version: "0.0.0-test",
+      });
+      const response = yield* Effect.promise(() =>
+        fetch(`http://127.0.0.1:${port}/api/provider-daemon/rpc`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${TEST_TOKEN}`,
+            "content-type": "application/json",
+          },
+          body: encodeProviderDaemonRpcRequestJson({
+            method: "readSubagentDetail",
+            payload: {
+              threadId: ThreadId.make("thread-ended"),
+              turnId: TurnId.make("turn-ended"),
+              subagentId: "provider-child-ended",
+            },
+          }),
+        }),
+      );
+      assert.equal(response.status, 400);
+      assert.equal(readSubagentDetail.mock.calls.length, 1);
+
+      const healthResponse = yield* Effect.promise(() =>
+        fetch(`http://127.0.0.1:${port}/api/provider-daemon/health`, {
+          headers: { authorization: `Bearer ${TEST_TOKEN}` },
+        }),
+      );
+      const health = decodeProviderDaemonHealth(yield* Effect.promise(() => healthResponse.json()));
+      assert.equal(health.completedCommandCount, 0);
+      assert.equal(health.failedCommandCount, 0);
+      assert.equal(health.runningCommandCount, 0);
+      assert.equal(health.rpc?.failedRpcCount, 1);
+    }).pipe(Effect.scoped, Effect.provide(layer));
+  });
+
+  it.effect("redacts subagent read failures from RPC, health diagnostics, and logs", () => {
+    const childId = "sentinel-provider-child-id";
+    const threadId = ThreadId.make("sentinel-cafe-thread-id");
+    const sentinels = [
+      childId,
+      String(threadId),
+      "/Users/private-account/.codex/rollouts/provider-child.jsonl",
+      "owner-account@example.invalid",
+      "raw-provider-response-body",
+      "raw-provider-cause",
+      "raw-provider-stack",
+    ];
+    const rawCause = new Error(`${sentinels[5]} ${sentinels[2]} ${sentinels[3]}`);
+    rawCause.stack = `Error: ${sentinels[6]}\n    at ${sentinels[2]}:1:1`;
+    const logMessages: unknown[] = [];
+    const logCapture = Logger.make<unknown, void>(({ message }) => {
+      if (Array.isArray(message)) {
+        logMessages.push(...message);
+      } else {
+        logMessages.push(message);
+      }
+    });
+    const providerService = {
+      ...mockProviderService,
+      readSubagentDetail: () =>
+        Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: "codex",
+            method: "thread/read-subagent-detail",
+            detail: `${sentinels[4]} ${childId}`,
+            cause: {
+              account: sentinels[3],
+              responseBody: sentinels[4],
+              cause: rawCause,
+            },
+          }),
+        ),
+    } satisfies ProviderServiceShape;
+    const layer = Layer.mergeAll(
+      makeProviderDaemonServerTestLayer(providerService),
+      Logger.layer([logCapture], { mergeWithExisting: false }),
+    );
+
+    return Effect.gen(function* () {
+      const port = yield* startProviderDaemonServerOnEphemeralPort({
+        host: "127.0.0.1",
+        token: TEST_TOKEN,
+        version: "0.0.0-test",
+      });
+      const response = yield* Effect.promise(() =>
+        fetch(`http://127.0.0.1:${port}/api/provider-daemon/rpc`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${TEST_TOKEN}`,
+            "content-type": "application/json",
+          },
+          body: encodeProviderDaemonRpcRequestJson({
+            method: "readSubagentDetail",
+            payload: { threadId, turnId: TurnId.make("turn-defect"), subagentId: childId },
+          }),
+        }),
+      );
+      assert.equal(response.status, 400);
+      const responseText = yield* Effect.promise(() => response.text());
+      const envelope = decodeProviderDaemonRpcEnvelopeJson(responseText);
+      assert.equal(envelope.ok, false);
+      if (!envelope.ok) {
+        assert.equal(envelope.error.tag, "ProviderSubagentDetailReadError");
+        assert.equal(
+          envelope.error.message,
+          "Subagent detail read failed: provider-request-failed",
+        );
+        assert.equal(envelope.error.diagnostics?.stack, undefined);
+        assert.deepEqual(
+          envelope.error.diagnostics?.causeChain.map((entry) => entry.stack),
+          [undefined],
+        );
+      }
+
+      const healthResponse = yield* Effect.promise(() =>
+        fetch(`http://127.0.0.1:${port}/api/provider-daemon/health`, {
+          headers: { authorization: `Bearer ${TEST_TOKEN}` },
+        }),
+      );
+      const healthText = yield* Effect.promise(() => healthResponse.text());
+      const health = decodeProviderDaemonHealth(JSON.parse(healthText));
+      assert.equal(health.rpc?.recentFailures?.[0]?.tag, "ProviderSubagentDetailReadError");
+
+      const serializedLogs = JSON.stringify(logMessages);
+      assert.match(serializedLogs, /provider daemon rpc failed/u);
+      const observableOutput = `${responseText}\n${healthText}\n${serializedLogs}`;
+      for (const sentinel of sentinels) {
+        assert.notInclude(observableOutput, sentinel);
+      }
+    }).pipe(Effect.scoped, Effect.provide(layer));
+  });
 
   it.effect("exposes recent completed command summaries without prompt text in health", () => {
     const successfulSendTurnLayer = Layer.succeed(ProviderService, {

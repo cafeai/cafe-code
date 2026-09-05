@@ -29,6 +29,7 @@ const workspaceFiles = [
   "oxlint-plugin-cafecode/package.json",
   "packages/client-runtime/package.json",
   "packages/contracts/package.json",
+  "packages/effect-acp/package.json",
   "packages/shared/package.json",
   "packages/effect-codex-app-server/package.json",
   "scripts/package.json",

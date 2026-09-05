@@ -4,8 +4,9 @@ import { scopedThreadKey, scopeThreadRef } from "@cafecode/client-runtime";
 
 import { selectSidebarThreadsAcrossEnvironments, useStore } from "../../store";
 import { useUiStateStore } from "../../uiStateStore";
-import { hasUnseenCompletion } from "../Sidebar.logic";
-import { SidebarTrigger } from "../ui/sidebar";
+import { hasUnseenCompletion, shouldInsetContentSidebarTrigger } from "../Sidebar.logic";
+import { SidebarTrigger, useSidebar } from "../ui/sidebar";
+import { isElectron } from "../../env";
 import { cn } from "~/lib/utils";
 
 /** True when any thread has a completed turn the user hasn't viewed yet. */
@@ -53,5 +54,25 @@ export function SidebarTriggerWithUnreadDot({ className }: { className?: string 
           dot overlapping the button edge gets clipped. */}
       {hasUnseenCompletions ? <UnseenCompletionsDot className="right-0 top-0" /> : null}
     </span>
+  );
+}
+
+/**
+ * Content-header counterpart to the toggle housed beside the Cafe wordmark.
+ * Desktop only needs this copy while the off-canvas navigation is hidden;
+ * mobile always needs it because the sidebar lives in a modal sheet.
+ */
+export function ContentSidebarTriggerWithUnreadDot({ className }: { className?: string }) {
+  const { isMobile, open } = useSidebar();
+  if (!isMobile && open) {
+    return null;
+  }
+  const needsMacTitlebarInset = shouldInsetContentSidebarTrigger({
+    isElectronHost: isElectron,
+    isMobile,
+    platform: typeof navigator === "undefined" ? "" : navigator.platform,
+  });
+  return (
+    <SidebarTriggerWithUnreadDot className={cn(needsMacTitlebarInset && "ml-[70px]", className)} />
   );
 }

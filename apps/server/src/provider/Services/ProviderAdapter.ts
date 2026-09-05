@@ -15,8 +15,13 @@ import type {
   ProviderRuntimeEvent,
   ProviderSendTurnInput,
   ProviderSession,
+  ProviderSessionForkInput,
+  ProviderSessionForkResult,
   ProviderSessionStartInput,
   ProviderSteerTurnInput,
+  ProviderThreadGoal,
+  ProviderThreadGoalClearResult,
+  ProviderThreadGoalSetInput,
   ThreadId,
   ProviderTurnSteerResult,
   ProviderTurnStartResult,
@@ -25,18 +30,34 @@ import type {
 import type * as Effect from "effect/Effect";
 import type * as Stream from "effect/Stream";
 
-export type ProviderSessionModelSwitchMode = "in-session" | "unsupported";
+export type ProviderSessionModelSwitchMode = "in-session" | "restart-resume" | "unsupported";
 export type ProviderLiveSteerSupport = "supported" | "unsupported";
+export type ProviderThreadGoalSupport = "supported" | "unsupported";
+export type ProviderSessionForkSupport = "supported" | "unsupported";
 
 export interface ProviderAdapterCapabilities {
   /**
-   * Declares whether changing the model on an existing session is supported.
+   * Declares how changing a model or its provider-owned traits is applied.
+   * `restart-resume` preserves the native conversation while atomically
+   * replacing an idle provider process with the newly selected configuration.
    */
   readonly sessionModelSwitch: ProviderSessionModelSwitchMode;
   /**
    * Declares whether the adapter accepts user guidance while a turn is already running.
    */
   readonly liveSteer: ProviderLiveSteerSupport;
+  /**
+   * Declares whether this provider exposes Codex-style durable thread goals.
+   *
+   * This remains optional while decoding adapters built before the goal
+   * capability existed; absence is always interpreted as unsupported.
+   */
+  readonly threadGoals?: ProviderThreadGoalSupport;
+  /**
+   * Declares whether the adapter can branch provider-owned conversation state.
+   * Missing is interpreted as unsupported for older/out-of-process adapters.
+   */
+  readonly sessionFork?: ProviderSessionForkSupport;
 }
 
 export interface ProviderThreadTurnSnapshot {
@@ -47,6 +68,44 @@ export interface ProviderThreadTurnSnapshot {
 export interface ProviderThreadSnapshot {
   readonly threadId: ThreadId;
   readonly turns: ReadonlyArray<ProviderThreadTurnSnapshot>;
+}
+
+/** Public transcript material extracted from a provider-owned child thread. */
+export interface ProviderSubagentDetailMessage {
+  /** Stable Cafe-owned sequence key; never a provider-native item id. */
+  readonly key: string;
+  readonly role: "user" | "assistant";
+  /** Complete public text, or the retained head when `omission` is present. */
+  readonly text: string;
+  readonly omission?:
+    | {
+        /** Retained public suffix rendered after a typed content-gap marker. */
+        readonly tail: string;
+        /** Sanitized UTF-8 bytes removed between `text` and `tail`. */
+        readonly omittedUtf8Bytes: number;
+      }
+    | undefined;
+}
+
+export interface ProviderSubagentDetailGap {
+  /** `null` identifies an omitted prefix; otherwise the retained head anchor. */
+  readonly afterMessageKey: string | null;
+  readonly omittedMessages: number;
+  readonly omittedUtf8Bytes: number;
+}
+
+/**
+ * Canonical subagent detail returned by an adapter.
+ *
+ * This intentionally has no escape hatch for provider-native items. Reasoning,
+ * commands, tool calls, paths, and raw payloads must be discarded inside the
+ * trusted adapter boundary before the value reaches orchestration transports.
+ */
+export interface ProviderSubagentDetail {
+  readonly messages: ReadonlyArray<ProviderSubagentDetailMessage>;
+  /** Ordered discontinuities between retained chronological message blocks. */
+  readonly gaps: ReadonlyArray<ProviderSubagentDetailGap>;
+  readonly truncated: boolean;
 }
 
 export interface ProviderAdapterShape<TError> {
@@ -62,6 +121,18 @@ export interface ProviderAdapterShape<TError> {
   readonly startSession: (
     input: ProviderSessionStartInput,
   ) => Effect.Effect<ProviderSession, TError>;
+
+  /** Fork a completed provider-native conversation without changing the source. */
+  readonly forkSession?: (
+    input: ProviderSessionForkInput,
+  ) => Effect.Effect<ProviderSessionForkResult, TError>;
+
+  /**
+   * Remove a just-created native fork when Cafe cannot commit its matching
+   * thread. This is intentionally narrow cleanup, not a general thread-delete
+   * surface.
+   */
+  readonly discardSessionFork?: (fork: ProviderSessionForkResult) => Effect.Effect<void, TError>;
 
   /**
    * Send a turn to an active provider session.
@@ -105,9 +176,38 @@ export interface ProviderAdapterShape<TError> {
   ) => Effect.Effect<void, TError>;
 
   /**
+   * Disable provider-side auto-resolution for one pending user-input request.
+   * Only providers that advertise non-blocking questions need to implement it.
+   */
+  readonly snoozeUserInput?: (
+    threadId: ThreadId,
+    requestId: ApprovalRequestId,
+  ) => Effect.Effect<void, TError>;
+
+  /**
    * Stop one provider session.
    */
   readonly stopSession: (threadId: ThreadId) => Effect.Effect<void, TError>;
+
+  /**
+   * Read the provider-owned goal for a materialized thread.
+   *
+   * Goal methods are present only when `threadGoals` is supported. The
+   * provider-native thread id must remain encapsulated by the adapter.
+   */
+  readonly getGoal?: (threadId: ThreadId) => Effect.Effect<ProviderThreadGoal | null, TError>;
+
+  /**
+   * Create or update a provider-owned goal.
+   */
+  readonly setGoal?: (
+    input: ProviderThreadGoalSetInput,
+  ) => Effect.Effect<ProviderThreadGoal, TError>;
+
+  /**
+   * Clear a provider-owned goal.
+   */
+  readonly clearGoal?: (threadId: ThreadId) => Effect.Effect<ProviderThreadGoalClearResult, TError>;
 
   /**
    * List currently active provider sessions for this adapter.
@@ -123,6 +223,31 @@ export interface ProviderAdapterShape<TError> {
    * Read a provider thread snapshot.
    */
   readonly readThread: (threadId: ThreadId) => Effect.Effect<ProviderThreadSnapshot, TError>;
+
+  /**
+   * Read the public user/assistant transcript for one provider-owned child.
+   * Only adapters with a securely verifiable child-thread protocol expose it.
+   */
+  readonly readSubagentDetail?: (
+    threadId: ThreadId,
+    subagentId: string,
+    context?: {
+      /**
+       * Exact provider-owned root identity persisted for this Cafe thread.
+       * Adapters may use it for a transient read-only history connection, but
+       * must never treat a failed history lookup as authority to start a fresh
+       * provider conversation or replace the durable binding.
+       */
+      readonly resumeCursor?: unknown | null;
+      /** Exact persisted workspace used to scope provider-native history discovery. */
+      readonly cwd?: string | null;
+      /**
+       * Exact provider-owned transcript identity authorized from the durable
+       * subagent activity. It is not accepted as authority on its own.
+       */
+      readonly historyId?: string;
+    },
+  ) => Effect.Effect<ProviderSubagentDetail, TError>;
 
   /**
    * Roll back a provider thread by N turns.

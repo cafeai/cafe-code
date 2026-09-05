@@ -106,6 +106,15 @@ describe("ElectronShell", () => {
     }).pipe(Effect.provide(makeShellLayer(undefined, "darwin"))),
   );
 
+  it.effect("writes text through Electron's native clipboard", () =>
+    Effect.gen(function* () {
+      const electronShell = yield* ElectronShell.ElectronShell;
+      yield* electronShell.copyText("clipboard text");
+
+      assert.deepEqual(writeTextMock.mock.calls, [["clipboard text"]]);
+    }).pipe(Effect.provide(makeShellLayer(undefined, "darwin"))),
+  );
+
   it.effect("opens Linux URLs through the default browser desktop entry", () => {
     const commands: ChildProcess.Command[] = [];
     return Effect.gen(function* () {

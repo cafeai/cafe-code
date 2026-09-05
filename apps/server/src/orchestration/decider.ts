@@ -314,6 +314,103 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       ];
     }
 
+    case "thread.fork":
+      return yield* new OrchestrationCommandInvariantError({
+        commandType: command.type,
+        detail:
+          "Provider-native thread forks must be prepared by the authenticated server transport.",
+      });
+
+    case "thread.fork.commit": {
+      const sourceThread = yield* requireThreadNotArchived({
+        readModel,
+        command,
+        threadId: command.sourceThreadId,
+      });
+      if (sourceThread.deletedAt !== null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.sourceThreadId}' is in the Recycle Bin and cannot be forked.`,
+        });
+      }
+      if (
+        sourceThread.latestTurn?.state === "running" ||
+        sourceThread.session?.status === "starting" ||
+        sourceThread.session?.status === "running"
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.sourceThreadId}' must be idle before it can be forked.`,
+        });
+      }
+      yield* requireThreadAbsent({
+        readModel,
+        command,
+        threadId: command.targetThreadId,
+      });
+      if (
+        command.session.threadId !== command.targetThreadId ||
+        command.session.status !== "stopped" ||
+        command.session.activeTurnId !== null
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Fork commits require a stopped target provider session binding.",
+        });
+      }
+
+      return [
+        {
+          ...withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.targetThreadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          }),
+          type: "thread.created" as const,
+          payload: {
+            threadId: command.targetThreadId,
+            projectId: sourceThread.projectId,
+            title: command.title,
+            modelSelection: sourceThread.modelSelection,
+            runtimeMode: sourceThread.runtimeMode,
+            interactionMode: sourceThread.interactionMode,
+            branch: sourceThread.branch,
+            worktreePath: sourceThread.worktreePath,
+            createdAt: command.createdAt,
+            updatedAt: command.createdAt,
+          },
+        },
+        {
+          ...withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.targetThreadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          }),
+          type: "thread.forked" as const,
+          payload: {
+            sourceThreadId: command.sourceThreadId,
+            targetThreadId: command.targetThreadId,
+            forkedAt: command.createdAt,
+          },
+        },
+        {
+          ...withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.targetThreadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          }),
+          type: "thread.session-set" as const,
+          payload: {
+            threadId: command.targetThreadId,
+            session: command.session,
+          },
+        },
+      ];
+    }
+
     case "thread.delete": {
       yield* requireThread({
         readModel,
@@ -510,51 +607,74 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
-      if (threadHasUnsettledTurnStart(targetThread)) {
+      const boundProviderInstanceId =
+        targetThread.session?.providerInstanceId ?? targetThread.session?.providerName;
+      const requestsProviderInstanceSwitch =
+        command.modelSelection !== undefined &&
+        boundProviderInstanceId !== undefined &&
+        command.modelSelection.instanceId !== boundProviderInstanceId;
+      if (threadHasUnsettledTurnStart(targetThread) && !requestsProviderInstanceSwitch) {
         const activeTurnId = activeTurnIdForSteer(targetThread);
-        if (activeTurnId !== null) {
-          const userMessageEvent: Omit<OrchestrationEvent, "sequence"> = {
-            ...withEventBase({
-              aggregateKind: "thread",
-              aggregateId: command.threadId,
-              occurredAt: command.createdAt,
-              commandId: command.commandId,
-            }),
-            type: "thread.message-sent",
-            payload: {
-              threadId: command.threadId,
-              messageId: command.message.messageId,
-              role: "user",
-              text: command.message.text,
-              attachments: command.message.attachments,
-              turnId: activeTurnId,
-              streaming: false,
-              createdAt: command.createdAt,
-              updatedAt: command.createdAt,
-            },
-          };
-          const turnSteerRequestedEvent: Omit<OrchestrationEvent, "sequence"> = {
-            ...withEventBase({
-              aggregateKind: "thread",
-              aggregateId: command.threadId,
-              occurredAt: command.createdAt,
-              commandId: command.commandId,
-            }),
-            causationEventId: userMessageEvent.eventId,
-            type: "thread.turn-steer-requested",
-            payload: {
-              threadId: command.threadId,
-              messageId: command.message.messageId,
-              createdAt: command.createdAt,
-            },
-          };
-          return [userMessageEvent, turnSteerRequestedEvent];
-        }
-        return yield* new OrchestrationCommandInvariantError({
-          commandType: command.type,
-          detail: `Thread '${command.threadId}' already has a turn starting or running. Queue a follow-up or steer the active turn instead of starting another turn.`,
-        });
+        // The renderer can submit from an older ready snapshot while the
+        // authoritative aggregate has already moved to `starting`. Claude can
+        // also remain live while briefly projecting `running` without an
+        // active turn id as SDK response segments cross a terminal-looking
+        // boundary. Rejecting here loses the renderer's only durable handoff
+        // and exposes a recoverable projection race to the user.
+        //
+        // Persist one steer intent even when `activeTurnId` is null. The
+        // ProviderCommandReactor resolves that intent against live provider
+        // state in sequence: it steers a materialized active turn, or submits
+        // the same message as the next turn when no active provider turn
+        // remains. Command receipts keep exact retries idempotent, while the
+        // original message id and attachments remain bound to one accepted
+        // orchestration command.
+        const userMessageEvent: Omit<OrchestrationEvent, "sequence"> = {
+          ...withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          }),
+          type: "thread.message-sent",
+          payload: {
+            threadId: command.threadId,
+            messageId: command.message.messageId,
+            role: "user",
+            text: command.message.text,
+            attachments: command.message.attachments,
+            turnId: activeTurnId,
+            streaming: false,
+            createdAt: command.createdAt,
+            updatedAt: command.createdAt,
+          },
+        };
+        const turnSteerRequestedEvent: Omit<OrchestrationEvent, "sequence"> = {
+          ...withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          }),
+          causationEventId: userMessageEvent.eventId,
+          type: "thread.turn-steer-requested",
+          payload: {
+            threadId: command.threadId,
+            messageId: command.message.messageId,
+            expectedTurnId: activeTurnId,
+            createdAt: command.createdAt,
+          },
+        };
+        return [userMessageEvent, turnSteerRequestedEvent];
       }
+      // An explicit provider-instance change cannot be represented as a live
+      // steer: provider steering APIs keep using the session that already owns
+      // the active turn and do not accept a replacement routing key. Preserve
+      // the requested model selection on a normal turn-start intent so the
+      // provider reactor can replace stale runtime ownership before sending.
+      // The renderer queues ordinary sends while a turn is genuinely active;
+      // this branch handles the stale projection/runtime races that otherwise
+      // make a composer-selected Codex turn run through Claude (or vice versa).
       const sourceProposedPlan = command.sourceProposedPlan;
       const sourceThread = sourceProposedPlan
         ? yield* requireThread({
@@ -698,6 +818,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             modelSelection: targetThread.modelSelection,
             runtimeMode: targetThread.runtimeMode,
             interactionMode: targetThread.interactionMode,
+            ...(command.terminalRecovery !== undefined
+              ? { terminalSteerRecovery: command.terminalRecovery }
+              : {}),
             createdAt: command.createdAt,
           },
         };
@@ -715,6 +838,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           messageId: command.message.messageId,
+          expectedTurnId: activeTurnId,
+          ...(command.terminalRecovery !== undefined
+            ? { terminalSteerRecovery: command.terminalRecovery }
+            : {}),
           createdAt: command.createdAt,
         },
       };
@@ -773,6 +900,31 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "thread.user-input.snooze": {
+      yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      return {
+        ...withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+          metadata: {
+            requestId: command.requestId,
+          },
+        }),
+        type: "thread.user-input-snooze-requested",
+        payload: {
+          threadId: command.threadId,
+          requestId: command.requestId,
+          createdAt: command.createdAt,
+        },
+      };
+    }
+
     case "thread.checkpoint.revert": {
       yield* requireThread({
         readModel,
@@ -816,6 +968,99 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "thread.goal.set": {
+      const thread = yield* requireThreadNotArchived({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      if (
+        command.objective === undefined &&
+        command.status === undefined &&
+        command.tokenBudget === undefined
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "A goal update must change objective, status, or token budget.",
+        });
+      }
+      if (
+        command.replaceExisting === true &&
+        (command.objective === undefined || command.objective === null)
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Replacing a goal requires a new objective.",
+        });
+      }
+      if (
+        command.expectedUpdatedAt !== undefined &&
+        command.expectedUpdatedAt !== (thread.goal?.updatedAt ?? null)
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail:
+            "The provider goal changed after this editor opened. Refresh the goal and apply the change again.",
+        });
+      }
+      return {
+        ...withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        }),
+        type: "thread.goal-set-requested",
+        payload: {
+          threadId: command.threadId,
+          ...(command.objective !== undefined ? { objective: command.objective } : {}),
+          ...(command.status !== undefined ? { status: command.status } : {}),
+          ...(command.tokenBudget !== undefined ? { tokenBudget: command.tokenBudget } : {}),
+          ...(command.replaceExisting !== undefined
+            ? { replaceExisting: command.replaceExisting }
+            : {}),
+          ...(command.expectedUpdatedAt !== undefined
+            ? { expectedUpdatedAt: command.expectedUpdatedAt }
+            : {}),
+          createdAt: command.createdAt,
+        },
+      };
+    }
+
+    case "thread.goal.clear": {
+      const thread = yield* requireThreadNotArchived({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      if (
+        command.expectedUpdatedAt !== undefined &&
+        command.expectedUpdatedAt !== (thread.goal?.updatedAt ?? null)
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail:
+            "The provider goal changed after this editor opened. Refresh the goal before clearing it.",
+        });
+      }
+      return {
+        ...withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        }),
+        type: "thread.goal-clear-requested",
+        payload: {
+          threadId: command.threadId,
+          ...(command.expectedUpdatedAt !== undefined
+            ? { expectedUpdatedAt: command.expectedUpdatedAt }
+            : {}),
+          createdAt: command.createdAt,
+        },
+      };
+    }
+
     case "thread.session.set": {
       yield* requireThread({
         readModel,
@@ -837,6 +1082,33 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(command.terminalTurnRecovery !== undefined
             ? { terminalTurnRecovery: command.terminalTurnRecovery }
             : {}),
+        },
+      };
+    }
+
+    case "thread.goal.sync": {
+      yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      if (command.goal !== null && command.goal.threadId !== command.threadId) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Provider goal thread identity does not match the Cafe thread.",
+        });
+      }
+      return {
+        ...withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        }),
+        type: "thread.goal-synced",
+        payload: {
+          threadId: command.threadId,
+          goal: command.goal,
         },
       };
     }

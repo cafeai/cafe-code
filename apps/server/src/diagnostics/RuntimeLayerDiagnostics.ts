@@ -41,6 +41,7 @@ import { ProjectionStateRepository } from "../persistence/Services/ProjectionSta
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR } from "../providerDaemon/ProviderDaemonRuntimeCursor.ts";
+import { readProviderRuntimeIngestionCursor } from "../providerDaemon/ProviderRuntimeIngestionProgress.ts";
 import {
   isDiagnosticsQueryProcess,
   sanitizeProcessCommand,
@@ -393,7 +394,9 @@ export function mapProviderSupervisorHealth(input: {
   return {
     configured,
     reachable,
-    status: !configured ? "offline" : reachable ? "online" : "degraded",
+    // The supervisor is an optional extra process. Cafe currently runs provider
+    // sessions directly in the daemon by default, so absence is not an outage.
+    status: !configured ? "not-configured" : reachable ? "online" : "degraded",
     pid: upstream?.pid ?? process?.pid ?? null,
     ppid: upstream?.ppid ?? null,
     transport: upstream?.endpointTransport ?? process?.transport ?? null,
@@ -479,6 +482,7 @@ function statusForProviderRuntimeIngestionLag(lag: number): ServerRuntimeLayerSt
 
 export function buildProviderRuntimeIngestionDiagnostics(input: {
   readonly daemonEventCursor: number;
+  readonly liveIngestionCursor?: number;
   readonly lastDaemonEventAt: string | null;
   readonly projectorCursors: ReadonlyArray<
     Pick<ServerOrchestratorProjectorCursor, "projector" | "cursor" | "updatedAt">
@@ -488,7 +492,14 @@ export function buildProviderRuntimeIngestionDiagnostics(input: {
     (projector) => projector.projector === PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR,
   );
   const daemonEventCursor = Math.max(0, input.daemonEventCursor);
-  const ingestionCursor = Math.max(0, cursor?.cursor ?? 0);
+  // The durable cursor is intentionally persisted in batches. Prefer the
+  // process-local cursor after events have actually completed ingestion so an
+  // idle partial batch is not misreported as a provider backlog.
+  const ingestionCursor = Math.max(
+    0,
+    cursor?.cursor ?? 0,
+    Number.isFinite(input.liveIngestionCursor) ? Math.trunc(input.liveIngestionCursor ?? 0) : 0,
+  );
   const lag = Math.max(0, daemonEventCursor - ingestionCursor);
 
   return {
@@ -503,8 +514,6 @@ export function buildProviderRuntimeIngestionDiagnostics(input: {
 
 export function buildStaleStateFlags(input: {
   readonly counts: StaleStateCountsRow;
-  readonly daemonActiveStreams: number;
-  readonly activeTurnCount: number;
 }): ReadonlyArray<ServerOrchestratorStaleStateFlag> {
   const flags: ServerOrchestratorStaleStateFlag[] = [];
   if (input.counts.terminalActiveSessionCount > 0) {
@@ -521,14 +530,6 @@ export function buildStaleStateFlags(input: {
       count: input.counts.terminalStreamingMessageCount,
       severity: "warning",
       message: "Assistant messages are still marked streaming after terminal turns.",
-    });
-  }
-  if (input.daemonActiveStreams > 0 && input.activeTurnCount === 0) {
-    flags.push({
-      kind: "daemon-stream-without-active-turn",
-      count: input.daemonActiveStreams,
-      severity: "warning",
-      message: "Daemon reports active streams while projections show no active turns.",
     });
   }
   return flags;
@@ -566,6 +567,12 @@ export function buildLayerSummaries(input: {
       notes: notes.filter((note) => note.trim().length > 0),
     };
   };
+  const providerDaemonLastEventAt =
+    input.daemon.runtimeEventSummaries
+      .map((event) => event.lastSeenAt)
+      .filter((lastSeenAt): lastSeenAt is string => lastSeenAt !== null)
+      .toSorted()
+      .at(-1) ?? null;
 
   return [
     summarize("backend", "online", input.serverPid, ["Main backend process."], input.readAt),
@@ -584,13 +591,17 @@ export function buildLayerSummaries(input: {
       input.daemon.status,
       input.daemon.pid,
       input.daemon.error ? [input.daemon.error] : ["Provider daemon health summary."],
-      input.daemon.startedAt,
+      providerDaemonLastEventAt,
     ),
     summarize(
       "provider-supervisor",
       input.supervisor.status,
       input.supervisor.pid,
-      input.supervisor.error ? [input.supervisor.error] : ["Provider supervisor health summary."],
+      input.supervisor.error
+        ? [input.supervisor.error]
+        : input.supervisor.configured
+          ? ["Provider supervisor health summary."]
+          : ["Optional provider supervisor is not configured; providers run in the daemon."],
       null,
     ),
   ];
@@ -927,6 +938,7 @@ export const make = Effect.fn("makeRuntimeLayerDiagnostics")(function* () {
           daemonHealth.health?.newestEventCursor ??
           daemonHealth.health?.eventCursor ??
           providerDaemon.eventCursor,
+        liveIngestionCursor: readProviderRuntimeIngestionCursor(),
         lastDaemonEventAt: daemonHealth.health?.runtimeEvents?.lastEventAt ?? null,
         projectorCursors,
       });
@@ -976,8 +988,6 @@ export const make = Effect.fn("makeRuntimeLayerDiagnostics")(function* () {
       const activeTurnCount = activeTurnCounts.pendingTurnCount + activeTurnCounts.runningTurnCount;
       const staleStateFlags = buildStaleStateFlags({
         counts: staleCounts,
-        daemonActiveStreams: providerDaemon.activeStreamCount,
-        activeTurnCount,
       });
       const runtimeLayers = buildLayerSummaries({
         serverPid: process.pid,

@@ -11,6 +11,9 @@
 import * as Migrator from "effect/unstable/sql/Migrator";
 import * as Layer from "effect/Layer";
 import * as Effect from "effect/Effect";
+import * as Schedule from "effect/Schedule";
+
+import { isSqliteLockTimeoutError } from "./sqliteLockRetry.ts";
 
 // Import all migrations statically
 import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
@@ -73,6 +76,18 @@ import Migration0058 from "./Migrations/058_UsageStatsDays.ts";
 import Migration0059 from "./Migrations/059_DropLegacyUsageStatsProjections.ts";
 import Migration0060 from "./Migrations/060_ProjectionTurnCheckpointCompletedAt.ts";
 import Migration0061 from "./Migrations/061_UsageStatsTokenBreakdown.ts";
+import Migration0062 from "./Migrations/062_ProjectionThreadGoals.ts";
+import Migration0063 from "./Migrations/063_UsageStatsTokenDetail.ts";
+import Migration0064 from "./Migrations/064_ProviderSubagentHistoryBindings.ts";
+import Migration0065 from "./Migrations/065_HardDeletedThreadTombstones.ts";
+import Migration0066 from "./Migrations/066_OrchestrationMessageIdentityIndexes.ts";
+import Migration0067 from "./Migrations/067_AttachmentContentCommitments.ts";
+import Migration0068 from "./Migrations/068_OrchestrationMessageIdentityLedger.ts";
+import Migration0069 from "./Migrations/069_OrchestrationMessageIdentityForeignKeyIndexes.ts";
+import Migration0070 from "./Migrations/070_UnsettledCodexSteerIntentLedger.ts";
+import Migration0071 from "./Migrations/071_ProviderDaemonHardDeleteIdentity.ts";
+import Migration0072 from "./Migrations/072_CodexSteerControlBarrierLedger.ts";
+import Migration0073 from "./Migrations/073_UsageAccountingCheckpoints.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -150,6 +165,18 @@ export const migrationEntries = [
   [59, "DropLegacyUsageStatsProjections", Migration0059],
   [60, "ProjectionTurnCheckpointCompletedAt", Migration0060],
   [61, "UsageStatsTokenBreakdown", Migration0061],
+  [62, "ProjectionThreadGoals", Migration0062],
+  [63, "UsageStatsTokenDetail", Migration0063],
+  [64, "ProviderSubagentHistoryBindings", Migration0064],
+  [65, "HardDeletedThreadTombstones", Migration0065],
+  [66, "OrchestrationMessageIdentityIndexes", Migration0066],
+  [67, "AttachmentContentCommitments", Migration0067],
+  [68, "OrchestrationMessageIdentityLedger", Migration0068],
+  [69, "OrchestrationMessageIdentityForeignKeyIndexes", Migration0069],
+  [70, "UnsettledCodexSteerIntentLedger", Migration0070],
+  [71, "ProviderDaemonHardDeleteIdentity", Migration0071],
+  [72, "CodexSteerControlBarrierLedger", Migration0072],
+  [73, "UsageAccountingCheckpoints", Migration0073],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -166,6 +193,11 @@ export const makeMigrationLoader = (throughId?: number) =>
  * Uses the base Migrator.make without platform dependencies
  */
 const run = Migrator.make({});
+
+const MIGRATION_LOCK_RETRY_ATTEMPTS = 8;
+const MIGRATION_LOCK_RETRY_BASE_DELAY = "50 millis";
+
+export const isMigrationLockTimeoutError = isSqliteLockTimeoutError;
 
 export interface RunMigrationsOptions {
   readonly toMigrationInclusive?: number | undefined;
@@ -189,7 +221,37 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
       ? "Running all migrations..."
       : `Running migrations 1 through ${toMigrationInclusive}...`,
   );
-  const executedMigrations = yield* run({ loader: makeMigrationLoader(toMigrationInclusive) });
+  let attempt = 0;
+  const runOnce = Effect.suspend(() => {
+    attempt += 1;
+    return run({ loader: makeMigrationLoader(toMigrationInclusive) }).pipe(
+      Effect.tapError((error) =>
+        isMigrationLockTimeoutError(error)
+          ? Effect.logWarning("SQLite migration writer lock contention observed").pipe(
+              Effect.annotateLogs({
+                attempt,
+                reason: error.reason._tag,
+              }),
+            )
+          : Effect.void,
+      ),
+    );
+  });
+  // Desktop startup intentionally overlaps the provider daemon and main
+  // backend. Both open the same database and may discover a cheap pending
+  // migration at nearly the same instant. SQLite can return BUSY_SNAPSHOT
+  // immediately on the loser's deferred read-to-write transaction even with a
+  // busy timeout. Retry only typed transient lock failures, with a bounded
+  // exponential schedule; syntax, constraint, and migration defects still
+  // fail immediately. Startup migrations themselves must remain bounded and
+  // must never rely on this policy to hide a long-running backfill.
+  const executedMigrations = yield* runOnce.pipe(
+    Effect.retry({
+      schedule: Schedule.exponential(MIGRATION_LOCK_RETRY_BASE_DELAY),
+      times: MIGRATION_LOCK_RETRY_ATTEMPTS,
+      while: isMigrationLockTimeoutError,
+    }),
+  );
   yield* Effect.log("Migrations ran successfully").pipe(
     Effect.annotateLogs({ migrations: executedMigrations.map(([id, name]) => `${id}_${name}`) }),
   );

@@ -17,6 +17,14 @@ const isCodexAppServerError = Schema.is(CodexError.CodexAppServerError);
 const RAW_INCOMING_NOTIFICATION_QUEUE_CAPACITY = 2_048;
 const RAW_INCOMING_REQUEST_QUEUE_CAPACITY = 256;
 const MAX_PROTOCOL_DIAGNOSTIC_LENGTH = 8_000;
+/**
+ * A 16-hour provider session can legitimately produce a large snapshot, but a
+ * newline-delimited protocol cannot leave one line unbounded: the prior reader
+ * concatenated forever before JSON decoding could apply any schema limit. Keep
+ * a generous finite ceiling while allowing callers with a stricter boundary
+ * (such as a read-only history client) to lower it.
+ */
+export const DEFAULT_CODEX_APP_SERVER_MAX_INCOMING_LINE_BYTES = 64 * 1024 * 1024;
 
 export interface CodexAppServerProtocolLogEvent {
   readonly direction: "incoming" | "outgoing";
@@ -44,6 +52,7 @@ export interface CodexAppServerIncomingRequest {
 
 export interface CodexAppServerPatchedProtocolOptions {
   readonly stdio: Stdio.Stdio;
+  readonly maxIncomingLineBytes?: number;
   readonly terminationError?: Effect.Effect<CodexError.CodexAppServerError>;
   readonly logIncoming?: boolean;
   readonly logOutgoing?: boolean;
@@ -159,6 +168,76 @@ const normalizeIncomingError = (error: unknown, detail: string): CodexError.Code
         cause: error,
       });
 
+interface IncomingLineRemainder {
+  readonly text: string;
+  readonly utf8Bytes: number;
+}
+
+type IncomingChunkSplit =
+  | {
+      readonly ok: true;
+      readonly lines: ReadonlyArray<string>;
+      readonly remainder: IncomingLineRemainder;
+    }
+  | {
+      readonly ok: false;
+      readonly error: CodexError.CodexAppServerIncomingMessageTooLargeError;
+    };
+
+const incomingLineLimitError = (
+  maxBytes: number,
+): CodexError.CodexAppServerIncomingMessageTooLargeError =>
+  new CodexError.CodexAppServerIncomingMessageTooLargeError({ maxBytes });
+
+/**
+ * Split one decoded stdout chunk without ever concatenating an over-limit
+ * remainder. UTF-8 is measured after streaming decode; invalid source bytes are
+ * represented as U+FFFD and therefore counted conservatively.
+ */
+function splitIncomingChunk(
+  current: IncomingLineRemainder,
+  chunk: string,
+  maxBytes: number,
+): IncomingChunkSplit {
+  const segments = chunk.split("\n");
+  const firstSegment = segments[0] ?? "";
+  const firstSegmentBytes = Buffer.byteLength(firstSegment, "utf8");
+  if (current.utf8Bytes + firstSegmentBytes > maxBytes) {
+    return { ok: false, error: incomingLineLimitError(maxBytes) };
+  }
+
+  if (segments.length === 1) {
+    return {
+      ok: true,
+      lines: [],
+      remainder: {
+        text: current.text + firstSegment,
+        utf8Bytes: current.utf8Bytes + firstSegmentBytes,
+      },
+    };
+  }
+
+  const lines: string[] = [(current.text + firstSegment).replace(/\r$/, "")];
+  for (let index = 1; index < segments.length - 1; index += 1) {
+    const segment = segments[index] ?? "";
+    if (Buffer.byteLength(segment, "utf8") > maxBytes) {
+      return { ok: false, error: incomingLineLimitError(maxBytes) };
+    }
+    lines.push(segment.replace(/\r$/, ""));
+  }
+
+  const finalSegment = segments.at(-1) ?? "";
+  const finalSegmentBytes = Buffer.byteLength(finalSegment, "utf8");
+  if (finalSegmentBytes > maxBytes) {
+    return { ok: false, error: incomingLineLimitError(maxBytes) };
+  }
+  return {
+    ok: true,
+    lines,
+    remainder: { text: finalSegment, utf8Bytes: finalSegmentBytes },
+  };
+}
+
 const toProtocolMessage = (
   requestId: string | number,
   fields: {
@@ -187,7 +266,14 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
       new Map<string, Deferred.Deferred<unknown, CodexError.CodexAppServerError>>(),
     );
     const nextRequestId = yield* Ref.make(1);
-    const remainder = yield* Ref.make("");
+    const configuredMaxIncomingLineBytes = options.maxIncomingLineBytes;
+    const maxIncomingLineBytes =
+      configuredMaxIncomingLineBytes !== undefined &&
+      Number.isSafeInteger(configuredMaxIncomingLineBytes) &&
+      configuredMaxIncomingLineBytes >= 1
+        ? configuredMaxIncomingLineBytes
+        : DEFAULT_CODEX_APP_SERVER_MAX_INCOMING_LINE_BYTES;
+    const remainder = yield* Ref.make<IncomingLineRemainder>({ text: "", utf8Bytes: 0 });
     const terminationHandled = yield* Ref.make(false);
 
     const logProtocol = (event: CodexAppServerProtocolLogEvent) => {
@@ -447,12 +533,27 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
     yield* options.stdio.stdin.pipe(
       Stream.decodeText(),
       Stream.runForEach((chunk) =>
-        Ref.modify(remainder, (current) => {
-          const combined = current + chunk;
-          const lines = combined.split("\n");
-          const nextRemainder = lines.pop() ?? "";
-          return [lines.map((line) => line.replace(/\r$/, "")), nextRemainder] as const;
-        }).pipe(Effect.flatMap((lines) => Effect.forEach(lines, handleLine, { discard: true }))),
+        Ref.modify<IncomingLineRemainder, IncomingChunkSplit>(
+          remainder,
+          (current): readonly [IncomingChunkSplit, IncomingLineRemainder] => {
+            const split = splitIncomingChunk(current, chunk, maxIncomingLineBytes);
+            return split.ok
+              ? [split, split.remainder]
+              : [
+                  split,
+                  // Release the retained prefix immediately. The stream is about
+                  // to terminate, but keeping attacker-controlled text until the
+                  // enclosing scope closes would defeat the early memory bound.
+                  { text: "", utf8Bytes: 0 },
+                ];
+          },
+        ).pipe(
+          Effect.flatMap((split) =>
+            split.ok
+              ? Effect.forEach(split.lines, handleLine, { discard: true })
+              : Effect.fail(split.error),
+          ),
+        ),
       ),
       Effect.matchEffect({
         onFailure: (error) =>
@@ -461,7 +562,9 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
           ),
         onSuccess: () =>
           Ref.get(remainder).pipe(
-            Effect.flatMap((line) => (line.trim().length === 0 ? Effect.void : handleLine(line))),
+            Effect.flatMap(({ text }) =>
+              text.trim().length === 0 ? Effect.void : handleLine(text),
+            ),
             Effect.matchEffect({
               onFailure: (error) => handleTermination(() => Effect.succeed(error)),
               onSuccess: () =>

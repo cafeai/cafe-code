@@ -14,7 +14,13 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 import { createModelSelection } from "@cafecode/shared/model";
 import { expect } from "vitest";
 
-import { CodexSettings, ProviderInstanceId, TextGenerationError } from "@cafecode/contracts";
+import {
+  CodexSettings,
+  ProviderInstanceId,
+  TextGenerationError,
+  type UsageAccountingSnapshot,
+} from "@cafecode/contracts";
+import { AuxiliaryUsage, AuxiliaryUsageLive } from "../usageStats/Services/AuxiliaryUsage.ts";
 
 import { ServerConfig } from "../config.ts";
 import { type TextGenerationShape } from "./TextGeneration.ts";
@@ -251,7 +257,7 @@ type CapturedCodexCommand = {
   };
 };
 
-function makeCodexHandle(input: { stderr?: string; exitCode?: number }) {
+function makeCodexHandle(input: { stdout?: string; stderr?: string; exitCode?: number }) {
   const encoder = new TextEncoder();
   return ChildProcessSpawner.makeHandle({
     pid: ChildProcessSpawner.ProcessId(1),
@@ -260,7 +266,7 @@ function makeCodexHandle(input: { stderr?: string; exitCode?: number }) {
     kill: () => Effect.void,
     unref: Effect.succeed(Effect.void),
     stdin: Sink.drain,
-    stdout: Stream.empty,
+    stdout: Stream.make(encoder.encode(input.stdout ?? "")),
     stderr: Stream.make(encoder.encode(input.stderr ?? "")),
     all: Stream.empty,
     getInputFd: () => Sink.drain,
@@ -271,6 +277,7 @@ function makeCodexHandle(input: { stderr?: string; exitCode?: number }) {
 function withFakeCodexSpawner<A, E, R>(
   input: {
     output: string;
+    stdout?: string;
     exitCode?: number;
     stderr?: string;
     requireImage?: boolean;
@@ -303,6 +310,7 @@ function withFakeCodexSpawner<A, E, R>(
         );
 
         expect(command.command).toBe("fake-codex");
+        expect(command.args).toContain("--json");
         expect(outputPath).toBeTypeOf("string");
         if (outputPath !== undefined) {
           writeFileSync(outputPath, input.output);
@@ -340,6 +348,81 @@ function withFakeCodexSpawner<A, E, R>(
 }
 
 it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
+  for (const exitCode of [0, 1]) {
+    it.effect(`records one Codex terminal usage snapshot when the helper exits ${exitCode}`, () =>
+      Effect.gen(function* () {
+        const service = yield* AuxiliaryUsage;
+        const recorded: UsageAccountingSnapshot[] = [];
+        yield* service.installSink((provider, snapshot) =>
+          Effect.sync(() => {
+            expect(provider).toBe("codex");
+            recorded.push(snapshot);
+          }),
+        );
+        const terminal = JSON.stringify({
+          type: "turn.completed",
+          usage: {
+            input_tokens: 60,
+            cached_input_tokens: 20,
+            cache_write_input_tokens: 10,
+            output_tokens: 40,
+            reasoning_output_tokens: 5,
+          },
+        });
+        const result = yield* withFakeCodexSpawner(
+          {
+            output: JSON.stringify({ title: "Helper title", branch: "helper-branch" }),
+            stdout: `${JSON.stringify({ type: "item.completed", item: { text: "private generated text" } })}\n${terminal}\n${terminal}\n`,
+            exitCode,
+          },
+          (generation) =>
+            generation.generateThreadMetadata({
+              cwd: process.cwd(),
+              message: "Task seed",
+              modelSelection: DEFAULT_TEST_MODEL_SELECTION,
+            }),
+        ).pipe(Effect.result);
+        expect(Result.isSuccess(result)).toBe(exitCode === 0);
+        expect(recorded).toHaveLength(1);
+        expect(recorded[0]).toMatchObject({
+          revision: 1,
+          models: [{ model: "unknown", inputTokens: 60, outputTokens: 40 }],
+        });
+        expect(recorded[0]?.scopeId).toMatch(/^[0-9a-f-]{36}$/);
+        if (Result.isFailure(result)) {
+          expect(result.failure.message).toContain("Codex CLI command failed with code 1.");
+          expect(result.failure.message).not.toContain("private generated text");
+        }
+      }).pipe(Effect.provide(AuxiliaryUsageLive)),
+    );
+  }
+
+  it.effect("does not fail or invent accounting for malformed Codex usage", () =>
+    Effect.gen(function* () {
+      const service = yield* AuxiliaryUsage;
+      let records = 0;
+      yield* service.installSink(() =>
+        Effect.sync(() => {
+          records += 1;
+        }),
+      );
+      const generated = yield* withFakeCodexSpawner(
+        {
+          output: JSON.stringify({ title: "Helper title" }),
+          stdout: '{"type":"turn.completed","usage":{"input_tokens":-10}}',
+        },
+        (generation) =>
+          generation.generateThreadTitle({
+            cwd: process.cwd(),
+            message: "Task seed",
+            modelSelection: DEFAULT_TEST_MODEL_SELECTION,
+          }),
+      );
+      expect(generated.title).toBe("Helper title");
+      expect(records).toBe(0);
+    }).pipe(Effect.provide(AuxiliaryUsageLive)),
+  );
+
   it.effect("generates and sanitizes commit messages without branch by default", () =>
     withFakeCodexCli(
       {
@@ -486,6 +569,24 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
           });
 
           expect(generated.branch).toBe("feat/session");
+        }),
+    ),
+  );
+
+  it.effect("generates and sanitizes both first-turn labels in one structured response", () =>
+    withFakeCodexSpawner(
+      {
+        output: JSON.stringify({ title: '  "Safer reconnect"  ', branch: "  Feat/Reconnect  " }),
+        stdinMustContain: "Return a JSON object with keys: title, branch.",
+      },
+      (textGeneration) =>
+        Effect.gen(function* () {
+          const generated = yield* textGeneration.generateThreadMetadata({
+            cwd: process.cwd(),
+            message: "Improve reconnect reliability",
+            modelSelection: DEFAULT_TEST_MODEL_SELECTION,
+          });
+          expect(generated).toEqual({ title: "Safer reconnect", branch: "feat/reconnect" });
         }),
     ),
   );

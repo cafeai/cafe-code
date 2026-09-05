@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { CircleAlertIcon, LoaderCircleIcon, RefreshCwIcon, WifiOffIcon } from "lucide-react";
+import type { EnvironmentId } from "@cafecode/contracts";
 
 import { cn } from "~/lib/utils";
 import {
@@ -7,10 +8,18 @@ import {
   useWsConnectionStatus,
   type WsConnectionStatus,
 } from "../../rpc/wsConnectionState";
-import { getPrimaryEnvironmentConnection } from "../../environments/runtime";
+import {
+  getPrimaryEnvironmentConnection,
+  reconnectSavedEnvironment,
+  useSavedEnvironmentRegistryStore,
+  useSavedEnvironmentRuntimeStore,
+} from "../../environments/runtime";
+import { usePrimaryEnvironmentId } from "../../environments/primary";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
-
-type ConnectionIssue = "reconnecting" | "offline" | "exhausted";
+import {
+  resolveSavedEnvironmentConnectionIssue,
+  type ConnectionIssue,
+} from "./ConnectionStatusIndicator.logic";
 
 // Mirror the precedence the toast surface used: offline (no network) wins over
 // an exhausted retry loop, which wins over an in-flight reconnect.
@@ -36,7 +45,10 @@ function getConnectionDisplayName(status: WsConnectionStatus): string {
 // not a real ceiling — focus/visibility/online events keep retrying past it, so
 // the count climbs until the socket actually reconnects.
 function formatAttemptCount(status: WsConnectionStatus): string | null {
-  const count = status.reconnectAttemptCount;
+  return formatAttemptCountValue(status.reconnectAttemptCount);
+}
+
+function formatAttemptCountValue(count: number): string | null {
   if (count < 1) {
     return null;
   }
@@ -64,6 +76,11 @@ const ISSUE_VISUALS: Record<
     tone: "text-rose-600 dark:text-rose-500",
     icon: CircleAlertIcon,
   },
+  disconnected: {
+    label: "Disconnected",
+    tone: "text-muted-foreground",
+    icon: CircleAlertIcon,
+  },
 };
 
 /**
@@ -72,13 +89,32 @@ const ISSUE_VISUALS: Record<
  * countdown / attempt detail lives in a popover opened on hover (desktop) or
  * tap (mobile). Renders nothing while the socket is healthy.
  */
-export function ConnectionStatusIndicator({ className }: { readonly className?: string }) {
+export function ConnectionStatusIndicator({
+  environmentId,
+  className,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly className?: string;
+}) {
   const status = useWsConnectionStatus();
-  const issue = resolveConnectionIssue(status);
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const savedRuntime = useSavedEnvironmentRuntimeStore((state) => state.byId[environmentId]);
+  const savedEnvironment = useSavedEnvironmentRegistryStore((state) => state.byId[environmentId]);
+  const isPrimaryEnvironment = environmentId === primaryEnvironmentId;
+  const issue = isPrimaryEnvironment
+    ? resolveConnectionIssue(status)
+    : resolveSavedEnvironmentConnectionIssue({
+        runtime: savedRuntime,
+        browserOnline: status.online,
+      });
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const savedNextRetryAt = savedRuntime?.nextRetryAt ?? null;
 
   const isCountingDown =
-    issue === "reconnecting" && status.reconnectPhase === "waiting" && status.nextRetryAt !== null;
+    issue === "reconnecting" &&
+    (isPrimaryEnvironment
+      ? status.reconnectPhase === "waiting" && status.nextRetryAt !== null
+      : savedRuntime?.reconnectPhase === "waiting" && savedNextRetryAt !== null);
 
   useEffect(() => {
     if (!isCountingDown) {
@@ -87,7 +123,7 @@ export function ConnectionStatusIndicator({ className }: { readonly className?: 
     setNowMs(Date.now());
     const intervalId = window.setInterval(() => setNowMs(Date.now()), 1_000);
     return () => window.clearInterval(intervalId);
-  }, [isCountingDown, status.nextRetryAt]);
+  }, [isCountingDown, savedNextRetryAt, status.nextRetryAt]);
 
   if (issue === null) {
     return null;
@@ -95,14 +131,22 @@ export function ConnectionStatusIndicator({ className }: { readonly className?: 
 
   const visual = ISSUE_VISUALS[issue];
   const Icon = visual.icon;
-  const attemptLabel = formatAttemptCount(status);
+  const attemptLabel = isPrimaryEnvironment
+    ? formatAttemptCount(status)
+    : formatAttemptCountValue(savedRuntime?.reconnectAttemptCount ?? 0);
+  const connectionDisplayName = isPrimaryEnvironment
+    ? getConnectionDisplayName(status)
+    : savedEnvironment?.label.trim() || "Saved Cafe Code Server";
+  const nextRetryAt = isPrimaryEnvironment ? status.nextRetryAt : savedNextRetryAt;
+  const lastError = isPrimaryEnvironment ? status.lastError : (savedRuntime?.lastError ?? null);
 
   const handleRetry = () => {
-    void getPrimaryEnvironmentConnection()
-      .reconnect()
-      .catch((error) => {
-        console.warn("Manual WebSocket reconnect failed", { error });
-      });
+    const retry = isPrimaryEnvironment
+      ? getPrimaryEnvironmentConnection().reconnect()
+      : reconnectSavedEnvironment(environmentId);
+    void retry.catch((error) => {
+      console.warn("Manual WebSocket reconnect failed", { error });
+    });
   };
 
   return (
@@ -134,9 +178,7 @@ export function ConnectionStatusIndicator({ className }: { readonly className?: 
       >
         <div className="space-y-1.5 leading-tight">
           <div className="text-[12px] font-medium text-foreground">
-            {issue === "offline"
-              ? "Offline"
-              : `Disconnected from ${getConnectionDisplayName(status)}`}
+            {issue === "offline" ? "Offline" : `Disconnected from ${connectionDisplayName}`}
           </div>
           <div className="space-y-0.5 text-[11px] text-muted-foreground">
             {issue === "offline" ? (
@@ -144,22 +186,24 @@ export function ConnectionStatusIndicator({ className }: { readonly className?: 
             ) : issue === "exhausted" ? (
               <div>
                 {attemptLabel
-                  ? `Backoff stopped after ${attemptLabel} — retrying on activity.`
+                  ? isPrimaryEnvironment
+                    ? `Backoff stopped after ${attemptLabel} — retrying on activity.`
+                    : `Retries exhausted after ${attemptLabel}.`
                   : "Retries exhausted trying to reconnect."}
               </div>
+            ) : issue === "disconnected" ? (
+              <div>This connection is inactive.</div>
             ) : (
               <>
                 <div>
-                  {status.nextRetryAt === null
+                  {nextRetryAt === null
                     ? "Reconnecting now…"
-                    : `Next attempt in ${formatRetryCountdown(status.nextRetryAt, nowMs)}`}
+                    : `Next attempt in ${formatRetryCountdown(nextRetryAt, nowMs)}`}
                 </div>
                 {attemptLabel ? <div>{attemptLabel}</div> : null}
               </>
             )}
-            {status.lastError ? (
-              <div className="text-muted-foreground/80">{status.lastError}</div>
-            ) : null}
+            {lastError ? <div className="text-muted-foreground/80">{lastError}</div> : null}
           </div>
           {issue !== "offline" ? (
             <button

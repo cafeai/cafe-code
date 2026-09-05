@@ -9,8 +9,10 @@ import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstab
 
 import { ServerAuth } from "../auth/Services/ServerAuth.ts";
 import { normalizeDispatchCommand } from "./Normalizer.ts";
+import { dispatchProviderNativeThreadFork } from "./threadFork.ts";
 import { OrchestrationEngineService } from "./Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
+import { ProviderService } from "../provider/Services/ProviderService.ts";
 
 const respondToOrchestrationHttpError = (
   error: OrchestrationDispatchCommandError | OrchestrationGetSnapshotError,
@@ -69,6 +71,8 @@ export const orchestrationDispatchRouteLayer = HttpRouter.add(
   Effect.gen(function* () {
     yield* authenticateOwnerSession;
     const orchestrationEngine = yield* OrchestrationEngineService;
+    const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
+    const providerService = yield* ProviderService;
     const command = yield* HttpServerRequest.schemaBodyJson(ClientOrchestrationCommand).pipe(
       Effect.mapError(
         (cause) =>
@@ -79,7 +83,16 @@ export const orchestrationDispatchRouteLayer = HttpRouter.add(
       ),
     );
     const normalizedCommand = yield* normalizeDispatchCommand(command);
-    const result = yield* orchestrationEngine.dispatch(normalizedCommand).pipe(
+    const dispatch =
+      normalizedCommand.type === "thread.fork"
+        ? dispatchProviderNativeThreadFork({
+            command: normalizedCommand,
+            orchestrationEngine,
+            projectionSnapshotQuery,
+            providerService,
+          })
+        : orchestrationEngine.dispatch(normalizedCommand);
+    const result = yield* dispatch.pipe(
       Effect.mapError(
         (cause) =>
           new OrchestrationDispatchCommandError({

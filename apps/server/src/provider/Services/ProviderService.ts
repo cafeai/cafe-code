@@ -17,14 +17,24 @@ import type {
   ProviderInstanceId,
   ProviderRespondToRequestInput,
   ProviderRespondToUserInputInput,
+  ProviderSnoozeUserInputInput,
   ProviderRuntimeEvent,
   ProviderSendTurnInput,
   ProviderSession,
+  ProviderSessionForkDiscardInput,
+  ProviderSessionForkInput,
+  ProviderSessionForkResult,
   ProviderSessionStartInput,
+  ProviderThreadGoal,
+  ProviderThreadGoalClearInput,
+  ProviderThreadGoalClearResult,
+  ProviderThreadGoalGetInput,
+  ProviderThreadGoalSetInput,
   ServerProviderRuntimeRestartInput,
   ProviderSteerTurnInput,
   ProviderStopSessionInput,
   ThreadId,
+  TurnId,
   ProviderTurnSteerResult,
   ProviderTurnStartResult,
 } from "@cafecode/contracts";
@@ -33,13 +43,22 @@ import type * as Effect from "effect/Effect";
 import type * as Stream from "effect/Stream";
 
 import type { ProviderServiceError } from "../Errors.ts";
-import type { ProviderAdapterCapabilities, ProviderThreadSnapshot } from "./ProviderAdapter.ts";
+import type {
+  ProviderAdapterCapabilities,
+  ProviderSubagentDetail,
+  ProviderThreadSnapshot,
+} from "./ProviderAdapter.ts";
 import type { ProviderInstanceRoutingInfo } from "./ProviderAdapterRegistry.ts";
 
 export interface ProviderThreadReadResult {
   readonly provider: ProviderDriverKind;
   readonly providerInstanceId: ProviderInstanceId;
   readonly snapshot: ProviderThreadSnapshot;
+}
+
+export interface ProviderSubagentDetailReadResult extends ProviderSubagentDetail {
+  readonly provider: ProviderDriverKind;
+  readonly providerInstanceId: ProviderInstanceId;
 }
 
 /**
@@ -53,6 +72,16 @@ export interface ProviderServiceShape {
     threadId: ThreadId,
     input: ProviderSessionStartInput,
   ) => Effect.Effect<ProviderSession, ProviderServiceError>;
+
+  /** Persistently fork one Codex/Claude conversation into a new Cafe thread id. */
+  readonly forkSession: (
+    input: ProviderSessionForkInput,
+  ) => Effect.Effect<ProviderSessionForkResult, ProviderServiceError>;
+
+  /** Compensate a successful provider fork whose Cafe domain commit failed. */
+  readonly discardSessionFork: (
+    input: ProviderSessionForkDiscardInput,
+  ) => Effect.Effect<void, ProviderServiceError>;
 
   /**
    * Send a provider turn.
@@ -89,10 +118,29 @@ export interface ProviderServiceShape {
     input: ProviderRespondToUserInputInput,
   ) => Effect.Effect<void, ProviderServiceError>;
 
+  /** Disable automatic resolution for one provider user-input request. */
+  readonly snoozeUserInput: (
+    input: ProviderSnoozeUserInputInput,
+  ) => Effect.Effect<void, ProviderServiceError>;
+
   /**
    * Stop a provider session.
    */
   readonly stopSession: (
+    input: ProviderStopSessionInput,
+  ) => Effect.Effect<void, ProviderServiceError>;
+
+  /**
+   * Permanently retire every provider session for one Cafe thread.
+   *
+   * This is stronger than a normal Stop. The implementation first fences the
+   * thread against new provider mutations and runtime-event persistence, then
+   * stops every configured adapter that still owns the thread. The hard-delete
+   * transport must await this boundary (and downstream runtime ingestion)
+   * before removing persistence so a delayed lifecycle event cannot resurrect
+   * rows after the delete transaction commits.
+   */
+  readonly quiesceThreadForHardDelete: (
     input: ProviderStopSessionInput,
   ) => Effect.Effect<void, ProviderServiceError>;
 
@@ -132,6 +180,27 @@ export interface ProviderServiceShape {
   ) => Effect.Effect<ProviderInstanceRoutingInfo, ProviderServiceError>;
 
   /**
+   * Read a provider-owned durable goal for a Cafe thread.
+   */
+  readonly getGoal?: (
+    input: ProviderThreadGoalGetInput,
+  ) => Effect.Effect<ProviderThreadGoal | null, ProviderServiceError>;
+
+  /**
+   * Create or update a provider-owned durable goal.
+   */
+  readonly setGoal?: (
+    input: ProviderThreadGoalSetInput,
+  ) => Effect.Effect<ProviderThreadGoal, ProviderServiceError>;
+
+  /**
+   * Clear a provider-owned durable goal.
+   */
+  readonly clearGoal?: (
+    input: ProviderThreadGoalClearInput,
+  ) => Effect.Effect<ProviderThreadGoalClearResult, ProviderServiceError>;
+
+  /**
    * Read provider-owned thread history for the selected Cafe thread.
    *
    * The call routes through the configured provider adapter, so Codex/OpenAI
@@ -141,6 +210,18 @@ export interface ProviderServiceShape {
   readonly readThread?: (input: {
     readonly threadId: ThreadId;
   }) => Effect.Effect<ProviderThreadReadResult, ProviderServiceError>;
+
+  /**
+   * Read a provider-verified child thread through its root Cafe session.
+   * The adapter returns public conversation text only; provider-native rollout
+   * objects are never exposed by this service.
+   */
+  readonly readSubagentDetail: (input: {
+    readonly threadId: ThreadId;
+    readonly turnId: TurnId;
+    readonly subagentId: string;
+    readonly historyId?: string;
+  }) => Effect.Effect<ProviderSubagentDetailReadResult, ProviderServiceError>;
 
   /**
    * Roll back provider conversation state by a number of turns.

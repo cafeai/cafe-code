@@ -20,7 +20,11 @@ import type {
   ScopedProjectRef,
   ScopedThreadRef,
 } from "@cafecode/contracts";
-import { isProviderDriverKind, ProviderDriverKind } from "@cafecode/contracts";
+import {
+  isProviderDriverKind,
+  MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN,
+  ProviderDriverKind,
+} from "@cafecode/contracts";
 import type { ThreadId, TurnId } from "@cafecode/contracts";
 import * as Schema from "effect/Schema";
 import { resolveModelSlugForProvider } from "@cafecode/shared/model";
@@ -275,6 +279,7 @@ function mapThread(thread: OrchestrationThread, environmentId: EnvironmentId): T
     worktreePath: thread.worktreePath,
     turnDiffSummaries: thread.checkpoints.map(mapTurnDiffSummary),
     activities: thread.activities.map((activity) => ({ ...activity })),
+    goal: thread.goal ?? null,
   };
 }
 
@@ -418,6 +423,10 @@ function cloneThreadContextForDuplicate(input: {
     pendingSourceProposedPlan: latestTurn?.sourceProposedPlan,
     session: null,
     error: null,
+    // A duplicate carries visible conversation context into a fresh provider
+    // session. Provider-owned goal continuation state must never cross that
+    // new session boundary.
+    goal: null,
     messages: sourceThread.messages.map((message) => ({
       ...message,
       id: copiedThreadScopedId(targetThread.id, message.id) as MessageId,
@@ -1076,6 +1085,85 @@ function compareActivities(
   }
 
   return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
+}
+
+function structuredSubagentLifecycleKeys(
+  activity: OrchestrationThreadActivity,
+  currentTurnId: TurnId | null | undefined,
+): { identity: string; lifecycle: string } | undefined {
+  if (
+    activity.turnId === null ||
+    activity.turnId !== currentTurnId ||
+    (activity.kind !== "task.started" &&
+      activity.kind !== "task.progress" &&
+      activity.kind !== "task.completed")
+  ) {
+    return undefined;
+  }
+  const payload =
+    typeof activity.payload === "object" &&
+    activity.payload !== null &&
+    !Array.isArray(activity.payload)
+      ? (activity.payload as Record<string, unknown>)
+      : null;
+  const subagent =
+    typeof payload?.subagent === "object" &&
+    payload.subagent !== null &&
+    !Array.isArray(payload.subagent)
+      ? (payload.subagent as Record<string, unknown>)
+      : null;
+  const identity = typeof subagent?.threadId === "string" ? subagent.threadId.trim() : "";
+  if (identity.length === 0 || identity.length > 512) return undefined;
+  return {
+    identity: JSON.stringify([activity.turnId, identity]),
+    lifecycle: JSON.stringify([activity.turnId, identity, activity.kind]),
+  };
+}
+
+/**
+ * Retain the ordinary bounded tail plus the minimum durable state needed by
+ * compact, current-turn renderer projections.
+ *
+ * A subagent may stay silent while hundreds of unrelated tool rows arrive. If
+ * its lifecycle edges were treated like ordinary history, it would disappear
+ * from chat/Atrium before it finished. Keeping the latest start, progress, and
+ * terminal edge per current-turn identity reconstructs restarts and rejects a
+ * delayed post-terminal progress replay without making the full activity
+ * history unbounded. The latest plan snapshot follows the same established
+ * compact-retention rule.
+ */
+function retainThreadActivityWindow(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+  currentTurnId: TurnId | null | undefined,
+): OrchestrationThreadActivity[] {
+  const byId = new Map<string, OrchestrationThreadActivity>();
+  for (const activity of activities) byId.set(activity.id, activity);
+  const ordered = [...byId.values()].toSorted(compareActivities);
+  const retainedIds = new Set(ordered.slice(-MAX_THREAD_ACTIVITIES).map((activity) => activity.id));
+
+  const latestPlan = ordered.findLast((activity) => activity.kind === "turn.plan.updated");
+  if (latestPlan) retainedIds.add(latestPlan.id);
+
+  const retainedSubagentIdentities = new Set<string>();
+  const latestSubagentLifecycleByKey = new Map<string, OrchestrationThreadActivity>();
+  // Walk newest-first so an adversarial stream of unique ids cannot make the
+  // compact exception unbounded. Once the identity ceiling is reached, older
+  // identities fall back to the ordinary 500-row activity tail.
+  for (let index = ordered.length - 1; index >= 0; index -= 1) {
+    const activity = ordered[index]!;
+    const keys = structuredSubagentLifecycleKeys(activity, currentTurnId);
+    if (!keys) continue;
+    if (!retainedSubagentIdentities.has(keys.identity)) {
+      if (retainedSubagentIdentities.size >= MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN) continue;
+      retainedSubagentIdentities.add(keys.identity);
+    }
+    if (!latestSubagentLifecycleByKey.has(keys.lifecycle)) {
+      latestSubagentLifecycleByKey.set(keys.lifecycle, activity);
+    }
+  }
+  for (const activity of latestSubagentLifecycleByKey.values()) retainedIds.add(activity.id);
+
+  return ordered.filter((activity) => retainedIds.has(activity.id));
 }
 
 function buildLatestTurn(params: {
@@ -1741,6 +1829,7 @@ function applyEnvironmentOrchestrationEvent(
           activities: [],
           checkpoints: [],
           session: null,
+          goal: null,
         },
         environmentId,
       );
@@ -1777,6 +1866,41 @@ function applyEnvironmentOrchestrationEvent(
               (plan) => plan.implementedAt === null,
             ),
             updatedAt: event.payload.duplicatedAt,
+          },
+        },
+      };
+    }
+
+    case "thread.forked": {
+      const sourceThread = getThreadFromEnvironmentState(state, event.payload.sourceThreadId);
+      const targetThread = getThreadFromEnvironmentState(state, event.payload.targetThreadId);
+      const targetSummary = state.sidebarThreadSummaryById[event.payload.targetThreadId];
+      if (!sourceThread || !targetThread || !targetSummary) {
+        return state;
+      }
+      const nextThread = cloneThreadContextForDuplicate({
+        sourceThread,
+        targetThread,
+        duplicatedAt: event.payload.forkedAt,
+      });
+      const nextState = writeThreadState(state, nextThread, targetThread);
+      return {
+        ...nextState,
+        sidebarThreadSummaryById: {
+          ...nextState.sidebarThreadSummaryById,
+          [nextThread.id]: {
+            ...targetSummary,
+            session: null,
+            latestTurn: nextThread.latestTurn,
+            latestUserMessageAt:
+              sourceThread.messages.findLast((message) => message.role === "user")?.createdAt ??
+              null,
+            hasPendingApprovals: false,
+            hasPendingUserInput: false,
+            hasActionableProposedPlan: sourceThread.proposedPlans.some(
+              (plan) => plan.implementedAt === null,
+            ),
+            updatedAt: event.payload.forkedAt,
           },
         },
       };
@@ -1853,6 +1977,13 @@ function applyEnvironmentOrchestrationEvent(
         ...thread,
         interactionMode: event.payload.interactionMode,
         updatedAt: event.payload.updatedAt,
+      }));
+
+    case "thread.goal-synced":
+      return updateThreadState(state, event.payload.threadId, (thread) => ({
+        ...thread,
+        goal: event.payload.goal,
+        updatedAt: event.occurredAt,
       }));
 
     case "thread.turn-start-requested":
@@ -2127,12 +2258,13 @@ function applyEnvironmentOrchestrationEvent(
 
     case "thread.activity-appended":
       return updateThreadState(state, event.payload.threadId, (thread) => {
-        const activities = [
-          ...thread.activities.filter((activity) => activity.id !== event.payload.activity.id),
-          { ...event.payload.activity },
-        ]
-          .toSorted(compareActivities)
-          .slice(-MAX_THREAD_ACTIVITIES);
+        const activities = retainThreadActivityWindow(
+          [
+            ...thread.activities.filter((activity) => activity.id !== event.payload.activity.id),
+            { ...event.payload.activity },
+          ],
+          thread.latestTurn?.turnId ?? event.payload.activity.turnId,
+        );
         const latestTurn =
           event.payload.activity.turnId !== null &&
           thread.latestTurn?.turnId === event.payload.activity.turnId &&
@@ -2391,6 +2523,28 @@ export function selectThreadExistsByRef(
     : false;
 }
 
+/**
+ * Reports whether the per-thread detail stream has materialized its first
+ * complete snapshot for this thread.
+ *
+ * The shell stream deliberately never writes `messageIdsByThreadId`, while
+ * `writeThreadState` always materializes that entry for a detail snapshot,
+ * including a conclusively empty one. Checking property ownership therefore
+ * distinguishes "history is still loading" from "this thread has no
+ * messages" without guessing from elapsed time or session status.
+ */
+export function selectThreadDetailHydratedByRef(
+  state: AppState,
+  ref: ScopedThreadRef | null | undefined,
+): boolean {
+  if (!ref) {
+    return false;
+  }
+
+  const environmentState = selectEnvironmentState(state, ref.environmentId);
+  return Object.hasOwn(environmentState.messageIdsByThreadId, ref.threadId);
+}
+
 export function selectSidebarThreadSummaryByRef(
   state: AppState,
   ref: ScopedThreadRef | null | undefined,
@@ -2410,20 +2564,20 @@ export function selectThreadIdsByProjectRef(
     : EMPTY_THREAD_IDS;
 }
 
-export function setError(state: AppState, threadId: ThreadId, error: string | null): AppState {
-  if (state.activeEnvironmentId === null) {
-    return state;
-  }
-
+export function setError(
+  state: AppState,
+  threadRef: ScopedThreadRef,
+  error: string | null,
+): AppState {
   const nextEnvironmentState = updateThreadState(
-    getStoredEnvironmentState(state, state.activeEnvironmentId),
-    threadId,
+    getStoredEnvironmentState(state, threadRef.environmentId),
+    threadRef.threadId,
     (thread) => {
       if (thread.error === error) return thread;
       return { ...thread, error };
     },
   );
-  return commitEnvironmentState(state, state.activeEnvironmentId, nextEnvironmentState);
+  return commitEnvironmentState(state, threadRef.environmentId, nextEnvironmentState);
 }
 
 export function applyOrchestrationEvent(
@@ -2520,7 +2674,7 @@ interface AppStore extends AppState {
     environmentId: EnvironmentId,
   ) => void;
   applyShellEvent: (event: OrchestrationShellStreamEvent, environmentId: EnvironmentId) => void;
-  setError: (threadId: ThreadId, error: string | null) => void;
+  setError: (threadRef: ScopedThreadRef, error: string | null) => void;
   setThreadBranch: (
     threadRef: ScopedThreadRef,
     branch: string | null,
@@ -2544,7 +2698,7 @@ export const useStore = create<AppStore>((set) => ({
     set((state) => applyOrchestrationEvents(state, events, environmentId)),
   applyShellEvent: (event, environmentId) =>
     set((state) => applyShellEvent(state, event, environmentId)),
-  setError: (threadId, error) => set((state) => setError(state, threadId, error)),
+  setError: (threadRef, error) => set((state) => setError(state, threadRef, error)),
   setThreadBranch: (threadRef, branch, worktreePath) =>
     set((state) => setThreadBranch(state, threadRef, branch, worktreePath)),
 }));

@@ -1323,3 +1323,337 @@ label:has(> select#reasoning-effort) select {
     outline-color 260ms ease !important;
   transition-delay: 0s !important;
 }
+
+/* ── Ambiance (decorative weather layer) ─────────────────────────────
+   Settings-tab tile previews and the composer frame ring. The live weather
+   itself is canvas-drawn by src/ambiance/; these styles only cover the CSS
+   side: tiny looping effect previews (ported from the approved mockup) and
+   the state-colored composer ring fed by CSS variables that AmbianceLayer
+   maintains (--cafe-ambiance-state-color / --cafe-ambiance-composer-ring). */
+
+@keyframes cafe-ambiance-fall {
+  to {
+    transform: translateY(30%);
+  }
+}
+
+@keyframes cafe-ambiance-rise {
+  to {
+    transform: translateY(-30%);
+  }
+}
+
+@keyframes cafe-ambiance-drift {
+  to {
+    transform: translate3d(-12px, -8px, 0);
+  }
+}
+
+@keyframes cafe-ambiance-flicker {
+  from {
+    opacity: 0.55;
+    transform: scaleY(0.88);
+  }
+
+  to {
+    opacity: 0.9;
+    transform: scaleY(1.06);
+  }
+}
+
+.cafe-ambiance-preview {
+  position: relative;
+  overflow: hidden;
+  /* Night-sky thumbnail in both themes so low-alpha particles stay legible. */
+  background: #08080a;
+}
+
+.cafe-ambiance-preview::before,
+.cafe-ambiance-preview::after {
+  position: absolute;
+  inset: -30%;
+  pointer-events: none;
+}
+
+.cafe-ambiance-preview::before {
+  content: "";
+}
+
+.cafe-ambiance-preview-rain::before {
+  background-image: repeating-linear-gradient(
+    105deg,
+    transparent 0 5px,
+    color-mix(in srgb, var(--cafe-ambiance-accent, var(--cafe-sidebar-accent)) 55%, transparent) 5px
+      6px
+  );
+  animation: cafe-ambiance-fall 0.7s linear infinite;
+}
+
+.cafe-ambiance-preview-snow::before {
+  background-image:
+    radial-gradient(circle at 4px 4px, rgba(255, 255, 255, 0.75) 0 1.4px, transparent 2px),
+    radial-gradient(circle at 9px 12px, rgba(255, 255, 255, 0.3) 0 0.9px, transparent 1.3px);
+  background-size:
+    19px 21px,
+    11px 13px;
+  animation: cafe-ambiance-fall 3.4s linear infinite;
+}
+
+.cafe-ambiance-preview-matrix::before {
+  background-image: repeating-linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--cafe-ambiance-accent, var(--cafe-sidebar-accent)) 60%, transparent) 0
+      3px,
+    transparent 3px 9px
+  );
+  background-size: 6px 22px;
+  animation: cafe-ambiance-fall 1.1s steps(6) infinite;
+}
+
+.cafe-ambiance-preview-fire::before {
+  inset: 18% -10% -55%;
+  background: radial-gradient(
+    ellipse at 50% 100%,
+    #ff7a1f 0%,
+    rgba(255, 61, 0, 0.45) 34%,
+    transparent 68%
+  );
+  filter: blur(3px);
+  animation: cafe-ambiance-flicker 1.3s ease-in-out infinite alternate;
+}
+
+.cafe-ambiance-preview-fire::after {
+  content: "";
+  background-image: radial-gradient(circle at 5px 5px, #ffb347 0 1.1px, transparent 1.7px);
+  background-size: 14px 16px;
+  animation: cafe-ambiance-rise 2.2s linear infinite;
+}
+
+.cafe-ambiance-preview-stars::before {
+  background-image:
+    radial-gradient(circle at 6px 8px, rgba(255, 255, 255, 0.7) 0 1px, transparent 1.4px),
+    radial-gradient(
+      circle at 18px 3px,
+      color-mix(in srgb, var(--cafe-ambiance-accent, var(--cafe-sidebar-accent)) 70%, transparent) 0
+        1px,
+      transparent 1.5px
+    );
+  background-size:
+    26px 24px,
+    41px 33px;
+  animation: cafe-ambiance-drift 9s linear infinite;
+}
+
+/* Beads of condensation sitting on the pane, with two running trails. */
+.cafe-ambiance-preview-glass::before {
+  background-image:
+    radial-gradient(circle at 5px 6px, rgba(255, 255, 255, 0.55) 0 0.7px, transparent 1.1px),
+    radial-gradient(
+      circle at 6px 7px,
+      color-mix(in srgb, var(--cafe-ambiance-accent, var(--cafe-sidebar-accent)) 55%, transparent) 0
+        2.1px,
+      transparent 2.8px
+    ),
+    radial-gradient(
+      circle at 15px 17px,
+      color-mix(in srgb, var(--cafe-ambiance-accent, var(--cafe-sidebar-accent)) 40%, transparent) 0
+        1.2px,
+      transparent 1.8px
+    ),
+    linear-gradient(
+      180deg,
+      transparent 0 40%,
+      color-mix(in srgb, var(--cafe-ambiance-accent, var(--cafe-sidebar-accent)) 16%, transparent)
+        40% 41%,
+      transparent 41%
+    );
+  background-size:
+    17px 19px,
+    17px 19px,
+    23px 26px,
+    31px 100%;
+  animation: cafe-ambiance-fall 7s linear infinite;
+}
+
+/* A drifting node graph: dots plus the links between them. */
+.cafe-ambiance-preview-lattice::before {
+  background-image:
+    linear-gradient(
+      42deg,
+      transparent 0 49%,
+      color-mix(in srgb, var(--cafe-ambiance-accent, var(--cafe-sidebar-accent)) 26%, transparent)
+        49% 50%,
+      transparent 50%
+    ),
+    linear-gradient(
+      -38deg,
+      transparent 0 49%,
+      color-mix(in srgb, var(--cafe-ambiance-accent, var(--cafe-sidebar-accent)) 20%, transparent)
+        49% 50%,
+      transparent 50%
+    ),
+    radial-gradient(
+      circle at 7px 8px,
+      color-mix(in srgb, var(--cafe-ambiance-accent, var(--cafe-sidebar-accent)) 75%, transparent) 0
+        1.3px,
+      transparent 1.9px
+    );
+  background-size:
+    22px 20px,
+    26px 24px,
+    22px 20px;
+  animation: cafe-ambiance-drift 11s linear infinite;
+}
+
+/* Petals tumbling past a branch. */
+.cafe-ambiance-preview-blossom::before {
+  background-image:
+    radial-gradient(ellipse at 5px 6px, #f6cddb 0 1.6px, transparent 2.3px),
+    radial-gradient(ellipse at 14px 15px, #eab0c6 0 1.2px, transparent 1.8px),
+    radial-gradient(ellipse at 9px 20px, rgba(252, 233, 239, 0.7) 0 1px, transparent 1.5px);
+  background-size:
+    21px 24px,
+    29px 31px,
+    17px 27px;
+  animation: cafe-ambiance-fall 4.5s linear infinite;
+}
+.cafe-ambiance-preview-blossom::after {
+  content: "";
+  inset: 55% -10% -20%;
+  background: linear-gradient(96deg, transparent 0 8%, #4a3733 8% 13%, transparent 13%);
+  opacity: 0.85;
+}
+
+/* A single sweeping band of light over a faint dot lattice. */
+.cafe-ambiance-preview-aurora::before {
+  background:
+    radial-gradient(
+      120% 60% at 30% 45%,
+      color-mix(in srgb, var(--cafe-ambiance-accent, var(--cafe-sidebar-accent)) 70%, transparent) 0,
+      transparent 60%
+    ),
+    radial-gradient(90% 50% at 75% 62%, rgba(140, 120, 250, 0.5) 0, transparent 65%);
+  filter: blur(2px);
+  animation: cafe-ambiance-drift 8s ease-in-out infinite alternate;
+}
+
+/* Pulsing dot lattice. */
+.cafe-ambiance-preview-grid::before {
+  background-image: radial-gradient(
+    circle at 4px 4px,
+    color-mix(in srgb, var(--cafe-ambiance-accent, var(--cafe-sidebar-accent)) 65%, transparent) 0
+      1.1px,
+    transparent 1.7px
+  );
+  background-size: 9px 9px;
+  animation: cafe-ambiance-flicker 2.4s ease-in-out infinite alternate;
+}
+
+/* Aurora band hugging the bottom edge only. */
+.cafe-ambiance-preview-horizon::before {
+  inset: 40% -10% -25%;
+  background: radial-gradient(
+    ellipse at 50% 100%,
+    color-mix(in srgb, var(--cafe-ambiance-accent, var(--cafe-sidebar-accent)) 85%, transparent) 0%,
+    rgba(120, 105, 240, 0.4) 42%,
+    transparent 72%
+  );
+  filter: blur(3px);
+  animation: cafe-ambiance-flicker 2.8s ease-in-out infinite alternate;
+}
+
+/* Concentric standing waves on a struck plate. */
+.cafe-ambiance-preview-resonance::before {
+  background-image: repeating-radial-gradient(
+    circle at 50% 50%,
+    color-mix(in srgb, var(--cafe-ambiance-accent, var(--cafe-sidebar-accent)) 60%, transparent) 0
+      1px,
+    transparent 1px 6px
+  );
+  animation: cafe-ambiance-flicker 2s ease-in-out infinite alternate;
+}
+
+/* Filaments converging on a focus near the composer. */
+.cafe-ambiance-preview-converge::before {
+  background: repeating-conic-gradient(
+    from 0deg at 50% 92%,
+    color-mix(in srgb, var(--cafe-ambiance-accent, var(--cafe-sidebar-accent)) 55%, transparent)
+      0deg 3deg,
+    transparent 3deg 22deg
+  );
+  filter: blur(1px);
+  animation: cafe-ambiance-flicker 2.6s ease-in-out infinite alternate;
+}
+
+/* A volumetric blade with fog either side. */
+.cafe-ambiance-preview-beam::before {
+  background:
+    linear-gradient(
+      92deg,
+      transparent 0 47%,
+      color-mix(in srgb, var(--cafe-ambiance-accent, var(--cafe-sidebar-accent)) 95%, white) 49% 51%,
+      transparent 53%
+    ),
+    radial-gradient(
+      40% 90% at 50% 50%,
+      color-mix(in srgb, var(--cafe-ambiance-accent, var(--cafe-sidebar-accent)) 35%, transparent) 0,
+      transparent 70%
+    );
+  filter: blur(0.6px);
+  animation: cafe-ambiance-flicker 3s ease-in-out infinite alternate;
+}
+
+/* Curved glass with scanlines and rows of type. */
+.cafe-ambiance-preview-terminal::before {
+  background-image:
+    repeating-linear-gradient(180deg, rgba(0, 0, 0, 0.55) 0 1px, transparent 1px 3px),
+    repeating-linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--cafe-ambiance-accent, var(--cafe-sidebar-accent)) 70%, transparent) 0
+        2px,
+      transparent 2px 5px
+    );
+  background-size:
+    100% 3px,
+    26px 7px;
+  animation: cafe-ambiance-fall 5s steps(9) infinite;
+}
+
+/* A glowing sphere of smoke. */
+.cafe-ambiance-preview-core::before {
+  background: radial-gradient(
+    circle at 50% 50%,
+    white 0 4%,
+    color-mix(in srgb, var(--cafe-ambiance-accent, var(--cafe-sidebar-accent)) 80%, transparent) 12%,
+    color-mix(in srgb, var(--cafe-ambiance-accent, var(--cafe-sidebar-accent)) 30%, transparent) 21%,
+    transparent 30%
+  );
+  animation: cafe-ambiance-flicker 3.2s ease-in-out infinite alternate;
+}
+
+/* Composer frame ring: the 1px padding area of the composer frame carries a
+   state-colored gradient while the ambiance composer surface is enabled.
+   AmbianceLayer owns the variable; when it is absent the frame stays
+   transparent exactly like the default composer. */
+.cafe-ambiance-composer-frame {
+  background: var(--cafe-ambiance-composer-ring, transparent);
+  transition: background 400ms ease;
+}
+
+html[data-cafe-background-animations="paused"][data-cafe-visibility="hidden"]
+  .cafe-ambiance-preview::before,
+html[data-cafe-background-animations="paused"][data-cafe-visibility="hidden"]
+  .cafe-ambiance-preview::after,
+html[data-cafe-background-animations="paused"][data-cafe-window-focus="blurred"]
+  .cafe-ambiance-preview::before,
+html[data-cafe-background-animations="paused"][data-cafe-window-focus="blurred"]
+  .cafe-ambiance-preview::after {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cafe-ambiance-preview::before,
+  .cafe-ambiance-preview::after {
+    animation: none;
+  }
+}

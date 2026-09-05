@@ -208,6 +208,51 @@ describe("FollowUpQueueShelf", () => {
     }
   });
 
+  it("shows a provider-rejected live steer as a preserved queued follow-up", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+
+    const screen = await render(
+      <FollowUpQueueShelf
+        items={[
+          {
+            id: "queued-provider-rejection",
+            preview: "wrap it up quickly",
+            promptText: "wrap it up quickly",
+            images: [],
+            queuedAt: "2026-08-16T19:44:41.000Z",
+            expanded: false,
+            canExpand: false,
+            blockedReason: null,
+            automaticSteerRetry: {
+              nonSteerableTurnKind: null,
+            },
+          },
+        ]}
+        actionLabel="Send"
+        actionTitle="Cafe Code will send this follow-up as soon as the active turn can accept it."
+        onToggleExpanded={vi.fn()}
+        onAction={vi.fn()}
+        onRemove={vi.fn()}
+        onClear={vi.fn()}
+        onExpandImage={vi.fn()}
+      />,
+      { container: host },
+    );
+
+    try {
+      expect(document.body.textContent ?? "").toContain("1 follow-up requeued");
+      expect(document.body.textContent ?? "").toContain("Requeued");
+      await expect
+        .element(page.getByLabelText("Follow-up requeued after provider steer rejection"))
+        .toBeInTheDocument();
+      await expect.element(page.getByText("Send")).not.toBeInTheDocument();
+    } finally {
+      await screen.unmount();
+      host.remove();
+    }
+  });
+
   it("exposes expansion and image previews for queued attachments", async () => {
     const onToggleExpanded = vi.fn();
     const onExpandImage = vi.fn();

@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "include": ["src/**/*.ts", "scripts/**/*.ts", "test/**/*.ts"],
+  "compilerOptions": {
+    "rootDir": ".",
+    "tsBuildInfoFile": "node_modules/.cache/tsconfig.tsbuildinfo",
+    "plugins": [{ "name": "@effect/language-service" }]
+  }
+}

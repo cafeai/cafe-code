@@ -53,10 +53,12 @@ function PopoverArrow({ className, ...props }: PopoverPrimitive.Arrow.Props) {
 function PopoverPopup({
   children,
   className,
+  viewportClassName,
   side = "bottom",
   align = "center",
   sideOffset = 4,
   alignOffset = 0,
+  collisionAvoidance,
   tooltipStyle = false,
   anchor,
   arrow = false,
@@ -66,9 +68,17 @@ function PopoverPopup({
   align?: PopoverPrimitive.Positioner.Props["align"];
   sideOffset?: PopoverPrimitive.Positioner.Props["sideOffset"];
   alignOffset?: PopoverPrimitive.Positioner.Props["alignOffset"];
+  collisionAvoidance?: PopoverPrimitive.Positioner.Props["collisionAvoidance"];
   tooltipStyle?: boolean;
   anchor?: PopoverPrimitive.Positioner.Props["anchor"];
   arrow?: boolean;
+  /**
+   * Lets a composed popover nominate an internal scroll owner without reaching
+   * through the popup with a brittle descendant selector. Most popovers keep
+   * the viewport's default scrolling; complex popovers can opt out when a
+   * purpose-built child region already owns overflow.
+   */
+  viewportClassName?: string;
 }) {
   return (
     <PopoverPrimitive.Portal>
@@ -76,6 +86,7 @@ function PopoverPopup({
         align={align}
         alignOffset={alignOffset}
         anchor={anchor}
+        collisionAvoidance={collisionAvoidance}
         className="z-50 h-(--positioner-height) w-(--positioner-width) max-w-(--available-width) transition-[top,left,right,bottom,transform] data-instant:transition-none"
         data-slot="popover-positioner"
         side={side}
@@ -98,6 +109,7 @@ function PopoverPopup({
               tooltipStyle
                 ? "py-1 [--viewport-inline-padding:--spacing(2)]"
                 : "not-data-transitioning:overflow-y-auto",
+              viewportClassName,
             )}
             data-slot="popover-viewport"
           >

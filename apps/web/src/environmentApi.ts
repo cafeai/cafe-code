@@ -21,7 +21,6 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
     vcs: {
       pull: rpcClient.vcs.pull,
       refreshStatus: rpcClient.vcs.refreshStatus,
-      workingTreeDiff: rpcClient.vcs.workingTreeDiff,
       onStatus: (input, callback, options) => rpcClient.vcs.onStatus(input, callback, options),
       listRefs: rpcClient.vcs.listRefs,
       createWorktree: rpcClient.vcs.createWorktree,
@@ -39,6 +38,7 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       getArchivedShellSnapshot: rpcClient.orchestration.getArchivedShellSnapshot,
       getDeletedShellSnapshot: rpcClient.orchestration.getDeletedShellSnapshot,
       getThreadTurnActivityPage: rpcClient.orchestration.getThreadTurnActivityPage,
+      getThreadTurnSubagentDetail: rpcClient.orchestration.getThreadTurnSubagentDetail,
       getThreadTurnWorkLogPresence: rpcClient.orchestration.getThreadTurnWorkLogPresence,
       hardDeleteThread: rpcClient.orchestration.hardDeleteThread,
       repairAssistantMessageFromProviderJournal:

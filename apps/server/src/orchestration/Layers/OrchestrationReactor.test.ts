@@ -35,6 +35,8 @@ describe("OrchestrationReactor", () => {
               return Effect.void;
             },
             drain: Effect.void,
+            retireThreadForHardDelete: () => Effect.void,
+            completeThreadHardDelete: () => Effect.void,
           }),
         ),
         Layer.provideMerge(

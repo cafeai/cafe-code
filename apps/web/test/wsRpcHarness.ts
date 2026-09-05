@@ -17,7 +17,25 @@ export type NormalizedWsRpcRequestBody = {
   [key: string]: unknown;
 };
 
-type UnaryResolverResult = unknown | Promise<unknown>;
+/**
+ * Explicit typed-failure wrapper for browser RPC tests. Rejected promises are
+ * defects from Effect's point of view and can terminate the test WebSocket;
+ * production handlers instead fail with the error schema declared by the RPC.
+ * This wrapper lets a fixture exercise that real rejection path without
+ * weakening the harness or conflating transport loss with an application
+ * error.
+ */
+export class BrowserWsRpcFailure {
+  readonly _tag = "BrowserWsRpcFailure";
+
+  constructor(readonly error: unknown) {}
+}
+
+export function failBrowserWsRpc(error: unknown): BrowserWsRpcFailure {
+  return new BrowserWsRpcFailure(error);
+}
+
+type UnaryResolverResult = unknown | Promise<unknown> | BrowserWsRpcFailure;
 
 interface BrowserWsRpcHarnessOptions {
   readonly resolveUnary?: (request: NormalizedWsRpcRequestBody) => UnaryResolverResult;
@@ -46,7 +64,10 @@ function normalizeRequest(tag: string, payload: unknown): NormalizedWsRpcRequest
   return { _tag: tag, payload };
 }
 
-function asEffect(result: UnaryResolverResult): Effect.Effect<unknown> {
+function asEffect(result: UnaryResolverResult): Effect.Effect<unknown, unknown> {
+  if (result instanceof BrowserWsRpcFailure) {
+    return Effect.fail(result.error);
+  }
   if (result instanceof Promise) {
     return Effect.promise(() => result);
   }

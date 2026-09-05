@@ -26,7 +26,11 @@ import {
 } from "@cafecode/contracts";
 
 import { cn } from "../../lib/utils";
-import { formatCodexRateLimitSummary } from "../../lib/codexRateLimits";
+import {
+  formatCodexRateLimitResetAvailability,
+  formatCodexRateLimitSummary,
+  shouldSurfaceProviderAccountRateLimits,
+} from "../../lib/codexRateLimits";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { normalizeProviderAccentColor } from "../../providerInstances";
 import { Badge } from "../ui/badge";
@@ -742,11 +746,9 @@ export function ProviderInstanceCard({
   const authenticatedDetail = hasAuthenticatedEmail
     ? (liveProvider?.auth.label ?? liveProvider?.auth.type ?? null)
     : null;
-  const codexRateLimitSummary =
-    (liveProvider?.driver === "codex" || liveProvider?.driver === "claudeAgent") &&
-    liveProvider.auth.status === "authenticated"
-      ? formatCodexRateLimitSummary(liveProvider.accountRateLimits)
-      : null;
+  const codexRateLimitSummary = shouldSurfaceProviderAccountRateLimits(liveProvider)
+    ? formatCodexRateLimitSummary(liveProvider?.accountRateLimits)
+    : null;
   const codexRateLimitWindowText = codexRateLimitSummary
     ? [codexRateLimitSummary.primary?.text, codexRateLimitSummary.secondary?.text]
         .filter((part): part is string => Boolean(part))
@@ -757,6 +759,10 @@ export function ProviderInstanceCard({
         .filter((part): part is string => Boolean(part))
         .join(" · ")
     : null;
+  const codexRateLimitResetAvailabilityText =
+    liveProvider?.driver === "codex" && liveProvider.auth.status === "authenticated"
+      ? formatCodexRateLimitResetAvailability(liveProvider.accountRateLimits)
+      : null;
   const summary = rawSummary;
   const versionLabel = getProviderVersionLabel(liveProvider?.version);
   const versionAdvisory = getProviderVersionAdvisoryPresentation(liveProvider?.versionAdvisory);
@@ -1067,9 +1073,12 @@ export function ProviderInstanceCard({
               {titleTailNode}
             </div>
             {authRowNode}
-            {codexRateLimitSummary ? (
+            {codexRateLimitSummary || codexRateLimitResetAvailabilityText ? (
               <div className="grid gap-0.5 text-xs leading-snug text-muted-foreground/80">
                 {codexRateLimitWindowText ? <p>Usage: {codexRateLimitWindowText}</p> : null}
+                {codexRateLimitResetAvailabilityText ? (
+                  <p>{codexRateLimitResetAvailabilityText}</p>
+                ) : null}
                 {codexRateLimitResetText ? <p>{codexRateLimitResetText}</p> : null}
               </div>
             ) : null}

@@ -5,6 +5,7 @@
  * @module SqliteClient
  */
 import { DatabaseSync, type StatementSync } from "node:sqlite";
+import { createHash } from "node:crypto";
 
 import * as Cache from "effect/Cache";
 import * as Config from "effect/Config";
@@ -20,10 +21,138 @@ import * as Stream from "effect/Stream";
 import * as Reactivity from "effect/unstable/reactivity/Reactivity";
 import * as Client from "effect/unstable/sql/SqlClient";
 import type { Connection } from "effect/unstable/sql/SqlConnection";
-import { SqlError, classifySqliteError } from "effect/unstable/sql/SqlError";
+import { LockTimeoutError, SqlError, classifySqliteError } from "effect/unstable/sql/SqlError";
 import * as Statement from "effect/unstable/sql/Statement";
 
 const ATTR_DB_SYSTEM_NAME = "db.system.name";
+const SQLITE_STATEMENT_DIAGNOSTICS_ENV = "CAFE_CODE_SQL_STATEMENT_DIAGNOSTICS";
+const SQLITE_SLOW_STATEMENT_MS = 25;
+
+type SqliteStatementDiagnosticRecord =
+  | {
+      readonly phase: "start";
+      readonly queryId: number;
+      readonly fingerprint: string;
+      readonly operation: string;
+      readonly parameterCount: number;
+    }
+  | {
+      readonly phase: "slow-complete";
+      readonly queryId: number;
+      readonly fingerprint: string;
+      readonly operation: string;
+      readonly parameterCount: number;
+      readonly durationMs: number;
+      readonly outcome: "success" | "failure";
+    };
+
+interface SqliteStatementDiagnosticReporterOptions {
+  readonly enabled: boolean;
+  readonly write: (record: SqliteStatementDiagnosticRecord) => void;
+  readonly now?: () => number;
+  readonly slowStatementMs?: number;
+}
+
+const SQL_OPERATION_ALLOWLIST = new Set([
+  "alter",
+  "create",
+  "delete",
+  "drop",
+  "insert",
+  "pragma",
+  "replace",
+  "select",
+  "update",
+  "vacuum",
+  "with",
+]);
+
+/**
+ * Build a stable, content-free identity for one prepared SQL statement.
+ *
+ * Debugging a synchronous `StatementSync.all()` stall requires recording the
+ * statement *before* Node enters SQLite. Logging SQL text is unacceptable: a
+ * future call site could accidentally interpolate a prompt, path, or secret
+ * into an unprepared statement. The domain-separated digest lets maintainers
+ * correlate starts with completed trace spans without retaining that text.
+ */
+function sqliteStatementFingerprint(sql: string): string {
+  return createHash("sha256")
+    .update("cafe-code/sqlite-statement/v1\0", "utf8")
+    .update(sql, "utf8")
+    .digest("hex")
+    .slice(0, 16);
+}
+
+function sqliteStatementOperation(sql: string): string {
+  const firstToken = /^[\s;]*([A-Za-z]+)/u.exec(sql)?.[1]?.toLowerCase();
+  return firstToken !== undefined && SQL_OPERATION_ALLOWLIST.has(firstToken) ? firstToken : "other";
+}
+
+/**
+ * This deliberately tiny reporter is exported only for security regression
+ * coverage. Its records contain an allowlisted operation class, a digest, and
+ * counts/timing; SQL text, parameter values, errors, and database paths never
+ * cross the diagnostic boundary.
+ */
+export function makeSqliteStatementDiagnosticReporter(
+  options: SqliteStatementDiagnosticReporterOptions,
+): (sql: string, parameterCount: number, execute: () => unknown) => unknown {
+  if (!options.enabled) {
+    return (_sql, _parameterCount, execute) => execute();
+  }
+
+  const now = options.now ?? performance.now.bind(performance);
+  const slowStatementMs = Math.max(0, options.slowStatementMs ?? SQLITE_SLOW_STATEMENT_MS);
+  let nextQueryId = 0;
+
+  return (sql, parameterCount, execute) => {
+    const queryId = (nextQueryId += 1);
+    const fingerprint = sqliteStatementFingerprint(sql);
+    const operation = sqliteStatementOperation(sql);
+    const startedAt = now();
+    options.write({
+      phase: "start",
+      queryId,
+      fingerprint,
+      operation,
+      parameterCount,
+    });
+
+    let outcome: "success" | "failure" = "success";
+    try {
+      return execute();
+    } catch (cause) {
+      outcome = "failure";
+      throw cause;
+    } finally {
+      const durationMs = now() - startedAt;
+      if (durationMs >= slowStatementMs) {
+        options.write({
+          phase: "slow-complete",
+          queryId,
+          fingerprint,
+          operation,
+          parameterCount,
+          durationMs: Math.round(durationMs * 10) / 10,
+          outcome,
+        });
+      }
+    }
+  };
+}
+
+function writeSqliteStatementDiagnostic(record: SqliteStatementDiagnosticRecord): void {
+  try {
+    // stderr is already captured by the desktop backend manager. Keep this a
+    // synchronous call immediately before StatementSync.all(); an Effect log
+    // span cannot finish while the main thread is blocked inside native SQLite.
+    process.stderr.write(`[Cafe Code SQLite] ${JSON.stringify(record)}\n`);
+  } catch {
+    // Diagnostics must never make a database operation fail or expose the
+    // original write error, which can contain unrestricted local paths.
+  }
+}
 
 export const TypeId: TypeId = "~local/sqlite-node/SqliteClient";
 
@@ -85,6 +214,83 @@ function normalizeBusyTimeoutMs(value: number | undefined): number {
   return Math.min(60_000, Math.trunc(value));
 }
 
+interface SqliteClassificationContext {
+  readonly message: string;
+  readonly operation: string;
+}
+
+function readNumericErrorProperty(cause: unknown, property: string): number | undefined {
+  if ((typeof cause !== "object" || cause === null) && typeof cause !== "function") {
+    return undefined;
+  }
+  try {
+    const value = Reflect.get(cause, property);
+    return typeof value === "number" ? value : undefined;
+  } catch {
+    // Error-like inputs can be hostile proxies. Classification diagnostics
+    // must never let a throwing property trap replace the original SQL error.
+    return undefined;
+  }
+}
+
+function readSqliteErrorCode(cause: unknown): string | number | undefined {
+  if ((typeof cause !== "object" || cause === null) && typeof cause !== "function") {
+    return undefined;
+  }
+  try {
+    const value = Reflect.get(cause, "code");
+    return typeof value === "string" || typeof value === "number" ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Adapt Node's native SQLite error shape to Effect's classifier.
+ *
+ * `node:sqlite` currently reports SQLite's numeric result code as `errcode`,
+ * while Effect's SQLite classifier reads `errno`. Classify a small, local
+ * facade so extended SQLITE_BUSY/SQLITE_LOCKED codes retain Effect's normal
+ * low-byte handling, then rebuild the retryable reason with the untouched
+ * native Error as its cause. We intentionally do not mutate the native error
+ * or retain the facade: diagnostics and callers must see the exact exception
+ * thrown by `node:sqlite`.
+ */
+function classifyNodeSqliteError(
+  cause: unknown,
+  context: SqliteClassificationContext,
+): ReturnType<typeof classifySqliteError> {
+  if (readNumericErrorProperty(cause, "errno") !== undefined) {
+    return classifySqliteError(cause, context);
+  }
+
+  const errcode = readNumericErrorProperty(cause, "errcode");
+  if (errcode === undefined) {
+    return classifySqliteError(cause, context);
+  }
+
+  const code = readSqliteErrorCode(cause);
+  const classified = classifySqliteError(
+    {
+      ...(code !== undefined ? { code } : {}),
+      errno: errcode,
+    },
+    context,
+  );
+  if (classified._tag !== "LockTimeoutError") {
+    // Keep this compatibility shim deliberately narrow. Other numeric result
+    // codes continue through Effect's standard classifier until its upstream
+    // implementation gains native `errcode` support.
+    return classifySqliteError(cause, context);
+  }
+
+  return new LockTimeoutError({
+    cause,
+    message: context.message,
+    operation: context.operation,
+  });
+}
+
 const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
   options: SqliteClientConfig,
   openDatabase: () => DatabaseSync,
@@ -99,6 +305,10 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
   const makeConnection = Effect.gen(function* () {
     const scope = yield* Effect.scope;
     const db = openDatabase();
+    const runWithStatementDiagnostics = makeSqliteStatementDiagnosticReporter({
+      enabled: process.env[SQLITE_STATEMENT_DIAGNOSTICS_ENV] === "1",
+      write: writeSqliteStatementDiagnostic,
+    });
     yield* Scope.addFinalizer(
       scope,
       Effect.sync(() => db.close()),
@@ -127,7 +337,7 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
           try: () => db.prepare(sql),
           catch: (cause) =>
             new SqlError({
-              reason: classifySqliteError(cause, {
+              reason: classifyNodeSqliteError(cause, {
                 message: "Failed to prepare statement",
                 operation: "prepare",
               }),
@@ -135,19 +345,28 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
         }),
     });
 
-    const runStatement = (statement: StatementSync, params: ReadonlyArray<unknown>, raw: boolean) =>
+    const runStatement = (
+      sql: string,
+      statement: StatementSync,
+      params: ReadonlyArray<unknown>,
+      raw: boolean,
+    ) =>
       Effect.withFiber<ReadonlyArray<any>, SqlError>((fiber) => {
         statement.setReadBigInts(Boolean(Context.get(fiber.context, Client.SafeIntegers)));
         try {
           if (hasRows(statement)) {
-            return Effect.succeed(statement.all(...(params as any)));
+            return Effect.succeed(
+              runWithStatementDiagnostics(sql, params.length, () =>
+                statement.all(...(params as any)),
+              ) as ReadonlyArray<any>,
+            );
           }
           const result = statement.run(...(params as any));
           return Effect.succeed(raw ? (result as unknown as ReadonlyArray<any>) : []);
         } catch (cause) {
           return Effect.fail(
             new SqlError({
-              reason: classifySqliteError(cause, {
+              reason: classifyNodeSqliteError(cause, {
                 message: "Failed to execute statement",
                 operation: "execute",
               }),
@@ -157,7 +376,7 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
       });
 
     const run = (sql: string, params: ReadonlyArray<unknown>, raw = false) =>
-      Effect.flatMap(Cache.get(prepareCache, sql), (s) => runStatement(s, params, raw));
+      Effect.flatMap(Cache.get(prepareCache, sql), (s) => runStatement(sql, s, params, raw));
 
     const runValues = (sql: string, params: ReadonlyArray<unknown>) =>
       Effect.acquireUseRelease(
@@ -168,16 +387,16 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
               if (hasRows(statement)) {
                 statement.setReturnArrays(true);
                 // Safe to cast to array after we've setReturnArrays(true)
-                return statement.all(...(params as any)) as unknown as ReadonlyArray<
-                  ReadonlyArray<unknown>
-                >;
+                return runWithStatementDiagnostics(sql, params.length, () =>
+                  statement.all(...(params as any)),
+                ) as ReadonlyArray<ReadonlyArray<unknown>>;
               }
               statement.run(...(params as any));
               return [];
             },
             catch: (cause) =>
               new SqlError({
-                reason: classifySqliteError(cause, {
+                reason: classifyNodeSqliteError(cause, {
                   message: "Failed to execute statement",
                   operation: "execute",
                 }),
@@ -202,7 +421,7 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
         return runValues(sql, params);
       },
       executeUnprepared(sql, params, rowTransform) {
-        const effect = runStatement(db.prepare(sql), params ?? [], false);
+        const effect = runStatement(sql, db.prepare(sql), params ?? [], false);
         return rowTransform ? Effect.map(effect, rowTransform) : effect;
       },
       executeStream(sql, params, rowTransform) {

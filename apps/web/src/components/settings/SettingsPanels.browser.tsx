@@ -22,7 +22,7 @@ import {
 import { MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES } from "@cafecode/contracts/settings";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
-import { page } from "vitest/browser";
+import { page, userEvent } from "vitest/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 import type { ReactNode } from "react";
@@ -310,6 +310,16 @@ function createRuntimeLayerDiagnosticsResult(): ServerRuntimeLayerDiagnosticsRes
         lastEventAt: "2036-04-07T00:00:00.000Z",
         notes: ["Provider daemon health summary."],
       },
+      {
+        role: "provider-supervisor",
+        status: "not-configured",
+        pid: null,
+        rssBytes: 0,
+        cpuPercent: 0,
+        uptimeLabel: null,
+        lastEventAt: null,
+        notes: ["Optional provider supervisor is not configured; providers run in the daemon."],
+      },
     ],
     orchestrator: {
       latestEventSequence: 10,
@@ -401,7 +411,7 @@ function createRuntimeLayerDiagnosticsResult(): ServerRuntimeLayerDiagnosticsRes
     providerSupervisor: {
       configured: false,
       reachable: false,
-      status: "offline",
+      status: "not-configured",
       pid: null,
       ppid: null,
       transport: null,
@@ -579,6 +589,7 @@ const createDesktopBridgeStub = (overrides?: {
     openExternal: vi.fn().mockResolvedValue(true),
     openPath: vi.fn().mockResolvedValue(true),
     revealPath: vi.fn().mockResolvedValue(true),
+    copyText: vi.fn().mockResolvedValue(undefined),
     onMenuAction: () => () => {},
     getUpdateState: vi.fn().mockResolvedValue(idleUpdateState),
     setUpdateChannel:
@@ -1002,6 +1013,14 @@ describe("settings panels", () => {
     };
 
     await expect.element(page.getByText("Accent color")).toBeInTheDocument();
+    await expect.element(page.getByText("Interface size")).toBeInTheDocument();
+    page.getByRole("slider", { name: "Interface size" }).element().focus();
+    await userEvent.keyboard("{ArrowRight}");
+
+    await vi.waitFor(() => {
+      expect(updateClientSettings).toHaveBeenCalledWith({ interfaceScalePercent: 105 });
+    });
+
     setColorInput("Branding prefix", "Acme");
 
     await vi.waitFor(() => {
@@ -1139,7 +1158,7 @@ describe("settings panels", () => {
     });
   });
 
-  it("shows detected editor icons in the Files & Diffs default editor selector", async () => {
+  it("shows detected editor icons in the Files default editor selector", async () => {
     const platformSpy = vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
     const desktopBridge = createDesktopBridgeStub();
     window.desktopBridge = desktopBridge;
@@ -1602,6 +1621,15 @@ describe("settings panels", () => {
     await expect
       .element(page.getByRole("heading", { name: "Provider Supervisor", exact: true }))
       .toBeInTheDocument();
+    await expect.element(page.getByText("not-configured", { exact: true })).toBeInTheDocument();
+    await expect
+      .element(
+        page.getByText(
+          "Optional provider supervisor is not configured; providers run in the daemon.",
+          { exact: true },
+        ),
+      )
+      .toBeInTheDocument();
     await openLogsButton.click();
 
     expect(openInEditor).toHaveBeenCalledWith("/repo/project/.t3/logs", "cursor");
@@ -1679,6 +1707,58 @@ describe("settings panels", () => {
     expect(updateProvider).toHaveBeenCalledWith({
       provider: ProviderDriverKind.make("codex"),
       instanceId: ProviderInstanceId.make("codex"),
+    });
+  });
+
+  it("shows Codex reset availability above the reset schedule", async () => {
+    const codexProvider: ServerProvider = {
+      ...createOutdatedProvider("codex"),
+      accountRateLimits: {
+        checkedAt: "2026-07-27T00:00:00.000Z",
+        rateLimits: {
+          limitId: "codex",
+          primary: {
+            usedPercent: 25,
+            windowDurationMins: 300,
+            resetsAt: 1_784_944_800,
+          },
+          secondary: {
+            usedPercent: 50,
+            windowDurationMins: 10_080,
+            resetsAt: 1_785_549_600,
+          },
+        },
+        rateLimitResetCredits: {
+          availableCount: 2,
+          credits: null,
+        },
+      },
+    };
+    setServerConfigSnapshot({
+      ...createBaseServerConfig(),
+      providers: [codexProvider],
+    });
+
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <ProviderSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect
+      .element(page.getByText("Usage limit resets available: 2", { exact: true }))
+      .toBeInTheDocument();
+    await vi.waitFor(() => {
+      const lines = Array.from(document.querySelectorAll<HTMLParagraphElement>("p"));
+      const availabilityIndex = lines.findIndex(
+        (line) => line.textContent === "Usage limit resets available: 2",
+      );
+      const resetScheduleIndex = lines.findIndex((line) =>
+        line.textContent?.includes("Weekly reset:"),
+      );
+
+      expect(availabilityIndex).toBeGreaterThanOrEqual(0);
+      expect(resetScheduleIndex).toBeGreaterThan(availabilityIndex);
     });
   });
 

@@ -3,6 +3,13 @@ import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
 
 import { ExternalLauncherError, LaunchEditorInput, LaunchTerminalInput } from "./editor.ts";
+import {
+  DictationCreateClientSecretInput,
+  DictationCredentialStatus,
+  DictationError,
+  DictationRealtimeClientSecret,
+  DictationSetApiKeyInput,
+} from "./dictation.ts";
 import { AuthAccessStreamEvent } from "./auth.ts";
 import {
   FilesystemBrowseInput,
@@ -31,8 +38,6 @@ import {
   VcsStatusInput,
   VcsStatusResult,
   VcsStatusStreamEvent,
-  VcsWorkingTreeDiffInput,
-  VcsWorkingTreeDiffResult,
 } from "./git.ts";
 import { KeybindingsConfigError } from "./keybindings.ts";
 import {
@@ -118,7 +123,6 @@ export const WS_METHODS = {
   // VCS methods
   vcsPull: "vcs.pull",
   vcsRefreshStatus: "vcs.refreshStatus",
-  vcsWorkingTreeDiff: "vcs.workingTreeDiff",
   vcsListRefs: "vcs.listRefs",
   vcsCreateWorktree: "vcs.createWorktree",
   vcsRemoveWorktree: "vcs.removeWorktree",
@@ -149,6 +153,13 @@ export const WS_METHODS = {
   serverGetProcessResourceHistory: "server.getProcessResourceHistory",
   serverGetRuntimeLayerDiagnostics: "server.getRuntimeLayerDiagnostics",
   serverSignalProcess: "server.signalProcess",
+
+  // Opt-in OpenAI Realtime dictation. The permanent key is accepted only by
+  // the dedicated set method and is never part of ServerSettings.
+  dictationGetStatus: "dictation.getStatus",
+  dictationSetApiKey: "dictation.setApiKey",
+  dictationClearApiKey: "dictation.clearApiKey",
+  dictationCreateClientSecret: "dictation.createClientSecret",
 
   // Usage stats
   usageStatsGet: "usageStats.get",
@@ -192,6 +203,12 @@ export const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProv
      * refreshes.
      */
     instanceId: Schema.optional(ProviderInstanceId),
+    /**
+     * `models` invokes only the provider's bounded model-catalogue path. The
+     * default `full` behavior preserves the existing installation/auth/status
+     * refresh contract.
+     */
+    scope: Schema.optional(Schema.Literals(["full", "models"])),
   }),
   success: ServerProviderUpdatedPayload,
 });
@@ -242,6 +259,30 @@ export const WsServerUpdateClientSettingsRpc = Rpc.make(WS_METHODS.serverUpdateC
   payload: Schema.Struct({ patch: ClientSettingsPatch }),
   success: ClientSettingsSchema,
   error: ClientSettingsError,
+});
+
+export const WsDictationGetStatusRpc = Rpc.make(WS_METHODS.dictationGetStatus, {
+  payload: Schema.Struct({}),
+  success: DictationCredentialStatus,
+  error: DictationError,
+});
+
+export const WsDictationSetApiKeyRpc = Rpc.make(WS_METHODS.dictationSetApiKey, {
+  payload: DictationSetApiKeyInput,
+  success: DictationCredentialStatus,
+  error: DictationError,
+});
+
+export const WsDictationClearApiKeyRpc = Rpc.make(WS_METHODS.dictationClearApiKey, {
+  payload: Schema.Struct({}),
+  success: DictationCredentialStatus,
+  error: DictationError,
+});
+
+export const WsDictationCreateClientSecretRpc = Rpc.make(WS_METHODS.dictationCreateClientSecret, {
+  payload: DictationCreateClientSecretInput,
+  success: DictationRealtimeClientSecret,
+  error: DictationError,
 });
 
 export const WsServerDiscoverSourceControlRpc = Rpc.make(WS_METHODS.serverDiscoverSourceControl, {
@@ -339,12 +380,6 @@ export const WsVcsPullRpc = Rpc.make(WS_METHODS.vcsPull, {
 export const WsVcsRefreshStatusRpc = Rpc.make(WS_METHODS.vcsRefreshStatus, {
   payload: VcsStatusInput,
   success: VcsStatusResult,
-  error: GitManagerServiceError,
-});
-
-export const WsVcsWorkingTreeDiffRpc = Rpc.make(WS_METHODS.vcsWorkingTreeDiff, {
-  payload: VcsWorkingTreeDiffInput,
-  success: VcsWorkingTreeDiffResult,
   error: GitManagerServiceError,
 });
 
@@ -472,6 +507,15 @@ export const WsOrchestrationGetThreadTurnWorkLogPresenceRpc = Rpc.make(
   },
 );
 
+export const WsOrchestrationGetThreadTurnSubagentDetailRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.getThreadTurnSubagentDetail,
+  {
+    payload: OrchestrationRpcSchemas.getThreadTurnSubagentDetail.input,
+    success: OrchestrationRpcSchemas.getThreadTurnSubagentDetail.output,
+    error: OrchestrationGetSnapshotError,
+  },
+);
+
 export const WsOrchestrationSubscribeShellRpc = Rpc.make(ORCHESTRATION_WS_METHODS.subscribeShell, {
   payload: OrchestrationRpcSchemas.subscribeShell.input,
   success: OrchestrationRpcSchemas.subscribeShell.output,
@@ -532,6 +576,10 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerUpdateSettingsRpc,
   WsServerGetClientSettingsRpc,
   WsServerUpdateClientSettingsRpc,
+  WsDictationGetStatusRpc,
+  WsDictationSetApiKeyRpc,
+  WsDictationClearApiKeyRpc,
+  WsDictationCreateClientSecretRpc,
   WsServerDiscoverSourceControlRpc,
   WsServerGetTraceDiagnosticsRpc,
   WsServerGetProcessDiagnosticsRpc,
@@ -548,7 +596,6 @@ export const WsRpcGroup = RpcGroup.make(
   WsSubscribeVcsStatusRpc,
   WsVcsPullRpc,
   WsVcsRefreshStatusRpc,
-  WsVcsWorkingTreeDiffRpc,
   WsGitResolvePullRequestRpc,
   WsGitPreparePullRequestThreadRpc,
   WsVcsListRefsRpc,
@@ -571,6 +618,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationRepairThreadAssistantMessagesRpc,
   WsOrchestrationGetThreadTurnActivityPageRpc,
   WsOrchestrationGetThreadTurnWorkLogPresenceRpc,
+  WsOrchestrationGetThreadTurnSubagentDetailRpc,
   WsOrchestrationSubscribeShellRpc,
   WsOrchestrationSubscribeThreadRpc,
 );

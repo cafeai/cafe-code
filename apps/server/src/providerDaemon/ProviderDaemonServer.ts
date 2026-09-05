@@ -12,6 +12,7 @@ import {
   PROVIDER_DAEMON_RPC_PATH,
   ProviderDaemonEventRecord,
   ProviderDaemonLeaseRequest,
+  ProviderDaemonSubagentDetail,
   type ProviderDaemonProcessDiagnostic,
   ProviderDaemonRpcRequest,
   type ProviderDaemonCapability,
@@ -23,6 +24,7 @@ import {
   type ProviderDaemonTransport,
   type ProviderRuntimeEvent as ProviderRuntimeEventValue,
   type ProviderRuntimeProcessMode,
+  type ThreadId,
 } from "@cafecode/contracts";
 import { PROVIDER_PIPELINE_POLICY, utf8ByteLength } from "@cafecode/shared/providerPipelinePolicy";
 import {
@@ -41,7 +43,13 @@ import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
-import { type ProviderServiceError } from "../provider/Errors.ts";
+import {
+  isProviderSubagentDetailReadFailureReason,
+  makeProviderSubagentDetailReadError,
+  ProviderValidationError,
+  type ProviderServiceError,
+  type ProviderSubagentDetailReadFailureReason,
+} from "../provider/Errors.ts";
 import {
   ProviderService,
   type ProviderServiceShape,
@@ -63,6 +71,7 @@ import {
   summarizeProviderDaemonError,
 } from "./ErrorDiagnostics.ts";
 import { ProviderRuntimeInventory } from "./ProviderRuntimeInventory.ts";
+import { purgeProviderDaemonThreadPersistence } from "./ProviderDaemonThreadPurge.ts";
 
 const MAX_RPC_BODY_BYTES = 5 * 1024 * 1024;
 const PROVIDER_DAEMON_EVENT_JOURNAL_CAPACITY = 50_000;
@@ -75,7 +84,41 @@ const PROVIDER_SUPERVISOR_BRIDGE_CURSOR_PERSIST_INTERVAL = 100;
 
 const decodeRpcRequest = Schema.decodeUnknownEffect(ProviderDaemonRpcRequest);
 const decodeLeaseRequest = Schema.decodeUnknownEffect(ProviderDaemonLeaseRequest);
+const decodeProviderDaemonSubagentDetail = Schema.decodeUnknownEffect(ProviderDaemonSubagentDetail);
 const encodeEventRecordJson = Schema.encodeSync(Schema.fromJsonString(ProviderDaemonEventRecord));
+
+/**
+ * Revalidate and freshly reconstruct every nested public field before a
+ * provider-owned detail crosses the daemon boundary. Schema decoding rejects
+ * invalid shape/invariants; explicit reconstruction additionally prevents a
+ * hostile object prototype or `toJSON` method from influencing JSON output.
+ */
+const makePublicProviderDaemonSubagentDetail = (input: unknown) =>
+  decodeProviderDaemonSubagentDetail(input).pipe(
+    Effect.map((detail) => ({
+      provider: detail.provider,
+      providerInstanceId: detail.providerInstanceId,
+      messages: detail.messages.map((message) => ({
+        key: message.key,
+        role: message.role,
+        text: message.text,
+        ...(message.omission === undefined
+          ? {}
+          : {
+              omission: {
+                tail: message.omission.tail,
+                omittedUtf8Bytes: message.omission.omittedUtf8Bytes,
+              },
+            }),
+      })),
+      gaps: detail.gaps.map((gap) => ({
+        afterMessageKey: gap.afterMessageKey,
+        omittedMessages: gap.omittedMessages,
+        omittedUtf8Bytes: gap.omittedUtf8Bytes,
+      })),
+      truncated: detail.truncated,
+    })),
+  );
 
 class ProviderDaemonListenError extends Data.TaggedError("ProviderDaemonListenError")<{
   readonly cause: unknown;
@@ -718,13 +761,64 @@ function toRpcError(error: unknown): Extract<ProviderDaemonRpcEnvelope, { readon
   };
 }
 
+/**
+ * Fail closed before a child-transcript error reaches daemon diagnostics.
+ *
+ * This operation talks to a provider API whose failures can echo opaque child
+ * ids, local paths, account details, and response bodies. The generic daemon
+ * diagnostics intentionally preserve error messages, causes, and stacks for
+ * ordinary operations, so child reads must be reduced to a finite reason here
+ * even if a service implementation returns an unexpected error shape.
+ */
+function redactProviderSubagentDetailReadError(error: unknown) {
+  const record =
+    error !== null && typeof error === "object" ? (error as Record<string, unknown>) : undefined;
+  const tag = typeof record?._tag === "string" ? record._tag : undefined;
+  let reason: ProviderSubagentDetailReadFailureReason;
+
+  if (
+    tag === "ProviderSubagentDetailReadError" &&
+    isProviderSubagentDetailReadFailureReason(record?.reason)
+  ) {
+    reason = record.reason;
+  } else {
+    switch (tag) {
+      case "ProviderValidationError":
+      case "ProviderAdapterValidationError":
+        reason = "invalid-request";
+        break;
+      case "ProviderSessionNotFoundError":
+      case "ProviderAdapterSessionNotFoundError":
+      case "ProviderAdapterSessionClosedError":
+        reason = "session-unavailable";
+        break;
+      case "ProviderUnsupportedError":
+      case "ProviderInstanceNotFoundError":
+        reason = "provider-unavailable";
+        break;
+      default:
+        reason = "provider-request-failed";
+        break;
+    }
+  }
+
+  // Reconstruct even an already-typed error so a hand-written/mock service
+  // cannot smuggle an own stack or extra enumerable fields into diagnostics.
+  return makeProviderSubagentDetailReadError(reason);
+}
+
 const executeRpcRequest = (
   providerService: ProviderServiceShape,
   request: ProviderDaemonRpcRequestValue,
+  purgeThread: (threadId: ThreadId) => Effect.Effect<void, ProviderServiceError>,
 ): Effect.Effect<unknown, ProviderServiceError> => {
   switch (request.method) {
     case "startSession":
       return providerService.startSession(request.payload.threadId, request.payload);
+    case "forkSession":
+      return providerService.forkSession(request.payload);
+    case "discardSessionFork":
+      return providerService.discardSessionFork(request.payload);
     case "sendTurn":
       return providerService.sendTurn(request.payload);
     case "steerTurn":
@@ -735,8 +829,17 @@ const executeRpcRequest = (
       return providerService.respondToRequest(request.payload);
     case "respondToUserInput":
       return providerService.respondToUserInput(request.payload);
+    case "snoozeUserInput":
+      return providerService.snoozeUserInput(request.payload);
     case "stopSession":
       return providerService.stopSession(request.payload);
+    case "quiesceThreadForHardDelete":
+      // Provider quiescence installs the in-memory runtime fence first. Only
+      // then may daemon-owned journals be fenced and purged, ensuring a late
+      // provider callback cannot recreate prompt/output material.
+      return providerService
+        .quiesceThreadForHardDelete(request.payload)
+        .pipe(Effect.andThen(purgeThread(request.payload.threadId)));
     case "restartProviderRuntime":
       return providerService.restartProviderRuntime(request.payload);
     case "listSessions":
@@ -745,8 +848,37 @@ const executeRpcRequest = (
       return providerService.getCapabilities(request.payload.instanceId);
     case "getInstanceInfo":
       return providerService.getInstanceInfo(request.payload.instanceId);
+    case "getGoal":
+      return providerService.getGoal
+        ? providerService.getGoal(request.payload)
+        : Effect.die("Provider service does not expose goal operations.");
+    case "setGoal":
+      return providerService.setGoal
+        ? providerService.setGoal(request.payload)
+        : Effect.die("Provider service does not expose goal operations.");
+    case "clearGoal":
+      return providerService.clearGoal
+        ? providerService.clearGoal(request.payload)
+        : Effect.die("Provider service does not expose goal operations.");
     case "rollbackConversation":
       return providerService.rollbackConversation(request.payload);
+    case "readSubagentDetail":
+      return providerService
+        .readSubagentDetail({
+          threadId: request.payload.threadId,
+          turnId: request.payload.turnId,
+          subagentId: request.payload.subagentId,
+          ...(request.payload.historyId ? { historyId: request.payload.historyId } : {}),
+        })
+        .pipe(
+          Effect.flatMap(makePublicProviderDaemonSubagentDetail),
+          Effect.mapError(redactProviderSubagentDetailReadError),
+          // Defects do not pass through mapError. Collapse them separately while
+          // preserving interruption so daemon shutdown remains cooperative.
+          Effect.catchDefect(() =>
+            Effect.fail(makeProviderSubagentDetailReadError("provider-request-failed")),
+          ),
+        );
     default:
       request satisfies never;
       return Effect.void;
@@ -805,7 +937,7 @@ function yieldProviderStreamTurn(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
-async function handleEventStream(
+export async function handleProviderDaemonEventStream(
   request: http.IncomingMessage,
   response: http.ServerResponse,
   journal: ProviderDaemonPersistentEventJournal,
@@ -831,6 +963,7 @@ async function handleEventStream(
   let cleaned = false;
   let wakeWriter: (() => void) | null = null;
   let unsubscribe: (() => void) | null = null;
+  let replayBoundaryCursor: number | null = null;
 
   const cleanup = (cause?: unknown): void => {
     if (cleaned) return;
@@ -861,6 +994,14 @@ async function handleEventStream(
 
   const enqueueLive = (record: ProviderDaemonEventRecord): void => {
     if (!active) return;
+    // Once the durable high-water cursor is known, records at or below it are
+    // replay responsibility. The listener was deliberately installed before
+    // the snapshot, so it can observe those same records; dropping that proven
+    // overlap here prevents a large historical replay from filling the finite
+    // live queue with duplicates and forcing a reconnect loop.
+    if (replayBoundaryCursor !== null && record.cursor <= replayBoundaryCursor) {
+      return;
+    }
     try {
       const queued = encodeRecord(record);
       if (
@@ -897,34 +1038,75 @@ async function handleEventStream(
 
   request.once("aborted", () => cleanup());
   response.once("close", () => cleanup());
-  unsubscribe = journal.subscribe(enqueueLive);
-
-  let cursor = Math.max(0, Math.trunc(afterCursor));
-  let turnRecords = 0;
-  let turnBytes = 0;
-  let turnStartedAt = performance.now();
-  const accountWork = async (bytes: number): Promise<void> => {
-    turnRecords += 1;
-    turnBytes += bytes;
-    if (
-      turnRecords >= PROVIDER_PIPELINE_POLICY.workTurnMaxRecords ||
-      turnBytes >= PROVIDER_PIPELINE_POLICY.workTurnMaxBytes ||
-      performance.now() - turnStartedAt >= PROVIDER_PIPELINE_POLICY.workTurnMaxElapsedMs
-    ) {
-      await yieldProviderStreamTurn();
-      turnRecords = 0;
-      turnBytes = 0;
-      turnStartedAt = performance.now();
-    }
-  };
 
   try {
-    // Subscribe before replay so an event committed between the initial cursor
-    // and the database query cannot be lost. Cursor dedupe removes the overlap.
+    // Subscribe before capturing the high-water cursor. A record committed
+    // during the SQL snapshot is then guaranteed to be represented by replay,
+    // the live listener, or both. Boundary acquisition is inside this guarded
+    // region so even a database defect closes the response and decrements the
+    // route's active-stream count.
+    const replaySubscription = await runJournalEffect(
+      journal.subscribeWithReplayBoundary(enqueueLive),
+    );
+    unsubscribe = replaySubscription.unsubscribe;
+    if (!active) {
+      // `cleanup` may have run while the durable boundary query was still in
+      // flight, before the subscription returned its disposer. In that case
+      // the normal idempotent cleanup path had nothing it could unsubscribe.
+      // Release the late-arriving listener explicitly so repeated early
+      // reconnects cannot accumulate dormant callbacks on every publication.
+      replaySubscription.unsubscribe();
+      unsubscribe = null;
+      return;
+    }
+    replayBoundaryCursor = replaySubscription.replayBoundaryCursor;
+
+    // Listener callbacks can race boundary capture and temporarily enter the
+    // queue before `replayBoundaryCursor` is assigned. Remove only records that
+    // the durable snapshot proves replay will cover, retaining every newer live
+    // record in original cursor order.
+    if (liveQueue.length > 0) {
+      const newerRecords = liveQueue.filter(
+        (queued) => queued.record.cursor > replaySubscription.replayBoundaryCursor,
+      );
+      liveQueue.splice(0, liveQueue.length, ...newerRecords);
+      liveQueueBytes = newerRecords.reduce((total, queued) => total + queued.bytes, 0);
+      setProviderDaemonStreamDiagnostics({
+        queuedLiveRecords: liveQueue.length,
+        queuedLiveBytes: liveQueueBytes,
+      });
+    }
+
+    let cursor = Math.max(0, Math.trunc(afterCursor));
+    let turnRecords = 0;
+    let turnBytes = 0;
+    let turnStartedAt = performance.now();
+    const accountWork = async (bytes: number): Promise<void> => {
+      turnRecords += 1;
+      turnBytes += bytes;
+      if (
+        turnRecords >= PROVIDER_PIPELINE_POLICY.workTurnMaxRecords ||
+        turnBytes >= PROVIDER_PIPELINE_POLICY.workTurnMaxBytes ||
+        performance.now() - turnStartedAt >= PROVIDER_PIPELINE_POLICY.workTurnMaxElapsedMs
+      ) {
+        await yieldProviderStreamTurn();
+        turnRecords = 0;
+        turnBytes = 0;
+        turnStartedAt = performance.now();
+      }
+    };
+
+    // Replay is deliberately capped at the captured high-water cursor. Without
+    // this bound a busy provider can keep extending historical replay while
+    // the same records accumulate in the live queue.
     for (;;) {
       if (!active) break;
       const page = await runJournalEffect(
-        journal.replayPageAfter(cursor, PROVIDER_PIPELINE_POLICY.daemonReplayPageRecords),
+        journal.replayPageThrough(
+          cursor,
+          replaySubscription.replayBoundaryCursor,
+          PROVIDER_PIPELINE_POLICY.daemonReplayPageRecords,
+        ),
       );
       if (page.length === 0) break;
       addProviderDaemonStreamDiagnostics({ replayPageCount: 1 });
@@ -999,6 +1181,22 @@ export const runProviderDaemonServer = (
       ownerKey: mode,
     });
     const commandLedger = yield* makeProviderDaemonCommandLedger({ ownerKey: mode });
+    const purgeThread = (threadId: ThreadId): Effect.Effect<void, ProviderServiceError> =>
+      journal.startupMaintenance.pipe(
+        // Hard delete is an explicit post-readiness operation. Waiting for the
+        // bounded journal maintenance prevents a legacy installation with an
+        // unpruned multi-million-row journal from turning its on-demand typed
+        // hydration into another readiness/startup regression.
+        Effect.andThen(purgeProviderDaemonThreadPersistence({ threadId })),
+        Effect.provideService(SqlClient.SqlClient, sql),
+        Effect.mapError(
+          () =>
+            new ProviderValidationError({
+              operation: "ProviderDaemonServer.quiesceThreadForHardDelete",
+              issue: "provider-daemon-hard-delete-purge-failed",
+            }),
+        ),
+      );
     const leases = new Map<string, ProviderDaemonLease>();
     const rpcMetrics = initialRpcMetrics();
     const shouldPersistSupervisorBridgeCursor =
@@ -1370,7 +1568,7 @@ export const runProviderDaemonServer = (
           }
           activeStreamCount += 1;
           setProviderDaemonStreamDiagnostics({ activeStreamCount });
-          void handleEventStream(
+          void handleProviderDaemonEventStream(
             request,
             response,
             journal,
@@ -1406,7 +1604,7 @@ export const runProviderDaemonServer = (
                 Effect.flatMap((rpcRequest) =>
                   commandLedger.runOnce(
                     rpcRequest,
-                    executeRpcRequest(providerService, rpcRequest).pipe(
+                    executeRpcRequest(providerService, rpcRequest, purgeThread).pipe(
                       Effect.map(
                         (value): ProviderDaemonRpcEnvelope => ({
                           ok: true,

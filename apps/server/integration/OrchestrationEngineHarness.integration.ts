@@ -321,9 +321,15 @@ export const makeOrchestrationIntegrationHarness = (
     const textGenerationLayer = Layer.succeed(TextGeneration, {
       generateBranchName: () => Effect.succeed({ branch: "update" }),
       generateThreadTitle: () => Effect.succeed({ title: "New thread" }),
+      generateThreadMetadata: () =>
+        Effect.succeed({ title: "New thread", branch: "generated-branch" }),
     } as unknown as TextGenerationShape);
     const providerCommandReactorLayer = ProviderCommandReactorLive.pipe(
       Layer.provideMerge(runtimeServicesLayer),
+      // Startup reconciliation now reads durable provider ownership directly.
+      // Reuse the persistence-backed directory from ProviderService so the
+      // integration harness exercises the same source of truth as production.
+      Layer.provide(providerSessionDirectoryLayer),
       Layer.provideMerge(gitWorkflowLayer),
       Layer.provideMerge(textGenerationLayer),
       Layer.provideMerge(serverSettingsLayer),

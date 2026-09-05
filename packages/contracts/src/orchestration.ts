@@ -20,6 +20,11 @@ import {
   TurnId,
 } from "./baseSchemas.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
+import {
+  ProviderThreadGoal,
+  ProviderThreadGoalClearInput,
+  ProviderThreadGoalSetInput,
+} from "./providerGoal.ts";
 
 export const ORCHESTRATION_WS_METHODS = {
   dispatchCommand: "orchestration.dispatchCommand",
@@ -28,6 +33,7 @@ export const ORCHESTRATION_WS_METHODS = {
   getDeletedShellSnapshot: "orchestration.getDeletedShellSnapshot",
   getThreadTurnWorkLogPresence: "orchestration.getThreadTurnWorkLogPresence",
   getThreadTurnActivityPage: "orchestration.getThreadTurnActivityPage",
+  getThreadTurnSubagentDetail: "orchestration.getThreadTurnSubagentDetail",
   hardDeleteThread: "orchestration.hardDeleteThread",
   repairAssistantMessageFromProviderJournal:
     "orchestration.repairAssistantMessageFromProviderJournal",
@@ -148,7 +154,12 @@ export const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
 export const ProviderInteractionMode = Schema.Literals(["default", "plan", "auto"]);
 export type ProviderInteractionMode = typeof ProviderInteractionMode.Type;
 export const DEFAULT_PROVIDER_INTERACTION_MODE: ProviderInteractionMode = "default";
-export const ProviderRequestKind = Schema.Literals(["command", "file-read", "file-change"]);
+export const ProviderRequestKind = Schema.Literals([
+  "command",
+  "terminal-input",
+  "file-read",
+  "file-change",
+]);
 export type ProviderRequestKind = typeof ProviderRequestKind.Type;
 export const AssistantDeliveryMode = Schema.Literals(["buffered", "streaming"]);
 export type AssistantDeliveryMode = typeof AssistantDeliveryMode.Type;
@@ -383,6 +394,10 @@ export const OrchestrationThread = Schema.Struct({
   activities: Schema.Array(OrchestrationThreadActivity),
   checkpoints: Schema.Array(OrchestrationCheckpointSummary),
   session: Schema.NullOr(OrchestrationSession),
+  // Older snapshots predate durable provider goals. Keep the field optional at
+  // the transport boundary; current projectors emit either a canonical goal or
+  // null, while legacy snapshots decode without a migration-time rewrite.
+  goal: Schema.optional(Schema.NullOr(ProviderThreadGoal)),
 });
 export type OrchestrationThread = typeof OrchestrationThread.Type;
 
@@ -534,6 +549,236 @@ export const OrchestrationThreadTurnActivityPage = Schema.Struct({
 });
 export type OrchestrationThreadTurnActivityPage = typeof OrchestrationThreadTurnActivityPage.Type;
 
+/**
+ * Hard wire limits for provider-owned subagent history returned to a renderer.
+ *
+ * Provider rollouts may contain hours of private reasoning, command output,
+ * and tool payloads. The detail RPC canonicalizes that history to public chat
+ * text only, and these limits keep both the server response and authenticated
+ * remote renderer allocation finite.
+ */
+export const THREAD_TURN_SUBAGENT_ID_MAX_LENGTH = 512;
+export const THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES = 64;
+export const THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_BYTES = 32_768;
+export const THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_BYTES = 131_072;
+export const THREAD_TURN_SUBAGENT_DETAIL_MAX_ENCODED_BYTES = 1_048_576;
+export const THREAD_TURN_SUBAGENT_DETAIL_MESSAGE_KEY_MAX_LENGTH = 64;
+export const THREAD_TURN_SUBAGENT_DETAIL_MAX_GAPS = 2;
+
+/**
+ * Compatibility aliases for callers which compiled against the first detail
+ * contract. The limits are now enforced as UTF-8 bytes rather than UTF-16 code
+ * units; new code should use the `*_BYTES` names above.
+ */
+export const THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_CHARS =
+  THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_BYTES;
+export const THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_CHARS =
+  THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_BYTES;
+
+const ThreadTurnSubagentId = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(THREAD_TURN_SUBAGENT_ID_MAX_LENGTH),
+);
+
+export const OrchestrationThreadTurnSubagentDetailInput = Schema.Struct({
+  threadId: ThreadId,
+  turnId: TurnId,
+  subagentId: ThreadTurnSubagentId,
+  /**
+   * Optional provider transcript identity carried by the same durable
+   * subagent presentation. It is never authority by itself: the server must
+   * prove the exact `(threadId, turnId, subagentId, historyId)` activity tuple
+   * before forwarding it to a provider adapter.
+   */
+  historyId: Schema.optional(ThreadTurnSubagentId),
+});
+export type OrchestrationThreadTurnSubagentDetailInput =
+  typeof OrchestrationThreadTurnSubagentDetailInput.Type;
+
+const ThreadTurnSubagentDetailMessageKey = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(THREAD_TURN_SUBAGENT_DETAIL_MESSAGE_KEY_MAX_LENGTH),
+);
+
+const threadTurnSubagentUtf8ByteLength = (value: string): number =>
+  new TextEncoder().encode(value).byteLength;
+
+const ThreadTurnSubagentDetailText = Schema.String.check(
+  Schema.isMinLength(1),
+  Schema.makeFilter(
+    (text) =>
+      threadTurnSubagentUtf8ByteLength(text) <= THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_BYTES,
+    {
+      expected: `public subagent text with at most ${THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_BYTES} UTF-8 bytes`,
+    },
+  ),
+);
+
+/**
+ * Metadata for a single provider message whose middle was removed.
+ *
+ * `text` on the containing message is the retained head and `tail` is the
+ * retained suffix. Keeping the marker typed (rather than synthesizing a
+ * provider-authored Markdown message) prevents malformed code fences and
+ * makes the discontinuity unambiguous to every renderer.
+ */
+export const OrchestrationThreadTurnSubagentDetailContentOmission = Schema.Struct({
+  tail: ThreadTurnSubagentDetailText,
+  omittedUtf8Bytes: PositiveInt,
+});
+export type OrchestrationThreadTurnSubagentDetailContentOmission =
+  typeof OrchestrationThreadTurnSubagentDetailContentOmission.Type;
+
+export const OrchestrationThreadTurnSubagentDetailMessage = Schema.Struct({
+  key: ThreadTurnSubagentDetailMessageKey,
+  role: Schema.Literals(["user", "assistant"]),
+  // Deliberately use a non-trimming string schema: Markdown indentation and
+  // newlines are public assistant content and must survive the wire boundary.
+  text: ThreadTurnSubagentDetailText,
+  omission: Schema.optional(OrchestrationThreadTurnSubagentDetailContentOmission),
+}).check(
+  Schema.makeFilter(
+    (message) =>
+      threadTurnSubagentUtf8ByteLength(message.text) +
+        (message.omission === undefined
+          ? 0
+          : threadTurnSubagentUtf8ByteLength(message.omission.tail)) <=
+      THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_BYTES,
+    {
+      expected: `a public subagent message with at most ${THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_BYTES} retained UTF-8 bytes`,
+    },
+  ),
+);
+export type OrchestrationThreadTurnSubagentDetailMessage =
+  typeof OrchestrationThreadTurnSubagentDetailMessage.Type;
+
+/** The one chronological discontinuity between the retained head and tail. */
+export const OrchestrationThreadTurnSubagentDetailGap = Schema.Struct({
+  // `null` means that all retained messages follow the omitted prefix. In the
+  // normal head+tail policy this is a retained message key instead.
+  afterMessageKey: Schema.NullOr(ThreadTurnSubagentDetailMessageKey),
+  omittedMessages: PositiveInt,
+  omittedUtf8Bytes: NonNegativeInt,
+});
+export type OrchestrationThreadTurnSubagentDetailGap =
+  typeof OrchestrationThreadTurnSubagentDetailGap.Type;
+
+/**
+ * Shared flat body fields for both the public orchestration response and the
+ * provider-daemon response. Keeping one field set prevents the two authenticated
+ * transports from silently accepting different message or omission shapes.
+ */
+export const OrchestrationThreadTurnSubagentDetailBodyFields = {
+  messages: Schema.Array(OrchestrationThreadTurnSubagentDetailMessage).check(
+    Schema.isMaxLength(THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES),
+  ),
+  gaps: Schema.Array(OrchestrationThreadTurnSubagentDetailGap).check(
+    Schema.isMaxLength(THREAD_TURN_SUBAGENT_DETAIL_MAX_GAPS),
+  ),
+  truncated: Schema.Boolean,
+} as const;
+
+const OrchestrationThreadTurnSubagentDetailBodyStruct = Schema.Struct(
+  OrchestrationThreadTurnSubagentDetailBodyFields,
+);
+export type OrchestrationThreadTurnSubagentDetailBody =
+  typeof OrchestrationThreadTurnSubagentDetailBodyStruct.Type;
+
+/**
+ * Validate cross-field transcript invariants shared by every detail transport.
+ *
+ * In particular, a gap may identify an omitted prefix or a middle range, but it
+ * may never follow the final retained message. That rule makes "latest" a wire
+ * contract instead of a renderer convention: every accepted shortened history
+ * still ends with the newest retained provider message.
+ */
+export function orchestrationThreadTurnSubagentDetailBodyIssues(
+  detail: OrchestrationThreadTurnSubagentDetailBody,
+): Array<Schema.FilterIssue> {
+  const issues: Array<Schema.FilterIssue> = [];
+  const keys = new Set<string>();
+  const keyIndexes = new Map<string, number>();
+  let retainedBytes = 0;
+  for (let index = 0; index < detail.messages.length; index += 1) {
+    const message = detail.messages[index];
+    if (!message) continue;
+    if (keys.has(message.key)) {
+      issues.push({ path: ["messages", index, "key"], issue: "message keys must be unique" });
+    }
+    keys.add(message.key);
+    keyIndexes.set(message.key, index);
+    retainedBytes += threadTurnSubagentUtf8ByteLength(message.text);
+    if (message.omission !== undefined) {
+      retainedBytes += threadTurnSubagentUtf8ByteLength(message.omission.tail);
+    }
+  }
+  if (retainedBytes > THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_BYTES) {
+    issues.push({
+      path: ["messages"],
+      issue: `retained public transcript exceeds ${THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_BYTES} UTF-8 bytes`,
+    });
+  }
+  const gapAnchors = new Set<string | null>();
+  let previousGapAnchorIndex = -2;
+  for (let index = 0; index < detail.gaps.length; index += 1) {
+    const gap = detail.gaps[index];
+    if (!gap) continue;
+    if (gapAnchors.has(gap.afterMessageKey)) {
+      issues.push({ path: ["gaps", index], issue: "gap anchors must be unique" });
+    }
+    gapAnchors.add(gap.afterMessageKey);
+    const anchorIndex = gap.afterMessageKey === null ? -1 : keyIndexes.get(gap.afterMessageKey);
+    if (anchorIndex === undefined) {
+      issues.push({
+        path: ["gaps", index, "afterMessageKey"],
+        issue: "gap anchor must reference a retained public message key",
+      });
+      continue;
+    }
+    if (anchorIndex <= previousGapAnchorIndex) {
+      issues.push({
+        path: ["gaps", index, "afterMessageKey"],
+        issue: "gap anchors must follow retained transcript chronology",
+      });
+    }
+    previousGapAnchorIndex = Math.max(previousGapAnchorIndex, anchorIndex);
+    if (anchorIndex >= detail.messages.length - 1) {
+      issues.push({
+        path: ["gaps", index, "afterMessageKey"],
+        issue: "a shortened transcript must retain a message after every gap",
+      });
+    }
+  }
+  const hasOmission =
+    detail.gaps.length > 0 || detail.messages.some((message) => message.omission !== undefined);
+  if (detail.truncated !== hasOmission) {
+    issues.push({
+      path: ["truncated"],
+      issue: "truncated must exactly reflect typed message or transcript omissions",
+    });
+  }
+  if (
+    threadTurnSubagentUtf8ByteLength(JSON.stringify(detail)) >
+    THREAD_TURN_SUBAGENT_DETAIL_MAX_ENCODED_BYTES
+  ) {
+    issues.push({
+      path: [],
+      issue: `encoded public subagent detail exceeds ${THREAD_TURN_SUBAGENT_DETAIL_MAX_ENCODED_BYTES} UTF-8 bytes`,
+    });
+  }
+  return issues;
+}
+
+export const OrchestrationThreadTurnSubagentDetailBody =
+  OrchestrationThreadTurnSubagentDetailBodyStruct.check(
+    Schema.makeFilter(orchestrationThreadTurnSubagentDetailBodyIssues),
+  );
+
+export const OrchestrationThreadTurnSubagentDetail = Schema.Struct({
+  provider: ProviderDriverKind,
+  ...OrchestrationThreadTurnSubagentDetailBodyFields,
+}).check(Schema.makeFilter(orchestrationThreadTurnSubagentDetailBodyIssues));
+export type OrchestrationThreadTurnSubagentDetail =
+  typeof OrchestrationThreadTurnSubagentDetail.Type;
+
 export const THREAD_TURN_WORK_LOG_PRESENCE_MAX_TURNS = 256;
 
 export const OrchestrationThreadTurnWorkLogPresenceInput = Schema.Struct({
@@ -603,6 +848,15 @@ const ThreadCreateCommand = Schema.Struct({
 
 const ThreadDuplicateCommand = Schema.Struct({
   type: Schema.Literal("thread.duplicate"),
+  commandId: CommandId,
+  sourceThreadId: ThreadId,
+  targetThreadId: ThreadId,
+  title: TrimmedNonEmptyString,
+  createdAt: IsoDateTime,
+});
+
+const ThreadForkCommand = Schema.Struct({
+  type: Schema.Literal("thread.fork"),
   commandId: CommandId,
   sourceThreadId: ThreadId,
   targetThreadId: ThreadId,
@@ -744,6 +998,18 @@ const ThreadTurnSteerCommand = Schema.Struct({
     text: Schema.String,
     attachments: Schema.Array(ChatAttachment),
   }),
+  /**
+   * Server-only guard for replaying a steer that was accepted immediately
+   * before its original turn became terminal. Browser commands deliberately
+   * cannot author this field. Provider reactors must not route a guarded
+   * recovery into a different active turn that appeared after reconciliation.
+   */
+  terminalRecovery: Schema.optional(
+    Schema.Struct({
+      staleTurnId: TurnId,
+      intentSequence: NonNegativeInt,
+    }),
+  ),
   createdAt: IsoDateTime,
 });
 
@@ -778,6 +1044,14 @@ const ThreadUserInputRespondCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+const ThreadUserInputSnoozeCommand = Schema.Struct({
+  type: Schema.Literal("thread.user-input.snooze"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  requestId: ApprovalRequestId,
+  createdAt: IsoDateTime,
+});
+
 const ThreadCheckpointRevertCommand = Schema.Struct({
   type: Schema.Literal("thread.checkpoint.revert"),
   commandId: CommandId,
@@ -793,12 +1067,40 @@ const ThreadSessionStopCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+const ThreadGoalSetCommand = Schema.Struct({
+  type: Schema.Literal("thread.goal.set"),
+  commandId: CommandId,
+  ...ProviderThreadGoalSetInput.fields,
+  /**
+   * Codex TUI replacement semantics are clear-then-create, not an objective
+   * edit. The provider reactor executes both RPCs serially when this is true
+   * so accounting resets cannot interleave with another goal command.
+   */
+  replaceExisting: Schema.optional(Schema.Boolean),
+  /**
+   * Optional optimistic-concurrency guard from the detail snapshot that opened
+   * the goal dialog. It protects a slow renderer from overwriting a newer
+   * provider-side goal update after reconnect.
+   */
+  expectedUpdatedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  createdAt: IsoDateTime,
+});
+
+const ThreadGoalClearCommand = Schema.Struct({
+  type: Schema.Literal("thread.goal.clear"),
+  commandId: CommandId,
+  ...ProviderThreadGoalClearInput.fields,
+  expectedUpdatedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  createdAt: IsoDateTime,
+});
+
 const DispatchableClientOrchestrationCommand = Schema.Union([
   ProjectCreateCommand,
   ProjectMetaUpdateCommand,
   ProjectDeleteCommand,
   ThreadCreateCommand,
   ThreadDuplicateCommand,
+  ThreadForkCommand,
   ThreadDeleteCommand,
   ThreadRestoreCommand,
   ThreadArchiveCommand,
@@ -811,8 +1113,11 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadTurnSteerCommand,
   ThreadApprovalRespondCommand,
   ThreadUserInputRespondCommand,
+  ThreadUserInputSnoozeCommand,
   ThreadCheckpointRevertCommand,
   ThreadSessionStopCommand,
+  ThreadGoalSetCommand,
+  ThreadGoalClearCommand,
 ]);
 export type DispatchableClientOrchestrationCommand =
   typeof DispatchableClientOrchestrationCommand.Type;
@@ -823,6 +1128,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ProjectDeleteCommand,
   ThreadCreateCommand,
   ThreadDuplicateCommand,
+  ThreadForkCommand,
   ThreadDeleteCommand,
   ThreadRestoreCommand,
   ThreadArchiveCommand,
@@ -835,9 +1141,23 @@ export const ClientOrchestrationCommand = Schema.Union([
   ClientThreadTurnSteerCommand,
   ThreadApprovalRespondCommand,
   ThreadUserInputRespondCommand,
+  ThreadUserInputSnoozeCommand,
   ThreadCheckpointRevertCommand,
   ThreadSessionStopCommand,
-]);
+  ThreadGoalSetCommand,
+  ThreadGoalClearCommand,
+]).pipe(
+  Schema.check(
+    Schema.makeFilter((command) =>
+      String(command.commandId).startsWith("server:")
+        ? {
+            path: ["commandId"],
+            issue: "The 'server:' command-id namespace is reserved for server-authored commands.",
+          }
+        : undefined,
+    ),
+  ),
+);
 export type ClientOrchestrationCommand = typeof ClientOrchestrationCommand.Type;
 
 export const TerminalTurnRecoveryReason = Schema.Literal("live-provider-continuation");
@@ -849,6 +1169,17 @@ const ThreadSessionSetCommand = Schema.Struct({
   threadId: ThreadId,
   session: OrchestrationSession,
   terminalTurnRecovery: Schema.optional(TerminalTurnRecoveryReason),
+  createdAt: IsoDateTime,
+});
+
+/** Server-only commit produced after a provider-native fork succeeds. */
+const ThreadForkCommitCommand = Schema.Struct({
+  type: Schema.Literal("thread.fork.commit"),
+  commandId: CommandId,
+  sourceThreadId: ThreadId,
+  targetThreadId: ThreadId,
+  title: TrimmedNonEmptyString,
+  session: OrchestrationSession,
   createdAt: IsoDateTime,
 });
 
@@ -928,7 +1259,16 @@ const ThreadRevertCompleteCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+const ThreadGoalSyncCommand = Schema.Struct({
+  type: Schema.Literal("thread.goal.sync"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  goal: Schema.NullOr(ProviderThreadGoal),
+  createdAt: IsoDateTime,
+});
+
 const InternalOrchestrationCommand = Schema.Union([
+  ThreadForkCommitCommand,
   ThreadSessionSetCommand,
   ThreadMessageAssistantDeltaCommand,
   ThreadMessageAssistantCompleteCommand,
@@ -937,6 +1277,7 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadTurnDiffCompleteCommand,
   ThreadActivityAppendCommand,
   ThreadRevertCompleteCommand,
+  ThreadGoalSyncCommand,
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
 
@@ -952,6 +1293,7 @@ export const OrchestrationEventType = Schema.Literals([
   "project.deleted",
   "thread.created",
   "thread.duplicated",
+  "thread.forked",
   "thread.deleted",
   "thread.restored",
   "thread.archived",
@@ -966,10 +1308,14 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.turn-steer-requested",
   "thread.approval-response-requested",
   "thread.user-input-response-requested",
+  "thread.user-input-snooze-requested",
   "thread.checkpoint-revert-requested",
   "thread.reverted",
   "thread.session-stop-requested",
   "thread.session-set",
+  "thread.goal-set-requested",
+  "thread.goal-clear-requested",
+  "thread.goal-synced",
   "thread.proposed-plan-upserted",
   "thread.turn-diff-completed",
   "thread.activity-appended",
@@ -1027,6 +1373,12 @@ export const ThreadDuplicatedPayload = Schema.Struct({
   sourceThreadId: ThreadId,
   targetThreadId: ThreadId,
   duplicatedAt: IsoDateTime,
+});
+
+export const ThreadForkedPayload = Schema.Struct({
+  sourceThreadId: ThreadId,
+  targetThreadId: ThreadId,
+  forkedAt: IsoDateTime,
 });
 
 export const ThreadDeletedPayload = Schema.Struct({
@@ -1112,6 +1464,12 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
   ),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  terminalSteerRecovery: Schema.optional(
+    Schema.Struct({
+      staleTurnId: TurnId,
+      intentSequence: NonNegativeInt,
+    }),
+  ),
   createdAt: IsoDateTime,
 });
 
@@ -1124,6 +1482,19 @@ export const ThreadTurnInterruptRequestedPayload = Schema.Struct({
 export const ThreadTurnSteerRequestedPayload = Schema.Struct({
   threadId: ThreadId,
   messageId: MessageId,
+  /**
+   * Immutable turn target captured when the orchestration command is
+   * accepted. Older persisted events and the narrow pre-materialization race
+   * can have no target; recovery code must treat `null` as unbound and must
+   * never substitute a later provider turn.
+   */
+  expectedTurnId: Schema.NullOr(TurnId).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  terminalSteerRecovery: Schema.optional(
+    Schema.Struct({
+      staleTurnId: TurnId,
+      intentSequence: NonNegativeInt,
+    }),
+  ),
   createdAt: IsoDateTime,
 });
 
@@ -1138,6 +1509,12 @@ const ThreadUserInputResponseRequestedPayload = Schema.Struct({
   threadId: ThreadId,
   requestId: ApprovalRequestId,
   answers: ProviderUserInputAnswers,
+  createdAt: IsoDateTime,
+});
+
+const ThreadUserInputSnoozeRequestedPayload = Schema.Struct({
+  threadId: ThreadId,
+  requestId: ApprovalRequestId,
   createdAt: IsoDateTime,
 });
 
@@ -1161,6 +1538,24 @@ export const ThreadSessionSetPayload = Schema.Struct({
   threadId: ThreadId,
   session: OrchestrationSession,
   terminalTurnRecovery: Schema.optional(TerminalTurnRecoveryReason),
+});
+
+export const ThreadGoalSetRequestedPayload = Schema.Struct({
+  ...ProviderThreadGoalSetInput.fields,
+  replaceExisting: Schema.optional(Schema.Boolean),
+  expectedUpdatedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  createdAt: IsoDateTime,
+});
+
+export const ThreadGoalClearRequestedPayload = Schema.Struct({
+  ...ProviderThreadGoalClearInput.fields,
+  expectedUpdatedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  createdAt: IsoDateTime,
+});
+
+export const ThreadGoalSyncedPayload = Schema.Struct({
+  threadId: ThreadId,
+  goal: Schema.NullOr(ProviderThreadGoal),
 });
 
 export const ThreadProposedPlanUpsertedPayload = Schema.Struct({
@@ -1230,6 +1625,11 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.duplicated"),
     payload: ThreadDuplicatedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.forked"),
+    payload: ThreadForkedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,
@@ -1303,6 +1703,11 @@ export const OrchestrationEvent = Schema.Union([
   }),
   Schema.Struct({
     ...EventBaseFields,
+    type: Schema.Literal("thread.user-input-snooze-requested"),
+    payload: ThreadUserInputSnoozeRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
     type: Schema.Literal("thread.checkpoint-revert-requested"),
     payload: ThreadCheckpointRevertRequestedPayload,
   }),
@@ -1320,6 +1725,21 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.session-set"),
     payload: ThreadSessionSetPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.goal-set-requested"),
+    payload: ThreadGoalSetRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.goal-clear-requested"),
+    payload: ThreadGoalClearRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.goal-synced"),
+    payload: ThreadGoalSyncedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,
@@ -1516,6 +1936,10 @@ export const OrchestrationRpcSchemas = {
   getThreadTurnWorkLogPresence: {
     input: OrchestrationThreadTurnWorkLogPresenceInput,
     output: OrchestrationThreadTurnWorkLogPresenceResult,
+  },
+  getThreadTurnSubagentDetail: {
+    input: OrchestrationThreadTurnSubagentDetailInput,
+    output: OrchestrationThreadTurnSubagentDetail,
   },
   subscribeThread: {
     input: OrchestrationSubscribeThreadInput,

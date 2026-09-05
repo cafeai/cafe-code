@@ -1,4 +1,5 @@
 import * as DateTime from "effect/DateTime";
+import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -22,11 +23,12 @@ import type {
   ServerProviderModel,
   ServerProviderSkill,
   ServerProviderAccountRateLimits,
+  ServerProviderAccountRateLimitResetCredit,
   ServerProviderAccountRateLimitSnapshot,
   ServerProviderAccountRateLimitWindow,
-  ServerProviderAccountRateLimitResetCredit,
+  ServerProviderProbePhaseDiagnostics,
 } from "@cafecode/contracts";
-import { ServerSettingsError } from "@cafecode/contracts";
+import { ProviderDriverKind, ServerSettingsError } from "@cafecode/contracts";
 
 import { createModelCapabilities } from "@cafecode/shared/model";
 import {
@@ -37,9 +39,11 @@ import {
   isCommandMissingCause,
   parseGenericCliVersion,
   spawnAndCollect,
+  terminateProbeChild,
   type ServerProviderDraft,
 } from "../providerSnapshot.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
+import { codexAppServerRateLimitsToServer } from "../codexRateLimits.ts";
 import packageJson from "../../../package.json" with { type: "json" };
 const isCodexAppServerSpawnError = Schema.is(CodexErrors.CodexAppServerSpawnError);
 
@@ -52,6 +56,8 @@ const MAX_PROVIDER_EMAIL_LENGTH = 320;
 const CODEX_ACCOUNT_RATE_LIMIT_TIMEOUT_MS = 3_000;
 const CODEX_CHATGPT_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const CODEX_ORIGINATOR = "cafecode_desktop";
+export const CODEX_CLI_LOGIN_STATUS_TIMEOUT_MESSAGE =
+  "Codex CLI login status check timed out. Provider sessions may still work.";
 
 export interface CodexAppServerProviderSnapshot {
   readonly account: CodexSchema.V2GetAccountResponse;
@@ -98,14 +104,22 @@ function codexAccountAuthLabel(account: CodexSchema.V2GetAccountResponse["accoun
       return "ChatGPT Pro 5x Subscription";
     case "team":
       return "ChatGPT Team Subscription";
+    case "self_serve_business_prolite":
+      return "ChatGPT Business ProLite Subscription";
     case "self_serve_business_usage_based":
     case "business":
       return "ChatGPT Business Subscription";
+    case "ent26":
+    case "enterprise_cbp_automation":
     case "enterprise_cbp_usage_based":
     case "enterprise":
       return "ChatGPT Enterprise Subscription";
     case "edu":
       return "ChatGPT Edu Subscription";
+    case "edu_plus":
+      return "ChatGPT Edu Plus Subscription";
+    case "edu_pro":
+      return "ChatGPT Edu Pro Subscription";
     case "unknown":
       return "ChatGPT Subscription";
     default:
@@ -335,124 +349,6 @@ const readCodexUsageCredentials = Effect.fn("readCodexUsageCredentials")(functio
   const authJson = yield* fileSystem.readFileString(authPath).pipe(Effect.option);
   return Option.isSome(authJson) ? extractCodexUsageCredentials(authJson.value) : undefined;
 });
-
-function mapGeneratedRateLimitWindow(
-  window: CodexSchema.V2GetAccountRateLimitsResponse__RateLimitWindow | null | undefined,
-): ServerProviderAccountRateLimitWindow | null {
-  if (!window) return null;
-  return {
-    usedPercent: window.usedPercent,
-    ...(window.windowDurationMins !== undefined
-      ? { windowDurationMins: window.windowDurationMins }
-      : {}),
-    ...(window.resetsAt !== undefined ? { resetsAt: window.resetsAt } : {}),
-  };
-}
-
-function mapGeneratedCredits(
-  credits: CodexSchema.V2GetAccountRateLimitsResponse__CreditsSnapshot | null,
-): Exclude<ServerProviderAccountRateLimitSnapshot["credits"], undefined> {
-  if (credits === null) return null;
-  return {
-    hasCredits: credits.hasCredits,
-    unlimited: credits.unlimited,
-    ...(credits.balance !== undefined ? { balance: credits.balance } : {}),
-  };
-}
-
-function mapGeneratedSpendControlLimit(
-  limit: CodexSchema.V2GetAccountRateLimitsResponse__SpendControlLimitSnapshot | null | undefined,
-): Exclude<ServerProviderAccountRateLimitSnapshot["individualLimit"], undefined> {
-  if (limit === null || limit === undefined) return null;
-  return {
-    limit: limit.limit,
-    remainingPercent: limit.remainingPercent,
-    resetsAt: limit.resetsAt,
-    used: limit.used,
-  };
-}
-
-function mapGeneratedRateLimitSnapshot(
-  snapshot: CodexSchema.V2GetAccountRateLimitsResponse__RateLimitSnapshot,
-): ServerProviderAccountRateLimitSnapshot {
-  return {
-    ...(snapshot.limitId !== undefined ? { limitId: snapshot.limitId } : {}),
-    ...(snapshot.limitName !== undefined ? { limitName: snapshot.limitName } : {}),
-    ...(snapshot.planType !== undefined ? { planType: snapshot.planType } : {}),
-    ...(snapshot.rateLimitReachedType !== undefined
-      ? { rateLimitReachedType: snapshot.rateLimitReachedType }
-      : {}),
-    ...(snapshot.spendControlReached !== undefined
-      ? { spendControlReached: snapshot.spendControlReached }
-      : {}),
-    ...(snapshot.individualLimit !== undefined
-      ? { individualLimit: mapGeneratedSpendControlLimit(snapshot.individualLimit) }
-      : {}),
-    ...(snapshot.primary !== undefined
-      ? { primary: mapGeneratedRateLimitWindow(snapshot.primary) }
-      : {}),
-    ...(snapshot.secondary !== undefined
-      ? { secondary: mapGeneratedRateLimitWindow(snapshot.secondary) }
-      : {}),
-    ...(snapshot.credits !== undefined ? { credits: mapGeneratedCredits(snapshot.credits) } : {}),
-  };
-}
-
-function mapGeneratedRateLimitResetCredits(
-  summary:
-    | CodexSchema.V2GetAccountRateLimitsResponse__RateLimitResetCreditsSummary
-    | null
-    | undefined,
-): ServerProviderAccountRateLimits["rateLimitResetCredits"] | undefined {
-  if (summary === undefined) return undefined;
-  if (summary === null) return null;
-  return {
-    availableCount: summary.availableCount,
-    ...(summary.credits !== undefined
-      ? {
-          credits:
-            summary.credits === null ? null : summary.credits.map(mapGeneratedRateLimitResetCredit),
-        }
-      : {}),
-  };
-}
-
-function mapGeneratedRateLimitResetCredit(
-  credit: CodexSchema.V2GetAccountRateLimitsResponse__RateLimitResetCredit,
-): ServerProviderAccountRateLimitResetCredit {
-  return {
-    id: credit.id,
-    resetType: credit.resetType,
-    status: credit.status,
-    grantedAt: credit.grantedAt,
-    ...(credit.expiresAt !== undefined ? { expiresAt: credit.expiresAt } : {}),
-    ...(credit.title !== undefined ? { title: credit.title } : {}),
-    ...(credit.description !== undefined ? { description: credit.description } : {}),
-  };
-}
-
-function codexAppServerRateLimitsToServer(
-  response: CodexSchema.V2GetAccountRateLimitsResponse,
-  checkedAt: string,
-): ServerProviderAccountRateLimits {
-  const byLimitId =
-    response.rateLimitsByLimitId === null || response.rateLimitsByLimitId === undefined
-      ? undefined
-      : Object.fromEntries(
-          Object.entries(response.rateLimitsByLimitId).map(([limitId, snapshot]) => [
-            limitId,
-            mapGeneratedRateLimitSnapshot(snapshot),
-          ]),
-        );
-  const rateLimitResetCredits = mapGeneratedRateLimitResetCredits(response.rateLimitResetCredits);
-
-  return {
-    rateLimits: mapGeneratedRateLimitSnapshot(response.rateLimits),
-    ...(byLimitId ? { rateLimitsByLimitId: byLimitId } : {}),
-    ...(rateLimitResetCredits !== undefined ? { rateLimitResetCredits } : {}),
-    checkedAt,
-  };
-}
 
 function mapRawRateLimitWindow(value: unknown): ServerProviderAccountRateLimitWindow | null {
   const record = readRecord(value);
@@ -743,7 +639,13 @@ function mapCodexModelCapabilities(
         },
   );
   const defaultReasoning = reasoningOptions.find((option) => option.isDefault)?.id;
-  const supportsFastMode = (model.additionalSpeedTiers ?? []).includes("fast");
+  // Match ModelPreset::supports_fast_mode in Codex rust-v0.153.3
+  // (codex-rs/protocol/src/openai_models.rs). Current catalogues advertise
+  // the wire id in serviceTiers; older providers may supply only the
+  // deprecated additionalSpeedTiers alias. Either is authoritative evidence.
+  const supportsFastMode =
+    model.serviceTiers?.some((tier) => tier.id === "priority") === true ||
+    (model.additionalSpeedTiers ?? []).includes("fast");
   return createModelCapabilities({
     optionDescriptors: [
       ...(reasoningOptions.length > 0
@@ -818,15 +720,33 @@ function makeStaticCodexReasoningCapabilities(input: {
 
 const CODEX_STANDARD_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"] as const;
 const CODEX_MAX_REASONING_EFFORTS = [...CODEX_STANDARD_REASONING_EFFORTS, "max"] as const;
-// Mirrors Codex app-server `model/list` from codex-cli 0.144.0. The live
+// Mirrors Codex app-server `model/list` from codex-cli 0.153.4. The live
 // app-server response remains authoritative when available; this fallback keeps
 // fresh installs usable before the full Codex probe refreshes provider cache.
 const CODEX_ULTRA_REASONING_EFFORTS = [...CODEX_MAX_REASONING_EFFORTS, "ultra"] as const;
+
+// Codex 0.153.4 promotes Astra from hidden to listed in models-manager/models.json.
+// Share its bundled controls between cold-start discovery and explicitly added
+// custom entries. An authenticated live row still owns visibility and defaults.
+const ASTRA_CODEX_MODEL: ServerProviderModel = {
+  slug: "gpt-6-astra",
+  name: "GPT-6-Astra",
+  isCustom: false,
+  capabilities: makeStaticCodexReasoningCapabilities({
+    defaultEffort: "low",
+    supportedEfforts: CODEX_ULTRA_REASONING_EFFORTS,
+    supportsFastMode: true,
+  }),
+};
+const KNOWN_CUSTOM_CODEX_MODELS: ReadonlyMap<string, ServerProviderModel> = new Map([
+  [ASTRA_CODEX_MODEL.slug, { ...ASTRA_CODEX_MODEL, isCustom: true }],
+]);
 
 // Lightweight provider status deliberately avoids `codex app-server`; keep a
 // conservative model fallback so a fresh install still has selectable Codex
 // models before the full app-server diagnostic path has ever populated cache.
 const STATIC_CODEX_MODELS: ReadonlyArray<ServerProviderModel> = [
+  ASTRA_CODEX_MODEL,
   {
     slug: "gpt-5.6-sol",
     name: "GPT-5.6-Sol",
@@ -855,6 +775,15 @@ const STATIC_CODEX_MODELS: ReadonlyArray<ServerProviderModel> = [
       defaultEffort: "medium",
       supportedEfforts: CODEX_MAX_REASONING_EFFORTS,
       supportsFastMode: true,
+    }),
+  },
+  {
+    slug: "gpt-daybreak-blue-latest",
+    name: "Daybreak Blue",
+    isCustom: false,
+    capabilities: makeStaticCodexReasoningCapabilities({
+      defaultEffort: "low",
+      supportedEfforts: CODEX_ULTRA_REASONING_EFFORTS,
     }),
   },
   {
@@ -925,6 +854,11 @@ function appendCustomCodexModels(
       continue;
     }
     seen.add(slug);
+    const knownCustomModel = KNOWN_CUSTOM_CODEX_MODELS.get(slug);
+    if (knownCustomModel) {
+      customEntries.push(knownCustomModel);
+      continue;
+    }
     customEntries.push({
       slug,
       name: slug,
@@ -957,6 +891,12 @@ function parseCodexSkillsListResponse(
     if (skill.description) {
       parsedSkill.description = skill.description;
     }
+    if (skill.pluginId?.trim()) {
+      // Codex 0.150 makes plugin ownership explicit. Preserve the provider's
+      // stable plugin id instead of forcing the renderer to infer ownership
+      // from a platform-specific cache path.
+      parsedSkill.pluginId = skill.pluginId.trim();
+    }
     if (skill.scope) {
       parsedSkill.scope = skill.scope;
     }
@@ -971,22 +911,147 @@ function parseCodexSkillsListResponse(
   });
 }
 
-const requestAllCodexModels = Effect.fn("requestAllCodexModels")(function* (
+// Model picker refreshes are fed by provider-owned, opaque cursor pages. Keep
+// both network/process work and retained memory finite even if a future or
+// compromised provider repeats cursors, ignores its own page size, or exposes
+// an unexpectedly large catalogue.
+export const CODEX_MODEL_LIST_MAX_PAGES = 32;
+export const CODEX_MODEL_LIST_MAX_MODELS = 512;
+const CODEX_MODEL_LIST_PAGE_SIZE = 100;
+const CODEX_MODEL_LIST_CHILD_TERMINATION_GRACE = Duration.seconds(1);
+
+export const requestAllCodexModelsWithClient = Effect.fn("requestAllCodexModels")(function* (
   client: CodexClient.CodexAppServerClientShape,
 ) {
   const models: ServerProviderModel[] = [];
-  let cursor: string | null | undefined = undefined;
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
 
-  do {
-    const response: CodexSchema.V2ModelListResponse = yield* client.request(
-      "model/list",
-      cursor ? { cursor } : {},
-    );
-    models.push(...parseCodexModelListResponse(response));
-    cursor = response.nextCursor;
-  } while (cursor);
+  for (let pageIndex = 0; pageIndex < CODEX_MODEL_LIST_MAX_PAGES; pageIndex += 1) {
+    const remainingCapacity = CODEX_MODEL_LIST_MAX_MODELS - models.length;
+    const response: CodexSchema.V2ModelListResponse = yield* client.request("model/list", {
+      limit: Math.min(CODEX_MODEL_LIST_PAGE_SIZE, remainingCapacity),
+      ...(cursor !== undefined ? { cursor } : {}),
+    });
+    const pageModels = parseCodexModelListResponse(response);
+    if (pageModels.length > remainingCapacity) {
+      return yield* Effect.fail(
+        CodexErrors.CodexAppServerRequestError.internalError(
+          "Codex model catalogue exceeded Cafe's bounded model limit",
+        ),
+      );
+    }
+    models.push(...pageModels);
 
-  return models;
+    const nextCursor = response.nextCursor ?? undefined;
+    if (nextCursor === undefined || nextCursor.length === 0) {
+      return models;
+    }
+    if (models.length >= CODEX_MODEL_LIST_MAX_MODELS) {
+      return yield* Effect.fail(
+        CodexErrors.CodexAppServerRequestError.internalError(
+          "Codex model catalogue exceeded Cafe's bounded model limit",
+        ),
+      );
+    }
+    if (seenCursors.has(nextCursor)) {
+      return yield* Effect.fail(
+        CodexErrors.CodexAppServerRequestError.internalError(
+          "Codex model catalogue pagination returned a repeated cursor",
+        ),
+      );
+    }
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+  }
+
+  return yield* Effect.fail(
+    CodexErrors.CodexAppServerRequestError.internalError(
+      "Codex model catalogue exceeded Cafe's bounded page limit",
+    ),
+  );
+});
+
+export function makeCodexModelListCommand(input: {
+  readonly binaryPath: string;
+  readonly homePath?: string;
+  readonly cwd: string;
+  readonly environment?: NodeJS.ProcessEnv;
+}): ChildProcess.StandardCommand {
+  const resolvedHomePath = input.homePath ? expandHomePath(input.homePath) : undefined;
+  return ChildProcess.make(input.binaryPath, ["app-server"], {
+    cwd: input.cwd,
+    env: {
+      ...(input.environment ?? process.env),
+      ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
+    },
+    shell: process.platform === "win32",
+    // Match disposable CLI probe ownership: isolate the POSIX child tree and
+    // leave an unconditional SIGKILL scope-finalizer backstop. The explicit
+    // cleanup below still gives the provider one bounded graceful interval.
+    killSignal: "SIGKILL",
+    detached: process.platform !== "win32",
+  });
+}
+
+export function finalizeCodexModelListRefresh(
+  upstreamModels: ReadonlyArray<ServerProviderModel>,
+  customModels: ReadonlyArray<string>,
+): ReadonlyArray<ServerProviderModel> | undefined {
+  // Custom settings supplement provider truth; they cannot manufacture a
+  // successful refresh when the provider returned an empty catalogue.
+  return upstreamModels.length === 0
+    ? undefined
+    : appendCustomCodexModels(upstreamModels, customModels);
+}
+
+/**
+ * Read only Codex's live model catalogue.
+ *
+ * Codex 0.152 refreshes `model/list` when its native picker opens. Cafe uses
+ * the same provider boundary, but intentionally does not couple that user
+ * gesture to `account/read`, rate-limit reads, skills, or the CLI health/auth
+ * probes. The caller owns the scope and timeout so an unresponsive disposable
+ * app-server is interrupted and reaped without clearing the cached models.
+ */
+export const readCodexAppServerModels = Effect.fn("readCodexAppServerModels")(function* (input: {
+  readonly binaryPath: string;
+  readonly homePath?: string;
+  readonly cwd: string;
+  readonly customModels?: ReadonlyArray<string>;
+  readonly environment?: NodeJS.ProcessEnv;
+}) {
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  return yield* Effect.acquireUseRelease(
+    spawner.spawn(makeCodexModelListCommand(input)).pipe(
+      Effect.mapError(
+        (cause) =>
+          // Deliberately omit the configured binary/home paths. Picker refresh
+          // failures are logged only as a fixed phase marker by the driver.
+          new CodexErrors.CodexAppServerSpawnError({ cause }),
+      ),
+    ),
+    (child) =>
+      Effect.gen(function* () {
+        const clientContext = yield* Layer.build(CodexClient.layerChildProcess(child));
+        const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
+          Effect.provide(clientContext),
+        );
+
+        yield* client.request("initialize", buildCodexInitializeParams());
+        yield* client.notify("initialized", undefined);
+        const models = yield* requestAllCodexModelsWithClient(client);
+        // A custom-model setting must not turn an empty provider response into
+        // an apparently authoritative success. Keep the stale catalogue intact
+        // until Codex itself returns at least one model.
+        return finalizeCodexModelListRefresh(models, input.customModels ?? []);
+      }),
+    // Effect's process scope sends the configured SIGKILL as a final backstop,
+    // but its force-kill timeout does not bound the later exit wait. The
+    // acquire/use/release bracket closes the post-spawn interruption gap and
+    // explicitly waits for TERM, then KILL, before scope release.
+    (child) => terminateProbeChild(child, CODEX_MODEL_LIST_CHILD_TERMINATION_GRACE),
+  );
 });
 
 export function buildCodexInitializeParams(): CodexSchema.V1InitializeParams {
@@ -1068,7 +1133,7 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
       client.request("skills/list", {
         cwds: [input.cwd],
       }),
-      requestAllCodexModels(client),
+      requestAllCodexModelsWithClient(client),
     ],
     { concurrency: "unbounded" },
   );
@@ -1093,23 +1158,41 @@ const emptyCodexModelsFromSettings = (codexSettings: CodexSettings): ServerProvi
       capabilities: null,
     }));
 
-const fallbackCodexModelsFromSettings = (codexSettings: CodexSettings): ServerProvider["models"] =>
+export const fallbackCodexModelsFromSettings = (
+  codexSettings: CodexSettings,
+): ServerProvider["models"] =>
   appendCustomCodexModels(STATIC_CODEX_MODELS, codexSettings.customModels);
+
+export function makeCodexHealthProbeCommand(
+  codexSettings: CodexSettings,
+  args: ReadonlyArray<string>,
+  environment: NodeJS.ProcessEnv = process.env,
+): ChildProcess.StandardCommand {
+  const resolvedHomePath = codexSettings.homePath ? expandHomePath(codexSettings.homePath) : "";
+  return ChildProcess.make(codexSettings.binaryPath, [...args], {
+    env: {
+      ...environment,
+      ...(resolvedHomePath.length > 0 ? { CODEX_HOME: resolvedHomePath } : {}),
+    },
+    shell: process.platform === "win32",
+    // POSIX probes use their own process group so cleanup reaches descendants;
+    // Windows keeps the platform default and uses taskkill. The scoped
+    // backstop is SIGKILL because runCodexCommand performs the graceful,
+    // bounded SIGTERM -> SIGKILL sequence before scope release.
+    killSignal: "SIGKILL",
+    detached: process.platform !== "win32",
+  });
+}
 
 const runCodexCommand = Effect.fn("runCodexCommand")(function* (
   codexSettings: CodexSettings,
   args: ReadonlyArray<string>,
   environment: NodeJS.ProcessEnv = process.env,
 ) {
-  const resolvedHomePath = codexSettings.homePath ? expandHomePath(codexSettings.homePath) : "";
-  const command = ChildProcess.make(codexSettings.binaryPath, [...args], {
-    env: {
-      ...environment,
-      ...(resolvedHomePath.length > 0 ? { CODEX_HOME: resolvedHomePath } : {}),
-    },
-    shell: process.platform === "win32",
+  const command = makeCodexHealthProbeCommand(codexSettings, args, environment);
+  return yield* spawnAndCollect(codexSettings.binaryPath, command, {
+    terminationGrace: Duration.seconds(1),
   });
-  return yield* spawnAndCollect(codexSettings.binaryPath, command);
 });
 
 function codexAuthProbeStatusFromLoginStatusResult(result: {
@@ -1383,6 +1466,7 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
 > {
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
   const models = fallbackCodexModelsFromSettings(codexSettings);
+  const phases: ServerProviderProbePhaseDiagnostics[] = [];
 
   if (!codexSettings.enabled) {
     return buildServerProvider({
@@ -1401,12 +1485,18 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
     });
   }
 
+  const versionStartedAtMs = yield* Clock.currentTimeMillis;
   const versionProbe = yield* runCodexCommand(codexSettings, ["--version"], environment).pipe(
     Effect.timeoutOption(DEFAULT_TIMEOUT_MS),
     Effect.result,
   );
+  const versionFinishedAtMs = yield* Clock.currentTimeMillis;
+  const versionDurationMs = Math.max(0, Math.floor(versionFinishedAtMs - versionStartedAtMs));
 
   if (Result.isFailure(versionProbe)) {
+    phases.push({ phase: "version", outcome: "error", durationMs: versionDurationMs });
+    phases.push({ phase: "login-status", outcome: "skipped", durationMs: 0 });
+    phases.push({ phase: "account-usage", outcome: "skipped", durationMs: 0 });
     const error = versionProbe.failure;
     return buildServerProvider({
       presentation: CODEX_PRESENTATION,
@@ -1419,6 +1509,7 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
         version: null,
         status: "error",
         auth: { status: "unknown" },
+        phases,
         message: isCommandMissingCause(error)
           ? "Codex CLI (`codex`) is not installed or not on PATH."
           : `Failed to execute Codex CLI health check: ${error instanceof Error ? error.message : String(error)}.`,
@@ -1427,6 +1518,9 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
   }
 
   if (Option.isNone(versionProbe.success)) {
+    phases.push({ phase: "version", outcome: "timeout", durationMs: versionDurationMs });
+    phases.push({ phase: "login-status", outcome: "skipped", durationMs: 0 });
+    phases.push({ phase: "account-usage", outcome: "skipped", durationMs: 0 });
     return buildServerProvider({
       presentation: CODEX_PRESENTATION,
       enabled: codexSettings.enabled,
@@ -1438,6 +1532,7 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
         version: null,
         status: "error",
         auth: { status: "unknown" },
+        phases,
         message: "Codex CLI is installed but failed to run. Timed out while running command.",
       },
     });
@@ -1446,6 +1541,9 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
   const versionResult = versionProbe.success.value;
   const parsedVersion = parseGenericCliVersion(`${versionResult.stdout}\n${versionResult.stderr}`);
   if (versionResult.code !== 0) {
+    phases.push({ phase: "version", outcome: "error", durationMs: versionDurationMs });
+    phases.push({ phase: "login-status", outcome: "skipped", durationMs: 0 });
+    phases.push({ phase: "account-usage", outcome: "skipped", durationMs: 0 });
     const detail = detailFromResult(versionResult);
     return buildServerProvider({
       presentation: CODEX_PRESENTATION,
@@ -1458,20 +1556,27 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
         version: parsedVersion,
         status: "error",
         auth: { status: "unknown" },
+        phases,
         message: detail
           ? `Codex CLI is installed but failed to run. ${detail}`
           : "Codex CLI is installed but failed to run.",
       },
     });
   }
+  phases.push({ phase: "version", outcome: "success", durationMs: versionDurationMs });
 
+  const loginStartedAtMs = yield* Clock.currentTimeMillis;
   const loginStatusProbe = yield* runCodexCommand(
     codexSettings,
     ["login", "status"],
     environment,
   ).pipe(Effect.timeoutOption(DEFAULT_TIMEOUT_MS), Effect.result);
+  const loginFinishedAtMs = yield* Clock.currentTimeMillis;
+  const loginDurationMs = Math.max(0, Math.floor(loginFinishedAtMs - loginStartedAtMs));
 
   if (Result.isFailure(loginStatusProbe)) {
+    phases.push({ phase: "login-status", outcome: "error", durationMs: loginDurationMs });
+    phases.push({ phase: "account-usage", outcome: "skipped", durationMs: 0 });
     const error = loginStatusProbe.failure;
     return buildServerProvider({
       presentation: CODEX_PRESENTATION,
@@ -1484,12 +1589,15 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
         version: parsedVersion,
         status: "error",
         auth: { status: "unknown" },
+        phases,
         message: `Failed to execute Codex CLI login status check: ${error instanceof Error ? error.message : String(error)}.`,
       },
     });
   }
 
   if (Option.isNone(loginStatusProbe.success)) {
+    phases.push({ phase: "login-status", outcome: "timeout", durationMs: loginDurationMs });
+    phases.push({ phase: "account-usage", outcome: "skipped", durationMs: 0 });
     return buildServerProvider({
       presentation: CODEX_PRESENTATION,
       enabled: codexSettings.enabled,
@@ -1501,20 +1609,36 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
         version: parsedVersion,
         status: "warning",
         auth: { status: "unknown" },
-        message: "Codex CLI login status check timed out. Provider sessions may still work.",
+        phases,
+        message: CODEX_CLI_LOGIN_STATUS_TIMEOUT_MESSAGE,
       },
     });
   }
+  const loginStatusResult = loginStatusProbe.success.value;
+  phases.push({
+    phase: "login-status",
+    outcome: loginStatusResult.code === 0 ? "success" : "error",
+    durationMs: loginDurationMs,
+  });
 
   const authEmail = yield* readCodexAuthEmail(codexSettings, environment);
   const accountStatus = codexAuthProbeStatusFromLoginStatusResult({
-    ...loginStatusProbe.success.value,
+    ...loginStatusResult,
     ...(authEmail ? { authEmail } : {}),
   });
-  const accountRateLimits =
-    accountStatus.auth.status === "authenticated" && accountStatus.auth.type === "chatgpt"
-      ? yield* readCodexAccountRateLimits(codexSettings, environment, checkedAt)
-      : undefined;
+  let accountRateLimits: ServerProviderAccountRateLimits | undefined;
+  if (accountStatus.auth.status === "authenticated" && accountStatus.auth.type === "chatgpt") {
+    const usageStartedAtMs = yield* Clock.currentTimeMillis;
+    accountRateLimits = yield* readCodexAccountRateLimits(codexSettings, environment, checkedAt);
+    const usageFinishedAtMs = yield* Clock.currentTimeMillis;
+    phases.push({
+      phase: "account-usage",
+      outcome: accountRateLimits === undefined ? "skipped" : "success",
+      durationMs: Math.max(0, Math.floor(usageFinishedAtMs - usageStartedAtMs)),
+    });
+  } else {
+    phases.push({ phase: "account-usage", outcome: "skipped", durationMs: 0 });
+  }
   return buildServerProvider({
     presentation: CODEX_PRESENTATION,
     enabled: codexSettings.enabled,
@@ -1526,11 +1650,26 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
       version: parsedVersion,
       status: accountStatus.status,
       auth: accountStatus.auth,
+      phases,
       ...(accountRateLimits ? { accountRateLimits } : {}),
       ...(accountStatus.message ? { message: accountStatus.message } : {}),
     },
   });
 });
+
+/**
+ * A login-status timeout is different from a conclusive authentication
+ * failure: Codex sessions may remain usable and the bounded subprocess simply
+ * failed to answer in time. Keep this classification colocated with the probe
+ * that emits it so the managed provider never has to infer lifecycle meaning
+ * from arbitrary provider output.
+ */
+export const isCodexCliLoginStatusProbeInconclusive = (snapshot: ServerProvider): boolean =>
+  snapshot.driver === ProviderDriverKind.make("codex") &&
+  snapshot.installed &&
+  snapshot.status === "warning" &&
+  snapshot.auth.status === "unknown" &&
+  snapshot.message === CODEX_CLI_LOGIN_STATUS_TIMEOUT_MESSAGE;
 
 // NOTE: the singleton `CodexProviderLive` Layer has been removed as part of
 // the per-instance-driver refactor. `CodexDriver.create()` builds a managed

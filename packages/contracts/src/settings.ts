@@ -2,7 +2,14 @@ import * as Effect from "effect/Effect";
 import * as Duration from "effect/Duration";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
-import { TrimmedNonEmptyString, TrimmedString } from "./baseSchemas.ts";
+import {
+  EnvironmentId,
+  IsoDateTime,
+  ThreadId,
+  TrimmedNonEmptyString,
+  TrimmedString,
+  TurnId,
+} from "./baseSchemas.ts";
 import { DEFAULT_GIT_TEXT_GENERATION_MODEL, ProviderOptionSelections } from "./model.ts";
 import { ModelSelection } from "./orchestration.ts";
 import { ProviderInstanceConfig, ProviderInstanceId } from "./providerInstance.ts";
@@ -35,6 +42,9 @@ export const DEFAULT_SIDEBAR_BRAND_IMAGE_DATA_URL = "";
 export const DEFAULT_SIDEBAR_BRAND_IMAGE = null;
 export const DEFAULT_APP_ACCENT_COLOR = "";
 export const DEFAULT_THEME_ACCENT_COLOR = "";
+export const MIN_INTERFACE_SCALE_PERCENT = 80;
+export const MAX_INTERFACE_SCALE_PERCENT = 130;
+export const DEFAULT_INTERFACE_SCALE_PERCENT = 100;
 export const MIN_SIDEBAR_STAR_SPEED = 0.25;
 export const MAX_SIDEBAR_STAR_SPEED = 4;
 export const DEFAULT_SIDEBAR_STAR_SPEED = 1;
@@ -85,6 +95,150 @@ export const SidebarStarSpeed = Schema.Number.check(
   }),
 );
 export type SidebarStarSpeed = typeof SidebarStarSpeed.Type;
+export const InterfaceScalePercent = Schema.Int.check(
+  Schema.isBetween({
+    minimum: MIN_INTERFACE_SCALE_PERCENT,
+    maximum: MAX_INTERFACE_SCALE_PERCENT,
+  }),
+);
+export type InterfaceScalePercent = typeof InterfaceScalePercent.Type;
+
+// ── Model pricing (Usage page) ─────────────────────────────────────
+//
+// Cost on the Usage page is computed client-side from recorded token counters.
+// A bundled rate table ships with the app so the page works out of the box;
+// these overrides win over it, keyed by model id or by a prefix covering a
+// family. Rates are USD per million tokens, matching provider price sheets.
+// Models matched by neither are reported as unpriced rather than free.
+export const MAX_MODEL_PRICING_OVERRIDES = 200;
+export const MAX_MODEL_RATE_USD_PER_MILLION = 10_000;
+
+const ModelRateValue = Schema.Number.check(
+  Schema.isBetween({ minimum: 0, maximum: MAX_MODEL_RATE_USD_PER_MILLION }),
+);
+
+export const ModelRateOverride = Schema.Struct({
+  input: ModelRateValue,
+  cachedInput: ModelRateValue,
+  cacheWrite: ModelRateValue,
+  output: ModelRateValue,
+});
+export type ModelRateOverride = typeof ModelRateOverride.Type;
+
+export const ModelPricingOverrides = Schema.Record(TrimmedNonEmptyString, ModelRateOverride);
+export type ModelPricingOverrides = typeof ModelPricingOverrides.Type;
+export const DEFAULT_MODEL_PRICING_OVERRIDES: ModelPricingOverrides = {};
+
+// ── Ambiance (decorative weather layer) ────────────────────────────
+//
+// Purely cosmetic renderer state: an animated weather canvas drawn over the
+// app chrome. Off by default so fresh installs keep the plain sidebar stars.
+// All values are client settings so every connected renderer (Electron and
+// browser) shares the same ambiance once the backend syncs client settings.
+// Effects are split by rendering backend. The first five plus the canvas-2D
+// additions draw on a 2D context; the rest are fullscreen-quad fragment
+// shaders on a WebGL context. A canvas can only ever hold one context type, so
+// the renderer mounts one canvas or the other for the selected effect — see
+// `ambianceEffects.ts` for the backend/cost table the settings picker reads.
+export const AmbianceEffect = Schema.Literals([
+  // canvas 2D
+  "stars",
+  "rain",
+  "snow",
+  "matrix",
+  "fire",
+  "glass",
+  "lattice",
+  "blossom",
+  // WebGL fullscreen quad
+  "aurora",
+  "grid",
+  "horizon",
+  "resonance",
+  "converge",
+  "beam",
+  "terminal",
+  "core",
+]);
+export type AmbianceEffect = typeof AmbianceEffect.Type;
+export const DEFAULT_AMBIANCE_ENABLED = false;
+export const DEFAULT_AMBIANCE_EFFECT: AmbianceEffect = "rain";
+export const MIN_AMBIANCE_INTENSITY = 0;
+export const MAX_AMBIANCE_INTENSITY = 1;
+export const DEFAULT_AMBIANCE_INTENSITY = 0.55;
+export const AmbianceIntensity = Schema.Number.check(
+  Schema.isBetween({
+    minimum: MIN_AMBIANCE_INTENSITY,
+    maximum: MAX_AMBIANCE_INTENSITY,
+  }),
+);
+export type AmbianceIntensity = typeof AmbianceIntensity.Type;
+// Overall opacity of the weather layer, applied to the whole canvas. Intensity
+// controls how *busy* the sky is; this controls how *strong* it reads, which
+// matters because the catalog now ranges from a faint dot lattice to shaders
+// that cover the viewport.
+export const MIN_AMBIANCE_OPACITY = 0.05;
+export const MAX_AMBIANCE_OPACITY = 1;
+export const DEFAULT_AMBIANCE_OPACITY = 1;
+export const AmbianceOpacity = Schema.Number.check(
+  Schema.isBetween({
+    minimum: MIN_AMBIANCE_OPACITY,
+    maximum: MAX_AMBIANCE_OPACITY,
+  }),
+);
+export type AmbianceOpacity = typeof AmbianceOpacity.Type;
+// How much of the thread run the weather is allowed to react to:
+// "off" ignores thread state entirely, "session" follows session lifecycle
+// (starting/running/error/...), and "live" adds activity signals such as tool
+// bursts, approval holds, and completion clears.
+export const AmbianceReactMode = Schema.Literals(["off", "session", "live"]);
+export type AmbianceReactMode = typeof AmbianceReactMode.Type;
+export const DEFAULT_AMBIANCE_REACT_MODE: AmbianceReactMode = "live";
+export const DEFAULT_AMBIANCE_SURFACE_SIDEBAR = true;
+export const DEFAULT_AMBIANCE_SURFACE_THREAD = true;
+export const DEFAULT_AMBIANCE_SURFACE_COMPOSER = true;
+// Empty string means "follow the accent color configured in Appearance".
+export const DEFAULT_AMBIANCE_COLOR = "";
+
+// Task Atrium: a decorative read-only view of everything currently running,
+// opened explicitly from the chat header and dismissed with Escape. It never
+// appears on its own — no idle takeover, no taking over the empty pane — so the
+// only thing the enabled setting controls is whether the button exists. Like
+// the weather layer it never dispatches orchestration. Presentation-only error
+// dismissals are persisted separately so a historical provider failure does
+// not reappear after every restart.
+export const DEFAULT_AMBIANCE_ATRIUM_ENABLED = false;
+// Empty string means "follow the ambiance weather color", which itself falls
+// back to the Appearance accent. An explicit value tints only the Atrium.
+export const DEFAULT_AMBIANCE_ATRIUM_COLOR = "";
+
+/**
+ * Maximum number of historical Task Atrium failure occurrences retained in
+ * client settings. The records are also compacted to one per scoped thread by
+ * the renderer before each write. The schema bound is the final defensive
+ * limit for imported or concurrently written settings files.
+ */
+export const MAX_TASK_ATRIUM_ERROR_DISMISSALS = 2_000;
+
+/**
+ * Identity of one dismissed Task Atrium error occurrence.
+ *
+ * Deliberately exclude provider error text, prompts, output, paths, and account
+ * data. A turn id identifies turn-bound failures; the observed timestamp
+ * distinguishes turnless session failures on the same thread. Neither path
+ * persists potentially sensitive diagnostics.
+ */
+export const TaskAtriumErrorDismissal = Schema.Struct({
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+  turnId: Schema.NullOr(TurnId),
+  observedAt: IsoDateTime,
+});
+export type TaskAtriumErrorDismissal = typeof TaskAtriumErrorDismissal.Type;
+
+const TaskAtriumErrorDismissals = Schema.Array(TaskAtriumErrorDismissal).check(
+  Schema.isMaxLength(MAX_TASK_ATRIUM_ERROR_DISMISSALS),
+);
 
 export const SidebarProjectSortOrder = Schema.Literals(["updated_at", "created_at", "manual"]);
 export type SidebarProjectSortOrder = typeof SidebarProjectSortOrder.Type;
@@ -113,6 +267,11 @@ export type SidebarThreadPreviewCount = typeof SidebarThreadPreviewCount.Type;
 export const DEFAULT_SIDEBAR_THREAD_PREVIEW_COUNT: SidebarThreadPreviewCount = 6;
 
 export const ClientSettingsSchema = Schema.Struct({
+  // The persisted key predates the composer task-progress control. It now
+  // applies only to completed authored-plan documents. Runtime checklists
+  // stay in the composer popover unless the user docks the separate session
+  // rail; that placement is a local UI preference and must not follow this
+  // auto-open setting.
   autoOpenPlanSidebar: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   // Per-device first-run flow. `onboardingCompleted` gates the full-screen
   // onboarding surface so it only appears on a fresh install (and never loops
@@ -133,8 +292,9 @@ export const ClientSettingsSchema = Schema.Struct({
   dismissedProviderUpdateNotificationKeys: Schema.Array(TrimmedNonEmptyString).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
-  diffIgnoreWhitespace: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
-  diffWordWrap: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  interfaceScalePercent: InterfaceScalePercent.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_INTERFACE_SCALE_PERCENT)),
+  ),
   continueBackgroundAnimations: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS)),
   ),
@@ -160,6 +320,45 @@ export const ClientSettingsSchema = Schema.Struct({
   ).pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_BRAND_IMAGE_DATA_URL))),
   sidebarStarSpeed: SidebarStarSpeed.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_STAR_SPEED)),
+  ),
+  ambianceEnabled: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIANCE_ENABLED)),
+  ),
+  ambianceEffect: AmbianceEffect.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIANCE_EFFECT)),
+  ),
+  ambianceIntensity: AmbianceIntensity.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIANCE_INTENSITY)),
+  ),
+  ambianceOpacity: AmbianceOpacity.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIANCE_OPACITY)),
+  ),
+  ambianceReactMode: AmbianceReactMode.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIANCE_REACT_MODE)),
+  ),
+  ambianceSurfaceSidebar: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIANCE_SURFACE_SIDEBAR)),
+  ),
+  ambianceSurfaceThread: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIANCE_SURFACE_THREAD)),
+  ),
+  ambianceSurfaceComposer: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIANCE_SURFACE_COMPOSER)),
+  ),
+  ambianceColor: TrimmedString.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIANCE_COLOR)),
+  ),
+  ambianceAtriumEnabled: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIANCE_ATRIUM_ENABLED)),
+  ),
+  modelPricingOverrides: ModelPricingOverrides.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_MODEL_PRICING_OVERRIDES)),
+  ),
+  ambianceAtriumColor: TrimmedString.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIANCE_ATRIUM_COLOR)),
+  ),
+  dismissedTaskAtriumErrors: TaskAtriumErrorDismissals.pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
   ),
   themeAccentColor: TrimmedString.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_THEME_ACCENT_COLOR)),
@@ -257,6 +456,7 @@ export const CLIENT_SETTINGS_EXCLUDED_SECRET_STORES = [
   "provider-credentials",
   "provider-api-keys",
   "provider-environment-secrets",
+  "openai-realtime-api-key",
   "tls-private-keys",
 ] as const;
 
@@ -337,6 +537,10 @@ export interface ProviderSettingsFormAnnotation {
   // validation and used as the input's `min` attribute. Omit for no lower
   // bound.
   readonly minimum?: number | undefined;
+  // Upper bound for `control: "number"` fields, enforced by the renderer's
+  // validation and used as the input's `max` attribute. Omit for no upper
+  // bound.
+  readonly maximum?: number | undefined;
   // Whether `control: "number"` fields reject non-integer input. Defaults to
   // allowing fractional values when omitted.
   readonly integerOnly?: boolean | undefined;
@@ -374,21 +578,17 @@ export function makeProviderSettingsSchema<const Fields extends Schema.Struct.Fi
   );
 }
 
-// Cafe supplies this as Codex app-server thread config because Codex 0.133.0's
-// `gpt-5.5` model metadata advertises the context window while leaving
-// `auto_compact_token_limit` unset. OpenAI's current public compaction guide
-// uses a 200k threshold for Codex-style long-running Responses loops, and
-// upstream Codex compact tests exercise 200k for the same automatic compaction
-// path. That leaves practical headroom under the app-server's currently
-// reported 272k input / 258.4k effective window while avoiding the premature
-// compactions caused by Cafe's older 100k override. This constant lives in
-// `contracts` (rather than `shared`, which depends on `contracts`) so the
-// settings schema default and every runtime consumer share one source of
-// truth; `@cafecode/shared/codexCompaction` re-exports it for existing callers.
-export const CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT = 200_000;
-
 export const CodexAutoCompactTokenLimit = Schema.Int.check(Schema.isGreaterThan(0));
 export type CodexAutoCompactTokenLimit = typeof CodexAutoCompactTokenLimit.Type;
+
+// Codex counts only spawned agent threads against this limit; the primary
+// thread is separate. The provider default is model/backend-specific, so Cafe
+// leaves this setting absent unless the user explicitly overrides it.
+export const CODEX_MAX_CONCURRENT_SUBAGENTS = 64;
+export const CodexMaxConcurrentSubagents = Schema.Int.check(
+  Schema.isBetween({ minimum: 1, maximum: CODEX_MAX_CONCURRENT_SUBAGENTS }),
+);
+export type CodexMaxConcurrentSubagents = typeof CodexMaxConcurrentSubagents.Type;
 
 export const CodexSettings = makeProviderSettingsSchema(
   {
@@ -441,12 +641,27 @@ export const CodexSettings = makeProviderSettingsSchema(
       Schema.withDecodingDefault(Effect.succeed([])),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
-    autoCompactTokenLimit: CodexAutoCompactTokenLimit.pipe(
-      Schema.withDecodingDefault(Effect.succeed(CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT)),
+    maxConcurrentSubagents: Schema.optionalKey(CodexMaxConcurrentSubagents).pipe(
       Schema.annotateKey({
-        title: "Auto-compact token limit",
+        title: "Maximum concurrent subagents",
         description:
-          "Controls when Codex automatically compacts Cafe-managed threads. Default is 200,000 tokens.",
+          "Optional maximum number of spawned Codex agent threads that may be open concurrently. Enter 1–64, or leave blank to let the selected Codex model and backend choose; Cafe's current default Sol backend uses 3 spawned slots. The primary agent is not counted.",
+        providerSettingsForm: {
+          control: "number",
+          step: 1,
+          minimum: 1,
+          maximum: CODEX_MAX_CONCURRENT_SUBAGENTS,
+          integerOnly: true,
+          placeholder: "Provider default",
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
+    autoCompactTokenLimit: Schema.optionalKey(CodexAutoCompactTokenLimit).pipe(
+      Schema.annotateKey({
+        title: "Auto-compact override",
+        description:
+          "Optional token threshold override. Leave blank to use Codex app-server's model-specific automatic compaction policy.",
         providerSettingsForm: {
           control: "number",
           step: 1_000,
@@ -458,7 +673,14 @@ export const CodexSettings = makeProviderSettingsSchema(
     ),
   },
   {
-    order: ["runtimeSource", "binaryPath", "homePath", "shadowHomePath", "autoCompactTokenLimit"],
+    order: [
+      "runtimeSource",
+      "binaryPath",
+      "homePath",
+      "shadowHomePath",
+      "maxConcurrentSubagents",
+      "autoCompactTokenLimit",
+    ],
   },
 );
 export type CodexSettings = typeof CodexSettings.Type;
@@ -517,6 +739,36 @@ export const ClaudeSettings = makeProviderSettingsSchema(
   },
 );
 export type ClaudeSettings = typeof ClaudeSettings.Type;
+
+export const GrokSettings = makeProviderSettingsSchema(
+  {
+    enabled: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(true)),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+    binaryPath: makeBinaryPathSetting("grok").pipe(
+      Schema.annotateKey({
+        title: "Binary path",
+        description: "Path to the Grok Build CLI binary.",
+        providerSettingsForm: { placeholder: "grok", clearWhenEmpty: "omit" },
+      }),
+    ),
+    homePath: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "GROK_HOME path",
+        description: "Optional Grok home used by this instance. Leave blank to reuse grok login.",
+        providerSettingsForm: { placeholder: "Default Grok home", clearWhenEmpty: "omit" },
+      }),
+    ),
+    customModels: Schema.Array(Schema.String).pipe(
+      Schema.withDecodingDefault(Effect.succeed([])),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+  },
+  { order: ["binaryPath", "homePath"] },
+);
+export type GrokSettings = typeof GrokSettings.Type;
 
 export const OpenCodeSettings = makeProviderSettingsSchema(
   {
@@ -606,6 +858,7 @@ export const ServerSettings = Schema.Struct({
   providers: Schema.Struct({
     codex: CodexSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     claudeAgent: ClaudeSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+    grok: GrokSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     opencode: OpenCodeSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   }).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   // New driver-agnostic instance map. Keyed by `ProviderInstanceId`; values
@@ -666,6 +919,7 @@ const CodexSettingsPatch = Schema.Struct({
   homePath: Schema.optionalKey(TrimmedString),
   shadowHomePath: Schema.optionalKey(TrimmedString),
   customModels: Schema.optionalKey(Schema.Array(Schema.String)),
+  maxConcurrentSubagents: Schema.optionalKey(CodexMaxConcurrentSubagents),
   autoCompactTokenLimit: Schema.optionalKey(CodexAutoCompactTokenLimit),
 });
 
@@ -676,6 +930,13 @@ const ClaudeSettingsPatch = Schema.Struct({
   homePath: Schema.optionalKey(TrimmedString),
   customModels: Schema.optionalKey(Schema.Array(Schema.String)),
   launchArgs: Schema.optionalKey(TrimmedString),
+});
+
+const GrokSettingsPatch = Schema.Struct({
+  enabled: Schema.optionalKey(Schema.Boolean),
+  binaryPath: Schema.optionalKey(TrimmedString),
+  homePath: Schema.optionalKey(TrimmedString),
+  customModels: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 
 const OpenCodeSettingsPatch = Schema.Struct({
@@ -704,6 +965,7 @@ export const ServerSettingsPatch = Schema.Struct({
     Schema.Struct({
       codex: Schema.optionalKey(CodexSettingsPatch),
       claudeAgent: Schema.optionalKey(ClaudeSettingsPatch),
+      grok: Schema.optionalKey(GrokSettingsPatch),
       opencode: Schema.optionalKey(OpenCodeSettingsPatch),
     }),
   ),
@@ -724,8 +986,7 @@ export const ClientSettingsPatch = Schema.Struct({
   notificationsEnabled: Schema.optionalKey(Schema.Boolean),
   confirmThreadArchive: Schema.optionalKey(Schema.Boolean),
   confirmThreadDelete: Schema.optionalKey(Schema.Boolean),
-  diffIgnoreWhitespace: Schema.optionalKey(Schema.Boolean),
-  diffWordWrap: Schema.optionalKey(Schema.Boolean),
+  interfaceScalePercent: Schema.optionalKey(InterfaceScalePercent),
   continueBackgroundAnimations: Schema.optionalKey(Schema.Boolean),
   showSidebarSearch: Schema.optionalKey(Schema.Boolean),
   showSidebarMascot: Schema.optionalKey(Schema.Boolean),
@@ -738,6 +999,19 @@ export const ClientSettingsPatch = Schema.Struct({
   ),
   sidebarBrandImage: Schema.optionalKey(Schema.NullOr(SidebarBrandImageAsset)),
   sidebarStarSpeed: Schema.optionalKey(SidebarStarSpeed),
+  ambianceEnabled: Schema.optionalKey(Schema.Boolean),
+  ambianceEffect: Schema.optionalKey(AmbianceEffect),
+  ambianceIntensity: Schema.optionalKey(AmbianceIntensity),
+  ambianceOpacity: Schema.optionalKey(AmbianceOpacity),
+  ambianceReactMode: Schema.optionalKey(AmbianceReactMode),
+  ambianceSurfaceSidebar: Schema.optionalKey(Schema.Boolean),
+  ambianceSurfaceThread: Schema.optionalKey(Schema.Boolean),
+  ambianceSurfaceComposer: Schema.optionalKey(Schema.Boolean),
+  ambianceColor: Schema.optionalKey(TrimmedString),
+  ambianceAtriumEnabled: Schema.optionalKey(Schema.Boolean),
+  ambianceAtriumColor: Schema.optionalKey(TrimmedString),
+  modelPricingOverrides: Schema.optionalKey(ModelPricingOverrides),
+  dismissedTaskAtriumErrors: Schema.optionalKey(TaskAtriumErrorDismissals),
   themeAccentColor: Schema.optionalKey(TrimmedString),
   appAccentColor: Schema.optionalKey(TrimmedString),
   defaultEditor: Schema.optionalKey(DefaultEditorSelection),

@@ -5,6 +5,7 @@ import {
   EnvironmentId,
   EventId,
   MessageId,
+  MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
@@ -23,6 +24,7 @@ import {
   selectEnvironmentState,
   selectProjectsAcrossEnvironments,
   selectThreadByRef,
+  selectThreadDetailHydratedByRef,
   selectThreadExistsByRef,
   setThreadBranch,
   selectThreadsAcrossEnvironments,
@@ -464,6 +466,32 @@ describe("thread selection memoization", () => {
       ),
     ).toBe(false);
     expect(selectThreadExistsByRef(state, null)).toBe(false);
+  });
+
+  it("distinguishes a shell-only thread from a conclusively empty detail snapshot", () => {
+    const thread = makeThread();
+    const hydratedState = makeState(thread);
+    const ref = scopeThreadRef(thread.environmentId, thread.id);
+    const hydratedEnvironment = hydratedState.environmentStateById[thread.environmentId];
+    if (!hydratedEnvironment) {
+      throw new Error("Expected test environment state");
+    }
+    const shellOnlyState: AppState = {
+      ...hydratedState,
+      environmentStateById: {
+        ...hydratedState.environmentStateById,
+        [thread.environmentId]: {
+          ...hydratedEnvironment,
+          messageIdsByThreadId: {},
+        },
+      },
+    };
+
+    expect(selectThreadDetailHydratedByRef(shellOnlyState, ref)).toBe(false);
+    // An owned empty array is intentional: detail snapshots always materialize
+    // it, so an empty conversation is no longer ambiguous with loading.
+    expect(selectThreadDetailHydratedByRef(hydratedState, ref)).toBe(true);
+    expect(selectThreadDetailHydratedByRef(hydratedState, null)).toBe(false);
   });
 });
 
@@ -1470,5 +1498,182 @@ describe("incremental orchestration updates", () => {
       state: "running",
     });
     expect(threadsOf(next)[0]?.latestTurn?.sourceProposedPlan).toBeUndefined();
+  });
+
+  it("retains compact current-turn subagent lifecycle state beyond the live activity tail", () => {
+    const turnId = TurnId.make("turn-long-subagents");
+    const child = {
+      threadId: "provider-child-1",
+      label: "Audit long turn",
+      status: "active",
+      startedAt: "2026-02-27T00:00:01.000Z",
+    } as const;
+    const lifecycle: Thread["activities"] = [
+      {
+        id: EventId.make("subagent-start"),
+        tone: "info",
+        kind: "task.started",
+        summary: "Subagent started",
+        payload: { taskId: child.threadId, subagent: child },
+        turnId,
+        sequence: 1,
+        createdAt: "2026-02-27T00:00:01.000Z",
+      },
+      {
+        id: EventId.make("subagent-progress-obsolete"),
+        tone: "info",
+        kind: "task.progress",
+        summary: "Subagent update",
+        payload: { taskId: child.threadId, detail: "Old detail", subagent: child },
+        turnId,
+        sequence: 2,
+        createdAt: "2026-02-27T00:00:02.000Z",
+      },
+      {
+        id: EventId.make("subagent-progress-latest"),
+        tone: "info",
+        kind: "task.progress",
+        summary: "Subagent update",
+        payload: { taskId: child.threadId, detail: "Latest detail", subagent: child },
+        turnId,
+        sequence: 3,
+        createdAt: "2026-02-27T00:00:03.000Z",
+      },
+      {
+        id: EventId.make("subagent-completed"),
+        tone: "info",
+        kind: "task.completed",
+        summary: "Subagent completed",
+        payload: {
+          taskId: child.threadId,
+          status: "completed",
+          subagent: { ...child, status: "completed" },
+        },
+        turnId,
+        sequence: 4,
+        createdAt: "2026-02-27T00:00:04.000Z",
+      },
+    ];
+    const ordinaryTail: Thread["activities"] = Array.from({ length: 500 }, (_, index) => ({
+      id: EventId.make(`ordinary-${String(index + 1).padStart(4, "0")}`),
+      tone: "tool" as const,
+      kind: "tool.completed",
+      summary: `Ordinary activity ${index + 1}`,
+      payload: {},
+      turnId,
+      sequence: index + 5,
+      createdAt: "2026-02-27T00:01:00.000Z",
+    }));
+    const thread = makeThread({
+      latestTurn: {
+        turnId,
+        state: "running",
+        requestedAt: "2026-02-27T00:00:00.000Z",
+        startedAt: "2026-02-27T00:00:00.000Z",
+        completedAt: null,
+        assistantMessageId: null,
+      },
+      activities: [...lifecycle, ...ordinaryTail],
+    });
+
+    const next = applyOrchestrationEvent(
+      makeState(thread),
+      makeEvent(
+        "thread.activity-appended",
+        {
+          threadId: thread.id,
+          activity: {
+            id: EventId.make("ordinary-newest"),
+            tone: "tool",
+            kind: "tool.completed",
+            summary: "Newest ordinary activity",
+            payload: {},
+            turnId,
+            sequence: 505,
+            createdAt: "2026-02-27T00:02:00.000Z",
+          },
+        },
+        { sequence: 2_000 },
+      ),
+      localEnvironmentId,
+    );
+
+    const retained = threadsOf(next)[0]?.activities ?? [];
+    expect(retained).toHaveLength(503);
+    expect(retained.some((activity) => activity.id === "subagent-progress-obsolete")).toBe(false);
+    expect(
+      retained
+        .filter((activity) => activity.kind.startsWith("task."))
+        .map((activity) => activity.id),
+    ).toEqual(["subagent-start", "subagent-progress-latest", "subagent-completed"]);
+  });
+
+  it("caps compact lifecycle retention across adversarial unique subagent identities", () => {
+    const turnId = TurnId.make("turn-subagent-cardinality-limit");
+    const lifecycle: Thread["activities"] = Array.from(
+      { length: MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN + 1 },
+      (_, index) => ({
+        id: EventId.make(`subagent-cardinality-${String(index).padStart(5, "0")}`),
+        tone: "info" as const,
+        kind: "task.started",
+        summary: "Subagent started",
+        payload: {
+          taskId: `child-${index}`,
+          subagent: { threadId: `child-${index}`, status: "active" },
+        },
+        turnId,
+        sequence: index + 1,
+        createdAt: "2026-02-27T00:00:01.000Z",
+      }),
+    );
+    const ordinaryTail: Thread["activities"] = Array.from({ length: 500 }, (_, index) => ({
+      id: EventId.make(`ordinary-cardinality-${String(index).padStart(4, "0")}`),
+      tone: "tool" as const,
+      kind: "tool.completed",
+      summary: "Ordinary activity",
+      payload: {},
+      turnId,
+      sequence: lifecycle.length + index + 1,
+      createdAt: "2026-02-27T00:01:00.000Z",
+    }));
+    const thread = makeThread({
+      latestTurn: {
+        turnId,
+        state: "running",
+        requestedAt: "2026-02-27T00:00:00.000Z",
+        startedAt: "2026-02-27T00:00:00.000Z",
+        completedAt: null,
+        assistantMessageId: null,
+      },
+      activities: [...lifecycle, ...ordinaryTail],
+    });
+
+    const next = applyOrchestrationEvent(
+      makeState(thread),
+      makeEvent(
+        "thread.activity-appended",
+        {
+          threadId: thread.id,
+          activity: {
+            id: EventId.make("ordinary-cardinality-newest"),
+            tone: "tool",
+            kind: "tool.completed",
+            summary: "Newest ordinary activity",
+            payload: {},
+            turnId,
+            sequence: lifecycle.length + ordinaryTail.length + 1,
+            createdAt: "2026-02-27T00:02:00.000Z",
+          },
+        },
+        { sequence: 2_100 },
+      ),
+      localEnvironmentId,
+    );
+
+    const retained = threadsOf(next)[0]?.activities ?? [];
+    const retainedSubagentStarts = retained.filter((activity) => activity.kind === "task.started");
+    expect(retainedSubagentStarts).toHaveLength(MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN);
+    expect(retained).toHaveLength(MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN + 500);
+    expect(retained.some((activity) => activity.id === "subagent-cardinality-00000")).toBe(false);
   });
 });

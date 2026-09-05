@@ -89,6 +89,19 @@ describe("thread detail snapshot stream encoding", () => {
     ]);
   });
 
+  it("chunks a medium snapshot before it can monopolize the shared connection budget", () => {
+    const snapshot = makeSnapshot("x".repeat(THREAD_DETAIL_SNAPSHOT_CHUNK_RAW_BYTES));
+    const items = encodeThreadDetailSnapshotStreamItems(snapshot);
+
+    expect(items.length).toBeGreaterThan(1);
+    expect(items.every((item) => item.kind === "snapshot-chunk")).toBe(true);
+    expect(
+      items.every(
+        (item) => encodedJsonByteLength(item) < PROVIDER_PIPELINE_POLICY.webSocketMaxFrameBytes,
+      ),
+    ).toBe(true);
+  });
+
   it("chunks an oversized snapshot below the WebSocket frame ceiling without data loss", () => {
     const snapshot = makeSnapshot(`start🙂${"x".repeat(7 * 1024 * 1024)}end`);
     const items = encodeThreadDetailSnapshotStreamItems(snapshot);

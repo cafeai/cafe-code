@@ -93,12 +93,12 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
     Effect.sync(() => {
       const compiled = compileResolvedKeybindingRule({
         key: "mod+d",
-        command: "diff.toggle",
+        command: "chat.new",
         when: "modelPickerOpen && !modelPickerOpen",
       });
 
       assert.deepEqual(compiled, {
-        command: "diff.toggle",
+        command: "chat.new",
         shortcut: {
           key: "d",
           metaKey: false,
@@ -150,7 +150,7 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
       assert.isNull(
         compileResolvedKeybindingRule({
           key: "mod+d",
-          command: "diff.toggle",
+          command: "chat.new",
           when: "modelPickerOpen && (",
         }),
       );
@@ -158,7 +158,7 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
       assert.isNull(
         compileResolvedKeybindingRule({
           key: "mod+d",
-          command: "diff.toggle",
+          command: "chat.new",
           when: `${"!".repeat(300)}modelPickerOpen`,
         }),
       );
@@ -313,6 +313,39 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
         }
         assert.isTrue(byCommand.has("script.run-tests.run"));
       }).pipe(Effect.provide(makeKeybindingsLayer())),
+  );
+
+  it.effect("removes the retired diff viewer keybinding during startup sync", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const { keybindingsConfigPath } = yield* ServerConfig;
+      yield* fs.writeFileString(
+        keybindingsConfigPath,
+        // This entry predates the diff viewer removal and intentionally cannot
+        // be encoded through the current KeybindingRule schema.
+        '[{"key":"mod+d","command":"diff.toggle"}]',
+      );
+
+      const configState = yield* Effect.gen(function* () {
+        const keybindings = yield* Keybindings;
+        const state = yield* keybindings.loadConfigState;
+        yield* keybindings.syncDefaultKeybindingsOnStartup;
+        return state;
+      });
+
+      assert.deepEqual(configState.issues, []);
+      assert.isFalse(
+        configState.keybindings.some((entry) => String(entry.command) === "diff.toggle"),
+      );
+      const persisted = yield* readKeybindingsConfig(keybindingsConfigPath);
+      assert.isFalse(persisted.some((entry) => String(entry.command) === "diff.toggle"));
+      for (const defaultRule of DEFAULT_KEYBINDINGS) {
+        assert.isTrue(
+          persisted.some((entry) => entry.command === defaultRule.command),
+          `expected ${defaultRule.command}`,
+        );
+      }
+    }).pipe(Effect.provide(makeKeybindingsLayer())),
   );
 
   it.effect("skips conflicting default keybindings on startup and logs a detailed warning", () => {

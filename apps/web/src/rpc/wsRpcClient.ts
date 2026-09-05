@@ -14,7 +14,7 @@ import * as Stream from "effect/Stream";
 import { dispatchIdempotentCommandWithTransportRetry } from "./idempotentDispatch";
 import { type WsRpcProtocolClient } from "./protocol";
 import { resetWsReconnectBackoff } from "./wsConnectionState";
-import { WsTransport } from "./wsTransport";
+import { WsTransport, type WsTransportOpenEvent } from "./wsTransport";
 
 type RpcTag = keyof WsRpcProtocolClient & string;
 type RpcMethod<TTag extends RpcTag> = WsRpcProtocolClient[TTag];
@@ -53,6 +53,9 @@ export interface WsRpcClient {
   readonly dispose: () => Promise<void>;
   readonly reconnect: () => Promise<void>;
   readonly isHeartbeatFresh: () => boolean;
+  readonly subscribeConnectionOpened: (
+    listener: (event: WsTransportOpenEvent) => void,
+  ) => () => void;
   readonly projects: {
     readonly searchEntries: RpcUnaryMethod<typeof WS_METHODS.projectsSearchEntries>;
     readonly writeFile: RpcUnaryMethod<typeof WS_METHODS.projectsWriteFile>;
@@ -76,7 +79,6 @@ export interface WsRpcClient {
   readonly vcs: {
     readonly pull: RpcUnaryMethod<typeof WS_METHODS.vcsPull>;
     readonly refreshStatus: RpcUnaryMethod<typeof WS_METHODS.vcsRefreshStatus>;
-    readonly workingTreeDiff: RpcUnaryMethod<typeof WS_METHODS.vcsWorkingTreeDiff>;
     readonly onStatus: (
       input: RpcInput<typeof WS_METHODS.subscribeVcsStatus>,
       listener: (status: VcsStatusResult) => void,
@@ -94,6 +96,14 @@ export interface WsRpcClient {
     readonly preparePullRequestThread: RpcUnaryMethod<
       typeof WS_METHODS.gitPreparePullRequestThread
     >;
+  };
+  readonly dictation: {
+    readonly getStatus: RpcUnaryNoArgMethod<typeof WS_METHODS.dictationGetStatus>;
+    readonly setApiKey: RpcUnaryMethod<typeof WS_METHODS.dictationSetApiKey>;
+    readonly clearApiKey: RpcUnaryNoArgMethod<typeof WS_METHODS.dictationClearApiKey>;
+    readonly createClientSecret: (
+      input?: RpcInput<typeof WS_METHODS.dictationCreateClientSecret>,
+    ) => ReturnType<RpcUnaryMethod<typeof WS_METHODS.dictationCreateClientSecret>>;
   };
   readonly server: {
     readonly getConfig: RpcUnaryNoArgMethod<typeof WS_METHODS.serverGetConfig>;
@@ -151,6 +161,9 @@ export interface WsRpcClient {
     readonly getThreadTurnActivityPage: RpcUnaryMethod<
       typeof ORCHESTRATION_WS_METHODS.getThreadTurnActivityPage
     >;
+    readonly getThreadTurnSubagentDetail: RpcUnaryMethod<
+      typeof ORCHESTRATION_WS_METHODS.getThreadTurnSubagentDetail
+    >;
     readonly getThreadTurnWorkLogPresence: RpcUnaryMethod<
       typeof ORCHESTRATION_WS_METHODS.getThreadTurnWorkLogPresence
     >;
@@ -174,6 +187,7 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
       await transport.reconnect();
     },
     isHeartbeatFresh: () => transport.isHeartbeatFresh(),
+    subscribeConnectionOpened: (listener) => transport.subscribeConnectionOpened(listener),
     projects: {
       searchEntries: (input) =>
         transport.request((client) => client[WS_METHODS.projectsSearchEntries](input)),
@@ -199,8 +213,6 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
       pull: (input) => transport.request((client) => client[WS_METHODS.vcsPull](input)),
       refreshStatus: (input) =>
         transport.request((client) => client[WS_METHODS.vcsRefreshStatus](input)),
-      workingTreeDiff: (input) =>
-        transport.request((client) => client[WS_METHODS.vcsWorkingTreeDiff](input)),
       onStatus: (input, listener, options) => {
         let current: VcsStatusResult | null = null;
         return transport.subscribe(
@@ -226,6 +238,26 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
         transport.request((client) => client[WS_METHODS.gitResolvePullRequest](input)),
       preparePullRequestThread: (input) =>
         transport.request((client) => client[WS_METHODS.gitPreparePullRequestThread](input)),
+    },
+    dictation: {
+      getStatus: () =>
+        transport.request((client) =>
+          client[WS_METHODS.dictationGetStatus]({}).pipe(Effect.withTracerEnabled(false)),
+        ),
+      setApiKey: (input) =>
+        transport.request((client) =>
+          client[WS_METHODS.dictationSetApiKey](input).pipe(Effect.withTracerEnabled(false)),
+        ),
+      clearApiKey: () =>
+        transport.request((client) =>
+          client[WS_METHODS.dictationClearApiKey]({}).pipe(Effect.withTracerEnabled(false)),
+        ),
+      createClientSecret: (input = {}) =>
+        transport.request((client) =>
+          client[WS_METHODS.dictationCreateClientSecret](input).pipe(
+            Effect.withTracerEnabled(false),
+          ),
+        ),
     },
     server: {
       getConfig: () => transport.request((client) => client[WS_METHODS.serverGetConfig]({})),
@@ -316,6 +348,10 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
       getThreadTurnActivityPage: (input) =>
         transport.request((client) =>
           client[ORCHESTRATION_WS_METHODS.getThreadTurnActivityPage](input),
+        ),
+      getThreadTurnSubagentDetail: (input) =>
+        transport.request((client) =>
+          client[ORCHESTRATION_WS_METHODS.getThreadTurnSubagentDetail](input),
         ),
       getThreadTurnWorkLogPresence: (input) =>
         transport.request((client) =>

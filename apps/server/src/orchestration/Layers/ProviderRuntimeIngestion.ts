@@ -15,9 +15,11 @@ import {
   type OrchestrationProposedPlan,
   type OrchestrationThread,
   type OrchestrationThreadActivity,
+  type ProviderThreadGoal,
   type ProviderRuntimeEvent,
 } from "@cafecode/contracts";
 import { readCafeCodeEnv } from "@cafecode/shared/compatEnv";
+import { PROVIDER_PIPELINE_POLICY } from "@cafecode/shared/providerPipelinePolicy";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
@@ -25,10 +27,16 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { makeDrainableWorker } from "@cafecode/shared/DrainableWorker";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import {
+  buildCodexSteerClientCorrelationId,
+  parseCodexSteerClientCorrelationId,
+} from "../../provider/codexSteerCorrelation.ts";
 import { ProjectionStateRepository } from "../../persistence/Services/ProjectionState.ts";
 import { ProjectionStateRepositoryLive } from "../../persistence/Layers/ProjectionState.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
@@ -38,6 +46,7 @@ import {
   PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR,
   readProviderDaemonRuntimeEventCursor,
 } from "../../providerDaemon/ProviderDaemonRuntimeCursor.ts";
+import { recordProviderRuntimeIngestionCursor } from "../../providerDaemon/ProviderRuntimeIngestionProgress.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
@@ -51,6 +60,19 @@ import {
   hasRenderableAssistantText,
 } from "../providerAssistantCompletionText.ts";
 import { AssistantStreamTextCommitment } from "../providerAssistantStreamCommitment.ts";
+import { makeProviderTurnRecoveryEvidenceReader } from "../providerTurnRecoveryEvidence.ts";
+import {
+  buildTerminalCodexSteerRecoveryCommands,
+  codexSteerAcceptanceEvidenceFromProjection,
+} from "../codexSteerRecovery.ts";
+import {
+  pruneAcceptedCodexSteerCandidateAfterDurableProcessing,
+  pruneCodexSteerIntentAfterDurableProcessing,
+  readAcceptedCodexSteerRecoveryBarriers,
+  type PersistedAcceptedCodexSteerBarrier,
+  type PersistedCodexSteerProcessingSource,
+  type PersistedUnsettledCodexSteerIntent,
+} from "../codexSteerIntentLedger.ts";
 import { sanitizeProviderToolData } from "@cafecode/shared/activityPayloadSanitizer";
 import { ServerSettingsService } from "../../serverSettings.ts";
 
@@ -90,7 +112,10 @@ const BUFFERED_PROPOSED_PLAN_BY_ID_CACHE_CAPACITY = 10_000;
 const BUFFERED_PROPOSED_PLAN_BY_ID_TTL = Duration.minutes(120);
 const PROCESSED_RUNTIME_EVENT_IDS_CACHE_CAPACITY = 100_000;
 const PROCESSED_RUNTIME_EVENT_IDS_TTL = Duration.minutes(120);
+const HARD_DELETED_THREAD_CACHE_CAPACITY = 10_000;
+const HARD_DELETED_THREAD_CACHE_TTL = Duration.minutes(30);
 const PROVIDER_DAEMON_RUNTIME_CURSOR_PERSIST_INTERVAL = 1_000;
+const PROVIDER_RUNTIME_INGESTION_FAIRNESS_DELAY_MS = 1;
 const MAX_BUFFERED_ASSISTANT_CHARS = 24_000;
 const STREAMED_MESSAGE_IDS_CACHE_CAPACITY = 20_000;
 const STREAMED_MESSAGE_IDS_TTL = Duration.minutes(120);
@@ -106,9 +131,32 @@ const STREAMING_ASSISTANT_PUNCTUATION_FLUSH_REGEX = /[.!?。！？]\s*$/u;
 const STRICT_PROVIDER_LIFECYCLE_GUARD =
   readCafeCodeEnv(process.env, "CAFE_CODE_STRICT_PROVIDER_LIFECYCLE_GUARD") !== "0";
 
-type TurnStartRequestedDomainEvent = Extract<
+/**
+ * Yield a real Node timer turn rather than only yielding to Effect's scheduler.
+ *
+ * Node's SQLite driver is synchronous. During bounded daemon catch-up, a long
+ * sequence of otherwise asynchronous Effects can therefore remain entirely in
+ * one JavaScript turn. A recursively scheduled `setImmediate` still lets the
+ * ingestion Promise continuation regain the Effect executor before HTTP work
+ * waiting behind the shared SQLite client receives a fair turn. A minimal
+ * timer delay crosses both the poll and timer phases, which lets readiness,
+ * WebSocket handshakes, and renderer queries enter that queue without changing
+ * the ingestion worker's strict one-event-at-a-time ordering.
+ */
+function yieldProviderRuntimeIngestionEventLoop(): Effect.Effect<void> {
+  return Effect.promise(
+    () =>
+      new Promise<void>((resolve) =>
+        setTimeout(resolve, PROVIDER_RUNTIME_INGESTION_FAIRNESS_DELAY_MS),
+      ),
+  );
+}
+
+type RuntimeIngestionDomainEvent = Extract<
   OrchestrationEvent,
-  { type: "thread.turn-start-requested" }
+  {
+    type: "thread.turn-start-requested" | "thread.goal-set-requested" | "thread.goal-synced";
+  }
 >;
 
 type RuntimeIngestionInput =
@@ -118,8 +166,12 @@ type RuntimeIngestionInput =
     }
   | {
       source: "domain";
-      event: TurnStartRequestedDomainEvent;
+      event: RuntimeIngestionDomainEvent;
     };
+
+function runtimeIngestionInputThreadId(input: RuntimeIngestionInput): ThreadId {
+  return input.source === "runtime" ? input.event.threadId : input.event.payload.threadId;
+}
 
 function toTurnId(value: TurnId | string | undefined): TurnId | undefined {
   return value === undefined ? undefined : TurnId.make(String(value));
@@ -405,12 +457,29 @@ function runtimeEventCarriesActiveTurnWork(event: ProviderRuntimeEvent): boolean
     case "turn.proposed.delta":
     case "item.started":
     case "item.updated":
-    case "task.started":
-    case "task.progress":
     case "hook.started":
     case "hook.progress":
     case "tool.progress":
       return true;
+    case "task.started":
+      // Codex credential recovery belongs to the model-provider control plane,
+      // not the assistant turn. The adapter intentionally projects a bounded,
+      // visible task row so the user can understand a temporary credential
+      // refresh, but that row must never repair an orphaned turn, replace a
+      // conflicting active turn, or refresh a settled session to `running`.
+      // The corresponding task.completed edge is already non-liveness data.
+      // Keep this discriminator canonical instead of parsing provider-authored
+      // descriptions or opaque task ids.
+      if (event.payload.taskType === "provider-auth-recovery") {
+        return false;
+      }
+      return event.payload.visibility !== "ambient";
+    case "task.progress":
+      // Ambient provider work is intentionally absent from the root task
+      // surface and is not proof that the root turn is still live. Treating a
+      // visibility-only snapshot as active work could resurrect a completed
+      // turn or keep a stale session running indefinitely.
+      return event.payload.visibility !== "ambient";
     default:
       return false;
   }
@@ -418,11 +487,13 @@ function runtimeEventCarriesActiveTurnWork(event: ProviderRuntimeEvent): boolean
 
 function requestKindFromCanonicalRequestType(
   requestType: string | undefined,
-): "command" | "file-read" | "file-change" | undefined {
+): "command" | "terminal-input" | "file-read" | "file-change" | undefined {
   switch (requestType) {
     case "command_execution_approval":
     case "exec_command_approval":
       return "command";
+    case "terminal_input_approval":
+      return "terminal-input";
     case "file_read_approval":
       return "file-read";
     case "file_change_approval":
@@ -457,11 +528,13 @@ function runtimeEventToActivities(
           summary:
             requestKind === "command"
               ? "Command approval requested"
-              : requestKind === "file-read"
-                ? "File-read approval requested"
-                : requestKind === "file-change"
-                  ? "File-change approval requested"
-                  : "Approval requested",
+              : requestKind === "terminal-input"
+                ? "Terminal input approval requested"
+                : requestKind === "file-read"
+                  ? "File-read approval requested"
+                  : requestKind === "file-change"
+                    ? "File-change approval requested"
+                    : "Approval requested",
           payload: {
             requestId: toApprovalRequestId(event.requestId),
             ...(requestKind ? { requestKind } : {}),
@@ -572,6 +645,7 @@ function runtimeEventToActivities(
           payload: {
             ...(event.requestId ? { requestId: event.requestId } : {}),
             questions: event.payload.questions,
+            isBlocking: event.payload.isBlocking,
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -586,10 +660,13 @@ function runtimeEventToActivities(
           createdAt: event.createdAt,
           tone: "info",
           kind: "user-input.resolved",
-          summary: "User input submitted",
+          summary: event.payload.autoResolved
+            ? "User input continued automatically"
+            : "User input submitted",
           payload: {
             ...(event.requestId ? { requestId: event.requestId } : {}),
             answers: event.payload.answers,
+            ...(event.payload.autoResolved ? { autoResolved: true } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -604,8 +681,9 @@ function runtimeEventToActivities(
           createdAt: event.createdAt,
           tone: "info",
           kind: "task.started",
-          summary:
-            event.payload.taskType === "plan"
+          summary: event.payload.subagent
+            ? "Subagent started"
+            : event.payload.taskType === "plan"
               ? "Plan task started"
               : event.payload.taskType === "approval-review"
                 ? "Approval review started"
@@ -615,6 +693,8 @@ function runtimeEventToActivities(
           payload: {
             taskId: event.payload.taskId,
             ...(event.payload.taskType ? { taskType: event.payload.taskType } : {}),
+            ...(event.payload.visibility ? { visibility: event.payload.visibility } : {}),
+            ...(event.payload.subagent ? { subagent: event.payload.subagent } : {}),
             ...(event.payload.description
               ? { detail: truncateDetail(event.payload.description) }
               : {}),
@@ -632,10 +712,12 @@ function runtimeEventToActivities(
           createdAt: event.createdAt,
           tone: "info",
           kind: "task.progress",
-          summary: "Reasoning update",
+          summary: event.payload.subagent ? "Subagent update" : "Reasoning update",
           payload: {
             taskId: event.payload.taskId,
             detail: truncateDetail(event.payload.summary ?? event.payload.description),
+            ...(event.payload.visibility ? { visibility: event.payload.visibility } : {}),
+            ...(event.payload.subagent ? { subagent: event.payload.subagent } : {}),
             ...(event.payload.summary ? { summary: truncateDetail(event.payload.summary) } : {}),
             ...(event.payload.lastToolName ? { lastToolName: event.payload.lastToolName } : {}),
             ...(event.payload.usage !== undefined ? { usage: event.payload.usage } : {}),
@@ -655,15 +737,24 @@ function runtimeEventToActivities(
           kind: "task.completed",
           summary:
             event.payload.status === "failed"
-              ? "Task failed"
+              ? event.payload.subagent
+                ? "Subagent failed"
+                : "Task failed"
               : event.payload.status === "stopped"
-                ? "Task stopped"
-                : "Task completed",
+                ? event.payload.subagent
+                  ? "Subagent stopped"
+                  : "Task stopped"
+                : event.payload.subagent
+                  ? "Subagent completed"
+                  : "Task completed",
           payload: {
             taskId: event.payload.taskId,
             status: event.payload.status,
+            ...(event.payload.visibility ? { visibility: event.payload.visibility } : {}),
+            ...(event.payload.subagent ? { subagent: event.payload.subagent } : {}),
             ...(event.payload.summary ? { detail: truncateDetail(event.payload.summary) } : {}),
             ...(event.payload.usage !== undefined ? { usage: event.payload.usage } : {}),
+            ...(event.payload.resourceLinks ? { resourceLinks: event.payload.resourceLinks } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -860,7 +951,62 @@ function runtimeEventToActivities(
   return [];
 }
 
+function readUnknownRecord(value: unknown): Readonly<Record<string, unknown>> | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Readonly<Record<string, unknown>>;
+}
+
+/**
+ * Read Cafe's opaque Codex steer token only from the dedicated processing
+ * activity shape. A provider-controlled `usage` object can contain arbitrary
+ * fields, so knowing a valid token is not enough: the bounded task id must be
+ * derived from that same token before durable Cafe identities are restored.
+ */
+function readCodexSteerProcessingToken(event: ProviderRuntimeEvent): string | undefined {
+  if (event.provider !== "codex" || event.type !== "task.progress") {
+    return undefined;
+  }
+
+  const usage = readUnknownRecord(event.payload.usage);
+  if (usage === null) {
+    return undefined;
+  }
+
+  // Provider-owned diagnostics are never allowed to carry Cafe's raw,
+  // open-string MessageId. Reject legacy or forged mixed-identity payloads;
+  // the trusted orchestration reads below are the only reverse-map authority.
+  if (typeof usage.messageId === "string" && usage.messageId.length > 0) {
+    return undefined;
+  }
+
+  const token = parseCodexSteerClientCorrelationId(
+    typeof usage.clientCorrelationId === "string" ? usage.clientCorrelationId : undefined,
+  );
+  if (token === undefined || event.payload.taskId !== `codex-turn-steer-processing:${token}`) {
+    return undefined;
+  }
+  return token;
+}
+
+interface EnrichedCodexSteerProcessingActivities {
+  readonly activities: ReadonlyArray<OrchestrationThreadActivity>;
+  /**
+   * Exact compact-ledger rows that may be retired only after every enriched
+   * canonical activity below has been durably dispatched. Keeping the rows,
+   * rather than only a provider-supplied correlation string, makes the delete
+   * resistant to reconnect reordering and stale ingestion fibers.
+   */
+  readonly settlement: {
+    readonly acceptedCandidates: ReadonlyArray<PersistedAcceptedCodexSteerBarrier>;
+    readonly unsettledIntents: ReadonlyArray<PersistedUnsettledCodexSteerIntent>;
+    readonly source: PersistedCodexSteerProcessingSource;
+  } | null;
+}
+
 const make = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
@@ -868,8 +1014,207 @@ const make = Effect.gen(function* () {
   const projectionStateRepository = yield* ProjectionStateRepository;
   const projectionTurnRepository = yield* ProjectionTurnRepository;
   const serverSettingsService = yield* ServerSettingsService;
-  let lastPersistedProviderDaemonCursor = 0;
-  let pendingProviderDaemonCursor = 0;
+  const readProviderTurnRecoveryEvidence = yield* makeProviderTurnRecoveryEvidenceReader;
+
+  const enrichCodexSteerProcessingActivities = (
+    event: ProviderRuntimeEvent,
+    activities: ReadonlyArray<OrchestrationThreadActivity>,
+  ): Effect.Effect<EnrichedCodexSteerProcessingActivities> => {
+    const unchanged = {
+      activities,
+      settlement: null,
+    } satisfies EnrichedCodexSteerProcessingActivities;
+    const clientCorrelationId = readCodexSteerProcessingToken(event);
+    if (clientCorrelationId === undefined) {
+      return Effect.succeed(unchanged);
+    }
+
+    return Effect.gen(function* () {
+      const eventTurnId = toTurnId(event.turnId);
+      const [unsettledIntents, pendingAcceptedCandidates] = yield* Effect.all([
+        projectionSnapshotQuery.getUnsettledCodexSteerIntentEvents({
+          threadId: event.threadId,
+          // The current provider notification is itself the candidate
+          // processing evidence. Do not synchronously rescan historical
+          // activity projections here: after enrichment the canonical event
+          // is dispatched first, then the exact sequence/time-bound ledger
+          // prune below validates that durable event. Startup recovery keeps
+          // the default reconciliation path for crash fallback.
+          reconcileDurableProcessing: false,
+        }),
+        readAcceptedCodexSteerRecoveryBarriers(sql, [event.threadId]),
+      ]);
+
+      // Keep candidates keyed by the exact Cafe entity id. The same original
+      // intent can appear in both reads during projection convergence, which
+      // is one identity rather than an ambiguity. Two different identities
+      // matching one token must fail closed, even though SHA-256 makes that
+      // condition computationally infeasible under honest persisted data.
+      const candidatesById = new Map<string, MessageId>();
+      for (const candidate of pendingAcceptedCandidates) {
+        if (
+          eventTurnId === undefined ||
+          candidate.threadId !== event.threadId ||
+          candidate.acceptedTurnId !== eventTurnId ||
+          candidate.clientCorrelationId !== clientCorrelationId ||
+          buildCodexSteerClientCorrelationId(candidate.messageId) !== clientCorrelationId
+        ) {
+          continue;
+        }
+        candidatesById.set(candidate.messageId, candidate.messageId);
+      }
+      for (const intent of unsettledIntents) {
+        if (
+          intent.threadId !== event.threadId ||
+          eventTurnId === undefined ||
+          intent.expectedTurnId !== eventTurnId ||
+          buildCodexSteerClientCorrelationId(intent.messageId) !== clientCorrelationId
+        ) {
+          continue;
+        }
+        candidatesById.set(intent.messageId, intent.messageId);
+      }
+
+      if (candidatesById.size !== 1) {
+        return unchanged;
+      }
+      const messageId = candidatesById.values().next().value;
+      if (messageId === undefined) {
+        return unchanged;
+      }
+
+      let processingSource: PersistedCodexSteerProcessingSource | undefined;
+      const enrichedActivities = activities.map((activity): OrchestrationThreadActivity => {
+        if (activity.kind !== "task.progress") {
+          return activity;
+        }
+        const payload = readUnknownRecord(activity.payload);
+        const usage = readUnknownRecord(payload?.usage);
+        if (
+          payload === null ||
+          usage === null ||
+          payload.taskId !== `codex-turn-steer-processing:${clientCorrelationId}`
+        ) {
+          return activity;
+        }
+
+        // The raw MessageId is restored only in Cafe's canonical activity.
+        // Codex-owned runtime state, task ids, diagnostics, and logs retain the
+        // fixed-size opaque token across process restarts.
+        processingSource = {
+          threadId: event.threadId,
+          activityId: activity.id,
+          turnId: activity.turnId,
+          createdAt: activity.createdAt,
+          messageId,
+          clientCorrelationId,
+          taskId: payload.taskId,
+        };
+        return {
+          ...activity,
+          payload: {
+            ...payload,
+            messageId,
+            usage: {
+              ...usage,
+              messageId,
+            },
+          },
+        };
+      });
+
+      if (processingSource === undefined) {
+        return unchanged;
+      }
+
+      // A non-null correlation is mandatory here. Legacy null-correlation
+      // acceptances cannot be converted into delete authority from a provider
+      // progress event, even when the provider guesses Cafe's MessageId. The
+      // hash binding was already checked while selecting `messageId`; repeat
+      // it at the destructive boundary so future refactors fail closed.
+      if (buildCodexSteerClientCorrelationId(messageId) !== clientCorrelationId) {
+        return unchanged;
+      }
+
+      return {
+        activities: enrichedActivities,
+        settlement: {
+          source: processingSource,
+          acceptedCandidates: pendingAcceptedCandidates.filter(
+            (candidate) =>
+              eventTurnId !== undefined &&
+              candidate.threadId === event.threadId &&
+              candidate.messageId === messageId &&
+              candidate.acceptedTurnId === eventTurnId &&
+              candidate.clientCorrelationId === clientCorrelationId &&
+              buildCodexSteerClientCorrelationId(candidate.messageId) ===
+                candidate.clientCorrelationId,
+          ),
+          unsettledIntents: unsettledIntents.filter(
+            (candidate) =>
+              eventTurnId !== undefined &&
+              candidate.threadId === event.threadId &&
+              candidate.messageId === messageId &&
+              candidate.expectedTurnId === eventTurnId,
+          ),
+        },
+      } satisfies EnrichedCodexSteerProcessingActivities;
+    }).pipe(
+      Effect.catchCause(() =>
+        Effect.logWarning("Codex restart steer correlation enrichment failed closed", {
+          threadId: event.threadId,
+          eventId: event.eventId,
+          turnId: event.turnId,
+        }).pipe(Effect.as(unchanged)),
+      ),
+    );
+  };
+  const initialProviderDaemonCursorState = yield* projectionStateRepository
+    .getByProjector({ projector: PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR })
+    .pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("provider runtime ingestion cursor hydration failed", {
+          projector: PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR,
+          cause: Cause.pretty(cause),
+        }).pipe(Effect.as(Option.none())),
+      ),
+    );
+  let lastPersistedProviderDaemonCursor = Option.match(initialProviderDaemonCursorState, {
+    onNone: () => 0,
+    onSome: (state) => Math.max(0, Math.trunc(state.lastAppliedSequence)),
+  });
+  let pendingProviderDaemonCursor = lastPersistedProviderDaemonCursor;
+  // Codex app-server owns goal continuation and emits the next turn itself.
+  // This bounded set bridges the intentional gap between one turn completing
+  // and the next goal turn starting, without manufacturing a Cafe prompt.
+  const activeGoalThreadIds = new Set<string>();
+  const goalLifecycleByThreadId = new Map<
+    string,
+    { readonly goal: ProviderThreadGoal | null; readonly observedAt: string }
+  >();
+  const observeGoalLifecycle = (input: {
+    readonly threadId: ThreadId;
+    readonly goal: ProviderThreadGoal | null;
+    readonly observedAt: string;
+  }): ProviderThreadGoal | null => {
+    const current = goalLifecycleByThreadId.get(input.threadId);
+    const effective =
+      current !== undefined && current.observedAt > input.observedAt ? current : input;
+    goalLifecycleByThreadId.set(input.threadId, effective);
+    if (effective.goal?.status === "active") {
+      activeGoalThreadIds.add(input.threadId);
+    } else {
+      activeGoalThreadIds.delete(input.threadId);
+    }
+    return effective.goal;
+  };
+  // A user interrupt is a cancellation barrier, even if an in-flight Codex
+  // goal-accounting notification still reports the goal as active. Upstream
+  // Codex pauses active goals on interrupt and does not reinterpret the
+  // terminal interrupted turn as provider continuation. Keep this index
+  // separate from activeGoalThreadIds so delayed provider notifications cannot
+  // reopen a turn the user explicitly stopped.
+  const interruptedGoalThreadIds = new Set<string>();
 
   const persistProviderDaemonCursor = (
     cursor: number,
@@ -890,27 +1235,62 @@ const make = Effect.gen(function* () {
         return;
       }
 
-      const cursorToPersist = pendingProviderDaemonCursor;
-      yield* projectionStateRepository
-        .upsert({
-          projector: PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR,
-          lastAppliedSequence: cursorToPersist,
-          updatedAt: DateTime.formatIso(yield* DateTime.now),
-        })
-        .pipe(
-          Effect.tap(() =>
-            Effect.sync(() => {
-              lastPersistedProviderDaemonCursor = cursorToPersist;
-            }),
-          ),
-          Effect.catchCause((cause) =>
-            Effect.logWarning("provider runtime ingestion cursor persist failed", {
-              projector: PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR,
-              cursor: cursorToPersist,
-              cause: Cause.pretty(cause),
-            }),
-          ),
+      yield* Effect.gen(function* () {
+        const cursorToPersist = pendingProviderDaemonCursor;
+        const updatedAt = DateTime.formatIso(yield* DateTime.now);
+        // A read-then-upsert fence is not sufficient here: a short-lived old
+        // backend can race a replacement between those two statements and
+        // overwrite the replacement's newer checkpoint. Keep the maximum in
+        // one SQLite statement so the durable cursor is monotonic across every
+        // desktop restart/adoption overlap. Preserve the timestamp when the
+        // candidate loses that race so diagnostics describe real progress.
+        const [persisted] = yield* sql<{ readonly lastAppliedSequence: number }>`
+          INSERT INTO projection_state (
+            projector,
+            last_applied_sequence,
+            updated_at
+          )
+          VALUES (
+            ${PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR},
+            ${cursorToPersist},
+            ${updatedAt}
+          )
+          ON CONFLICT (projector)
+          DO UPDATE SET
+            last_applied_sequence = MAX(
+              projection_state.last_applied_sequence,
+              excluded.last_applied_sequence
+            ),
+            updated_at = CASE
+              WHEN excluded.last_applied_sequence > projection_state.last_applied_sequence
+                THEN excluded.updated_at
+              ELSE projection_state.updated_at
+            END
+          RETURNING last_applied_sequence AS "lastAppliedSequence"
+        `;
+        if (
+          persisted === undefined ||
+          !Number.isSafeInteger(persisted.lastAppliedSequence) ||
+          persisted.lastAppliedSequence < 0
+        ) {
+          return yield* Effect.die(
+            "Provider runtime ingestion cursor UPSERT returned an invalid sequence.",
+          );
+        }
+        lastPersistedProviderDaemonCursor = persisted.lastAppliedSequence;
+        pendingProviderDaemonCursor = Math.max(
+          pendingProviderDaemonCursor,
+          persisted.lastAppliedSequence,
         );
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("provider runtime ingestion cursor persist failed", {
+            projector: PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR,
+            cursor: pendingProviderDaemonCursor,
+            cause: Cause.pretty(cause),
+          }),
+        ),
+      );
     });
 
   yield* Effect.addFinalizer(() =>
@@ -961,6 +1341,36 @@ const make = Effect.gen(function* () {
     timeToLive: PROCESSED_RUNTIME_EVENT_IDS_TTL,
     lookup: () => Effect.succeed(true),
   });
+  const hardDeletedThreadCache = yield* Cache.make<ThreadId, boolean>({
+    capacity: HARD_DELETED_THREAD_CACHE_CAPACITY,
+    timeToLive: HARD_DELETED_THREAD_CACHE_TTL,
+    lookup: (threadId) =>
+      Effect.gen(function* () {
+        const [row] = yield* sql<{ readonly retired: number }>`
+          SELECT EXISTS (
+            SELECT 1
+            FROM hard_deleted_threads
+            WHERE thread_id = ${threadId}
+          ) AS retired
+        `;
+        // Fail closed if SQLite returns an unexpected row shape. A false
+        // negative here could let a replay mutate in-memory buffers before the
+        // database trigger rejects its eventual command.
+        return row?.retired === 1;
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("hard-delete tombstone lookup failed closed", {
+            threadId,
+            cause: Cause.pretty(cause),
+          }).pipe(Effect.as(true)),
+        ),
+      ),
+  });
+  // This set contains only deletions currently executing in this process and
+  // is removed after the engine's durable tombstone/purge succeeds. It closes
+  // the narrow race where an already-running cache lookup could otherwise
+  // publish `false` after retirement called Cache.set(true).
+  const hardDeleteRetiringThreadIds = yield* Ref.make<ReadonlySet<ThreadId>>(new Set());
 
   const resolveThreadDetail = Effect.fn("resolveThreadDetail")(function* (threadId: ThreadId) {
     return yield* projectionSnapshotQuery
@@ -1679,6 +2089,46 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const getRunningProviderTurnIdForThread = Effect.fn("getRunningProviderTurnIdForThread")(
+    function* (threadId: ThreadId) {
+      const sessions = yield* providerService.listSessions();
+      const session = sessions.find((entry) => entry.threadId === threadId);
+      return session?.status === "running" ? session.activeTurnId : undefined;
+    },
+  );
+
+  /**
+   * A provider process may emit `starting` and thread `idle` notifications
+   * before its resume request fails. Those events remain in the daemon journal
+   * after the failed adapter scope is gone. They are not proof that a usable
+   * session exists, so a previous start failure may be cleared only when the
+   * current ProviderService can name a matching registered session.
+   */
+  const hasRegisteredSessionForFailureRecovery = Effect.fn(
+    "hasRegisteredSessionForFailureRecovery",
+  )(function* (event: ProviderRuntimeEvent) {
+    const sessions = yield* providerService.listSessions().pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("provider runtime ingestion could not verify failed-session recovery", {
+          threadId: event.threadId,
+          provider: event.provider,
+          providerInstanceId: event.providerInstanceId,
+          eventId: event.eventId,
+          eventType: event.type,
+          cause: Cause.pretty(cause),
+        }).pipe(Effect.as([])),
+      ),
+    );
+    return sessions.some(
+      (session) =>
+        session.threadId === event.threadId &&
+        session.provider === event.provider &&
+        (event.providerInstanceId === undefined ||
+          session.providerInstanceId === event.providerInstanceId) &&
+        (session.status === "ready" || session.status === "running"),
+    );
+  });
+
   const getSourceProposedPlanReferenceForAcceptedTurnStart = Effect.fn(
     "getSourceProposedPlanReferenceForAcceptedTurnStart",
   )(function* (threadId: ThreadId, eventTurnId: TurnId | undefined) {
@@ -1742,7 +2192,75 @@ const make = Effect.gen(function* () {
       const now = event.createdAt;
       const eventTurnId = toTurnId(event.turnId);
       const activeTurnId = thread.session?.activeTurnId ?? null;
-      const terminalTurnRecovery =
+
+      if (event.type === "thread.goal.updated" || event.type === "thread.goal.cleared") {
+        yield* orchestrationEngine.dispatch({
+          type: "thread.goal.sync",
+          commandId: providerCommandId(event, "thread-goal-sync"),
+          threadId: thread.id,
+          goal: event.type === "thread.goal.updated" ? event.payload.goal : null,
+          createdAt: now,
+        });
+
+        // Runtime journal delivery is at-least-once, and one provider event
+        // fans out to more than one orchestration command. A backend restart
+        // can therefore occur after the idempotent goal sync commits but before
+        // its session-state command commits. The goal lifecycle index is
+        // hydrated from projection state and advanced by ordered domain/runtime
+        // events, so a replayed payload cannot supersede a newer blocked or
+        // completed goal and leave the UI indefinitely on "Starting provider"
+        // with no live provider process.
+        const incomingGoal = event.type === "thread.goal.updated" ? event.payload.goal : null;
+        const effectiveGoal = observeGoalLifecycle({
+          threadId: thread.id,
+          goal: incomingGoal,
+          observedAt: now,
+        });
+        const goalIsActive = effectiveGoal?.status === "active";
+        const currentSession = thread.session;
+        if (currentSession !== null && currentSession.activeTurnId === null) {
+          const nextStatus =
+            goalIsActive &&
+            (currentSession.status === "ready" ||
+              (currentSession.status === "interrupted" && !interruptedGoalThreadIds.has(thread.id)))
+              ? ("starting" as const)
+              : !goalIsActive && currentSession.status === "starting"
+                ? ("ready" as const)
+                : null;
+          if (nextStatus !== null) {
+            yield* orchestrationEngine.dispatch({
+              type: "thread.session.set",
+              commandId: providerCommandId(event, "thread-goal-session-state"),
+              threadId: thread.id,
+              session: {
+                ...currentSession,
+                status: nextStatus,
+                activeTurnId: null,
+                lastError: null,
+                // Session clocks are monotonic even when an older daemon event
+                // resumes midway through its fanout after a restart.
+                updatedAt: currentSession.updatedAt > now ? currentSession.updatedAt : now,
+              },
+              createdAt: now,
+            });
+          }
+        }
+      }
+
+      const completedTurnState =
+        event.type === "turn.completed" ? normalizeRuntimeTurnState(event.payload.state) : null;
+      if (
+        event.type === "turn.aborted" ||
+        completedTurnState === "interrupted" ||
+        completedTurnState === "cancelled"
+      ) {
+        interruptedGoalThreadIds.add(thread.id);
+      }
+
+      const activeGoalContinuationExpected =
+        activeGoalThreadIds.has(thread.id) && !interruptedGoalThreadIds.has(thread.id);
+
+      const explicitTerminalTurnRecovery =
         event.type === "turn.started" &&
         event.raw?.source === "codex.app-server.notification" &&
         event.raw.method === "codex.aggregateTurn/reopened"
@@ -1760,6 +2278,42 @@ const make = Effect.gen(function* () {
           pendingTurnStartForThread = Option.isSome(pendingTurnStart);
           return pendingTurnStartForThread;
         });
+
+      const failedSessionHeartbeatState = (() => {
+        if (
+          event.type === "session.state.changed" &&
+          (event.payload.state === "starting" || event.payload.state === "ready")
+        ) {
+          return event.payload.state;
+        }
+        if (event.type === "thread.state.changed" && event.payload.state === "idle") {
+          return event.payload.state;
+        }
+        return undefined;
+      })();
+      const isNonConclusiveFailedSessionHeartbeat =
+        thread.session?.activeTurnId === null &&
+        thread.session.lastError !== null &&
+        failedSessionHeartbeatState !== undefined;
+      const shouldSuppressFailedSessionHeartbeat = isNonConclusiveFailedSessionHeartbeat
+        ? !(
+            (yield* hasPendingTurnStartForThread()) ||
+            (yield* hasRegisteredSessionForFailureRecovery(event))
+          )
+        : false;
+      if (shouldSuppressFailedSessionHeartbeat) {
+        // Keep this diagnostic finite. The recorded session error already has
+        // the sanitized failure detail; duplicating it here would expose
+        // provider-controlled process output and add no reconciliation value.
+        yield* Effect.logWarning("provider runtime ingestion ignored stale startup heartbeat", {
+          threadId: thread.id,
+          provider: event.provider,
+          providerInstanceId: event.providerInstanceId,
+          eventId: event.eventId,
+          eventType: event.type,
+          runtimeState: failedSessionHeartbeatState,
+        });
+      }
 
       const conflictsWithActiveTurn =
         activeTurnId !== null && eventTurnId !== undefined && !sameId(activeTurnId, eventTurnId);
@@ -1789,8 +2343,60 @@ const make = Effect.gen(function* () {
         providerRuntimeActiveTurnIdForConflict,
         eventTurnId,
       );
+      const falseOrphanTerminalRecoveryCandidate =
+        activeTurnId === null &&
+        eventTurnId !== undefined &&
+        runtimeEventCarriesActiveTurnWork(event) &&
+        thread.latestTurn?.state === "interrupted" &&
+        sameId(thread.latestTurn.turnId, eventTurnId);
+      const providerRuntimeActiveTurnIdForTerminalRecovery = falseOrphanTerminalRecoveryCandidate
+        ? yield* getRunningProviderTurnIdForThread(thread.id).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning(
+                "provider runtime ingestion could not verify live ownership for terminal recovery",
+                {
+                  eventId: event.eventId,
+                  eventType: event.type,
+                  threadId: thread.id,
+                  eventTurnId,
+                  cause: Cause.pretty(cause),
+                },
+              ).pipe(Effect.as(undefined)),
+            ),
+          )
+        : undefined;
+      const providerRuntimeOwnsTerminalRecoveryTurn = sameId(
+        providerRuntimeActiveTurnIdForTerminalRecovery,
+        eventTurnId,
+      );
+      const terminalRecoveryEvidence =
+        providerRuntimeOwnsTerminalRecoveryTurn && eventTurnId !== undefined
+          ? yield* readProviderTurnRecoveryEvidence({
+              threadId: thread.id,
+              turnId: eventTurnId,
+            }).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning(
+                  "provider runtime ingestion could not read terminal recovery evidence",
+                  {
+                    eventId: event.eventId,
+                    eventType: event.type,
+                    threadId: thread.id,
+                    eventTurnId,
+                    cause: Cause.pretty(cause),
+                  },
+                ).pipe(Effect.as("none" as const)),
+              ),
+            )
+          : "none";
+      const restoresFalseOrphanTerminal =
+        providerRuntimeOwnsTerminalRecoveryTurn &&
+        terminalRecoveryEvidence === "orphaned-active-turn";
+      const terminalTurnRecovery =
+        explicitTerminalTurnRecovery ??
+        (restoresFalseOrphanTerminal ? ("live-provider-continuation" as const) : undefined);
 
-      const shouldApplyThreadLifecycle = (() => {
+      const passesStrictProviderLifecycleGuard = (() => {
         if (!STRICT_PROVIDER_LIFECYCLE_GUARD) {
           return true;
         }
@@ -1835,6 +2441,14 @@ const make = Effect.gen(function* () {
             return true;
         }
       })();
+      const shouldApplyThreadLifecycle =
+        !shouldSuppressFailedSessionHeartbeat && passesStrictProviderLifecycleGuard;
+      if (event.type === "turn.started" && shouldApplyThreadLifecycle) {
+        // Only an accepted concrete provider turn may release a cancellation
+        // barrier. Replayed or conflicting turn.started events are content
+        // history, not fresh user intent.
+        interruptedGoalThreadIds.delete(thread.id);
+      }
       const acceptedTurnStartedSourcePlan =
         event.type === "turn.started" && shouldApplyThreadLifecycle
           ? yield* getSourceProposedPlanReferenceForAcceptedTurnStart(thread.id, eventTurnId)
@@ -1850,14 +2464,16 @@ const make = Effect.gen(function* () {
       // for a turn that projections have already closed. Preserve the content
       // later in this function, but do not reopen session lifecycle state from
       // those ambiguous events. Codex aggregate child continuation is the one
-      // explicit exception: CodexSessionRuntime emits a synthetic turn.started
-      // carrying `terminalTurnRecovery` only after observing live child-channel
-      // work in the same runtime, so projectors can distinguish it from stale
-      // reconnect snapshots.
+      // provider-native exception. Cafe's own orphan repair is also reversible,
+      // but only when the durable event ledger identifies that exact repair and
+      // the current ProviderService still owns the same active turn. A later
+      // explicit Stop wins in sequence order and therefore remains terminal.
       const eventCarriesActiveTurnWork =
         eventTurnId !== undefined &&
         runtimeEventCarriesActiveTurnWork(event) &&
-        (eventMatchesTrackedActiveTurn || providerRuntimeOwnsConflictingTurn);
+        (eventMatchesTrackedActiveTurn ||
+          providerRuntimeOwnsConflictingTurn ||
+          restoresFalseOrphanTerminal);
       // Once turn.started has made the provider turn active, token/tool
       // notifications are runtime progress facts, not session heartbeats that
       // need another durable thread.session-set. Writing a session-set for
@@ -1869,6 +2485,20 @@ const make = Effect.gen(function* () {
         (thread.session?.status !== "running" ||
           (thread.session?.lastError ?? null) !== null ||
           providerRuntimeOwnsConflictingTurn);
+
+      if (event.type === "turn.completed" && eventTurnId !== undefined) {
+        // A terminal session projection closes every streaming message for the
+        // turn. Flush the ingestion coalescer first so a short final token
+        // (commonly a Markdown fence or URL suffix) cannot arrive afterward as
+        // stale replay and be discarded by the terminal projection guard.
+        yield* flushBufferedAssistantMessagesForTurn({
+          event,
+          threadId: thread.id,
+          turnId: eventTurnId,
+          createdAt: now,
+          commandTag: "assistant-delta-flush-before-turn-completed",
+        });
+      }
 
       if (
         event.type === "session.started" ||
@@ -1915,8 +2545,21 @@ const make = Effect.gen(function* () {
               return runtimeStatus === "ready" && hasPendingTurnStart ? "starting" : runtimeStatus;
             }
             case "thread.state.changed":
+              if (
+                sessionRelevantThreadState === "idle" &&
+                interruptedGoalThreadIds.has(thread.id)
+              ) {
+                return "interrupted";
+              }
               if (sessionRelevantThreadState === "idle" && nextActiveTurnId !== null) {
                 return "running";
+              }
+              if (
+                sessionRelevantThreadState === "idle" &&
+                activeGoalContinuationExpected &&
+                event.provider === "codex"
+              ) {
+                return "starting";
               }
               if (sessionRelevantThreadState === "idle" && hasPendingTurnStart) {
                 return "starting";
@@ -1926,22 +2569,33 @@ const make = Effect.gen(function* () {
             case "turn.proposed.delta":
             case "item.started":
             case "item.updated":
-            case "task.started":
-            case "task.progress":
             case "hook.started":
             case "hook.progress":
             case "tool.progress":
               return "running";
+            case "task.started":
+            case "task.progress":
+              return event.payload.visibility === "ambient"
+                ? (thread.session?.status ?? "ready")
+                : "running";
             case "turn.started":
               return "running";
             case "session.exited":
               return "stopped";
             case "turn.aborted":
               return "interrupted";
-            case "turn.completed":
-              return normalizeRuntimeTurnState(event.payload.state) === "failed"
-                ? "error"
+            case "turn.completed": {
+              const turnState = normalizeRuntimeTurnState(event.payload.state);
+              if (turnState === "failed") {
+                return "error";
+              }
+              if (turnState === "interrupted" || turnState === "cancelled") {
+                return "interrupted";
+              }
+              return activeGoalContinuationExpected && event.provider === "codex"
+                ? "starting"
                 : "ready";
+            }
             case "session.started":
             case "thread.started":
               // Provider thread/session start notifications can arrive during an
@@ -1963,9 +2617,11 @@ const make = Effect.gen(function* () {
                 : event.type === "turn.completed" &&
                     normalizeRuntimeTurnState(event.payload.state) === "failed"
                   ? (event.payload.errorMessage ?? thread.session?.lastError ?? "Turn failed")
-                  : status === "ready"
+                  : restoresFalseOrphanTerminal
                     ? null
-                    : (thread.session?.lastError ?? null);
+                    : status === "ready" || status === "starting"
+                      ? null
+                      : (thread.session?.lastError ?? null);
 
         if (shouldApplyThreadLifecycle) {
           if (event.type === "turn.started" && acceptedTurnStartedSourcePlan !== null) {
@@ -2338,8 +2994,11 @@ const make = Effect.gen(function* () {
         }
       }
 
-      const activities = runtimeEventToActivities(event);
-      yield* Effect.forEach(activities, (activity) =>
+      const enrichedActivities = yield* enrichCodexSteerProcessingActivities(
+        event,
+        runtimeEventToActivities(event),
+      );
+      yield* Effect.forEach(enrichedActivities.activities, (activity) =>
         orchestrationEngine.dispatch({
           type: "thread.activity.append",
           commandId: providerCommandId(event, "thread-activity-append", activity.id),
@@ -2348,36 +3007,162 @@ const make = Effect.gen(function* () {
           createdAt: activity.createdAt,
         }),
       ).pipe(Effect.asVoid);
+
+      const settlement = enrichedActivities.settlement;
+      if (settlement !== null) {
+        // Never prune before the canonical provider activity is durable. If
+        // Cafe crashes between dispatch and these exact deletes, command
+        // idempotency makes the replay harmless and startup's strict evidence
+        // fallback performs the same cleanup. A failed delete also prevents
+        // the provider cursor from advancing, so reconnect retries it.
+        yield* Effect.forEach(
+          settlement.acceptedCandidates,
+          (candidate) =>
+            pruneAcceptedCodexSteerCandidateAfterDurableProcessing(
+              sql,
+              candidate,
+              settlement.source,
+            ),
+          { discard: true },
+        );
+        yield* Effect.forEach(
+          settlement.unsettledIntents,
+          (candidate) =>
+            pruneCodexSteerIntentAfterDurableProcessing(sql, candidate, settlement.source),
+          { discard: true },
+        );
+      }
+
+      if (event.provider === "codex" && event.type === "turn.completed") {
+        const terminalTurnId = toTurnId(event.turnId);
+        if (terminalTurnId !== undefined) {
+          // Discover only authenticated, still-pending acceptance identities
+          // from the compact ledger. A broad thread/turn acceptance query can
+          // synchronously scan millions of activities/events during daemon
+          // replay and starve desktop readiness. Each candidate below is then
+          // revalidated through its immutable event/activity primary keys.
+          const [acceptedCandidates, providerSessionsOption] = yield* Effect.all([
+            readAcceptedCodexSteerRecoveryBarriers(sql, [thread.id]),
+            providerService.listSessions().pipe(Effect.option),
+          ]);
+          const terminalAcceptedCandidates = acceptedCandidates.filter(
+            (candidate) =>
+              candidate.threadId === thread.id && candidate.acceptedTurnId === terminalTurnId,
+          );
+          const projectionEvidence = (yield* Effect.forEach(
+            terminalAcceptedCandidates,
+            (candidate) =>
+              projectionSnapshotQuery.getCodexSteerAcceptanceEvidence({
+                exactAcceptedBarrier: {
+                  _tag: "accepted",
+                  threadId: candidate.threadId,
+                  eventSequence: candidate.sequence,
+                  intentSequence: candidate.intentSequence,
+                  intentCreatedAt: candidate.intentCreatedAt,
+                  activityId: candidate.activityId,
+                  acceptedTurnId: candidate.acceptedTurnId,
+                  clientCorrelationId: candidate.clientCorrelationId,
+                  messageId: candidate.messageId,
+                  acceptedAt: candidate.acceptedAt,
+                },
+              }),
+            // The compact ledger is normally empty or contains one row for
+            // this turn. Serialize exact primary-key reads so corrupted
+            // local state cannot amplify SQLite work during startup replay.
+            { concurrency: 1 },
+          )).flat();
+          if (Option.isNone(providerSessionsOption)) {
+            yield* Effect.logWarning(
+              "Codex terminal steer recovery skipped without provider session evidence",
+              {
+                threadId: thread.id,
+                terminalTurnId,
+              },
+            );
+            return;
+          }
+          const providerSessions = providerSessionsOption.value;
+          const providerSession = providerSessions.find(
+            (session) => session.threadId === thread.id,
+          );
+          const providerActiveTurnId =
+            providerSession?.status === "running" && providerSession.activeTurnId !== undefined
+              ? providerSession.activeTurnId
+              : null;
+          const recoveryCommands = buildTerminalCodexSteerRecoveryCommands({
+            evidence: projectionEvidence.map(codexSteerAcceptanceEvidenceFromProjection),
+            providerActiveTurnId,
+            createdAt: event.createdAt,
+          });
+          yield* Effect.forEach(recoveryCommands, orchestrationEngine.dispatch, {
+            concurrency: 1,
+            discard: true,
+          });
+        }
+      }
     });
 
-  const processDomainEvent = (_event: TurnStartRequestedDomainEvent) => Effect.void;
+  const processDomainEvent = (event: RuntimeIngestionDomainEvent) =>
+    Effect.sync(() => {
+      if (event.type === "thread.turn-start-requested") {
+        // A new user turn is an explicit release of the prior Stop barrier.
+        interruptedGoalThreadIds.delete(event.payload.threadId);
+        return;
+      }
+      if (event.type === "thread.goal-set-requested") {
+        // Resuming an existing goal is the other explicit operation that may
+        // restart provider-owned goal continuation after a user interrupt.
+        if (event.payload.status === "active") {
+          interruptedGoalThreadIds.delete(event.payload.threadId);
+        }
+        return;
+      }
+      if (event.type !== "thread.goal-synced") {
+        return;
+      }
+      observeGoalLifecycle({
+        threadId: event.payload.threadId,
+        goal: event.payload.goal ?? null,
+        observedAt: event.occurredAt,
+      });
+    });
+
+  const publishTurnIngestionQuiesced = (event: ProviderRuntimeEvent) => {
+    const turnId = toTurnId(event.turnId);
+    if (event.type !== "turn.completed" || !turnId) {
+      return Effect.void;
+    }
+
+    // This is the synchronization boundary for independent provider-event
+    // consumers. By publishing only after processRuntimeEvent, replay dedupe,
+    // and daemon cursor persistence have completed, checkpoint terminalization
+    // can wait for text/proposed-plan buffers to flush without relying on
+    // arbitrary quiet-time delays.
+    return receiptBus.publish({
+      type: "provider.turn.ingestion-quiesced",
+      threadId: event.threadId,
+      turnId,
+      provider: event.provider,
+      ...(event.providerInstanceId ? { providerInstanceId: event.providerInstanceId } : {}),
+      sourceEventId: event.eventId,
+      createdAt: event.createdAt,
+    });
+  };
 
   const processRuntimeEventOnce = (event: ProviderRuntimeEvent) =>
     Effect.gen(function* () {
       const eventKey = providerRuntimeEventKey(event);
-      const publishTurnIngestionQuiesced = () => {
-        const turnId = toTurnId(event.turnId);
-        if (event.type !== "turn.completed" || !turnId) {
-          return Effect.void;
-        }
-
-        // This is the synchronization boundary for independent provider-event
-        // consumers. By publishing only after processRuntimeEvent, replay
-        // dedupe, and daemon cursor persistence have completed, checkpoint
-        // terminalization can wait for text/proposed-plan buffers to flush
-        // without relying on arbitrary quiet-time delays.
-        return receiptBus.publish({
-          type: "provider.turn.ingestion-quiesced",
-          threadId: event.threadId,
-          turnId,
-          provider: event.provider,
-          ...(event.providerInstanceId ? { providerInstanceId: event.providerInstanceId } : {}),
-          sourceEventId: event.eventId,
-          createdAt: event.createdAt,
-        });
-      };
+      const providerDaemonCursor = readProviderDaemonRuntimeEventCursor(event);
       const alreadyProcessed = yield* Cache.getOption(processedRuntimeEventIds, eventKey);
       if (Option.isSome(alreadyProcessed)) {
+        const replayedProviderDaemonCursor = readProviderDaemonRuntimeEventCursor(event);
+        if (replayedProviderDaemonCursor !== undefined) {
+          // A reconnect can replay an event that this process already applied.
+          // It is still valid cursor progress: advancing it prevents the overlap
+          // window from looking like backend ingestion lag indefinitely.
+          recordProviderRuntimeIngestionCursor(replayedProviderDaemonCursor);
+          yield* persistProviderDaemonCursor(replayedProviderDaemonCursor);
+        }
         yield* Effect.logDebug("skipping replayed provider runtime event").pipe(
           Effect.annotateLogs({
             eventId: event.eventId,
@@ -2385,7 +3170,7 @@ const make = Effect.gen(function* () {
             threadId: event.threadId,
           }),
         );
-        yield* publishTurnIngestionQuiesced();
+        yield* publishTurnIngestionQuiesced(event);
         return;
       }
 
@@ -2394,17 +3179,62 @@ const make = Effect.gen(function* () {
       // mark also protects buffered assistant/proposed-plan state that can be
       // mutated before an orchestration command is dispatched.
       yield* Cache.set(processedRuntimeEventIds, eventKey, true);
-      const providerDaemonCursor = readProviderDaemonRuntimeEventCursor(event);
       if (providerDaemonCursor !== undefined) {
+        // Record only after the canonical event has been fully processed. The
+        // diagnostics cursor therefore never outruns chat/orchestration state,
+        // while the durable checkpoint can remain intentionally batched.
+        recordProviderRuntimeIngestionCursor(providerDaemonCursor);
         yield* persistProviderDaemonCursor(providerDaemonCursor);
       }
-      yield* publishTurnIngestionQuiesced();
+      yield* publishTurnIngestionQuiesced(event);
     });
 
   const processInput = (input: RuntimeIngestionInput) =>
-    input.source === "runtime"
-      ? processRuntimeEventOnce(input.event)
-      : processDomainEvent(input.event);
+    Ref.get(hardDeleteRetiringThreadIds).pipe(
+      Effect.flatMap((retiringThreadIds) =>
+        retiringThreadIds.has(runtimeIngestionInputThreadId(input))
+          ? Effect.succeed(true)
+          : Cache.get(hardDeletedThreadCache, runtimeIngestionInputThreadId(input)),
+      ),
+      Effect.flatMap((retired) => {
+        if (retired) {
+          return Effect.logDebug("skipping provider ingestion for hard-deleted thread", {
+            source: input.source,
+            threadId: runtimeIngestionInputThreadId(input),
+            eventType: input.event.type,
+          });
+        }
+        return input.source === "runtime"
+          ? processRuntimeEventOnce(input.event)
+          : processDomainEvent(input.event);
+      }),
+    );
+
+  let workTurnRecords = 0;
+  let workTurnStartedAt = performance.now();
+  const accountIngestionWork = (): Effect.Effect<void> =>
+    Effect.suspend(() => {
+      workTurnRecords += 1;
+      if (
+        workTurnRecords < PROVIDER_PIPELINE_POLICY.workTurnMaxRecords &&
+        performance.now() - workTurnStartedAt < PROVIDER_PIPELINE_POLICY.workTurnMaxElapsedMs
+      ) {
+        return Effect.void;
+      }
+      workTurnRecords = 0;
+      workTurnStartedAt = performance.now();
+      // Persist at the same bounded work-turn boundary that yields HTTP a
+      // macrotask. A count-only 1,000-event checkpoint loses all useful
+      // progress when a replay contains fewer records and a later pathological
+      // synchronous SQLite read wedges the backend. This write occurs only
+      // after each event has been fully projected, remains monotonic across
+      // overlapping backend processes, and caps crash replay to one work turn
+      // (32 records or roughly 8ms of admitted work) without putting a write on
+      // every token event.
+      return persistProviderDaemonCursor(pendingProviderDaemonCursor, { force: true }).pipe(
+        Effect.andThen(yieldProviderRuntimeIngestionEventLoop()),
+      );
+    });
 
   const processInputSafely = (input: RuntimeIngestionInput) =>
     processInput(input).pipe(
@@ -2419,12 +3249,73 @@ const make = Effect.gen(function* () {
           cause: Cause.pretty(cause),
         });
       }),
+      Effect.flatMap(() => accountIngestionWork()),
     );
 
   const worker = yield* makeDrainableWorker(processInputSafely);
 
+  const retireThreadForHardDelete: ProviderRuntimeIngestionShape["retireThreadForHardDelete"] = (
+    input,
+  ) =>
+    Effect.gen(function* () {
+      // Cache.set is the ingress linearization point. The worker independently
+      // checks this cache, so an event that raced past the stream subscriber
+      // before this call is still dropped when dequeued. drain then waits for
+      // an event whose processing began before the fence.
+      yield* Ref.update(hardDeleteRetiringThreadIds, (current) => {
+        const next = new Set(current);
+        next.add(input.threadId);
+        return next;
+      });
+      yield* Cache.set(hardDeletedThreadCache, input.threadId, true);
+      activeGoalThreadIds.delete(input.threadId);
+      interruptedGoalThreadIds.delete(input.threadId);
+      goalLifecycleByThreadId.delete(input.threadId);
+      yield* worker.drain;
+    });
+
+  const completeThreadHardDelete: ProviderRuntimeIngestionShape["completeThreadHardDelete"] = (
+    input,
+  ) =>
+    Effect.gen(function* () {
+      // Cache remains the bounded steady-state index. The migration-65
+      // tombstone backs it after eviction and across process restarts.
+      yield* Cache.set(hardDeletedThreadCache, input.threadId, true);
+      yield* Ref.update(hardDeleteRetiringThreadIds, (current) => {
+        const next = new Set(current);
+        next.delete(input.threadId);
+        return next;
+      });
+    });
+
   const start: ProviderRuntimeIngestionShape["start"] = () =>
     Effect.gen(function* () {
+      // Rehydrate the bounded process-local continuation index from the
+      // message-free command read model. Loading thread detail on every token
+      // event would put a SQLite query on the provider streaming hot path.
+      yield* Effect.gen(function* () {
+        const readModel = yield* projectionSnapshotQuery.getCommandReadModel();
+        for (const thread of readModel.threads) {
+          if (thread.goal !== undefined) {
+            observeGoalLifecycle({
+              threadId: thread.id,
+              goal: thread.goal,
+              observedAt: thread.goal?.updatedAt ?? thread.updatedAt,
+            });
+          }
+          if (thread.goal?.status === "active") {
+            if (thread.session?.status === "interrupted") {
+              interruptedGoalThreadIds.add(thread.id);
+            }
+          }
+        }
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("provider goal continuation index hydration failed", {
+            cause: Cause.pretty(cause),
+          }),
+        ),
+      );
       yield* Effect.forkScoped(
         Stream.runForEach(providerService.streamEvents, (event) =>
           worker.enqueue({ source: "runtime", event }),
@@ -2432,7 +3323,11 @@ const make = Effect.gen(function* () {
       );
       yield* Effect.forkScoped(
         Stream.runForEach(orchestrationEngine.streamDomainEvents, (event) => {
-          if (event.type !== "thread.turn-start-requested") {
+          if (
+            event.type !== "thread.turn-start-requested" &&
+            event.type !== "thread.goal-set-requested" &&
+            event.type !== "thread.goal-synced"
+          ) {
             return Effect.void;
           }
           return worker.enqueue({ source: "domain", event });
@@ -2443,6 +3338,8 @@ const make = Effect.gen(function* () {
   return {
     start,
     drain: worker.drain,
+    retireThreadForHardDelete,
+    completeThreadHardDelete,
   } satisfies ProviderRuntimeIngestionShape;
 });
 

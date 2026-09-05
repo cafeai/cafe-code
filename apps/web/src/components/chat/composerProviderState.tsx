@@ -15,7 +15,12 @@ import type { ReactNode } from "react";
 
 import type { DraftId } from "../../composerDraftStore";
 import { getProviderModelCapabilities } from "../../providerModels";
-import { shouldRenderTraitsControls, TraitsMenuContent, TraitsPicker } from "./TraitsPicker";
+import {
+  getTraitsTriggerLabel,
+  shouldRenderTraitsControls,
+  TraitsMenuContent,
+  TraitsPicker,
+} from "./TraitsPicker";
 
 export type ComposerProviderStateInput = {
   provider: ProviderDriverKind;
@@ -28,6 +33,7 @@ export type ComposerProviderStateInput = {
 export type ComposerProviderState = {
   provider: ProviderDriverKind;
   promptEffort: string | null;
+  traitsTriggerLabel: string | null;
   modelOptionsForDispatch: ReadonlyArray<ProviderOptionSelection> | undefined;
   composerFrameClassName?: string;
   composerSurfaceClassName?: string;
@@ -59,10 +65,16 @@ export function getComposerProviderState(input: ComposerProviderStateInput): Com
   const ultrathinkActive =
     (primarySelectDescriptor?.promptInjectedValues?.length ?? 0) > 0 &&
     isClaudeUltrathinkPrompt(prompt);
+  const traitsTriggerLabel = getTraitsTriggerLabel(
+    descriptors,
+    primarySelectDescriptor ?? null,
+    ultrathinkActive,
+  );
 
   return {
     provider,
     promptEffort,
+    traitsTriggerLabel: traitsTriggerLabel || null,
     modelOptionsForDispatch: buildProviderOptionSelectionsFromDescriptors(descriptors),
     ...(ultrathinkActive
       ? {

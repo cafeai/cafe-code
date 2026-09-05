@@ -12,6 +12,7 @@ import { assert, it } from "@effect/vitest";
 
 import * as CodexError from "./errors.ts";
 import * as CodexProtocol from "./protocol.ts";
+import * as CodexSchema from "./schema.ts";
 import { makeInMemoryStdio } from "./_internal/stdio.ts";
 const encodeUnknownJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 
@@ -20,6 +21,84 @@ const encoder = new TextEncoder();
 const encodeJsonl = (value: unknown) => encoder.encode(`${encodeUnknownJsonString(value)}\n`);
 
 const decodeJson = Schema.decodeEffect(Schema.UnknownFromJsonString);
+const isAccountRateLimitPlanType = Schema.is(
+  CodexSchema.V2AccountRateLimitsUpdatedNotification__PlanType,
+);
+const isThreadMetadataUpdateParams = Schema.is(CodexSchema.V2ThreadMetadataUpdateParams);
+const isItemStartedNotification = Schema.is(CodexSchema.V2ItemStartedNotification);
+const decodeServerNotification = Schema.decodeUnknownSync(CodexSchema.ServerNotification);
+const decodeThreadShellCommandParams = Schema.decodeUnknownSync(
+  CodexSchema.V2ThreadShellCommandParams,
+);
+
+it("tracks Codex 0.146 app-server compatibility additions", () => {
+  assert.equal(
+    CodexSchema.CLIENT_REQUEST_METHODS["externalAgentConfig/import/recordHistory"],
+    "externalAgentConfig/import/recordHistory",
+  );
+  assert.equal(isAccountRateLimitPlanType("ent26"), true);
+  assert.equal(
+    isThreadMetadataUpdateParams({
+      threadId: "thread-1",
+      isPinned: true,
+    }),
+    true,
+  );
+  assert.equal(
+    isItemStartedNotification({
+      threadId: "thread-1",
+      turnId: "turn-1",
+      startedAtMs: 1_721_234_567_890,
+      item: {
+        type: "commandExecution",
+        id: "command-1",
+        command: "node scripts/check.mjs",
+        commandActions: [],
+        cwd: "/workspace",
+        status: "inProgress",
+        pluginId: "openai/example",
+        scriptPath: "scripts/check.mjs",
+      },
+    }),
+    true,
+  );
+});
+
+it("tracks Codex 0.152 auth recovery and shell-command timeout additions", () => {
+  const started = {
+    method: "modelProvider/authRecoveryStarted" as const,
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      provider: "example-provider",
+      message: "Refreshing credentials.",
+    },
+  };
+  const completed = {
+    method: "modelProvider/authRecoveryCompleted" as const,
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      provider: "example-provider",
+      message: "Credentials refreshed.",
+    },
+  };
+
+  assert.deepEqual(decodeServerNotification(started), started);
+  assert.deepEqual(decodeServerNotification(completed), completed);
+  assert.deepEqual(
+    decodeThreadShellCommandParams({
+      threadId: "thread-1",
+      command: "printf ready",
+      timeoutMs: 2_500,
+    }),
+    {
+      threadId: "thread-1",
+      command: "printf ready",
+      timeoutMs: 2_500,
+    },
+  );
+});
 
 it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
   it.effect(
@@ -91,6 +170,7 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
             id: 77,
             method: "item/tool/requestUserInput",
             params: {
+              isBlocking: true,
               itemId: "item-approval-1",
               threadId: "thread-1",
               turnId: "turn-1",
@@ -140,6 +220,7 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
             id: 77,
             method: "item/tool/requestUserInput",
             params: {
+              isBlocking: true,
               itemId: "item-approval-1",
               threadId: "thread-1",
               turnId: "turn-1",
@@ -217,6 +298,7 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
           id: 77,
           method: "item/tool/requestUserInput",
           params: {
+            isBlocking: true,
             itemId: "item-approval-1",
             threadId: "thread-1",
             turnId: "turn-1",
@@ -312,6 +394,58 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
       const circularError = yield* transport.notify("x/test", circular).pipe(Effect.flip);
       assert.instanceOf(circularError, CodexError.CodexAppServerProtocolParseError);
       assert.equal(circularError.detail, "Failed to encode Codex App Server message");
+    }),
+  );
+
+  it.effect("fails pending requests when one fragmented incoming line exceeds the byte cap", () =>
+    Effect.gen(function* () {
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      const transport = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+        stdio,
+        maxIncomingLineBytes: 32,
+      });
+
+      const pending = yield* transport.request("x/read").pipe(Effect.forkScoped);
+      yield* Queue.take(output);
+
+      // Neither source chunk is individually large. The reader must account
+      // for the retained prefix incrementally instead of waiting for a newline
+      // and building an attacker-controlled string without a bound.
+      yield* Queue.offer(input, encoder.encode('{"id":1,"result":"'));
+      yield* Queue.offer(input, encoder.encode("private-wire-sentinel-that-must-not-leak"));
+
+      const error = yield* Fiber.join(pending).pipe(Effect.flip);
+      assert.instanceOf(error, CodexError.CodexAppServerIncomingMessageTooLargeError);
+      if (error instanceof CodexError.CodexAppServerIncomingMessageTooLargeError) {
+        assert.equal(error.maxBytes, 32);
+      }
+      assert.equal(String(error).includes("private-wire-sentinel"), false);
+      assert.equal(JSON.stringify(error).includes("private-wire-sentinel"), false);
+    }),
+  );
+
+  it.effect("counts fragmented multibyte input in UTF-8 bytes and accepts the exact cap", () =>
+    Effect.gen(function* () {
+      const wire = encodeJsonl({ id: 1, result: "🙂" });
+      const lineBytes = wire.byteLength - 1;
+      const emojiStart = wire.findIndex((byte) => byte === 0xf0);
+      assert.notEqual(emojiStart, -1);
+
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      const transport = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+        stdio,
+        maxIncomingLineBytes: lineBytes,
+      });
+      const pending = yield* transport.request("x/read").pipe(Effect.forkScoped);
+      yield* Queue.take(output);
+
+      // Split inside the four-byte scalar. Stream.decodeText must preserve it,
+      // while the protocol cap must measure the reconstructed UTF-8 line.
+      const splitAt = emojiStart + 2;
+      yield* Queue.offer(input, wire.slice(0, splitAt));
+      yield* Queue.offer(input, wire.slice(splitAt));
+
+      assert.equal(yield* Fiber.join(pending), "🙂");
     }),
   );
 

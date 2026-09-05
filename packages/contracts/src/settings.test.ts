@@ -4,14 +4,24 @@ import * as Schema from "effect/Schema";
 import {
   ClientSettingsPatch,
   ClientSettingsSchema,
+  CODEX_MAX_CONCURRENT_SUBAGENTS,
   CodexSettings,
   ClaudeSettings,
-  CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
+  GrokSettings,
+  DEFAULT_AMBIANCE_COLOR,
+  DEFAULT_AMBIANCE_EFFECT,
+  DEFAULT_AMBIANCE_ENABLED,
+  DEFAULT_AMBIANCE_INTENSITY,
+  DEFAULT_AMBIANCE_REACT_MODE,
+  DEFAULT_AMBIANCE_SURFACE_COMPOSER,
+  DEFAULT_AMBIANCE_SURFACE_SIDEBAR,
+  DEFAULT_AMBIANCE_SURFACE_THREAD,
   DEFAULT_APP_ACCENT_COLOR,
   DEFAULT_BRAND_WORDMARK_PREFIX,
   DEFAULT_CHAT_COPY_FORMAT,
   DEFAULT_CLIENT_SETTINGS,
   DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS,
+  DEFAULT_INTERFACE_SCALE_PERCENT,
   DEFAULT_POWER_SAVE_BLOCKER_MODE,
   DEFAULT_SHOW_SIDEBAR_ATTRIBUTION,
   DEFAULT_SIDEBAR_BRAND_IMAGE_DATA_URL,
@@ -21,10 +31,15 @@ import {
   DEFAULT_SHOW_SIDEBAR_SEARCH,
   DEFAULT_THEME_ACCENT_COLOR,
   MAX_BRAND_WORDMARK_PREFIX_LENGTH,
+  MAX_INTERFACE_SCALE_PERCENT,
   MAX_SIDEBAR_BRAND_IMAGE_DATA_URL_LENGTH,
   MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES,
   MAX_SIDEBAR_BRAND_IMAGE_ID_LENGTH,
+  MAX_AMBIANCE_INTENSITY,
   MAX_SIDEBAR_STAR_SPEED,
+  MAX_TASK_ATRIUM_ERROR_DISMISSALS,
+  MIN_AMBIANCE_INTENSITY,
+  MIN_INTERFACE_SCALE_PERCENT,
   MIN_SIDEBAR_STAR_SPEED,
   ServerSettingsPatch,
 } from "./settings.ts";
@@ -33,6 +48,7 @@ const decodeClientSettings = Schema.decodeSync(ClientSettingsSchema);
 const decodeClientSettingsPatch = Schema.decodeUnknownSync(ClientSettingsPatch);
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
+const decodeGrokSettings = Schema.decodeSync(GrokSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 
 describe("client settings", () => {
@@ -68,6 +84,7 @@ describe("client settings", () => {
   });
 
   it("defaults appearance preferences", () => {
+    expect(DEFAULT_CLIENT_SETTINGS.interfaceScalePercent).toBe(DEFAULT_INTERFACE_SCALE_PERCENT);
     expect(DEFAULT_CLIENT_SETTINGS.continueBackgroundAnimations).toBe(
       DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS,
     );
@@ -83,6 +100,7 @@ describe("client settings", () => {
     expect(DEFAULT_CLIENT_SETTINGS.themeAccentColor).toBe(DEFAULT_THEME_ACCENT_COLOR);
     expect(DEFAULT_CLIENT_SETTINGS.appAccentColor).toBe(DEFAULT_APP_ACCENT_COLOR);
     expect(decodeClientSettings({}).continueBackgroundAnimations).toBe(false);
+    expect(decodeClientSettings({}).interfaceScalePercent).toBe(100);
     expect(decodeClientSettings({}).showSidebarSearch).toBe(true);
     expect(decodeClientSettings({}).showSidebarMascot).toBe(true);
     expect(decodeClientSettings({}).showSidebarAttribution).toBe(true);
@@ -92,6 +110,100 @@ describe("client settings", () => {
     expect(decodeClientSettings({}).sidebarStarSpeed).toBe(1);
     expect(decodeClientSettings({}).themeAccentColor).toBe("");
     expect(decodeClientSettings({}).appAccentColor).toBe("");
+  });
+
+  it("bounds interface scale patches", () => {
+    expect(
+      decodeClientSettingsPatch({ interfaceScalePercent: MIN_INTERFACE_SCALE_PERCENT }),
+    ).toEqual({ interfaceScalePercent: MIN_INTERFACE_SCALE_PERCENT });
+    expect(
+      decodeClientSettingsPatch({ interfaceScalePercent: MAX_INTERFACE_SCALE_PERCENT }),
+    ).toEqual({ interfaceScalePercent: MAX_INTERFACE_SCALE_PERCENT });
+    expect(() =>
+      decodeClientSettingsPatch({ interfaceScalePercent: MIN_INTERFACE_SCALE_PERCENT - 1 }),
+    ).toThrow();
+    expect(() =>
+      decodeClientSettingsPatch({ interfaceScalePercent: MAX_INTERFACE_SCALE_PERCENT + 1 }),
+    ).toThrow();
+    expect(() => decodeClientSettingsPatch({ interfaceScalePercent: 100.5 })).toThrow();
+  });
+
+  it("defaults ambiance to off with rain, live reaction, and accent-following color", () => {
+    expect(DEFAULT_CLIENT_SETTINGS.ambianceEnabled).toBe(DEFAULT_AMBIANCE_ENABLED);
+    expect(DEFAULT_CLIENT_SETTINGS.ambianceEffect).toBe(DEFAULT_AMBIANCE_EFFECT);
+    expect(DEFAULT_CLIENT_SETTINGS.ambianceIntensity).toBe(DEFAULT_AMBIANCE_INTENSITY);
+    expect(DEFAULT_CLIENT_SETTINGS.ambianceReactMode).toBe(DEFAULT_AMBIANCE_REACT_MODE);
+    expect(DEFAULT_CLIENT_SETTINGS.ambianceSurfaceSidebar).toBe(DEFAULT_AMBIANCE_SURFACE_SIDEBAR);
+    expect(DEFAULT_CLIENT_SETTINGS.ambianceSurfaceThread).toBe(DEFAULT_AMBIANCE_SURFACE_THREAD);
+    expect(DEFAULT_CLIENT_SETTINGS.ambianceSurfaceComposer).toBe(DEFAULT_AMBIANCE_SURFACE_COMPOSER);
+    expect(DEFAULT_CLIENT_SETTINGS.ambianceColor).toBe(DEFAULT_AMBIANCE_COLOR);
+    expect(decodeClientSettings({}).ambianceEnabled).toBe(false);
+    expect(decodeClientSettings({}).ambianceEffect).toBe("rain");
+    expect(decodeClientSettings({}).ambianceIntensity).toBe(0.55);
+    expect(decodeClientSettings({}).ambianceReactMode).toBe("live");
+    expect(decodeClientSettings({}).ambianceColor).toBe("");
+  });
+
+  it("bounds ambiance patches to supported effects, modes, and intensity range", () => {
+    expect(
+      decodeClientSettingsPatch({
+        ambianceEnabled: true,
+        ambianceEffect: "snow",
+        ambianceIntensity: MAX_AMBIANCE_INTENSITY,
+        ambianceReactMode: "session",
+        ambianceSurfaceSidebar: false,
+        ambianceSurfaceThread: false,
+        ambianceSurfaceComposer: false,
+        ambianceColor: "  #48cfff  ",
+      }),
+    ).toEqual({
+      ambianceEnabled: true,
+      ambianceEffect: "snow",
+      ambianceIntensity: MAX_AMBIANCE_INTENSITY,
+      ambianceReactMode: "session",
+      ambianceSurfaceSidebar: false,
+      ambianceSurfaceThread: false,
+      ambianceSurfaceComposer: false,
+      ambianceColor: "#48cfff",
+    });
+    expect(decodeClientSettingsPatch({ ambianceIntensity: MIN_AMBIANCE_INTENSITY })).toEqual({
+      ambianceIntensity: MIN_AMBIANCE_INTENSITY,
+    });
+    expect(() => decodeClientSettingsPatch({ ambianceEffect: "hail" })).toThrow();
+    expect(() => decodeClientSettingsPatch({ ambianceReactMode: "sometimes" })).toThrow();
+    expect(() =>
+      decodeClientSettingsPatch({ ambianceIntensity: MAX_AMBIANCE_INTENSITY + 0.5 }),
+    ).toThrow();
+    expect(() =>
+      decodeClientSettingsPatch({ ambianceIntensity: MIN_AMBIANCE_INTENSITY - 0.5 }),
+    ).toThrow();
+  });
+
+  it("defaults Task Atrium error dismissals and validates persisted occurrence identities", () => {
+    expect(DEFAULT_CLIENT_SETTINGS.dismissedTaskAtriumErrors).toEqual([]);
+
+    const dismissal = {
+      environmentId: "environment-1",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      observedAt: "2026-08-25T04:00:00.000Z",
+    };
+    expect(decodeClientSettingsPatch({ dismissedTaskAtriumErrors: [dismissal] })).toEqual({
+      dismissedTaskAtriumErrors: [dismissal],
+    });
+    expect(() =>
+      decodeClientSettingsPatch({
+        dismissedTaskAtriumErrors: [{ ...dismissal, environmentId: "" }],
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeClientSettingsPatch({
+        dismissedTaskAtriumErrors: Array.from(
+          { length: MAX_TASK_ATRIUM_ERROR_DISMISSALS + 1 },
+          () => dismissal,
+        ),
+      }),
+    ).toThrow();
   });
 
   it("accepts only supported power-save blocker modes in patches", () => {
@@ -258,6 +370,22 @@ describe("client settings", () => {
 });
 
 describe("provider settings", () => {
+  it("decodes Grok defaults and its legacy settings patch", () => {
+    expect(decodeGrokSettings({})).toEqual({
+      enabled: true,
+      binaryPath: "grok",
+      homePath: "",
+      customModels: [],
+    });
+    expect(
+      decodeServerSettingsPatch({
+        providers: { grok: { binaryPath: "/opt/grok", homePath: "/srv/grok-home" } },
+      }),
+    ).toEqual({
+      providers: { grok: { binaryPath: "/opt/grok", homePath: "/srv/grok-home" } },
+    });
+  });
+
   it("defaults Codex and Claude provider runtime source to system", () => {
     expect(decodeCodexSettings({}).runtimeSource).toBe("system");
     expect(decodeClaudeSettings({}).runtimeSource).toBe("system");
@@ -287,9 +415,50 @@ describe("provider settings", () => {
     ).toThrow();
   });
 
-  it("defaults the Codex auto-compact token limit to 200,000 tokens", () => {
-    expect(CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT).toBe(200_000);
-    expect(decodeCodexSettings({}).autoCompactTokenLimit).toBe(200_000);
+  it("leaves the Codex concurrent subagent limit unset for provider resolution", () => {
+    expect(decodeCodexSettings({}).maxConcurrentSubagents).toBeUndefined();
+  });
+
+  it.each([1, 6, CODEX_MAX_CONCURRENT_SUBAGENTS])(
+    "decodes a valid Codex concurrent subagent limit of %i",
+    (maxConcurrentSubagents) => {
+      expect(decodeCodexSettings({ maxConcurrentSubagents }).maxConcurrentSubagents).toBe(
+        maxConcurrentSubagents,
+      );
+    },
+  );
+
+  it.each([0, -1, 1.5, CODEX_MAX_CONCURRENT_SUBAGENTS + 1, Number.NaN, Number.POSITIVE_INFINITY])(
+    "rejects an invalid Codex concurrent subagent limit of %s",
+    (maxConcurrentSubagents) => {
+      expect(() => decodeCodexSettings({ maxConcurrentSubagents })).toThrow();
+    },
+  );
+
+  it("saves the Codex concurrent subagent limit through legacy settings patches", () => {
+    expect(
+      decodeServerSettingsPatch({
+        providers: {
+          codex: { maxConcurrentSubagents: 12 },
+        },
+      }),
+    ).toEqual({
+      providers: {
+        codex: { maxConcurrentSubagents: 12 },
+      },
+    });
+
+    expect(() =>
+      decodeServerSettingsPatch({
+        providers: {
+          codex: { maxConcurrentSubagents: CODEX_MAX_CONCURRENT_SUBAGENTS + 1 },
+        },
+      }),
+    ).toThrow();
+  });
+
+  it("leaves the Codex auto-compact limit unset for upstream resolution", () => {
+    expect(decodeCodexSettings({}).autoCompactTokenLimit).toBeUndefined();
   });
 
   it("decodes a configured Codex auto-compact token limit", () => {

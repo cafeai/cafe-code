@@ -6,9 +6,125 @@ import {
   deriveMessagesTimelineRows,
   filterHistoricalWorkLogSummariesByPresence,
   findHistoricalWorkLogPresenceCandidates,
+  mergeHistoricalSubagentEntries,
   normalizeCompactToolLabel,
   resolveAssistantMessageCopyState,
 } from "./MessagesTimeline.logic";
+
+describe("mergeHistoricalSubagentEntries", () => {
+  it("keeps the complete snapshot roster while merging only newer paged lifecycle fields", () => {
+    const turnId = "turn-history" as never;
+    const makeEntry = (input: {
+      id: string;
+      childId: string;
+      updatedAt: string;
+      status: "active" | "completed";
+      lifecycleRevision?: string;
+      startedAt?: string;
+      completedAt?: string;
+      description?: string;
+      historyId?: string;
+    }) => ({
+      id: input.id,
+      turnId,
+      createdAt: "2026-01-01T00:00:00Z",
+      label: input.childId,
+      tone: "info" as const,
+      subagent: {
+        id: input.childId,
+        label: input.childId,
+        status: input.status,
+        startedAt: input.startedAt ?? "2026-01-01T00:00:00Z",
+        updatedAt: input.updatedAt,
+        ...(input.lifecycleRevision ? { lifecycleRevision: input.lifecycleRevision } : {}),
+        ...(input.completedAt ? { completedAt: input.completedAt } : {}),
+        ...(input.description ? { description: input.description } : {}),
+        ...(input.historyId ? { historyId: input.historyId } : {}),
+      },
+    });
+    const snapshotA = makeEntry({
+      id: "snapshot-a",
+      childId: "child-a",
+      updatedAt: "2026-01-01T00:00:10Z",
+      status: "completed",
+      completedAt: "2026-01-01T00:00:10Z",
+      description: "Complete saved description",
+      historyId: "history-a",
+    });
+    const snapshotB = makeEntry({
+      id: "snapshot-b",
+      childId: "child-b",
+      updatedAt: "2026-01-01T00:00:08Z",
+      status: "completed",
+    });
+    const partialOlderA = makeEntry({
+      id: "page-a-old",
+      childId: "child-a",
+      updatedAt: "2026-01-01T00:00:05Z",
+      status: "active",
+    });
+    const pageOnlyC = makeEntry({
+      id: "page-c",
+      childId: "child-c",
+      updatedAt: "2026-01-01T00:00:12Z",
+      status: "completed",
+    });
+
+    const merged = mergeHistoricalSubagentEntries(
+      [snapshotA, snapshotB],
+      [partialOlderA, pageOnlyC],
+    );
+    expect(merged.map((entry) => entry.subagent.id)).toEqual(["child-a", "child-b", "child-c"]);
+    expect(merged[0]?.subagent).toMatchObject({
+      status: "completed",
+      description: "Complete saved description",
+      historyId: "history-a",
+    });
+
+    const sameTimestampNewerSequence = makeEntry({
+      id: "page-a-new",
+      childId: "child-a",
+      updatedAt: "2026-01-01T00:00:10Z",
+      lifecycleRevision: "sequence:11:10:page-a-new",
+      status: "active",
+      description: "Newest lifecycle revision",
+    });
+    const sameTimestampSnapshot = makeEntry({
+      id: "snapshot-a-live",
+      childId: "child-a",
+      updatedAt: "2026-01-01T00:00:10Z",
+      lifecycleRevision: "sequence:10:15:snapshot-a-live",
+      status: "active",
+      description: "Older lifecycle revision",
+      historyId: "history-a",
+    });
+    expect(
+      mergeHistoricalSubagentEntries([sameTimestampSnapshot], [sameTimestampNewerSequence])[0]
+        ?.subagent,
+    ).toMatchObject({
+      lifecycleRevision: "sequence:11:10:page-a-new",
+      status: "active",
+      description: "Newest lifecycle revision",
+      historyId: "history-a",
+    });
+
+    const delayedProgress = makeEntry({
+      id: "page-a-delayed-progress",
+      childId: "child-a",
+      updatedAt: "2026-01-01T00:00:12Z",
+      lifecycleRevision: "sequence:12:23:page-a-delayed-progress",
+      status: "active",
+      startedAt: "2026-01-01T00:00:00Z",
+      description: "Delayed progress must not resurrect",
+    });
+    expect(
+      mergeHistoricalSubagentEntries([snapshotA], [delayedProgress])[0]?.subagent,
+    ).toMatchObject({
+      status: "completed",
+      description: "Complete saved description",
+    });
+  });
+});
 
 describe("computeMessageDurationStart", () => {
   it("returns message createdAt when there is no preceding user message", () => {

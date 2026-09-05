@@ -10,6 +10,7 @@ import {
   ProviderDaemonRpcEnvelope,
   ProviderDaemonRpcRequest,
   ProviderDaemonRpcResultByMethod,
+  type ThreadId,
   type ProviderRuntimeEvent,
   type ProviderDaemonClientConfig,
 } from "@cafecode/contracts";
@@ -49,6 +50,9 @@ import {
   PROVIDER_SUPERVISOR_RUNTIME_CURSOR_PROJECTOR,
   rewindProviderDaemonCursorForReplay,
 } from "./ProviderDaemonRuntimeCursor.ts";
+import { providerDaemonRequestThreadIds } from "./ProviderDaemonThreadIdentity.ts";
+
+export { providerDaemonRequestThreadIds } from "./ProviderDaemonThreadIdentity.ts";
 
 const decodeRpcEnvelopeJson = Schema.decodeUnknownSync(
   Schema.fromJsonString(ProviderDaemonRpcEnvelope),
@@ -61,24 +65,34 @@ const decodeAdapterCapabilities = Schema.decodeUnknownSync(ProviderDaemonAdapter
 const decodeInstanceRoutingInfo = Schema.decodeUnknownSync(ProviderDaemonInstanceRoutingInfo);
 const encodeRpcRequestJson = Schema.encodeSync(Schema.fromJsonString(ProviderDaemonRpcRequest));
 const VOID_RPC_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
+  "discardSessionFork",
   "interruptTurn",
   "respondToRequest",
   "respondToUserInput",
+  "snoozeUserInput",
   "stopSession",
+  "quiesceThreadForHardDelete",
   "rollbackConversation",
 ]);
 const MUTATING_RPC_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
   "startSession",
+  "forkSession",
+  "discardSessionFork",
   "sendTurn",
   "steerTurn",
   "interruptTurn",
   "respondToRequest",
   "respondToUserInput",
+  "snoozeUserInput",
   "stopSession",
+  "quiesceThreadForHardDelete",
   "restartProviderRuntime",
+  "setGoal",
+  "clearGoal",
   "rollbackConversation",
 ]);
 const PROVIDER_DAEMON_REPLAY_OVERLAP_EVENTS = 1_000;
+const PROVIDER_DAEMON_REPLAY_HEALTH_TIMEOUT_MS = 5_000;
 
 function providerDaemonUrl(config: ProviderDaemonClientConfig, path: string): URL {
   return new URL(
@@ -140,17 +154,88 @@ export const isVoidProviderDaemonRpcMethod = (
   method: ProviderDaemonRpcRequest["method"],
 ): boolean => VOID_RPC_METHODS.has(method);
 
+type ProviderDaemonControlRequester = typeof requestProviderDaemonJson;
+
+const RETRYABLE_PROVIDER_DAEMON_CONTROL_ERROR_CODES = new Set(["ECONNRESET", "EPIPE"]);
+
+/**
+ * Classify only transport resets that occur before Cafe has decoded a daemon
+ * RPC envelope. Do not use message substring matching here: daemon-side
+ * structured errors, schema failures, timeouts, and provider failures must not
+ * be replayed merely because their human-readable text happens to mention a
+ * connection.
+ */
+export function isRetryableProviderDaemonControlError(cause: unknown): boolean {
+  if (cause === null || typeof cause !== "object" || !("code" in cause)) {
+    return false;
+  }
+  const code = cause.code;
+  return typeof code === "string" && RETRYABLE_PROVIDER_DAEMON_CONTROL_ERROR_CODES.has(code);
+}
+
+/**
+ * Send one RPC request with a single reset-only retry.
+ *
+ * The mutation command id and encoded JSON are deliberately constructed once,
+ * before either transport attempt. A daemon may have durably executed the
+ * first request even when its response socket resets; replaying byte-identical
+ * input lets the daemon CommandLedger return that existing result instead of
+ * performing the mutation twice. Never move command-id attachment into the
+ * attempt loop or wrap the outer `rpc` Effect in a generic retry policy.
+ */
+export async function requestProviderDaemonRpcJsonWithStableRetry<
+  M extends ProviderDaemonRpcRequest["method"],
+>(
+  daemonConfig: ProviderDaemonClientConfig,
+  request: Extract<ProviderDaemonRpcRequest, { readonly method: M }>,
+  requestJson: ProviderDaemonControlRequester = requestProviderDaemonJson,
+) {
+  const requestWithCommandId = attachCommandIdToMutatingProviderDaemonRequest(request);
+  const body = encodeRpcRequestJson(requestWithCommandId);
+  const attempt = () =>
+    requestJson(daemonConfig, PROVIDER_DAEMON_RPC_PATH, {
+      method: "POST",
+      body,
+    });
+
+  try {
+    return await attempt();
+  } catch (cause) {
+    if (!isRetryableProviderDaemonControlError(cause)) {
+      throw cause;
+    }
+    return attempt();
+  }
+}
+
+/** Reject locally retired identities before evaluating the HTTP request. */
+export const guardRemoteProviderThreadOperation = <A, E, R>(input: {
+  readonly retiredThreadIds: ReadonlySet<string>;
+  readonly operation: string;
+  readonly threadIds: ReadonlyArray<ThreadId>;
+  readonly effect: Effect.Effect<A, E, R>;
+}): Effect.Effect<A, E | ProviderValidationError, R> =>
+  Effect.suspend((): Effect.Effect<A, E | ProviderValidationError, R> => {
+    const retiredThreadId = input.threadIds.find((threadId) =>
+      input.retiredThreadIds.has(String(threadId)),
+    );
+    return retiredThreadId === undefined
+      ? input.effect
+      : Effect.fail(
+          new ProviderValidationError({
+            operation: input.operation,
+            issue: `Thread '${retiredThreadId}' is permanently retired and cannot accept provider work.`,
+          }),
+        );
+  });
+
 const rpc = <M extends ProviderDaemonRpcRequest["method"]>(
   daemonConfig: ProviderDaemonClientConfig,
   request: Extract<ProviderDaemonRpcRequest, { readonly method: M }>,
 ) =>
   Effect.tryPromise({
     try: async () => {
-      const requestWithCommandId = attachCommandIdToMutatingProviderDaemonRequest(request);
-      const response = await requestProviderDaemonJson(daemonConfig, PROVIDER_DAEMON_RPC_PATH, {
-        method: "POST",
-        body: encodeRpcRequestJson(requestWithCommandId),
-      });
+      const response = await requestProviderDaemonRpcJsonWithStableRetry(daemonConfig, request);
       const envelope = decodeRpcEnvelopeJson(response.body);
       if (!envelope.ok) {
         const rootCause = envelope.error.diagnostics?.causeChain.find(
@@ -191,7 +276,15 @@ async function readRemoteHealth(
 ): Promise<typeof ProviderDaemonHealth.Type> {
   const response = await requestProviderDaemonJson(daemonConfig, PROVIDER_DAEMON_HEALTH_PATH, {
     method: "GET",
+    // Startup must never inherit the transport helper's much larger general
+    // request budget. Health only informs replay policy; if it is inconclusive,
+    // the caller safely falls back to the bounded overlap instead of delaying
+    // backend readiness for an unhealthy daemon.
+    timeoutMs: PROVIDER_DAEMON_REPLAY_HEALTH_TIMEOUT_MS,
   });
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    throw new Error(`provider daemon health failed with HTTP ${response.statusCode}`);
+  }
   return decodeHealthJson(response.body);
 }
 
@@ -213,6 +306,72 @@ export function remoteProviderCursorProjectorForConfig(config: {
   return config.providerDaemon !== undefined
     ? PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR
     : PROVIDER_SUPERVISOR_RUNTIME_CURSOR_PROJECTOR;
+}
+
+/**
+ * Select the daemon journal cursor used by a freshly constructed bridge.
+ *
+ * Overlap replay exists to reconstruct process-local streaming/coalescer state
+ * for sessions that survived a backend restart. An authoritative idle health
+ * snapshot proves there is no such live state to recover, so replaying the same
+ * 1,000 durable rows only creates startup work and can starve readiness on a
+ * large journal. Any active-session count or inconclusive health read retains
+ * the conservative overlap. The latter fail-closed policy favors recovering a
+ * possibly live stream over the idle-startup optimization.
+ */
+export function providerDaemonReplayCursorForHealth(input: {
+  readonly persistedCursor: number;
+  readonly activeSessionCount: number | undefined;
+  readonly overlapEvents?: number;
+}): number {
+  const normalizedPersistedCursor = rewindProviderDaemonCursorForReplay(input.persistedCursor, 0);
+  if (input.activeSessionCount === 0) {
+    return normalizedPersistedCursor;
+  }
+  return rewindProviderDaemonCursorForReplay(
+    normalizedPersistedCursor,
+    input.overlapEvents ?? PROVIDER_DAEMON_REPLAY_OVERLAP_EVENTS,
+  );
+}
+
+/**
+ * Execute the bounded health decision while preserving the conservative
+ * overlap on an ordinary transport failure. Keeping this Effect boundary in a
+ * directly exercised helper is intentional: Effect's public combinator names
+ * vary between major versions, and a helper-only cursor test would not execute
+ * a misspelled/unsupported recovery combinator during CI.
+ */
+export function resolveProviderDaemonReplayCursor<E, R>(input: {
+  readonly persistedCursor: number;
+  readonly projector: string;
+  readonly health: Effect.Effect<
+    Pick<typeof ProviderDaemonHealth.Type, "activeSessionCount">,
+    E,
+    R
+  >;
+}): Effect.Effect<number, never, R> {
+  return input.health.pipe(
+    Effect.map((health) =>
+      providerDaemonReplayCursorForHealth({
+        persistedCursor: input.persistedCursor,
+        activeSessionCount: health.activeSessionCount,
+      }),
+    ),
+    Effect.catch(() => {
+      const fallbackCursor = providerDaemonReplayCursorForHealth({
+        persistedCursor: input.persistedCursor,
+        activeSessionCount: undefined,
+      });
+      // Do not attach the raw transport cause: Unix socket paths and other
+      // local endpoint details are not appropriate for routine diagnostics.
+      return Effect.logWarning("provider daemon replay health read was inconclusive", {
+        projector: input.projector,
+        replayPolicy: "bounded-overlap",
+        afterCursor: fallbackCursor,
+        replayOverlapEvents: PROVIDER_DAEMON_REPLAY_OVERLAP_EVENTS,
+      }).pipe(Effect.as(fallbackCursor));
+    }),
+  );
 }
 
 const makeRemoteProviderService = Effect.gen(function* () {
@@ -238,6 +397,20 @@ const makeRemoteProviderService = Effect.gen(function* () {
     ),
   );
   const runtimeEventPubSub = yield* PubSub.bounded<ProviderRuntimeEvent>(bridgeQueueCapacity);
+  // The daemon owns provider processes, but this bridge owns delivery into the
+  // backend ingestion worker. Fence locally before sending the daemon RPC so
+  // a journal record already in flight cannot arrive after the backend has
+  // drained ingestion and committed permanent deletion.
+  const hardDeleteRetiredThreadIds = new Set<string>();
+  const guardedRpc = <M extends ProviderDaemonRpcRequest["method"]>(
+    request: Extract<ProviderDaemonRpcRequest, { readonly method: M }>,
+  ) =>
+    guardRemoteProviderThreadOperation({
+      retiredThreadIds: hardDeleteRetiredThreadIds,
+      operation: `ProviderDaemonRemoteProviderService.${request.method}`,
+      threadIds: providerDaemonRequestThreadIds(request),
+      effect: rpc(daemonConfig, request),
+    });
   const publishContext = yield* Effect.context<never>();
   const publishRuntimeEvent = Effect.runPromiseWith(publishContext);
   const initialProjectionState = yield* projectionStateRepository
@@ -250,14 +423,18 @@ const makeRemoteProviderService = Effect.gen(function* () {
         }).pipe(Effect.as(Option.none())),
       ),
     );
-  let eventCursor = Option.match(initialProjectionState, {
-    onNone: () => 0,
-    onSome: (state) =>
-      rewindProviderDaemonCursorForReplay(
-        state.lastAppliedSequence,
-        PROVIDER_DAEMON_REPLAY_OVERLAP_EVENTS,
-      ),
-  });
+  let eventCursor = 0;
+  if (Option.isSome(initialProjectionState)) {
+    const persistedCursor = initialProjectionState.value.lastAppliedSequence;
+    eventCursor = yield* resolveProviderDaemonReplayCursor({
+      persistedCursor,
+      projector: remoteCursorProjector,
+      health: Effect.tryPromise({
+        try: () => readRemoteHealth(daemonConfig),
+        catch: (cause) => toRemoteRequestError("health", cause),
+      }),
+    });
+  }
 
   if (
     Option.isNone(initialProjectionState) &&
@@ -331,6 +508,10 @@ const makeRemoteProviderService = Effect.gen(function* () {
               eventCursor = Math.max(eventCursor, record.cursor);
               return;
             }
+            if (hardDeleteRetiredThreadIds.has(String(record.event.threadId))) {
+              eventCursor = Math.max(eventCursor, record.cursor);
+              return;
+            }
             await publishRuntimeEvent(
               PubSub.publish(
                 runtimeEventPubSub,
@@ -357,21 +538,32 @@ const makeRemoteProviderService = Effect.gen(function* () {
 
   const service: ProviderServiceShape = {
     startSession: (threadId, input) =>
-      rpc(daemonConfig, {
+      guardedRpc({
         method: "startSession",
         payload: { ...input, threadId },
       }),
-    sendTurn: (input) => rpc(daemonConfig, { method: "sendTurn", payload: input }),
-    steerTurn: (input) => rpc(daemonConfig, { method: "steerTurn", payload: input }),
-    interruptTurn: (input) => rpc(daemonConfig, { method: "interruptTurn", payload: input }),
-    respondToRequest: (input) => rpc(daemonConfig, { method: "respondToRequest", payload: input }),
-    respondToUserInput: (input) =>
-      rpc(daemonConfig, { method: "respondToUserInput", payload: input }),
-    stopSession: (input) => rpc(daemonConfig, { method: "stopSession", payload: input }),
+    forkSession: (input) => guardedRpc({ method: "forkSession", payload: input }),
+    discardSessionFork: (input) => guardedRpc({ method: "discardSessionFork", payload: input }),
+    sendTurn: (input) => guardedRpc({ method: "sendTurn", payload: input }),
+    steerTurn: (input) => guardedRpc({ method: "steerTurn", payload: input }),
+    interruptTurn: (input) => guardedRpc({ method: "interruptTurn", payload: input }),
+    respondToRequest: (input) => guardedRpc({ method: "respondToRequest", payload: input }),
+    respondToUserInput: (input) => guardedRpc({ method: "respondToUserInput", payload: input }),
+    snoozeUserInput: (input) => guardedRpc({ method: "snoozeUserInput", payload: input }),
+    stopSession: (input) => guardedRpc({ method: "stopSession", payload: input }),
+    quiesceThreadForHardDelete: (input) =>
+      Effect.sync(() => {
+        hardDeleteRetiredThreadIds.add(String(input.threadId));
+      }).pipe(
+        Effect.andThen(rpc(daemonConfig, { method: "quiesceThreadForHardDelete", payload: input })),
+      ),
     restartProviderRuntime: (input) =>
-      rpc(daemonConfig, { method: "restartProviderRuntime", payload: input }),
+      guardedRpc({ method: "restartProviderRuntime", payload: input }),
     listSessions: () =>
-      rpc(daemonConfig, { method: "listSessions", payload: {} }).pipe(
+      guardedRpc({ method: "listSessions", payload: {} }).pipe(
+        Effect.map((sessions) =>
+          sessions.filter((session) => !hardDeleteRetiredThreadIds.has(String(session.threadId))),
+        ),
         Effect.catch((error) =>
           Effect.logWarning("provider daemon listSessions failed", {
             detail: error.message,
@@ -379,17 +571,20 @@ const makeRemoteProviderService = Effect.gen(function* () {
         ),
       ),
     getCapabilities: (instanceId) =>
-      rpc(daemonConfig, { method: "getCapabilities", payload: { instanceId } }).pipe(
+      guardedRpc({ method: "getCapabilities", payload: { instanceId } }).pipe(
         Effect.map(
           (capabilities) => decodeAdapterCapabilities(capabilities) as ProviderAdapterCapabilities,
         ),
       ),
     getInstanceInfo: (instanceId) =>
-      rpc(daemonConfig, { method: "getInstanceInfo", payload: { instanceId } }).pipe(
+      guardedRpc({ method: "getInstanceInfo", payload: { instanceId } }).pipe(
         Effect.map((info) => decodeInstanceRoutingInfo(info) as ProviderInstanceRoutingInfo),
       ),
-    rollbackConversation: (input) =>
-      rpc(daemonConfig, { method: "rollbackConversation", payload: input }),
+    getGoal: (input) => guardedRpc({ method: "getGoal", payload: input }),
+    setGoal: (input) => guardedRpc({ method: "setGoal", payload: input }),
+    clearGoal: (input) => guardedRpc({ method: "clearGoal", payload: input }),
+    rollbackConversation: (input) => guardedRpc({ method: "rollbackConversation", payload: input }),
+    readSubagentDetail: (input) => guardedRpc({ method: "readSubagentDetail", payload: input }),
     get streamEvents(): ProviderServiceShape["streamEvents"] {
       return Stream.fromPubSub(runtimeEventPubSub);
     },

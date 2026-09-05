@@ -79,6 +79,25 @@ export class OrchestrationListenerCallbackError extends Schema.TaggedErrorClass<
   }
 }
 
+/**
+ * A redacted failure at the serialized hard-delete boundary.
+ *
+ * SQL driver causes can contain statement text and local database details.
+ * Keep those causes on the server-side log path and expose only this typed,
+ * operation-scoped signal through orchestration services.
+ */
+export class OrchestrationThreadHardDeleteError extends Schema.TaggedErrorClass<OrchestrationThreadHardDeleteError>()(
+  "OrchestrationThreadHardDeleteError",
+  {
+    operation: Schema.Literals(["retire", "purge"]),
+    detail: Schema.Literal("hard-delete-persistence-failed"),
+  },
+) {
+  override get message(): string {
+    return `Thread hard delete failed during ${this.operation}`;
+  }
+}
+
 export type OrchestrationDispatchError =
   | ProjectionRepositoryError
   | OrchestrationCommandInvariantError

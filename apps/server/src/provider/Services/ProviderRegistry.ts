@@ -10,6 +10,7 @@ import type {
   ProviderInstanceId,
   ProviderDriverKind,
   ServerProvider,
+  ServerProviderAccountRateLimitSnapshot,
   ServerProviderAccountRateLimitWindow,
   ServerProviderUpdateState,
 } from "@cafecode/contracts";
@@ -60,6 +61,15 @@ export interface ProviderRegistryShape {
   ) => Effect.Effect<ReadonlyArray<ServerProvider>>;
 
   /**
+   * Refresh only one instance's provider-owned model catalogue. This is a
+   * no-op for drivers that do not expose a bounded model-list path and never
+   * falls back to a full installation/authentication/account probe.
+   */
+  readonly refreshInstanceModels?: (
+    instanceId: ProviderInstanceId,
+  ) => Effect.Effect<ReadonlyArray<ServerProvider>>;
+
+  /**
    * Resolve the maintenance capabilities owned by one live provider instance.
    * Falls back to manual-only capabilities when the instance is not live.
    */
@@ -81,19 +91,26 @@ export interface ProviderRegistryShape {
   }) => Effect.Effect<ReadonlyArray<ServerProvider>>;
 
   /**
-   * Merge a single account rate-limit window into one instance's snapshot and
-   * republish if it changed. Used for event-sourced rate limits (e.g. Claude's
-   * `rate_limit_event`), which arrive one window at a time during a session
-   * rather than from the periodic probe. The other window slot is preserved, so
-   * repeated calls accumulate the latest `primary` (5h) and `secondary` (weekly).
-   * No-ops when the instance is not currently tracked.
+   * Merge an event-sourced account rate-limit update into one instance's snapshot
+   * and republish if it changed. Claude reports one complete window at a time;
+   * Codex reports a sparse named snapshot that must be merged into its latest
+   * `account/rateLimits/read` result. No-ops when the instance is not tracked.
    */
-  readonly updateProviderAccountRateLimits: (input: {
-    readonly instanceId: ProviderInstanceId;
-    readonly slot: "primary" | "secondary";
-    readonly window: ServerProviderAccountRateLimitWindow;
-    readonly checkedAt: string;
-  }) => Effect.Effect<void>;
+  readonly updateProviderAccountRateLimits: (
+    input:
+      | {
+          readonly instanceId: ProviderInstanceId;
+          readonly slot: "primary" | "secondary";
+          readonly window: ServerProviderAccountRateLimitWindow;
+          readonly checkedAt: string;
+        }
+      | {
+          readonly instanceId: ProviderInstanceId;
+          readonly limitId: string;
+          readonly snapshot: ServerProviderAccountRateLimitSnapshot;
+          readonly checkedAt: string;
+        },
+  ) => Effect.Effect<void>;
 
   /**
    * Stream of provider snapshot updates — one emission per aggregated

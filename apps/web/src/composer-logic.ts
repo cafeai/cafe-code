@@ -1,7 +1,11 @@
 import { splitPromptIntoComposerSegments } from "./composer-editor-mentions";
 
 export type ComposerTriggerKind = "path" | "slash-command" | "skill";
-export type ComposerSlashCommand = "model" | "plan" | "default";
+export type ComposerSlashCommand = "model" | "plan" | "default" | "goal";
+
+export type ComposerGoalCommand =
+  | { readonly action: "show" | "edit" | "pause" | "resume" | "clear" }
+  | { readonly action: "set"; readonly objective: string };
 
 export interface ComposerTrigger {
   kind: ComposerTriggerKind;
@@ -219,7 +223,7 @@ export function detectComposerTrigger(text: string, cursorInput: number): Compos
 
 export function parseStandaloneComposerSlashCommand(
   text: string,
-): Exclude<ComposerSlashCommand, "model"> | null {
+): Exclude<ComposerSlashCommand, "model" | "goal"> | null {
   const match = /^\/(plan|default)\s*$/i.exec(text.trim());
   if (!match) {
     return null;
@@ -227,6 +231,35 @@ export function parseStandaloneComposerSlashCommand(
   const command = match[1]?.toLowerCase();
   if (command === "plan") return "plan";
   return "default";
+}
+
+/**
+ * Parse the Codex TUI's `/goal` command shape without interpreting provider
+ * prompt text. Callers must gate this parser on the bound provider instance's
+ * advertised thread-goal capability; Claude and other providers retain their
+ * own slash-command semantics.
+ */
+export function parseStandaloneComposerGoalCommand(text: string): ComposerGoalCommand | null {
+  const match = /^\/goal(?:\s+([\s\S]*))?$/i.exec(text.trim());
+  if (!match) {
+    return null;
+  }
+  const argument = match[1]?.trim() ?? "";
+  if (argument.length === 0) {
+    return { action: "show" };
+  }
+  switch (argument.toLowerCase()) {
+    case "edit":
+      return { action: "edit" };
+    case "pause":
+      return { action: "pause" };
+    case "resume":
+      return { action: "resume" };
+    case "clear":
+      return { action: "clear" };
+    default:
+      return { action: "set", objective: argument };
+  }
 }
 
 export function replaceTextRange(

@@ -72,6 +72,7 @@ const handleMethod = (message: Record<string, unknown>) => {
       const firstCwd = params?.cwds?.[0];
       pendingSkillsListCwd = typeof firstCwd === "string" ? firstCwd : process.cwd();
       pendingUserInputRequestId = sendRequest("item/tool/requestUserInput", {
+        isBlocking: true,
         itemId: "item-approval-1",
         threadId: "thread-1",
         turnId: "turn-1",

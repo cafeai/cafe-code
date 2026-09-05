@@ -22,11 +22,13 @@ import {
   type ScopedThreadRef,
 } from "@cafecode/contracts";
 import { scopeThreadRef } from "@cafecode/client-runtime";
+import { copyTextToClipboard } from "../../lib/copyToClipboard";
 import {
   DEFAULT_UNIFIED_SETTINGS,
   DEFAULT_APP_ACCENT_COLOR,
   DEFAULT_BRAND_WORDMARK_PREFIX,
   DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS,
+  DEFAULT_INTERFACE_SCALE_PERCENT,
   DEFAULT_SHOW_SIDEBAR_ATTRIBUTION,
   DEFAULT_SIDEBAR_BRAND_IMAGE,
   DEFAULT_SIDEBAR_STAR_SPEED,
@@ -34,9 +36,11 @@ import {
   DEFAULT_SHOW_SIDEBAR_SEARCH,
   DEFAULT_THEME_ACCENT_COLOR,
   MAX_BRAND_WORDMARK_PREFIX_LENGTH,
+  MAX_INTERFACE_SCALE_PERCENT,
   MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES,
   MAX_SIDEBAR_STAR_SPEED,
   MIN_SIDEBAR_STAR_SPEED,
+  MIN_INTERFACE_SCALE_PERCENT,
   type ChatCopyFormat,
   type DefaultEditorSelection,
   type PowerSaveBlockerMode,
@@ -79,6 +83,7 @@ import {
   NumberFieldInput,
 } from "../ui/number-field";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
+import { Slider } from "../ui/slider";
 import { Switch } from "../ui/switch";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -112,6 +117,7 @@ import {
   useServerProviders,
 } from "../../rpc/serverState";
 import { resolveEditorOpenOptions, type EditorOpenOption } from "../../editorOpenOptions";
+import { snapInterfaceScalePercent } from "../../interfaceScale";
 import { openInPreferredEditor } from "../../editorPreferences";
 import {
   DEFAULT_SIDEBAR_BRAND_IMAGE_SIZES,
@@ -370,6 +376,9 @@ export function useSettingsRestore(onRestored?: () => void) {
   const changedSettingLabels = useMemo(
     () => [
       ...(theme !== "system" ? ["Theme"] : []),
+      ...(settings.interfaceScalePercent !== DEFAULT_UNIFIED_SETTINGS.interfaceScalePercent
+        ? ["Interface size"]
+        : []),
       ...(settings.continueBackgroundAnimations !==
       DEFAULT_UNIFIED_SETTINGS.continueBackgroundAnimations
         ? ["Background animations"]
@@ -392,6 +401,16 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.sidebarStarSpeed !== DEFAULT_UNIFIED_SETTINGS.sidebarStarSpeed
         ? ["Sidebar star speed"]
         : []),
+      ...(settings.ambianceEnabled !== DEFAULT_UNIFIED_SETTINGS.ambianceEnabled ||
+      settings.ambianceEffect !== DEFAULT_UNIFIED_SETTINGS.ambianceEffect ||
+      settings.ambianceIntensity !== DEFAULT_UNIFIED_SETTINGS.ambianceIntensity ||
+      settings.ambianceReactMode !== DEFAULT_UNIFIED_SETTINGS.ambianceReactMode ||
+      settings.ambianceSurfaceSidebar !== DEFAULT_UNIFIED_SETTINGS.ambianceSurfaceSidebar ||
+      settings.ambianceSurfaceThread !== DEFAULT_UNIFIED_SETTINGS.ambianceSurfaceThread ||
+      settings.ambianceSurfaceComposer !== DEFAULT_UNIFIED_SETTINGS.ambianceSurfaceComposer ||
+      settings.ambianceColor !== DEFAULT_UNIFIED_SETTINGS.ambianceColor
+        ? ["Ambiance"]
+        : []),
       ...(settings.appAccentColor !== DEFAULT_UNIFIED_SETTINGS.appAccentColor
         ? ["Accent color"]
         : []),
@@ -407,14 +426,8 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.sidebarThreadPreviewCount !== DEFAULT_UNIFIED_SETTINGS.sidebarThreadPreviewCount
         ? ["Visible threads"]
         : []),
-      ...(settings.diffWordWrap !== DEFAULT_UNIFIED_SETTINGS.diffWordWrap
-        ? ["Diff line wrapping"]
-        : []),
-      ...(settings.diffIgnoreWhitespace !== DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace
-        ? ["Diff whitespace changes"]
-        : []),
       ...(settings.autoOpenPlanSidebar !== DEFAULT_UNIFIED_SETTINGS.autoOpenPlanSidebar
-        ? ["Auto-open task panel"]
+        ? ["Auto-open plan panel"]
         : []),
       ...(settings.enableAssistantStreaming !== DEFAULT_UNIFIED_SETTINGS.enableAssistantStreaming
         ? ["Assistant output"]
@@ -439,14 +452,20 @@ export function useSettingsRestore(onRestored?: () => void) {
     ],
     [
       isGitWritingModelDirty,
+      settings.ambianceColor,
+      settings.ambianceEffect,
+      settings.ambianceEnabled,
+      settings.ambianceIntensity,
+      settings.ambianceReactMode,
+      settings.ambianceSurfaceComposer,
+      settings.ambianceSurfaceSidebar,
+      settings.ambianceSurfaceThread,
       settings.autoOpenPlanSidebar,
       settings.confirmThreadArchive,
       settings.confirmThreadDelete,
       settings.continueBackgroundAnimations,
       settings.addProjectBaseDirectory,
       settings.defaultThreadEnvMode,
-      settings.diffIgnoreWhitespace,
-      settings.diffWordWrap,
       settings.defaultEditor,
       settings.appAccentColor,
       settings.brandWordmarkPrefix,
@@ -458,6 +477,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.themeAccentColor,
       settings.automaticGitFetchInterval,
       settings.enableAssistantStreaming,
+      settings.interfaceScalePercent,
       settings.sidebarThreadPreviewCount,
       settings.timestampFormat,
       theme,
@@ -477,6 +497,7 @@ export function useSettingsRestore(onRestored?: () => void) {
     setTheme("system");
     updateSettings({
       timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat,
+      interfaceScalePercent: DEFAULT_UNIFIED_SETTINGS.interfaceScalePercent,
       continueBackgroundAnimations: DEFAULT_UNIFIED_SETTINGS.continueBackgroundAnimations,
       appAccentColor: DEFAULT_UNIFIED_SETTINGS.appAccentColor,
       showSidebarSearch: DEFAULT_UNIFIED_SETTINGS.showSidebarSearch,
@@ -486,10 +507,16 @@ export function useSettingsRestore(onRestored?: () => void) {
       sidebarBrandImage: DEFAULT_UNIFIED_SETTINGS.sidebarBrandImage,
       sidebarBrandImageDataUrl: "",
       sidebarStarSpeed: DEFAULT_UNIFIED_SETTINGS.sidebarStarSpeed,
+      ambianceEnabled: DEFAULT_UNIFIED_SETTINGS.ambianceEnabled,
+      ambianceEffect: DEFAULT_UNIFIED_SETTINGS.ambianceEffect,
+      ambianceIntensity: DEFAULT_UNIFIED_SETTINGS.ambianceIntensity,
+      ambianceReactMode: DEFAULT_UNIFIED_SETTINGS.ambianceReactMode,
+      ambianceSurfaceSidebar: DEFAULT_UNIFIED_SETTINGS.ambianceSurfaceSidebar,
+      ambianceSurfaceThread: DEFAULT_UNIFIED_SETTINGS.ambianceSurfaceThread,
+      ambianceSurfaceComposer: DEFAULT_UNIFIED_SETTINGS.ambianceSurfaceComposer,
+      ambianceColor: DEFAULT_UNIFIED_SETTINGS.ambianceColor,
       themeAccentColor: DEFAULT_UNIFIED_SETTINGS.themeAccentColor,
       defaultEditor: DEFAULT_UNIFIED_SETTINGS.defaultEditor,
-      diffWordWrap: DEFAULT_UNIFIED_SETTINGS.diffWordWrap,
-      diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
       sidebarThreadPreviewCount: DEFAULT_UNIFIED_SETTINGS.sidebarThreadPreviewCount,
       autoOpenPlanSidebar: DEFAULT_UNIFIED_SETTINGS.autoOpenPlanSidebar,
       enableAssistantStreaming: DEFAULT_UNIFIED_SETTINGS.enableAssistantStreaming,
@@ -727,6 +754,38 @@ export function AppearanceSettingsPanel() {
                 ))}
               </SelectPopup>
             </Select>
+          }
+        />
+
+        <SettingsRow
+          title="Interface size"
+          description="Scale text, controls, icons, and spacing across Cafe Code."
+          resetAction={
+            settings.interfaceScalePercent !== DEFAULT_INTERFACE_SCALE_PERCENT ? (
+              <SettingResetButton
+                label="interface size"
+                onClick={() =>
+                  updateSettings({ interfaceScalePercent: DEFAULT_INTERFACE_SCALE_PERCENT })
+                }
+              />
+            ) : null
+          }
+          control={
+            <div className="flex w-full items-center gap-3 sm:w-56">
+              <Slider
+                value={settings.interfaceScalePercent}
+                min={MIN_INTERFACE_SCALE_PERCENT}
+                max={MAX_INTERFACE_SCALE_PERCENT}
+                step={5}
+                aria-label="Interface size"
+                onValueChange={(value) =>
+                  updateSettings({ interfaceScalePercent: snapInterfaceScalePercent(value) })
+                }
+              />
+              <span className="w-10 shrink-0 text-right font-mono text-xs text-muted-foreground">
+                {settings.interfaceScalePercent}%
+              </span>
+            </div>
           }
         />
 
@@ -1061,7 +1120,7 @@ export function ChatSettingsPanel() {
         const api = ensureLocalApi();
         return api.server.openSystemPromptFile().then(async ({ path }) => {
           if (!canOpenLocalEditor) {
-            await navigator.clipboard.writeText(path);
+            await copyTextToClipboard(path);
             toastManager.add({
               title: "Path copied",
               description: path,
@@ -1122,12 +1181,12 @@ export function ChatSettingsPanel() {
         />
 
         <SettingsRow
-          title="Auto-open task panel"
-          description="Open the right-side plan and task panel the first time steps appear, until a thread is manually opened or closed."
+          title="Auto-open plan panel"
+          description="Open the right-side panel when a provider finishes an authored plan. Runtime task steps stay in the composer progress control."
           resetAction={
             settings.autoOpenPlanSidebar !== DEFAULT_UNIFIED_SETTINGS.autoOpenPlanSidebar ? (
               <SettingResetButton
-                label="auto-open task panel"
+                label="auto-open plan panel"
                 onClick={() =>
                   updateSettings({
                     autoOpenPlanSidebar: DEFAULT_UNIFIED_SETTINGS.autoOpenPlanSidebar,
@@ -1142,7 +1201,7 @@ export function ChatSettingsPanel() {
               onCheckedChange={(checked) =>
                 updateSettings({ autoOpenPlanSidebar: Boolean(checked) })
               }
-              aria-label="Open the task panel automatically"
+              aria-label="Open the plan panel automatically"
             />
           }
         />
@@ -1325,7 +1384,7 @@ export function FilesSettingsPanel() {
 
   return (
     <SettingsPageContainer>
-      <SettingsSection title="Files & Diffs">
+      <SettingsSection title="Files">
         <SettingsRow
           title="Default editor"
           description="Choose how file links open from chats and activity."
@@ -1378,54 +1437,6 @@ export function FilesSettingsPanel() {
                 ))}
               </SelectPopup>
             </Select>
-          }
-        />
-
-        <SettingsRow
-          title="Diff line wrapping"
-          description="Set the default wrap state when the diff panel opens."
-          resetAction={
-            settings.diffWordWrap !== DEFAULT_UNIFIED_SETTINGS.diffWordWrap ? (
-              <SettingResetButton
-                label="diff line wrapping"
-                onClick={() =>
-                  updateSettings({ diffWordWrap: DEFAULT_UNIFIED_SETTINGS.diffWordWrap })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.diffWordWrap}
-              onCheckedChange={(checked) => updateSettings({ diffWordWrap: Boolean(checked) })}
-              aria-label="Wrap diff lines by default"
-            />
-          }
-        />
-
-        <SettingsRow
-          title="Hide whitespace changes"
-          description="Set whether the diff panel ignores whitespace-only edits by default."
-          resetAction={
-            settings.diffIgnoreWhitespace !== DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace ? (
-              <SettingResetButton
-                label="diff whitespace changes"
-                onClick={() =>
-                  updateSettings({
-                    diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.diffIgnoreWhitespace}
-              onCheckedChange={(checked) =>
-                updateSettings({ diffIgnoreWhitespace: Boolean(checked) })
-              }
-              aria-label="Hide whitespace changes by default"
-            />
           }
         />
 

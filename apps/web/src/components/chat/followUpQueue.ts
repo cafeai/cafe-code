@@ -66,6 +66,20 @@ export function canStartQueuedFollowUpTurn(input: QueuedFollowUpStartInput): boo
   );
 }
 
+export interface AutomaticQueuedFollowUpStartInput extends QueuedFollowUpStartInput {
+  manualStopBarrierActive: boolean;
+}
+
+/**
+ * A normal queued follow-up may auto-dispatch when a provider becomes idle,
+ * but the main Stop button is an explicit cancellation barrier. This mirrors
+ * upstream Codex TUI's distinction between ordinary interrupt (restore input)
+ * and its dedicated interrupt-and-submit pending-steer path.
+ */
+export function canAutoStartQueuedFollowUpTurn(input: AutomaticQueuedFollowUpStartInput): boolean {
+  return !input.manualStopBarrierActive && canStartQueuedFollowUpTurn(input);
+}
+
 export interface QueuedFollowUpDispatchCandidateInput<
   ThreadKey extends string,
   Item extends { readonly blockedReason: string | null },

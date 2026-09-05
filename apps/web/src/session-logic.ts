@@ -12,6 +12,14 @@ import {
   type ThreadId,
   type TurnId,
 } from "@cafecode/contracts";
+import { summarizeToolArguments } from "@cafecode/shared/toolActivity";
+
+import {
+  deriveSubagentActivities,
+  type DeriveSubagentActivityOptions,
+  type DerivedSubagentActivity,
+  type SubagentRunStatus,
+} from "./subagent-activity";
 
 import type {
   ChatMessage,
@@ -33,6 +41,12 @@ export const PROVIDER_OPTIONS: Array<{
 }> = [
   { value: ProviderDriverKind.make("codex"), label: "Codex", available: true },
   { value: ProviderDriverKind.make("claudeAgent"), label: "Claude", available: true },
+  {
+    value: ProviderDriverKind.make("grok"),
+    label: "Grok Build",
+    available: true,
+    pickerSidebarBadge: "new",
+  },
 ];
 
 export interface WorkLogEntry {
@@ -48,12 +62,30 @@ export interface WorkLogEntry {
   toolTitle?: string;
   itemType?: ToolLifecycleItemType;
   requestKind?: PendingApproval["requestKind"];
+  subagent?: {
+    /** Stable provider child identity and deterministic avatar seed. */
+    id: string;
+    label: string;
+    objective?: string;
+    description?: string;
+    status: SubagentRunStatus;
+    startedAt: string;
+    completedAt?: string;
+    /** Latest durable lifecycle edge, used to invalidate an open detail view. */
+    updatedAt?: string;
+    /** Activity sequence/id revision; unlike timestamps this cannot collide. */
+    lifecycleRevision?: string;
+    /** Opaque provider history binding; never render or log this value. */
+    historyId?: string;
+  };
 }
 
 export interface HistoricalWorkLogSummary {
   turnId: TurnId;
   previewEntries: ReadonlyArray<WorkLogEntry>;
   snapshotEntryCount: number;
+  /** Subagents are conversation history, not command/tool Work Log rows. */
+  subagentEntries?: ReadonlyArray<WorkLogEntry>;
 }
 
 interface DerivedWorkLogEntry extends WorkLogEntry {
@@ -64,7 +96,7 @@ interface DerivedWorkLogEntry extends WorkLogEntry {
 
 export interface PendingApproval {
   requestId: ApprovalRequestId;
-  requestKind: "command" | "file-read" | "file-change";
+  requestKind: "command" | "terminal-input" | "file-read" | "file-change";
   createdAt: string;
   detail?: string;
 }
@@ -73,6 +105,7 @@ export interface PendingUserInput {
   requestId: ApprovalRequestId;
   createdAt: string;
   questions: ReadonlyArray<UserInputQuestion>;
+  isBlocking: boolean;
 }
 
 export interface ActivePlanState {
@@ -202,6 +235,8 @@ function requestKindFromRequestType(requestType: unknown): PendingApproval["requ
     case "exec_command_approval":
     case "dynamic_tool_call":
       return "command";
+    case "terminal_input_approval":
+      return "terminal-input";
     case "file_read_approval":
       return "file-read";
     case "file_change_approval":
@@ -244,6 +279,7 @@ export function derivePendingApprovals(
     const requestKind =
       payload &&
       (payload.requestKind === "command" ||
+        payload.requestKind === "terminal-input" ||
         payload.requestKind === "file-read" ||
         payload.requestKind === "file-change")
         ? payload.requestKind
@@ -358,6 +394,9 @@ export function derivePendingUserInputs(
         requestId,
         createdAt: activity.createdAt,
         questions,
+        // Events written before Codex 0.147 did not carry the field and must
+        // remain blocking. Only an explicit false enables auto-resolution.
+        isBlocking: payload?.isBlocking !== false,
       });
       continue;
     }
@@ -387,8 +426,10 @@ export function deriveActivePlanState(
 ): ActivePlanState | null {
   const ordered = [...activities].toSorted(compareActivitiesByOrder);
   const allPlanActivities = ordered.filter((activity) => activity.kind === "turn.plan.updated");
-  // Prefer plan from the current turn; fall back to the most recent plan from any turn
-  // so that TodoWrite tasks persist across follow-up messages.
+  // Codex and Claude both emit complete checklist snapshots rather than
+  // per-step patches. Prefer the current turn's newest snapshot, then retain
+  // the prior turn's final snapshot across follow-up turns just as the Codex
+  // TUI retains its last update_plan progress.
   const latest = Option.firstSomeOf([
     ...(latestTurnId
       ? Arr.findLast(allPlanActivities, (activity) => activity.turnId === latestTurnId)
@@ -504,10 +545,28 @@ export function hasActionableProposedPlan(
 export function deriveWorkLogEntries(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
   latestTurnId: TurnId | undefined,
+  _subagentOptions: DeriveSubagentActivityOptions = {},
 ): WorkLogEntry[] {
-  const ordered = [...activities].toSorted(compareActivitiesByOrder);
+  const ordered = [...activities]
+    .toSorted(compareActivitiesByOrder)
+    .filter((activity) => (latestTurnId ? activity.turnId === latestTurnId : true));
+  const latestTaskVisibility = new Map<string, "visible" | "ambient">();
+  for (const activity of ordered) {
+    const identity = taskActivityIdentityKey(activity);
+    if (!identity) continue;
+    const visibility = taskActivityVisibility(activity);
+    if (visibility) latestTaskVisibility.set(identity, visibility);
+  }
   const entries = ordered
-    .filter((activity) => (latestTurnId ? activity.turnId === latestTurnId : true))
+    // Structured task lifecycle supersedes the old generic collab tool row.
+    // Removing both here avoids rendering `Subagent task - Started /root/x`
+    // next to the richer, identity-stable subagent row.
+    .filter((activity) => !isSubagentWorkActivity(activity))
+    .filter((activity) => {
+      const identity = taskActivityIdentityKey(activity);
+      if (identity && latestTaskVisibility.get(identity) === "ambient") return false;
+      return !isAmbientTaskActivity(activity);
+    })
     .filter((activity) => activity.kind !== "tool.started" || isContextCompactionActivity(activity))
     .filter(
       (activity) => activity.kind !== "task.started" || isUserVisibleTaskStartedActivity(activity),
@@ -517,9 +576,137 @@ export function deriveWorkLogEntries(
     .filter((activity) => !isPlanBoundaryToolActivity(activity))
     .filter((activity) => !isRetryableSteerDeliveryActivity(activity))
     .map(toDerivedWorkLogEntry);
-  return collapseDerivedWorkLogEntries(entries).map(
+  const collapsed = collapseDerivedWorkLogEntries(entries).map(
     ({ activityKind: _activityKind, collapseKey: _collapseKey, ...entry }) => entry,
   );
+  return collapsed;
+}
+
+function taskActivityIdentityKey(activity: OrchestrationThreadActivity): string | undefined {
+  if (
+    activity.kind !== "task.started" &&
+    activity.kind !== "task.progress" &&
+    activity.kind !== "task.completed"
+  ) {
+    return undefined;
+  }
+  const payload =
+    activity.payload && typeof activity.payload === "object" && !Array.isArray(activity.payload)
+      ? (activity.payload as Record<string, unknown>)
+      : null;
+  const taskId = typeof payload?.taskId === "string" && payload.taskId ? payload.taskId : undefined;
+  return taskId ? JSON.stringify([activity.turnId ?? null, taskId]) : undefined;
+}
+
+function taskActivityVisibility(
+  activity: OrchestrationThreadActivity,
+): "visible" | "ambient" | undefined {
+  const payload =
+    activity.payload && typeof activity.payload === "object" && !Array.isArray(activity.payload)
+      ? (activity.payload as Record<string, unknown>)
+      : null;
+  return payload?.visibility === "visible" || payload?.visibility === "ambient"
+    ? payload.visibility
+    : undefined;
+}
+
+function isAmbientTaskActivity(activity: OrchestrationThreadActivity): boolean {
+  if (
+    activity.kind !== "task.started" &&
+    activity.kind !== "task.progress" &&
+    activity.kind !== "task.completed"
+  ) {
+    return false;
+  }
+  return taskActivityVisibility(activity) === "ambient";
+}
+
+/**
+ * Derive the provider-neutral child roster independently from command/tool
+ * activity. Keeping this boundary explicit prevents presentation code from
+ * accidentally counting a worker as a Work Log command while retaining the
+ * same durable lifecycle ordering for Codex and Claude.
+ */
+export function deriveSubagentWorkEntries(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+  latestTurnId: TurnId | undefined,
+  options: DeriveSubagentActivityOptions = {},
+): WorkLogEntry[] {
+  const ordered = [...activities]
+    .toSorted(compareActivitiesByOrder)
+    .filter((activity) => (latestTurnId ? activity.turnId === latestTurnId : true));
+  return deriveSubagentActivities(ordered, options).map(subagentToWorkLogEntry);
+}
+
+/**
+ * Build the composer roster across every turn while completing only legacy
+ * rows from turns that are no longer running. Structured provider lifecycle
+ * rows remain authoritative, because Codex and Claude children can continue
+ * in the background after the parent turn that spawned them settles.
+ */
+export function deriveActiveSubagentWorkEntries(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+  runningTurnId: TurnId | null | undefined,
+): WorkLogEntry[] {
+  const terminalTurnIds = new Set<TurnId>();
+  for (const activity of activities) {
+    if (activity.turnId !== null) terminalTurnIds.add(activity.turnId);
+  }
+  if (runningTurnId) terminalTurnIds.delete(runningTurnId);
+
+  return deriveSubagentWorkEntries(activities, undefined, { terminalTurnIds }).filter(
+    (entry) => entry.subagent?.status === "active" || entry.subagent?.status === "waiting",
+  );
+}
+
+function isSubagentWorkActivity(activity: OrchestrationThreadActivity): boolean {
+  const payload =
+    activity.payload && typeof activity.payload === "object" && !Array.isArray(activity.payload)
+      ? (activity.payload as Record<string, unknown>)
+      : null;
+  return (
+    (payload?.subagent !== null && typeof payload?.subagent === "object") ||
+    payload?.itemType === "collab_agent_tool_call"
+  );
+}
+
+function subagentToWorkLogEntry(subagent: DerivedSubagentActivity): WorkLogEntry {
+  const fallback =
+    subagent.status === "waiting"
+      ? "Waiting"
+      : subagent.status === "active"
+        ? "Working"
+        : subagent.status === "failed"
+          ? "Failed"
+          : subagent.status === "stopped"
+            ? "Stopped"
+            : "Completed";
+  return {
+    id: subagent.rowId,
+    turnId: subagent.turnId,
+    createdAt: subagent.startedAt,
+    label: subagent.label,
+    detail: subagent.objective ?? subagent.description ?? fallback,
+    tone:
+      subagent.status === "failed"
+        ? "error"
+        : subagent.status === "active" || subagent.status === "waiting"
+          ? "thinking"
+          : "info",
+    itemType: "collab_agent_tool_call",
+    subagent: {
+      id: subagent.id,
+      label: subagent.label,
+      ...(subagent.objective ? { objective: subagent.objective } : {}),
+      ...(subagent.description ? { description: subagent.description } : {}),
+      status: subagent.status,
+      startedAt: subagent.startedAt,
+      updatedAt: subagent.updatedAt,
+      lifecycleRevision: subagent.lifecycleRevision,
+      ...(subagent.completedAt ? { completedAt: subagent.completedAt } : {}),
+      ...(subagent.historyId ? { historyId: subagent.historyId } : {}),
+    },
+  };
 }
 
 export function deriveHistoricalWorkLogSummaries(input: {
@@ -552,7 +739,9 @@ export function deriveHistoricalWorkLogSummaries(input: {
   }
 
   const entriesByTurnId = new Map<TurnId, WorkLogEntry[]>();
-  for (const entry of deriveWorkLogEntries(input.activities, undefined)) {
+  for (const entry of deriveWorkLogEntries(input.activities, undefined, {
+    terminalTurnIds: historicalTurnIds,
+  })) {
     if (
       entry.turnId === null ||
       entry.turnId === undefined ||
@@ -567,6 +756,21 @@ export function deriveHistoricalWorkLogSummaries(input: {
       entriesByTurnId.set(entry.turnId, [entry]);
     }
   }
+  const subagentsByTurnId = new Map<TurnId, WorkLogEntry[]>();
+  for (const entry of deriveSubagentWorkEntries(input.activities, undefined, {
+    terminalTurnIds: historicalTurnIds,
+  })) {
+    if (
+      entry.turnId === null ||
+      entry.turnId === undefined ||
+      !historicalTurnIds.has(entry.turnId)
+    ) {
+      continue;
+    }
+    const existing = subagentsByTurnId.get(entry.turnId);
+    if (existing) existing.push(entry);
+    else subagentsByTurnId.set(entry.turnId, [entry]);
+  }
 
   const summaries = new Map<TurnId, HistoricalWorkLogSummary>();
   for (const turnId of historicalTurnIds) {
@@ -575,6 +779,7 @@ export function deriveHistoricalWorkLogSummaries(input: {
       turnId,
       previewEntries: entries.slice(-6),
       snapshotEntryCount: entries.length,
+      subagentEntries: subagentsByTurnId.get(turnId) ?? [],
     });
   }
   return summaries;
@@ -620,7 +825,10 @@ function isUserVisibleTaskStartedActivity(activity: OrchestrationThreadActivity)
   // keeping ordinary internal task starts out of conversation history. Cafe's
   // work log follows the same distinction instead of hiding the review until
   // its terminal notification arrives.
-  return payload?.taskType === "approval-review";
+  return (
+    payload?.taskType === "approval-review" ||
+    (payload?.subagent !== null && typeof payload?.subagent === "object")
+  );
 }
 
 function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWorkLogEntry {
@@ -1111,6 +1319,61 @@ function isCommandToolDetail(payload: Record<string, unknown> | null, heading: s
   );
 }
 
+function extractPersistedWebSearchQuery(payload: Record<string, unknown> | null): string | null {
+  if (extractWorkLogItemType(payload) !== "web_search") {
+    return null;
+  }
+  const data = asRecord(payload?.data);
+  const item = asRecord(data?.item);
+  const action = asRecord(item?.action);
+  const rawInput = asRecord(data?.rawInput);
+  const rawOutput = asRecord(data?.rawOutput);
+  const rawOutputAction = asRecord(rawOutput?.action);
+  const nestedToolInput = asRecord(rawInput?.tool_input);
+  const query =
+    asTrimmedString(item?.query) ??
+    asTrimmedString(action?.query) ??
+    asTrimmedString(rawInput?.query) ??
+    asTrimmedString(rawInput?.pattern) ??
+    asTrimmedString(rawInput?.searchTerm) ??
+    asTrimmedString(rawInput?.url) ??
+    asTrimmedString(nestedToolInput?.query) ??
+    asTrimmedString(nestedToolInput?.pattern) ??
+    asTrimmedString(nestedToolInput?.searchTerm) ??
+    asTrimmedString(rawOutputAction?.query);
+  return summarizeToolArguments(query) ?? null;
+}
+
+function extractPersistedToolInvocationDetail(
+  payload: Record<string, unknown> | null,
+): string | null {
+  const itemType = extractWorkLogItemType(payload);
+  if (itemType !== "mcp_tool_call" && itemType !== "dynamic_tool_call") {
+    return null;
+  }
+  const data = asRecord(payload?.data);
+  const item = asRecord(data?.item);
+  if (item) {
+    const itemKind = asTrimmedString(item.type);
+    if (itemKind === "mcpToolCall" || itemKind === "dynamicToolCall") {
+      const namespace = asTrimmedString(itemKind === "mcpToolCall" ? item.server : item.namespace);
+      const tool = asTrimmedString(item.tool);
+      const toolName = truncateInlinePreview(
+        normalizeInlinePreview([namespace, tool].filter(Boolean).join(".")),
+        160,
+      );
+      const argumentsPreview = summarizeToolArguments(item.arguments);
+      if (toolName && argumentsPreview) {
+        return `${toolName}: ${argumentsPreview}`;
+      }
+      return toolName || argumentsPreview || null;
+    }
+  }
+
+  const rawInput = asRecord(data?.rawInput);
+  return summarizeToolArguments(rawInput?.tool_input) ?? null;
+}
+
 function extractToolDetail(
   payload: Record<string, unknown> | null,
   heading: string,
@@ -1126,6 +1389,21 @@ function extractToolDetail(
 
   if (isCommandToolDetail(payload, heading)) {
     return null;
+  }
+
+  // Older persisted Codex activities predate the adapter's canonical `detail`
+  // mapping but retain the original webSearch item under `data`.
+  const persistedWebSearchQuery = extractPersistedWebSearchQuery(payload);
+  if (persistedWebSearchQuery) {
+    return persistedWebSearchQuery;
+  }
+
+  // Retained Codex and ACP activities can predate the provider-side detail
+  // mapping. Recover only bounded/redacted invocation metadata here so old
+  // rows improve without replaying or rewriting the durable event store.
+  const persistedToolInvocationDetail = extractPersistedToolInvocationDetail(payload);
+  if (persistedToolInvocationDetail) {
+    return persistedToolInvocationDetail;
   }
 
   const rawOutputSummary = summarizeToolRawOutput(payload);
@@ -1193,6 +1471,7 @@ function extractWorkLogRequestKind(
 ): WorkLogEntry["requestKind"] | undefined {
   if (
     payload?.requestKind === "command" ||
+    payload?.requestKind === "terminal-input" ||
     payload?.requestKind === "file-read" ||
     payload?.requestKind === "file-change"
   ) {

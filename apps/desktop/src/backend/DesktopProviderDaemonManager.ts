@@ -117,6 +117,8 @@ export interface DesktopProviderDaemonSnapshot {
 }
 
 export interface DesktopProviderDaemonManagerShape {
+  /** Configure the main backend loopback port before daemon adoption/spawn. */
+  readonly configureCafeMcpPort?: (port: number) => Effect.Effect<void>;
   readonly ensureRunning: Effect.Effect<ProviderDaemonClientConfig>;
   /**
    * Replace an unhealthy provider daemon and issue a fresh desktop lease.
@@ -500,6 +502,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
   const daemonScope = yield* Scope.make();
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const state = yield* Ref.make(initialState);
+  const cafeMcpPortRef = yield* Ref.make<number | undefined>(undefined);
   const lifecycleMutex = yield* Semaphore.make(1);
   const runtimeBuildId = yield* computeProviderDaemonRuntimeBuildId(environment);
 
@@ -597,6 +600,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
   ): Effect.Effect<Option.Option<ProviderDaemonClientConfig>> =>
     Effect.gen(function* () {
       const adoptionStartedAtMs = performance.now();
+      const cafeMcpPort = yield* Ref.get(cafeMcpPortRef);
       const transport = marker.transport ?? "tcp";
       const socketPath = marker.socketPath;
       const credentialPath = marker.credentialPath ?? environment.providerDaemonCredentialPath;
@@ -634,7 +638,8 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
         health.value.runtimeBuildId !== runtimeBuildId ||
         marker.appVersion !== environment.appVersion ||
         marker.protocolVersion !== PROVIDER_DAEMON_PROTOCOL_VERSION ||
-        marker.runtimeBuildId !== runtimeBuildId
+        marker.runtimeBuildId !== runtimeBuildId ||
+        (cafeMcpPort !== undefined && marker.cafeMcpPort !== cafeMcpPort)
       ) {
         if (Option.isSome(health)) {
           const supervisorPid = health.value.upstreamSupervisor?.pid;
@@ -698,6 +703,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
     const socketPath = providerDaemonIpcSocketPath(environment);
     yield* prepareProviderDaemonIpcPath(environment, socketPath);
     const token = makeProviderDaemonToken();
+    const cafeMcpPort = yield* Ref.get(cafeMcpPortRef);
     const rootEndpoint: ProviderDaemonClientConfig = {
       httpBaseUrl: "http://provider-daemon.local",
       transport: "ipc",
@@ -710,6 +716,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
       transport: "ipc",
       socketPath,
       cafeCodeHome: environment.baseDir,
+      ...(cafeMcpPort !== undefined ? { cafeMcpPort } : {}),
       token,
       runtimeBuildId,
       ...Option.match(environment.otlpTracesUrl, {
@@ -771,6 +778,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
       updatedAt: now,
       appVersion: environment.appVersion,
       runtimeBuildId,
+      ...(cafeMcpPort !== undefined ? { cafeMcpPort } : {}),
     };
     yield* writeMarker({ markerPath: environment.providerDaemonMarkerPath, marker });
     const previous = yield* Ref.get(state);
@@ -1086,6 +1094,10 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
   yield* publishDebugSnapshot;
 
   return {
+    configureCafeMcpPort: (port) =>
+      Number.isInteger(port) && port > 0 && port <= 65_535
+        ? Ref.set(cafeMcpPortRef, port)
+        : Effect.die(new Error("Invalid Cafe MCP backend port.")),
     ensureRunning,
     recover,
     currentConfig,

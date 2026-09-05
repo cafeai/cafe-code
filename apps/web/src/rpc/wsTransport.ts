@@ -57,6 +57,11 @@ interface StreamRequestStartInfo {
   readonly stream: boolean;
 }
 
+export interface WsTransportOpenEvent {
+  readonly openCount: number;
+  readonly reconnected: boolean;
+}
+
 function formatErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message.trim().length > 0) {
     return error.message;
@@ -77,6 +82,8 @@ export class WsTransport {
   private lastHeartbeatPongAt = 0;
   private heartbeatRecoveryInFlight = false;
   private readonly streamRequestStartListeners = new Set<(info: StreamRequestStartInfo) => void>();
+  private readonly openListeners = new Set<(event: WsTransportOpenEvent) => void>();
+  private successfulOpenCount = 0;
 
   constructor(
     url: WsRpcProtocolSocketUrlProvider,
@@ -276,11 +283,19 @@ export class WsTransport {
     return this.lastHeartbeatPongAt > 0 && Date.now() - this.lastHeartbeatPongAt <= maxAgeMs;
   }
 
+  subscribeConnectionOpened(listener: (event: WsTransportOpenEvent) => void): () => void {
+    this.openListeners.add(listener);
+    return () => {
+      this.openListeners.delete(listener);
+    };
+  }
+
   async dispose() {
     if (this.disposed) {
       return;
     }
     this.disposed = true;
+    this.openListeners.clear();
     await this.closeSession(this.session);
   }
 
@@ -293,6 +308,15 @@ export class WsTransport {
   }
 
   private createSession(): TransportSession {
+    // A replacement protocol session owns a fresh bounded socket-retry
+    // schedule. Notify environment-scoped lifecycle models before its first
+    // URL resolution/socket attempt so their exhaustion counters reset with
+    // the transport that actually enforces the bound.
+    try {
+      this.lifecycleHandlers?.onSessionStart?.();
+    } catch {
+      // A renderer status observer must never prevent transport recovery.
+    }
     const sessionId = this.nextSessionId + 1;
     this.nextSessionId = sessionId;
     this.activeSessionId = sessionId;
@@ -305,6 +329,22 @@ export class WsTransport {
             this.disposed ||
             this.intentionalCloseDepth > 0 ||
             this.lifecycleHandlers?.isCloseIntentional?.() === true,
+          onOpen: () => {
+            this.lifecycleHandlers?.onOpen?.();
+            this.successfulOpenCount += 1;
+            const event = {
+              openCount: this.successfulOpenCount,
+              reconnected: this.successfulOpenCount > 1,
+            } satisfies WsTransportOpenEvent;
+            for (const listener of this.openListeners) {
+              try {
+                listener(event);
+              } catch {
+                // A diagnostic/cache refresh hook must never destabilize the
+                // transport lifecycle that it observes.
+              }
+            }
+          },
           onHeartbeatPong: () => {
             this.lastHeartbeatPongAt = Date.now();
             this.lifecycleHandlers?.onHeartbeatPong?.();

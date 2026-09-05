@@ -3,11 +3,8 @@ import {
   ArrowUpDownIcon,
   ChevronRightIcon,
   FolderPlusIcon,
-  PanelLeftCloseIcon,
-  PanelLeftIcon,
   PlusIcon,
   SearchIcon,
-  SettingsIcon,
   SquarePenIcon,
   Trash2Icon,
   TriangleAlertIcon,
@@ -48,7 +45,6 @@ import {
   ThreadId,
 } from "@cafecode/contracts";
 import {
-  parseScopedThreadKey,
   scopedProjectKey,
   scopedThreadKey,
   scopeProjectRef,
@@ -98,8 +94,6 @@ import { useDesktopDebugEnabled } from "../lib/desktopDebugState";
 import { readLocalApi } from "../localApi";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
-import { retainThreadDetailSubscription } from "../environments/runtime/service";
-
 import { useThreadActions } from "../hooks/useThreadActions";
 import {
   buildThreadRouteParams,
@@ -109,6 +103,8 @@ import {
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { formatRelativeTimeLabel } from "../timestampFormat";
 import { SettingsSidebarNav } from "./settings/SettingsSidebarNav";
+import { SidebarFooterNavigation } from "./SidebarFooterNavigation";
+import { useTaskAtriumStore } from "./atrium/taskAtriumStore";
 import { Kbd } from "./ui/kbd";
 import {
   getArm64IntelBuildWarningDescription,
@@ -169,7 +165,6 @@ import { useThreadSelectionStore } from "../threadSelectionStore";
 import { useCommandPaletteStore } from "../commandPaletteStore";
 import {
   buildSidebarThreadContextMenuItems,
-  getSidebarThreadIdsToPrewarm,
   isProjectDeleteRequiresForceError,
   resolveAdjacentThreadId,
   isContextMenuPointerDown,
@@ -185,6 +180,7 @@ import {
   ThreadStatusPill,
 } from "./Sidebar.logic";
 import { sortThreads } from "../lib/threadSort";
+import { isLatestTurnSettled } from "../session-logic";
 import { SidebarUpdatePill } from "./sidebar/SidebarUpdatePill";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { useIsMobile } from "~/hooks/useMediaQuery";
@@ -212,11 +208,7 @@ import {
   type SidebarProjectSnapshot,
 } from "../sidebarProjectGrouping";
 import { SidebarProviderUpdatePill } from "./sidebar/SidebarProviderUpdatePill";
-import {
-  SidebarTriggerWithUnreadDot,
-  UnseenCompletionsDot,
-  useHasUnseenThreadCompletions,
-} from "./sidebar/unseenCompletions";
+import { SidebarTriggerWithUnreadDot } from "./sidebar/unseenCompletions";
 const SIDEBAR_SORT_LABELS: Record<SidebarProjectSortOrder, string> = {
   updated_at: "Last user message",
   created_at: "Created at",
@@ -2333,6 +2325,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         buildSidebarThreadContextMenuItems({
           debugEnabled: desktopDebugEnabled,
           repairRunning: threadRepairDialog?.phase === "running",
+          forkDisabled:
+            (thread.session?.provider !== "codex" && thread.session?.provider !== "claudeAgent") ||
+            !isLatestTurnSettled(thread.latestTurn, thread.session),
         }),
         position,
       );
@@ -2344,13 +2339,13 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         return;
       }
 
-      if (clicked === "duplicate") {
+      if (clicked === "fork") {
         const environmentApi = readEnvironmentApi(threadRef.environmentId);
         if (!environmentApi) {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Unable to duplicate thread",
+              title: "Unable to fork thread",
               description: "The environment for this thread is not available.",
             }),
           );
@@ -2360,11 +2355,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         const targetThreadRef = scopeThreadRef(threadRef.environmentId, newThreadId());
         try {
           await environmentApi.orchestration.dispatchCommand({
-            type: "thread.duplicate",
+            type: "thread.fork",
             commandId: newCommandId(),
             sourceThreadId: threadRef.threadId,
             targetThreadId: targetThreadRef.threadId,
-            title: `${thread.title} (copy)`,
+            title: `${thread.title} (fork)`,
             createdAt: new Date().toISOString(),
           });
           void router.navigate({
@@ -2375,7 +2370,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Failed to duplicate thread",
+              title: "Failed to fork thread",
               description: error instanceof Error ? error.message : "An error occurred.",
             }),
           );
@@ -3086,47 +3081,42 @@ const SidebarChromeHeader = memo(function SidebarChromeHeader({
 }: {
   isElectron: boolean;
 }) {
-  const { open } = useSidebar();
   const wordmark = (
-    <div className="flex min-w-0 flex-1 items-center gap-2 group-data-[collapsible=icon]:justify-center">
-      {open ? (
-        <>
-          <SidebarTriggerWithUnreadDot className="md:hidden" />
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                // In Electron the wordmark shares the frameless title bar, so
-                // keep it non-interactive: a <span> inherits the header's
-                // `drag-region` (letting the whole 52px band drag the window),
-                // whereas an <a>/<button> would opt out via `.drag-region a`.
-                // On the web it stays a link back to the threads home.
-                isElectron ? (
-                  <span className="ml-1 flex min-w-0 items-center gap-1">
-                    <CafeCodeWordmark />
-                    <span className="rounded-full bg-muted/50 px-1.5 py-0.5 text-[8px] font-medium uppercase tracking-[0.18em] text-muted-foreground/60">
-                      {APP_STAGE_LABEL}
-                    </span>
-                  </span>
-                ) : (
-                  <Link
-                    aria-label="Go to threads"
-                    className="ml-1 flex min-w-0 flex-1 cursor-pointer items-center gap-1 rounded-md outline-hidden ring-ring transition-colors hover:text-foreground focus-visible:ring-2"
-                    to="/"
-                  >
-                    <CafeCodeWordmark />
-                    <span className="rounded-full bg-muted/50 px-1.5 py-0.5 text-[8px] font-medium uppercase tracking-[0.18em] text-muted-foreground/60">
-                      {APP_STAGE_LABEL}
-                    </span>
-                  </Link>
-                )
-              }
-            />
-            <TooltipPopup side="bottom" sideOffset={2}>
-              Version {APP_VERSION}
-            </TooltipPopup>
-          </Tooltip>
-        </>
-      ) : null}
+    <div className="flex min-w-0 flex-1 items-center gap-2">
+      <SidebarTriggerWithUnreadDot />
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            // In Electron the wordmark shares the frameless title bar, so
+            // keep it non-interactive: a <span> inherits the header's
+            // `drag-region` (letting the whole 52px band drag the window),
+            // whereas an <a>/<button> would opt out via `.drag-region a`.
+            // On the web it stays a link back to the threads home.
+            isElectron ? (
+              <span className="ml-1 flex min-w-0 items-center gap-1">
+                <CafeCodeWordmark />
+                <span className="rounded-full bg-muted/50 px-1.5 py-0.5 text-[8px] font-medium uppercase tracking-[0.18em] text-muted-foreground/60">
+                  {APP_STAGE_LABEL}
+                </span>
+              </span>
+            ) : (
+              <Link
+                aria-label="Go to threads"
+                className="ml-1 flex min-w-0 flex-1 cursor-pointer items-center gap-1 rounded-md outline-hidden ring-ring transition-colors hover:text-foreground focus-visible:ring-2"
+                to="/"
+              >
+                <CafeCodeWordmark />
+                <span className="rounded-full bg-muted/50 px-1.5 py-0.5 text-[8px] font-medium uppercase tracking-[0.18em] text-muted-foreground/60">
+                  {APP_STAGE_LABEL}
+                </span>
+              </Link>
+            )
+          }
+        />
+        <TooltipPopup side="bottom" sideOffset={2}>
+          Version {APP_VERSION}
+        </TooltipPopup>
+      </Tooltip>
     </div>
   );
   const persistentHeaderClassName = "relative z-30 transition-[padding] duration-200 ease-linear";
@@ -3135,21 +3125,14 @@ const SidebarChromeHeader = memo(function SidebarChromeHeader({
     <SidebarHeader
       className={cn(
         persistentHeaderClassName,
-        "drag-region flex-row items-center gap-2 py-0",
-        open
-          ? "h-[52px] px-4 pl-[90px] wco:h-[env(titlebar-area-height)] wco:pl-[calc(env(titlebar-area-x)+1em)]"
-          : "h-[52px] justify-center px-2",
+        "drag-region h-[52px] flex-row items-center gap-2 px-4 py-0 pl-[90px] wco:h-[env(titlebar-area-height)] wco:pl-[calc(env(titlebar-area-x)+1em)]",
       )}
     >
       {wordmark}
     </SidebarHeader>
   ) : (
     <SidebarHeader
-      className={cn(
-        persistentHeaderClassName,
-        "gap-3 py-2 sm:gap-2.5 sm:py-3",
-        open ? "px-3 sm:px-4" : "items-center px-2",
-      )}
+      className={cn(persistentHeaderClassName, "gap-3 px-3 py-2 sm:gap-2.5 sm:px-4 sm:py-3")}
     >
       {wordmark}
     </SidebarHeader>
@@ -3159,11 +3142,17 @@ const SidebarChromeHeader = memo(function SidebarChromeHeader({
 const SidebarChromeFooter = memo(function SidebarChromeFooter() {
   const navigate = useNavigate();
   const pathname = useLocation({ select: (loc) => loc.pathname });
-  const { isMobile, open, setOpen, setOpenMobile } = useSidebar();
-  const hasUnseenCompletions = useHasUnseenThreadCompletions();
-  const ToggleIcon = open ? PanelLeftCloseIcon : PanelLeftIcon;
-  const toggleLabel = open ? "Hide sidebar" : "Show sidebar";
+  const { isMobile, setOpenMobile } = useSidebar();
+  const atriumEnabled = useSettings((settings) => settings.ambianceAtriumEnabled);
+  const atriumOpen = useTaskAtriumStore((state) => state.open);
+  const setAtriumOpen = useTaskAtriumStore((state) => state.setOpen);
   const isOnSettingsFooter = pathname.startsWith("/settings");
+  const handleAtriumClick = useCallback(() => {
+    if (isMobile) {
+      setOpenMobile(false);
+    }
+    setAtriumOpen(true);
+  }, [isMobile, setAtriumOpen, setOpenMobile]);
   const handleSettingsClick = useCallback(() => {
     if (isMobile) {
       setOpenMobile(false);
@@ -3172,60 +3161,16 @@ const SidebarChromeFooter = memo(function SidebarChromeFooter() {
   }, [isMobile, navigate, setOpenMobile]);
 
   return (
-    <SidebarFooter className="p-2 group-data-[collapsible=icon]:items-center">
-      {open ? (
-        <>
-          <SidebarProviderUpdatePill />
-          <SidebarUpdatePill />
-        </>
-      ) : null}
-      <SidebarMenu className="group-data-[collapsible=icon]:items-center">
-        <SidebarMenuItem
-          className={cn("flex items-center gap-1", open ? "w-full" : "justify-center")}
-        >
-          {open ? (
-            <SidebarMenuButton
-              size="sm"
-              className={cn(
-                "min-w-0 flex-1 gap-2 px-2 py-1.5 text-muted-foreground/70 hover:bg-accent hover:text-foreground",
-                isOnSettingsFooter && "bg-accent text-foreground",
-              )}
-              onClick={handleSettingsClick}
-            >
-              <SettingsIcon className="size-3.5" />
-              <span className="text-xs">Settings</span>
-            </SidebarMenuButton>
-          ) : null}
-          <span className="relative hidden shrink-0 md:inline-flex">
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Button
-                    aria-label={toggleLabel}
-                    className="size-7 shrink-0 text-muted-foreground/70 hover:bg-accent hover:text-foreground"
-                    onClick={() => {
-                      void setOpen(!open);
-                    }}
-                    size="icon"
-                    type="button"
-                    variant="ghost"
-                  />
-                }
-              >
-                <ToggleIcon className="size-4" />
-              </TooltipTrigger>
-              <TooltipPopup side="top" sideOffset={2}>
-                {toggleLabel}
-              </TooltipPopup>
-            </Tooltip>
-            {/* When the desktop sidebar is collapsed the thread status pills are
-                hidden, so the toggle carries the unseen-completion dot instead. */}
-            {!open && hasUnseenCompletions ? (
-              <UnseenCompletionsDot className="right-0 top-0 ring-sidebar" />
-            ) : null}
-          </span>
-        </SidebarMenuItem>
-      </SidebarMenu>
+    <SidebarFooter className="p-2">
+      <SidebarProviderUpdatePill />
+      <SidebarUpdatePill />
+      <SidebarFooterNavigation
+        atriumEnabled={atriumEnabled}
+        atriumOpen={atriumOpen}
+        settingsActive={isOnSettingsFooter}
+        onOpenAtrium={handleAtriumClick}
+        onOpenSettings={handleSettingsClick}
+      />
     </SidebarFooter>
   );
 });
@@ -3952,30 +3897,6 @@ export default function Sidebar() {
     ? threadJumpLabelByKey
     : EMPTY_THREAD_JUMP_LABELS;
   const orderedSidebarThreadKeys = visibleSidebarThreadKeys;
-  const prewarmedSidebarThreadKeys = useMemo(
-    () => getSidebarThreadIdsToPrewarm(visibleSidebarThreadKeys),
-    [visibleSidebarThreadKeys],
-  );
-  const prewarmedSidebarThreadRefs = useMemo(
-    () =>
-      prewarmedSidebarThreadKeys.flatMap((threadKey) => {
-        const ref = parseScopedThreadKey(threadKey);
-        return ref ? [ref] : [];
-      }),
-    [prewarmedSidebarThreadKeys],
-  );
-
-  useEffect(() => {
-    const releases = prewarmedSidebarThreadRefs.map((ref) =>
-      retainThreadDetailSubscription(ref.environmentId, ref.threadId),
-    );
-
-    return () => {
-      for (const release of releases) {
-        release();
-      }
-    };
-  }, [prewarmedSidebarThreadRefs]);
 
   useEffect(() => {
     updateThreadJumpHintsVisibility(shouldShowThreadJumpHintsNow);
@@ -4225,18 +4146,12 @@ export default function Sidebar() {
       <SidebarChromeHeader isElectron={isElectron} />
 
       {isOnSettings ? (
-        <>
-          <div className="flex min-h-0 flex-1 flex-col group-data-[collapsible=icon]:hidden">
-            <SettingsSidebarNav pathname={pathname} />
-          </div>
-          <div aria-hidden="true" className="hidden flex-1 group-data-[collapsible=icon]:block" />
-          <div className="hidden group-data-[collapsible=icon]:block">
-            <SidebarChromeFooter />
-          </div>
-        </>
+        <div className="flex min-h-0 flex-1 flex-col">
+          <SettingsSidebarNav pathname={pathname} />
+        </div>
       ) : (
         <>
-          <div className="flex min-h-0 flex-1 flex-col group-data-[collapsible=icon]:hidden">
+          <div className="flex min-h-0 flex-1 flex-col">
             <SidebarProjectsContent
               primaryEnvironmentBootstrapped={primaryEnvironmentBootstrapped}
               bootstrappedEnvironmentIds={bootstrappedEnvironmentIdSet}
@@ -4286,7 +4201,6 @@ export default function Sidebar() {
 
             <SidebarSeparator />
           </div>
-          <div aria-hidden="true" className="hidden flex-1 group-data-[collapsible=icon]:block" />
           <SidebarChromeFooter />
         </>
       )}

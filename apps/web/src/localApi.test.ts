@@ -207,6 +207,7 @@ function makeDesktopBridge(overrides: Partial<DesktopBridge> = {}): DesktopBridg
     openExternal: async () => true,
     openPath: async () => true,
     revealPath: async () => true,
+    copyText: async () => undefined,
     onMenuAction: () => () => undefined,
     getUpdateState: async () => {
       throw new Error("getUpdateState not implemented in test");
@@ -525,8 +526,12 @@ describe("wsApi", () => {
 
     const api = createLocalApi(rpcClientMock as never);
 
-    await expect(api.server.refreshProviders()).resolves.toEqual({ providers: nextProviders });
-    expect(rpcClientMock.server.refreshProviders).toHaveBeenCalledWith();
+    const input = {
+      instanceId: ProviderInstanceId.make("codex"),
+      scope: "models" as const,
+    };
+    await expect(api.server.refreshProviders(input)).resolves.toEqual({ providers: nextProviders });
+    expect(rpcClientMock.server.refreshProviders).toHaveBeenCalledWith(input);
   });
 
   it("forwards provider updates directly to the RPC client", async () => {
@@ -674,8 +679,6 @@ describe("wsApi", () => {
       confirmThreadArchive: true,
       confirmThreadDelete: false,
       dismissedProviderUpdateNotificationKeys: [],
-      diffIgnoreWhitespace: true,
-      diffWordWrap: true,
       continueBackgroundAnimations: false,
       showSidebarMascot: true,
       themeAccentColor: "",
@@ -741,8 +744,6 @@ describe("wsApi", () => {
       confirmThreadArchive: true,
       confirmThreadDelete: false,
       dismissedProviderUpdateNotificationKeys: [],
-      diffIgnoreWhitespace: true,
-      diffWordWrap: true,
       continueBackgroundAnimations: false,
       showSidebarMascot: true,
       themeAccentColor: "",

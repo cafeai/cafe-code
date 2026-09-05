@@ -129,12 +129,16 @@ describe("ProviderSessionReaper", () => {
 
     const providerService: ProviderServiceShape = {
       startSession: () => unsupported(),
+      forkSession: () => unsupported(),
+      discardSessionFork: () => unsupported(),
       sendTurn: () => unsupported(),
       steerTurn: () => unsupported(),
       interruptTurn: () => unsupported(),
       respondToRequest: () => unsupported(),
       respondToUserInput: () => unsupported(),
+      snoozeUserInput: () => unsupported(),
       stopSession,
+      quiesceThreadForHardDelete: () => unsupported(),
       restartProviderRuntime: () => unsupported(),
       listSessions: () => Effect.succeed([]),
       getCapabilities: () =>
@@ -153,6 +157,7 @@ describe("ProviderSessionReaper", () => {
         });
       },
       rollbackConversation: () => unsupported(),
+      readSubagentDetail: () => unsupported(),
       streamEvents: Stream.empty,
     };
     const threadDetailSubscriptionRegistry = {
@@ -204,9 +209,14 @@ describe("ProviderSessionReaper", () => {
                 ? Option.some(input.readModel.threads.find((thread) => thread.id === threadId)!)
                 : Option.none(),
             ),
+          getPostTerminalStaleSteerCandidates: () => Effect.die("unused"),
           getPostTerminalStaleSteerCandidateThreadIds: () => Effect.die("unused"),
+          getCodexSteerAcceptanceEvidence: () => Effect.die("unused"),
+          getUnsettledCodexSteerIntentEvents: () => Effect.die("unused"),
+          getCodexSteerIntentRecoveryBarriers: () => Effect.die("unused"),
           getThreadTurnActivityPage: () => Effect.die("unused"),
           getThreadTurnWorkLogPresence: () => Effect.die("unused"),
+          hasThreadTurnSubagentActivity: () => Effect.die("unused"),
           getThreadDetailById: () => Effect.die("unused"),
           getThreadDetailSnapshotById: () => Effect.die("unused"),
         }),

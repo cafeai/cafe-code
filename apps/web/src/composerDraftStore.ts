@@ -394,6 +394,15 @@ interface ComposerDraftStoreState {
     threadRef: ComposerThreadTarget,
     attachments: PersistedComposerImageAttachment[],
   ) => void;
+  /**
+   * Atomically restores a rejected send only when that exact scoped composer
+   * still has no newer editable content. Returns whether ownership of `images`
+   * transferred back to the draft.
+   */
+  restoreComposerContentIfEmpty: (
+    threadRef: ComposerThreadTarget,
+    content: { prompt: string; images: ComposerImageAttachment[] },
+  ) => boolean;
   clearComposerContent: (threadRef: ComposerThreadTarget) => void;
 }
 
@@ -2700,6 +2709,41 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
           Promise.resolve().then(() => {
             verifyPersistedAttachments(threadKey, attachments, set);
           });
+        },
+        restoreComposerContentIfEmpty: (threadRef, content) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
+          if (threadKey.length === 0) {
+            return false;
+          }
+
+          let restored = false;
+          set((state) => {
+            const existing = state.draftsByThreadKey[threadKey] ?? createEmptyThreadDraft();
+            // This check and replacement run in one Zustand state transition.
+            // A send failure may arrive after navigation or dictation/input on
+            // the same thread; never overwrite content authored after dispatch.
+            if (
+              existing.prompt.length > 0 ||
+              existing.images.length > 0 ||
+              existing.nonPersistedImageIds.length > 0 ||
+              existing.persistedAttachments.length > 0
+            ) {
+              return state;
+            }
+
+            restored = true;
+            return {
+              draftsByThreadKey: {
+                ...state.draftsByThreadKey,
+                [threadKey]: {
+                  ...existing,
+                  prompt: content.prompt,
+                  images: [...content.images],
+                },
+              },
+            };
+          });
+          return restored;
         },
         clearComposerContent: (threadRef) => {
           const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";

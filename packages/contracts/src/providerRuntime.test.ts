@@ -1,11 +1,54 @@
 import { describe, expect, it } from "vitest";
 import * as Schema from "effect/Schema";
 
-import { ProviderRuntimeEvent } from "./providerRuntime.ts";
+import { ProviderRuntimeEvent, UsageAccountingSnapshot } from "./providerRuntime.ts";
 
 const decodeRuntimeEvent = Schema.decodeUnknownSync(ProviderRuntimeEvent);
 
 describe("ProviderRuntimeEvent", () => {
+  it("bounds independent billing snapshots and rejects unsafe aggregate counts or identifiers", () => {
+    const decode = Schema.decodeUnknownSync(UsageAccountingSnapshot);
+    const model = {
+      model: "claude-sonnet-5",
+      inputTokens: 100,
+      cachedInputTokens: 80,
+      cacheWriteInputTokens: 10,
+      outputTokens: 20,
+      reasoningOutputTokens: 5,
+    };
+    const snapshot = {
+      scopeId: "10000000-0000-4000-8000-000000000000",
+      revision: 1,
+      completeness: "complete",
+      models: [model],
+    };
+    expect(decode(snapshot)).toEqual(snapshot);
+    for (const invalid of [
+      { ...snapshot, scopeId: "provider-account-id" },
+      { ...snapshot, revision: Infinity },
+      { ...snapshot, models: [model, model] },
+      { ...snapshot, models: [{ ...model, cachedInputTokens: 101 }] },
+      { ...snapshot, models: [{ ...model, model: "/private/account/path" }] },
+      {
+        ...snapshot,
+        models: [
+          { ...model, outputTokens: Number.MAX_SAFE_INTEGER },
+          { ...model, model: "claude-haiku-4-5", outputTokens: 1 },
+        ],
+      },
+    ])
+      expect(() => decode(invalid)).toThrow();
+    expect(
+      decodeRuntimeEvent({
+        type: "thread.usage-accounting.updated",
+        provider: "claudeAgent",
+        threadId: "thread-1",
+        eventId: "event-accounting-1",
+        createdAt: "2026-09-05T00:00:00Z",
+        payload: snapshot,
+      }).type,
+    ).toBe("thread.usage-accounting.updated");
+  });
   it("accepts fork-provided driver kinds as branded slugs", () => {
     const parsed = decodeRuntimeEvent({
       type: "session.started",
@@ -47,6 +90,58 @@ describe("ProviderRuntimeEvent", () => {
     }
     expect(parsed.payload.plan).toHaveLength(2);
     expect(parsed.payload.plan[1]?.status).toBe("inProgress");
+  });
+
+  it("enforces bounded structured subagent presentation text", () => {
+    const baseEvent = {
+      type: "task.started",
+      eventId: "event-bounded-subagent",
+      provider: "codex",
+      createdAt: "2026-02-28T00:00:00.000Z",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      payload: {
+        taskId: "child-1",
+        subagent: {
+          threadId: "x".repeat(512),
+          historyId: "h".repeat(512),
+          label: "l".repeat(96),
+          path: "p".repeat(256),
+          role: "r".repeat(80),
+          objective: "o".repeat(240),
+          status: "active",
+        },
+      },
+    };
+
+    expect(decodeRuntimeEvent(baseEvent).type).toBe("task.started");
+    expect(() =>
+      decodeRuntimeEvent({
+        ...baseEvent,
+        payload: {
+          ...baseEvent.payload,
+          subagent: { ...baseEvent.payload.subagent, threadId: "x".repeat(513) },
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeRuntimeEvent({
+        ...baseEvent,
+        payload: {
+          ...baseEvent.payload,
+          subagent: { ...baseEvent.payload.subagent, historyId: "h".repeat(513) },
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeRuntimeEvent({
+        ...baseEvent,
+        payload: {
+          ...baseEvent.payload,
+          subagent: { ...baseEvent.payload.subagent, objective: "o".repeat(241) },
+        },
+      }),
+    ).toThrow();
   });
 
   it("decodes proposed-plan completion events", () => {
@@ -180,5 +275,27 @@ describe("ProviderRuntimeEvent", () => {
     }
     expect(parsed.payload.usage.maxTokens).toBe(200000);
     expect(parsed.payload.usage.usedTokens).toBe(31251);
+  });
+
+  it("decodes provider VCS invalidation hints without a filesystem path", () => {
+    const parsed = decodeRuntimeEvent({
+      type: "vcs.state.changed",
+      eventId: "event-vcs-state-changed-1",
+      provider: "claudeAgent",
+      createdAt: "2026-08-18T00:00:00.000Z",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      payload: {
+        kind: "commit",
+        branch: "main",
+      },
+    });
+
+    expect(parsed.type).toBe("vcs.state.changed");
+    if (parsed.type !== "vcs.state.changed") {
+      throw new Error("expected vcs.state.changed");
+    }
+    expect(parsed.payload).toEqual({ kind: "commit", branch: "main" });
+    expect("cwd" in parsed.payload).toBe(false);
   });
 });

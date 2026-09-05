@@ -29,6 +29,7 @@ import { openInPreferredEditor } from "../editorPreferences";
 import { resolveDiffThemeName, type DiffThemeName } from "../lib/diffRendering";
 import { fnv1a32 } from "../lib/diffRendering";
 import { LRUCache } from "../lib/lruCache";
+import { copyTextToClipboard } from "../lib/copyToClipboard";
 import { useTheme } from "../hooks/useTheme";
 import {
   normalizeMarkdownLinkDestination,
@@ -213,11 +214,7 @@ function MarkdownCodeBlock({ code, children }: { code: string; children: ReactNo
   const [copied, setCopied] = useState(false);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleCopy = useCallback(() => {
-    if (typeof navigator === "undefined" || navigator.clipboard == null) {
-      return;
-    }
-    void navigator.clipboard
-      .writeText(code)
+    void copyTextToClipboard(code)
       .then(() => {
         if (copiedTimerRef.current != null) {
           clearTimeout(copiedTimerRef.current);
@@ -464,18 +461,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
   const canOpenLocalEditor = localShellCapabilities.canOpenLocalEditor;
   const canRevealLocalPath = localShellCapabilities.canOpenLocalPath;
   const handleCopy = useCallback((value: string, title: string) => {
-    if (typeof window === "undefined" || !navigator.clipboard?.writeText) {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: `Failed to copy ${title.toLowerCase()}`,
-          description: "Clipboard API unavailable.",
-        }),
-      );
-      return;
-    }
-
-    void navigator.clipboard.writeText(value).then(
+    void copyTextToClipboard(value).then(
       () => {
         toastManager.add({
           type: "success",

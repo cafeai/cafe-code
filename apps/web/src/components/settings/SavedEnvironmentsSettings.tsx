@@ -117,9 +117,11 @@ function SavedEnvironmentRow({
   const [actionError, setActionError] = useState<string | null>(null);
   const [isRemoveDialogOpen, setIsRemoveDialogOpen] = useState(false);
 
-  const isConnecting = runtime?.connectionState === "connecting";
+  const isRetrying =
+    runtime?.reconnectPhase === "attempting" || runtime?.reconnectPhase === "waiting";
+  const isConnecting = runtime?.connectionState === "connecting" || isRetrying;
   const isConnected = runtime?.connectionState === "connected";
-  const isError = runtime?.connectionState === "error";
+  const isError = runtime?.connectionState === "error" || runtime?.reconnectPhase === "exhausted";
   const requiresAuth = runtime?.authState === "requires-auth";
   const versionMismatch = resolveServerConfigVersionMismatch(runtime?.serverConfig);
   const actionsDisabled = isConnecting || pendingAction !== null;
@@ -131,7 +133,7 @@ function SavedEnvironmentRow({
     statusText = "Pairing required";
     dotColor = "bg-destructive";
   } else if (isConnecting) {
-    statusText = "Connecting";
+    statusText = runtime?.connectedAt ? "Reconnecting" : "Connecting";
     dotColor = "bg-warning";
   } else if (isConnected) {
     statusText = "Connected";

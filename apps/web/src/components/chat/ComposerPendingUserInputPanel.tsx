@@ -1,5 +1,5 @@
 import { type ApprovalRequestId } from "@cafecode/contracts";
-import { memo, useEffect, useEffectEvent, useRef } from "react";
+import { memo, useEffect, useEffectEvent, useRef, useState } from "react";
 import { type PendingUserInput } from "../../session-logic";
 import {
   derivePendingUserInputProgress,
@@ -15,7 +15,12 @@ interface PendingUserInputPanelProps {
   questionIndex: number;
   onToggleOption: (questionId: string, optionLabel: string) => void;
   onAdvance: () => void;
+  autoResolutionSnoozed: boolean;
+  onSnoozeAutoResolution: () => void;
 }
+
+const CODEX_USER_INPUT_HIDDEN_GRACE_MS = 60_000;
+const CODEX_USER_INPUT_AUTO_RESOLUTION_MS = 120_000;
 
 export const ComposerPendingUserInputPanel = memo(function ComposerPendingUserInputPanel({
   pendingUserInputs,
@@ -24,6 +29,8 @@ export const ComposerPendingUserInputPanel = memo(function ComposerPendingUserIn
   questionIndex,
   onToggleOption,
   onAdvance,
+  autoResolutionSnoozed,
+  onSnoozeAutoResolution,
 }: PendingUserInputPanelProps) {
   if (pendingUserInputs.length === 0) return null;
   const activePrompt = pendingUserInputs[0];
@@ -38,6 +45,8 @@ export const ComposerPendingUserInputPanel = memo(function ComposerPendingUserIn
       questionIndex={questionIndex}
       onToggleOption={onToggleOption}
       onAdvance={onAdvance}
+      autoResolutionSnoozed={autoResolutionSnoozed}
+      onSnoozeAutoResolution={onSnoozeAutoResolution}
     />
   );
 });
@@ -49,6 +58,8 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
   questionIndex,
   onToggleOption,
   onAdvance,
+  autoResolutionSnoozed,
+  onSnoozeAutoResolution,
 }: {
   prompt: PendingUserInput;
   isResponding: boolean;
@@ -56,11 +67,14 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
   questionIndex: number;
   onToggleOption: (questionId: string, optionLabel: string) => void;
   onAdvance: () => void;
+  autoResolutionSnoozed: boolean;
+  onSnoozeAutoResolution: () => void;
 }) {
   const progress = derivePendingUserInputProgress(prompt.questions, answers, questionIndex);
   const activeQuestion = progress.activeQuestion;
   const autoAdvanceTimerRef = useRef<number | null>(null);
   const onAdvanceRef = useRef(onAdvance);
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
   useEffect(() => {
     onAdvanceRef.current = onAdvance;
@@ -75,7 +89,49 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
     };
   }, []);
 
+  useEffect(() => {
+    if (prompt.isBlocking || autoResolutionSnoozed) {
+      return;
+    }
+    const requestedAtMs = Date.parse(prompt.createdAt);
+    if (!Number.isFinite(requestedAtMs)) {
+      return;
+    }
+    const visibleAtMs = requestedAtMs + CODEX_USER_INPUT_HIDDEN_GRACE_MS;
+    const deadlineMs = requestedAtMs + CODEX_USER_INPUT_AUTO_RESOLUTION_MS;
+    let intervalId: number | null = null;
+    let revealTimeoutId: number | null = null;
+
+    const beginVisibleCountdown = () => {
+      const tick = () => {
+        const nextNow = Date.now();
+        setNowMs(nextNow);
+        if (nextNow >= deadlineMs && intervalId !== null) {
+          window.clearInterval(intervalId);
+          intervalId = null;
+        }
+      };
+      tick();
+      if (Date.now() < deadlineMs) {
+        intervalId = window.setInterval(tick, 1_000);
+      }
+    };
+
+    const delayUntilVisible = visibleAtMs - Date.now();
+    if (delayUntilVisible > 0) {
+      revealTimeoutId = window.setTimeout(beginVisibleCountdown, delayUntilVisible);
+    } else {
+      beginVisibleCountdown();
+    }
+
+    return () => {
+      if (revealTimeoutId !== null) window.clearTimeout(revealTimeoutId);
+      if (intervalId !== null) window.clearInterval(intervalId);
+    };
+  }, [autoResolutionSnoozed, prompt.createdAt, prompt.isBlocking]);
+
   const handleOptionSelection = useEffectEvent((questionId: string, optionLabel: string) => {
+    onSnoozeAutoResolution();
     onToggleOption(questionId, optionLabel);
     if (activeQuestion?.multiSelect) {
       return;
@@ -123,8 +179,21 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
     return null;
   }
 
+  const requestedAtMs = Date.parse(prompt.createdAt);
+  const countdownVisibleAtMs = requestedAtMs + CODEX_USER_INPUT_HIDDEN_GRACE_MS;
+  const countdownDeadlineMs = requestedAtMs + CODEX_USER_INPUT_AUTO_RESOLUTION_MS;
+  const countdownText =
+    !prompt.isBlocking &&
+    !autoResolutionSnoozed &&
+    Number.isFinite(requestedAtMs) &&
+    nowMs >= countdownVisibleAtMs
+      ? nowMs < countdownDeadlineMs
+        ? `Continues automatically in ${Math.max(1, Math.ceil((countdownDeadlineMs - nowMs) / 1_000))}s`
+        : "Continuing automatically"
+      : null;
+
   return (
-    <div className="px-4 py-3 sm:px-5">
+    <div className="px-4 py-3 sm:px-5" onPointerDownCapture={onSnoozeAutoResolution}>
       <div className="flex items-center gap-3">
         <div className="flex items-center gap-2">
           {prompt.questions.length > 1 ? (
@@ -136,6 +205,11 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
             {activeQuestion.header}
           </span>
         </div>
+        {countdownText ? (
+          <span className="ml-auto text-[10px] tabular-nums text-muted-foreground/55">
+            {countdownText}
+          </span>
+        ) : null}
       </div>
       <p className="mt-1.5 text-sm text-foreground/90">{activeQuestion.question}</p>
       {activeQuestion.multiSelect ? (

@@ -235,14 +235,8 @@ describe("RuntimeLayerDiagnostics", () => {
           terminalActiveSessionCount: 1,
           terminalStreamingMessageCount: 2,
         },
-        daemonActiveStreams: 1,
-        activeTurnCount: 0,
       }).map((flag) => flag.kind),
-    ).toEqual([
-      "terminal-active-session",
-      "terminal-streaming-message",
-      "daemon-stream-without-active-turn",
-    ]);
+    ).toEqual(["terminal-active-session", "terminal-streaming-message"]);
   });
 
   it("ignores provider-daemon ingestion cursors when deriving orchestrator projection lag", () => {
@@ -292,6 +286,22 @@ describe("RuntimeLayerDiagnostics", () => {
       updatedAt: readAt,
       lastDaemonEventAt: "2026-05-26T00:01:00.000Z",
       status: "offline",
+    });
+
+    expect(
+      buildProviderRuntimeIngestionDiagnostics({
+        daemonEventCursor: 175_250,
+        liveIngestionCursor: 175_250,
+        lastDaemonEventAt: "2026-05-26T00:01:00.000Z",
+        projectorCursors,
+      }),
+    ).toEqual({
+      cursor: 175_250,
+      daemonEventCursor: 175_250,
+      lag: 0,
+      updatedAt: readAt,
+      lastDaemonEventAt: "2026-05-26T00:01:00.000Z",
+      status: "online",
     });
   });
 
@@ -358,5 +368,51 @@ describe("RuntimeLayerDiagnostics", () => {
       cpuPercent: 0,
     });
     expect(orchestrator?.notes.join(" ")).toContain("backend PID 100");
+    expect(layers.find((layer) => layer.role === "provider-supervisor")).toMatchObject({
+      status: "not-configured",
+      notes: ["Optional provider supervisor is not configured; providers run in the daemon."],
+    });
+  });
+
+  it("reports daemon runtime activity instead of daemon startup as its last event", () => {
+    const daemon = {
+      ...mapProviderDaemonHealth({
+        health: null,
+        configured: true,
+        reachable: true,
+        healthLatencyMs: 1,
+        error: null,
+      }),
+      startedAt: "2026-05-26T00:00:00.000Z",
+      runtimeEventSummaries: [
+        {
+          eventType: "provider.delta",
+          count: 1,
+          lastSeenAt: "2026-05-26T00:03:00.000Z",
+        },
+        {
+          eventType: "turn.completed",
+          count: 1,
+          lastSeenAt: "2026-05-26T00:04:00.000Z",
+        },
+      ],
+    };
+    const layers = buildLayerSummaries({
+      readAt,
+      serverPid: 100,
+      serverStartedAt: null,
+      processes: [],
+      daemon,
+      supervisor: mapProviderSupervisorHealth({
+        daemonHealth: null,
+        daemonConfigured: false,
+        daemonReachable: false,
+      }),
+      orchestratorLag: 0,
+    });
+
+    expect(layers.find((layer) => layer.role === "provider-daemon")?.lastEventAt).toBe(
+      "2026-05-26T00:04:00.000Z",
+    );
   });
 });

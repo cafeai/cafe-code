@@ -3,7 +3,15 @@
 // @effect-diagnostics globalDateInEffect:off
 // @effect-diagnostics globalConsoleInEffect:off
 // @effect-diagnostics globalTimers:off
-import type { DesktopDebugEndpointState, DesktopRendererDebugSnapshot } from "@cafecode/contracts";
+import {
+  DICTATION_OPENAI_REQUEST_ID_MAX_CHARS,
+  DICTATION_PROVIDER_ERROR_CODES,
+  DICTATION_PROVIDER_ERROR_TYPES,
+  DICTATION_SESSION_PROFILE,
+  DICTATION_TRANSCRIPTION_MODELS,
+  type DesktopDebugEndpointState,
+  type DesktopRendererDebugSnapshot,
+} from "@cafecode/contracts";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import type * as Scope from "effect/Scope";
@@ -28,6 +36,110 @@ const PROCESS_DIAGNOSTIC_MESSAGE_LIMIT = 4_000;
 const PROCESS_DIAGNOSTIC_STACK_LIMIT = 16_000;
 const COMPACT_STRING_LIMIT = 240;
 const COMPACT_ARRAY_LIMIT = 12;
+const DICTATION_REQUEST_ID_PATTERN = /^req_[A-Za-z0-9_-]+$/u;
+const DICTATION_TIMELINE_LIMIT = 32;
+const DICTATION_MAX_DURATION_MS = 24 * 60 * 60 * 1_000;
+const DICTATION_MAX_BYTE_COUNT = 100 * 1024 * 1024;
+const DICTATION_MAX_SDP_LINE_COUNT = 16_384;
+const DICTATION_MAX_SDP_MEDIA_SECTION_COUNT = 128;
+const DICTATION_MAX_SDP_CANDIDATE_COUNT = 4_096;
+const DICTATION_MAX_AUDIO_TRACK_COUNT = 32;
+const DICTATION_MAX_AUDIO_SAMPLE_RATE = 768_000;
+const DICTATION_MAX_AUDIO_CHANNEL_COUNT = 32;
+const DICTATION_MAX_AUDIO_SAMPLE_SIZE = 64;
+const DICTATION_STAGES = new Set([
+  "client_secret",
+  "microphone",
+  "sdp_exchange",
+  "peer_connect",
+  "active",
+  "finalizing",
+  "closed",
+]);
+const DICTATION_OUTCOMES = new Set([
+  "starting",
+  "retrying",
+  "connected",
+  "completed",
+  "cancelled",
+  "failed",
+]);
+const DICTATION_CONTENT_TYPE_CATEGORIES = new Set([
+  "missing",
+  "sdp",
+  "json",
+  "html",
+  "text",
+  "other",
+]);
+const DICTATION_PEER_CONNECTION_STATES = new Set([
+  "new",
+  "connecting",
+  "connected",
+  "disconnected",
+  "failed",
+  "closed",
+]);
+const DICTATION_ICE_CONNECTION_STATES = new Set([
+  "new",
+  "checking",
+  "connected",
+  "completed",
+  "failed",
+  "disconnected",
+  "closed",
+]);
+const DICTATION_ICE_GATHERING_STATES = new Set(["new", "gathering", "complete"]);
+const DICTATION_SIGNALING_STATES = new Set([
+  "stable",
+  "have-local-offer",
+  "have-remote-offer",
+  "have-local-pranswer",
+  "have-remote-pranswer",
+  "closed",
+]);
+const DICTATION_DATA_CHANNEL_STATES = new Set(["connecting", "open", "closing", "closed"]);
+const DICTATION_AUDIO_TRACK_STATES = new Set(["live", "ended"]);
+const DICTATION_CLIENT_SECRET_EFFECTIVE_PROFILES = new Set([
+  "matches",
+  "not_reported",
+  "model_mismatch",
+  "format_mismatch",
+  "turn_detection_mismatch",
+  "malformed",
+]);
+const DICTATION_PROVIDER_ERROR_TYPE_CATEGORIES: ReadonlySet<string> = new Set(
+  DICTATION_PROVIDER_ERROR_TYPES,
+);
+const DICTATION_PROVIDER_ERROR_CODE_CATEGORIES: ReadonlySet<string> = new Set(
+  DICTATION_PROVIDER_ERROR_CODES,
+);
+const DICTATION_TRANSCRIPTION_MODEL_CATEGORIES: ReadonlySet<string> = new Set(
+  DICTATION_TRANSCRIPTION_MODELS,
+);
+const DICTATION_ERROR_CODES = new Set([
+  "not_configured",
+  "not_authorized",
+  "insecure_transport",
+  "rate_limited",
+  "secret_store_failed",
+  "upstream_auth_failed",
+  "upstream_quota_exhausted",
+  "upstream_rate_limited",
+  "upstream_unavailable",
+  "upstream_invalid_response",
+  "cancelled",
+  "connection_failed",
+  "finalization_timeout",
+  "microphone_denied",
+  "microphone_unavailable",
+  "protocol_error",
+  "session_rejected",
+  "session_expired",
+  "session_setup_failed",
+  "transcript_conflict",
+  "unsupported",
+]);
 const KNOWN_SLOW_VALIDATION_TARGETS = [
   {
     target: "apps/server/src/git/GitManager.test.ts",
@@ -327,6 +439,245 @@ function compactCountedArray(value: unknown, limit = COMPACT_ARRAY_LIMIT): Recor
     count: value.length,
     items: value.slice(0, limit),
     omitted: Math.max(0, value.length - limit),
+  };
+}
+
+function readAllowlistedString(value: unknown, allowlist: ReadonlySet<string>): string | null {
+  return typeof value === "string" && allowlist.has(value) ? value : null;
+}
+
+function readBoundedInteger(value: unknown, minimum: number, maximum: number): number | null {
+  return typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= minimum &&
+    value <= maximum
+    ? value
+    : null;
+}
+
+function readBoundedNumber(value: unknown, minimum: number, maximum: number): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= minimum && value <= maximum
+    ? Math.round(value * 100) / 100
+    : null;
+}
+
+function readCanonicalIsoTimestamp(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const timestampMs = Date.parse(value);
+  return Number.isFinite(timestampMs) ? new Date(timestampMs).toISOString() : null;
+}
+
+function readDictationRequestId(value: unknown): string | null {
+  const requestId = readString(value);
+  return requestId !== null &&
+    requestId.length > 0 &&
+    requestId.length <= DICTATION_OPENAI_REQUEST_ID_MAX_CHARS &&
+    DICTATION_REQUEST_ID_PATTERN.test(requestId)
+    ? requestId
+    : null;
+}
+
+function readDictationProviderErrorCategory(
+  value: unknown,
+  allowlist: ReadonlySet<string>,
+): string | null {
+  if (value === null || value === undefined) return null;
+  return typeof value === "string" && allowlist.has(value) ? value : "other";
+}
+
+function readExactDictationLiteral(value: unknown, expected: string): string | null {
+  return value === expected ? expected : null;
+}
+
+function readAllowlistedDictationLiteral(
+  value: unknown,
+  allowlist: ReadonlySet<string>,
+): string | null {
+  return typeof value === "string" && allowlist.has(value) ? value : null;
+}
+
+/**
+ * Rebuild one renderer timeline entry from the compact-debug allowlist. This
+ * duplicate validation is intentional: renderer IPC is not a trust boundary,
+ * so even a compromised renderer cannot smuggle a provider body, credential,
+ * SDP, transcript, raw error, header map, or path through a nested event.
+ */
+function summarizeDictationTimelineEntry(value: unknown): Record<string, unknown> | null {
+  const entry = readRecord(value);
+  if (entry === null) return null;
+
+  return {
+    // Canonicalize instead of echoing the renderer string. Date.parse accepts
+    // multiple spellings; returning the source would create a covert path for
+    // arbitrary renderer text through an otherwise allowlisted field.
+    capturedAt: readCanonicalIsoTimestamp(entry.capturedAt),
+    operationElapsedMs: readBoundedNumber(entry.operationElapsedMs, 0, DICTATION_MAX_DURATION_MS),
+    stageElapsedMs: readBoundedNumber(entry.stageElapsedMs, 0, DICTATION_MAX_DURATION_MS),
+    attemptElapsedMs: readBoundedNumber(entry.attemptElapsedMs, 0, DICTATION_MAX_DURATION_MS),
+    stage: readAllowlistedString(entry.stage, DICTATION_STAGES),
+    outcome: readAllowlistedString(entry.outcome, DICTATION_OUTCOMES),
+    attempt: readBoundedInteger(entry.attempt, 1, 8),
+    maxAttempts: readBoundedInteger(entry.maxAttempts, 1, 8),
+    requestDurationMs: readBoundedNumber(entry.requestDurationMs, 0, DICTATION_MAX_DURATION_MS),
+    httpStatus: readBoundedInteger(entry.httpStatus, 100, 599),
+    requestId: readDictationRequestId(entry.requestId),
+    openAiProcessingMs: readBoundedNumber(entry.openAiProcessingMs, 0, DICTATION_MAX_DURATION_MS),
+    retryAfterMs: readBoundedNumber(entry.retryAfterMs, 0, DICTATION_MAX_DURATION_MS),
+    responseContentTypeCategory: readAllowlistedString(
+      entry.responseContentTypeCategory,
+      DICTATION_CONTENT_TYPE_CATEGORIES,
+    ),
+    responseContentLengthBytes: readBoundedInteger(
+      entry.responseContentLengthBytes,
+      0,
+      DICTATION_MAX_BYTE_COUNT,
+    ),
+    providerErrorType: readDictationProviderErrorCategory(
+      entry.providerErrorType,
+      DICTATION_PROVIDER_ERROR_TYPE_CATEGORIES,
+    ),
+    providerErrorCode: readDictationProviderErrorCategory(
+      entry.providerErrorCode,
+      DICTATION_PROVIDER_ERROR_CODE_CATEGORIES,
+    ),
+    responseBodyBytes: readBoundedInteger(entry.responseBodyBytes, 0, DICTATION_MAX_BYTE_COUNT),
+    responseBodyTruncated: readBoolean(entry.responseBodyTruncated),
+    sessionProfile: readExactDictationLiteral(entry.sessionProfile, DICTATION_SESSION_PROFILE),
+    clientSecretModel: readAllowlistedDictationLiteral(
+      entry.clientSecretModel,
+      DICTATION_TRANSCRIPTION_MODEL_CATEGORIES,
+    ),
+    clientSecretLifetimeMs: readBoundedNumber(
+      entry.clientSecretLifetimeMs,
+      0,
+      DICTATION_MAX_DURATION_MS,
+    ),
+    clientSecretRequestId: readDictationRequestId(entry.clientSecretRequestId),
+    clientSecretRequestDurationMs: readBoundedNumber(
+      entry.clientSecretRequestDurationMs,
+      0,
+      DICTATION_MAX_DURATION_MS,
+    ),
+    clientSecretOpenAiProcessingMs: readBoundedNumber(
+      entry.clientSecretOpenAiProcessingMs,
+      0,
+      DICTATION_MAX_DURATION_MS,
+    ),
+    clientSecretEffectiveProfile: readAllowlistedString(
+      entry.clientSecretEffectiveProfile,
+      DICTATION_CLIENT_SECRET_EFFECTIVE_PROFILES,
+    ),
+    offerSdpBytes: readBoundedInteger(entry.offerSdpBytes, 0, DICTATION_MAX_BYTE_COUNT),
+    offerSdpLineCount: readBoundedInteger(entry.offerSdpLineCount, 0, DICTATION_MAX_SDP_LINE_COUNT),
+    offerMediaSectionCount: readBoundedInteger(
+      entry.offerMediaSectionCount,
+      0,
+      DICTATION_MAX_SDP_MEDIA_SECTION_COUNT,
+    ),
+    offerAudioSectionCount: readBoundedInteger(
+      entry.offerAudioSectionCount,
+      0,
+      DICTATION_MAX_SDP_MEDIA_SECTION_COUNT,
+    ),
+    offerApplicationSectionCount: readBoundedInteger(
+      entry.offerApplicationSectionCount,
+      0,
+      DICTATION_MAX_SDP_MEDIA_SECTION_COUNT,
+    ),
+    offerCandidateCount: readBoundedInteger(
+      entry.offerCandidateCount,
+      0,
+      DICTATION_MAX_SDP_CANDIDATE_COUNT,
+    ),
+    offerHasOpus: readBoolean(entry.offerHasOpus),
+    offerHasIceCandidate: readBoolean(entry.offerHasIceCandidate),
+    answerSdpBytes: readBoundedInteger(entry.answerSdpBytes, 0, DICTATION_MAX_BYTE_COUNT),
+    answerSdpLineCount: readBoundedInteger(
+      entry.answerSdpLineCount,
+      0,
+      DICTATION_MAX_SDP_LINE_COUNT,
+    ),
+    answerMediaSectionCount: readBoundedInteger(
+      entry.answerMediaSectionCount,
+      0,
+      DICTATION_MAX_SDP_MEDIA_SECTION_COUNT,
+    ),
+    answerAudioSectionCount: readBoundedInteger(
+      entry.answerAudioSectionCount,
+      0,
+      DICTATION_MAX_SDP_MEDIA_SECTION_COUNT,
+    ),
+    answerApplicationSectionCount: readBoundedInteger(
+      entry.answerApplicationSectionCount,
+      0,
+      DICTATION_MAX_SDP_MEDIA_SECTION_COUNT,
+    ),
+    answerCandidateCount: readBoundedInteger(
+      entry.answerCandidateCount,
+      0,
+      DICTATION_MAX_SDP_CANDIDATE_COUNT,
+    ),
+    answerHasOpus: readBoolean(entry.answerHasOpus),
+    answerHasIceCandidate: readBoolean(entry.answerHasIceCandidate),
+    peerConnectionState: readAllowlistedString(
+      entry.peerConnectionState,
+      DICTATION_PEER_CONNECTION_STATES,
+    ),
+    iceConnectionState: readAllowlistedString(
+      entry.iceConnectionState,
+      DICTATION_ICE_CONNECTION_STATES,
+    ),
+    iceGatheringState: readAllowlistedString(
+      entry.iceGatheringState,
+      DICTATION_ICE_GATHERING_STATES,
+    ),
+    signalingState: readAllowlistedString(entry.signalingState, DICTATION_SIGNALING_STATES),
+    dataChannelState: readAllowlistedString(entry.dataChannelState, DICTATION_DATA_CHANNEL_STATES),
+    audioTrackCount: readBoundedInteger(entry.audioTrackCount, 0, DICTATION_MAX_AUDIO_TRACK_COUNT),
+    audioTrackState: readAllowlistedString(entry.audioTrackState, DICTATION_AUDIO_TRACK_STATES),
+    audioTrackEnabled: readBoolean(entry.audioTrackEnabled),
+    audioTrackMuted: readBoolean(entry.audioTrackMuted),
+    audioSampleRate: readBoundedInteger(entry.audioSampleRate, 1, DICTATION_MAX_AUDIO_SAMPLE_RATE),
+    audioChannelCount: readBoundedInteger(
+      entry.audioChannelCount,
+      1,
+      DICTATION_MAX_AUDIO_CHANNEL_COUNT,
+    ),
+    audioSampleSize: readBoundedInteger(entry.audioSampleSize, 1, DICTATION_MAX_AUDIO_SAMPLE_SIZE),
+    audioEchoCancellation: readBoolean(entry.audioEchoCancellation),
+    audioNoiseSuppression: readBoolean(entry.audioNoiseSuppression),
+    audioAutoGainControl: readBoolean(entry.audioAutoGainControl),
+    errorCode: readAllowlistedString(entry.errorCode, DICTATION_ERROR_CODES),
+  };
+}
+
+/**
+ * Keep only the newest bounded timeline window. The renderer already applies
+ * the same limit, but enforcing it again prevents a hostile renderer from
+ * inflating the default debug response with nested diagnostic objects.
+ */
+function summarizeDictationForCompactDebug(value: unknown): Record<string, unknown> | null {
+  const dictation = readRecord(value);
+  if (dictation === null) return null;
+
+  const summary = summarizeDictationTimelineEntry(dictation);
+  if (summary === null) return null;
+
+  const sourceTimeline = Array.isArray(dictation.timeline) ? dictation.timeline : [];
+  const timeline = sourceTimeline
+    .slice(-DICTATION_TIMELINE_LIMIT)
+    .map(summarizeDictationTimelineEntry)
+    .filter((entry): entry is Record<string, unknown> => entry !== null);
+  const rendererOmitted =
+    readBoundedInteger(dictation.omittedTimelineEntryCount, 0, Number.MAX_SAFE_INTEGER) ?? 0;
+  const boundaryOmitted = Math.max(0, sourceTimeline.length - DICTATION_TIMELINE_LIMIT);
+
+  return {
+    ...summary,
+    timeline,
+    omittedTimelineEntryCount: Math.min(Number.MAX_SAFE_INTEGER, rendererOmitted + boundaryOmitted),
   };
 }
 
@@ -665,6 +1016,12 @@ function summarizeProviderDaemonHealthForCompactDebug(
   const supervisor = readRecord(health.supervisor);
   const supervisorProcess = readRecord(health.supervisorProcess);
   const processDiagnostics = readRecord(health.processDiagnostics);
+  const pipelineDiagnostics = readRecord(health.pipelineDiagnostics);
+  const pipelineEventLoop = readRecord(pipelineDiagnostics?.eventLoop);
+  const daemonStream = readRecord(pipelineDiagnostics?.daemonStream);
+  const backendBridge = readRecord(pipelineDiagnostics?.backendBridge);
+  const subscriptions = readRecord(pipelineDiagnostics?.subscriptions);
+  const webSocket = readRecord(pipelineDiagnostics?.webSocket);
 
   return {
     ok: readBoolean(health.ok),
@@ -686,6 +1043,54 @@ function summarizeProviderDaemonHealthForCompactDebug(
     completedCommandCount: readNumber(health.completedCommandCount),
     failedCommandCount: readNumber(health.failedCommandCount),
     runningCommandCount: readNumber(health.runningCommandCount),
+    pipelineDiagnostics:
+      pipelineDiagnostics === null
+        ? null
+        : {
+            eventLoop: {
+              retainedSampleCount: readNumber(pipelineEventLoop?.retainedSampleCount),
+              currentLagMs: readNumber(pipelineEventLoop?.currentLagMs),
+              p95LagMs: readNumber(pipelineEventLoop?.p95LagMs),
+              p99LagMs: readNumber(pipelineEventLoop?.p99LagMs),
+              maxLagMs: readNumber(pipelineEventLoop?.maxLagMs),
+            },
+            daemonStream: {
+              activeStreamCount: readNumber(daemonStream?.activeStreamCount),
+              replayPageCount: readNumber(daemonStream?.replayPageCount),
+              replayRecordCount: readNumber(daemonStream?.replayRecordCount),
+              replayBytes: readNumber(daemonStream?.replayBytes),
+              drainWaitCount: readNumber(daemonStream?.drainWaitCount),
+              queuedLiveRecords: readNumber(daemonStream?.queuedLiveRecords),
+              queuedLiveBytes: readNumber(daemonStream?.queuedLiveBytes),
+              laggingDisconnectCount: readNumber(daemonStream?.laggingDisconnectCount),
+            },
+            backendBridge: {
+              pendingBytes: readNumber(backendBridge?.pendingBytes),
+              largestLineBytes: readNumber(backendBridge?.largestLineBytes),
+              pauseCount: readNumber(backendBridge?.pauseCount),
+              pausedMs: readNumber(backendBridge?.pausedMs),
+              decodedRecordCount: readNumber(backendBridge?.decodedRecordCount),
+              decodeFailureCount: readNumber(backendBridge?.decodeFailureCount),
+              acceptedRecordCount: readNumber(backendBridge?.acceptedRecordCount),
+            },
+            subscriptions: {
+              cursor: readNumber(subscriptions?.cursor),
+              replayRingEvents: readNumber(subscriptions?.replayRingEvents),
+              replayRingBytes: readNumber(subscriptions?.replayRingBytes),
+              activeShellSubscribers: readNumber(subscriptions?.activeShellSubscribers),
+              activeThreadSubscribers: readNumber(subscriptions?.activeThreadSubscribers),
+              slowSubscriberCloseCount: readNumber(subscriptions?.slowSubscriberCloseCount),
+              coalescedEventCount: readNumber(subscriptions?.coalescedEventCount),
+            },
+            webSocket: {
+              activeBulkFrames: readNumber(webSocket?.activeBulkFrames),
+              activeBulkBytes: readNumber(webSocket?.activeBulkBytes),
+              largestFrameBytes: readNumber(webSocket?.largestFrameBytes),
+              serializationTimeMs: readNumber(webSocket?.serializationTimeMs),
+              overloadCloseCount: readNumber(webSocket?.overloadCloseCount),
+              connectionOpenCount: readNumber(webSocket?.connectionOpenCount),
+            },
+          },
     rpc:
       rpc === null
         ? null
@@ -841,6 +1246,9 @@ function summarizeRendererForCompactDebug(): Record<string, unknown> {
   const composer = readRecord(snapshot.composer);
   const diagnostics = readRecord(snapshot.diagnostics);
   const connection = readRecord(snapshot.connection);
+  const usage = readRecord(snapshot.usage);
+  const usageDetail = readRecord(usage?.detail);
+  const dictation = snapshot.dictation;
   const timelineScroll = readRecord(snapshot.timelineScroll);
 
   return {
@@ -861,7 +1269,56 @@ function summarizeRendererForCompactDebug(): Record<string, unknown> {
       phase: readString(connection?.phase),
       hasConnected: readBoolean(connection?.hasConnected),
       connected: readBoolean(connection?.connected),
+      online: readBoolean(connection?.online),
+      reconnectPhase: readString(connection?.reconnectPhase),
+      attemptCount: readNumber(connection?.attemptCount),
+      reconnectAttemptCount: readNumber(connection?.reconnectAttemptCount),
+      reconnectMaxAttempts: readNumber(connection?.reconnectMaxAttempts),
+      closeCode: readNumber(connection?.closeCode),
+      connectedAt: readString(connection?.connectedAt),
+      disconnectedAt: readString(connection?.disconnectedAt),
+      lastErrorAt: readString(connection?.lastErrorAt),
+      nextRetryAt: readString(connection?.nextRetryAt),
+      recentEvents: Array.isArray(connection?.recentEvents)
+        ? connection.recentEvents.slice(-32).map((eventValue) => {
+            const event = readRecord(eventValue);
+            return {
+              at: readString(event?.at),
+              kind: readString(event?.kind),
+              phase: readString(event?.phase),
+              reconnectPhase: readString(event?.reconnectPhase),
+              attemptCount: readNumber(event?.attemptCount),
+              reconnectAttemptCount: readNumber(event?.reconnectAttemptCount),
+              closeCode: readNumber(event?.closeCode),
+              online: readBoolean(event?.online),
+            };
+          })
+        : [],
     },
+    usage: {
+      detail:
+        usageDetail === null
+          ? null
+          : {
+              active: readBoolean(usageDetail.active),
+              consumerCount: readNumber(usageDetail.consumerCount),
+              cacheAvailable: readBoolean(usageDetail.cacheAvailable),
+              inFlight: readBoolean(usageDetail.inFlight),
+              attemptCount: readNumber(usageDetail.attemptCount),
+              successCount: readNumber(usageDetail.successCount),
+              failureCount: readNumber(usageDetail.failureCount),
+              reconnectRefreshCount: readNumber(usageDetail.reconnectRefreshCount),
+              lastStartedAt: readString(usageDetail.lastStartedAt),
+              lastFinishedAt: readString(usageDetail.lastFinishedAt),
+              lastSuccessAt: readString(usageDetail.lastSuccessAt),
+              lastDurationMs: readNumber(usageDetail.lastDurationMs),
+              lastOutcome: readString(usageDetail.lastOutcome),
+              lastErrorCategory: readString(usageDetail.lastErrorCategory),
+              lastDayCount: readNumber(usageDetail.lastDayCount),
+              lastTokenBreakdownCount: readNumber(usageDetail.lastTokenBreakdownCount),
+            },
+    },
+    dictation: summarizeDictationForCompactDebug(dictation),
     timelineScroll:
       timelineScroll === null
         ? null

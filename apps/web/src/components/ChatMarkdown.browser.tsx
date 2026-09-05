@@ -255,6 +255,38 @@ describe("ChatMarkdown", () => {
     }
   });
 
+  it("renders mixed LaTeX replacement source as code without KaTeX errors", async () => {
+    const source = [
+      "Replace the source with:",
+      "",
+      "```latex",
+      "Equation \\eqref{eq:composition} is the compatibility condition for",
+      "\\eqref{eq:addition}. With the selected convention",
+      "\\[",
+      "q(x,y)=h(x+y)-h(x)-h(y)",
+      "\\]",
+      "from \\eqref{eq:prior-result}, the section satisfies $r=-q$.",
+      "",
+      "\\begin{proposition}[Compatibility]",
+      "Let $A$ and $D$ be additive groups.",
+      "\\end{proposition}",
+      "```",
+    ].join("\n");
+    const screen = await render(<ChatMarkdown text={source} cwd="/repo/project" />);
+
+    try {
+      await vi.waitFor(() => {
+        expect(document.querySelector(".chat-markdown-codeblock")).not.toBeNull();
+      });
+      const codeBlock = document.querySelector(".chat-markdown-codeblock");
+      expect(codeBlock?.textContent).toContain("proposition}[Compatibility]");
+      expect(codeBlock?.textContent).toContain("Let $A$ and $D$ be additive groups");
+      expect(document.querySelector(".katex-error")).toBeNull();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("renders Claude inline and display math delimiters with KaTeX", async () => {
     const screen = await render(
       <ChatMarkdown

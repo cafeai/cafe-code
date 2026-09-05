@@ -3,7 +3,7 @@ import type {
   VcsStatusRemoteResult,
   VcsStatusStreamEvent,
 } from "@cafecode/contracts";
-import { ORCHESTRATION_WS_METHODS } from "@cafecode/contracts";
+import { ORCHESTRATION_WS_METHODS, WS_METHODS } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
 import { describe, expect, it, vi } from "vitest";
 
@@ -38,6 +38,80 @@ const baseRemoteStatus: VcsStatusRemoteResult = {
 };
 
 describe("wsRpcClient", () => {
+  it("routes dictation credentials through their dedicated untraced RPC methods", async () => {
+    const getStatus = vi.fn(() => Effect.succeed({ configured: true, canManage: true }));
+    const setApiKey = vi.fn(() => Effect.succeed({ configured: true, canManage: true }));
+    const clearApiKey = vi.fn(() => Effect.succeed({ configured: false, canManage: true }));
+    const createClientSecret = vi.fn(() =>
+      Effect.succeed({
+        clientSecret: "ephemeral-test-secret",
+        expiresAt: 2_000,
+        model: "gpt-live-transcribe" as const,
+        sessionProfile: "transcription_pcm24k_minimal_v1" as const,
+        clientSecretRequestId: "req_mint_test",
+        clientSecretRequestDurationMs: 42,
+        clientSecretOpenAiProcessingMs: 12,
+        clientSecretEffectiveProfile: "matches" as const,
+      }),
+    );
+    const requestMock = vi.fn(
+      async <TSuccess>(
+        execute: (client: WsRpcProtocolClient) => Effect.Effect<TSuccess, Error, never>,
+      ) =>
+        Effect.runPromise(
+          execute({
+            [WS_METHODS.dictationGetStatus]: getStatus,
+            [WS_METHODS.dictationSetApiKey]: setApiKey,
+            [WS_METHODS.dictationClearApiKey]: clearApiKey,
+            [WS_METHODS.dictationCreateClientSecret]: createClientSecret,
+          } as unknown as WsRpcProtocolClient),
+        ),
+    );
+    const transport = {
+      dispose: vi.fn(async () => undefined),
+      reconnect: vi.fn(async () => undefined),
+      request: requestMock as unknown as WsTransport["request"],
+      requestStream: vi.fn(),
+      subscribe: vi.fn(() => () => undefined),
+    } satisfies Pick<
+      WsTransport,
+      "dispose" | "reconnect" | "request" | "requestStream" | "subscribe"
+    >;
+
+    const client = createWsRpcClient(transport as unknown as WsTransport);
+    await expect(client.dictation.getStatus()).resolves.toEqual({
+      configured: true,
+      canManage: true,
+    });
+    await expect(client.dictation.setApiKey({ apiKey: "sk-test" })).resolves.toEqual({
+      configured: true,
+      canManage: true,
+    });
+    await expect(client.dictation.clearApiKey()).resolves.toEqual({
+      configured: false,
+      canManage: true,
+    });
+    await expect(client.dictation.createClientSecret()).resolves.toEqual({
+      clientSecret: "ephemeral-test-secret",
+      expiresAt: 2_000,
+      model: "gpt-live-transcribe",
+      sessionProfile: "transcription_pcm24k_minimal_v1",
+      clientSecretRequestId: "req_mint_test",
+      clientSecretRequestDurationMs: 42,
+      clientSecretOpenAiProcessingMs: 12,
+      clientSecretEffectiveProfile: "matches",
+    });
+    await expect(
+      client.dictation.createClientSecret({ model: "gpt-realtime-whisper" }),
+    ).resolves.toMatchObject({ clientSecret: "ephemeral-test-secret" });
+
+    expect(getStatus).toHaveBeenCalledWith({});
+    expect(setApiKey).toHaveBeenCalledWith({ apiKey: "sk-test" });
+    expect(clearApiKey).toHaveBeenCalledWith({});
+    expect(createClientSecret.mock.calls).toEqual([[{}], [{ model: "gpt-realtime-whisper" }]]);
+    expect(requestMock).toHaveBeenCalledTimes(5);
+  });
+
   it("retries an interrupted durable command with the same command id", async () => {
     const rpcMethod = vi.fn(() => Effect.succeed({ sequence: 99 }));
     let requestAttempt = 0;

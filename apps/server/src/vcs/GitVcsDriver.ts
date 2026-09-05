@@ -184,10 +184,6 @@ export interface GitVcsDriverShape {
     cwd: string,
     baseRef: string,
   ) => Effect.Effect<GitRangeContext, GitCommandError>;
-  readonly workingTreeDiff: (
-    cwd: string,
-    options?: { readonly ignoreWhitespace?: boolean },
-  ) => Effect.Effect<string, GitCommandError>;
   readonly readConfigValue: (
     cwd: string,
     key: string,

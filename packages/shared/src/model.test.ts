@@ -79,9 +79,19 @@ describe("normalizeModelSlug", () => {
     expect(normalizeModelSlug("5.6-luna")).toBe("gpt-5.6-luna");
     expect(normalizeModelSlug("gpt-5-codex")).toBe("gpt-5.4");
     expect(normalizeModelSlug("5.3")).toBe("gpt-5.3-codex");
+    expect(normalizeModelSlug("fable-5.1", claude)).toBe("claude-fable-5-1");
+    expect(normalizeModelSlug("fable-5-1", claude)).toBe("claude-fable-5-1");
+    expect(normalizeModelSlug("fable51", claude)).toBe("claude-fable-5-1");
+    expect(normalizeModelSlug("fable-5-1[1m]", claude)).toBe("claude-fable-5-1");
+    // Claude Code and third-party gateways may resolve their bare `fable`
+    // alias differently. Preserve Cafe's existing canonicalization unless the
+    // persisted value names 5.1 explicitly.
     expect(normalizeModelSlug("fable", claude)).toBe("claude-fable-5");
     expect(normalizeModelSlug("fable[1m]", claude)).toBe("claude-fable-5");
-    expect(normalizeModelSlug("opus", claude)).toBe("claude-opus-4-8");
+    expect(normalizeModelSlug("default", claude)).toBe("claude-opus-5");
+    expect(normalizeModelSlug("opus", claude)).toBe("claude-opus-5");
+    expect(normalizeModelSlug("opus-5", claude)).toBe("claude-opus-5");
+    expect(normalizeModelSlug("opus[1m]", claude)).toBe("claude-opus-5");
     expect(normalizeModelSlug("opus-4.7", claude)).toBe("claude-opus-4-7");
     expect(normalizeModelSlug("sonnet", claude)).toBe("claude-sonnet-5");
     expect(normalizeModelSlug("sonnet[1m]", claude)).toBe("claude-sonnet-5");
@@ -96,6 +106,13 @@ describe("normalizeModelSlug", () => {
 });
 
 describe("resolveModelSlugForProvider", () => {
+  it("defaults new Codex selections to Astra while preserving explicit Sol selections", () => {
+    const codex = ProviderDriverKind.make("codex");
+    expect(resolveModelSlugForProvider(codex, undefined)).toBe("gpt-6-astra");
+    expect(resolveModelSlugForProvider(codex, "gpt-5.6-sol")).toBe("gpt-5.6-sol");
+    expect(resolveModelSlugForProvider(codex, "gpt-5.6")).toBe("gpt-5.6-sol");
+  });
+
   it("returns defaults when the model is missing", () => {
     expect(resolveModelSlugForProvider(ProviderDriverKind.make("codex"), undefined)).toBe(
       DEFAULT_MODEL,

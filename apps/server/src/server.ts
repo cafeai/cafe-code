@@ -61,6 +61,7 @@ import { WebPushNotificationsLive } from "./notifications/WebPushNotifications.t
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
 import { UsageStatsRepositoryLive } from "./persistence/Layers/UsageStats.ts";
 import { UsageStatsServiceLive } from "./usageStats/Layers/UsageStatsService.ts";
+import { AuxiliaryUsageLive } from "./usageStats/Services/AuxiliaryUsage.ts";
 import { ProviderRegistryLive } from "./provider/Layers/ProviderRegistry.ts";
 import { ServerSettingsLive } from "./serverSettings.ts";
 import { ServerClientSettingsLive } from "./serverClientSettings.ts";
@@ -100,6 +101,7 @@ import {
   authWebSocketTokenRouteLayer,
 } from "./auth/http.ts";
 import { ServerSecretStoreLive } from "./auth/Layers/ServerSecretStore.ts";
+import { OpenAiRealtimeDictationLive } from "./dictation/Layers/OpenAiRealtimeDictation.ts";
 import { ServerAuthLive } from "./auth/Layers/ServerAuth.ts";
 import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
 import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts";
@@ -119,6 +121,7 @@ import {
 } from "./orchestration/http.ts";
 import * as NetService from "@cafecode/shared/Net";
 import * as NodeHttpServerCompression from "./nodeHttpServerCompression.ts";
+import { cafeMcpRouteLayer } from "./mcp/http.ts";
 
 const HttpServerLive = Layer.unwrap(
   Effect.gen(function* () {
@@ -257,6 +260,8 @@ const AuthLayerLive = ServerAuthLive.pipe(
   Layer.provide(ServerSecretStoreLive),
 );
 
+const DictationLayerLive = OpenAiRealtimeDictationLive.pipe(Layer.provide(ServerSecretStoreLive));
+
 const ProviderRuntimeLayerLive = ProviderSessionReaperLive.pipe(
   Layer.provideMerge(ProviderLayerLive),
   Layer.provideMerge(ProviderSessionDirectoryLayerLive),
@@ -301,6 +306,10 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   Layer.provideMerge(RepositoryIdentityResolverLive),
   Layer.provideMerge(ServerEnvironmentLive),
   Layer.provideMerge(AuthLayerLive),
+).pipe(
+  // One scoped bridge is visible both while provider factories are built and
+  // when the usage accumulator later installs its hydrated ledger callback.
+  Layer.provideMerge(AuxiliaryUsageLive),
 );
 
 const RuntimeCoreWithDiagnosticsLive = RuntimeLayerDiagnostics.layer.pipe(
@@ -341,6 +350,7 @@ export const makeRoutesLayer = Layer.mergeAll(
   brandingSidebarImageServeRouteLayer,
   brandingSidebarImageUploadRouteLayer,
   clientDebugLogRouteLayer,
+  cafeMcpRouteLayer,
   orchestrationDispatchRouteLayer,
   orchestrationSnapshotRouteLayer,
   otlpTracesProxyRouteLayer,
@@ -351,7 +361,7 @@ export const makeRoutesLayer = Layer.mergeAll(
   webPushPublicKeyRouteLayer,
   webPushSubscribeRouteLayer,
   webPushUnsubscribeRouteLayer,
-  websocketRpcRouteLayer,
+  websocketRpcRouteLayer.pipe(Layer.provide(DictationLayerLive)),
 ).pipe(Layer.provide(browserApiCorsLayer));
 
 export const makeServerLayer = Layer.unwrap(

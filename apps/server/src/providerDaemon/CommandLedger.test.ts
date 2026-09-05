@@ -48,6 +48,59 @@ describe("ProviderDaemonCommandLedger", () => {
     );
   });
 
+  it("deduplicates goal mutations without exposing objective text in diagnostics", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const callCount = yield* Ref.make(0);
+        const ledger = yield* makeProviderDaemonCommandLedger();
+        const objective = "private goal objective";
+        const request = {
+          method: "setGoal",
+          commandId: "command-goal-000000000000000000000",
+          payload: {
+            threadId: ThreadId.make("thread-1"),
+            objective,
+            status: "active",
+            tokenBudget: null,
+          },
+        } satisfies ProviderDaemonRpcRequestValue;
+        const result = {
+          ok: true,
+          value: {
+            threadId: ThreadId.make("thread-1"),
+            objective,
+            status: "active",
+            tokenBudget: null,
+            tokensUsed: 0,
+            timeUsedSeconds: 0,
+            createdAt: "2026-01-01T00:00:00.000Z",
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          },
+        } as const;
+        const execute = Ref.update(callCount, (count) => count + 1).pipe(Effect.as(result));
+
+        expect(yield* ledger.runOnce(request, execute)).toEqual(result);
+        expect(yield* ledger.runOnce(request, execute)).toEqual(result);
+
+        const snapshot = yield* ledger.snapshot;
+        expect(yield* Ref.get(callCount)).toBe(1);
+        expect(snapshot.recentCompletedCommands[0]).toMatchObject({
+          method: "setGoal",
+          requestSummary: {
+            method: "setGoal",
+            threadId: "thread-1",
+          },
+          responseSummary: {
+            ok: true,
+            threadId: "thread-1",
+            status: "active",
+          },
+        });
+        expect(JSON.stringify(snapshot)).not.toContain(objective);
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+    );
+  });
+
   it("rejects mutating commands without command ids", async () => {
     await Effect.runPromise(
       Effect.gen(function* () {

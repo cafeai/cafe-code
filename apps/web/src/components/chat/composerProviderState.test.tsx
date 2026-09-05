@@ -80,6 +80,7 @@ describe("getComposerProviderState", () => {
     expect(state).toEqual({
       provider: PROVIDER,
       promptEffort: "high",
+      traitsTriggerLabel: "High",
       modelOptionsForDispatch: selections(["effort", "high"]),
     });
   });
@@ -102,6 +103,7 @@ describe("getComposerProviderState", () => {
     expect(state).toEqual({
       provider: PROVIDER,
       promptEffort: "low",
+      traitsTriggerLabel: "Low · Fast",
       modelOptionsForDispatch: selections(["effort", "low"], ["fastMode", true]),
     });
   });
@@ -135,6 +137,7 @@ describe("getComposerProviderState", () => {
     expect(state).toEqual({
       provider: PROVIDER,
       promptEffort: null,
+      traitsTriggerLabel: "thinking Off",
       modelOptionsForDispatch: selections(["thinking", false]),
     });
   });
@@ -159,6 +162,7 @@ describe("getComposerProviderState", () => {
     });
 
     expect(state.promptEffort).toBe("high");
+    expect(state.traitsTriggerLabel).toBe("High · 200k · Plan");
     expect(state.modelOptionsForDispatch).toEqual(
       selections(["effort", "high"], ["contextWindow", "200k"], ["agent", "plan"]),
     );
@@ -176,6 +180,7 @@ describe("getComposerProviderState", () => {
     expect(state).toEqual({
       provider: PROVIDER,
       promptEffort: null,
+      traitsTriggerLabel: null,
       modelOptionsForDispatch: undefined,
     });
   });
@@ -202,6 +207,7 @@ describe("getComposerProviderState", () => {
     expect(state).toEqual({
       provider: PROVIDER,
       promptEffort: "medium",
+      traitsTriggerLabel: "Ultrathink",
       modelOptionsForDispatch: selections(["effort", "medium"]),
       ...ULTRATHINK_FRAME_CLASSES,
     });

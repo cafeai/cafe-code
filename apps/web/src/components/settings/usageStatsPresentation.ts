@@ -1,5 +1,55 @@
 import type { ProviderDriverKind, UsageStatsTokenBreakdownEntry } from "@cafecode/contracts";
 
+const tokenIntegerFormat = new Intl.NumberFormat("en-US");
+
+/**
+ * Usage counters are decoded as non-negative finite numbers, but presentation
+ * helpers still fail closed so a mixed-version or corrupt snapshot cannot put
+ * `NaN` or `Infinity` into the interface.
+ */
+function normalizedTokenCount(value: number): number {
+  return Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+
+/** Full comma-separated token count used as the primary usage readout. */
+export function formatFullTokenCount(value: number): string {
+  return tokenIntegerFormat.format(Math.round(normalizedTokenCount(value)));
+}
+
+/** Compact companion readout, such as `3.54B`, `3.00M`, or `9.5K`. */
+export function formatCompactTokenCount(value: number): string {
+  const normalized = normalizedTokenCount(value);
+  const formatMagnitude = (
+    divisor: number,
+    suffix: string,
+    precisionBelowTen: number,
+    precisionAtLeastTen: number,
+  ) => {
+    const scaled = normalized / divisor;
+    const initialPrecision = scaled < 10 ? precisionBelowTen : precisionAtLeastTen;
+    const rounded = Number(scaled.toFixed(initialPrecision));
+    const stablePrecision = rounded < 10 ? precisionBelowTen : precisionAtLeastTen;
+    return { rounded, text: `${rounded.toFixed(stablePrecision)}${suffix}` };
+  };
+
+  if (normalized >= 1_000_000_000) {
+    return formatMagnitude(1_000_000_000, "B", 2, 1).text;
+  }
+  if (normalized >= 1_000_000) {
+    const millions = formatMagnitude(1_000_000, "M", 2, 0);
+    // Promote a rounded boundary instead of flashing `1000M` as an animated
+    // full counter crosses into its next magnitude.
+    return millions.rounded >= 1_000
+      ? formatMagnitude(1_000_000_000, "B", 2, 1).text
+      : millions.text;
+  }
+  if (normalized >= 1_000) {
+    const thousands = formatMagnitude(1_000, "K", 1, 0);
+    return thousands.rounded >= 1_000 ? formatMagnitude(1_000_000, "M", 2, 0).text : thousands.text;
+  }
+  return tokenIntegerFormat.format(Math.round(normalized));
+}
+
 export interface UsageModelBreakdownView {
   readonly model: string;
   readonly outputTokens: number;

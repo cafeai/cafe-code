@@ -166,6 +166,35 @@ describe("ProviderDaemonEventJournal", () => {
     );
   });
 
+  it("captures a replay high-water boundary and never extends bounded replay into live records", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const journal = yield* makePersistentProviderDaemonEventJournal({
+          capacity: 20,
+          ownerKey: "provider-daemon",
+        });
+        yield* journal.publish(makeRuntimeEvent("event-before-1"));
+        yield* journal.publish(makeRuntimeEvent("event-before-2"));
+
+        const liveCursors: number[] = [];
+        const subscription = yield* journal.subscribeWithReplayBoundary((record) => {
+          liveCursors.push(record.cursor);
+        });
+        const firstLive = yield* journal.publish(makeRuntimeEvent("event-live-1"));
+        const secondLive = yield* journal.publish(makeRuntimeEvent("event-live-2"));
+        const replay = yield* journal.replayPageThrough(0, subscription.replayBoundaryCursor, 20);
+        subscription.unsubscribe();
+
+        expect(subscription.replayBoundaryCursor).toBe(2);
+        expect(replay.map((record) => record.cursor)).toEqual([1, 2]);
+        expect(liveCursors).toEqual([firstLive.cursor, secondLive.cursor]);
+        expect(replay.some((record) => record.cursor > subscription.replayBoundaryCursor)).toBe(
+          false,
+        );
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+    );
+  });
+
   it("prunes the persistent journal to its configured owner capacity", async () => {
     await Effect.runPromise(
       Effect.gen(function* () {

@@ -1,10 +1,25 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
+import { it as effectIt } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
-import { describe, it } from "vitest";
-import { ProviderInstanceId, ProviderItemId, ThreadId, TurnId } from "@cafecode/contracts";
-import { CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT } from "@cafecode/shared/codexCompaction";
+import * as Semaphore from "effect/Semaphore";
+import * as TestClock from "effect/testing/TestClock";
+import { describe, it, vi } from "vitest";
+import {
+  MessageId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ProviderItemId,
+  type ProviderSession,
+  type ProviderUserInputAnswers,
+  ThreadId,
+  TurnId,
+} from "@cafecode/contracts";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexRpc from "effect-codex-app-server/rpc";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
@@ -14,37 +29,621 @@ import {
   CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS,
 } from "../CodexDeveloperInstructions.ts";
 import {
+  CODEX_SUMMARY_HISTORY_MAX_PAGES,
+  CODEX_SUMMARY_HISTORY_MAX_TURNS,
+  CODEX_SUMMARY_HISTORY_PAGE_TURN_LIMIT,
+  CODEX_PENDING_STEER_UNRESOLVED_CAPACITY,
+  acknowledgeCodexPendingSteerProcessing,
+  acknowledgeCodexSteerLifecycleBoundary,
+  admitCodexPendingSteerProcessing,
   buildCodexAppServerArgs,
   buildCodexActiveContextCompactionSteerError,
+  buildCodexPendingSteerCapacityError,
   buildCodexThreadSnapshotBackfillEvents,
   buildTurnStartParams,
   buildTurnSteerParams,
+  awaitCodexUserInputResolution,
   claimCodexSnapshotBackfillWatcher,
+  claimCodexRestartedSteerProcessingObservation,
   codexAggregateNotificationMethod,
   codexAggregateTurnHasUnfinishedChildren,
   codexChildConversationThreadIdsForTurn,
   codexElapsedDelayMilliseconds,
   codexElapsedDelayRemainingMilliseconds,
+  codexTerminalSessionPatch,
+  codexSubagentProjectionMethod,
   isRecoverableThreadResumeError,
   isCodexContextCompactionItemType,
   isCodexChildConversationWorkNotification,
   isCodexUserMessageItemType,
   isTerminalCodexChildThreadReadError,
   openCodexThread,
+  prunePendingSteerProcessing,
+  publishCodexTurnCompletionAfterLifecycleBoundary,
+  readCodexBoundedSummaryThreadWithClient,
+  readCodexBoundedThreadSnapshotWithClient,
   readCodexExpectedActiveTurnMismatchActualTurnId,
+  readCodexSubagentThreadWithInitializedClient,
   readCodexNotificationEmittedAtIso,
   readCodexNotificationRouteFields,
   readCodexSteerExpectedTurnMismatchActualTurnId,
+  reconcileCodexTerminalSnapshotSteerLifecycle,
   rememberCodexChildConversationTurns,
+  retargetCodexPendingSteerProcessing,
+  resolveCodexSessionRuntimeSteerClientCorrelationId,
   resolveCodexThreadSettingsSessionModel,
   resolveCodexChildConversationNotification,
+  sanitizeCodexProtocolDiagnosticPayload,
+  shouldForwardCodexRootGoalNotification,
   selectCodexActiveSnapshotTurn,
   summarizeCodexAppServerChildProcesses,
+  terminalizeCodexPendingSteerProcessing,
   updateCodexChildConversationLiveness,
   updateCodexActiveContextCompactions,
   updateCodexPendingSteerProcessingFromNotification,
+  validateCodexSubagentThreadReadMetadata,
+  type CodexInitializedSubagentHistoryReadClient,
+  type CodexBoundedThreadSnapshotClient,
+  type CodexPendingSteerProcessing,
+  type CodexSubagentHistoryReadClient,
 } from "./CodexSessionRuntime.ts";
+import {
+  buildCodexSteerClientCorrelationId,
+  parseCodexSteerClientCorrelationId,
+} from "../codexSteerCorrelation.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
+const decodeMessageId = Schema.decodeUnknownSync(MessageId);
+
+function makePendingSteerProcessingFixture(index: number): CodexPendingSteerProcessing {
+  return {
+    steerId: `steer-${index}`,
+    clientCorrelationId: buildCodexSteerClientCorrelationId(`message-${index}`),
+    providerThreadId: "provider-thread-1",
+    turnId: TurnId.make("turn-active"),
+    requestedAt: new Date(Date.UTC(2026, 4, 26) + index).toISOString(),
+    promptByteLength: 10,
+    attachmentCount: 0,
+    warningCount: 0,
+  };
+}
+
+function makeCodexSummaryTurnFixture(id: string) {
+  return {
+    id,
+    status: "completed" as const,
+    itemsView: "summary" as const,
+    items: [],
+    startedAt: null,
+    completedAt: null,
+    durationMs: null,
+    error: null,
+  };
+}
+
+function makeCodexMetadataResponseFixture(threadId: string) {
+  return {
+    thread: {
+      id: threadId,
+      parentThreadId: null,
+      sessionId: "provider-session-1",
+      source: "appServer" as const,
+      status: { type: "idle" as const },
+      turns: [],
+    },
+  };
+}
+
+describe("Codex non-blocking user input", () => {
+  effectIt.effect("submits an empty answer map after the upstream 120-second deadline", () =>
+    Effect.gen(function* () {
+      const answers = yield* Deferred.make<ProviderUserInputAnswers>();
+      const autoResolutionSnoozed = yield* Deferred.make<void>();
+      const resolutionFiber = yield* awaitCodexUserInputResolution({
+        answers,
+        autoResolutionSnoozed,
+        isBlocking: false,
+      }).pipe(Effect.forkChild);
+
+      yield* TestClock.adjust("119 seconds");
+      assert.equal(resolutionFiber.pollUnsafe(), undefined);
+      yield* TestClock.adjust("1 second");
+
+      assert.deepEqual(yield* Fiber.join(resolutionFiber), {
+        answers: {},
+        source: "automatic",
+      });
+    }),
+  );
+
+  effectIt.effect("permanently retires the deadline after the user interacts", () =>
+    Effect.gen(function* () {
+      const answers = yield* Deferred.make<ProviderUserInputAnswers>();
+      const autoResolutionSnoozed = yield* Deferred.make<void>();
+      const resolutionFiber = yield* awaitCodexUserInputResolution({
+        answers,
+        autoResolutionSnoozed,
+        isBlocking: false,
+      }).pipe(Effect.forkChild);
+
+      yield* Deferred.succeed(autoResolutionSnoozed, undefined);
+      yield* TestClock.adjust("5 minutes");
+      assert.equal(resolutionFiber.pollUnsafe(), undefined);
+
+      yield* Deferred.succeed(answers, { choice: "continue" });
+      assert.deepEqual(yield* Fiber.join(resolutionFiber), {
+        answers: { choice: "continue" },
+        source: "explicit",
+      });
+    }),
+  );
+});
+
+describe("Codex subagent thread ownership validation", () => {
+  const root = {
+    id: "root-provider-thread",
+    parentThreadId: null,
+    sessionId: "session-tree-1",
+    source: "appServer" as const,
+  };
+  const nestedChild = {
+    id: "nested-provider-child",
+    parentThreadId: "intermediate-provider-child",
+    sessionId: "session-tree-1",
+    source: {
+      subAgent: {
+        thread_spawn: {
+          depth: 2,
+          parent_thread_id: "intermediate-provider-child",
+        },
+      },
+    } as const,
+  };
+
+  it("accepts a nested child in the recovered root session tree", () => {
+    assert.equal(
+      validateCodexSubagentThreadReadMetadata({
+        expectedRootThreadId: "root-provider-thread",
+        expectedChildThreadId: "nested-provider-child",
+        root,
+        child: nestedChild,
+      }),
+      undefined,
+    );
+  });
+
+  it("rejects mismatched ids, provider session trees, and parent metadata", () => {
+    assert.equal(
+      validateCodexSubagentThreadReadMetadata({
+        expectedRootThreadId: "different-root",
+        expectedChildThreadId: "nested-provider-child",
+        root,
+        child: nestedChild,
+      }),
+      "root-identity-mismatch",
+    );
+    assert.equal(
+      validateCodexSubagentThreadReadMetadata({
+        expectedRootThreadId: "root-provider-thread",
+        expectedChildThreadId: "different-child",
+        root,
+        child: nestedChild,
+      }),
+      "child-identity-mismatch",
+    );
+    assert.equal(
+      validateCodexSubagentThreadReadMetadata({
+        expectedRootThreadId: "root-provider-thread",
+        expectedChildThreadId: "nested-provider-child",
+        root,
+        child: { ...nestedChild, sessionId: "other-session-tree" },
+      }),
+      "session-tree-mismatch",
+    );
+    assert.equal(
+      validateCodexSubagentThreadReadMetadata({
+        expectedRootThreadId: "root-provider-thread",
+        expectedChildThreadId: "nested-provider-child",
+        root,
+        child: {
+          ...nestedChild,
+          source: {
+            subAgent: {
+              thread_spawn: {
+                depth: 2,
+                parent_thread_id: "wrong-immediate-parent",
+              },
+            },
+          },
+        },
+      }),
+      "parent-metadata-mismatch",
+    );
+    assert.equal(
+      validateCodexSubagentThreadReadMetadata({
+        expectedRootThreadId: "root-provider-thread",
+        expectedChildThreadId: "nested-provider-child",
+        root,
+        child: { ...nestedChild, source: "appServer" },
+      }),
+      "missing-subagent-metadata",
+    );
+  });
+
+  effectIt.effect("validates root and child metadata before reading bounded child history", () =>
+    Effect.gen(function* () {
+      const calls: Array<{ method: string; payload: unknown }> = [];
+      const request = ((method: string, payload: unknown) =>
+        Effect.sync(() => {
+          calls.push({ method, payload });
+          if (method === "initialize") {
+            return { userAgent: "codex-test" };
+          }
+          if (method === "thread/turns/list") {
+            return {
+              data: [
+                {
+                  id: "child-turn-1",
+                  status: "completed",
+                  itemsView: "summary",
+                  items: [],
+                },
+              ],
+              nextCursor: null,
+            };
+          }
+          const requestedThreadId = (payload as { threadId: string }).threadId;
+          return {
+            thread:
+              requestedThreadId === root.id
+                ? { ...root, turns: [] }
+                : {
+                    ...nestedChild,
+                    turns: [],
+                  },
+          };
+        })) as CodexSubagentHistoryReadClient["request"];
+      const notify = ((method: string, payload: unknown) =>
+        Effect.sync(() => {
+          calls.push({ method, payload });
+        })) as CodexInitializedSubagentHistoryReadClient["notify"];
+
+      const snapshot = yield* readCodexSubagentThreadWithInitializedClient({
+        client: { request, notify },
+        rootProviderThreadId: root.id,
+        subagentThreadId: nestedChild.id,
+      });
+
+      assert.equal(snapshot.threadId, nestedChild.id);
+      assert.deepEqual(
+        calls.map((call) => call.method),
+        ["initialize", "initialized", "thread/read", "thread/read", "thread/turns/list"],
+      );
+      assert.deepEqual(calls.slice(2), [
+        { method: "thread/read", payload: { threadId: root.id, includeTurns: false } },
+        { method: "thread/read", payload: { threadId: nestedChild.id, includeTurns: false } },
+        {
+          method: "thread/turns/list",
+          payload: {
+            threadId: nestedChild.id,
+            limit: CODEX_SUMMARY_HISTORY_PAGE_TURN_LIMIT,
+            sortDirection: "desc",
+            itemsView: "summary",
+          },
+        },
+      ]);
+      assert.equal(
+        calls.some((call) => call.method === "thread/resume"),
+        false,
+      );
+      assert.equal(
+        calls.some((call) => call.method === "thread/start"),
+        false,
+      );
+    }),
+  );
+
+  effectIt.effect("rejects invalid child metadata before requesting any child turns", () =>
+    Effect.gen(function* () {
+      const calls: Array<{ method: string; payload: unknown }> = [];
+      const request = ((method: string, payload: unknown) =>
+        Effect.sync(() => {
+          calls.push({ method, payload });
+          if (method === "thread/read") {
+            const requestedThreadId = (payload as { threadId: string }).threadId;
+            return {
+              thread:
+                requestedThreadId === root.id
+                  ? { ...root, turns: [] }
+                  : { ...nestedChild, sessionId: "unrelated-session-tree", turns: [] },
+            };
+          }
+          throw new Error(`Unexpected method: ${method}`);
+        })) as CodexSubagentHistoryReadClient["request"];
+
+      const exit = yield* readCodexSubagentThreadWithInitializedClient({
+        client: {
+          request,
+          notify: ((_method: string, _payload: unknown) =>
+            Effect.void) as CodexInitializedSubagentHistoryReadClient["notify"],
+        },
+        rootProviderThreadId: root.id,
+        subagentThreadId: nestedChild.id,
+      }).pipe(Effect.exit);
+
+      assert.equal(exit._tag, "Failure");
+      assert.equal(
+        calls.some((call) => call.method === "thread/turns/list"),
+        false,
+      );
+    }),
+  );
+
+  effectIt.effect("does not disclose the child id upstream when the exact root read fails", () =>
+    Effect.gen(function* () {
+      const requestMock = vi.fn((method: string, _payload: unknown) =>
+        method === "initialize"
+          ? Effect.succeed({ userAgent: "codex-test" })
+          : Effect.fail(
+              new CodexErrors.CodexAppServerTransportError({
+                detail: "root history unavailable",
+                cause: new Error("closed"),
+              }),
+            ),
+      );
+      const request = requestMock as unknown as CodexSubagentHistoryReadClient["request"];
+      const notifyMock = vi.fn((_method: string, _payload: unknown) => Effect.void);
+      const notify = notifyMock as unknown as CodexInitializedSubagentHistoryReadClient["notify"];
+
+      const exit = yield* readCodexSubagentThreadWithInitializedClient({
+        client: { request, notify },
+        rootProviderThreadId: root.id,
+        subagentThreadId: nestedChild.id,
+      }).pipe(Effect.exit);
+
+      assert.equal(exit._tag, "Failure");
+      assert.equal(requestMock.mock.calls.length, 2);
+      assert.equal(notifyMock.mock.calls.length, 1);
+      assert.deepEqual(requestMock.mock.calls[1], [
+        "thread/read",
+        { threadId: root.id, includeTurns: false },
+      ]);
+    }),
+  );
+});
+
+describe("Codex bounded lifecycle snapshots", () => {
+  effectIt.effect(
+    "reads metadata plus one summarized newest turn without full-history hydration",
+    () =>
+      Effect.gen(function* () {
+        const calls: Array<{ method: string; payload: unknown }> = [];
+        const request = ((method: string, payload: unknown) =>
+          Effect.sync(() => {
+            calls.push({ method, payload });
+            if (method === "thread/read") {
+              return {
+                thread: {
+                  id: "provider-thread-1",
+                  parentThreadId: null,
+                  sessionId: "provider-session-1",
+                  source: "appServer",
+                  status: { type: "active", activeFlags: [] },
+                  turns: [],
+                },
+              };
+            }
+            if (method === "thread/turns/list") {
+              return {
+                data: [
+                  {
+                    id: "turn-latest",
+                    status: "inProgress",
+                    itemsView: "summary",
+                    items: [],
+                    startedAt: 1_788_174_288,
+                    completedAt: null,
+                    durationMs: null,
+                    error: null,
+                  },
+                ],
+                nextCursor: "older-turns",
+              };
+            }
+            throw new Error(`Unexpected method: ${method}`);
+          })) as CodexBoundedThreadSnapshotClient["request"];
+
+        const response = yield* readCodexBoundedThreadSnapshotWithClient({
+          client: { request },
+          providerThreadId: "provider-thread-1",
+        });
+
+        assert.deepEqual(calls, [
+          {
+            method: "thread/read",
+            payload: { threadId: "provider-thread-1", includeTurns: false },
+          },
+          {
+            method: "thread/turns/list",
+            payload: {
+              threadId: "provider-thread-1",
+              limit: 1,
+              sortDirection: "desc",
+              itemsView: "summary",
+            },
+          },
+        ]);
+        assert.equal(response.thread.turns.length, 1);
+        assert.equal(response.thread.turns[0]?.id, "turn-latest");
+        assert.equal(
+          calls.some(
+            (call) =>
+              call.method === "thread/read" &&
+              (call.payload as { includeTurns?: boolean }).includeTurns === true,
+          ),
+          false,
+        );
+      }),
+  );
+});
+
+describe("Codex bounded summary history", () => {
+  effectIt.effect("paginates newest-first summaries and returns chronological turns", () =>
+    Effect.gen(function* () {
+      const calls: Array<{ method: string; payload: unknown }> = [];
+      const request = ((method: string, payload: unknown) =>
+        Effect.sync(() => {
+          calls.push({ method, payload });
+          if (method === "thread/read") {
+            return makeCodexMetadataResponseFixture("provider-thread-1");
+          }
+          if (method === "thread/turns/list") {
+            const cursor = (payload as { cursor?: string }).cursor;
+            return cursor === undefined
+              ? {
+                  data: [
+                    makeCodexSummaryTurnFixture("turn-3"),
+                    makeCodexSummaryTurnFixture("turn-2"),
+                  ],
+                  nextCursor: "older-page",
+                }
+              : { data: [makeCodexSummaryTurnFixture("turn-1")], nextCursor: null };
+          }
+          throw new Error(`Unexpected method: ${method}`);
+        })) as CodexBoundedThreadSnapshotClient["request"];
+
+      const response = yield* readCodexBoundedSummaryThreadWithClient({
+        client: { request },
+        providerThreadId: "provider-thread-1",
+      });
+
+      assert.deepEqual(
+        response.thread.turns.map((turn) => turn.id),
+        ["turn-1", "turn-2", "turn-3"],
+      );
+      assert.deepEqual(calls, [
+        {
+          method: "thread/read",
+          payload: { threadId: "provider-thread-1", includeTurns: false },
+        },
+        {
+          method: "thread/turns/list",
+          payload: {
+            threadId: "provider-thread-1",
+            limit: CODEX_SUMMARY_HISTORY_PAGE_TURN_LIMIT,
+            sortDirection: "desc",
+            itemsView: "summary",
+          },
+        },
+        {
+          method: "thread/turns/list",
+          payload: {
+            threadId: "provider-thread-1",
+            limit: CODEX_SUMMARY_HISTORY_PAGE_TURN_LIMIT,
+            sortDirection: "desc",
+            itemsView: "summary",
+            cursor: "older-page",
+          },
+        },
+      ]);
+      assert.equal(
+        calls.some(
+          (call) =>
+            call.method === "thread/turns/list" &&
+            (call.payload as { itemsView?: string }).itemsView === "full",
+        ),
+        false,
+      );
+    }),
+  );
+
+  effectIt.effect("fails closed when app-server repeats a pagination cursor", () =>
+    Effect.gen(function* () {
+      let turnsListCalls = 0;
+      const request = ((method: string, _payload: unknown) =>
+        Effect.sync(() => {
+          if (method === "thread/read") {
+            return makeCodexMetadataResponseFixture("provider-thread-1");
+          }
+          if (method === "thread/turns/list") {
+            turnsListCalls += 1;
+            return {
+              data: [makeCodexSummaryTurnFixture(`turn-${turnsListCalls}`)],
+              nextCursor: "repeated-cursor",
+            };
+          }
+          throw new Error(`Unexpected method: ${method}`);
+        })) as CodexBoundedThreadSnapshotClient["request"];
+
+      const exit = yield* readCodexBoundedSummaryThreadWithClient({
+        client: { request },
+        providerThreadId: "provider-thread-1",
+      }).pipe(Effect.exit);
+
+      assert.equal(exit._tag, "Failure");
+      assert.equal(turnsListCalls, 2);
+    }),
+  );
+
+  effectIt.effect("enforces both page and retained-turn caps", () =>
+    Effect.gen(function* () {
+      let pageBoundCalls = 0;
+      const pageBoundRequest = ((method: string, _payload: unknown) =>
+        Effect.sync(() => {
+          if (method === "thread/read") {
+            return makeCodexMetadataResponseFixture("provider-thread-pages");
+          }
+          if (method === "thread/turns/list") {
+            pageBoundCalls += 1;
+            return {
+              data: [makeCodexSummaryTurnFixture(`turn-${pageBoundCalls}`)],
+              nextCursor: `cursor-${pageBoundCalls}`,
+            };
+          }
+          throw new Error(`Unexpected method: ${method}`);
+        })) as CodexBoundedThreadSnapshotClient["request"];
+      const pageBoundResponse = yield* readCodexBoundedSummaryThreadWithClient({
+        client: { request: pageBoundRequest },
+        providerThreadId: "provider-thread-pages",
+      });
+
+      assert.equal(pageBoundCalls, CODEX_SUMMARY_HISTORY_MAX_PAGES);
+      assert.equal(pageBoundResponse.thread.turns.length, CODEX_SUMMARY_HISTORY_MAX_PAGES);
+
+      let turnBoundCalls = 0;
+      const turnBoundRequest = ((method: string, _payload: unknown) =>
+        Effect.sync(() => {
+          if (method === "thread/read") {
+            return makeCodexMetadataResponseFixture("provider-thread-turns");
+          }
+          if (method === "thread/turns/list") {
+            turnBoundCalls += 1;
+            return {
+              data: Array.from({ length: CODEX_SUMMARY_HISTORY_MAX_TURNS + 10 }, (_, index) =>
+                makeCodexSummaryTurnFixture(`turn-${index}`),
+              ),
+              nextCursor: "ignored-after-turn-cap",
+            };
+          }
+          throw new Error(`Unexpected method: ${method}`);
+        })) as CodexBoundedThreadSnapshotClient["request"];
+      const turnBoundResponse = yield* readCodexBoundedSummaryThreadWithClient({
+        client: { request: turnBoundRequest },
+        providerThreadId: "provider-thread-turns",
+      });
+
+      assert.equal(turnBoundCalls, 1);
+      assert.equal(turnBoundResponse.thread.turns.length, CODEX_SUMMARY_HISTORY_MAX_TURNS);
+    }),
+  );
+
+  it("contains no live full-history thread/read request", () => {
+    const runtimeSource = readFileSync(
+      new URL("./CodexSessionRuntime.ts", import.meta.url),
+      "utf8",
+    );
+    assert.doesNotMatch(runtimeSource, /^\s*includeTurns:\s*true,\s*$/m);
+  });
+});
 
 describe("Codex notification emission timestamps", () => {
   it("accepts valid provider emission time and rejects malformed or future values", () => {
@@ -86,31 +685,168 @@ describe("Codex notification emission timestamps", () => {
 });
 
 describe("buildCodexAppServerArgs", () => {
-  it("uses plain app-server args until a transport fallback policy is active", () => {
-    assert.deepStrictEqual(buildCodexAppServerArgs(undefined), ["app-server"]);
-    assert.deepStrictEqual(buildCodexAppServerArgs({ responsesWebsockets: "auto" }), [
+  it("enables Cafe task plans while preserving Codex concurrency defaults when unset", () => {
+    assert.deepStrictEqual(buildCodexAppServerArgs({}), [
       "app-server",
+      "-c",
+      "tools.update_plan.enabled=true",
+    ]);
+    assert.deepStrictEqual(
+      buildCodexAppServerArgs({
+        transportPolicy: { responsesWebsockets: "auto" },
+      }),
+      ["app-server", "-c", "tools.update_plan.enabled=true"],
+    );
+  });
+
+  it("overrides both V1 and root-inclusive V2 capacity when explicitly configured", () => {
+    assert.deepStrictEqual(buildCodexAppServerArgs({ maxConcurrentSubagents: 12 }), [
+      "app-server",
+      "-c",
+      "tools.update_plan.enabled=true",
+      "-c",
+      "agents.max_concurrent_threads_per_session=12",
+      "-c",
+      "features.multi_agent_v2.max_concurrent_threads_per_session=13",
     ]);
   });
 
   it("uses a Cafe-scoped OpenAI provider when Responses WebSockets are disabled", () => {
-    assert.deepStrictEqual(buildCodexAppServerArgs({ responsesWebsockets: "disabled" }), [
-      "app-server",
-      "-c",
-      'model_provider="cafecode-openai-http"',
-      "-c",
-      'model_providers.cafecode-openai-http.name="OpenAI"',
-      "-c",
-      'model_providers.cafecode-openai-http.wire_api="responses"',
-      "-c",
-      "model_providers.cafecode-openai-http.requires_openai_auth=true",
-      "-c",
-      'model_providers.cafecode-openai-http.env_http_headers.OpenAI-Organization="OPENAI_ORGANIZATION"',
-      "-c",
-      'model_providers.cafecode-openai-http.env_http_headers.OpenAI-Project="OPENAI_PROJECT"',
-      "-c",
-      "model_providers.cafecode-openai-http.supports_websockets=false",
-    ]);
+    assert.deepStrictEqual(
+      buildCodexAppServerArgs({
+        maxConcurrentSubagents: 24,
+        transportPolicy: { responsesWebsockets: "disabled" },
+      }),
+      [
+        "app-server",
+        "-c",
+        "tools.update_plan.enabled=true",
+        "-c",
+        "agents.max_concurrent_threads_per_session=24",
+        "-c",
+        "features.multi_agent_v2.max_concurrent_threads_per_session=25",
+        "-c",
+        'model_provider="cafecode-openai-http"',
+        "-c",
+        'model_providers.cafecode-openai-http.name="OpenAI"',
+        "-c",
+        'model_providers.cafecode-openai-http.wire_api="responses"',
+        "-c",
+        "model_providers.cafecode-openai-http.requires_openai_auth=true",
+        "-c",
+        'model_providers.cafecode-openai-http.env_http_headers.OpenAI-Organization="OPENAI_ORGANIZATION"',
+        "-c",
+        'model_providers.cafecode-openai-http.env_http_headers.OpenAI-Project="OPENAI_PROJECT"',
+        "-c",
+        "model_providers.cafecode-openai-http.supports_websockets=false",
+      ],
+    );
+  });
+
+  it("rejects subagent limits outside the decoded provider-setting bounds", () => {
+    for (const maxConcurrentSubagents of [0, 65, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      assert.throws(
+        () => buildCodexAppServerArgs({ maxConcurrentSubagents }),
+        /maxConcurrentSubagents must be an integer between 1 and 64/,
+      );
+    }
+  });
+});
+
+describe("Codex protocol diagnostic redaction", () => {
+  it("redacts raw wire content and valid decoded auth recovery payloads", () => {
+    const raw = sanitizeCodexProtocolDiagnosticPayload({
+      direction: "incoming",
+      stage: "raw",
+      payload:
+        '{"method":"modelProvider/authRecoveryStarted","params":{"message":"raw-auth-sentinel"}}',
+    });
+    assert.deepStrictEqual(raw, {
+      redacted: true,
+      diagnosticClass: "incoming-raw-protocol-content",
+      byteLength: 87,
+    });
+    assert.doesNotMatch(JSON.stringify(raw), /raw-auth-sentinel/u);
+
+    const decoded = sanitizeCodexProtocolDiagnosticPayload({
+      direction: "incoming",
+      stage: "decoded",
+      payload: {
+        method: "modelProvider/authRecoveryCompleted",
+        params: {
+          provider: "decoded-provider-sentinel",
+          message: "decoded-message-sentinel",
+          threadId: "decoded-thread-sentinel",
+          turnId: "decoded-turn-sentinel",
+        },
+      },
+    });
+    assert.deepStrictEqual(decoded, {
+      method: "modelProvider/authRecoveryCompleted",
+      phase: "completed",
+      diagnosticClass: "notification-payload-redacted",
+    });
+    assert.doesNotMatch(
+      JSON.stringify(decoded),
+      /decoded-(?:provider|message|thread|turn)-sentinel/u,
+    );
+  });
+
+  it("removes credential-bearing values from malformed auth recovery diagnostics", () => {
+    for (const method of [
+      "modelProvider/authRecoveryStarted",
+      "modelProvider/authRecoveryCompleted",
+    ] as const) {
+      const sanitized = sanitizeCodexProtocolDiagnosticPayload({
+        stage: "decode_failed",
+        payload: {
+          detail: "schema failed against provider-message-sentinel",
+          method,
+          message: "provider-message-sentinel",
+          cause: {
+            actual: {
+              provider: "provider-account-sentinel",
+              threadId: "provider-thread-sentinel",
+              turnId: "provider-turn-sentinel",
+            },
+          },
+        },
+      });
+
+      assert.deepStrictEqual(sanitized, {
+        method,
+        phase: method === "modelProvider/authRecoveryStarted" ? "started" : "completed",
+        errorClass: "notification-schema-decode-failed",
+      });
+      assert.doesNotMatch(
+        JSON.stringify(sanitized),
+        /provider-(?:message|account|thread|turn)-sentinel/u,
+      );
+    }
+  });
+});
+
+describe("Codex terminal session state", () => {
+  it("clears a previous runtime error after successful completion", () => {
+    assert.deepStrictEqual(codexTerminalSessionPatch({ turnStatus: "completed" }), {
+      status: "ready",
+      activeTurnId: undefined,
+      lastError: undefined,
+    });
+  });
+
+  it("retains the current failure message after failed completion", () => {
+    assert.deepStrictEqual(
+      codexTerminalSessionPatch({
+        turnStatus: "failed",
+        errorMessage: "current turn failed",
+      }),
+      {
+        status: "error",
+        activeTurnId: undefined,
+        lastError: "current turn failed",
+      },
+    );
   });
 });
 
@@ -196,6 +932,33 @@ describe("Codex child conversation routing", () => {
     assert.equal(codexAggregateNotificationMethod("item/completed", true), "item/completed");
   });
 
+  it("projects only bounded child lifecycle snapshots needed by the subagent UI", () => {
+    assert.equal(
+      codexSubagentProjectionMethod({
+        method: "thread/status/changed",
+        params: { threadId: "thread-child", status: { type: "active", activeFlags: [] } },
+      }),
+      "codex.subagent/threadStatusChanged",
+    );
+    assert.equal(
+      codexSubagentProjectionMethod({
+        method: "item/completed",
+        params: {
+          threadId: "thread-child",
+          item: { id: "reasoning-1", type: "reasoning", summary: ["Working"] },
+        },
+      }),
+      "codex.subagent/itemCompleted",
+    );
+    assert.equal(
+      codexSubagentProjectionMethod({
+        method: "item/reasoning/summaryTextDelta",
+        params: { threadId: "thread-child", delta: "token" },
+      }),
+      undefined,
+    );
+  });
+
   it("routes multi-agent-v2 child output to the parent without forwarding child lifecycle", () => {
     const parentTurnId = TurnId.make("turn-parent");
     const routes = new Map<string, TurnId>();
@@ -239,6 +1002,59 @@ describe("Codex child conversation routing", () => {
       {
         parentTurnId,
         suppressLifecycle: true,
+      },
+    );
+    assert.deepStrictEqual(
+      resolveCodexChildConversationNotification(
+        routes,
+        {
+          method: "modelProvider/authRecoveryStarted",
+          params: {
+            threadId: "thread-child",
+            turnId: "turn-child",
+            provider: "bedrock",
+            message: "Refreshing credentials.",
+          },
+        },
+        "thread-parent",
+      ),
+      {
+        parentTurnId,
+        suppressLifecycle: false,
+      },
+    );
+    assert.deepStrictEqual(
+      resolveCodexChildConversationNotification(
+        routes,
+        {
+          method: "modelProvider/authRecoveryCompleted",
+          params: {
+            threadId: "thread-parent",
+            turnId: "turn-parent",
+            provider: "bedrock",
+            message: "Credentials refreshed.",
+          },
+        },
+        "thread-parent",
+      ),
+      undefined,
+    );
+    assert.deepStrictEqual(
+      resolveCodexChildConversationNotification(
+        routes,
+        {
+          method: "autoApprovalReview/strictReviewRequired",
+          params: {
+            threadId: "thread-child",
+            turnId: "turn-child",
+            startedAtMs: 1_778_000_000_000,
+          },
+        },
+        "thread-parent",
+      ),
+      {
+        parentTurnId,
+        suppressLifecycle: false,
       },
     );
     assert.deepStrictEqual(
@@ -293,6 +1109,76 @@ describe("Codex child conversation routing", () => {
         parentTurnId,
         suppressLifecycle: true,
       },
+    );
+    assert.deepStrictEqual(
+      resolveCodexChildConversationNotification(
+        routes,
+        {
+          method: "thread/goal/updated",
+          params: {
+            threadId: "thread-child",
+            goal: {
+              threadId: "thread-child",
+              objective: "Child objective",
+              status: "active",
+              tokenBudget: null,
+              tokensUsed: 0,
+              timeUsedSeconds: 0,
+              createdAt: 1,
+              updatedAt: 1,
+            },
+          },
+        },
+        "thread-parent",
+      ),
+      {
+        parentTurnId,
+        suppressLifecycle: true,
+      },
+    );
+    assert.deepStrictEqual(
+      resolveCodexChildConversationNotification(
+        routes,
+        {
+          method: "turn/plan/updated",
+          params: {
+            threadId: "thread-child",
+            turnId: "turn-child",
+            explanation: "Child-only checklist",
+            plan: [{ step: "Inspect child workspace", status: "inProgress" }],
+          },
+        },
+        "thread-parent",
+      ),
+      {
+        parentTurnId,
+        suppressLifecycle: true,
+      },
+    );
+  });
+
+  it("forwards goal notifications only from the root provider thread", () => {
+    const rootGoal = {
+      method: "thread/goal/cleared",
+      params: { threadId: "thread-parent" },
+    } as const;
+    const childGoal = {
+      method: "thread/goal/cleared",
+      params: { threadId: "thread-child" },
+    } as const;
+
+    assert.equal(shouldForwardCodexRootGoalNotification(rootGoal, "thread-parent"), true);
+    assert.equal(shouldForwardCodexRootGoalNotification(childGoal, "thread-parent"), false);
+    assert.equal(shouldForwardCodexRootGoalNotification(rootGoal, undefined), false);
+    assert.equal(
+      shouldForwardCodexRootGoalNotification(
+        {
+          method: "item/completed",
+          params: { threadId: "thread-child" },
+        },
+        "thread-parent",
+      ),
+      true,
     );
   });
 
@@ -417,8 +1303,22 @@ describe("Codex child conversation routing", () => {
       },
       "2026-07-14T00:00:02.000Z",
     );
-    const allCompleted = updateCodexChildConversationLiveness(
+    const childAAuthCompletionReplay = updateCodexChildConversationLiveness(
       childACompleted,
+      routes,
+      {
+        method: "modelProvider/authRecoveryCompleted",
+        params: {
+          threadId: "thread-child-a",
+          turnId: "turn-child-a",
+          provider: "example-provider",
+          message: "Credentials refreshed.",
+        },
+      },
+      "2026-07-14T00:00:02.500Z",
+    );
+    const allCompleted = updateCodexChildConversationLiveness(
+      childAAuthCompletionReplay,
       routes,
       {
         method: "thread/status/changed",
@@ -429,11 +1329,70 @@ describe("Codex child conversation routing", () => {
 
     assert.equal(childAStarted.get("thread-child-a")?.state, "active");
     assert.equal(childACompleted.get("thread-child-a")?.state, "inactive");
+    assert.equal(childAAuthCompletionReplay.get("thread-child-a")?.state, "inactive");
+    assert.equal(childAAuthCompletionReplay.get("thread-child-a")?.method, "turn/completed");
     assert.equal(allCompleted.get("thread-child-b")?.state, "inactive");
     assert.equal(
       codexAggregateTurnHasUnfinishedChildren(routes, allCompleted, parentTurnId),
       false,
     );
+  });
+
+  it("uses parent-emitted completed subagent activity as authoritative child liveness", () => {
+    const parentTurnId = TurnId.make("turn-parent");
+    const routes = new Map<string, TurnId>([["thread-child", parentTurnId]]);
+    const started = updateCodexChildConversationLiveness(
+      new Map(),
+      routes,
+      {
+        method: "item/started",
+        params: {
+          threadId: "thread-parent",
+          turnId: "turn-parent",
+          item: {
+            type: "subAgentActivity",
+            id: "subagent-activity-started",
+            kind: "started",
+            agentThreadId: "thread-child",
+            agentPath: "/root/workers/audit",
+          },
+        },
+      },
+      "2026-08-27T00:00:00.000Z",
+    );
+    const completed = updateCodexChildConversationLiveness(
+      started,
+      routes,
+      {
+        method: "item/completed",
+        params: {
+          threadId: "thread-parent",
+          turnId: "turn-parent",
+          item: {
+            type: "subAgentActivity",
+            id: "subagent-activity-completed",
+            kind: "completed",
+            agentThreadId: "thread-child",
+            agentPath: "/root/workers/audit",
+          },
+        },
+      },
+      "2026-08-27T00:00:01.000Z",
+    );
+
+    assert.deepStrictEqual(started.get("thread-child"), {
+      parentTurnId,
+      state: "active",
+      observedAt: "2026-08-27T00:00:00.000Z",
+      method: "subAgentActivity:started",
+    });
+    assert.deepStrictEqual(completed.get("thread-child"), {
+      parentTurnId,
+      state: "inactive",
+      observedAt: "2026-08-27T00:00:01.000Z",
+      method: "subAgentActivity:completed",
+    });
+    assert.equal(codexAggregateTurnHasUnfinishedChildren(routes, completed, parentTurnId), false);
   });
 
   it("resets child liveness when Codex reuses a child thread for a later parent turn", () => {
@@ -486,6 +1445,30 @@ describe("Codex child conversation routing", () => {
       false,
     );
     assert.equal(
+      isCodexChildConversationWorkNotification({
+        method: "modelProvider/authRecoveryStarted",
+        params: {
+          threadId: "thread-child",
+          turnId: "turn-child",
+          provider: "example-provider",
+          message: "Refreshing credentials.",
+        },
+      }),
+      false,
+    );
+    assert.equal(
+      isCodexChildConversationWorkNotification({
+        method: "modelProvider/authRecoveryCompleted",
+        params: {
+          threadId: "thread-child",
+          turnId: "turn-child",
+          provider: "example-provider",
+          message: "Credentials refreshed.",
+        },
+      }),
+      false,
+    );
+    assert.equal(
       isTerminalCodexChildThreadReadError(new Error("thread not loaded: child-1")),
       true,
     );
@@ -524,6 +1507,20 @@ describe("Codex notification route fields", () => {
       {
         turnId: TurnId.make("turn-1"),
         itemId: ProviderItemId.make("review-1"),
+      },
+    );
+    assert.deepStrictEqual(
+      readCodexNotificationRouteFields({
+        method: "autoApprovalReview/strictReviewRequired",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          startedAtMs: 1_778_000_000_000,
+        },
+      }),
+      {
+        turnId: TurnId.make("turn-1"),
+        itemId: undefined,
       },
     );
   });
@@ -571,6 +1568,70 @@ describe("Codex notification route fields", () => {
         itemId: undefined,
       },
     );
+    assert.deepStrictEqual(
+      readCodexNotificationRouteFields({
+        method: "modelProvider/authRecoveryStarted",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-auth-recovery",
+          provider: "bedrock",
+          message: "Refreshing credentials.",
+        },
+      }),
+      {
+        turnId: TurnId.make("turn-auth-recovery"),
+        itemId: undefined,
+      },
+    );
+    assert.deepStrictEqual(
+      readCodexNotificationRouteFields({
+        method: "modelProvider/authRecoveryCompleted",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-auth-recovery",
+          provider: "bedrock",
+          message: "Credentials refreshed.",
+        },
+      }),
+      {
+        turnId: TurnId.make("turn-auth-recovery"),
+        itemId: undefined,
+      },
+    );
+    assert.deepStrictEqual(
+      readCodexNotificationRouteFields({
+        method: "thread/realtime/item/started",
+        params: {
+          threadId: "thread-1",
+          item: {
+            type: "bemItemPromoted",
+            id: "realtime-item-1",
+            realtimeSessionId: "realtime-session-1",
+            item_id: "provider-item-1",
+            turn_id: "turn-realtime-1",
+            presentation: { type: "wholeItem" },
+          },
+        },
+      }),
+      {
+        turnId: TurnId.make("turn-realtime-1"),
+        itemId: ProviderItemId.make("realtime-item-1"),
+      },
+    );
+    assert.deepStrictEqual(
+      readCodexNotificationRouteFields({
+        method: "thread/realtime/item/transcript/delta",
+        params: {
+          threadId: "thread-1",
+          itemId: "realtime-transcript-1",
+          delta: "private transcript text",
+        },
+      }),
+      {
+        turnId: undefined,
+        itemId: ProviderItemId.make("realtime-transcript-1"),
+      },
+    );
   });
 });
 
@@ -592,6 +1653,7 @@ function makeThreadOpenResponse(
       id: threadId,
       modelProvider: "openai",
       preview: "",
+      projectId: null,
       sessionId: "session-1",
       source: "cli",
       turns: [],
@@ -761,10 +1823,12 @@ describe("buildTurnStartParams", () => {
 
 describe("buildTurnSteerParams", () => {
   it("builds the upstream Codex turn/steer shape without turn-start overrides", () => {
+    const clientCorrelationId = buildCodexSteerClientCorrelationId("message-1");
     const params = Effect.runSync(
       buildTurnSteerParams({
         threadId: "provider-thread-1",
         expectedTurnId: TurnId.make("turn-active"),
+        clientUserMessageId: clientCorrelationId,
         prompt: "stay on this path",
         attachments: [
           {
@@ -778,6 +1842,7 @@ describe("buildTurnSteerParams", () => {
     assert.deepStrictEqual(params, {
       threadId: "provider-thread-1",
       expectedTurnId: "turn-active",
+      clientUserMessageId: clientCorrelationId,
       input: [
         {
           type: "text",
@@ -918,12 +1983,116 @@ describe("Codex context compaction steer guard", () => {
 });
 
 describe("Codex steer processing diagnostics", () => {
+  it("accepts only fixed-size correlations inside provider runtime state", () => {
+    const token = buildCodexSteerClientCorrelationId("message-1");
+
+    assert.equal(
+      resolveCodexSessionRuntimeSteerClientCorrelationId({
+        clientCorrelationId: token,
+        fallbackSource: "unused",
+      }),
+      token,
+    );
+    assert.equal(
+      resolveCodexSessionRuntimeSteerClientCorrelationId({
+        clientCorrelationId: `raw-message-${"x".repeat(4_096)}`,
+        fallbackSource: "unused",
+      }),
+      undefined,
+    );
+    assert.equal(
+      resolveCodexSessionRuntimeSteerClientCorrelationId({
+        clientCorrelationId: undefined,
+        fallbackSource: "steer-random-source",
+      }),
+      buildCodexSteerClientCorrelationId("steer-random-source"),
+    );
+  });
+
   it("recognizes upstream user-message item type spellings", () => {
     assert.equal(isCodexUserMessageItemType("userMessage"), true);
     assert.equal(isCodexUserMessageItemType("user_message"), true);
     assert.equal(isCodexUserMessageItemType("user-message"), true);
     assert.equal(isCodexUserMessageItemType("commandExecution"), false);
     assert.equal(isCodexUserMessageItemType(undefined), false);
+  });
+
+  it("recovers a bounded content-free message correlation after runtime restart", () => {
+    const clientCorrelationId = buildCodexSteerClientCorrelationId("message-after-restart");
+    const result = updateCodexPendingSteerProcessingFromNotification(new Map(), {
+      method: "item/started",
+      providerThreadId: "provider-thread-1",
+      turnId: TurnId.make("turn-active"),
+      itemId: ProviderItemId.make("user-message-after-restart"),
+      itemType: "userMessage",
+      clientUserMessageId: clientCorrelationId,
+      observedAt: "2026-05-26T00:00:03.000Z",
+      observedAtMs: 3_000,
+    });
+
+    assert.equal(result.pending, undefined);
+    assert.deepStrictEqual(result.restartedObservation, {
+      clientCorrelationId,
+      providerThreadId: "provider-thread-1",
+      turnId: "turn-active",
+      providerUserMessageItemId: "user-message-after-restart",
+      providerUserMessageMethod: "item/started",
+      observedAt: "2026-05-26T00:00:03.000Z",
+    });
+    assert.equal(result.next.size, 0);
+  });
+
+  it("rejects malformed or oversized provider client ids from restart correlation", () => {
+    const valid = buildCodexSteerClientCorrelationId("message-1");
+    assert.equal(parseCodexSteerClientCorrelationId(" message-1"), undefined);
+    assert.equal(parseCodexSteerClientCorrelationId("message-1\nspoof"), undefined);
+    assert.equal(parseCodexSteerClientCorrelationId(`message-${"x".repeat(600)}`), undefined);
+    assert.equal(parseCodexSteerClientCorrelationId(valid), valid);
+
+    const malformed = updateCodexPendingSteerProcessingFromNotification(new Map(), {
+      method: "item/started",
+      turnId: TurnId.make("turn-active"),
+      itemType: "userMessage",
+      clientUserMessageId: "message-1\u202Espoof",
+      observedAt: "2026-05-26T00:00:03.000Z",
+      observedAtMs: 3_000,
+    });
+    assert.equal(malformed.restartedObservation, undefined);
+  });
+
+  it("deduplicates restart observations across the provider item lifecycle with bounded history", () => {
+    const observation = {
+      clientCorrelationId: buildCodexSteerClientCorrelationId("message-after-restart"),
+      providerThreadId: "provider-thread-1",
+      turnId: TurnId.make("turn-active"),
+      providerUserMessageItemId: ProviderItemId.make("item-after-restart"),
+      providerUserMessageMethod: "item/started",
+      observedAt: "2026-05-26T00:00:03.000Z",
+    };
+    const started = claimCodexRestartedSteerProcessingObservation(new Map(), observation);
+    const completed = claimCodexRestartedSteerProcessingObservation(started.next, {
+      ...observation,
+      providerUserMessageMethod: "item/completed",
+      observedAt: "2026-05-26T00:00:03.100Z",
+    });
+
+    assert.equal(started.claimed, true);
+    assert.equal(completed.claimed, false);
+    assert.equal(completed.next.size, 1);
+
+    let bounded = completed.next;
+    for (let index = 0; index < 1_000; index += 1) {
+      const claim = claimCodexRestartedSteerProcessingObservation(bounded, {
+        ...observation,
+        clientCorrelationId: buildCodexSteerClientCorrelationId(`message-${index}`),
+        observedAt: new Date(Date.UTC(2026, 4, 26) + index).toISOString(),
+      });
+      assert.equal(claim.claimed, true);
+      bounded = claim.next;
+    }
+    assert.equal(bounded.size, 256);
+    assert.equal(bounded.has(buildCodexSteerClientCorrelationId("message-after-restart")), false);
+    assert.equal(bounded.has(buildCodexSteerClientCorrelationId("message-999")), true);
   });
 
   it("summarizes active app-server child processes without leaking credential material", () => {
@@ -1091,6 +2260,7 @@ describe("Codex steer processing diagnostics", () => {
     const turnId = TurnId.make("turn-active");
     const first = {
       steerId: "steer-1",
+      clientCorrelationId: buildCodexSteerClientCorrelationId("message-1"),
       providerThreadId: "provider-thread-1",
       turnId,
       requestedAt: "2026-05-26T00:00:00.000Z",
@@ -1132,10 +2302,587 @@ describe("Codex steer processing diagnostics", () => {
     assert.equal(next.get("steer-2")?.processedAt, undefined);
   });
 
+  it("matches an injected user message to its client correlation instead of acknowledgement order", () => {
+    const turnId = TurnId.make("turn-active");
+    const secondMessageId = decodeMessageId(`message-\u0000-\u202e-${"x".repeat(600)}-tail`);
+    const first: CodexPendingSteerProcessing = {
+      steerId: "steer-1",
+      clientCorrelationId: buildCodexSteerClientCorrelationId("message-1"),
+      providerThreadId: "provider-thread-1",
+      turnId,
+      requestedAt: "2026-05-26T00:00:00.000Z",
+      acknowledgedAt: "2026-05-26T00:00:00.100Z",
+      acknowledgedAtMs: 100,
+      ackLatencyMs: 100,
+      promptByteLength: 10,
+      attachmentCount: 0,
+      warningCount: 0,
+    };
+    const second: CodexPendingSteerProcessing = {
+      ...first,
+      steerId: "steer-2",
+      clientCorrelationId: buildCodexSteerClientCorrelationId(secondMessageId),
+      requestedAt: "2026-05-26T00:00:02.000Z",
+      acknowledgedAt: "2026-05-26T00:00:02.100Z",
+      acknowledgedAtMs: 2_100,
+    };
+
+    const { pending, next } = updateCodexPendingSteerProcessingFromNotification(
+      new Map([
+        [first.steerId, first],
+        [second.steerId, second],
+      ]),
+      {
+        method: "item/started",
+        providerThreadId: "provider-thread-1",
+        turnId,
+        itemId: ProviderItemId.make("user-message-2"),
+        itemType: "userMessage",
+        clientUserMessageId: second.clientCorrelationId,
+        observedAt: "2026-05-26T00:00:03.000Z",
+        observedAtMs: 3_000,
+      },
+    );
+
+    assert.equal(pending?.steerId, "steer-2");
+    assert.equal(pending?.clientCorrelationId, buildCodexSteerClientCorrelationId(secondMessageId));
+    assert.equal(pending?.providerUserMessageItemId, "user-message-2");
+    assert.equal(next.get("steer-1")?.processedAt, undefined);
+    const serializedPendingState = JSON.stringify([...next]);
+    assert.equal(serializedPendingState.includes('"messageId"'), false);
+    assert.equal(serializedPendingState.includes("x".repeat(600)), false);
+  });
+
+  it("does not consume another pending steer for an unknown client correlation", () => {
+    const turnId = TurnId.make("turn-active");
+    const pendingSteer = {
+      steerId: "steer-1",
+      clientCorrelationId: buildCodexSteerClientCorrelationId("message-1"),
+      providerThreadId: "provider-thread-1",
+      turnId,
+      requestedAt: "2026-05-26T00:00:00.000Z",
+      acknowledgedAt: "2026-05-26T00:00:00.100Z",
+      acknowledgedAtMs: 100,
+      ackLatencyMs: 100,
+      promptByteLength: 10,
+      attachmentCount: 0,
+      warningCount: 0,
+    };
+
+    const { pending, restartedObservation, next } =
+      updateCodexPendingSteerProcessingFromNotification(
+        new Map([[pendingSteer.steerId, pendingSteer]]),
+        {
+          method: "item/started",
+          providerThreadId: "provider-thread-1",
+          turnId,
+          itemId: ProviderItemId.make("unrelated-user-message"),
+          itemType: "userMessage",
+          clientUserMessageId: buildCodexSteerClientCorrelationId("some-other-client-message"),
+          observedAt: "2026-05-26T00:00:03.000Z",
+          observedAtMs: 3_000,
+        },
+      );
+
+    assert.equal(pending, undefined);
+    assert.equal(
+      restartedObservation?.clientCorrelationId,
+      buildCodexSteerClientCorrelationId("some-other-client-message"),
+    );
+    assert.equal(next.get("steer-1")?.processedAt, undefined);
+  });
+
+  it("does not let an exact client id rebind a steer from another turn", () => {
+    const targetTurnId = TurnId.make("turn-target");
+    const unrelatedTurnId = TurnId.make("turn-unrelated");
+    const pendingSteer = {
+      steerId: "steer-1",
+      clientCorrelationId: buildCodexSteerClientCorrelationId("message-1"),
+      providerThreadId: "provider-thread-1",
+      turnId: targetTurnId,
+      requestedAt: "2026-05-26T00:00:00.000Z",
+      acknowledgedAt: "2026-05-26T00:00:00.100Z",
+      acknowledgedAtMs: 100,
+      ackLatencyMs: 100,
+      promptByteLength: 10,
+      attachmentCount: 0,
+      warningCount: 0,
+    };
+
+    const { pending, restartedObservation, next } =
+      updateCodexPendingSteerProcessingFromNotification(
+        new Map([[pendingSteer.steerId, pendingSteer]]),
+        {
+          method: "item/started",
+          providerThreadId: pendingSteer.providerThreadId,
+          turnId: unrelatedTurnId,
+          itemId: ProviderItemId.make("spoofed-user-message"),
+          itemType: "userMessage",
+          clientUserMessageId: pendingSteer.clientCorrelationId,
+          observedAt: "2026-05-26T00:00:03.000Z",
+          observedAtMs: 3_000,
+        },
+      );
+
+    assert.equal(pending, undefined);
+    assert.equal(restartedObservation, undefined);
+    assert.equal(next.get(pendingSteer.steerId)?.turnId, targetTurnId);
+    assert.equal(next.get(pendingSteer.steerId)?.processedAt, undefined);
+  });
+
+  it("records provider processing when the correlated user message arrives before acknowledgement", () => {
+    const turnId = TurnId.make("turn-active");
+    const inFlightSteer = {
+      steerId: "steer-1",
+      clientCorrelationId: buildCodexSteerClientCorrelationId("message-1"),
+      providerThreadId: "provider-thread-1",
+      turnId,
+      requestedAt: "2026-05-26T00:00:00.000Z",
+      promptByteLength: 10,
+      attachmentCount: 0,
+      warningCount: 0,
+    };
+
+    const { pending, next } = updateCodexPendingSteerProcessingFromNotification(
+      new Map([[inFlightSteer.steerId, inFlightSteer]]),
+      {
+        method: "item/started",
+        providerThreadId: "provider-thread-1",
+        turnId,
+        itemId: ProviderItemId.make("user-message-1"),
+        itemType: "userMessage",
+        clientUserMessageId: inFlightSteer.clientCorrelationId,
+        observedAt: "2026-05-26T00:00:00.050Z",
+        observedAtMs: 50,
+      },
+    );
+
+    assert.equal(pending?.steerId, "steer-1");
+    assert.equal(pending?.processedAt, "2026-05-26T00:00:00.050Z");
+    assert.equal(pending?.providerUserMessageItemId, "user-message-1");
+    assert.equal(pending?.ackToProviderItemMs, undefined);
+    assert.equal(next.get("steer-1")?.processedAt, "2026-05-26T00:00:00.050Z");
+  });
+
+  it("preserves terminal state when acknowledgement arrives after completion", () => {
+    const turnId = TurnId.make("turn-active");
+    const inFlightSteer = {
+      steerId: "steer-1",
+      clientCorrelationId: buildCodexSteerClientCorrelationId("message-1"),
+      providerThreadId: "provider-thread-1",
+      turnId,
+      requestedAt: "2026-05-26T00:00:00.000Z",
+      promptByteLength: 10,
+      attachmentCount: 0,
+      warningCount: 0,
+    };
+
+    const terminal = terminalizeCodexPendingSteerProcessing(
+      new Map([[inFlightSteer.steerId, inFlightSteer]]),
+      {
+        turnId,
+        terminalState: "interrupted",
+        observedAt: "2026-05-26T00:00:00.050Z",
+      },
+    );
+    const acknowledged = acknowledgeCodexPendingSteerProcessing(terminal.next, {
+      steerId: inFlightSteer.steerId,
+      turnId,
+      acknowledgedAt: "2026-05-26T00:00:00.100Z",
+      acknowledgedAtMs: 100,
+      ackLatencyMs: 100,
+    });
+    assert.equal(acknowledged.pending?.steerId, inFlightSteer.steerId);
+    assert.equal(acknowledged.pending?.terminalState, "interrupted");
+
+    const replayedTerminal = terminalizeCodexPendingSteerProcessing(acknowledged.next, {
+      turnId,
+      terminalState: "interrupted",
+      observedAt: "2026-05-26T00:00:00.200Z",
+    });
+    assert.equal(replayedTerminal.next.get(inFlightSteer.steerId)?.terminalState, "interrupted");
+  });
+
+  effectIt.effect(
+    "keeps an authoritative thread/read terminal snapshot final when the steer ACK resumes late",
+    () =>
+      Effect.gen(function* () {
+        const turnId = TurnId.make("turn-active");
+        const pending = makePendingSteerProcessingFixture(1);
+        const pendingRef = yield* Ref.make(
+          new Map<string, CodexPendingSteerProcessing>([[pending.steerId, pending]]),
+        );
+        const sessionRef = yield* Ref.make<ProviderSession>({
+          provider: ProviderDriverKind.make("codex"),
+          status: "running",
+          runtimeMode: "full-access",
+          cwd: "/workspace",
+          threadId: ThreadId.make("thread-1"),
+          activeTurnId: turnId,
+          createdAt: "2026-05-26T00:00:00.000Z",
+          updatedAt: "2026-05-26T00:00:00.000Z",
+          lastError: "stale failure from a previous turn",
+        });
+        const semaphore = yield* Semaphore.make(1);
+        const ackWaiting = yield* Deferred.make<void>();
+        const releaseAck = yield* Deferred.make<void>();
+
+        // Model the JSON-RPC response continuation being runnable but held
+        // until the authoritative thread/read handler has committed. This
+        // gives the regression a deterministic late-ACK order without sleeps.
+        const acknowledgementFiber = yield* Effect.gen(function* () {
+          yield* Deferred.succeed(ackWaiting, undefined);
+          yield* Deferred.await(releaseAck);
+          return yield* acknowledgeCodexSteerLifecycleBoundary({
+            semaphore,
+            pendingRef,
+            sessionRef,
+            steerId: pending.steerId,
+            expectedTurnId: turnId,
+            turnId,
+            acknowledgedAt: "2026-05-26T00:00:00.100Z",
+            acknowledgedAtMs: 100,
+            ackLatencyMs: 100,
+          });
+        }).pipe(Effect.forkChild);
+
+        yield* Deferred.await(ackWaiting);
+        yield* reconcileCodexTerminalSnapshotSteerLifecycle({
+          semaphore,
+          pendingRef,
+          sessionRef,
+          turnId,
+          turnStatus: "completed",
+          observedAt: "2026-05-26T00:00:00.050Z",
+        });
+        yield* Deferred.succeed(releaseAck, undefined);
+
+        const acknowledgement = yield* Fiber.join(acknowledgementFiber);
+        const finalSession = yield* Ref.get(sessionRef);
+        const finalPending = (yield* Ref.get(pendingRef)).get(pending.steerId);
+
+        assert.equal(acknowledgement.restoredRunning, false);
+        assert.equal(acknowledgement.pending?.acknowledgedAt, "2026-05-26T00:00:00.100Z");
+        assert.equal(finalSession.status, "ready");
+        assert.equal(finalSession.activeTurnId, undefined);
+        assert.equal(finalSession.lastError, undefined);
+        assert.equal(finalSession.updatedAt, "2026-05-26T00:00:00.050Z");
+        assert.equal(finalPending?.terminalState, "completed");
+        assert.equal(finalPending?.terminalObservedAt, "2026-05-26T00:00:00.050Z");
+        assert.equal(finalPending?.acknowledgedAt, "2026-05-26T00:00:00.100Z");
+      }),
+  );
+
+  effectIt.effect("commits a late T1 completion before publication without clearing live T2", () =>
+    Effect.gen(function* () {
+      const firstTurnId = TurnId.make("turn-1");
+      const secondTurnId = TurnId.make("turn-2");
+      const pending = {
+        ...makePendingSteerProcessingFixture(1),
+        turnId: firstTurnId,
+      } satisfies CodexPendingSteerProcessing;
+      const pendingRef = yield* Ref.make(
+        new Map<string, CodexPendingSteerProcessing>([[pending.steerId, pending]]),
+      );
+      const sessionRef = yield* Ref.make<ProviderSession>({
+        provider: ProviderDriverKind.make("codex"),
+        status: "running",
+        runtimeMode: "full-access",
+        cwd: "/workspace",
+        threadId: ThreadId.make("thread-1"),
+        activeTurnId: firstTurnId,
+        createdAt: "2026-05-26T00:00:00.000Z",
+        updatedAt: "2026-05-26T00:00:00.000Z",
+      });
+      const semaphore = yield* Semaphore.make(1);
+      const terminalWaiting = yield* Deferred.make<void>();
+      const releaseTerminal = yield* Deferred.make<void>();
+      const stateObservedAtPublication = yield* Ref.make<{
+        readonly session: ProviderSession;
+        readonly pending: CodexPendingSteerProcessing | undefined;
+      } | null>(null);
+
+      // Hold the old turn's terminal handler until the newer turn has become
+      // visible. This models independent notification fibers without sleeps
+      // or relying on scheduler/semaphore FIFO behavior.
+      const terminalFiber = yield* Effect.gen(function* () {
+        yield* Deferred.succeed(terminalWaiting, undefined);
+        yield* Deferred.await(releaseTerminal);
+        return yield* publishCodexTurnCompletionAfterLifecycleBoundary({
+          semaphore,
+          pendingRef,
+          sessionRef,
+          turnId: firstTurnId,
+          turnStatus: "completed",
+          observedAt: "2026-05-26T00:00:00.200Z",
+          publish: Effect.gen(function* () {
+            const session = yield* Ref.get(sessionRef);
+            const pendingAtPublication = (yield* Ref.get(pendingRef)).get(pending.steerId);
+            yield* Ref.set(stateObservedAtPublication, {
+              session,
+              pending: pendingAtPublication,
+            });
+          }),
+        });
+      }).pipe(Effect.forkChild);
+
+      yield* Deferred.await(terminalWaiting);
+      yield* Ref.update(sessionRef, (session) => ({
+        ...session,
+        status: "running" as const,
+        activeTurnId: secondTurnId,
+        lastError: "turn-2 remains live",
+        updatedAt: "2026-05-26T00:00:00.100Z",
+      }));
+      yield* Deferred.succeed(releaseTerminal, undefined);
+
+      const terminalizedVisibleSession = yield* Fiber.join(terminalFiber);
+      const finalSession = yield* Ref.get(sessionRef);
+      const finalPending = (yield* Ref.get(pendingRef)).get(pending.steerId);
+      const publishedState = yield* Ref.get(stateObservedAtPublication);
+
+      assert.equal(terminalizedVisibleSession, false);
+      assert.equal(finalSession.status, "running");
+      assert.equal(finalSession.activeTurnId, secondTurnId);
+      assert.equal(finalSession.lastError, "turn-2 remains live");
+      assert.equal(finalSession.updatedAt, "2026-05-26T00:00:00.100Z");
+      assert.equal(finalPending?.terminalState, "completed");
+      assert.equal(finalPending?.terminalObservedAt, "2026-05-26T00:00:00.200Z");
+      assert.equal(publishedState?.session.activeTurnId, secondTurnId);
+      assert.equal(publishedState?.pending?.terminalState, "completed");
+    }),
+  );
+
+  effectIt.effect("does not apply a late T1 failure to live T2", () =>
+    Effect.gen(function* () {
+      const firstTurnId = TurnId.make("turn-1");
+      const secondTurnId = TurnId.make("turn-2");
+      const pending = {
+        ...makePendingSteerProcessingFixture(1),
+        turnId: firstTurnId,
+      } satisfies CodexPendingSteerProcessing;
+      const pendingRef = yield* Ref.make(
+        new Map<string, CodexPendingSteerProcessing>([[pending.steerId, pending]]),
+      );
+      const sessionRef = yield* Ref.make<ProviderSession>({
+        provider: ProviderDriverKind.make("codex"),
+        status: "running",
+        runtimeMode: "full-access",
+        cwd: "/workspace",
+        threadId: ThreadId.make("thread-1"),
+        activeTurnId: secondTurnId,
+        createdAt: "2026-05-26T00:00:00.000Z",
+        updatedAt: "2026-05-26T00:00:00.100Z",
+        lastError: "turn-2 diagnostic",
+      });
+      const semaphore = yield* Semaphore.make(1);
+      const stateObservedAtPublication = yield* Ref.make<ProviderSession | null>(null);
+
+      const terminalizedVisibleSession = yield* publishCodexTurnCompletionAfterLifecycleBoundary({
+        semaphore,
+        pendingRef,
+        sessionRef,
+        turnId: firstTurnId,
+        turnStatus: "failed",
+        errorMessage: "turn-1 failed late",
+        observedAt: "2026-05-26T00:00:00.200Z",
+        publish: Ref.get(sessionRef).pipe(
+          Effect.flatMap((session) => Ref.set(stateObservedAtPublication, session)),
+        ),
+      });
+
+      const finalSession = yield* Ref.get(sessionRef);
+      const finalPending = (yield* Ref.get(pendingRef)).get(pending.steerId);
+      const publishedSession = yield* Ref.get(stateObservedAtPublication);
+
+      assert.equal(terminalizedVisibleSession, false);
+      assert.equal(finalSession.activeTurnId, secondTurnId);
+      assert.equal(finalSession.status, "running");
+      assert.equal(finalSession.lastError, "turn-2 diagnostic");
+      assert.equal(finalPending?.terminalState, "failed");
+      assert.equal(publishedSession?.activeTurnId, secondTurnId);
+      assert.equal(publishedSession?.lastError, "turn-2 diagnostic");
+    }),
+  );
+
+  it("does not recover a steer whose correlated user message was processed before terminal", () => {
+    const turnId = TurnId.make("turn-active");
+    const inFlightSteer = {
+      steerId: "steer-1",
+      clientCorrelationId: buildCodexSteerClientCorrelationId("message-1"),
+      providerThreadId: "provider-thread-1",
+      turnId,
+      requestedAt: "2026-05-26T00:00:00.000Z",
+      promptByteLength: 10,
+      attachmentCount: 0,
+      warningCount: 0,
+    };
+    const processed = updateCodexPendingSteerProcessingFromNotification(
+      new Map([[inFlightSteer.steerId, inFlightSteer]]),
+      {
+        method: "item/started",
+        providerThreadId: inFlightSteer.providerThreadId,
+        turnId,
+        itemId: ProviderItemId.make("user-message-1"),
+        itemType: "userMessage",
+        clientUserMessageId: inFlightSteer.clientCorrelationId,
+        observedAt: "2026-05-26T00:00:00.050Z",
+        observedAtMs: 50,
+      },
+    );
+    const acknowledged = acknowledgeCodexPendingSteerProcessing(processed.next, {
+      steerId: inFlightSteer.steerId,
+      turnId,
+      acknowledgedAt: "2026-05-26T00:00:00.100Z",
+      acknowledgedAtMs: 100,
+      ackLatencyMs: 100,
+    });
+    assert.equal(acknowledged.pending?.ackToProviderItemMs, 0);
+
+    const terminal = terminalizeCodexPendingSteerProcessing(acknowledged.next, {
+      turnId,
+      terminalState: "completed",
+      observedAt: "2026-05-26T00:00:00.200Z",
+    });
+    assert.equal(terminal.next.get(inFlightSteer.steerId)?.processedAt !== undefined, true);
+  });
+
+  it("retargets a stale expected-turn correlation before retrying provider I/O", () => {
+    const staleTurnId = TurnId.make("turn-stale");
+    const activeTurnId = TurnId.make("turn-active");
+    const pending = {
+      steerId: "steer-1",
+      clientCorrelationId: buildCodexSteerClientCorrelationId("message-1"),
+      providerThreadId: "provider-thread-1",
+      turnId: staleTurnId,
+      requestedAt: "2026-05-26T00:00:00.000Z",
+      promptByteLength: 10,
+      attachmentCount: 0,
+      warningCount: 0,
+      terminalObservedAt: "2026-05-26T00:00:00.050Z",
+      terminalState: "completed" as const,
+    };
+
+    const retargeted = retargetCodexPendingSteerProcessing(new Map([[pending.steerId, pending]]), {
+      steerId: pending.steerId,
+      turnId: activeTurnId,
+    });
+    assert.equal(retargeted.get(pending.steerId)?.turnId, activeTurnId);
+    assert.equal(retargeted.get(pending.steerId)?.terminalObservedAt, undefined);
+
+    const terminal = terminalizeCodexPendingSteerProcessing(retargeted, {
+      turnId: activeTurnId,
+      terminalState: "interrupted",
+      observedAt: "2026-05-26T00:00:00.100Z",
+    });
+    const acknowledged = acknowledgeCodexPendingSteerProcessing(terminal.next, {
+      steerId: pending.steerId,
+      turnId: activeTurnId,
+      acknowledgedAt: "2026-05-26T00:00:00.150Z",
+      acknowledgedAtMs: 150,
+      ackLatencyMs: 150,
+    });
+    assert.equal(acknowledged.pending?.turnId, activeTurnId);
+    assert.equal(acknowledged.pending?.terminalState, "interrupted");
+  });
+
+  it("never evicts unresolved steer correlations to enforce the history cap", () => {
+    const unresolved = new Map<string, CodexPendingSteerProcessing>(
+      Array.from({ length: 51 }, (_, index) => {
+        const steerId = `steer-${index.toString().padStart(2, "0")}`;
+        return [
+          steerId,
+          {
+            steerId,
+            clientCorrelationId: buildCodexSteerClientCorrelationId(`message-${index}`),
+            providerThreadId: "provider-thread-1",
+            turnId: TurnId.make("turn-active"),
+            requestedAt: `2026-05-26T00:00:${index.toString().padStart(2, "0")}.000Z`,
+            promptByteLength: 10,
+            attachmentCount: 0,
+            warningCount: 0,
+          },
+        ] as const;
+      }),
+    );
+
+    assert.equal(prunePendingSteerProcessing(unresolved).size, 51);
+
+    const withSettledOldest = new Map(unresolved);
+    const oldest = withSettledOldest.get("steer-00")!;
+    withSettledOldest.set("steer-00", {
+      ...oldest,
+      processedAt: "2026-05-26T00:01:00.000Z",
+    });
+    const pruned = prunePendingSteerProcessing(withSettledOldest);
+    assert.equal(pruned.size, 50);
+    assert.equal(pruned.has("steer-00"), false);
+  });
+
+  it("applies bounded backpressure without evicting unresolved accepted or ambiguous steers", () => {
+    let current = new Map<string, CodexPendingSteerProcessing>();
+    for (let index = 0; index < CODEX_PENDING_STEER_UNRESOLVED_CAPACITY; index += 1) {
+      const admission = admitCodexPendingSteerProcessing(
+        current,
+        makePendingSteerProcessingFixture(index),
+      );
+      assert.equal(admission.admitted, true);
+      current = admission.next;
+    }
+
+    const protectedIds = [...current.keys()];
+    for (let index = 0; index < 2_000; index += 1) {
+      const denied = admitCodexPendingSteerProcessing(
+        current,
+        makePendingSteerProcessingFixture(CODEX_PENDING_STEER_UNRESOLVED_CAPACITY + index),
+      );
+      assert.equal(denied.admitted, false);
+      assert.equal(denied.unresolvedCount, CODEX_PENDING_STEER_UNRESOLVED_CAPACITY);
+      assert.equal(denied.next.size, CODEX_PENDING_STEER_UNRESOLVED_CAPACITY);
+      current = denied.next;
+    }
+    assert.deepStrictEqual([...current.keys()], protectedIds);
+
+    const settled = current.get("steer-0")!;
+    current.set("steer-0", {
+      ...settled,
+      processedAt: "2026-05-26T00:01:00.000Z",
+    });
+    const admittedAfterSettlement = admitCodexPendingSteerProcessing(
+      current,
+      makePendingSteerProcessingFixture(CODEX_PENDING_STEER_UNRESOLVED_CAPACITY + 2_001),
+    );
+    assert.equal(admittedAfterSettlement.admitted, true);
+    assert.equal(admittedAfterSettlement.next.has("steer-0"), false);
+    assert.equal(admittedAfterSettlement.next.size, CODEX_PENDING_STEER_UNRESOLVED_CAPACITY);
+    for (const id of protectedIds.slice(1)) {
+      assert.equal(admittedAfterSettlement.next.has(id), true);
+    }
+  });
+
+  it("builds content-free steer admission backpressure errors", () => {
+    const error = buildCodexPendingSteerCapacityError({
+      unresolvedCount: CODEX_PENDING_STEER_UNRESOLVED_CAPACITY,
+      capacity: CODEX_PENDING_STEER_UNRESOLVED_CAPACITY,
+    });
+
+    assert.equal(error.code, -32600);
+    assert.equal(error.errorMessage, "cannot steer while unresolved steer capacity is exhausted");
+    assert.deepStrictEqual(error.data, {
+      message: "cannot steer while unresolved steer capacity is exhausted",
+      additionalDetails: {
+        unresolvedCount: CODEX_PENDING_STEER_UNRESOLVED_CAPACITY,
+        capacity: CODEX_PENDING_STEER_UNRESOLVED_CAPACITY,
+        retryableAfterReconciliation: true,
+      },
+    });
+  });
+
   it("binds a user message lifecycle pair to only one pending steer", () => {
     const turnId = TurnId.make("turn-active");
     const first = {
       steerId: "steer-1",
+      clientCorrelationId: buildCodexSteerClientCorrelationId("message-1"),
       providerThreadId: "provider-thread-1",
       turnId,
       requestedAt: "2026-05-26T00:00:00.000Z",
@@ -1182,6 +2929,7 @@ describe("Codex steer processing diagnostics", () => {
 
     assert.equal(started.pending?.steerId, "steer-1");
     assert.equal(completed.pending, undefined);
+    assert.equal(completed.restartedObservation, undefined);
     assert.equal(completed.next.get("steer-1")?.providerUserMessageMethod, "item/started");
     assert.equal(completed.next.get("steer-2")?.processedAt, undefined);
   });
@@ -1190,6 +2938,7 @@ describe("Codex steer processing diagnostics", () => {
     const turnId = TurnId.make("turn-active");
     const pendingSteer = {
       steerId: "steer-1",
+      clientCorrelationId: buildCodexSteerClientCorrelationId("message-1"),
       providerThreadId: "provider-thread-1",
       turnId,
       requestedAt: "2026-05-26T00:00:00.000Z",
@@ -1545,6 +3294,70 @@ describe("selectCodexActiveSnapshotTurn", () => {
 });
 
 describe("openCodexThread", () => {
+  it("resumes with one metadata-only recent turn instead of the full thread history", async () => {
+    const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
+    const response = {
+      ...makeThreadOpenResponse("existing-thread"),
+      thread: {
+        ...makeThreadOpenResponse("existing-thread").thread,
+        status: { type: "active", activeFlags: [] },
+        turns: [],
+      },
+      initialTurnsPage: {
+        data: [
+          {
+            id: "active-turn",
+            items: [],
+            itemsView: "notLoaded",
+            status: "inProgress",
+          },
+        ],
+        nextCursor: "older-turns",
+      },
+    };
+    const client = {
+      raw: {
+        request: (method: "thread/start" | "thread/resume", payload: unknown) => {
+          calls.push({ method, payload });
+          return Effect.succeed(response);
+        },
+      },
+    };
+
+    const opened = await Effect.runPromise(
+      openCodexThread({
+        client,
+        threadId: ThreadId.make("thread-1"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/project",
+        requestedModel: "gpt-5.3-codex",
+        serviceTier: undefined,
+        resumeThreadId: "existing-thread",
+      }),
+    );
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]?.method, "thread/resume");
+    assert.deepStrictEqual(
+      calls[0]?.payload && typeof calls[0].payload === "object"
+        ? {
+            excludeTurns: Reflect.get(calls[0].payload, "excludeTurns"),
+            initialTurnsPage: Reflect.get(calls[0].payload, "initialTurnsPage"),
+          }
+        : null,
+      {
+        excludeTurns: true,
+        initialTurnsPage: {
+          itemsView: "notLoaded",
+          limit: 1,
+          sortDirection: "desc",
+        },
+      },
+    );
+    assert.deepStrictEqual(opened.thread.turns, response.initialTurnsPage.data);
+    assert.equal(selectCodexActiveSnapshotTurn(opened.thread)?.id, "active-turn");
+  });
+
   it("falls back to thread/start when resume fails recoverably", async () => {
     const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
     const started = makeThreadOpenResponse("fresh-thread");
@@ -1592,11 +3405,7 @@ describe("openCodexThread", () => {
         }>;
         readonly runtimeWorkspaceRoots?: ReadonlyArray<string>;
       };
-      assert.deepStrictEqual(payload.config, {
-        "features.remote_compaction_v2": false,
-        model_auto_compact_token_limit: CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
-        model_auto_compact_token_limit_scope: "total",
-      });
+      assert.deepStrictEqual(payload.config, {});
       assert.deepStrictEqual(payload.environments, [
         {
           environmentId: "local",
@@ -1608,7 +3417,7 @@ describe("openCodexThread", () => {
     }
   });
 
-  it("preserves workspace-write roots alongside Codex auto-compaction overrides", async () => {
+  it("preserves workspace-write roots without injecting Codex compaction defaults", async () => {
     const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
     const client = {
       raw: {
@@ -1642,9 +3451,6 @@ describe("openCodexThread", () => {
       readonly runtimeWorkspaceRoots?: ReadonlyArray<string>;
     };
     assert.deepStrictEqual(payload.config, {
-      "features.remote_compaction_v2": false,
-      model_auto_compact_token_limit: CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
-      model_auto_compact_token_limit_scope: "total",
       sandbox_workspace_write: {
         writable_roots: ["/tmp/extra"],
       },
@@ -1702,9 +3508,7 @@ describe("openCodexThread", () => {
     for (const call of calls) {
       const payload = call.payload as { readonly config?: Record<string, unknown> };
       assert.deepStrictEqual(payload.config, {
-        "features.remote_compaction_v2": false,
         model_auto_compact_token_limit: 150_000,
-        model_auto_compact_token_limit_scope: "total",
       });
     }
   });

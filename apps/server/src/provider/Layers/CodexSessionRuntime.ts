@@ -1,5 +1,6 @@
 import {
   ApprovalRequestId,
+  CODEX_MAX_CONCURRENT_SUBAGENTS,
   DEFAULT_MODEL,
   EventId,
   ProviderDriverKind,
@@ -10,6 +11,9 @@ import {
   type ProviderInteractionMode,
   type ProviderRequestKind,
   type ProviderSession,
+  ProviderThreadGoal,
+  type ProviderThreadGoalClearResult,
+  type ProviderThreadGoalSetInput,
   type ProviderTurnSteerResult,
   type ProviderTurnStartResult,
   type ProviderUserInputAnswers,
@@ -18,10 +22,6 @@ import {
   TurnId,
 } from "@cafecode/contracts";
 import { normalizeModelSlug } from "@cafecode/shared/model";
-import {
-  CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
-  CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT_SCOPE,
-} from "@cafecode/shared/codexCompaction";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
@@ -46,6 +46,11 @@ import * as CodexRpc from "effect-codex-app-server/rpc";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { buildCodexInitializeParams } from "./CodexProvider.ts";
+import { isCodexRootAgentPath } from "./CodexSubagentPath.ts";
+import {
+  buildCodexSteerClientCorrelationId,
+  parseCodexSteerClientCorrelationId,
+} from "../codexSteerCorrelation.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import {
   CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS,
@@ -60,6 +65,7 @@ import {
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
 const decodeV2TurnSteerParams = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnSteerParams);
 const decodeV2TurnSteerResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnSteerResponse);
+const decodeProviderThreadGoal = Schema.decodeUnknownEffect(ProviderThreadGoal);
 
 const PROVIDER = ProviderDriverKind.make("codex");
 
@@ -72,8 +78,12 @@ const BENIGN_ERROR_LOG_SNIPPETS = [
   "state db record_discrepancy: find_thread_path_by_id_str_in_subdir, falling_back",
 ];
 const CODEX_APP_SERVER_FORCE_KILL_AFTER = "2 seconds" as const;
-const CODEX_REMOTE_COMPACTION_V2_FEATURE_CONFIG_KEY = "features.remote_compaction_v2";
 const CODEX_LOCAL_ENVIRONMENT_ID = "local";
+// Codex TUI 0.147 uses a 60-second hidden grace followed by a 60-second
+// visible countdown for non-blocking request_user_input calls. The runtime
+// owns the total deadline so background Cafe threads cannot remain wedged just
+// because no renderer currently has that thread mounted.
+const CODEX_NON_BLOCKING_USER_INPUT_AUTO_RESOLUTION_DELAY = "120 seconds" as const;
 // App-server and Cafe share the host clock. A small future allowance tolerates
 // clock adjustment without allowing a malformed provider timestamp to push
 // durable events arbitrarily far into the future.
@@ -110,6 +120,17 @@ const CODEX_TURN_STEER_PROCESSING_WARNING_DELAYS = [
   "60 seconds",
   "120 seconds",
 ] as const;
+// Ambiguous transport failures must retain their client correlation because
+// app-server may have consumed the steer before the connection failed. Bound
+// admission instead of silently evicting those correctness-critical entries.
+// 128 is intentionally far above normal interactive concurrency while still
+// placing a hard memory bound on a hostile or repeatedly failing caller.
+export const CODEX_PENDING_STEER_UNRESOLVED_CAPACITY = 128;
+const CODEX_PENDING_STEER_HISTORY_LIMIT = 50;
+// Restart observations are diagnostic hints, not ownership records. Keeping a
+// bounded recent set suppresses app-server's item/started + item/completed pair
+// without allowing untrusted client ids to grow process memory indefinitely.
+const CODEX_RESTARTED_STEER_OBSERVATION_HISTORY_LIMIT = 256;
 const CODEX_AGGREGATE_CHILD_LIVENESS_POLL_DELAYS = [
   "2 seconds",
   "10 seconds",
@@ -171,10 +192,30 @@ const decodeV2ThreadStartResponse = Schema.decodeUnknownEffect(
 const decodeV2ThreadResumeResponse = Schema.decodeUnknownEffect(
   EffectCodexSchema.V2ThreadResumeResponse,
 );
+// Codex 0.151 exposes bounded resume hydration as an experimental response
+// field that is intentionally absent from its stable generated top-level
+// schema. Keep this compatibility schema deliberately narrow: Cafe asks for
+// one turn with no items, and only reads that page back. Unknown provider
+// fields remain owned by the generated response decoder.
+const CodexThreadResumeInitialTurnsPageResponse = Schema.Struct({
+  initialTurnsPage: Schema.optionalKey(
+    Schema.Union([EffectCodexSchema.V2ThreadResumeResponse__TurnsPage, Schema.Null]),
+  ),
+});
+const decodeCodexThreadResumeInitialTurnsPageResponse = Schema.decodeUnknownEffect(
+  CodexThreadResumeInitialTurnsPageResponse,
+);
 
 type CodexThreadStartParamsWithRuntimeWorkspaceRoots =
   typeof CodexThreadStartParamsWithRuntimeWorkspaceRoots.Type;
 type CodexThreadResumeParamsWithRuntimeWorkspaceRoots = EffectCodexSchema.V2ThreadResumeParams & {
+  /**
+   * Codex 0.151+ can omit the legacy full `thread.turns` snapshot and return a
+   * bounded recent page instead. This prevents multi-hour threads from turning
+   * one newline-delimited JSON-RPC response into an unbounded memory event.
+   */
+  readonly excludeTurns?: boolean;
+  readonly initialTurnsPage?: EffectCodexSchema.V2ThreadResumeParams__ThreadResumeInitialTurnsPageParams | null;
   readonly environments?: ReadonlyArray<{
     readonly environmentId: string;
     readonly cwd: string;
@@ -186,10 +227,15 @@ export type CodexTurnStartParamsWithExperimentalFields =
   typeof CodexTurnStartParamsWithExperimentalFields.Type;
 const formatSchemaIssue = SchemaIssue.makeFormatterDefault();
 const CODEX_HTTP_FALLBACK_PROVIDER_ID = "cafecode-openai-http";
+// Codex 0.152 changed `update_plan` from default-on to explicit opt-in. Cafe's
+// Tasks surface is a first-class client capability, so every app-server that
+// can own a real Cafe session opts in at process startup. Keep the lightweight
+// provider-status probe independent: it never starts a thread or exposes tools.
+const CODEX_UPDATE_PLAN_CONFIG_OVERRIDE = "tools.update_plan.enabled=true";
 
 export type CodexResumeCursor = typeof CodexResumeCursorSchema.Type;
 type CodexServiceTier = NonNullable<EffectCodexSchema.V2ThreadStartParams["serviceTier"]>;
-type CodexThreadItem =
+export type CodexThreadItem =
   | EffectCodexSchema.V2ThreadReadResponse["thread"]["turns"][number]["items"][number]
   | EffectCodexSchema.V2ThreadRollbackResponse["thread"]["turns"][number]["items"][number];
 type CodexSnapshotThreadItem = CodexThreadItem;
@@ -231,18 +277,70 @@ export interface CodexTransportPolicy {
   readonly observedAt?: string;
 }
 
+export interface CodexAppServerLaunchOptions {
+  readonly maxConcurrentSubagents?: number | undefined;
+  readonly transportPolicy?: CodexTransportPolicy | undefined;
+}
+
 export function buildCodexAppServerArgs(
-  transportPolicy: CodexTransportPolicy | undefined,
+  options: CodexAppServerLaunchOptions,
 ): ReadonlyArray<string> {
-  if (transportPolicy?.responsesWebsockets !== "disabled") {
-    return ["app-server"];
+  // Provider settings are schema-decoded before adapter construction, but this
+  // builder is also exported for direct runtime use. Revalidate the bounded
+  // integer at the process boundary so a future internal caller cannot place
+  // untrusted text or an unbounded resource limit into the Windows shell-backed
+  // launch path.
+  const concurrencyArgs: ReadonlyArray<string> = (() => {
+    const maxConcurrentSubagents = options.maxConcurrentSubagents;
+    if (maxConcurrentSubagents === undefined) {
+      // Omission is meaningful: Codex may select V1 or V2 from model metadata,
+      // persisted thread history, or user configuration, and those backends
+      // intentionally have different upstream defaults. Do not erase that
+      // behavior with an implicit Cafe value.
+      return [];
+    }
+    if (
+      !Number.isInteger(maxConcurrentSubagents) ||
+      maxConcurrentSubagents < 1 ||
+      maxConcurrentSubagents > CODEX_MAX_CONCURRENT_SUBAGENTS
+    ) {
+      throw new RangeError(
+        `maxConcurrentSubagents must be an integer between 1 and ${CODEX_MAX_CONCURRENT_SUBAGENTS}.`,
+      );
+    }
+
+    // The public setting counts only spawned subagents and controls V1. Codex
+    // V2 stores a higher-precedence root-inclusive total, so emit N + 1 there
+    // as well. Supplying both structured overrides makes an explicit Cafe
+    // setting authoritative even when the user's config already contains a
+    // V2-specific value, without changing whether V1 or V2 is selected.
+    return [
+      "-c",
+      `agents.max_concurrent_threads_per_session=${maxConcurrentSubagents}`,
+      "-c",
+      `features.multi_agent_v2.max_concurrent_threads_per_session=${maxConcurrentSubagents + 1}`,
+    ];
+  })();
+
+  // These process-level overrides apply before either `thread/start` or
+  // `thread/resume`, so fresh, resumed, and recoverable-resume sessions all
+  // receive the same explicit per-provider-instance policy when configured.
+  const baseArgs = [
+    "app-server",
+    "-c",
+    CODEX_UPDATE_PLAN_CONFIG_OVERRIDE,
+    ...concurrencyArgs,
+  ] as const;
+
+  if (options.transportPolicy?.responsesWebsockets !== "disabled") {
+    return baseArgs;
   }
 
   // Codex's built-in `openai` provider cannot be overridden by config. A
   // Cafe-scoped provider id lets us keep ChatGPT/OpenAI auth and Responses API
   // behavior while turning off only the unstable Responses WebSocket transport.
   return [
-    "app-server",
+    ...baseArgs,
     "-c",
     `model_provider="${CODEX_HTTP_FALLBACK_PROVIDER_ID}"`,
     "-c",
@@ -268,14 +366,19 @@ export interface CodexSessionRuntimeOptions {
   readonly homePath?: string;
   readonly environment?: NodeJS.ProcessEnv;
   readonly transportPolicy?: CodexTransportPolicy;
+  // Optional decoded, bounded Cafe provider setting forwarded as structured
+  // Codex `-c` arguments. Absence preserves Codex's model/backend-specific
+  // defaults and any user-owned config.
+  readonly maxConcurrentSubagents?: number | undefined;
   readonly cwd: string;
   readonly runtimeMode: RuntimeMode;
   readonly model?: string;
   readonly serviceTier?: CodexServiceTier | undefined;
   readonly additionalDirectories?: ReadonlyArray<string> | undefined;
   readonly resumeCursor?: CodexResumeCursor;
-  // Per-provider-instance override for `model_auto_compact_token_limit`.
-  // Defaults to `CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT` when absent.
+  // Optional per-provider-instance override for
+  // `model_auto_compact_token_limit`. When absent, app-server owns threshold
+  // resolution exactly as it does for the official Codex CUI.
   readonly autoCompactTokenLimit?: number | undefined;
 }
 
@@ -294,6 +397,13 @@ export interface CodexSessionRuntimeSendTurnInput {
 
 export interface CodexSessionRuntimeSteerTurnInput {
   readonly expectedTurnId: TurnId;
+  /**
+   * Fixed-size, content-free correlation derived by CodexAdapter before the
+   * request enters provider-owned runtime state. The runtime validates this
+   * value again before forwarding it to app-server; Cafe's open-string
+   * MessageId must never cross this boundary.
+   */
+  readonly clientCorrelationId?: string;
   readonly input?: string;
   readonly attachments?: ReadonlyArray<{
     readonly type: "image";
@@ -311,6 +421,56 @@ export interface CodexThreadSnapshot {
   readonly turns: ReadonlyArray<CodexThreadTurnSnapshot>;
 }
 
+export type CodexSubagentThreadValidationFailure =
+  | "root-identity-mismatch"
+  | "child-identity-mismatch"
+  | "missing-subagent-metadata"
+  | "parent-metadata-mismatch"
+  | "session-tree-mismatch";
+
+type CodexThreadReadMetadata = Pick<
+  EffectCodexSchema.V2ThreadReadResponse["thread"],
+  "id" | "parentThreadId" | "sessionId" | "source"
+>;
+
+/**
+ * Verify that an opaque child id resolves inside the recovered root session
+ * tree before its transcript is canonicalized. Nested descendants are valid:
+ * their immediate parent need not equal the root, but Codex's duplicate parent
+ * metadata must agree and both threads must share one provider session id.
+ */
+export function validateCodexSubagentThreadReadMetadata(input: {
+  readonly expectedRootThreadId: string;
+  readonly expectedChildThreadId: string;
+  readonly root: CodexThreadReadMetadata;
+  readonly child: CodexThreadReadMetadata;
+}): CodexSubagentThreadValidationFailure | undefined {
+  if (input.root.id !== input.expectedRootThreadId) return "root-identity-mismatch";
+  if (input.child.id !== input.expectedChildThreadId) return "child-identity-mismatch";
+
+  const source = input.child.source;
+  if (
+    typeof source !== "object" ||
+    source === null ||
+    !("subAgent" in source) ||
+    typeof input.child.parentThreadId !== "string" ||
+    input.child.parentThreadId.length === 0
+  ) {
+    return "missing-subagent-metadata";
+  }
+
+  const subagentSource = source.subAgent;
+  if (
+    typeof subagentSource === "object" &&
+    subagentSource !== null &&
+    "thread_spawn" in subagentSource &&
+    subagentSource.thread_spawn.parent_thread_id !== input.child.parentThreadId
+  ) {
+    return "parent-metadata-mismatch";
+  }
+  return input.child.sessionId === input.root.sessionId ? undefined : "session-tree-mismatch";
+}
+
 export interface CodexSessionRuntimeShape {
   readonly start: () => Effect.Effect<ProviderSession, CodexSessionRuntimeError>;
   readonly getSession: Effect.Effect<ProviderSession>;
@@ -321,7 +481,19 @@ export interface CodexSessionRuntimeShape {
     input: CodexSessionRuntimeSteerTurnInput,
   ) => Effect.Effect<ProviderTurnSteerResult, CodexSessionRuntimeError>;
   readonly interruptTurn: (turnId?: TurnId) => Effect.Effect<void, CodexSessionRuntimeError>;
+  readonly forkThread: Effect.Effect<CodexResumeCursor, CodexSessionRuntimeError>;
+  readonly discardFork: (
+    resumeCursor: CodexResumeCursor,
+  ) => Effect.Effect<void, CodexSessionRuntimeError>;
+  readonly getGoal: Effect.Effect<ProviderThreadGoal | null, CodexSessionRuntimeError>;
+  readonly setGoal: (
+    input: Omit<ProviderThreadGoalSetInput, "threadId">,
+  ) => Effect.Effect<ProviderThreadGoal, CodexSessionRuntimeError>;
+  readonly clearGoal: Effect.Effect<ProviderThreadGoalClearResult, CodexSessionRuntimeError>;
   readonly readThread: Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
+  readonly readSubagentThread: (
+    subagentThreadId: string,
+  ) => Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
   readonly rollbackThread: (
     numTurns: number,
   ) => Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
@@ -333,6 +505,9 @@ export interface CodexSessionRuntimeShape {
     requestId: ApprovalRequestId,
     answers: ProviderUserInputAnswers,
   ) => Effect.Effect<void, CodexSessionRuntimeError>;
+  readonly snoozeUserInput: (
+    requestId: ApprovalRequestId,
+  ) => Effect.Effect<void, CodexSessionRuntimeError>;
   readonly events: Stream.Stream<ProviderEvent, never>;
   readonly close: Effect.Effect<void>;
 }
@@ -342,7 +517,8 @@ export type CodexSessionRuntimeError =
   | CodexSessionRuntimePendingApprovalNotFoundError
   | CodexSessionRuntimePendingUserInputNotFoundError
   | CodexSessionRuntimeInvalidUserInputAnswersError
-  | CodexSessionRuntimeThreadIdMissingError;
+  | CodexSessionRuntimeThreadIdMissingError
+  | CodexSessionRuntimeInvalidSubagentThreadError;
 
 export class CodexSessionRuntimePendingApprovalNotFoundError extends Schema.TaggedErrorClass<CodexSessionRuntimePendingApprovalNotFoundError>()(
   "CodexSessionRuntimePendingApprovalNotFoundError",
@@ -388,6 +564,30 @@ export class CodexSessionRuntimeThreadIdMissingError extends Schema.TaggedErrorC
   }
 }
 
+/**
+ * A child-thread read failed Cafe's ownership/shape checks.
+ *
+ * The error deliberately carries only a finite reason code. Provider ids and
+ * rollout text are user-private data and must not enter logs, RPC errors, or
+ * raw diagnostics through an exception message.
+ */
+export class CodexSessionRuntimeInvalidSubagentThreadError extends Schema.TaggedErrorClass<CodexSessionRuntimeInvalidSubagentThreadError>()(
+  "CodexSessionRuntimeInvalidSubagentThreadError",
+  {
+    reason: Schema.Literals([
+      "root-identity-mismatch",
+      "child-identity-mismatch",
+      "missing-subagent-metadata",
+      "parent-metadata-mismatch",
+      "session-tree-mismatch",
+    ]),
+  },
+) {
+  override get message(): string {
+    return `Codex subagent thread validation failed: ${this.reason}`;
+  }
+}
+
 interface PendingApproval {
   readonly requestId: ApprovalRequestId;
   readonly jsonRpcId: string;
@@ -409,6 +609,61 @@ interface PendingUserInput {
   readonly turnId: TurnId | undefined;
   readonly itemId: ProviderItemId | undefined;
   readonly answers: Deferred.Deferred<ProviderUserInputAnswers>;
+  readonly autoResolutionSnoozed: Deferred.Deferred<void>;
+}
+
+interface CodexUserInputResolution {
+  readonly answers: ProviderUserInputAnswers;
+  readonly source: "explicit" | "automatic";
+}
+
+/**
+ * Wait for a request_user_input answer using Codex TUI 0.147 semantics.
+ *
+ * A non-blocking request has a single automatic deadline. Interaction wins a
+ * separate race and permanently retires that deadline before waiting for the
+ * explicit answer. Keeping that state transition explicit is important: a
+ * `snooze -> await answer` branch raced directly against the timer would leave
+ * the timer alive and could submit an empty answer while the user was typing.
+ */
+export function awaitCodexUserInputResolution(input: {
+  readonly answers: Deferred.Deferred<ProviderUserInputAnswers>;
+  readonly autoResolutionSnoozed: Deferred.Deferred<void>;
+  readonly isBlocking: boolean;
+}): Effect.Effect<CodexUserInputResolution> {
+  const explicitResolution: Effect.Effect<CodexUserInputResolution> = Deferred.await(
+    input.answers,
+  ).pipe(
+    Effect.map((answers) => ({
+      answers,
+      source: "explicit" as const,
+    })),
+  );
+  if (input.isBlocking) {
+    return explicitResolution;
+  }
+
+  const automaticResolutionDecision: Effect.Effect<"snoozed" | "automatic"> = Effect.raceFirst(
+    Deferred.await(input.autoResolutionSnoozed).pipe(Effect.as<"snoozed" | "automatic">("snoozed")),
+    Effect.sleep(CODEX_NON_BLOCKING_USER_INPUT_AUTO_RESOLUTION_DELAY).pipe(
+      Effect.as<"snoozed" | "automatic">("automatic"),
+    ),
+  );
+
+  const resolutionAfterDecision: Effect.Effect<CodexUserInputResolution> =
+    automaticResolutionDecision.pipe(
+      Effect.flatMap(
+        (decision): Effect.Effect<CodexUserInputResolution> =>
+          decision === "snoozed"
+            ? explicitResolution
+            : Effect.succeed({
+                answers: {} satisfies ProviderUserInputAnswers,
+                source: "automatic",
+              }),
+      ),
+    );
+
+  return Effect.raceFirst(explicitResolution, resolutionAfterDecision);
 }
 
 interface CodexTurnStartObservation {
@@ -442,20 +697,54 @@ interface CodexTurnStartObservation {
 
 export interface CodexPendingSteerProcessing {
   readonly steerId: string;
+  readonly clientCorrelationId: string;
   readonly providerThreadId: string;
   readonly turnId: TurnId;
   readonly requestedAt: string;
-  readonly acknowledgedAt: string;
-  readonly acknowledgedAtMs: number;
-  readonly ackLatencyMs: number;
+  readonly acknowledgedAt?: string;
+  readonly acknowledgedAtMs?: number;
+  readonly ackLatencyMs?: number;
   readonly promptByteLength: number;
   readonly attachmentCount: number;
   readonly warningCount: number;
   readonly processedAt?: string;
+  readonly processedAtMs?: number;
   readonly providerUserMessageItemId?: ProviderItemId;
   readonly providerUserMessageMethod?: string;
   readonly ackToProviderItemMs?: number;
+  readonly terminalObservedAt?: string;
+  readonly terminalState?: CodexPendingSteerTerminalState;
 }
+
+export interface CodexRestartedSteerProcessingObservation {
+  readonly clientCorrelationId: string;
+  readonly providerThreadId?: string;
+  readonly turnId: TurnId;
+  readonly providerUserMessageItemId?: ProviderItemId;
+  readonly providerUserMessageMethod: string;
+  readonly observedAt: string;
+}
+
+export type CodexPendingSteerAdmission =
+  | {
+      readonly admitted: true;
+      readonly next: Map<string, CodexPendingSteerProcessing>;
+      readonly unresolvedCount: number;
+      readonly capacity: number;
+    }
+  | {
+      readonly admitted: false;
+      readonly next: Map<string, CodexPendingSteerProcessing>;
+      readonly unresolvedCount: number;
+      readonly capacity: number;
+    };
+
+export type CodexPendingSteerTerminalState =
+  | "completed"
+  | "failed"
+  | "interrupted"
+  | "cancelled"
+  | "unknown";
 
 export type CodexChildConversationLivenessState = "unknown" | "active" | "inactive";
 
@@ -679,26 +968,22 @@ function buildThreadStartParams(input: {
     cwd: input.cwd,
     additionalDirectories: input.additionalDirectories,
   });
-  // Upstream Codex 0.143.0 only auto-compacts when the resolved model info or
-  // request config supplies `model_auto_compact_token_limit`. Current Codex
-  // model metadata can advertise a large context window while leaving that
-  // limit null, so Cafe passes the documented request-config override for
-  // Cafe-managed threads instead of mutating the user's shared
-  // `~/.codex/config.toml`. The shared constant documents why Cafe defaults to
-  // 200k instead of the older 100k override; the per-instance
-  // `autoCompactTokenLimit` provider setting lets a user override that default.
-  const threadConfig: Record<string, unknown> = {
-    // Upstream Codex rust-v0.143.0 marks remote_compaction_v2 stable and
-    // default-enabled, but its compaction request still builds the normal
-    // model-visible tool set. Cafe has observed text compaction failures from
-    // inherited hosted image-generation tools on accounts/models without that
-    // image model, so this remains a deliberate Cafe reliability quarantine
-    // until a live long-context compaction smoke verifies the v2 path.
-    [CODEX_REMOTE_COMPACTION_V2_FEATURE_CONFIG_KEY]: false,
-    model_auto_compact_token_limit:
-      input.autoCompactTokenLimit ?? CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
-    model_auto_compact_token_limit_scope: CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT_SCOPE,
-  };
+  // Codex rust-v0.146.0 derives an absent auto-compaction threshold as 90% of
+  // the resolved raw model context window, clamps explicit overrides to that
+  // ceiling, and defaults its accounting scope to `total`. Do not duplicate
+  // those defaults here: model metadata changes independently of Cafe, and an
+  // injected limit caused Cafe sessions to compact earlier than the CUI.
+  // Do not override `features.remote_compaction_v2`. Codex marks the feature
+  // stable and default-enabled, and the legacy ChatGPT compaction endpoint can
+  // return 404 for otherwise healthy authenticated sessions. Let app-server
+  // apply its current default (or an explicit user/managed configuration) so
+  // Cafe follows the same compaction path as the upstream CLI.
+  const threadConfig: Record<string, unknown> = {};
+  if (input.autoCompactTokenLimit !== undefined) {
+    // This is an explicit user override. App-server still applies its upstream
+    // context-window clamp and the user's upstream scope configuration.
+    threadConfig.model_auto_compact_token_limit = input.autoCompactTokenLimit;
+  }
   if (input.runtimeMode === "auto-accept-edits" && input.additionalDirectories?.length) {
     threadConfig.sandbox_workspace_write = {
       writable_roots: input.additionalDirectories,
@@ -841,6 +1126,7 @@ export function buildTurnStartParams(input: {
 export function buildTurnSteerParams(input: {
   readonly threadId: string;
   readonly expectedTurnId: TurnId;
+  readonly clientUserMessageId: string;
   readonly prompt?: string;
   readonly attachments?: ReadonlyArray<{
     readonly type: "image";
@@ -869,6 +1155,7 @@ export function buildTurnSteerParams(input: {
   return decodeV2TurnSteerParams({
     threadId: input.threadId,
     expectedTurnId: input.expectedTurnId,
+    clientUserMessageId: input.clientUserMessageId,
     input: turnInput,
   }).pipe(
     Effect.mapError((error) => toProtocolParseError("Invalid turn/steer request payload", error)),
@@ -964,21 +1251,28 @@ export function updateCodexPendingSteerProcessingFromNotification(
     readonly turnId?: TurnId | undefined;
     readonly itemId?: ProviderItemId | undefined;
     readonly itemType?: string | undefined;
+    readonly clientUserMessageId?: string | undefined;
     readonly observedAt: string;
     readonly observedAtMs: number;
   },
 ): {
   readonly pending: CodexPendingSteerProcessing | undefined;
+  readonly restartedObservation: CodexRestartedSteerProcessingObservation | undefined;
   readonly next: Map<string, CodexPendingSteerProcessing>;
 } {
   const unchanged = () => (current instanceof Map ? current : new Map(current));
+  const noObservation = () => ({
+    pending: undefined,
+    restartedObservation: undefined,
+    next: unchanged(),
+  });
 
   if (
     (input.method !== "item/started" && input.method !== "item/completed") ||
     !input.turnId ||
     !isCodexUserMessageItemType(input.itemType)
   ) {
-    return { pending: undefined, next: unchanged() };
+    return noObservation();
   }
 
   if (
@@ -990,48 +1284,439 @@ export function updateCodexPendingSteerProcessingFromNotification(
     // not proof that two queued steers were processed. Preserve the original
     // binding so a later notification for the same provider item cannot consume
     // the next pending steer.
-    return { pending: undefined, next: unchanged() };
+    return noObservation();
   }
 
-  const pending = Array.from(current.values())
-    .filter(
-      (entry) =>
-        entry.processedAt === undefined &&
-        entry.turnId === input.turnId &&
-        (!input.providerThreadId || entry.providerThreadId === input.providerThreadId),
-    )
-    .toSorted((left, right) => left.acknowledgedAt.localeCompare(right.acknowledgedAt))[0];
+  // Codex echoes `clientUserMessageId` as `item.clientId`. Prefer that exact
+  // binding over FIFO order: two steers can target one turn and notifications
+  // may arrive before either RPC response continuation runs. When Codex gives
+  // us a client id that is unknown, do not consume an unrelated pending steer.
+  const exactCorrelation = input.clientUserMessageId
+    ? Array.from(current.values()).find(
+        (entry) => entry.clientCorrelationId === input.clientUserMessageId,
+      )
+    : undefined;
+  const candidates = Array.from(current.values()).filter(
+    (entry) =>
+      entry.processedAt === undefined &&
+      entry.turnId === input.turnId &&
+      (!input.providerThreadId || entry.providerThreadId === input.providerThreadId),
+  );
+  const pending = input.clientUserMessageId
+    ? candidates.find((entry) => entry.clientCorrelationId === input.clientUserMessageId)
+    : candidates
+        .filter((entry) => entry.turnId === input.turnId)
+        .toSorted(
+          (left, right) =>
+            left.requestedAt.localeCompare(right.requestedAt) ||
+            left.steerId.localeCompare(right.steerId),
+        )[0];
 
   if (!pending) {
-    return { pending: undefined, next: unchanged() };
+    // A known client id that is already processed or belongs to another turn
+    // must not produce a second marker. With no known in-memory correlation,
+    // however, this can be a provider item replayed after Cafe restarted. Emit
+    // a content-free observation keyed by the echoed id; orchestration later
+    // requires exact independently persisted acceptance evidence before that
+    // observation can settle or recover anything.
+    const clientCorrelationId = exactCorrelation
+      ? undefined
+      : parseCodexSteerClientCorrelationId(input.clientUserMessageId);
+    return {
+      pending: undefined,
+      restartedObservation: clientCorrelationId
+        ? {
+            clientCorrelationId,
+            ...(input.providerThreadId ? { providerThreadId: input.providerThreadId } : {}),
+            turnId: input.turnId,
+            ...(input.itemId ? { providerUserMessageItemId: input.itemId } : {}),
+            providerUserMessageMethod: input.method,
+            observedAt: input.observedAt,
+          }
+        : undefined,
+      next: unchanged(),
+    };
   }
 
   const updated = {
     ...pending,
+    turnId: input.turnId,
     processedAt: input.observedAt,
+    processedAtMs: input.observedAtMs,
     providerUserMessageMethod: input.method,
-    ackToProviderItemMs: Math.max(0, input.observedAtMs - pending.acknowledgedAtMs),
+    ...(pending.acknowledgedAtMs !== undefined
+      ? { ackToProviderItemMs: Math.max(0, input.observedAtMs - pending.acknowledgedAtMs) }
+      : {}),
     ...(input.itemId ? { providerUserMessageItemId: input.itemId } : {}),
   } satisfies CodexPendingSteerProcessing;
   const next = new Map(current);
   next.set(pending.steerId, updated);
-  return { pending: updated, next };
+  return { pending: updated, restartedObservation: undefined, next };
 }
 
-function prunePendingSteerProcessing(
+/**
+ * Merge the RPC acknowledgement into the correlation registered before I/O.
+ *
+ * Provider notifications and request responses are independent producers in
+ * Codex app-server. This merge must therefore preserve an already-observed
+ * userMessage item or terminal state instead of replacing the entry wholesale.
+ */
+export function acknowledgeCodexPendingSteerProcessing(
+  current: ReadonlyMap<string, CodexPendingSteerProcessing>,
+  input: {
+    readonly steerId: string;
+    readonly turnId: TurnId;
+    readonly acknowledgedAt: string;
+    readonly acknowledgedAtMs: number;
+    readonly ackLatencyMs: number;
+  },
+): {
+  readonly pending: CodexPendingSteerProcessing | undefined;
+  readonly next: Map<string, CodexPendingSteerProcessing>;
+} {
+  const existing = current.get(input.steerId);
+  if (!existing) {
+    return {
+      pending: undefined,
+      next: current instanceof Map ? current : new Map(current),
+    };
+  }
+
+  const changedTurn = existing.turnId !== input.turnId;
+  const {
+    terminalObservedAt: _terminalObservedAt,
+    terminalState: _terminalState,
+    ...existingWithoutTerminal
+  } = existing;
+  const correlationBase = changedTurn ? existingWithoutTerminal : existing;
+  const acknowledged: CodexPendingSteerProcessing = {
+    ...correlationBase,
+    turnId: input.turnId,
+    acknowledgedAt: input.acknowledgedAt,
+    acknowledgedAtMs: input.acknowledgedAtMs,
+    ackLatencyMs: input.ackLatencyMs,
+    ...(existing.processedAtMs !== undefined
+      ? {
+          ackToProviderItemMs: Math.max(0, existing.processedAtMs - input.acknowledgedAtMs),
+        }
+      : {}),
+  } satisfies CodexPendingSteerProcessing;
+  const next = new Map(current);
+  next.set(input.steerId, acknowledged);
+  return { pending: acknowledged, next };
+}
+
+/**
+ * Apply the turn/steer response continuation under the same lock used by all
+ * authoritative terminal sources.
+ *
+ * A JSON-RPC response and `turn/completed`/`thread/read` observations arrive
+ * on independent fibers. Updating the pending correlation and the visible
+ * session in separate critical sections permits this invalid ordering:
+ * terminal snapshot -> late ACK -> session running. Keeping both writes here
+ * makes a terminal marker an irreversible barrier for that steer/turn pair.
+ */
+export function acknowledgeCodexSteerLifecycleBoundary(input: {
+  readonly semaphore: Semaphore.Semaphore;
+  readonly pendingRef: Ref.Ref<Map<string, CodexPendingSteerProcessing>>;
+  readonly sessionRef: Ref.Ref<ProviderSession>;
+  readonly steerId: string;
+  readonly expectedTurnId: TurnId;
+  readonly turnId: TurnId;
+  readonly acknowledgedAt: string;
+  readonly acknowledgedAtMs: number;
+  readonly ackLatencyMs: number;
+}): Effect.Effect<{
+  readonly pending: CodexPendingSteerProcessing | undefined;
+  readonly restoredRunning: boolean;
+}> {
+  return input.semaphore.withPermits(1)(
+    Effect.uninterruptible(
+      Effect.gen(function* () {
+        const acknowledgement = yield* Ref.modify(input.pendingRef, (current) => {
+          const result = acknowledgeCodexPendingSteerProcessing(current, input);
+          return [result, result.next] as const;
+        });
+        if (
+          acknowledgement.pending === undefined ||
+          acknowledgement.pending.terminalObservedAt !== undefined
+        ) {
+          return {
+            pending: acknowledgement.pending,
+            restoredRunning: false,
+          };
+        }
+
+        const restoredRunning = yield* Ref.modify(input.sessionRef, (session) => {
+          const activeTurnId = session.activeTurnId;
+          if (
+            activeTurnId !== undefined &&
+            activeTurnId !== input.expectedTurnId &&
+            activeTurnId !== input.turnId
+          ) {
+            // A newer provider notification won while this request was in
+            // flight. The successful ACK is still retained for correlation,
+            // but must not overwrite that separately authoritative active-turn
+            // identity. Keep the comparison and write in one Ref operation so
+            // an uncorrelated turn/started handler cannot land between them.
+            return [false, session] as const;
+          }
+          return [
+            true,
+            {
+              ...session,
+              status: "running" as const,
+              activeTurnId: input.turnId,
+              updatedAt: input.acknowledgedAt,
+            },
+          ] as const;
+        });
+        return {
+          pending: acknowledgement.pending,
+          restoredRunning,
+        };
+      }),
+    ),
+  );
+}
+
+/**
+ * Move a pre-I/O steer correlation to the active turn reported by Codex.
+ *
+ * A stale expected-turn response is not an acknowledgement and cannot have
+ * consumed the input. Clear terminal observations for only that stale turn,
+ * then bind the correlation to the server-reported turn before retrying so a
+ * terminal notification racing the retry is attributed to the correct turn.
+ */
+export function retargetCodexPendingSteerProcessing(
+  current: ReadonlyMap<string, CodexPendingSteerProcessing>,
+  input: {
+    readonly steerId: string;
+    readonly turnId: TurnId;
+  },
+): Map<string, CodexPendingSteerProcessing> {
+  const existing = current.get(input.steerId);
+  if (!existing || existing.turnId === input.turnId) {
+    return current instanceof Map ? current : new Map(current);
+  }
+  const {
+    terminalObservedAt: _terminalObservedAt,
+    terminalState: _terminalState,
+    ...existingWithoutTerminal
+  } = existing;
+  const next = new Map(current);
+  next.set(input.steerId, {
+    ...existingWithoutTerminal,
+    turnId: input.turnId,
+  });
+  return next;
+}
+
+/**
+ * Record authoritative terminal state for every correlated steer on the turn.
+ * Durable recovery is decided later from the trusted command-boundary
+ * acceptance activity plus the provider processing activity; this in-memory
+ * state exists only to prevent a late RPC continuation from reviving the turn.
+ */
+export function terminalizeCodexPendingSteerProcessing(
+  current: ReadonlyMap<string, CodexPendingSteerProcessing>,
+  input: {
+    readonly turnId: TurnId;
+    readonly terminalState: CodexPendingSteerTerminalState;
+    readonly observedAt: string;
+  },
+): {
+  readonly next: Map<string, CodexPendingSteerProcessing>;
+} {
+  const next = new Map(current);
+  for (const pending of current.values()) {
+    if (pending.turnId !== input.turnId) continue;
+    const terminal = {
+      ...pending,
+      terminalObservedAt: input.observedAt,
+      terminalState: input.terminalState,
+    } satisfies CodexPendingSteerProcessing;
+    next.set(terminal.steerId, terminal);
+  }
+  return { next };
+}
+
+/**
+ * Atomically apply authoritative provider terminal truth to both pending steer
+ * correlations and the visible runtime session. Live completion notifications
+ * and successful terminal `thread/read` snapshots must call this exact
+ * boundary; otherwise a response continuation can observe no terminal marker
+ * and restore `running` after the provider has already ended the turn.
+ */
+export function terminalizeCodexSteerLifecycleBoundary(input: {
+  readonly semaphore: Semaphore.Semaphore;
+  readonly pendingRef: Ref.Ref<Map<string, CodexPendingSteerProcessing>>;
+  readonly sessionRef: Ref.Ref<ProviderSession>;
+  readonly turnId: TurnId;
+  readonly terminalState: CodexPendingSteerTerminalState;
+  readonly observedAt: string;
+  readonly sessionPatch: Partial<ProviderSession>;
+}): Effect.Effect<boolean> {
+  return input.semaphore.withPermits(1)(
+    Effect.uninterruptible(
+      Effect.gen(function* () {
+        yield* Ref.update(
+          input.pendingRef,
+          (current) => terminalizeCodexPendingSteerProcessing(current, input).next,
+        );
+        return yield* Ref.modify(input.sessionRef, (session) =>
+          session.activeTurnId === input.turnId
+            ? [
+                true,
+                {
+                  ...session,
+                  ...input.sessionPatch,
+                  updatedAt: input.observedAt,
+                },
+              ]
+            : [false, session],
+        );
+      }),
+    ),
+  );
+}
+
+export function prunePendingSteerProcessing(
   current: ReadonlyMap<string, CodexPendingSteerProcessing>,
 ): Map<string, CodexPendingSteerProcessing> {
   const next = new Map(current);
-  while (next.size > 50) {
-    const oldest = Array.from(next.values()).toSorted((left, right) =>
-      left.acknowledgedAt.localeCompare(right.acknowledgedAt),
-    )[0];
+  while (next.size > CODEX_PENDING_STEER_HISTORY_LIMIT) {
+    // This map participates in correctness until Codex either echoes the
+    // correlated userMessage or Cafe claims terminal recovery. Never evict an
+    // unresolved entry merely to satisfy the diagnostics-history cap: a late
+    // ACK would otherwise have no terminal marker and could revive an ended
+    // turn. Only settled history is disposable.
+    const oldest = Array.from(next.values())
+      .filter(
+        (entry) =>
+          entry.processedAt !== undefined ||
+          (entry.terminalObservedAt !== undefined && entry.acknowledgedAt !== undefined),
+      )
+      .toSorted((left, right) => left.requestedAt.localeCompare(right.requestedAt))[0];
     if (!oldest) {
       break;
     }
     next.delete(oldest.steerId);
   }
   return next;
+}
+
+function isCodexPendingSteerProcessingSettled(entry: CodexPendingSteerProcessing): boolean {
+  return (
+    entry.processedAt !== undefined ||
+    (entry.terminalObservedAt !== undefined && entry.acknowledgedAt !== undefined)
+  );
+}
+
+/**
+ * Atomically decide whether another correctness-critical steer correlation may
+ * be retained. Settled history can be pruned, but accepted or transport-
+ * ambiguous correlations are never evicted: once the unresolved capacity is
+ * full, callers receive explicit backpressure before any provider I/O.
+ */
+export function admitCodexPendingSteerProcessing(
+  current: ReadonlyMap<string, CodexPendingSteerProcessing>,
+  pending: CodexPendingSteerProcessing,
+): CodexPendingSteerAdmission {
+  const next = prunePendingSteerProcessing(current);
+  const unresolvedCount = Array.from(next.values()).filter(
+    (entry) => !isCodexPendingSteerProcessingSettled(entry),
+  ).length;
+
+  if (next.has(pending.steerId) || unresolvedCount >= CODEX_PENDING_STEER_UNRESOLVED_CAPACITY) {
+    return {
+      admitted: false,
+      next,
+      unresolvedCount,
+      capacity: CODEX_PENDING_STEER_UNRESOLVED_CAPACITY,
+    };
+  }
+
+  next.set(pending.steerId, pending);
+  return {
+    admitted: true,
+    next: prunePendingSteerProcessing(next),
+    unresolvedCount: unresolvedCount + 1,
+    capacity: CODEX_PENDING_STEER_UNRESOLVED_CAPACITY,
+  };
+}
+
+export function claimCodexRestartedSteerProcessingObservation(
+  current: ReadonlyMap<string, string>,
+  observation: CodexRestartedSteerProcessingObservation,
+): {
+  readonly claimed: boolean;
+  readonly next: Map<string, string>;
+} {
+  // The parsed client token is fixed-size and globally deterministic for a
+  // Cafe message id. Using only that token suppresses both halves of Codex's
+  // item lifecycle without retaining raw, potentially unbounded ids or other
+  // untrusted provider fields in process memory.
+  const key = observation.clientCorrelationId;
+  if (current.has(key)) {
+    return {
+      claimed: false,
+      next: current instanceof Map ? current : new Map(current),
+    };
+  }
+  const next = new Map(current);
+  next.set(key, observation.observedAt);
+  while (next.size > CODEX_RESTARTED_STEER_OBSERVATION_HISTORY_LIMIT) {
+    const oldestKey = next.keys().next().value as string | undefined;
+    if (oldestKey === undefined) break;
+    next.delete(oldestKey);
+  }
+  return { claimed: true, next };
+}
+
+export function buildCodexPendingSteerCapacityError(input: {
+  readonly unresolvedCount: number;
+  readonly capacity: number;
+}): CodexErrors.CodexAppServerRequestError {
+  return CodexErrors.CodexAppServerRequestError.invalidRequest(
+    "cannot steer while unresolved steer capacity is exhausted",
+    {
+      message: "cannot steer while unresolved steer capacity is exhausted",
+      additionalDetails: {
+        unresolvedCount: input.unresolvedCount,
+        capacity: input.capacity,
+        retryableAfterReconciliation: true,
+      },
+    },
+  );
+}
+
+export function buildCodexInvalidSteerCorrelationError(): CodexErrors.CodexAppServerRequestError {
+  return CodexErrors.CodexAppServerRequestError.invalidRequest(
+    "cannot steer with an invalid client correlation",
+    {
+      message: "cannot steer with an invalid client correlation",
+      additionalDetails: {
+        issue: "client correlation must be Cafe's fixed-size Codex steer token",
+      },
+    },
+  );
+}
+
+/**
+ * Resolve the only correlation representation allowed inside the Codex
+ * runtime. Undefined means the adapter had no Cafe message identity, in which
+ * case a random per-request source is hashed. A supplied value must already be
+ * a canonical token; hashing malformed input here would hide a boundary bug
+ * and break the orchestration layer's exact reverse mapping.
+ */
+export function resolveCodexSessionRuntimeSteerClientCorrelationId(input: {
+  readonly clientCorrelationId: string | undefined;
+  readonly fallbackSource: string;
+}): string | undefined {
+  return input.clientCorrelationId === undefined
+    ? buildCodexSteerClientCorrelationId(input.fallbackSource)
+    : parseCodexSteerClientCorrelationId(input.clientCorrelationId);
 }
 
 function parseCodexProcessElapsedSeconds(value: string): number | null {
@@ -1386,7 +2071,26 @@ const requestCodexThreadOpen = <M extends CodexThreadOpenMethod>(
           CodexErrors.CodexAppServerError
         >;
       }
-      return decodeV2ThreadResumeResponse(rawResponse).pipe(
+      return Effect.all({
+        response: decodeV2ThreadResumeResponse(rawResponse),
+        recentTurns: decodeCodexThreadResumeInitialTurnsPageResponse(rawResponse),
+      }).pipe(
+        Effect.map(({ response, recentTurns }) => {
+          const initialTurnsPage = recentTurns.initialTurnsPage;
+          if (initialTurnsPage === undefined || initialTurnsPage === null) {
+            return response;
+          }
+          // Normalize the bounded page into the generated stable response shape
+          // so the existing active-turn recovery and snapshot backfill paths do
+          // not need a second pagination-specific lifecycle implementation.
+          return {
+            ...response,
+            thread: {
+              ...response.thread,
+              turns: initialTurnsPage.data,
+            },
+          };
+        }),
         Effect.mapError((error) =>
           toProtocolParseError("Invalid thread/resume response payload", error),
         ),
@@ -1425,6 +2129,16 @@ export const openCodexThread = (input: {
   return requestCodexThreadOpen(input.client, "thread/resume", {
     threadId: resumeThreadId,
     ...startParams,
+    // Upstream deprecated full-history resume hydration for paginated threads.
+    // One newest turn, with item bodies omitted, is sufficient to recover an
+    // active turn id/status while keeping the response bounded independently
+    // of thread age. Cafe hydrates detailed history through its normal reads.
+    excludeTurns: true,
+    initialTurnsPage: {
+      itemsView: "notLoaded",
+      limit: 1,
+      sortDirection: "desc",
+    },
   }).pipe(
     Effect.catchIf(isRecoverableThreadResumeError, (error) =>
       Effect.logWarning("codex app-server thread resume fell back to fresh start", {
@@ -1437,6 +2151,151 @@ export const openCodexThread = (input: {
     ),
   );
 };
+
+/**
+ * Minimal app-server surface needed by Cafe's lifecycle reconciliation reads.
+ *
+ * Codex 0.151 deprecated `thread/read(includeTurns: true)` because one JSON-RPC
+ * line then grows with the complete retained rollout. A multi-day thread can
+ * exceed Cafe's deliberately finite protocol boundary and terminate the stdio
+ * reader while an otherwise healthy turn is running. Keep metadata and turn
+ * pagination as two explicit, bounded requests instead.
+ */
+export interface CodexBoundedThreadSnapshotClient {
+  readonly request: CodexClient.CodexAppServerClientShape["request"];
+}
+
+export const CODEX_BOUNDED_SNAPSHOT_TURN_LIMIT = 1;
+
+// History reads serve user-visible transcript repair and subagent detail, so
+// they need more than the newest lifecycle turn. They still must remain
+// finite: Codex app-server writes each JSON-RPC response on one line, and Cafe
+// deliberately rejects lines above its 64 MiB protocol safety boundary. Small
+// summary pages avoid persisted command output, while independent page and
+// turn caps prevent a hostile or malformed cursor stream from growing memory
+// or keeping the provider runtime busy indefinitely.
+export const CODEX_SUMMARY_HISTORY_PAGE_TURN_LIMIT = 16;
+export const CODEX_SUMMARY_HISTORY_MAX_PAGES = 16;
+export const CODEX_SUMMARY_HISTORY_MAX_TURNS = 200;
+
+type CodexSummaryHistoryTurn = EffectCodexSchema.V2ThreadTurnsListResponse__Turn;
+
+/**
+ * Read the newest bounded window of summarized turns and restore chronological
+ * order for Cafe's provider-neutral snapshot contract.
+ *
+ * `sortDirection: "desc"` is intentional: when a thread contains more history
+ * than Cafe's hard cap, retain the most recent work rather than an arbitrarily
+ * old prefix. Opaque cursors are never logged or returned in errors because
+ * provider cursor contents are not part of Cafe's public diagnostic surface.
+ */
+export const readCodexBoundedSummaryTurnsWithClient = Effect.fn(
+  "CodexSessionRuntime.readCodexBoundedSummaryTurnsWithClient",
+)(function* (input: {
+  readonly client: CodexBoundedThreadSnapshotClient;
+  readonly providerThreadId: string;
+}) {
+  const descendingTurns: Array<CodexSummaryHistoryTurn> = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+
+  for (
+    let pageIndex = 0;
+    pageIndex < CODEX_SUMMARY_HISTORY_MAX_PAGES &&
+    descendingTurns.length < CODEX_SUMMARY_HISTORY_MAX_TURNS;
+    pageIndex += 1
+  ) {
+    const remainingTurnCapacity = CODEX_SUMMARY_HISTORY_MAX_TURNS - descendingTurns.length;
+    const response = yield* input.client.request("thread/turns/list", {
+      threadId: input.providerThreadId,
+      limit: Math.min(CODEX_SUMMARY_HISTORY_PAGE_TURN_LIMIT, remainingTurnCapacity),
+      sortDirection: "desc",
+      itemsView: "summary",
+      ...(cursor !== undefined ? { cursor } : {}),
+    });
+
+    // Do not trust an upstream implementation to honor the requested limit.
+    // Slice before retaining data so Cafe's in-memory snapshot cap is a hard
+    // invariant even across provider-version regressions.
+    descendingTurns.push(...response.data.slice(0, remainingTurnCapacity));
+
+    const nextCursor = response.nextCursor ?? undefined;
+    if (
+      response.data.length === 0 ||
+      nextCursor === undefined ||
+      nextCursor.length === 0 ||
+      descendingTurns.length >= CODEX_SUMMARY_HISTORY_MAX_TURNS
+    ) {
+      break;
+    }
+    if (seenCursors.has(nextCursor)) {
+      return yield* Effect.fail(
+        CodexErrors.CodexAppServerRequestError.internalError(
+          "Codex thread history pagination returned a repeated cursor",
+        ),
+      );
+    }
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+  }
+
+  // Descending pages are newest-first both within and across pages. Reverse
+  // the complete bounded window once so consumers see oldest-to-newest turns.
+  return descendingTurns.toReversed();
+});
+
+/** Metadata-only thread read followed by bounded summarized history pages. */
+export const readCodexBoundedSummaryThreadWithClient = Effect.fn(
+  "CodexSessionRuntime.readCodexBoundedSummaryThreadWithClient",
+)(function* (input: {
+  readonly client: CodexBoundedThreadSnapshotClient;
+  readonly providerThreadId: string;
+}) {
+  const metadata = yield* input.client.request("thread/read", {
+    threadId: input.providerThreadId,
+    includeTurns: false,
+  });
+  const turns = yield* readCodexBoundedSummaryTurnsWithClient(input);
+
+  return {
+    ...metadata,
+    thread: {
+      ...metadata.thread,
+      turns,
+    },
+  } satisfies EffectCodexSchema.V2ThreadReadResponse;
+});
+
+export const readCodexBoundedThreadSnapshotWithClient = Effect.fn(
+  "CodexSessionRuntime.readCodexBoundedThreadSnapshotWithClient",
+)(function* (input: {
+  readonly client: CodexBoundedThreadSnapshotClient;
+  readonly providerThreadId: string;
+}) {
+  // Keep these reads sequential. Metadata is tiny and verifies that the loaded
+  // thread still exists before Cafe asks for even a bounded history page.
+  const metadata = yield* input.client.request("thread/read", {
+    threadId: input.providerThreadId,
+    includeTurns: false,
+  });
+  const recentTurns = yield* input.client.request("thread/turns/list", {
+    threadId: input.providerThreadId,
+    limit: CODEX_BOUNDED_SNAPSHOT_TURN_LIMIT,
+    sortDirection: "desc",
+    // Summary keeps enough public lifecycle material for missed-event
+    // backfill without allowing command output or a long turn's complete item
+    // history to recreate the unbounded response that this path replaces.
+    itemsView: "summary",
+  });
+
+  return {
+    ...metadata,
+    thread: {
+      ...metadata.thread,
+      turns: recentTurns.data,
+    },
+  } satisfies EffectCodexSchema.V2ThreadReadResponse;
+});
 
 function readNotificationThreadId(notification: CodexServerNotification): string | undefined {
   switch (notification.method) {
@@ -1451,9 +2310,12 @@ function readNotificationThreadId(notification: CodexServerNotification): string
     case "thread/deleted":
     case "thread/unarchived":
     case "thread/closed":
+    case "thread/reverted":
     case "thread/name/updated":
     case "thread/goal/updated":
     case "thread/goal/cleared":
+    case "thread/queue/changed":
+    case "thread/project/updated":
     case "thread/environment/connected":
     case "thread/environment/disconnected":
     case "thread/settings/updated":
@@ -1467,6 +2329,7 @@ function readNotificationThreadId(notification: CodexServerNotification): string
     case "item/started":
     case "item/autoApprovalReview/started":
     case "item/autoApprovalReview/completed":
+    case "autoApprovalReview/strictReviewRequired":
     case "item/completed":
     case "rawResponseItem/completed":
     case "rawResponse/completed":
@@ -1485,10 +2348,15 @@ function readNotificationThreadId(notification: CodexServerNotification): string
     case "thread/compacted":
     case "model/rerouted":
     case "model/verification":
+    case "modelProvider/authRecoveryStarted":
+    case "modelProvider/authRecoveryCompleted":
     case "model/safetyBuffering/updated":
     case "turn/moderationMetadata":
     case "thread/realtime/started":
     case "thread/realtime/itemAdded":
+    case "thread/realtime/item/started":
+    case "thread/realtime/item/transcript/delta":
+    case "thread/realtime/item/completed":
     case "thread/realtime/transcript/delta":
     case "thread/realtime/transcript/done":
     case "thread/realtime/outputAudio/delta":
@@ -1521,8 +2389,11 @@ export function readCodexNotificationRouteFields(notification: CodexServerNotifi
     case "turn/completed":
     case "model/rerouted":
     case "model/verification":
+    case "modelProvider/authRecoveryStarted":
+    case "modelProvider/authRecoveryCompleted":
     case "model/safetyBuffering/updated":
     case "turn/moderationMetadata":
+    case "autoApprovalReview/strictReviewRequired":
       return {
         turnId: readNotificationTurnId(notification),
         itemId: undefined,
@@ -1557,6 +2428,24 @@ export function readCodexNotificationRouteFields(notification: CodexServerNotifi
       return {
         turnId: readNotificationTurnId(notification),
         itemId: undefined,
+      };
+    case "thread/realtime/item/started":
+    case "thread/realtime/item/completed": {
+      const params = readRecord(notification.params);
+      const item = params ? readRecord(params.item) : undefined;
+      const promotedTurnId = item?.type === "bemItemPromoted" ? item.turn_id : undefined;
+      return {
+        turnId:
+          typeof promotedTurnId === "string" && promotedTurnId.length > 0
+            ? TurnId.make(promotedTurnId)
+            : undefined,
+        itemId: providerItemIdFromString(readString(item?.id)),
+      };
+    }
+    case "thread/realtime/item/transcript/delta":
+      return {
+        turnId: undefined,
+        itemId: providerItemIdFromString(readNotificationParamString(notification, "itemId")),
       };
     case "error":
       return {
@@ -1641,10 +2530,8 @@ export function rememberCodexChildConversationTurns(
   // before that child emits `turn/started`. Cafe presents one aggregate thread
   // instead of separate TUI channels, so retain the same relationship here and
   // route descendant output back to the initiating Cafe turn.
-  const normalizedAgentPath =
-    typeof item.agentPath === "string" ? item.agentPath.trim().replace(/\/+$/, "") : undefined;
   const childThreadIds =
-    item.type === "subAgentActivity" && normalizedAgentPath !== "/root"
+    item.type === "subAgentActivity" && !isCodexRootAgentPath(item.agentPath)
       ? [item.agentThreadId]
       : item.type === "collabAgentToolCall" && Array.isArray(item.receiverThreadIds)
         ? item.receiverThreadIds
@@ -1669,15 +2556,43 @@ function shouldSuppressChildConversationNotification(method: string): boolean {
     method === "thread/deleted" ||
     method === "thread/unarchived" ||
     method === "thread/closed" ||
+    method === "thread/reverted" ||
     method === "thread/environment/connected" ||
     method === "thread/environment/disconnected" ||
     method === "thread/compacted" ||
     method === "thread/name/updated" ||
     method === "thread/tokenUsage/updated" ||
+    method === "thread/goal/updated" ||
+    method === "thread/goal/cleared" ||
+    method === "thread/queue/changed" ||
+    method === "thread/project/updated" ||
     method === "turn/started" ||
     method === "turn/completed" ||
     method === "turn/plan/updated" ||
     method === "item/plan/delta"
+  );
+}
+
+export function shouldForwardCodexRootGoalNotification(
+  notification: CodexServerNotification,
+  rootProviderThreadId: string | undefined,
+): boolean {
+  if (
+    notification.method !== "thread/goal/updated" &&
+    notification.method !== "thread/goal/cleared"
+  ) {
+    return true;
+  }
+
+  // The TUI keeps each provider thread on a separate event channel. Cafe
+  // aggregates child-agent channels into one visible thread, so it must add
+  // this explicit root check before canonicalizing a goal. Otherwise a child
+  // thread goal could overwrite the parent goal projection.
+  const notificationThreadId = readNotificationThreadId(notification);
+  return (
+    rootProviderThreadId !== undefined &&
+    notificationThreadId !== undefined &&
+    notificationThreadId === rootProviderThreadId
   );
 }
 
@@ -1691,6 +2606,54 @@ export function codexAggregateNotificationMethod(
   // so CodexAdapter can project a work-log warning without mutating primary
   // session error state.
   return isChildConversation && method === "error" ? "codex.subagent/error" : method;
+}
+
+/**
+ * Selects child-thread notifications that carry user-visible subagent state.
+ *
+ * Cafe intentionally suppresses child thread/turn lifecycle so it cannot
+ * mutate the parent Cafe thread. The same notifications are nevertheless the
+ * authoritative source for the Subagents UI in Codex 0.149. Project a narrow
+ * copy under a Cafe-private method name before suppression; CodexAdapter then
+ * converts it into canonical `task.*` activity without confusing it for root
+ * lifecycle. Item deltas are deliberately excluded to avoid an unbounded
+ * per-token task stream. Completed reasoning/tool snapshots are sufficient for
+ * meaningful progress and match the provider UI's snapshot-based status feed.
+ */
+export function codexSubagentProjectionMethod(
+  notification: CodexServerNotification,
+): string | undefined {
+  switch (notification.method) {
+    case "thread/started":
+      return "codex.subagent/threadStarted";
+    case "thread/name/updated":
+      return "codex.subagent/threadNameUpdated";
+    case "thread/status/changed":
+      return "codex.subagent/threadStatusChanged";
+    case "thread/archived":
+    case "thread/deleted":
+    case "thread/closed":
+      return "codex.subagent/threadStopped";
+    case "turn/started":
+      return "codex.subagent/turnStarted";
+    case "turn/completed":
+      return "codex.subagent/turnCompleted";
+    case "item/completed": {
+      const params = readRecord(notification.params);
+      const item = params ? readRecord(params.item) : undefined;
+      const itemType = typeof item?.type === "string" ? item.type : undefined;
+      return itemType === "reasoning" ||
+        itemType === "commandExecution" ||
+        itemType === "fileChange" ||
+        itemType === "mcpToolCall" ||
+        itemType === "dynamicToolCall" ||
+        itemType === "webSearch"
+        ? "codex.subagent/itemCompleted"
+        : undefined;
+    }
+    default:
+      return undefined;
+  }
 }
 
 export function resolveCodexChildConversationNotification(
@@ -1740,9 +2703,17 @@ export function isCodexChildConversationWorkNotification(
     method === "thread/archived" ||
     method === "thread/deleted" ||
     method === "thread/closed" ||
+    method === "thread/reverted" ||
     method === "thread/tokenUsage/updated" ||
+    method === "thread/queue/changed" ||
+    method === "thread/project/updated" ||
     method === "warning" ||
-    method === "guardianWarning"
+    method === "guardianWarning" ||
+    // Credential recovery is turn-scoped metadata, not proof that a child is
+    // doing work. In particular, a replayed completion can arrive after the
+    // child turn is already terminal and must never resurrect its liveness.
+    method === "modelProvider/authRecoveryStarted" ||
+    method === "modelProvider/authRecoveryCompleted"
   ) {
     return false;
   }
@@ -1779,6 +2750,35 @@ export function updateCodexChildConversationLiveness(
         observedAt,
         method: "child-registered",
       });
+    }
+  }
+
+  if (notification.method === "item/started" || notification.method === "item/completed") {
+    const params = readRecord(notification.params);
+    const item = params ? readRecord(params.item) : undefined;
+    if (item?.type === "subAgentActivity") {
+      const activityThreadId = readString(item.agentThreadId);
+      const activityParentTurnId = activityThreadId
+        ? childConversationTurns.get(activityThreadId)
+        : undefined;
+      const kind = readString(item.kind);
+      const state =
+        kind === "started"
+          ? "active"
+          : kind === "completed" || kind === "interrupted"
+            ? "inactive"
+            : undefined;
+      if (activityThreadId && activityParentTurnId && state) {
+        // Codex 0.150's TUI treats explicit completed/interrupted activity as
+        // authoritative liveness. Apply the same signal even though the
+        // notification itself is emitted on the initiating parent thread.
+        next.set(activityThreadId, {
+          parentTurnId: activityParentTurnId,
+          state,
+          observedAt,
+          method: `subAgentActivity:${kind}`,
+        });
+      }
     }
   }
 
@@ -1968,6 +2968,57 @@ function readRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+export function sanitizeCodexProtocolDiagnosticPayload(input: {
+  readonly direction?: string;
+  readonly stage: string;
+  readonly payload: unknown;
+}): unknown {
+  if (input.direction === "incoming" && input.stage === "raw") {
+    // A raw JSONL record can contain prompts, credentials, provider-authored
+    // text, and opaque cursors before any method-aware decoder runs. Logging
+    // only its bounded byte count preserves framing diagnostics without ever
+    // copying wire content into the backend log.
+    return {
+      redacted: true,
+      diagnosticClass: "incoming-raw-protocol-content",
+      byteLength:
+        typeof input.payload === "string" ? Buffer.byteLength(input.payload, "utf8") : null,
+    };
+  }
+
+  const payload = readRecord(input.payload);
+  const method = payload ? readString(payload.method) : undefined;
+  if (
+    method !== "modelProvider/authRecoveryStarted" &&
+    method !== "modelProvider/authRecoveryCompleted"
+  ) {
+    return input.payload;
+  }
+
+  const phase = method === "modelProvider/authRecoveryStarted" ? "started" : "completed";
+  if (input.stage === "decoded") {
+    return {
+      method,
+      phase,
+      diagnosticClass: "notification-payload-redacted",
+    };
+  }
+  if (input.stage !== "decode_failed") {
+    return input.payload;
+  }
+
+  // Effect Schema's decode issue can contain the rejected `actual` value.
+  // Auth-recovery payloads contain provider/account identifiers and an
+  // upstream-authored message, so this method-specific boundary records only
+  // finite classifier fields. General protocol diagnostics retain their
+  // existing detail because they do not cross this credential-bearing schema.
+  return {
+    method,
+    phase,
+    errorClass: "notification-schema-decode-failed",
+  };
+}
+
 function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
@@ -2037,8 +3088,31 @@ function readNotificationItemType(notification: CodexServerNotification): string
   );
 }
 
+function readNotificationClientUserMessageId(
+  notification: CodexServerNotification,
+): string | undefined {
+  return (
+    readNotificationNestedString(notification, "item", "clientId") ??
+    readNotificationParamString(notification, "clientUserMessageId")
+  );
+}
+
 function readNotificationTurnStatus(notification: CodexServerNotification): string | undefined {
   return readNotificationNestedString(notification, "turn", "status");
+}
+
+function normalizeCodexPendingSteerTerminalState(
+  value: string | undefined,
+): CodexPendingSteerTerminalState {
+  switch (value) {
+    case "completed":
+    case "failed":
+    case "interrupted":
+    case "cancelled":
+      return value;
+    default:
+      return "unknown";
+  }
 }
 
 function readNotificationErrorMessage(notification: CodexServerNotification): string | undefined {
@@ -2062,6 +3136,89 @@ function updateSession(
   });
 }
 
+export function codexTerminalSessionPatch(input: {
+  readonly turnStatus: string;
+  readonly errorMessage?: string | undefined;
+}): Partial<ProviderSession> {
+  const failed = input.turnStatus === "failed";
+  return {
+    status: failed ? "error" : "ready",
+    activeTurnId: undefined,
+    // `lastError` describes the current runtime outcome, not an append-only
+    // diagnostic. Successful completion must clear a prior failure or later
+    // session polls will resurrect the same recovered error.
+    lastError: failed ? input.errorMessage : undefined,
+  };
+}
+
+/**
+ * Apply a successful terminal `thread/read` observation through the shared
+ * steer lifecycle boundary. This effect is deliberately exported as a narrow
+ * deterministic test seam: exercising it with the ACK handler verifies the
+ * real Ref/Semaphore ordering used by the runtime, not only the pure map merge.
+ */
+export function reconcileCodexTerminalSnapshotSteerLifecycle(input: {
+  readonly semaphore: Semaphore.Semaphore;
+  readonly pendingRef: Ref.Ref<Map<string, CodexPendingSteerProcessing>>;
+  readonly sessionRef: Ref.Ref<ProviderSession>;
+  readonly turnId: TurnId;
+  readonly turnStatus: string;
+  readonly errorMessage?: string | undefined;
+  readonly observedAt: string;
+}): Effect.Effect<boolean> {
+  return terminalizeCodexSteerLifecycleBoundary({
+    semaphore: input.semaphore,
+    pendingRef: input.pendingRef,
+    sessionRef: input.sessionRef,
+    turnId: input.turnId,
+    terminalState: normalizeCodexPendingSteerTerminalState(input.turnStatus),
+    observedAt: input.observedAt,
+    sessionPatch: codexTerminalSessionPatch({
+      turnStatus: input.turnStatus,
+      errorMessage: input.errorMessage,
+    }),
+  });
+}
+
+/**
+ * Commit a live Codex turn completion before publishing its canonical event.
+ *
+ * Raw app-server notifications are delivered on independent fibers. A late
+ * `turn/completed` for T1 may therefore arrive after `turn/started` has made T2
+ * the visible active turn. The shared lifecycle boundary always records T1's
+ * terminal evidence for its pending steers, but its atomic exact-turn compare
+ * prevents that stale completion from clearing T2. Publication is sequenced
+ * after the commit so downstream recovery can never observe the terminal event
+ * while the response continuation can still revive T1.
+ */
+export function publishCodexTurnCompletionAfterLifecycleBoundary<E, R>(input: {
+  readonly semaphore: Semaphore.Semaphore;
+  readonly pendingRef: Ref.Ref<Map<string, CodexPendingSteerProcessing>>;
+  readonly sessionRef: Ref.Ref<ProviderSession>;
+  readonly turnId: TurnId;
+  readonly turnStatus: string;
+  readonly errorMessage?: string | undefined;
+  readonly observedAt: string;
+  readonly publish: Effect.Effect<void, E, R>;
+}): Effect.Effect<boolean, E, R> {
+  return Effect.gen(function* () {
+    const terminalizedVisibleSession = yield* terminalizeCodexSteerLifecycleBoundary({
+      semaphore: input.semaphore,
+      pendingRef: input.pendingRef,
+      sessionRef: input.sessionRef,
+      turnId: input.turnId,
+      terminalState: normalizeCodexPendingSteerTerminalState(input.turnStatus),
+      observedAt: input.observedAt,
+      sessionPatch: codexTerminalSessionPatch({
+        turnStatus: input.turnStatus,
+        errorMessage: input.errorMessage,
+      }),
+    });
+    yield* input.publish;
+    return terminalizedVisibleSession;
+  });
+}
+
 function parseThreadSnapshot(
   response: EffectCodexSchema.V2ThreadReadResponse | EffectCodexSchema.V2ThreadRollbackResponse,
 ): CodexThreadSnapshot {
@@ -2082,6 +3239,31 @@ function timestampSecondsToIso(timestampSeconds: number | null | undefined): str
     return undefined;
   }
   return DateTime.formatIso(DateTime.makeUnsafe(timestampSeconds * 1_000));
+}
+
+function normalizeCodexThreadGoal(
+  goal:
+    | EffectCodexSchema.V2ThreadGoalGetResponse__ThreadGoal
+    | EffectCodexSchema.V2ThreadGoalSetResponse__ThreadGoal
+    | EffectCodexSchema.V2ThreadGoalUpdatedNotification__ThreadGoal,
+  cafeThreadId: ThreadId,
+): Effect.Effect<ProviderThreadGoal, CodexSessionRuntimeError> {
+  const createdAt = timestampSecondsToIso(goal.createdAt);
+  const updatedAt = timestampSecondsToIso(goal.updatedAt);
+  return decodeProviderThreadGoal({
+    threadId: cafeThreadId,
+    objective: goal.objective,
+    status: goal.status,
+    tokenBudget: goal.tokenBudget ?? null,
+    tokensUsed: goal.tokensUsed,
+    timeUsedSeconds: goal.timeUsedSeconds,
+    createdAt,
+    updatedAt,
+  }).pipe(
+    Effect.mapError((error) =>
+      toProtocolParseError("Invalid thread goal payload from Codex app-server", error),
+    ),
+  );
 }
 
 function timestampSecondsToMillis(
@@ -2379,6 +3561,132 @@ export function buildCodexThreadSnapshotBackfillEvents(input: {
   return events;
 }
 
+export interface CodexSubagentHistoryReadClient {
+  readonly request: CodexClient.CodexAppServerClientShape["request"];
+}
+
+/**
+ * Execute the exact read sequence shared by live and transient Codex clients.
+ * Root metadata is intentionally fetched first: a missing or inaccessible root
+ * short-circuits before Cafe sends the browser-supplied child id upstream.
+ */
+export const readCodexSubagentThreadWithClient = Effect.fn(
+  "CodexSessionRuntime.readSubagentThreadWithClient",
+)(function* (input: {
+  readonly client: CodexSubagentHistoryReadClient;
+  readonly rootProviderThreadId: string;
+  readonly subagentThreadId: string;
+}) {
+  const rootResponse = yield* input.client.request("thread/read", {
+    threadId: input.rootProviderThreadId,
+    includeTurns: false,
+  });
+  if (rootResponse.thread.id !== input.rootProviderThreadId) {
+    return yield* new CodexSessionRuntimeInvalidSubagentThreadError({
+      reason: "root-identity-mismatch",
+    });
+  }
+  const childMetadata = yield* input.client.request("thread/read", {
+    threadId: input.subagentThreadId,
+    includeTurns: false,
+  });
+  const validationFailure = validateCodexSubagentThreadReadMetadata({
+    expectedRootThreadId: input.rootProviderThreadId,
+    expectedChildThreadId: input.subagentThreadId,
+    root: rootResponse.thread,
+    child: childMetadata.thread,
+  });
+  if (validationFailure !== undefined) {
+    return yield* new CodexSessionRuntimeInvalidSubagentThreadError({
+      reason: validationFailure,
+    });
+  }
+
+  // Do not disclose even bounded child history until both metadata reads prove
+  // that the browser-supplied id belongs to the root's provider session tree.
+  const childTurns = yield* readCodexBoundedSummaryTurnsWithClient({
+    client: input.client,
+    providerThreadId: input.subagentThreadId,
+  });
+  const childResponse = {
+    ...childMetadata,
+    thread: {
+      ...childMetadata.thread,
+      turns: childTurns,
+    },
+  } satisfies EffectCodexSchema.V2ThreadReadResponse;
+
+  return parseThreadSnapshot(childResponse);
+});
+
+export interface CodexInitializedSubagentHistoryReadClient extends CodexSubagentHistoryReadClient {
+  readonly notify: CodexClient.CodexAppServerClientShape["notify"];
+}
+
+/** Initialize one isolated app-server client, then perform only verified reads. */
+export const readCodexSubagentThreadWithInitializedClient = Effect.fn(
+  "CodexSessionRuntime.readSubagentThreadWithInitializedClient",
+)(function* (input: {
+  readonly client: CodexInitializedSubagentHistoryReadClient;
+  readonly rootProviderThreadId: string;
+  readonly subagentThreadId: string;
+}) {
+  yield* input.client.request("initialize", buildCodexInitializeParams());
+  yield* input.client.notify("initialized", undefined);
+  return yield* readCodexSubagentThreadWithClient(input);
+});
+
+export interface CodexTransientSubagentHistoryReadOptions {
+  readonly binaryPath: string;
+  readonly appServerCwd: string;
+  readonly rootProviderThreadId: string;
+  readonly subagentThreadId: string;
+  readonly environment?: NodeJS.ProcessEnv;
+  readonly homePath?: string;
+  readonly transportPolicy?: CodexTransportPolicy;
+  readonly maxConcurrentSubagents?: number | undefined;
+}
+
+/**
+ * Spawn a short-lived app-server for provider history only. This deliberately
+ * does not construct a CodexSessionRuntime: there is no adapter session map,
+ * event queue/bridge, `thread/resume`, snapshot backfill, or canonical runtime
+ * event. Closing the scoped command layer always retires the child process.
+ */
+export const readCodexSubagentThreadTransient = Effect.fn(
+  "CodexSessionRuntime.readCodexSubagentThreadTransient",
+)(function* (options: CodexTransientSubagentHistoryReadOptions) {
+  const resolvedHomePath = options.homePath ? expandHomePath(options.homePath) : undefined;
+  return yield* Effect.scoped(
+    Effect.gen(function* () {
+      const clientContext = yield* Layer.build(
+        CodexClient.layerCommand({
+          command: options.binaryPath,
+          args: buildCodexAppServerArgs({
+            maxConcurrentSubagents: options.maxConcurrentSubagents,
+            transportPolicy: options.transportPolicy,
+          }),
+          cwd: options.appServerCwd,
+          env: {
+            ...(options.environment ?? process.env),
+            ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
+          },
+          // Do not install a protocol logger for this privacy-sensitive read.
+          // The finite adapter error mapping is the only diagnostic boundary.
+        }),
+      );
+      const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
+        Effect.provide(clientContext),
+      );
+      return yield* readCodexSubagentThreadWithInitializedClient({
+        client,
+        rootProviderThreadId: options.rootProviderThreadId,
+        subagentThreadId: options.subagentThreadId,
+      });
+    }),
+  );
+});
+
 export const makeCodexSessionRuntime = (
   options: CodexSessionRuntimeOptions,
 ): Effect.Effect<
@@ -2404,6 +3712,10 @@ export const makeCodexSessionRuntime = (
     const aggregateManagedTurnIdsRef = yield* Ref.make<ReadonlySet<string>>(new Set());
     const aggregateCompletionWatcherTurnIdsRef = yield* Ref.make<ReadonlySet<string>>(new Set());
     const aggregateLifecycleSemaphore = yield* Semaphore.make(1);
+    // Request responses and raw notifications are independent Effect fibers.
+    // Serialize the two writes that decide steer-vs-terminal ownership so a
+    // late ACK can never overwrite an already-authoritative terminal state.
+    const steerLifecycleSemaphore = yield* Semaphore.make(1);
     const closedRef = yield* Ref.make(false);
     const snapshotBackfillEventIdsRef = yield* Ref.make(new Set<string>());
     const turnStartObservationsRef = yield* Ref.make(new Map<string, CodexTurnStartObservation>());
@@ -2414,6 +3726,7 @@ export const makeCodexSessionRuntime = (
     const pendingSteerProcessingRef = yield* Ref.make(
       new Map<string, CodexPendingSteerProcessing>(),
     );
+    const restartedSteerProcessingObservationsRef = yield* Ref.make(new Map<string, string>());
 
     // `~` is not shell-expanded when env vars are set via
     // `child_process.spawn`; `expandHomePath` lets a configured
@@ -2423,7 +3736,10 @@ export const makeCodexSessionRuntime = (
       ...(options.environment ?? process.env),
       ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
     };
-    const appServerArgs = buildCodexAppServerArgs(options.transportPolicy);
+    const appServerArgs = buildCodexAppServerArgs({
+      maxConcurrentSubagents: options.maxConcurrentSubagents,
+      transportPolicy: options.transportPolicy,
+    });
     const appServerCwd = options.appServerCwd ?? process.cwd();
     const child = yield* spawner
       .spawn(
@@ -2454,6 +3770,13 @@ export const makeCodexSessionRuntime = (
         ),
       );
 
+    const protocolTerminationRef = yield* Ref.make<
+      | {
+          readonly tag: CodexErrors.CodexAppServerError["_tag"];
+          readonly maxBytes?: number;
+        }
+      | undefined
+    >(undefined);
     const clientContext = yield* CodexClient.layerChildProcess(child, {
       logger: (event) =>
         Effect.logWarning("codex.app-server.protocol.diagnostic", {
@@ -2461,8 +3784,26 @@ export const makeCodexSessionRuntime = (
           providerInstanceId: options.providerInstanceId ?? PROVIDER,
           direction: event.direction,
           stage: event.stage,
-          payload: event.payload,
+          payload: sanitizeCodexProtocolDiagnosticPayload(event),
         }),
+      onTermination: (error) => {
+        const diagnostic = {
+          tag: error._tag,
+          ...(error._tag === "CodexAppServerIncomingMessageTooLargeError"
+            ? { maxBytes: error.maxBytes }
+            : {}),
+        } as const;
+        return Ref.set(protocolTerminationRef, diagnostic).pipe(
+          Effect.andThen(
+            Effect.logError("codex.app-server.protocol.terminated", {
+              threadId: options.threadId,
+              providerInstanceId: options.providerInstanceId ?? PROVIDER,
+              errorTag: diagnostic.tag,
+              maxBytes: diagnostic.maxBytes ?? null,
+            }),
+          ),
+        );
+      },
     }).pipe(Layer.build, Effect.provideService(Scope.Scope, runtimeScope));
     const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
       Effect.provide(clientContext),
@@ -2739,10 +4080,17 @@ export const makeCodexSessionRuntime = (
       });
 
     const recordPendingSteerProcessing = (pending: CodexPendingSteerProcessing) =>
-      Ref.update(pendingSteerProcessingRef, (current) => {
-        const next = new Map(current);
-        next.set(pending.steerId, pending);
-        return prunePendingSteerProcessing(next);
+      Ref.modify(pendingSteerProcessingRef, (current) => {
+        const admission = admitCodexPendingSteerProcessing(current, pending);
+        return [admission, admission.next] as const;
+      });
+
+    const claimRestartedSteerProcessingObservationOnce = (
+      observation: CodexRestartedSteerProcessingObservation,
+    ) =>
+      Ref.modify(restartedSteerProcessingObservationsRef, (current) => {
+        const claim = claimCodexRestartedSteerProcessingObservation(current, observation);
+        return [claim.claimed, claim.next] as const;
       });
 
     const markPendingSteerProcessingWarning = (
@@ -2751,7 +4099,12 @@ export const makeCodexSessionRuntime = (
     ) =>
       Ref.modify(pendingSteerProcessingRef, (current) => {
         const pending = current.get(steerId);
-        if (!pending || pending.processedAt !== undefined) {
+        if (
+          !pending ||
+          pending.acknowledgedAt === undefined ||
+          pending.processedAt !== undefined ||
+          pending.terminalObservedAt !== undefined
+        ) {
           return [undefined, current] as const;
         }
         const updated = {
@@ -2781,8 +4134,8 @@ export const makeCodexSessionRuntime = (
           providerThreadId: input.pending.providerThreadId,
           turnId: input.pending.turnId,
           elapsedDelay: input.elapsedDelay,
-          acknowledgedAt: input.pending.acknowledgedAt,
-          ackLatencyMs: input.pending.ackLatencyMs,
+          acknowledgedAt: input.pending.acknowledgedAt ?? null,
+          ackLatencyMs: input.pending.ackLatencyMs ?? null,
           promptByteLength: input.pending.promptByteLength,
           attachmentCount: input.pending.attachmentCount,
           warningCount: input.pending.warningCount,
@@ -2800,8 +4153,9 @@ export const makeCodexSessionRuntime = (
             turnId: input.pending.turnId,
             elapsedDelay: input.elapsedDelay,
             requestedAt: input.pending.requestedAt,
-            acknowledgedAt: input.pending.acknowledgedAt,
-            ackLatencyMs: input.pending.ackLatencyMs,
+            acknowledgedAt: input.pending.acknowledgedAt ?? null,
+            ackLatencyMs: input.pending.ackLatencyMs ?? null,
+            clientCorrelationId: input.pending.clientCorrelationId,
             promptByteLength: input.pending.promptByteLength,
             attachmentCount: input.pending.attachmentCount,
             warningCount: input.pending.warningCount,
@@ -2843,19 +4197,57 @@ export const makeCodexSessionRuntime = (
           return;
         }
 
-        const processed = yield* Ref.modify(pendingSteerProcessingRef, (current) => {
+        const processing = yield* Ref.modify(pendingSteerProcessingRef, (current) => {
           const result = updateCodexPendingSteerProcessingFromNotification(current, {
             method: notification.method,
             providerThreadId: readNotificationThreadId(notification),
             turnId: readNotificationTurnId(notification),
             itemId: readNotificationItemId(notification),
             itemType: readNotificationItemType(notification),
+            clientUserMessageId: readNotificationClientUserMessageId(notification),
             observedAt: observation.observedAt,
             observedAtMs: observation.observedAtMs,
           });
-          return [result.pending, result.next] as const;
+          return [result, result.next] as const;
         });
+        const processed = processing.pending;
         if (!processed) {
+          const restartedObservation = processing.restartedObservation;
+          if (
+            !restartedObservation ||
+            !(yield* claimRestartedSteerProcessingObservationOnce(restartedObservation))
+          ) {
+            return;
+          }
+
+          yield* Effect.logInfo("codex.turnSteer.processingObservedAfterRestart", {
+            threadId: options.threadId,
+            providerInstanceId: options.providerInstanceId ?? PROVIDER,
+            turnId: restartedObservation.turnId,
+            providerUserMessageItemId: restartedObservation.providerUserMessageItemId ?? null,
+            providerUserMessageMethod: restartedObservation.providerUserMessageMethod,
+            clientCorrelationId: restartedObservation.clientCorrelationId,
+          });
+          yield* emitEvent({
+            kind: "notification",
+            threadId: options.threadId,
+            method: "codex.turnSteer/processingObserved",
+            turnId: restartedObservation.turnId,
+            ...(restartedObservation.providerUserMessageItemId
+              ? { itemId: restartedObservation.providerUserMessageItemId }
+              : {}),
+            message: "Codex app-server observed the correlated user message after recovery.",
+            payload: {
+              clientCorrelationId: restartedObservation.clientCorrelationId,
+              providerThreadId: restartedObservation.providerThreadId ?? null,
+              turnId: restartedObservation.turnId,
+              providerUserMessageItemId: restartedObservation.providerUserMessageItemId ?? null,
+              providerUserMessageMethod: restartedObservation.providerUserMessageMethod,
+              observedAt: restartedObservation.observedAt,
+              semantics:
+                "Cafe restarted without the volatile steer correlation. The provider-echoed client id is an untrusted, content-free observation; durable recovery requires an exact match to independently persisted command-boundary acceptance evidence.",
+            },
+          });
           return;
         }
 
@@ -2869,6 +4261,7 @@ export const makeCodexSessionRuntime = (
           providerUserMessageMethod: processed.providerUserMessageMethod ?? null,
           ackToProviderItemMs: processed.ackToProviderItemMs ?? null,
           warningCount: processed.warningCount,
+          clientCorrelationId: processed.clientCorrelationId,
         });
         yield* emitEvent({
           kind: "notification",
@@ -2881,14 +4274,15 @@ export const makeCodexSessionRuntime = (
           message: "Codex app-server began processing turn/steer.",
           payload: {
             steerId: processed.steerId,
+            clientCorrelationId: processed.clientCorrelationId,
             providerThreadId: processed.providerThreadId,
             turnId: processed.turnId,
             providerUserMessageItemId: processed.providerUserMessageItemId ?? null,
             providerUserMessageMethod: processed.providerUserMessageMethod ?? null,
             requestedAt: processed.requestedAt,
-            acknowledgedAt: processed.acknowledgedAt,
+            acknowledgedAt: processed.acknowledgedAt ?? null,
             processedAt: processed.processedAt ?? null,
-            ackLatencyMs: processed.ackLatencyMs,
+            ackLatencyMs: processed.ackLatencyMs ?? null,
             ackToProviderItemMs: processed.ackToProviderItemMs ?? null,
             promptByteLength: processed.promptByteLength,
             attachmentCount: processed.attachmentCount,
@@ -2898,6 +4292,7 @@ export const makeCodexSessionRuntime = (
           },
         });
       });
+
     const emitSnapshotBackfillEvents = (input: {
       readonly providerThread: CodexSnapshotThread;
       readonly reason: CodexSnapshotBackfillReason;
@@ -2960,12 +4355,10 @@ export const makeCodexSessionRuntime = (
         timeout: CODEX_SEND_TURN_SNAPSHOT_BACKFILL_READ_TIMEOUT,
       }).pipe(
         Effect.andThen(
-          client
-            .request("thread/read", {
-              threadId: input.providerThreadId,
-              includeTurns: true,
-            })
-            .pipe(Effect.timeoutOption(CODEX_SEND_TURN_SNAPSHOT_BACKFILL_READ_TIMEOUT)),
+          readCodexBoundedThreadSnapshotWithClient({
+            client,
+            providerThreadId: input.providerThreadId,
+          }).pipe(Effect.timeoutOption(CODEX_SEND_TURN_SNAPSHOT_BACKFILL_READ_TIMEOUT)),
         ),
         Effect.flatMap(
           Option.match({
@@ -3077,19 +4470,22 @@ export const makeCodexSessionRuntime = (
           return;
         }
 
-        const session = yield* Ref.get(sessionRef);
-        if (session.activeTurnId !== input.turnId) {
+        const observedAt = yield* nowIso;
+        // A successful authoritative terminal snapshot supersedes an older
+        // runtime error. Apply the same patch as the live completion path so
+        // reconnect reconciliation cannot replay a recovered failure.
+        const reconciledActiveTurn = yield* reconcileCodexTerminalSnapshotSteerLifecycle({
+          semaphore: steerLifecycleSemaphore,
+          pendingRef: pendingSteerProcessingRef,
+          sessionRef,
+          turnId: input.turnId,
+          turnStatus: input.turn.status,
+          errorMessage: input.turn.error?.message,
+          observedAt,
+        });
+        if (!reconciledActiveTurn) {
           return;
         }
-
-        const observedAt = yield* nowIso;
-        yield* updateSession(sessionRef, {
-          status: input.turn.status === "failed" ? "error" : "ready",
-          activeTurnId: undefined,
-          ...(input.turn.status === "failed" && input.turn.error?.message
-            ? { lastError: input.turn.error.message }
-            : {}),
-        });
         yield* Effect.logInfo("codex.turnProgress.reconciledFromThreadRead", {
           threadId: options.threadId,
           providerInstanceId: options.providerInstanceId ?? PROVIDER,
@@ -3136,12 +4532,10 @@ export const makeCodexSessionRuntime = (
         timeout: CODEX_SEND_TURN_SNAPSHOT_BACKFILL_READ_TIMEOUT,
       }).pipe(
         Effect.andThen(
-          client
-            .request("thread/read", {
-              threadId: input.providerThreadId,
-              includeTurns: true,
-            })
-            .pipe(Effect.timeoutOption(CODEX_SEND_TURN_SNAPSHOT_BACKFILL_READ_TIMEOUT)),
+          readCodexBoundedThreadSnapshotWithClient({
+            client,
+            providerThreadId: input.providerThreadId,
+          }).pipe(Effect.timeoutOption(CODEX_SEND_TURN_SNAPSHOT_BACKFILL_READ_TIMEOUT)),
         ),
         Effect.flatMap(
           Option.match({
@@ -3276,8 +4670,8 @@ export const makeCodexSessionRuntime = (
 
         // A steer belongs to the existing active turn. Reusing that turn's one
         // watchdog preserves Cafe's missed-event recovery without multiplying
-        // full `thread/read(includeTurns)` calls for every steer in a long run.
-        // Upstream turn/completed and authoritative thread/read status remain
+        // bounded metadata + newest-turn reads for every steer in a long run.
+        // Upstream turn/completed and authoritative paginated status remain
         // the only terminal signals; deduplication changes polling load only.
         const watcher = Effect.gen(function* () {
           const scheduledAtMs = yield* Clock.currentTimeMillis;
@@ -3437,28 +4831,37 @@ export const makeCodexSessionRuntime = (
           const nextPending = new Set(pending);
           nextPending.delete(key);
           yield* Ref.set(pendingAggregateCompletionsRef, nextPending);
-          yield* updateSession(sessionRef, {
-            status: completion.state === "failed" ? "error" : "ready",
-            activeTurnId: undefined,
-            lastError: completion.state === "failed" ? completion.errorMessage : undefined,
-          });
-          yield* emitEvent({
-            kind: "notification",
-            threadId: options.threadId,
-            method: "codex.aggregateTurn/completed",
+          const aggregateCompletedAt = yield* nowIso;
+          // The root completion was intentionally hidden while child agents
+          // remained live. Commit its pending-steer and exact-turn session
+          // terminal state before the aggregate terminal event becomes visible
+          // to orchestration. A newer active turn must remain untouched.
+          yield* publishCodexTurnCompletionAfterLifecycleBoundary({
+            semaphore: steerLifecycleSemaphore,
+            pendingRef: pendingSteerProcessingRef,
+            sessionRef,
             turnId,
-            message: "Codex aggregate turn completed after all routed subagents became inactive.",
-            payload: {
-              state: completion.state,
-              ...(completion.errorMessage ? { errorMessage: completion.errorMessage } : {}),
-              ...(completion.providerThreadId
-                ? { providerThreadId: completion.providerThreadId }
-                : {}),
-              rootCompletedAt: completion.observedAt,
-              aggregateCompletedAt: yield* nowIso,
-              semantics:
-                "Upstream Codex TUI tracks primary and subagent thread liveness separately. Cafe combines those channels, so the visible aggregate turn becomes terminal only after every routed child thread is non-active.",
-            },
+            turnStatus: completion.state,
+            errorMessage: completion.errorMessage,
+            observedAt: aggregateCompletedAt,
+            publish: emitEvent({
+              kind: "notification",
+              threadId: options.threadId,
+              method: "codex.aggregateTurn/completed",
+              turnId,
+              message: "Codex aggregate turn completed after all routed subagents became inactive.",
+              payload: {
+                state: completion.state,
+                ...(completion.errorMessage ? { errorMessage: completion.errorMessage } : {}),
+                ...(completion.providerThreadId
+                  ? { providerThreadId: completion.providerThreadId }
+                  : {}),
+                rootCompletedAt: completion.observedAt,
+                aggregateCompletedAt,
+                semantics:
+                  "Upstream Codex TUI tracks primary and subagent thread liveness separately. Cafe combines those channels, so the visible aggregate turn becomes terminal only after every routed child thread is non-active.",
+              },
+            }),
           });
           return true;
         }),
@@ -3640,11 +5043,17 @@ export const makeCodexSessionRuntime = (
               yield* Ref.set(pendingAggregateCompletionsRef, nextPending);
             }
             yield* rememberAggregateManagedTurn(turnId);
-            yield* updateSession(sessionRef, {
-              status: "running",
-              activeTurnId: turnId,
-              lastError: undefined,
-            });
+            yield* Ref.update(sessionRef, (session) =>
+              session.activeTurnId !== undefined && session.activeTurnId !== turnId
+                ? session
+                : {
+                    ...session,
+                    status: "running" as const,
+                    activeTurnId: turnId,
+                    lastError: undefined,
+                    updatedAt: observedAt,
+                  },
+            );
             if (!alreadyPending) {
               const childCount = codexChildConversationThreadIdsForTurn(routes, turnId).length;
               yield* emitEvent({
@@ -3770,14 +5179,9 @@ export const makeCodexSessionRuntime = (
             return;
           }
           case "turn/completed": {
-            const turnStatus = readNotificationTurnStatus(notification);
-            const errorMessage =
-              turnStatus === "failed" ? readNotificationErrorMessage(notification) : undefined;
-            yield* updateSession(sessionRef, {
-              status: turnStatus === "failed" ? "error" : "ready",
-              activeTurnId: undefined,
-              ...(errorMessage ? { lastError: errorMessage } : {}),
-            });
+            // Root completion is committed together with pending steer state
+            // immediately before publication in `handleRawNotification`.
+            // Child completions never own the visible primary session.
             return;
           }
           case "thread/status/changed": {
@@ -3896,6 +5300,9 @@ export const makeCodexSessionRuntime = (
         const payload = notification.params;
         const route = readCodexNotificationRouteFields(notification);
         const rootProviderThreadId = yield* currentSessionProviderThreadId;
+        if (!shouldForwardCodexRootGoalNotification(notification, rootProviderThreadId)) {
+          return;
+        }
         const collabReceiverTurns = new Map(yield* Ref.get(collabReceiverTurnsRef));
         const childRoute = resolveCodexChildConversationNotification(
           collabReceiverTurns,
@@ -3907,6 +5314,13 @@ export const makeCodexSessionRuntime = (
           notification.method,
           childRoute !== undefined,
         );
+        const subagentProjectionMethod = childRoute
+          ? codexSubagentProjectionMethod(notification)
+          : undefined;
+        const isCurrentRootTurnCompletion =
+          childRoute === undefined &&
+          notification.method === "turn/completed" &&
+          (yield* notificationBelongsToCurrentSession(notification));
 
         // Use the already-routed parent turn when a subagent creates another
         // subagent. This keeps arbitrary-depth multi-agent output attached to
@@ -3934,10 +5348,27 @@ export const makeCodexSessionRuntime = (
           }),
         );
 
-        const aggregateCompletionDeferred =
-          childRoute === undefined && notification.method === "turn/completed"
-            ? yield* handleAggregateRootCompletion(notification, observedAt)
-            : false;
+        if (childRoute && subagentProjectionMethod) {
+          // This event retains the provider child thread id inside the typed
+          // notification payload while keeping Cafe's canonical thread/turn
+          // ownership on the visible parent. CodexAdapter replaces the raw
+          // payload with a bounded descriptor before durable ingestion.
+          yield* emitEvent(
+            {
+              kind: "notification",
+              threadId: options.threadId,
+              method: subagentProjectionMethod,
+              turnId: childRoute.parentTurnId,
+              ...(route.itemId ? { itemId: route.itemId } : {}),
+              ...(payload !== undefined ? { payload } : {}),
+            },
+            observedAt,
+          );
+        }
+
+        const aggregateCompletionDeferred = isCurrentRootTurnCompletion
+          ? yield* handleAggregateRootCompletion(notification, observedAt)
+          : false;
         if (aggregateCompletionDeferred) {
           yield* markTurnStartNotification(notification, routedTurnId, observedAt);
           return;
@@ -3992,7 +5423,7 @@ export const makeCodexSessionRuntime = (
             });
           }
         }
-        yield* emitEvent(
+        const publish = emitEvent(
           {
             kind: "notification",
             threadId: options.threadId,
@@ -4008,6 +5439,23 @@ export const makeCodexSessionRuntime = (
           },
           observedAt,
         );
+        if (isCurrentRootTurnCompletion && turnId) {
+          const turnStatus = readNotificationTurnStatus(notification) ?? "completed";
+          yield* publishCodexTurnCompletionAfterLifecycleBoundary({
+            semaphore: steerLifecycleSemaphore,
+            pendingRef: pendingSteerProcessingRef,
+            sessionRef,
+            turnId,
+            turnStatus,
+            ...(turnStatus === "failed"
+              ? { errorMessage: readNotificationErrorMessage(notification) }
+              : {}),
+            observedAt,
+            publish,
+          });
+          return;
+        }
+        yield* publish;
       });
 
     yield* client.handleServerNotification("thread/started", (payload) =>
@@ -4080,14 +5528,17 @@ export const makeCodexSessionRuntime = (
         const requestId = ApprovalRequestId.make(yield* Random.nextUUIDv4);
         const turnId = TurnId.make(payload.turnId);
         const itemId = ProviderItemId.make(payload.itemId);
+        const requestKind: ProviderRequestKind =
+          payload.kind === "writeStdin" ? "terminal-input" : "command";
+        const jsonRpcId = payload.approvalId ?? payload.itemId;
         const decision = yield* Deferred.make<ProviderApprovalDecision>();
 
         yield* Ref.update(pendingApprovalsRef, (current) => {
           const next = new Map(current);
           next.set(requestId, {
             requestId,
-            jsonRpcId: payload.approvalId ?? payload.itemId,
-            requestKind: "command",
+            jsonRpcId,
+            requestKind,
             turnId,
             itemId,
             decision,
@@ -4096,9 +5547,9 @@ export const makeCodexSessionRuntime = (
         });
         yield* Ref.update(approvalCorrelationsRef, (current) => {
           const next = new Map(current);
-          next.set(payload.approvalId ?? payload.itemId, {
+          next.set(jsonRpcId, {
             requestId,
-            requestKind: "command",
+            requestKind,
             turnId,
             itemId,
           });
@@ -4110,7 +5561,7 @@ export const makeCodexSessionRuntime = (
           threadId: options.threadId,
           method: "item/commandExecution/requestApproval",
           requestId,
-          requestKind: "command",
+          requestKind,
           ...(turnId ? { turnId } : {}),
           ...(itemId ? { itemId } : {}),
           payload,
@@ -4193,6 +5644,7 @@ export const makeCodexSessionRuntime = (
         const turnId = TurnId.make(payload.turnId);
         const itemId = ProviderItemId.make(payload.itemId);
         const answers = yield* Deferred.make<ProviderUserInputAnswers>();
+        const autoResolutionSnoozed = yield* Deferred.make<void>();
 
         yield* Ref.update(pendingUserInputsRef, (current) => {
           const next = new Map(current);
@@ -4201,6 +5653,7 @@ export const makeCodexSessionRuntime = (
             turnId,
             itemId,
             answers,
+            autoResolutionSnoozed,
           });
           return next;
         });
@@ -4215,7 +5668,11 @@ export const makeCodexSessionRuntime = (
           payload,
         });
 
-        const resolvedAnswers = yield* Deferred.await(answers).pipe(
+        const resolution = yield* awaitCodexUserInputResolution({
+          answers,
+          autoResolutionSnoozed,
+          isBlocking: payload.isBlocking,
+        }).pipe(
           Effect.ensuring(
             Ref.update(pendingUserInputsRef, (current) => {
               const next = new Map(current);
@@ -4225,14 +5682,35 @@ export const makeCodexSessionRuntime = (
           ),
         );
 
-        return {
-          answers: yield* toCodexUserInputAnswers(resolvedAnswers).pipe(
-            Effect.mapError((error) =>
-              CodexErrors.CodexAppServerRequestError.invalidParams(error.message, {
-                questionId: error.questionId,
-              }),
-            ),
+        const codexAnswers = yield* toCodexUserInputAnswers(resolution.answers).pipe(
+          Effect.mapError((error) =>
+            CodexErrors.CodexAppServerRequestError.invalidParams(error.message, {
+              questionId: error.questionId,
+            }),
           ),
+        );
+
+        if (resolution.source === "automatic") {
+          // The TUI submits an empty answer map when its countdown expires.
+          // Emit the same canonical acknowledgement as an explicit response so
+          // projections clear the pending card and the work log records why the
+          // turn resumed.
+          yield* emitEvent({
+            kind: "notification",
+            threadId: options.threadId,
+            method: "item/tool/requestUserInput/answered",
+            requestId,
+            ...(turnId ? { turnId } : {}),
+            ...(itemId ? { itemId } : {}),
+            payload: {
+              answers: codexAnswers,
+              autoResolved: true,
+            },
+          });
+        }
+
+        return {
+          answers: codexAnswers,
         } satisfies EffectCodexSchema.ToolRequestUserInputResponse;
       }),
     );
@@ -4331,20 +5809,37 @@ export const makeCodexSessionRuntime = (
             if (closed) {
               return Effect.void;
             }
-            const nextStatus = exitCode === 0 ? "closed" : "error";
-            return updateSession(sessionRef, {
-              status: nextStatus,
-              activeTurnId: undefined,
-            }).pipe(
-              Effect.andThen(
-                emitSessionEvent(
-                  "session/exited",
-                  exitCode === 0
-                    ? "Codex App Server exited."
-                    : `Codex App Server exited with code ${exitCode}.`,
-                ),
-              ),
-            );
+            return Effect.gen(function* () {
+              const termination = yield* Ref.get(protocolTerminationRef);
+              const exitMessage =
+                termination?.tag === "CodexAppServerIncomingMessageTooLargeError"
+                  ? "Codex App Server ended after a provider response exceeded Cafe's finite protocol safety limit."
+                  : exitCode === 0
+                    ? "Codex App Server exited unexpectedly."
+                    : `Codex App Server exited unexpectedly with code ${exitCode}.`;
+              yield* updateSession(sessionRef, {
+                status: "error",
+                activeTurnId: undefined,
+                lastError: exitMessage,
+              });
+              // An app-server process is expected to live until `close` marks
+              // the runtime closed. Even exit code zero is therefore a provider
+              // failure here, not a graceful session completion. Publish the
+              // error before `session/exited` so projections and the user never
+              // receive a silent stopped state for a lost active turn.
+              yield* emitEvent({
+                kind: "error",
+                threadId: options.threadId,
+                method: "process/exitedUnexpectedly",
+                message: exitMessage,
+                payload: {
+                  exitCode,
+                  protocolErrorTag: termination?.tag ?? null,
+                  maxIncomingLineBytes: termination?.maxBytes ?? null,
+                },
+              });
+              yield* emitSessionEvent("session/exited", exitMessage);
+            });
           }),
         ),
       ),
@@ -4627,19 +6122,69 @@ export const makeCodexSessionRuntime = (
                 startedAt: activeContextCompaction.startedAt,
               });
             });
+          const steerRequestedAt = yield* nowIso;
+          const steerRequestedAtMs = yield* Clock.currentTimeMillis;
+          const steerId = yield* Random.nextUUIDv4;
+          // Upstream accepts this opaque value and echoes it on the injected
+          // userMessage item. CodexAdapter derives the token from Cafe's exact
+          // MessageId before entering this provider-owned runtime. Requests
+          // without a Cafe message identity use the random steer id as a
+          // fixed-size correlation source. Validate even this internal input
+          // so a future caller cannot accidentally reintroduce an open-string
+          // identifier into app-server state, diagnostics, or event payloads.
+          const clientCorrelationId = resolveCodexSessionRuntimeSteerClientCorrelationId({
+            clientCorrelationId: input.clientCorrelationId,
+            fallbackSource: steerId,
+          });
+          if (clientCorrelationId === undefined) {
+            return yield* buildCodexInvalidSteerCorrelationError();
+          }
           const requestSteer = (expectedTurnId: TurnId) =>
             Effect.gen(function* () {
               yield* rejectIfContextCompactionActive(expectedTurnId);
               const params = yield* buildTurnSteerParams({
                 threadId: providerThreadId,
                 expectedTurnId,
+                clientUserMessageId: clientCorrelationId,
                 ...(input.input ? { prompt: input.input } : {}),
                 ...(input.attachments ? { attachments: input.attachments } : {}),
               });
               return yield* client.raw.request("turn/steer", params);
             });
-          const steerRequestedAt = yield* nowIso;
-          const steerRequestedAtMs = yield* Clock.currentTimeMillis;
+          const pendingSteerAdmission = yield* recordPendingSteerProcessing({
+            steerId,
+            clientCorrelationId,
+            providerThreadId,
+            turnId: input.expectedTurnId,
+            requestedAt: steerRequestedAt,
+            promptByteLength: Buffer.byteLength(input.input ?? "", "utf8"),
+            attachmentCount: input.attachments?.length ?? 0,
+            warningCount: 0,
+          });
+          if (!pendingSteerAdmission.admitted) {
+            // Do not call app-server without retaining the correlation needed
+            // to resolve an ACK/notification/terminal race. In particular, do
+            // not evict an older ambiguous request to make room: Codex may have
+            // accepted it already, so replacement would risk both duplicate
+            // delivery and a late ACK reviving a terminal turn.
+            yield* Effect.logWarning("codex.turnSteer.admissionBackpressure", {
+              threadId: options.threadId,
+              providerInstanceId: options.providerInstanceId ?? PROVIDER,
+              providerThreadId,
+              turnId: input.expectedTurnId,
+              unresolvedCount: pendingSteerAdmission.unresolvedCount,
+              capacity: pendingSteerAdmission.capacity,
+              promptByteLength: Buffer.byteLength(input.input ?? "", "utf8"),
+              attachmentCount: input.attachments?.length ?? 0,
+            });
+            return yield* buildCodexPendingSteerCapacityError(pendingSteerAdmission);
+          }
+          const removePendingSteerProcessing = Ref.update(pendingSteerProcessingRef, (current) => {
+            if (!current.has(steerId)) return current;
+            const next = new Map(current);
+            next.delete(steerId);
+            return next;
+          });
           const rawResponse = yield* requestSteer(input.expectedTurnId).pipe(
             Effect.catchIf(isCodexNoActiveTurnToSteerError, (error) =>
               Effect.gen(function* () {
@@ -4705,8 +6250,29 @@ export const makeCodexSessionRuntime = (
                     "Codex app-server reported a newer active turn; Cafe Code retried turn/steer with that turn id.",
                   payload: diagnostics,
                 });
+                // Bind the correlation to the authoritative active turn
+                // before issuing the retry. A terminal notification for that
+                // turn can arrive before the request promise resumes, and it
+                // must win over the later acknowledgement.
+                yield* steerLifecycleSemaphore.withPermits(1)(
+                  Ref.update(pendingSteerProcessingRef, (current) =>
+                    retargetCodexPendingSteerProcessing(current, {
+                      steerId,
+                      turnId: actualTurnId,
+                    }),
+                  ),
+                );
                 return yield* requestSteer(actualTurnId);
               }),
+            ),
+            // A JSON-RPC error is an explicit provider rejection. Transport,
+            // process, and protocol failures are ambiguous: Codex may already
+            // have accepted the client-correlated input, so preserve that
+            // correlation for a later echoed item or terminal reconciliation.
+            Effect.tapError((error) =>
+              error._tag === "CodexAppServerRequestError"
+                ? removePendingSteerProcessing
+                : Effect.void,
             ),
           );
           const steerAcknowledgedAt = yield* nowIso;
@@ -4717,9 +6283,9 @@ export const makeCodexSessionRuntime = (
             ),
           );
           const turnId = TurnId.make(response.turnId);
-          const steerId = yield* Random.nextUUIDv4;
           const diagnostics = {
             steerId,
+            clientCorrelationId,
             providerThreadId,
             turnId,
             expectedTurnId: input.expectedTurnId,
@@ -4734,7 +6300,16 @@ export const makeCodexSessionRuntime = (
           yield* Effect.logInfo("codex.turnSteer.accepted", {
             threadId: options.threadId,
             providerInstanceId: options.providerInstanceId ?? PROVIDER,
-            ...diagnostics,
+            steerId,
+            clientCorrelationId,
+            providerThreadId,
+            turnId,
+            expectedTurnId: input.expectedTurnId,
+            requestedAt: steerRequestedAt,
+            acknowledgedAt: steerAcknowledgedAt,
+            ackLatencyMs: Math.max(0, steerAcknowledgedAtMs - steerRequestedAtMs),
+            promptByteLength: Buffer.byteLength(input.input ?? "", "utf8"),
+            attachmentCount: input.attachments?.length ?? 0,
           });
           yield* emitEvent({
             kind: "notification",
@@ -4744,32 +6319,42 @@ export const makeCodexSessionRuntime = (
             message: "Codex app-server accepted turn/steer.",
             payload: diagnostics,
           });
-          yield* recordPendingSteerProcessing({
+          const acknowledgement = yield* acknowledgeCodexSteerLifecycleBoundary({
+            semaphore: steerLifecycleSemaphore,
+            pendingRef: pendingSteerProcessingRef,
+            sessionRef,
             steerId,
-            providerThreadId,
+            expectedTurnId: input.expectedTurnId,
             turnId,
-            requestedAt: steerRequestedAt,
             acknowledgedAt: steerAcknowledgedAt,
             acknowledgedAtMs: steerAcknowledgedAtMs,
             ackLatencyMs: Math.max(0, steerAcknowledgedAtMs - steerRequestedAtMs),
-            promptByteLength: Buffer.byteLength(input.input ?? "", "utf8"),
-            attachmentCount: input.attachments?.length ?? 0,
-            warningCount: 0,
           });
-          yield* schedulePendingSteerProcessingWarnings(steerId);
-          yield* updateSession(sessionRef, {
-            status: "running",
-            activeTurnId: turnId,
-          });
-          yield* scheduleSendTurnSnapshotBackfill({
-            providerThreadId,
-            turnId,
-            reason: "turn-steer-follow-up",
-          });
+          if (acknowledgement.pending === undefined) {
+            // Missing correlation is an invariant failure, never evidence that
+            // a late ACK may safely resurrect the turn. Keep this diagnostic
+            // fixed-size and leave authoritative session state intact.
+            yield* Effect.logError("codex.turnSteer.correlationMissingAfterAck", {
+              threadId: options.threadId,
+              providerInstanceId: options.providerInstanceId ?? PROVIDER,
+              steerId,
+              clientCorrelationId,
+              providerThreadId,
+              turnId,
+            });
+          } else if (acknowledgement.restoredRunning) {
+            yield* schedulePendingSteerProcessingWarnings(steerId);
+            yield* scheduleSendTurnSnapshotBackfill({
+              providerThreadId,
+              turnId,
+              reason: "turn-steer-follow-up",
+            });
+          }
           const resumedProviderThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
           return {
             threadId: options.threadId,
             turnId,
+            clientCorrelationId,
             ...(resumedProviderThreadId
               ? { resumeCursor: { threadId: resumedProviderThreadId } }
               : {}),
@@ -4864,15 +6449,119 @@ export const makeCodexSessionRuntime = (
               }),
             ),
           );
+          // Upstream Codex TUI pauses an active goal when the user interrupts
+          // the current task. Cafe awaits this update before its adapter may
+          // retire the app-server process, otherwise a restart can revive a
+          // goal the user explicitly stopped.
+          yield* Effect.gen(function* () {
+            const response = yield* client.request("thread/goal/get", {
+              threadId: providerThreadId,
+            });
+            if (response.goal?.status !== "active") {
+              return;
+            }
+            yield* client.request("thread/goal/set", {
+              threadId: providerThreadId,
+              status: "paused",
+            });
+          }).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("codex.goal.pause-after-interrupt-failed", {
+                threadId: options.threadId,
+                providerInstanceId: options.providerInstanceId ?? PROVIDER,
+                cause: Cause.pretty(cause),
+              }).pipe(
+                Effect.andThen(
+                  emitEvent({
+                    kind: "notification",
+                    threadId: options.threadId,
+                    method: "thread/goal/pauseFailed",
+                    message:
+                      "Codex stopped the turn, but the active goal could not be paused. Cafe Code will resynchronize it on the next session start.",
+                    payload: {
+                      operation: "pause-after-user-interrupt",
+                      willRetryOnSessionStart: true,
+                    },
+                  }),
+                ),
+              ),
+            ),
+          );
         }),
+      forkThread: Effect.gen(function* () {
+        const providerThreadId = yield* readProviderThreadId;
+        // Source sessions are checked for idleness by ProviderService. Keep the
+        // fork persistent and let app-server copy the complete stored history,
+        // matching the native Codex UI's thread/fork behavior. The source is
+        // never modified and the target keeps the exact same workspace cwd.
+        const response = yield* client.request("thread/fork", {
+          threadId: providerThreadId,
+          cwd: options.cwd,
+          ephemeral: false,
+        });
+        const forkCursor = { threadId: response.thread.id } satisfies CodexResumeCursor;
+
+        // thread/fork loads the new branch in this app-server process. Cafe
+        // resumes it later in a target-owned runtime, so unsubscribe here to
+        // avoid retaining a second loaded thread in the source process. A
+        // failed unsubscribe is only resource cleanup; the persistent fork is
+        // already valid and must still be returned to the caller.
+        yield* client.request("thread/unsubscribe", { threadId: response.thread.id }).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("codex.thread.fork.unsubscribe-failed", {
+              sourceThreadId: options.threadId,
+              providerForkThreadId: response.thread.id,
+              cause: Cause.pretty(cause),
+            }),
+          ),
+        );
+        return forkCursor;
+      }),
+      discardFork: (resumeCursor) =>
+        client.request("thread/delete", { threadId: resumeCursor.threadId }).pipe(Effect.asVoid),
+      getGoal: Effect.gen(function* () {
+        const providerThreadId = yield* readProviderThreadId;
+        const response = yield* client.request("thread/goal/get", {
+          threadId: providerThreadId,
+        });
+        return response.goal
+          ? yield* normalizeCodexThreadGoal(response.goal, options.threadId)
+          : null;
+      }),
+      setGoal: (input) =>
+        Effect.gen(function* () {
+          const providerThreadId = yield* readProviderThreadId;
+          const response = yield* client.request("thread/goal/set", {
+            threadId: providerThreadId,
+            ...(input.objective !== undefined ? { objective: input.objective } : {}),
+            ...(input.status !== undefined ? { status: input.status } : {}),
+            ...(input.tokenBudget !== undefined ? { tokenBudget: input.tokenBudget } : {}),
+          });
+          return yield* normalizeCodexThreadGoal(response.goal, options.threadId);
+        }),
+      clearGoal: Effect.gen(function* () {
+        const providerThreadId = yield* readProviderThreadId;
+        return yield* client.request("thread/goal/clear", {
+          threadId: providerThreadId,
+        });
+      }),
       readThread: Effect.gen(function* () {
         const providerThreadId = yield* readProviderThreadId;
-        const response = yield* client.request("thread/read", {
-          threadId: providerThreadId,
-          includeTurns: true,
+        const response = yield* readCodexBoundedSummaryThreadWithClient({
+          client,
+          providerThreadId,
         });
         return parseThreadSnapshot(response);
       }),
+      readSubagentThread: (subagentThreadId) =>
+        Effect.gen(function* () {
+          const rootProviderThreadId = yield* readProviderThreadId;
+          return yield* readCodexSubagentThreadWithClient({
+            client,
+            rootProviderThreadId,
+            subagentThreadId,
+          });
+        }),
       rollbackThread: (numTurns) =>
         Effect.gen(function* () {
           const providerThreadId = yield* readProviderThreadId;
@@ -4941,6 +6630,16 @@ export const makeCodexSessionRuntime = (
               answers: codexAnswers,
             },
           });
+        }),
+      snoozeUserInput: (requestId) =>
+        Effect.gen(function* () {
+          const pending = (yield* Ref.get(pendingUserInputsRef)).get(requestId);
+          if (!pending) {
+            return yield* new CodexSessionRuntimePendingUserInputNotFoundError({
+              requestId,
+            });
+          }
+          yield* Deferred.succeed(pending.autoResolutionSnoozed, undefined);
         }),
       events: Stream.fromQueue(events),
       close,

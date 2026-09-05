@@ -10,6 +10,11 @@ import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 
 import type {
+  GetProviderSubagentHistoryBindingInput,
+  ProviderSubagentHistoryBinding,
+} from "../../persistence/Services/ProviderSessionRuntime.ts";
+import type { ProviderSubagentHistoryBindingConflictError } from "../../persistence/Errors.ts";
+import type {
   ProviderSessionDirectoryPersistenceError,
   ProviderValidationError,
 } from "../Errors.ts";
@@ -45,6 +50,10 @@ export interface ProviderSessionDirectoryShape {
     binding: ProviderRuntimeBinding,
   ) => Effect.Effect<void, ProviderSessionDirectoryWriteError>;
 
+  readonly remove: (
+    threadId: ThreadId,
+  ) => Effect.Effect<void, ProviderSessionDirectoryPersistenceError>;
+
   readonly getProvider: (
     threadId: ThreadId,
   ) => Effect.Effect<ProviderDriverKind, ProviderSessionDirectoryReadError>;
@@ -60,6 +69,22 @@ export interface ProviderSessionDirectoryShape {
 
   readonly listBindings: () => Effect.Effect<
     ReadonlyArray<ProviderRuntimeBindingWithMetadata>,
+    ProviderSessionDirectoryPersistenceError
+  >;
+
+  /** Persist immutable, server-private routing for one nested-agent history. */
+  readonly upsertSubagentHistoryBinding: (
+    binding: ProviderSubagentHistoryBinding,
+  ) => Effect.Effect<
+    void,
+    ProviderSessionDirectoryPersistenceError | ProviderSubagentHistoryBindingConflictError
+  >;
+
+  /** Read routing only for the exact authorized Cafe thread/turn/child tuple. */
+  readonly getSubagentHistoryBinding: (
+    input: GetProviderSubagentHistoryBindingInput,
+  ) => Effect.Effect<
+    Option.Option<ProviderSubagentHistoryBinding>,
     ProviderSessionDirectoryPersistenceError
   >;
 }

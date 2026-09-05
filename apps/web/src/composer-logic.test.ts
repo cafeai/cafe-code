@@ -6,6 +6,7 @@ import {
   detectComposerTrigger,
   expandCollapsedComposerCursor,
   isCollapsedCursorAdjacentToInlineToken,
+  parseStandaloneComposerGoalCommand,
   parseStandaloneComposerSlashCommand,
   replaceTextRange,
 } from "./composer-logic";
@@ -296,5 +297,27 @@ describe("parseStandaloneComposerSlashCommand", () => {
 
   it("ignores slash commands with extra message text", () => {
     expect(parseStandaloneComposerSlashCommand("/plan explain this")).toBeNull();
+  });
+});
+
+describe("parseStandaloneComposerGoalCommand", () => {
+  it("parses the Codex goal summary and lifecycle actions", () => {
+    expect(parseStandaloneComposerGoalCommand(" /goal ")).toEqual({ action: "show" });
+    expect(parseStandaloneComposerGoalCommand("/goal edit")).toEqual({ action: "edit" });
+    expect(parseStandaloneComposerGoalCommand("/goal pause")).toEqual({ action: "pause" });
+    expect(parseStandaloneComposerGoalCommand("/goal resume")).toEqual({ action: "resume" });
+    expect(parseStandaloneComposerGoalCommand("/goal clear")).toEqual({ action: "clear" });
+  });
+
+  it("preserves the objective text for goal creation", () => {
+    expect(parseStandaloneComposerGoalCommand("/goal Finish the M4.2 proof")).toEqual({
+      action: "set",
+      objective: "Finish the M4.2 proof",
+    });
+  });
+
+  it("does not consume similarly named or embedded provider prompts", () => {
+    expect(parseStandaloneComposerGoalCommand("/goals")).toBeNull();
+    expect(parseStandaloneComposerGoalCommand("Please run /goal later")).toBeNull();
   });
 });

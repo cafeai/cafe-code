@@ -11,10 +11,12 @@ import {
   deriveCompletionDividerAfterEntryId,
   deriveActiveWorkStartedAt,
   deriveActivePlanState,
+  deriveActiveSubagentWorkEntries,
   deriveHistoricalWorkLogSummaries,
   derivePendingApprovals,
   derivePendingUserInputs,
   deriveTimelineEntries,
+  deriveSubagentWorkEntries,
   deriveWorkLogEntries,
   findLatestProposedPlan,
   findSidebarProposedPlan,
@@ -128,6 +130,32 @@ describe("derivePendingApprovals", () => {
         requestKind: "command",
         createdAt: "2026-02-23T00:00:01.000Z",
         detail: "pwd",
+      },
+    ]);
+  });
+
+  it("maps Codex terminal-input approvals into a distinct pending approval", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "terminal-input-approval-open",
+        createdAt: "2026-08-27T00:00:01.000Z",
+        kind: "approval.requested",
+        summary: "Terminal input approval requested",
+        tone: "approval",
+        payload: {
+          requestId: "stdin-approval-1",
+          requestType: "terminal_input_approval",
+          detail: "Allow input to the running terminal",
+        },
+      }),
+    ];
+
+    expect(derivePendingApprovals(activities)).toEqual([
+      {
+        requestId: "stdin-approval-1",
+        requestKind: "terminal-input",
+        createdAt: "2026-08-27T00:00:01.000Z",
+        detail: "Allow input to the running terminal",
       },
     ]);
   });
@@ -262,6 +290,7 @@ describe("derivePendingUserInputs", () => {
       {
         requestId: "req-user-input-1",
         createdAt: "2026-02-23T00:00:01.000Z",
+        isBlocking: true,
         questions: [
           {
             id: "sandbox_mode",
@@ -278,6 +307,33 @@ describe("derivePendingUserInputs", () => {
         ],
       },
     ]);
+  });
+
+  it("preserves an explicit non-blocking Codex prompt", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "user-input-non-blocking",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "user-input.requested",
+        summary: "User input requested",
+        tone: "info",
+        payload: {
+          requestId: "req-user-input-non-blocking",
+          isBlocking: false,
+          questions: [
+            {
+              id: "continue",
+              header: "Continue",
+              question: "Continue automatically?",
+              options: [{ label: "yes", description: "Continue execution" }],
+              multiSelect: false,
+            },
+          ],
+        },
+      }),
+    ];
+
+    expect(derivePendingUserInputs(activities)[0]?.isBlocking).toBe(false);
   });
 
   it("clears stale pending user-input prompts when the provider reports an orphaned request", () => {
@@ -383,6 +439,35 @@ describe("deriveActivePlanState", () => {
       turnId: "turn-1",
       steps: [{ step: "Write tests", status: "completed" }],
     });
+  });
+
+  it("treats an empty latest snapshot as an explicit task-list clear", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "plan-populated",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "turn.plan.updated",
+        summary: "Plan updated",
+        tone: "info",
+        turnId: "turn-1",
+        payload: {
+          plan: [{ step: "Old task", status: "inProgress" }],
+        },
+      }),
+      makeActivity({
+        id: "plan-cleared",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        kind: "turn.plan.updated",
+        summary: "Plan updated",
+        tone: "info",
+        turnId: "turn-1",
+        payload: {
+          plan: [],
+        },
+      }),
+    ];
+
+    expect(deriveActivePlanState(activities, TurnId.make("turn-1"))).toBeNull();
   });
 });
 
@@ -685,6 +770,459 @@ describe("deriveWorkLogEntries", () => {
 
     const entries = deriveWorkLogEntries(activities, undefined);
     expect(entries.map((entry) => entry.id)).toEqual(["task-progress", "task-complete"]);
+  });
+
+  it("keeps ambient provider tasks out of the ordinary work log", () => {
+    const ambientProgress = makeActivity({
+      id: "ambient-watcher-progress",
+      createdAt: "2026-02-23T00:00:02.000Z",
+      kind: "task.progress",
+      summary: "Watcher update",
+      tone: "info",
+      payload: {
+        taskId: "provider-watcher",
+        detail: "Refreshing provider-owned metadata",
+        visibility: "ambient",
+      },
+    });
+
+    expect(deriveWorkLogEntries([ambientProgress], undefined)).toEqual([]);
+  });
+
+  it("uses the latest exact task visibility to retract and restore ordinary work-log rows", () => {
+    const turnId = TurnId.make("turn-watcher-visibility");
+    const visible = makeActivity({
+      id: "watcher-visible",
+      createdAt: "2026-02-23T00:00:01.000Z",
+      kind: "task.progress",
+      summary: "Watcher is running",
+      tone: "info",
+      turnId,
+      payload: { taskId: "provider-watcher", visibility: "visible" },
+    });
+    const ambient = makeActivity({
+      id: "watcher-ambient",
+      createdAt: "2026-02-23T00:00:02.000Z",
+      kind: "task.progress",
+      summary: "Watcher moved to ambient work",
+      tone: "info",
+      turnId,
+      payload: { taskId: "provider-watcher", visibility: "ambient" },
+    });
+    const restored = makeActivity({
+      id: "watcher-restored",
+      createdAt: "2026-02-23T00:00:03.000Z",
+      kind: "task.progress",
+      summary: "Watcher is visible again",
+      tone: "info",
+      turnId,
+      payload: { taskId: "provider-watcher", visibility: "visible" },
+    });
+    const ambientTerminal = makeActivity({
+      id: "watcher-ambient-terminal",
+      createdAt: "2026-02-23T00:00:04.000Z",
+      kind: "task.completed",
+      summary: "Watcher ended silently",
+      tone: "info",
+      turnId,
+      payload: { taskId: "provider-watcher", visibility: "ambient" },
+    });
+
+    expect(deriveWorkLogEntries([visible], turnId).map((entry) => entry.id)).toEqual([
+      "watcher-visible",
+    ]);
+    expect(deriveWorkLogEntries([visible, ambient], turnId)).toEqual([]);
+    expect(
+      deriveWorkLogEntries([visible, ambient, restored], turnId).map((entry) => entry.id),
+    ).toContain("watcher-restored");
+    expect(deriveWorkLogEntries([visible, ambient, restored, ambientTerminal], turnId)).toEqual([]);
+  });
+
+  it("retracts and restores an ambient subagent in the active composer roster", () => {
+    const turnId = TurnId.make("turn-ambient-worker");
+    const presentation = {
+      threadId: "ambient-worker",
+      label: "Watch provider state",
+      objective: "Track provider-owned background state",
+      status: "active" as const,
+      startedAt: "2026-02-23T00:00:01.000Z",
+    };
+    const started = makeActivity({
+      id: "ambient-worker-started",
+      createdAt: presentation.startedAt,
+      kind: "task.started",
+      summary: "Subagent started",
+      tone: "info",
+      turnId,
+      payload: {
+        taskId: presentation.threadId,
+        visibility: "visible",
+        subagent: presentation,
+      },
+    });
+    const hidden = makeActivity({
+      id: "ambient-worker-hidden",
+      createdAt: "2026-02-23T00:00:02.000Z",
+      kind: "task.progress",
+      summary: "Subagent visibility changed",
+      tone: "info",
+      turnId,
+      payload: {
+        taskId: presentation.threadId,
+        visibility: "ambient",
+      },
+    });
+    const restored = makeActivity({
+      id: "ambient-worker-restored",
+      createdAt: "2026-02-23T00:00:03.000Z",
+      kind: "task.progress",
+      summary: "Subagent update",
+      tone: "info",
+      turnId,
+      payload: {
+        taskId: presentation.threadId,
+        detail: "Visible again",
+        visibility: "visible",
+        subagent: presentation,
+      },
+    });
+    const hiddenTerminal = makeActivity({
+      id: "ambient-worker-hidden-terminal",
+      createdAt: "2026-02-23T00:00:04.000Z",
+      kind: "task.completed",
+      summary: "Subagent completed",
+      tone: "info",
+      turnId,
+      payload: {
+        taskId: presentation.threadId,
+        status: "completed",
+        visibility: "ambient",
+      },
+    });
+
+    expect(deriveActiveSubagentWorkEntries([started], turnId)).toHaveLength(1);
+    expect(deriveActiveSubagentWorkEntries([started, hidden], turnId)).toEqual([]);
+    expect(deriveActiveSubagentWorkEntries([started, hidden, restored], turnId)).toHaveLength(1);
+    expect(
+      deriveActiveSubagentWorkEntries([started, hidden, restored, hiddenTerminal], turnId),
+    ).toEqual([]);
+  });
+
+  it("coalesces structured subagent lifecycle while ordinary task starts stay hidden", () => {
+    const subagent = {
+      threadId: " provider-child-locate-footer ",
+      historyId: " history  id with preserved spacing ",
+      label: "Locate footer label",
+      path: "/root/locate_footer_label",
+      objective: "Find where the footer status label is assembled",
+      startedAt: "2026-02-23T00:00:01.000Z",
+    };
+    const started = makeActivity({
+      id: "subagent-start",
+      createdAt: "2026-02-23T00:00:01.000Z",
+      kind: "task.started",
+      summary: "Subagent started",
+      tone: "info",
+      turnId: "turn-subagents",
+      payload: {
+        taskId: subagent.threadId,
+        taskType: "subagent",
+        detail: subagent.objective,
+        subagent: { ...subagent, status: "waiting" },
+      },
+    });
+    const progress = makeActivity({
+      id: "subagent-progress",
+      createdAt: "2026-02-23T00:00:06.000Z",
+      kind: "task.progress",
+      summary: "Subagent update",
+      tone: "info",
+      turnId: "turn-subagents",
+      sequence: 42,
+      payload: {
+        taskId: subagent.threadId,
+        detail: "Refining trigger label filtering",
+        subagent: { ...subagent, status: "active" },
+      },
+    });
+    const completed = makeActivity({
+      id: "subagent-complete",
+      createdAt: "2026-02-23T00:01:06.000Z",
+      kind: "task.completed",
+      summary: "Subagent completed",
+      tone: "info",
+      turnId: "turn-subagents",
+      payload: {
+        taskId: subagent.threadId,
+        status: "completed",
+        detail: "Located the footer label source",
+        subagent: { ...subagent, status: "completed" },
+      },
+    });
+    const ordinaryStart = makeActivity({
+      id: "ordinary-task-start",
+      createdAt: "2026-02-23T00:00:03.000Z",
+      kind: "task.started",
+      summary: "Default task started",
+      tone: "info",
+      turnId: "turn-subagents",
+      payload: {
+        taskId: "ordinary-task",
+        taskType: "background",
+        detail: "Internal bookkeeping",
+      },
+    });
+
+    const activeEntries = deriveSubagentWorkEntries(
+      [started, ordinaryStart, progress],
+      TurnId.make("turn-subagents"),
+    );
+    expect(
+      deriveWorkLogEntries([started, ordinaryStart, progress], TurnId.make("turn-subagents")),
+    ).toEqual([]);
+    expect(activeEntries).toEqual([
+      {
+        id: "subagent-start",
+        turnId: TurnId.make("turn-subagents"),
+        createdAt: "2026-02-23T00:00:01.000Z",
+        label: "Locate footer label",
+        detail: "Find where the footer status label is assembled",
+        tone: "thinking",
+        itemType: "collab_agent_tool_call",
+        subagent: {
+          id: " provider-child-locate-footer ",
+          label: "Locate footer label",
+          objective: "Find where the footer status label is assembled",
+          description: "Refining trigger label filtering",
+          status: "active",
+          startedAt: "2026-02-23T00:00:01.000Z",
+          updatedAt: "2026-02-23T00:00:06.000Z",
+          lifecycleRevision: "sequence:42:17:subagent-progress",
+          historyId: " history  id with preserved spacing ",
+        },
+      },
+    ]);
+
+    const completedEntries = deriveSubagentWorkEntries(
+      [started, ordinaryStart, progress, completed],
+      TurnId.make("turn-subagents"),
+    );
+    expect(completedEntries).toHaveLength(1);
+    expect(completedEntries[0]?.id).toBe("subagent-start");
+    expect(completedEntries[0]?.subagent).toMatchObject({
+      id: " provider-child-locate-footer ",
+      label: "Locate footer label",
+      objective: "Find where the footer status label is assembled",
+      description: "Refining trigger label filtering",
+      status: "completed",
+      startedAt: "2026-02-23T00:00:01.000Z",
+      completedAt: "2026-02-23T00:01:06.000Z",
+      historyId: " history  id with preserved spacing ",
+    });
+    expect(completedEntries.some((entry) => entry.id === "ordinary-task-start")).toBe(false);
+
+    const delayedProgress = makeActivity({
+      id: "subagent-delayed-progress",
+      createdAt: "2026-02-23T00:01:07.000Z",
+      kind: "task.progress",
+      summary: "Subagent update",
+      tone: "info",
+      turnId: "turn-subagents",
+      payload: {
+        taskId: subagent.threadId,
+        detail: "Delayed replay that must not resurrect the worker",
+        subagent: { ...subagent, status: "active" },
+      },
+    });
+    const afterDelayedProgress = deriveSubagentWorkEntries(
+      [started, progress, completed, delayedProgress],
+      TurnId.make("turn-subagents"),
+    );
+    expect(afterDelayedProgress[0]?.subagent).toMatchObject({
+      status: "completed",
+      description: "Refining trigger label filtering",
+      completedAt: "2026-02-23T00:01:06.000Z",
+    });
+
+    const restarted = makeActivity({
+      id: "subagent-restarted",
+      createdAt: "2026-02-23T00:02:00.000Z",
+      kind: "task.started",
+      summary: "Subagent started",
+      tone: "info",
+      turnId: "turn-subagents",
+      payload: {
+        taskId: subagent.threadId,
+        detail: "Rechecking after an explicit restart",
+        subagent: {
+          ...subagent,
+          status: "active",
+          startedAt: "2026-02-23T00:02:00.000Z",
+        },
+      },
+    });
+    const afterRestart = deriveSubagentWorkEntries(
+      [started, progress, completed, delayedProgress, restarted],
+      TurnId.make("turn-subagents"),
+    );
+    expect(afterRestart[0]?.subagent).toMatchObject({
+      status: "active",
+      description: "Rechecking after an explicit restart",
+      startedAt: "2026-02-23T00:02:00.000Z",
+    });
+    expect(afterRestart[0]?.subagent?.completedAt).toBeUndefined();
+  });
+
+  it("settles legacy Codex control rows when their parent turn is terminal", () => {
+    const turnId = TurnId.make("turn-legacy-subagent");
+    const legacy = makeActivity({
+      id: "legacy-subagent-started",
+      createdAt: "2026-02-23T00:00:01.000Z",
+      kind: "tool.completed",
+      summary: "Subagent task",
+      tone: "tool",
+      turnId,
+      payload: {
+        itemType: "collab_agent_tool_call",
+        itemId: "legacy-child",
+        detail: "Started /root/audit_history",
+      },
+    });
+
+    expect(deriveSubagentWorkEntries([legacy], turnId)[0]?.subagent?.status).toBe("active");
+    expect(
+      deriveSubagentWorkEntries([legacy], turnId, { terminalTurnIds: new Set([turnId]) })[0]
+        ?.subagent,
+    ).toMatchObject({ status: "completed", completedAt: legacy.createdAt });
+  });
+
+  it("keeps structured background children from older turns in the active composer roster", () => {
+    const olderTurnId = TurnId.make("turn-background-older");
+    const runningTurnId = TurnId.make("turn-background-current");
+    const structured = (id: string, turnId: TurnId, sequence: number) =>
+      makeActivity({
+        id: `started-${id}`,
+        createdAt: `2026-02-23T00:00:0${sequence}.000Z`,
+        kind: "task.started",
+        summary: "Subagent started",
+        tone: "info",
+        turnId,
+        sequence,
+        payload: {
+          taskId: id,
+          taskType: "subagent",
+          subagent: {
+            threadId: id,
+            label: id,
+            status: "active",
+          },
+        },
+      });
+    const legacyOlder = makeActivity({
+      id: "legacy-background-older",
+      createdAt: "2026-02-23T00:00:03.000Z",
+      kind: "tool.completed",
+      summary: "Subagent task",
+      tone: "tool",
+      turnId: olderTurnId,
+      sequence: 3,
+      payload: {
+        itemType: "collab_agent_tool_call",
+        itemId: "legacy-child",
+        detail: "Started /root/legacy_child",
+      },
+    });
+
+    const entries = deriveActiveSubagentWorkEntries(
+      [
+        structured("older-structured-child", olderTurnId, 1),
+        structured("current-child", runningTurnId, 2),
+        legacyOlder,
+      ],
+      runningTurnId,
+    );
+
+    expect(entries.map((entry) => entry.subagent?.id)).toEqual([
+      "older-structured-child",
+      "current-child",
+    ]);
+  });
+
+  it("heals persisted Codex root pseudo-agents without hiding genuine background children", () => {
+    const olderTurnId = TurnId.make("turn-poisoned-root-older");
+    const runningTurnId = TurnId.make("turn-poisoned-root-current");
+    const structured = (input: {
+      readonly id: string;
+      readonly path: string;
+      readonly label?: string;
+      readonly sequence: number;
+    }) =>
+      makeActivity({
+        id: `started-${input.id}`,
+        createdAt: `2026-02-23T00:01:0${input.sequence}.000Z`,
+        kind: "task.progress",
+        summary: "Subagent update",
+        tone: "info",
+        turnId: olderTurnId,
+        sequence: input.sequence,
+        payload: {
+          taskId: input.id,
+          detail: "Working",
+          subagent: {
+            threadId: input.id,
+            ...(input.label ? { label: input.label } : {}),
+            path: input.path,
+            status: "active",
+          },
+        },
+      });
+
+    const entries = deriveActiveSubagentWorkEntries(
+      [
+        structured({ id: "provider-root-thread", path: "/root/", sequence: 1 }),
+        structured({
+          id: "real-background-child",
+          path: "/root/audit_restart",
+          label: "Audit restart",
+          sequence: 2,
+        }),
+      ],
+      runningTurnId,
+    );
+
+    expect(entries.map((entry) => entry.subagent?.id)).toEqual(["real-background-child"]);
+    expect(entries[0]?.subagent).toMatchObject({
+      label: "Audit restart",
+      status: "active",
+    });
+  });
+
+  it("treats task.completed as terminal when repeated presentation state is stale", () => {
+    const turnId = TurnId.make("turn-contradictory-subagent-status");
+    const completed = makeActivity({
+      id: "subagent-completed-with-stale-presentation",
+      createdAt: "2026-02-23T00:03:00.000Z",
+      kind: "task.completed",
+      summary: "Subagent completed",
+      tone: "info",
+      turnId,
+      payload: {
+        taskId: "provider-child-stale-status",
+        status: "completed",
+        subagent: {
+          threadId: "provider-child-stale-status",
+          label: "Status audit",
+          // Provider presentation is repeated display metadata and may lag the
+          // canonical terminal task edge by one notification.
+          status: "active",
+        },
+      },
+    });
+
+    expect(deriveSubagentWorkEntries([completed], turnId)[0]?.subagent).toMatchObject({
+      status: "completed",
+      completedAt: completed.createdAt,
+    });
   });
 
   it("shows Codex guardian approval review starts", () => {
@@ -1105,6 +1643,143 @@ describe("deriveWorkLogEntries", () => {
     const [entry] = deriveWorkLogEntries(activities, undefined);
     expect(entry?.toolTitle).toBe("Read File");
     expect(entry?.detail).toBeUndefined();
+  });
+
+  it("recovers web-search queries from retained pre-detail activity payloads", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "codex-web-search-complete",
+        kind: "tool.completed",
+        summary: "Web search",
+        payload: {
+          itemType: "web_search",
+          title: "Web search",
+          data: {
+            item: {
+              type: "webSearch",
+              id: "web-search-1",
+              query: "current Codex five-hour and weekly usage limits",
+              action: {
+                type: "search",
+                query: "current Codex five-hour and weekly usage limits",
+              },
+            },
+          },
+        },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities, undefined);
+    expect(entry).toMatchObject({
+      toolTitle: "Web search",
+      detail: "current Codex five-hour and weekly usage limits",
+      itemType: "web_search",
+    });
+  });
+
+  it("recovers Codex MCP and dynamic-tool detail from retained activity payloads", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "codex-mcp-complete",
+        kind: "tool.completed",
+        summary: "MCP tool call",
+        payload: {
+          itemType: "mcp_tool_call",
+          title: "MCP tool call",
+          data: {
+            item: {
+              type: "mcpToolCall",
+              server: "openaiDeveloperDocs",
+              tool: "search_openai_docs",
+              arguments: {
+                query: "current Responses API tools",
+                apiKey: "sk-example-secret-value-1234567890",
+              },
+            },
+          },
+        },
+      }),
+      makeActivity({
+        id: "codex-dynamic-complete",
+        kind: "tool.completed",
+        summary: "Tool call",
+        payload: {
+          itemType: "dynamic_tool_call",
+          title: "Tool call",
+          data: {
+            item: {
+              type: "dynamicToolCall",
+              namespace: "workspace",
+              tool: "read_file",
+              arguments: { path: "/workspace/README.md" },
+            },
+          },
+        },
+      }),
+    ];
+
+    const entries = deriveWorkLogEntries(activities, undefined);
+    expect(entries.find((entry) => entry.id === "codex-mcp-complete")).toMatchObject({
+      detail:
+        'openaiDeveloperDocs.search_openai_docs: {"query":"current Responses API tools","apiKey":"[redacted]"}',
+      itemType: "mcp_tool_call",
+    });
+    expect(entries.find((entry) => entry.id === "codex-dynamic-complete")).toMatchObject({
+      detail: 'workspace.read_file: {"path":"/workspace/README.md"}',
+      itemType: "dynamic_tool_call",
+    });
+  });
+
+  it("recovers Grok output-side queries and nested tool arguments from retained payloads", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "grok-web-search-complete",
+        kind: "tool.completed",
+        summary: "Web search:",
+        payload: {
+          itemType: "web_search",
+          title: "Web search:",
+          data: {
+            kind: "search",
+            rawInput: { backend: true, variant: "web_search" },
+            rawOutput: {
+              action: {
+                type: "search",
+                query: "current Grok ACP release",
+                sources: [],
+              },
+            },
+          },
+        },
+      }),
+      makeActivity({
+        id: "grok-custom-tool-complete",
+        kind: "tool.completed",
+        summary: "cafe-code__list_threads",
+        payload: {
+          itemType: "dynamic_tool_call",
+          title: "cafe-code__list_threads",
+          data: {
+            kind: "other",
+            rawInput: {
+              variant: "mcp",
+              tool_name: "cafe-code__list_threads",
+              tool_input: { state: "active" },
+            },
+          },
+        },
+      }),
+    ];
+
+    const entries = deriveWorkLogEntries(activities, undefined);
+    expect(entries.find((entry) => entry.id === "grok-web-search-complete")).toMatchObject({
+      detail: "current Grok ACP release",
+      itemType: "web_search",
+    });
+    expect(entries.find((entry) => entry.id === "grok-custom-tool-complete")).toMatchObject({
+      detail: '{"state":"active"}',
+      itemType: "dynamic_tool_call",
+    });
   });
 
   it("uses grep raw output summaries instead of repeating the generic tool label", () => {
@@ -1561,6 +2236,32 @@ describe("deriveWorkLogEntries context window handling", () => {
 
     expect(entries).toHaveLength(1);
     expect(entries[0]?.label).toBe("Context compacted");
+  });
+
+  it("keeps provider switch notices as normal work log entries", () => {
+    const entries = deriveWorkLogEntries(
+      [
+        makeActivity({
+          id: "provider-switch-1",
+          turnId: "turn-1",
+          kind: "provider.switched",
+          summary: "Switched from Claude to Codex · gpt-5.6-sol",
+          tone: "info",
+          payload: {
+            fromProvider: "claudeAgent",
+            toProvider: "codex",
+            toModel: "gpt-5.6-sol",
+          },
+        }),
+      ],
+      TurnId.make("turn-1"),
+    );
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      label: "Switched from Claude to Codex · gpt-5.6-sol",
+      tone: "info",
+    });
   });
 
   it("shows active Codex context compaction items and collapses them when completed", () => {

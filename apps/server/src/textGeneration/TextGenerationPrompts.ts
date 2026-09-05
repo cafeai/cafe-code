@@ -216,3 +216,38 @@ export function buildThreadTitlePrompt(input: ThreadTitlePromptInput) {
 
   return { prompt, outputSchema };
 }
+
+/**
+ * First-turn title and branch naming share the same source material. Keep the
+ * message and attachment metadata in a single bounded section, while retaining
+ * each field's existing naming rules and structured-output validation.
+ */
+export function buildThreadMetadataPrompt(input: ThreadTitlePromptInput) {
+  const prompt = buildPromptFromMessage({
+    instruction: "You write concise thread titles and git branch names for coding conversations.",
+    responseShape: "Return a JSON object with keys: title, branch.",
+    rules: [
+      "Title should summarize the user's request, not restate it verbatim.",
+      "Keep the title short and specific (3-8 words).",
+      "Avoid quotes, filler, prefixes, and trailing punctuation in the title.",
+      "Branch should describe the requested work from the user message.",
+      "Keep the branch short and specific (2-6 words).",
+      "Use plain words only for the branch, no issue prefixes and no punctuation-heavy text.",
+      "If images are attached, use them as primary context for visual/UI issues.",
+    ],
+    message: input.message,
+    attachments: input.attachments,
+    additionalInstructions: [
+      input.policy?.threadTitleInstructions
+        ? `Thread title: ${input.policy.threadTitleInstructions}`
+        : "",
+      input.policy?.branchInstructions ? `Branch name: ${input.policy.branchInstructions}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n"),
+  });
+  return {
+    prompt,
+    outputSchema: Schema.Struct({ title: Schema.String, branch: Schema.String }),
+  };
+}

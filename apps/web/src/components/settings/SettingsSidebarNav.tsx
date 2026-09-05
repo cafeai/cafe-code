@@ -6,10 +6,12 @@ import {
   BarChart3Icon,
   BellIcon,
   BotIcon,
+  CloudDrizzleIcon,
   FileTextIcon,
   GitBranchIcon,
   KeyboardIcon,
   MessageSquareIcon,
+  MicIcon,
   MonitorSmartphoneIcon,
   PaletteIcon,
   Settings2Icon,
@@ -31,14 +33,16 @@ import {
 
 export type SettingsSectionPath =
   | "/settings/appearance"
+  | "/settings/ambiance"
   | "/settings/chat-threads"
-  | "/settings/files-diffs"
+  | "/settings/files"
   | "/settings/general"
   | "/settings/keybindings"
   | "/settings/notifications"
   | "/settings/providers"
   | "/settings/source-control"
   | "/settings/connections"
+  | "/settings/dictation"
   | "/settings/stats"
   | "/settings/archived"
   | "/settings/recently-deleted"
@@ -67,9 +71,10 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<SettingsNavGroup> = [
         icon: PaletteIcon,
         activePaths: ["/settings/general"],
       },
+      { label: "Ambiance", to: "/settings/ambiance", icon: CloudDrizzleIcon },
       { label: "Chat & Threads", to: "/settings/chat-threads", icon: MessageSquareIcon },
       { label: "Notifications", to: "/settings/notifications", icon: BellIcon },
-      { label: "Files & Diffs", to: "/settings/files-diffs", icon: FileTextIcon },
+      { label: "Files", to: "/settings/files", icon: FileTextIcon },
       { label: "Keybindings", to: "/settings/keybindings", icon: KeyboardIcon },
     ],
   },
@@ -77,6 +82,7 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<SettingsNavGroup> = [
     label: "AI & Integrations",
     items: [
       { label: "Providers", to: "/settings/providers", icon: BotIcon },
+      { label: "Dictation", to: "/settings/dictation", icon: MicIcon },
       { label: "Source Control", to: "/settings/source-control", icon: GitBranchIcon },
       { label: "WebUI", to: "/settings/connections", icon: MonitorSmartphoneIcon },
     ],

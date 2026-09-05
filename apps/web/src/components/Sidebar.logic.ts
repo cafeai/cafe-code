@@ -7,15 +7,21 @@ import {
   type ThreadSortInput,
 } from "../lib/threadSort";
 import type { SidebarThreadSummary, Thread } from "../types";
-import { cn } from "../lib/utils";
+import { cn, isMacPlatform } from "../lib/utils";
 import { isLatestTurnSettled } from "../session-logic";
 
 export const THREAD_SELECTION_SAFE_SELECTOR = "[data-thread-item], [data-thread-selection-safe]";
 export const THREAD_JUMP_HINT_SHOW_DELAY_MS = 100;
 const PROJECT_DELETE_REQUIRES_FORCE_MARKER = "cannot be deleted without force=true";
-// Visible sidebar rows are prewarmed into the thread-detail cache so opening a
-// nearby thread usually reuses an already-hot subscription.
-export const SIDEBAR_THREAD_PREWARM_LIMIT = 10;
+
+export function shouldInsetContentSidebarTrigger(input: {
+  readonly isElectronHost: boolean;
+  readonly isMobile: boolean;
+  readonly platform: string;
+}): boolean {
+  return input.isElectronHost && !input.isMobile && isMacPlatform(input.platform);
+}
+
 export type SidebarNewThreadEnvMode = "local" | "worktree";
 type SidebarProject = {
   id: string;
@@ -28,7 +34,7 @@ export type ThreadTraversalDirection = "previous" | "next";
 
 export type SidebarThreadContextMenuAction =
   | "rename"
-  | "duplicate"
+  | "fork"
   | "move"
   | "copy-path"
   | "copy-thread-id"
@@ -45,10 +51,11 @@ export interface SidebarThreadContextMenuItem {
 export function buildSidebarThreadContextMenuItems(input: {
   readonly debugEnabled: boolean;
   readonly repairRunning: boolean;
+  readonly forkDisabled?: boolean;
 }): ReadonlyArray<SidebarThreadContextMenuItem> {
   const items: SidebarThreadContextMenuItem[] = [
     { id: "rename", label: "Rename thread" },
-    { id: "duplicate", label: "Duplicate thread" },
+    { id: "fork", label: "Fork thread", disabled: input.forkDisabled === true },
     { id: "move", label: "Move Thread..." },
     { id: "copy-path", label: "Copy Path" },
     { id: "copy-thread-id", label: "Copy Thread ID" },
@@ -311,13 +318,6 @@ export function getVisibleSidebarThreadIds<TThreadId>(
   return renderedProjects.flatMap((renderedProject) =>
     renderedProject.shouldShowThreadPanel === false ? [] : renderedProject.renderedThreadIds,
   );
-}
-
-export function getSidebarThreadIdsToPrewarm<TThreadId>(
-  visibleThreadIds: readonly TThreadId[],
-  limit = SIDEBAR_THREAD_PREWARM_LIMIT,
-): TThreadId[] {
-  return visibleThreadIds.slice(0, Math.max(0, limit));
 }
 
 export function resolveAdjacentThreadId<T>(input: {

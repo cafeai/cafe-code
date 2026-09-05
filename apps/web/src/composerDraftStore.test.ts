@@ -267,6 +267,54 @@ describe("composerDraftStore clearComposerContent", () => {
   });
 });
 
+describe("composerDraftStore rejected-send restoration", () => {
+  const threadId = ThreadId.make("thread-send-restore");
+  const localThreadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+  const remoteThreadRef = scopeThreadRef(OTHER_TEST_ENVIRONMENT_ID, threadId);
+
+  beforeEach(() => {
+    resetComposerDraftStore();
+  });
+
+  it("atomically restores only the exact scoped empty draft", () => {
+    const restoredImage = makeImage({ id: "img-restored", previewUrl: "blob:restored" });
+    useComposerDraftStore.getState().setPrompt(remoteThreadRef, "newer remote edit");
+
+    expect(
+      useComposerDraftStore.getState().restoreComposerContentIfEmpty(localThreadRef, {
+        prompt: "original local draft",
+        images: [restoredImage],
+      }),
+    ).toBe(true);
+    expect(useComposerDraftStore.getState().getComposerDraft(localThreadRef)?.prompt).toBe(
+      "original local draft",
+    );
+    expect(
+      useComposerDraftStore
+        .getState()
+        .getComposerDraft(localThreadRef)
+        ?.images.map((image) => image.id),
+    ).toEqual(["img-restored"]);
+    expect(useComposerDraftStore.getState().getComposerDraft(remoteThreadRef)?.prompt).toBe(
+      "newer remote edit",
+    );
+  });
+
+  it("preserves content authored after the attempted send", () => {
+    useComposerDraftStore.getState().setPrompt(localThreadRef, "newer local edit");
+
+    expect(
+      useComposerDraftStore.getState().restoreComposerContentIfEmpty(localThreadRef, {
+        prompt: "stale rejected send",
+        images: [],
+      }),
+    ).toBe(false);
+    expect(useComposerDraftStore.getState().getComposerDraft(localThreadRef)?.prompt).toBe(
+      "newer local edit",
+    );
+  });
+});
+
 describe("composerDraftStore syncPersistedAttachments", () => {
   const threadId = ThreadId.make("thread-sync-persisted");
   const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
@@ -1369,6 +1417,27 @@ describe("composerDraftStore provider-scoped option updates", () => {
       toSelections({ reasoningEffort: "low" }),
     );
   });
+
+  it.each([CODEX_INSTANCE, CODEX_ZKM_INSTANCE])(
+    "keeps an explicit %s draft model while provider snapshots hydrate",
+    (instanceId) => {
+      const draftSelection = createModelSelection(instanceId, "gpt-5.6-sol");
+      expect(
+        deriveEffectiveComposerModelState({
+          draft: {
+            activeProvider: instanceId,
+            modelSelectionByProvider: { [instanceId]: draftSelection },
+          },
+          providers: [],
+          selectedProvider: CODEX_DRIVER,
+          selectedInstanceId: instanceId,
+          threadModelSelection: createModelSelection(instanceId, "gpt-6-astra"),
+          projectModelSelection: null,
+          settings: DEFAULT_UNIFIED_SETTINGS,
+        }).selectedModel,
+      ).toBe("gpt-5.6-sol");
+    },
+  );
 
   it("writes trait changes to the exact configured provider instance", () => {
     const store = useComposerDraftStore.getState();

@@ -17,6 +17,7 @@ describe("diagnosticsRuntimeViewModel", () => {
     expect(runtimeLayerStatusTone("degraded")).toBe("warning");
     expect(runtimeLayerStatusTone("unknown")).toBe("warning");
     expect(runtimeLayerStatusTone("offline")).toBe("danger");
+    expect(runtimeLayerStatusTone("not-configured")).toBe("default");
   });
 
   it("sorts primary layers before detached child roles", () => {

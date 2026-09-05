@@ -15,9 +15,12 @@ import {
   ProjectMetaUpdatedPayload,
   OrchestrationProposedPlan,
   OrchestrationSession,
+  OrchestrationThreadTurnSubagentDetail,
+  OrchestrationThreadTurnSubagentDetailInput,
   ProjectCreateCommand,
   ThreadMetaUpdatedPayload,
   ThreadDuplicatedPayload,
+  ThreadForkedPayload,
   ThreadTurnStartCommand,
   ThreadCreatedPayload,
   ThreadTurnStartRequestedPayload,
@@ -46,6 +49,7 @@ function getOptionValue(
 }
 const decodeThreadCreatedPayload = Schema.decodeUnknownEffect(ThreadCreatedPayload);
 const decodeThreadDuplicatedPayload = Schema.decodeUnknownEffect(ThreadDuplicatedPayload);
+const decodeThreadForkedPayload = Schema.decodeUnknownEffect(ThreadForkedPayload);
 const decodeOrchestrationCommand = Schema.decodeUnknownEffect(OrchestrationCommand);
 const decodeClientOrchestrationCommand = Schema.decodeUnknownEffect(ClientOrchestrationCommand);
 const decodeOrchestrationEvent = Schema.decodeUnknownEffect(OrchestrationEvent);
@@ -55,6 +59,12 @@ const decodeProviderJournalMessageRepairResult = Schema.decodeUnknownEffect(
 );
 const decodeProviderThreadAssistantMessagesRepairResult = Schema.decodeUnknownEffect(
   ProviderThreadAssistantMessagesRepairResult,
+);
+const decodeThreadTurnSubagentDetailInput = Schema.decodeUnknownEffect(
+  OrchestrationThreadTurnSubagentDetailInput,
+);
+const decodeThreadTurnSubagentDetail = Schema.decodeUnknownEffect(
+  OrchestrationThreadTurnSubagentDetail,
 );
 
 it.effect("trims branded ids and command string fields at decode boundaries", () =>
@@ -147,6 +157,31 @@ it.effect("decodes thread.duplicate client commands and duplicated payloads", ()
   }),
 );
 
+it.effect("decodes provider-native thread fork commands and events", () =>
+  Effect.gen(function* () {
+    const command = yield* decodeClientOrchestrationCommand({
+      type: "thread.fork",
+      commandId: "cmd-fork",
+      sourceThreadId: "source-thread",
+      targetThreadId: "target-thread",
+      title: "Source Thread (fork)",
+      createdAt: "2026-08-21T00:00:00.000Z",
+    });
+    assert.strictEqual(command.type, "thread.fork");
+    if (command.type !== "thread.fork") return;
+    assert.strictEqual(command.sourceThreadId, "source-thread");
+    assert.strictEqual(command.targetThreadId, "target-thread");
+
+    const payload = yield* decodeThreadForkedPayload({
+      sourceThreadId: "source-thread",
+      targetThreadId: "target-thread",
+      forkedAt: "2026-08-21T00:00:00.000Z",
+    });
+    assert.strictEqual(payload.sourceThreadId, "source-thread");
+    assert.strictEqual(payload.targetThreadId, "target-thread");
+  }),
+);
+
 it.effect("decodes historical project.created payloads with a default provider", () =>
   Effect.gen(function* () {
     const parsed = yield* decodeProjectCreatedPayload({
@@ -211,6 +246,129 @@ it.effect("rejects command fields that become empty after trim", () =>
       }),
     );
     assert.strictEqual(result._tag, "Failure");
+  }),
+);
+
+it.effect("bounds subagent detail identities and public transcript payloads", () =>
+  Effect.gen(function* () {
+    const input = yield* decodeThreadTurnSubagentDetailInput({
+      threadId: " thread-1 ",
+      turnId: " turn-1 ",
+      subagentId: " child-1 ",
+    });
+    assert.deepStrictEqual(input, {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      subagentId: "child-1",
+    });
+
+    const detail = yield* decodeThreadTurnSubagentDetail({
+      provider: "codex",
+      messages: [
+        { key: "m0", role: "user", text: "Audit the provider" },
+        {
+          key: "m1",
+          role: "assistant",
+          text: "## Result\n\nComplete.",
+          omission: { tail: "Latest conclusion.", omittedUtf8Bytes: 128 },
+        },
+      ],
+      gaps: [],
+      truncated: true,
+    });
+    assert.strictEqual(detail.messages[1]?.text, "## Result\n\nComplete.");
+
+    const oversizedId = yield* Effect.exit(
+      decodeThreadTurnSubagentDetailInput({
+        threadId: "thread-1",
+        turnId: "turn-1",
+        subagentId: "x".repeat(513),
+      }),
+    );
+    assert.strictEqual(oversizedId._tag, "Failure");
+
+    const oversizedMessage = yield* Effect.exit(
+      decodeThreadTurnSubagentDetail({
+        provider: "codex",
+        messages: [{ key: "m0", role: "assistant", text: "x".repeat(32_769) }],
+        gaps: [],
+        truncated: true,
+      }),
+    );
+    assert.strictEqual(oversizedMessage._tag, "Failure");
+
+    const aggregateOverflow = yield* Effect.exit(
+      decodeThreadTurnSubagentDetail({
+        provider: "claude",
+        messages: Array.from({ length: 5 }, (_, index) => ({
+          key: `m${index}`,
+          role: "assistant",
+          text: "🙂".repeat(8_192),
+        })),
+        gaps: [],
+        truncated: true,
+      }),
+    );
+    assert.strictEqual(aggregateOverflow._tag, "Failure");
+
+    const invalidGapAnchor = yield* Effect.exit(
+      decodeThreadTurnSubagentDetail({
+        provider: "codex",
+        messages: [{ key: "m0", role: "assistant", text: "Latest" }],
+        gaps: [
+          { afterMessageKey: "provider-native-item-id", omittedMessages: 3, omittedUtf8Bytes: 42 },
+        ],
+        truncated: true,
+      }),
+    );
+    assert.strictEqual(invalidGapAnchor._tag, "Failure");
+
+    const falseTruncationClaim = yield* Effect.exit(
+      decodeThreadTurnSubagentDetail({
+        provider: "codex",
+        messages: [
+          {
+            key: "m0",
+            role: "assistant",
+            text: "Retained head",
+            omission: { tail: "retained tail", omittedUtf8Bytes: 10 },
+          },
+        ],
+        gaps: [],
+        truncated: false,
+      }),
+    );
+    assert.strictEqual(falseTruncationClaim._tag, "Failure");
+
+    const suffixGap = yield* Effect.exit(
+      decodeThreadTurnSubagentDetail({
+        provider: "codex",
+        messages: [
+          { key: "m0", role: "user", text: "Assignment" },
+          { key: "m1", role: "assistant", text: "Stale progress" },
+        ],
+        gaps: [{ afterMessageKey: "m1", omittedMessages: 2, omittedUtf8Bytes: 20 }],
+        truncated: true,
+      }),
+    );
+    assert.strictEqual(suffixGap._tag, "Failure");
+
+    const reverseOrderedGaps = yield* Effect.exit(
+      decodeThreadTurnSubagentDetail({
+        provider: "codex",
+        messages: [
+          { key: "m0", role: "user", text: "Assignment" },
+          { key: "m1", role: "assistant", text: "Early progress" },
+          { key: "m2", role: "assistant", text: "Latest progress" },
+        ],
+        gaps: [
+          { afterMessageKey: "m1", omittedMessages: 2, omittedUtf8Bytes: 20 },
+          { afterMessageKey: "m0", omittedMessages: 2, omittedUtf8Bytes: 20 },
+        ],
+        truncated: true,
+      }),
+    );
+    assert.strictEqual(reverseOrderedGaps._tag, "Failure");
   }),
 );
 
@@ -309,6 +467,48 @@ it.effect("keeps provider journal repair out of client-dispatchable commands", (
     );
 
     assert.strictEqual(result._tag, "Failure");
+  }),
+);
+
+it.effect("reserves server command ids at the external client decode boundary", () =>
+  Effect.gen(function* () {
+    const clientResult = yield* Effect.exit(
+      decodeClientOrchestrationCommand({
+        type: "thread.turn.steer",
+        commandId: "server:forged-recovery-receipt",
+        threadId: "thread-1",
+        message: {
+          messageId: "message-1",
+          role: "user",
+          text: "forged recovery",
+          attachments: [],
+        },
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    assert.strictEqual(clientResult._tag, "Failure");
+
+    // Internal recovery commands deliberately retain this namespace. Their
+    // deterministic identities make receipt replay idempotent after restart.
+    const internal = yield* decodeOrchestrationCommand({
+      type: "thread.activity.append",
+      commandId: "server:trusted-recovery-receipt",
+      threadId: "thread-1",
+      activity: {
+        id: "activity-1",
+        tone: "info",
+        kind: "provider.turn.steer.recovered",
+        summary: "Provider steer recovered",
+        payload: {
+          provider: "codex",
+          messageId: "message-1",
+        },
+        turnId: "turn-1",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.strictEqual(internal.commandId, "server:trusted-recovery-receipt");
   }),
 );
 
@@ -561,6 +761,33 @@ it.effect("decodes thread archived and unarchived events", () =>
     assert.strictEqual(archived.type, "thread.archived");
     assert.strictEqual(archived.payload.archivedAt, "2026-01-01T00:00:00.000Z");
     assert.strictEqual(unarchived.type, "thread.unarchived");
+  }),
+);
+
+it.effect("decodes legacy steer intents as explicitly unbound recovery targets", () =>
+  Effect.gen(function* () {
+    const event = yield* decodeOrchestrationEvent({
+      sequence: 3,
+      eventId: "event-legacy-steer-intent",
+      aggregateKind: "thread",
+      aggregateId: "thread-1",
+      type: "thread.turn-steer-requested",
+      occurredAt: "2026-01-03T00:00:00.000Z",
+      commandId: "cmd-legacy-steer-intent",
+      causationEventId: null,
+      correlationId: "cmd-legacy-steer-intent",
+      metadata: {},
+      payload: {
+        threadId: "thread-1",
+        messageId: "message-legacy-steer-intent",
+        createdAt: "2026-01-03T00:00:00.000Z",
+      },
+    });
+
+    assert.strictEqual(event.type, "thread.turn-steer-requested");
+    if (event.type === "thread.turn-steer-requested") {
+      assert.strictEqual(event.payload.expectedTurnId, null);
+    }
   }),
 );
 

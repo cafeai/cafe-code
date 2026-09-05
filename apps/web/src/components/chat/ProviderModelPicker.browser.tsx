@@ -241,10 +241,18 @@ async function mountPicker(props: {
   providers?: ReadonlyArray<ServerProvider>;
   settings?: UnifiedSettings;
   triggerVariant?: "ghost" | "outline";
+  compact?: boolean;
+  hostWidth?: number;
+  onRequestModelsRefresh?: (instanceId: ProviderInstanceId) => void;
 }) {
   const host = document.createElement("div");
+  if (props.hostWidth !== undefined) {
+    host.style.display = "flex";
+    host.style.width = `${props.hostWidth}px`;
+  }
   document.body.append(host);
   const onInstanceModelChange = vi.fn();
+  const onRequestModelsRefresh = props.onRequestModelsRefresh ?? vi.fn();
   const providers = props.providers ?? TEST_PROVIDERS;
   const instanceEntries = sortProviderInstanceEntries(deriveProviderInstanceEntries(providers));
   const activeInstanceId = props.activeInstanceId ?? CODEX_INSTANCE_ID;
@@ -262,14 +270,18 @@ async function mountPicker(props: {
       lockedContinuationGroupKey={props.lockedContinuationGroupKey ?? null}
       instanceEntries={instanceEntries}
       modelOptionsByInstance={modelOptionsByInstance}
+      {...(props.compact !== undefined ? { compact: props.compact } : {})}
       triggerVariant={props.triggerVariant}
+      onRequestModelsRefresh={onRequestModelsRefresh}
       onInstanceModelChange={onInstanceModelChange}
     />,
     { container: host },
   );
 
   return {
+    host,
     onInstanceModelChange,
+    onRequestModelsRefresh,
     // Back-compat alias used by callers that still assert on the old callback
     // name. Delegates to the instance-aware mock so existing expectations work.
     get onProviderModelChange() {
@@ -315,6 +327,85 @@ describe("ProviderModelPicker", () => {
     document.body.innerHTML = "";
     localStorage.clear();
     await __resetLocalApiForTests();
+  });
+
+  it("requests one bounded catalogue refresh for each closed-to-open transition", async () => {
+    const onRequestModelsRefresh = vi.fn();
+    const mounted = await mountPicker({
+      activeInstanceId: CODEX_INSTANCE_ID,
+      model: "gpt-5.6-sol",
+      lockedProvider: ProviderDriverKind.make("codex"),
+      onRequestModelsRefresh,
+    });
+
+    try {
+      const trigger = page.getByRole("button");
+      await trigger.click();
+      await vi.waitFor(() => {
+        expect(onRequestModelsRefresh).toHaveBeenCalledTimes(1);
+        expect(onRequestModelsRefresh).toHaveBeenLastCalledWith(CODEX_INSTANCE_ID);
+      });
+
+      // Rerenders while the picker remains open must not generate duplicate
+      // model/list requests; close and reopen is the next explicit refresh.
+      await userEvent.keyboard("{Escape}");
+      await trigger.click();
+      await vi.waitFor(() => {
+        expect(onRequestModelsRefresh).toHaveBeenCalledTimes(2);
+      });
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("uses available compact-footer width to show Daybreak Blue without clipping", async () => {
+    const originalViewport = { width: window.innerWidth, height: window.innerHeight };
+    await page.viewport(477, Math.max(700, originalViewport.height));
+
+    const daybreakModel = {
+      slug: "gpt-daybreak-blue-latest",
+      name: "Daybreak Blue",
+      isCustom: false,
+      capabilities: createModelCapabilities({ optionDescriptors: [] }),
+    };
+    const mounted = await mountPicker({
+      activeInstanceId: CODEX_INSTANCE_ID,
+      model: daybreakModel.slug,
+      lockedProvider: ProviderDriverKind.make("codex"),
+      providers: [buildCodexProvider([daybreakModel])],
+      compact: true,
+      hostWidth: 260,
+    });
+
+    try {
+      await vi.waitFor(() => {
+        const trigger = document.querySelector<HTMLElement>(
+          '[data-chat-provider-model-picker="true"]',
+        );
+        const title = document.querySelector<HTMLElement>(
+          '[data-provider-model-trigger-title="true"]',
+        );
+        expect(trigger).not.toBeNull();
+        expect(title?.textContent).toBe("Daybreak Blue");
+        expect(title!.scrollWidth).toBeLessThanOrEqual(title!.clientWidth);
+        expect(trigger!.getBoundingClientRect().right).toBeLessThanOrEqual(
+          mounted.host.getBoundingClientRect().right,
+        );
+      });
+
+      mounted.host.style.width = "120px";
+      await vi.waitFor(() => {
+        const trigger = document.querySelector<HTMLElement>(
+          '[data-chat-provider-model-picker="true"]',
+        );
+        expect(trigger!.getBoundingClientRect().right).toBeLessThanOrEqual(
+          mounted.host.getBoundingClientRect().right,
+        );
+      });
+    } finally {
+      await mounted.cleanup();
+      await page.viewport(originalViewport.width, originalViewport.height);
+    }
   });
 
   it("shows provider sidebar in unlocked mode", async () => {
@@ -1059,6 +1150,61 @@ describe("ProviderModelPicker", () => {
       expect(mounted.onProviderModelChange).toHaveBeenCalledWith(
         "claudeAgent",
         "claude-sonnet-4-6",
+      );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("shows and selects Claude Fable 5.1 when the server advertises it", async () => {
+    const providersWithFable = TEST_PROVIDERS.map((provider) =>
+      provider.instanceId === CLAUDE_INSTANCE_ID
+        ? {
+            ...provider,
+            models: [
+              ...provider.models,
+              {
+                slug: "claude-fable-5-1",
+                name: "Claude Fable 5.1",
+                isCustom: false,
+                capabilities: createModelCapabilities({
+                  optionDescriptors: [
+                    selectDescriptor("effort", "Reasoning", [
+                      { id: "low", label: "low" },
+                      { id: "medium", label: "medium" },
+                      { id: "high", label: "high", isDefault: true },
+                      { id: "xhigh", label: "xhigh" },
+                      { id: "max", label: "max" },
+                    ]),
+                    selectDescriptor("contextWindow", "Context window", [
+                      { id: "1m", label: "1m", isDefault: true },
+                    ]),
+                  ],
+                }),
+              },
+            ],
+          }
+        : provider,
+    );
+    const mounted = await mountPicker({
+      activeInstanceId: CLAUDE_INSTANCE_ID,
+      model: "claude-opus-4-6",
+      lockedProvider: ProviderDriverKind.make("claudeAgent"),
+      providers: providersWithFable,
+    });
+
+    try {
+      await page.getByRole("button").click();
+
+      await vi.waitFor(() => {
+        expect(getModelPickerListText()).toContain("Claude Fable 5.1");
+      });
+
+      await page.getByText("Claude Fable 5.1", { exact: true }).click();
+
+      expect(mounted.onInstanceModelChange).toHaveBeenCalledWith(
+        CLAUDE_INSTANCE_ID,
+        "claude-fable-5-1",
       );
     } finally {
       await mounted.cleanup();

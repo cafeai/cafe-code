@@ -22,6 +22,7 @@ import {
   ThreadArchivedPayload,
   ThreadCreatedPayload,
   ThreadDuplicatedPayload,
+  ThreadForkedPayload,
   ThreadDeletedPayload,
   ThreadRestoredPayload,
   ThreadInteractionModeSetPayload,
@@ -31,10 +32,12 @@ import {
   ThreadUnarchivedPayload,
   ThreadRevertedPayload,
   ThreadSessionSetPayload,
+  ThreadGoalSyncedPayload,
   ThreadTurnDiffCompletedPayload,
   ThreadTurnInterruptRequestedPayload,
   ThreadTurnStartRequestedPayload,
 } from "./Schemas.ts";
+import { isStaleProvisionalSessionReplay } from "./sessionLifecycle.ts";
 
 type ThreadPatch = Partial<Omit<OrchestrationThread, "id">>;
 const MAX_THREAD_MESSAGES = 2_000;
@@ -146,11 +149,12 @@ function cloneThreadContextForDuplicate(input: {
         completedAt: checkpoint.completedAt,
       }),
     ),
-    // Provider runtime/session identity is intentionally not copied. A
-    // duplicate carries Cafe-visible conversation context only; the next user
-    // prompt must create a fresh provider boundary instead of resuming Claude
-    // or Codex state owned by the source thread.
+    // Context-copy events never clone a live session object. Projection-only
+    // duplicates stay unbound, while provider-native forks immediately apply a
+    // separate thread.session-set event carrying the target's dormant resume
+    // binding. Goals remain provider-thread-owned and are not inferred here.
     session: null,
+    goal: null,
     updatedAt: duplicatedAt,
   };
 }
@@ -403,6 +407,7 @@ export function projectEvent(
             activities: [],
             checkpoints: [],
             session: null,
+            goal: null,
           },
           event.type,
           "thread",
@@ -433,6 +438,32 @@ export function projectEvent(
           sourceThread,
           targetThread,
           duplicatedAt: payload.duplicatedAt,
+        });
+        return {
+          ...nextBase,
+          threads: nextBase.threads.map((entry) =>
+            entry.id === payload.targetThreadId ? copiedThread : entry,
+          ),
+        };
+      });
+
+    case "thread.forked":
+      return Effect.gen(function* () {
+        const payload = yield* decodeForEvent(
+          ThreadForkedPayload,
+          event.payload,
+          event.type,
+          "payload",
+        );
+        const sourceThread = nextBase.threads.find((entry) => entry.id === payload.sourceThreadId);
+        const targetThread = nextBase.threads.find((entry) => entry.id === payload.targetThreadId);
+        if (!sourceThread || !targetThread) {
+          return nextBase;
+        }
+        const copiedThread = cloneThreadContextForDuplicate({
+          sourceThread,
+          targetThread,
+          duplicatedAt: payload.forkedAt,
         });
         return {
           ...nextBase,
@@ -679,6 +710,15 @@ export function projectEvent(
           event.type,
           "session",
         );
+        if (
+          thread.session !== null &&
+          isStaleProvisionalSessionReplay({ current: thread.session, incoming: session })
+        ) {
+          // Keep the renderer's event projector consistent with the SQLite
+          // projector. An older, provider-less start remains in the durable
+          // audit log but cannot revive a spinner after reconciliation.
+          return nextBase;
+        }
         const existingActiveTurnId =
           thread.session?.activeTurnId ??
           (thread.latestTurn?.state === "running" ? thread.latestTurn.turnId : null);
@@ -764,6 +804,17 @@ export function projectEvent(
           }),
         };
       });
+
+    case "thread.goal-synced":
+      return decodeForEvent(ThreadGoalSyncedPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            goal: payload.goal,
+            updatedAt: event.occurredAt,
+          }),
+        })),
+      );
 
     case "thread.turn-interrupt-requested":
       return Effect.gen(function* () {

@@ -536,7 +536,7 @@ it.layer(
           eventId: EventId.make("evt-terminal-replay-stale-delta"),
           aggregateKind: "thread",
           aggregateId: threadId,
-          occurredAt: "2026-05-27T01:00:01.500Z",
+          occurredAt: "2026-05-27T01:00:04.000Z",
           commandId: CommandId.make("cmd-terminal-replay-stale-delta"),
           causationEventId: null,
           correlationId: CommandId.make("cmd-terminal-replay-stale-delta"),
@@ -548,8 +548,8 @@ it.layer(
             text: " duplicate",
             turnId,
             streaming: true,
-            createdAt: "2026-05-27T01:00:01.500Z",
-            updatedAt: "2026-05-27T01:00:01.500Z",
+            createdAt: "2026-05-27T01:00:04.000Z",
+            updatedAt: "2026-05-27T01:00:04.000Z",
           },
         });
 
@@ -572,6 +572,25 @@ it.layer(
             text: "complete text",
             isStreaming: 0,
             updatedAt: "2026-05-27T01:00:03.000Z",
+          },
+        ]);
+
+        const turnRows = yield* sql<{
+          readonly state: string;
+          readonly completedAt: string | null;
+        }>`
+        SELECT
+          state,
+          completed_at AS "completedAt"
+        FROM projection_turns
+        WHERE thread_id = ${threadId}
+          AND turn_id = ${turnId}
+      `;
+
+        assert.deepEqual(turnRows, [
+          {
+            state: "completed",
+            completedAt: "2026-05-27T01:00:03.000Z",
           },
         ]);
       }),
@@ -1217,6 +1236,50 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-terminal-sessio
             completedAt: "2026-05-24T17:00:03.000Z",
           },
         });
+        yield* appendAndProject({
+          type: "thread.session-set",
+          eventId: EventId.make("evt-terminal-replay-stale-starting"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-05-24T17:00:04.000Z",
+          commandId: CommandId.make("cmd-terminal-replay-stale-starting"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-terminal-replay-stale-starting"),
+          metadata: {},
+          payload: {
+            threadId,
+            session: {
+              threadId,
+              status: "starting",
+              providerName: "codex",
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              runtimeMode: "full-access",
+              activeTurnId: null,
+              lastError: null,
+              // This old logical time reproduces a daemon event whose second
+              // orchestration command resumed after restart recovery.
+              updatedAt: "2026-05-24T17:00:01.500Z",
+            },
+          },
+        });
+
+        const afterStaleStarting = yield* sql<{
+          readonly status: string;
+          readonly updatedAt: string;
+        }>`
+          SELECT
+            status,
+            updated_at AS "updatedAt"
+          FROM projection_thread_sessions
+          WHERE thread_id = ${threadId}
+        `;
+        assert.deepEqual(afterStaleStarting, [
+          {
+            status: "ready",
+            updatedAt: "2026-05-24T17:00:03.000Z",
+          },
+        ]);
+
         yield* appendAndProject({
           type: "thread.session-set",
           eventId: EventId.make("evt-terminal-replay-late-running"),

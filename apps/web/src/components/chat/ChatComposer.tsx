@@ -1,5 +1,6 @@
 import type {
   ApprovalRequestId,
+  DictationTranscriptionModel,
   EnvironmentId,
   ModelSelection,
   ProjectEntry,
@@ -10,7 +11,6 @@ import type {
   ScopedThreadRef,
   ServerProvider,
   ThreadId,
-  TurnId,
 } from "@cafecode/contracts";
 import {
   ProviderDriverKind,
@@ -28,6 +28,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
 import { flushSync } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
@@ -60,25 +61,23 @@ import { type ComposerCommandItem, ComposerCommandMenu } from "./ComposerCommand
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
 import { ComposerAttachImageButton } from "./ComposerAttachImageButton";
+import { ComposerDictationButton } from "./ComposerDictationButton";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { ComposerPendingApprovalPanel } from "./ComposerPendingApprovalPanel";
 import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
 import { ComposerPlanFollowUpBanner } from "./ComposerPlanFollowUpBanner";
+import { ComposerTaskProgress } from "./ComposerTaskProgress";
 import { resolveComposerMenuActiveItemId } from "./composerMenuHighlight";
 import { searchSlashCommandItems } from "./composerSlashCommandSearch";
-import {
-  getComposerProviderState,
-  renderProviderTraitsMenuContent,
-  renderProviderTraitsPicker,
-} from "./composerProviderState";
+import { getComposerProviderState, renderProviderTraitsMenuContent } from "./composerProviderState";
 import { ContextWindowMeter } from "./ContextWindowMeter";
+import { ThreadGoalFooterButton } from "./ThreadGoalControl";
 import { buildExpandedImagePreview, type ExpandedImagePreview } from "./ExpandedImagePreview";
 import { basenameOfPath } from "../../vscode-icons";
 import { cn, randomUUID } from "~/lib/utils";
 import { resolveShortcutCommand } from "../../keybindings";
 import { Separator } from "../ui/separator";
 import { Button } from "../ui/button";
-import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { toastManager } from "../ui/toast";
 import {
@@ -89,11 +88,6 @@ import {
   ImageIcon,
   LoaderCircleIcon,
   ListTodoIcon,
-  type LucideIcon,
-  LockIcon,
-  LockOpenIcon,
-  PenLineIcon,
-  ShieldCheckIcon,
   Trash2Icon,
   XIcon,
 } from "lucide-react";
@@ -109,54 +103,41 @@ import { type AppModelOption, getAppModelOptionsForInstance } from "../../modelS
 import type { UnifiedSettings } from "@cafecode/contracts/settings";
 import type { SessionPhase, Thread } from "../../types";
 import type { PendingUserInputDraftAnswer } from "../../pendingUserInput";
-import type { PendingApproval, PendingUserInput } from "../../session-logic";
+import type {
+  ActivePlanState,
+  LatestProposedPlanState,
+  PendingApproval,
+  PendingUserInput,
+  WorkLogEntry,
+} from "../../session-logic";
 import { deriveLatestContextWindowSnapshot } from "../../lib/contextWindow";
+import { shouldSurfaceProviderAccountRateLimits } from "../../lib/codexRateLimits";
 import { formatProviderSkillDisplayName } from "../../providerSkillPresentation";
 import { searchProviderSkills } from "../../providerSkillSearch";
 import { useHasOnScreenKeyboard } from "../../hooks/useMediaQuery";
+import { useSettings } from "../../hooks/useSettings";
+import { useComposerDictation } from "../../hooks/useComposerDictation";
+import { readDictationBrowserCapability } from "../../dictation/realtimeTranscription";
+import { requireEnvironmentConnection } from "../../environments/runtime";
+import { dictationStatusQueryOptions } from "../../lib/dictationReactQuery";
 import { domSnapshot, mobileDebugLog } from "../../lib/mobileDebugLog";
 import {
   applyClaudePermissionMode,
-  CLAUDE_PERMISSION_MODE_OPTIONS,
   type ClaudePermissionMode,
   deriveClaudePermissionMode,
-  getClaudePermissionModeOption,
   getNextClaudePermissionMode,
-  isClaudePermissionMode,
 } from "./claudePermissionMode";
 
 const IMAGE_SIZE_LIMIT_LABEL = `${Math.round(PROVIDER_SEND_TURN_MAX_IMAGE_BYTES / (1024 * 1024))}MB`;
 
-const runtimeModeConfig: Record<
-  RuntimeMode,
-  { label: string; description: string; icon: LucideIcon }
-> = {
-  "approval-required": {
-    label: "Supervised",
-    description: "Ask before commands and file changes.",
-    icon: LockIcon,
-  },
-  "auto-accept-edits": {
-    label: "Auto-accept edits",
-    description: "Auto-approve edits, ask before other actions.",
-    icon: PenLineIcon,
-  },
-  "full-access": {
-    label: "Full access",
-    description: "Allow commands and edits without prompts.",
-    icon: LockOpenIcon,
-  },
-};
-
-const runtimeModeOptions = Object.keys(runtimeModeConfig) as RuntimeMode[];
-const claudePermissionModeIcons: Record<ClaudePermissionMode, LucideIcon> = {
-  default: LockIcon,
-  acceptEdits: PenLineIcon,
-  plan: BotIcon,
-  auto: ShieldCheckIcon,
-  bypassPermissions: LockOpenIcon,
-};
 const COMPOSER_PATH_QUERY_DEBOUNCE_MS = 120;
+// React clears a queued follow-up draft immediately after submit. Retain the
+// harmless Send affordance across the ordinary double-click/tap window so the
+// same pointer coordinates cannot turn into the destructive Stop action
+// between clicks. This state belongs to ChatComposer because mobile submission
+// swaps the keyboard overlay action for the footer action without unmounting
+// the composer itself.
+const POST_SUBMIT_INTERRUPT_GUARD_MS = 500;
 const EMPTY_PROJECT_ENTRIES: ProjectEntry[] = [];
 const COMPOSER_FLOATING_LAYER_SELECTOR = [
   '[data-slot="popover-popup"]',
@@ -185,73 +166,25 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
   provider: ProviderDriverKind;
   showInteractionModeToggle: boolean;
   interactionMode: ProviderInteractionMode;
-  runtimeMode: RuntimeMode;
   showPlanToggle: boolean;
   planSidebarLabel: string;
   planSidebarOpen: boolean;
   onToggleInteractionMode: () => void;
-  onClaudePermissionModeChange: (mode: ClaudePermissionMode) => void;
-  onRuntimeModeChange: (mode: RuntimeMode) => void;
   onTogglePlanSidebar: () => void;
 }) {
-  const isClaude = props.provider === "claudeAgent";
-  const runtimeModeOption = runtimeModeConfig[props.runtimeMode];
-  const RuntimeModeIcon = runtimeModeOption.icon;
-  const claudePermissionMode = deriveClaudePermissionMode({
-    interactionMode: props.interactionMode,
-    runtimeMode: props.runtimeMode,
-  });
-  const claudePermissionModeOption = getClaudePermissionModeOption(claudePermissionMode);
-  const ClaudePermissionModeIcon = claudePermissionModeIcons[claudePermissionMode];
+  const usesNativePermissionModes = props.provider === "claudeAgent" || props.provider === "grok";
+  const showStandaloneInteractionMode =
+    props.showInteractionModeToggle && !usesNativePermissionModes;
+
+  if (!showStandaloneInteractionMode && !props.showPlanToggle) {
+    return null;
+  }
 
   return (
     <>
-      <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
-
-      {props.showInteractionModeToggle && isClaude ? (
+      {showStandaloneInteractionMode ? (
         <>
-          <Select
-            value={claudePermissionMode}
-            onValueChange={(value) => {
-              if (isClaudePermissionMode(value)) {
-                props.onClaudePermissionModeChange(value);
-              }
-            }}
-          >
-            <SelectTrigger
-              variant="ghost"
-              size="sm"
-              className="font-medium"
-              aria-label="Claude permission mode"
-              title={claudePermissionModeOption.description}
-            >
-              <ClaudePermissionModeIcon className="size-4" />
-              <SelectValue>{claudePermissionModeOption.label}</SelectValue>
-            </SelectTrigger>
-            <SelectPopup alignItemWithTrigger={false}>
-              {CLAUDE_PERMISSION_MODE_OPTIONS.map((option) => {
-                const OptionIcon = claudePermissionModeIcons[option.id];
-                return (
-                  <SelectItem key={option.id} value={option.id} className="min-w-72 py-2">
-                    <div className="grid min-w-0 gap-0.5">
-                      <span className="inline-flex items-center gap-1.5 font-medium text-foreground">
-                        <OptionIcon className="size-3.5 shrink-0 text-muted-foreground" />
-                        {option.label}
-                      </span>
-                      <span className="text-muted-foreground text-xs leading-4">
-                        {option.description}
-                      </span>
-                    </div>
-                  </SelectItem>
-                );
-              })}
-            </SelectPopup>
-          </Select>
-
           <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
-        </>
-      ) : props.showInteractionModeToggle ? (
-        <>
           <Button
             variant="ghost"
             className="shrink-0 whitespace-nowrap px-2 text-muted-foreground/70 hover:text-foreground/80 sm:px-3"
@@ -269,46 +202,7 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
               {props.interactionMode === "plan" ? "Plan" : "Build"}
             </span>
           </Button>
-
-          <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
         </>
-      ) : null}
-
-      {!isClaude ? (
-        <Select
-          value={props.runtimeMode}
-          onValueChange={(value) => props.onRuntimeModeChange(value!)}
-        >
-          <SelectTrigger
-            variant="ghost"
-            size="sm"
-            className="font-medium"
-            aria-label="Runtime mode"
-            title={runtimeModeOption.description}
-          >
-            <RuntimeModeIcon className="size-4" />
-            <SelectValue>{runtimeModeOption.label}</SelectValue>
-          </SelectTrigger>
-          <SelectPopup alignItemWithTrigger={false}>
-            {runtimeModeOptions.map((mode) => {
-              const option = runtimeModeConfig[mode];
-              const OptionIcon = option.icon;
-              return (
-                <SelectItem key={mode} value={mode} className="min-w-64 py-2">
-                  <div className="grid min-w-0 gap-0.5">
-                    <span className="inline-flex items-center gap-1.5 font-medium text-foreground">
-                      <OptionIcon className="size-3.5 shrink-0 text-muted-foreground" />
-                      {option.label}
-                    </span>
-                    <span className="text-muted-foreground text-xs leading-4">
-                      {option.description}
-                    </span>
-                  </div>
-                </SelectItem>
-              );
-            })}
-          </SelectPopup>
-        </Select>
       ) : null}
 
       {props.showPlanToggle ? (
@@ -344,6 +238,8 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   compact: boolean;
   activeContextWindow: ReturnType<typeof deriveLatestContextWindowSnapshot>;
   codexRateLimits: ServerProvider["accountRateLimits"] | null;
+  sessionRailVisible: boolean;
+  onShowSessionRail?: () => void;
   isPreparingWorktree: boolean;
   pendingAction: {
     questionIndex: number;
@@ -359,23 +255,28 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   isConnecting: boolean;
   isEnvironmentUnavailable: boolean;
   hasSendableContent: boolean;
+  postSubmitInterruptGuardActive: boolean;
   pendingStatusLabel: string | null;
+  dictationAction: ReactNode;
   preserveComposerFocusOnPointerDown?: boolean;
+  onArmPostSubmitInterruptGuard: () => void;
   onPreviousPendingQuestion: () => void;
   onInterrupt: () => void;
   onImplementPlanInNewThread: () => void;
 }) {
   return (
     <>
-      {props.activeContextWindow ? (
+      {props.activeContextWindow && !props.sessionRailVisible ? (
         <ContextWindowMeter
           usage={props.activeContextWindow}
           codexRateLimits={props.codexRateLimits}
+          {...(props.onShowSessionRail ? { onShowOnSide: props.onShowSessionRail } : {})}
         />
       ) : null}
       {props.pendingStatusLabel ? (
         <span className="text-muted-foreground/70 text-xs">{props.pendingStatusLabel}</span>
       ) : null}
+      {props.dictationAction}
       <ComposerPrimaryActions
         compact={props.compact}
         pendingAction={props.pendingAction}
@@ -387,7 +288,9 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         isEnvironmentUnavailable={props.isEnvironmentUnavailable}
         isPreparingWorktree={props.isPreparingWorktree}
         hasSendableContent={props.hasSendableContent}
+        postSubmitInterruptGuardActive={props.postSubmitInterruptGuardActive}
         preserveComposerFocusOnPointerDown={props.preserveComposerFocusOnPointerDown ?? false}
+        onArmPostSubmitInterruptGuard={props.onArmPostSubmitInterruptGuard}
         onPreviousPendingQuestion={props.onPreviousPendingQuestion}
         onInterrupt={props.onInterrupt}
         onImplementPlanInNewThread={props.onImplementPlanInNewThread}
@@ -455,7 +358,7 @@ export interface FollowUpQueueViewItem {
   canExpand: boolean;
   blockedReason: string | null;
   automaticSteerRetry?: {
-    readonly nonSteerableTurnKind: "review" | "compact";
+    readonly nonSteerableTurnKind: "review" | "compact" | null;
   } | null;
 }
 
@@ -479,7 +382,11 @@ function queuedAutomaticSteerCountLabel(items: readonly FollowUpQueueViewItem[])
 
   if (automaticSteerItems.length === 1) {
     const kind = automaticSteerItems[0]?.automaticSteerRetry?.nonSteerableTurnKind;
-    return kind === "compact" ? "1 steer waiting for compact" : "1 steer waiting for review";
+    return kind === "compact"
+      ? "1 steer waiting for compact"
+      : kind === "review"
+        ? "1 steer waiting for review"
+        : "1 follow-up requeued";
   }
 
   return `${automaticSteerItems.length} steers waiting`;
@@ -496,6 +403,14 @@ function automaticSteerRetryStatus(item: FollowUpQueueViewItem): {
   readonly title: string;
 } | null {
   const kind = item.automaticSteerRetry?.nonSteerableTurnKind ?? null;
+  if (kind === null && item.automaticSteerRetry != null) {
+    return {
+      ariaLabel: "Follow-up requeued after provider steer rejection",
+      label: "Requeued",
+      title:
+        "The provider did not accept this live steer. Cafe Code preserved it and will send it automatically when the active turn is ready.",
+    };
+  }
   if (kind === null) {
     return null;
   }
@@ -751,6 +666,7 @@ export interface ChatComposerProps {
   } | null;
   activePendingResolvedAnswers: Record<string, unknown> | null;
   activePendingIsResponding: boolean;
+  activePendingAutoResolutionSnoozed: boolean;
   activePendingDraftAnswers: Record<string, PendingUserInputDraftAnswer>;
   activePendingQuestionIndex: number;
   respondingRequestIds: ApprovalRequestId[];
@@ -758,10 +674,14 @@ export interface ChatComposerProps {
   // Plan
   showPlanFollowUpPrompt: boolean;
   activeProposedPlan: Thread["proposedPlans"][number] | null;
-  activePlan: { turnId?: TurnId } | null;
-  sidebarProposedPlan: { turnId?: TurnId } | null;
+  activePlan: ActivePlanState | null;
+  activeSubagents?: ReadonlyArray<WorkLogEntry>;
+  sidebarProposedPlan: LatestProposedPlanState | null;
   planSidebarLabel: string;
   planSidebarOpen: boolean;
+  sessionRailVisible?: boolean;
+  onShowSessionRail?: () => void;
+  goalControlsSupported: boolean;
 
   // Mode
   runtimeMode: RuntimeMode;
@@ -818,12 +738,15 @@ export interface ChatComposerProps {
     expandedCursor: number,
     cursorAdjacentToMention: boolean,
   ) => void;
+  onSnoozeActivePendingUserInput: () => void;
 
   onProviderModelSelect: (instanceId: ProviderInstanceId, model: string) => void;
   toggleInteractionMode: () => void;
   handleRuntimeModeChange: (mode: RuntimeMode) => void;
   handleInteractionModeChange: (mode: ProviderInteractionMode) => void;
   togglePlanSidebar: () => void;
+  onOpenGoalDialog: () => void;
+  onOpenSubagentDetail?: (workEntry: WorkLogEntry, trigger: HTMLButtonElement) => void;
 
   focusComposer: () => void;
   scheduleComposerFocus: () => void;
@@ -858,15 +781,20 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activePendingProgress,
     activePendingResolvedAnswers,
     activePendingIsResponding,
+    activePendingAutoResolutionSnoozed,
     activePendingDraftAnswers,
     activePendingQuestionIndex,
     respondingRequestIds,
     showPlanFollowUpPrompt,
     activeProposedPlan,
     activePlan,
+    activeSubagents = [],
     sidebarProposedPlan,
     planSidebarLabel,
     planSidebarOpen,
+    sessionRailVisible = false,
+    onShowSessionRail,
+    goalControlsSupported,
     runtimeMode,
     interactionMode,
     lockedProvider,
@@ -900,11 +828,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     onAdvanceActivePendingUserInput,
     onPreviousActivePendingUserInputQuestion,
     onChangeActivePendingUserInputCustomAnswer,
+    onSnoozeActivePendingUserInput,
     onProviderModelSelect,
     toggleInteractionMode,
     handleRuntimeModeChange,
     handleInteractionModeChange,
     togglePlanSidebar,
+    onOpenGoalDialog,
+    onOpenSubagentDetail,
     focusComposer,
     scheduleComposerFocus,
     setThreadError,
@@ -1067,12 +998,32 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     () => selectedProviderEntry?.snapshot ?? null,
     [selectedProviderEntry],
   );
-  const selectedCodexRateLimits =
-    (selectedProviderStatus?.driver === "codex" ||
-      selectedProviderStatus?.driver === "claudeAgent") &&
-    selectedProviderStatus.auth.status === "authenticated"
-      ? (selectedProviderStatus.accountRateLimits ?? null)
-      : null;
+  const selectedCodexRateLimits = shouldSurfaceProviderAccountRateLimits(selectedProviderStatus)
+    ? (selectedProviderStatus?.accountRateLimits ?? null)
+    : null;
+  const requestProviderModelsRefresh = useCallback(
+    (instanceId: ProviderInstanceId) => {
+      const entry = providerInstanceEntries.find(
+        (candidate) => candidate.instanceId === instanceId,
+      );
+      if (entry?.driverKind !== ProviderDriverKind.make("codex")) {
+        return;
+      }
+
+      try {
+        void requireEnvironmentConnection(environmentId)
+          .client.server.refreshProviders({ instanceId, scope: "models" })
+          // The picker intentionally keeps its stale catalogue on failure.
+          // The server records a redacted phase marker; avoid surfacing raw
+          // provider causes in the renderer console or a disruptive toast.
+          .catch(() => undefined);
+      } catch {
+        // A connection can disappear between the pointer event and this
+        // lookup. The next picker open will retry after reconnect.
+      }
+    },
+    [environmentId, providerInstanceEntries],
+  );
   const selectedProviderModels = useMemo<ReadonlyArray<ServerProvider["models"][number]>>(
     () => selectedProviderEntry?.models ?? [],
     [selectedProviderEntry],
@@ -1092,6 +1043,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   const selectedPromptEffort = composerProviderState.promptEffort;
   const selectedModelOptionsForDispatch = composerProviderState.modelOptionsForDispatch;
+  const selectedProviderUsesNativePermissionModes =
+    selectedProvider === "claudeAgent" || selectedProvider === "grok";
+  // Ambiance composer surface: tint the frame ring with the current weather
+  // state color (via CSS variables owned by AmbianceLayer). Ultrathink's
+  // rainbow frame intentionally wins when both want the frame.
+  const ambianceComposerRing = useSettings(
+    (appSettings) => appSettings.ambianceEnabled && appSettings.ambianceSurfaceComposer,
+  );
   const composerProviderControls = useMemo(
     () => ({
       showInteractionModeToggle: getProviderInteractionModeToggle(
@@ -1103,7 +1062,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   );
   const handleClaudePermissionModeChange = useCallback(
     (mode: ClaudePermissionMode) => {
-      const next = applyClaudePermissionMode({ interactionMode, runtimeMode }, mode);
+      const mapped = applyClaudePermissionMode({ interactionMode, runtimeMode }, mode);
+      const next =
+        selectedProvider === "grok" && mode === "auto"
+          ? { ...mapped, runtimeMode: "auto-accept-edits" as const }
+          : mapped;
       // Both draft-store updates are synchronous. Calling only the fields that
       // changed also avoids an unnecessary Claude session
       // restart when switching between Plan/Auto and the underlying access
@@ -1115,10 +1078,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         handleInteractionModeChange(next.interactionMode);
       }
     },
-    [handleInteractionModeChange, handleRuntimeModeChange, interactionMode, runtimeMode],
+    [
+      handleInteractionModeChange,
+      handleRuntimeModeChange,
+      interactionMode,
+      runtimeMode,
+      selectedProvider,
+    ],
   );
   const cycleComposerInteractionMode = useCallback(() => {
-    if (selectedProvider === "claudeAgent") {
+    if (selectedProvider === "claudeAgent" || selectedProvider === "grok") {
       const currentMode = deriveClaudePermissionMode({ interactionMode, runtimeMode });
       handleClaudePermissionModeChange(getNextClaudePermissionMode(currentMode));
       return;
@@ -1183,10 +1152,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const [isComposerModelPickerOpen, setIsComposerModelPickerOpen] = useState(false);
   const [isComposerFocused, setIsComposerFocused] = useState(false);
   const [composerFocusRequestRevision, setComposerFocusRequestRevision] = useState(0);
+  const [postSubmitInterruptGuardActive, setPostSubmitInterruptGuardActive] = useState(false);
   // Touch capability, not viewport width: foldables and tablets can be wider
   // than any phone breakpoint while still typing through an on-screen keyboard.
   const isOnScreenKeyboardDevice = useHasOnScreenKeyboard();
   const isComposerCollapsedMobile = isOnScreenKeyboardDevice && !isComposerFocused;
+  const [dictationBrowserCapability] = useState(readDictationBrowserCapability);
+  const dictationStatusQuery = useQuery({
+    ...dictationStatusQueryOptions(environmentId),
+    enabled: dictationBrowserCapability.supported && environmentUnavailable === null,
+  });
 
   // TEMPORARY: mobile DOM debugging — remove with lib/mobileDebugLog.ts.
   useEffect(() => {
@@ -1215,6 +1190,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const mobileComposerExpandInFlightRef = useRef(false);
   const dragDepthRef = useRef(0);
   const composerFileInputRef = useRef<HTMLInputElement>(null);
+  // A Send/queue action issued while dictation is active must cross exactly
+  // one finalization boundary. Keeping the single-flight here prevents a
+  // double click from dispatching the same final transcript twice while the
+  // microphone session is still committing its last audio buffer.
+  const pendingDictationComposerActionRef = useRef<Promise<void> | null>(null);
+  const postSubmitInterruptGuardArmedRef = useRef(false);
+  const postSubmitInterruptGuardTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ------------------------------------------------------------------
   // Derived: composer send state
@@ -1227,6 +1209,54 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       }),
     [composerImages.length, prompt],
   );
+  const postSubmitInterruptGuardTarget =
+    routeKind === "draft"
+      ? `draft:${draftId ?? "none"}`
+      : `thread:${routeThreadRef.environmentId}:${routeThreadRef.threadId}`;
+  const armPostSubmitInterruptGuard = useCallback(() => {
+    if (phase !== "running" || !composerSendState.hasSendableContent) return;
+    if (postSubmitInterruptGuardTimerRef.current !== null) {
+      clearTimeout(postSubmitInterruptGuardTimerRef.current);
+      postSubmitInterruptGuardTimerRef.current = null;
+    }
+    postSubmitInterruptGuardArmedRef.current = true;
+    setPostSubmitInterruptGuardActive(true);
+  }, [composerSendState.hasSendableContent, phase]);
+  const settlePostSubmitInterruptGuard = useCallback(() => {
+    if (!postSubmitInterruptGuardArmedRef.current) return;
+    if (postSubmitInterruptGuardTimerRef.current !== null) {
+      clearTimeout(postSubmitInterruptGuardTimerRef.current);
+    }
+    // Start the click-safety window after the asynchronous submit settles.
+    // Mobile keeps its keyboard overlay mounted until then, so starting this
+    // timer from the original click could expire before the footer replaces it.
+    setPostSubmitInterruptGuardActive(true);
+    postSubmitInterruptGuardTimerRef.current = setTimeout(() => {
+      postSubmitInterruptGuardTimerRef.current = null;
+      postSubmitInterruptGuardArmedRef.current = false;
+      setPostSubmitInterruptGuardActive(false);
+    }, POST_SUBMIT_INTERRUPT_GUARD_MS);
+  }, []);
+
+  useEffect(() => {
+    // A guard belongs only to the stable route target that armed it. Clear it
+    // when navigation selects another target (not when provider lifecycle
+    // reconciliation transiently changes activeThreadId or phase),
+    // and clear the timer on unmount so it cannot update a retired composer.
+    if (postSubmitInterruptGuardTimerRef.current !== null) {
+      clearTimeout(postSubmitInterruptGuardTimerRef.current);
+      postSubmitInterruptGuardTimerRef.current = null;
+    }
+    postSubmitInterruptGuardArmedRef.current = false;
+    setPostSubmitInterruptGuardActive(false);
+    return () => {
+      if (postSubmitInterruptGuardTimerRef.current !== null) {
+        clearTimeout(postSubmitInterruptGuardTimerRef.current);
+        postSubmitInterruptGuardTimerRef.current = null;
+      }
+      postSubmitInterruptGuardArmedRef.current = false;
+    };
+  }, [postSubmitInterruptGuardTarget]);
   const selectedProviderDisplayName =
     selectedProviderEntry?.displayName ||
     selectedProviderStatus?.displayName?.trim() ||
@@ -1297,6 +1327,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           label: "/default",
           description: "Switch this thread back to normal build mode",
         },
+        ...(goalControlsSupported
+          ? [
+              {
+                id: "slash:goal",
+                type: "slash-command" as const,
+                command: "goal" as const,
+                label: "/goal",
+                description: "View or update the Codex goal",
+              },
+            ]
+          : []),
       ] satisfies ReadonlyArray<Extract<ComposerCommandItem, { type: "slash-command" }>>;
       const providerSlashCommandItems = (selectedProviderStatus?.slashCommands ?? []).map(
         (command) => ({
@@ -1331,7 +1372,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       );
     }
     return [];
-  }, [composerTrigger, selectedProvider, selectedProviderStatus, workspaceEntries]);
+  }, [
+    composerTrigger,
+    goalControlsSupported,
+    selectedProvider,
+    selectedProviderStatus,
+    workspaceEntries,
+  ]);
 
   const composerMenuOpen = Boolean(composerTrigger);
   const composerMenuSearchKey = composerTrigger
@@ -1363,6 +1410,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   const isComposerApprovalState = activePendingApproval !== null;
   const activePendingUserInput = pendingUserInputs[0] ?? null;
+  const showComposerDictation =
+    dictationBrowserCapability.supported &&
+    dictationStatusQuery.data?.configured === true &&
+    !isComposerApprovalState &&
+    pendingUserInputs.length === 0;
+  const isComposerDictationUnavailable =
+    isSendBusy || isConnecting || environmentUnavailable !== null;
+  const isComposerDictationEnabled = showComposerDictation && !isComposerDictationUnavailable;
   const hasComposerHeader =
     isComposerApprovalState ||
     pendingUserInputs.length > 0 ||
@@ -1370,19 +1425,26 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const showCollapsedMobilePromptRow =
     isComposerCollapsedMobile && !isComposerApprovalState && pendingUserInputs.length === 0;
 
-  const composerFooterHasWideActions = showPlanFollowUpPrompt || activePendingProgress !== null;
-  const showPlanSidebarToggle = Boolean(activePlan || sidebarProposedPlan);
+  const composerFooterHasWideActions =
+    showPlanFollowUpPrompt ||
+    activePendingProgress !== null ||
+    activePlan !== null ||
+    activeSubagents.length > 0;
+  // Runtime checklists now live in the compact composer progress popover.
+  // The retained side-panel control is intentionally limited to authored plan
+  // documents so a task update can never reopen the old Tasks panel.
+  const showPlanSidebarToggle = sidebarProposedPlan !== null;
   const composerFooterActionLayoutKey = useMemo(() => {
     if (activePendingProgress) {
-      return `pending:${activePendingProgress.questionIndex}:${activePendingProgress.isLastQuestion}:${activePendingIsResponding}`;
+      return `pending:${activePendingProgress.questionIndex}:${activePendingProgress.isLastQuestion}:${activePendingIsResponding}:dictation:${showComposerDictation}`;
     }
     if (phase === "running") {
-      return "running";
+      return `running:${composerSendState.hasSendableContent}:${postSubmitInterruptGuardActive}:dictation:${showComposerDictation}`;
     }
     if (showPlanFollowUpPrompt) {
-      return prompt.trim().length > 0 ? "plan:refine" : "plan:implement";
+      return `${prompt.trim().length > 0 ? "plan:refine" : "plan:implement"}:dictation:${showComposerDictation}`;
     }
-    return `idle:${composerSendState.hasSendableContent}:${isSendBusy}:${isConnecting}:${isPreparingWorktree}`;
+    return `idle:${composerSendState.hasSendableContent}:${isSendBusy}:${isConnecting}:${isPreparingWorktree}:dictation:${showComposerDictation}`;
   }, [
     activePendingIsResponding,
     activePendingProgress,
@@ -1391,7 +1453,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     isPreparingWorktree,
     isSendBusy,
     phase,
+    postSubmitInterruptGuardActive,
     prompt,
+    showComposerDictation,
     showPlanFollowUpPrompt,
   ]);
 
@@ -1439,17 +1503,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     prompt,
     onPromptChange: setPromptFromTraits,
   });
-  const providerTraitsPicker = renderProviderTraitsPicker({
-    provider: selectedProvider,
-    providerInstanceId: selectedInstanceId,
-    ...(routeKind === "server" ? { threadRef: routeThreadRef } : {}),
-    ...(routeKind === "draft" && draftId ? { draftId } : {}),
-    model: selectedModel,
-    models: selectedProviderModels,
-    modelOptions: selectedComposerModelOptions,
-    prompt,
-    onPromptChange: setPromptFromTraits,
-  });
   const pendingPrimaryAction = useMemo(
     () =>
       activePendingProgress
@@ -1468,13 +1521,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // is overlaid on the editor instead. Approval state keeps its own footer.
   const showMobileComposerActionsOverlay =
     isOnScreenKeyboardDevice && !isComposerCollapsedMobile && !isComposerApprovalState;
-  const composerEditorDisabled =
-    isSendBusy ||
-    isConnecting ||
-    isComposerApprovalState ||
-    (environmentUnavailable !== null && activePendingProgress === null);
-  const previousComposerEditorDisabledRef = useRef(composerEditorDisabled);
-
   // ------------------------------------------------------------------
   // Prompt helpers
   // ------------------------------------------------------------------
@@ -1838,6 +1884,53 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     };
   }, [composerCursor, promptRef]);
 
+  const composerDictationSessionKey = JSON.stringify([
+    environmentId,
+    routeKind,
+    draftId ?? routeThreadRef.threadId,
+  ]);
+  const createComposerDictationClientSecret = useCallback(
+    (model: DictationTranscriptionModel) =>
+      requireEnvironmentConnection(environmentId).client.dictation.createClientSecret({ model }),
+    [environmentId],
+  );
+  const replaceComposerDictationRange = useCallback(
+    (replacement: {
+      readonly start: number;
+      readonly end: number;
+      readonly replacement: string;
+      readonly expectedText: string;
+    }) =>
+      applyPromptReplacement(replacement.start, replacement.end, replacement.replacement, {
+        expectedText: replacement.expectedText,
+        focusEditorAfterReplace: false,
+      }),
+    [applyPromptReplacement],
+  );
+  const reportComposerDictationError = useCallback((message: string) => {
+    toastManager.add({ type: "error", title: message });
+  }, []);
+  const composerDictation = useComposerDictation({
+    enabled: isComposerDictationEnabled,
+    sessionKey: composerDictationSessionKey,
+    createClientSecret: createComposerDictationClientSecret,
+    readComposerSnapshot,
+    replaceComposerRange: replaceComposerDictationRange,
+    onError: reportComposerDictationError,
+  });
+  const finishComposerDictation = composerDictation.finish;
+  const composerEditorDisabled =
+    isSendBusy ||
+    isConnecting ||
+    composerDictation.isEditingLocked ||
+    isComposerApprovalState ||
+    (environmentUnavailable !== null && activePendingProgress === null);
+  // Dictation owns its own connecting/recording/finalizing state. Reusing its
+  // transcript edit lock as the send button's busy state incorrectly rendered
+  // a "Sending" spinner before Cafe had dispatched any message.
+  const isComposerPrimaryActionBusy = isSendBusy;
+  const previousComposerEditorDisabledRef = useRef(composerEditorDisabled);
+
   const resolveActiveComposerTrigger = useCallback((): {
     snapshot: { value: string; cursor: number; expandedCursor: number };
     trigger: ComposerTrigger | null;
@@ -1888,6 +1981,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           }
           return;
         }
+        if (item.command === "goal") {
+          const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
+            expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd),
+            focusEditorAfterReplace: false,
+          });
+          if (applied) {
+            setComposerHighlightedItemId(null);
+            onOpenGoalDialog();
+          }
+          return;
+        }
         void handleInteractionModeChange(item.command === "plan" ? "plan" : "default");
         const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
           expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd),
@@ -1934,7 +2038,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         return;
       }
     },
-    [applyPromptReplacement, handleInteractionModeChange, resolveActiveComposerTrigger],
+    [
+      applyPromptReplacement,
+      handleInteractionModeChange,
+      onOpenGoalDialog,
+      resolveActiveComposerTrigger,
+    ],
   );
 
   const onComposerMenuItemHighlighted = useCallback(
@@ -1983,7 +2092,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     ) {
       activeElement.blur();
     }
-    setIsComposerFocused(false);
+    // Commit the collapsed state before any deferred focus work can run. This
+    // mirrors the synchronous expansion path and prevents a cleared mobile
+    // draft from repainting the keyboard overlay after its submit settles.
+    flushSync(() => {
+      setIsComposerFocused(false);
+    });
     mobileDebugLog("dismiss-keyboard", domSnapshot());
   }, []);
 
@@ -2020,33 +2134,114 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     };
   }, [dismissMobileComposerKeyboard, isComposerFocused, isOnScreenKeyboardDevice]);
 
-  const submitComposer = useCallback(
-    (event?: { preventDefault: () => void }) => {
+  const runComposerActionAfterDictation = useCallback(
+    (action: () => void | Promise<void>) => {
+      if (pendingDictationComposerActionRef.current) return;
+
+      const operation = (async () => {
+        let actionStarted = false;
+        try {
+          // `finish` resolves only after OpenAI's authoritative final transcript
+          // has been applied through replaceComposerRange. Deferring `action`
+          // until then means onSend/onSteer re-read the final prompt rather than
+          // racing the interim text currently painted in the editor.
+          if (!(await finishComposerDictation())) return;
+          actionStarted = true;
+          await action();
+        } finally {
+          // A failed/cancelled finalization never reaches runSubmitComposer's
+          // own finally block. Settle any click guard here so a failed
+          // microphone handoff cannot hide Stop behind Queue indefinitely.
+          if (!actionStarted) {
+            settlePostSubmitInterruptGuard();
+          }
+        }
+      })();
+      pendingDictationComposerActionRef.current = operation;
+      const clearOperation = () => {
+        if (pendingDictationComposerActionRef.current === operation) {
+          pendingDictationComposerActionRef.current = null;
+        }
+      };
+      void operation.then(clearOperation, clearOperation);
+    },
+    [finishComposerDictation, settlePostSubmitInterruptGuard],
+  );
+
+  const runSubmitComposer = useCallback(
+    async (event?: { preventDefault: () => void }) => {
       const keepKeyboardClosed = isOnScreenKeyboardDevice;
       mobileDebugLog("submit-start", { keepKeyboardClosed, ...domSnapshot() });
-      void Promise.resolve(onSend(event)).finally(() => {
+      try {
+        await onSend(event);
+      } finally {
         mobileDebugLog("submit-settled", { keepKeyboardClosed, ...domSnapshot() });
+        settlePostSubmitInterruptGuard();
         if (keepKeyboardClosed) {
           dismissMobileComposerKeyboard();
-          return;
+        } else {
+          requestComposerEditorFocus();
         }
-        requestComposerEditorFocus();
-      });
+      }
     },
-    [dismissMobileComposerKeyboard, isOnScreenKeyboardDevice, onSend, requestComposerEditorFocus],
+    [
+      dismissMobileComposerKeyboard,
+      isOnScreenKeyboardDevice,
+      onSend,
+      requestComposerEditorFocus,
+      settlePostSubmitInterruptGuard,
+    ],
   );
-  const steerComposer = useCallback(
+
+  const submitComposer = useCallback(
     (event?: { preventDefault: () => void }) => {
+      if (pendingDictationComposerActionRef.current) {
+        event?.preventDefault();
+        return;
+      }
+      if (composerDictation.isEditingLocked) {
+        // Prevent the browser's native form submission immediately. The real
+        // send is intentionally issued without this short-lived event only
+        // after dictation finalization has committed the last transcript.
+        event?.preventDefault();
+        runComposerActionAfterDictation(() => runSubmitComposer());
+        return;
+      }
+      void runSubmitComposer(event);
+    },
+    [composerDictation.isEditingLocked, runComposerActionAfterDictation, runSubmitComposer],
+  );
+
+  const runSteerComposer = useCallback(
+    async (event?: { preventDefault: () => void }) => {
       const keepKeyboardClosed = isOnScreenKeyboardDevice;
-      void Promise.resolve(onSteer(event)).finally(() => {
+      try {
+        await onSteer(event);
+      } finally {
         if (keepKeyboardClosed) {
           dismissMobileComposerKeyboard();
-          return;
+        } else {
+          requestComposerEditorFocus();
         }
-        requestComposerEditorFocus();
-      });
+      }
     },
     [dismissMobileComposerKeyboard, isOnScreenKeyboardDevice, onSteer, requestComposerEditorFocus],
+  );
+
+  const steerComposer = useCallback(
+    (event?: { preventDefault: () => void }) => {
+      if (pendingDictationComposerActionRef.current) {
+        event?.preventDefault();
+        return;
+      }
+      if (composerDictation.isEditingLocked) {
+        event?.preventDefault();
+        runComposerActionAfterDictation(() => runSteerComposer());
+        return;
+      }
+      void runSteerComposer(event);
+    },
+    [composerDictation.isEditingLocked, runComposerActionAfterDictation, runSteerComposer],
   );
 
   useEffect(() => {
@@ -2408,6 +2603,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     ],
   );
 
+  const renderComposerDictationButton = (className?: string): ReactNode =>
+    showComposerDictation ? (
+      <ComposerDictationButton
+        phase={composerDictation.phase}
+        statusMessage={composerDictation.statusMessage}
+        disabled={isComposerDictationUnavailable}
+        preserveComposerFocusOnPointerDown
+        {...(className ? { className } : {})}
+        onToggle={composerDictation.toggle}
+      />
+    ) : null;
+
   // Render
   // ------------------------------------------------------------------
   return (
@@ -2441,7 +2648,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       <div
         className={cn(
           "group rounded-[22px] p-px transition-colors duration-200",
-          composerProviderState.composerFrameClassName,
+          composerProviderState.composerFrameClassName ??
+            (ambianceComposerRing ? "cafe-ambiance-composer-frame" : undefined),
         )}
         onDragEnter={onComposerDragEnter}
         onDragOver={onComposerDragOver}
@@ -2527,6 +2735,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   questionIndex={activePendingQuestionIndex}
                   onToggleOption={onSelectActivePendingUserInputOption}
                   onAdvance={onAdvanceActivePendingUserInput}
+                  autoResolutionSnoozed={activePendingAutoResolutionSnoozed}
+                  onSnoozeAutoResolution={onSnoozeActivePendingUserInput}
                 />
               </div>
             ) : showPlanFollowUpPrompt && activeProposedPlan ? (
@@ -2567,6 +2777,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 questionIndex={activePendingQuestionIndex}
                 onToggleOption={onSelectActivePendingUserInputOption}
                 onAdvance={onAdvanceActivePendingUserInput}
+                autoResolutionSnoozed={activePendingAutoResolutionSnoozed}
+                onSnoozeAutoResolution={onSnoozeActivePendingUserInput}
               />
               <div className="px-3 pb-3 sm:px-4">
                 <div
@@ -2598,12 +2810,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       isRunning={false}
                       showPlanFollowUpPrompt={false}
                       promptHasText={false}
-                      isSendBusy={isSendBusy}
+                      isSendBusy={isComposerPrimaryActionBusy}
                       isConnecting={isConnecting}
                       isEnvironmentUnavailable={environmentUnavailable !== null}
                       isPreparingWorktree={false}
                       hasSendableContent={false}
+                      postSubmitInterruptGuardActive={postSubmitInterruptGuardActive}
                       preserveComposerFocusOnPointerDown
+                      onArmPostSubmitInterruptGuard={armPostSubmitInterruptGuard}
                       onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                       onInterrupt={handleInterruptPrimaryAction}
                       onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryAction}
@@ -2795,6 +3009,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   data-chat-composer-mobile-pending-actions="true"
                   className="absolute bottom-0 right-0 flex items-center justify-end gap-1.5"
                 >
+                  <ComposerTaskProgress
+                    plan={activePlan}
+                    subagents={activeSubagents}
+                    onOpenSubagentDetail={onOpenSubagentDetail}
+                    sessionRailVisible={sessionRailVisible}
+                    {...(onShowSessionRail ? { onShowOnSide: onShowSessionRail } : {})}
+                  />
                   {pendingUserInputs.length === 0 ? (
                     <ComposerAttachImageButton
                       preserveComposerFocusOnPointerDown
@@ -2803,6 +3024,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       onClick={openComposerImagePicker}
                     />
                   ) : null}
+                  {renderComposerDictationButton("bg-background/80 hover:bg-background/90")}
                   <ComposerPrimaryActions
                     compact
                     pendingAction={pendingPrimaryAction}
@@ -2811,12 +3033,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       pendingUserInputs.length === 0 && showPlanFollowUpPrompt
                     }
                     promptHasText={prompt.trim().length > 0}
-                    isSendBusy={isSendBusy}
+                    isSendBusy={isComposerPrimaryActionBusy}
                     isConnecting={isConnecting}
                     isEnvironmentUnavailable={environmentUnavailable !== null}
                     isPreparingWorktree={isPreparingWorktree}
                     hasSendableContent={composerSendState.hasSendableContent}
+                    postSubmitInterruptGuardActive={postSubmitInterruptGuardActive}
                     preserveComposerFocusOnPointerDown
+                    onArmPostSubmitInterruptGuard={armPostSubmitInterruptGuard}
                     onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                     onInterrupt={handleInterruptPrimaryAction}
                     onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryAction}
@@ -2833,7 +3057,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           {showMobileComposerActionsOverlay ||
           (isComposerCollapsedMobile &&
             !showCollapsedMobilePromptRow) ? null : activePendingApproval ? (
-            <div className="flex items-center justify-end gap-2 px-2.5 pb-2.5 sm:px-3 sm:pb-3">
+            <div className="flex min-w-0 items-center justify-end gap-2 px-2.5 pb-2.5 sm:px-3 sm:pb-3">
+              <ComposerTaskProgress
+                plan={activePlan}
+                subagents={activeSubagents}
+                onOpenSubagentDetail={onOpenSubagentDetail}
+                sessionRailVisible={sessionRailVisible}
+                {...(onShowSessionRail ? { onShowOnSide: onShowSessionRail } : {})}
+              />
               <ComposerPendingApprovalActions
                 requestId={activePendingApproval.requestId}
                 isResponding={respondingRequestIds.includes(activePendingApproval.requestId)}
@@ -2873,50 +3104,91 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   onOpenChange={(open) => {
                     setIsComposerModelPickerOpen(open);
                   }}
+                  onRequestModelsRefresh={requestProviderModelsRefresh}
                   onInstanceModelChange={onProviderModelSelect}
                 />
 
                 {isComposerFooterCompact ? (
                   <CompactComposerControlsMenu
-                    activePlan={showPlanSidebarToggle}
+                    showPlanSidebar={showPlanSidebarToggle}
                     provider={selectedProvider}
                     interactionMode={interactionMode}
                     planSidebarLabel={planSidebarLabel}
                     planSidebarOpen={planSidebarOpen}
                     runtimeMode={runtimeMode}
-                    showInteractionModeToggle={composerProviderControls.showInteractionModeToggle}
+                    showInteractionModeToggle={
+                      composerProviderControls.showInteractionModeToggle ||
+                      selectedProviderUsesNativePermissionModes
+                    }
+                    showGoalControl={goalControlsSupported}
+                    goalStatus={activeThread?.goal?.status ?? null}
                     traitsMenuContent={providerTraitsMenuContent}
+                    traitsTriggerLabel={
+                      providerTraitsMenuContent ? composerProviderState.traitsTriggerLabel : null
+                    }
                     onToggleInteractionMode={cycleComposerInteractionMode}
-                    onClaudePermissionModeChange={handleClaudePermissionModeChange}
+                    onNativePermissionModeChange={handleClaudePermissionModeChange}
                     onTogglePlanSidebar={togglePlanSidebar}
                     onRuntimeModeChange={handleRuntimeModeChange}
+                    onOpenGoal={onOpenGoalDialog}
                   />
                 ) : (
                   <>
-                    {providerTraitsPicker ? (
-                      <>
-                        <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
-                        {providerTraitsPicker}
-                      </>
-                    ) : null}
+                    <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
+                    <CompactComposerControlsMenu
+                      showPlanSidebar={false}
+                      provider={selectedProvider}
+                      interactionMode={interactionMode}
+                      planSidebarLabel={planSidebarLabel}
+                      planSidebarOpen={planSidebarOpen}
+                      runtimeMode={runtimeMode}
+                      showInteractionModeToggle={selectedProviderUsesNativePermissionModes}
+                      traitsMenuContent={providerTraitsMenuContent}
+                      traitsTriggerLabel={
+                        providerTraitsMenuContent ? composerProviderState.traitsTriggerLabel : null
+                      }
+                      onToggleInteractionMode={cycleComposerInteractionMode}
+                      onNativePermissionModeChange={handleClaudePermissionModeChange}
+                      onTogglePlanSidebar={togglePlanSidebar}
+                      onRuntimeModeChange={handleRuntimeModeChange}
+                    />
                     <ComposerFooterModeControls
                       provider={selectedProvider}
                       showInteractionModeToggle={composerProviderControls.showInteractionModeToggle}
                       interactionMode={interactionMode}
-                      runtimeMode={runtimeMode}
                       showPlanToggle={showPlanSidebarToggle}
                       planSidebarLabel={planSidebarLabel}
                       planSidebarOpen={planSidebarOpen}
                       onToggleInteractionMode={cycleComposerInteractionMode}
-                      onClaudePermissionModeChange={handleClaudePermissionModeChange}
-                      onRuntimeModeChange={handleRuntimeModeChange}
                       onTogglePlanSidebar={togglePlanSidebar}
                     />
+                    {goalControlsSupported && interactionMode !== "plan" ? (
+                      <>
+                        <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
+                        <ThreadGoalFooterButton
+                          goal={activeThread?.goal ?? null}
+                          activeTurnStartedAt={activeThread?.latestTurn?.startedAt ?? null}
+                          isTurnRunning={phase === "running"}
+                          onClick={onOpenGoalDialog}
+                        />
+                      </>
+                    ) : null}
                   </>
                 )}
               </div>
 
-              {/* Right side: send / stop button */}
+              {/* Keep task progress outside the horizontally scrolling provider
+                  controls so the status remains legible on narrow screens. The
+                  popover itself is portaled and cannot be clipped by the footer. */}
+              <ComposerTaskProgress
+                plan={activePlan}
+                subagents={activeSubagents}
+                onOpenSubagentDetail={onOpenSubagentDetail}
+                sessionRailVisible={sessionRailVisible}
+                {...(onShowSessionRail ? { onShowOnSide: onShowSessionRail } : {})}
+              />
+
+              {/* Right side: dictation plus send / stop button */}
               <div
                 data-chat-composer-actions="right"
                 data-chat-composer-primary-actions-compact={
@@ -2928,17 +3200,22 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   compact={isComposerPrimaryActionsCompact}
                   activeContextWindow={activeContextWindow}
                   codexRateLimits={selectedCodexRateLimits}
+                  sessionRailVisible={sessionRailVisible}
+                  {...(onShowSessionRail ? { onShowSessionRail } : {})}
                   pendingAction={pendingPrimaryAction}
                   isRunning={phase === "running"}
                   showPlanFollowUpPrompt={pendingUserInputs.length === 0 && showPlanFollowUpPrompt}
                   promptHasText={prompt.trim().length > 0}
-                  isSendBusy={isSendBusy}
+                  isSendBusy={isComposerPrimaryActionBusy}
                   isConnecting={isConnecting}
                   isEnvironmentUnavailable={environmentUnavailable !== null}
                   isPreparingWorktree={isPreparingWorktree}
                   hasSendableContent={composerSendState.hasSendableContent}
+                  postSubmitInterruptGuardActive={postSubmitInterruptGuardActive}
                   pendingStatusLabel={composerPendingStatusLabel}
+                  dictationAction={renderComposerDictationButton()}
                   preserveComposerFocusOnPointerDown
+                  onArmPostSubmitInterruptGuard={armPostSubmitInterruptGuard}
                   onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                   onInterrupt={handleInterruptPrimaryAction}
                   onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryAction}

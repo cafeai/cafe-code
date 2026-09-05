@@ -1,6 +1,8 @@
 import { scopeThreadRef } from "@cafecode/client-runtime";
 import {
   EnvironmentId,
+  EventId,
+  MessageId,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -13,19 +15,45 @@ import { type Thread } from "../types";
 
 import {
   createLocalDispatchSnapshot,
+  deriveRetryableSteerReplayCandidates,
   deriveComposerSendState,
   deriveLockedProvider,
+  doesSteerFailureActivityMatchPending,
+  doesSteerProcessingActivityMatchPending,
   hasServerAcknowledgedLocalDispatch,
+  isSteerProcessingActivityTimely,
   mergePendingSteerSnapshotsForInterruptedTurn,
+  readDeliveredSteerMessageId,
+  readRecoveredSteerMessageId,
+  readSteerProcessingMessageId,
+  restoreCanonicalRetryImages,
   resolveFollowUpQueuePhase,
   resolveSendEnvMode,
   shouldResolvePendingSteerDispatch,
+  shouldBackpressurePendingSteerDispatch,
   shouldPinTimelineToEndForLocalMessage,
   shouldWriteThreadErrorToCurrentServerThread,
   waitForStartedServerThread,
 } from "./ChatView.logic";
 
 const localEnvironmentId = EnvironmentId.make("environment-local");
+
+const fetchBoundedRetryImage: typeof fetch = async () =>
+  new Response(new Uint8Array([137, 80, 78, 71]), {
+    status: 200,
+    headers: { "content-type": "image/png" },
+  });
+
+async function fetchUnavailableRetryImage(url: RequestInfo | URL): Promise<Response> {
+  const value = String(url);
+  if (value.includes("oversized")) {
+    return {
+      ok: true,
+      blob: async () => ({ size: Number.MAX_SAFE_INTEGER }) as Blob,
+    } as Response;
+  }
+  throw new TypeError("preview transport unavailable");
+}
 
 describe("deriveComposerSendState", () => {
   it("ignores stale inline context placeholders when deciding sendability", () => {
@@ -165,6 +193,481 @@ describe("shouldResolvePendingSteerDispatch", () => {
         assistantResponseAfterSteer: false,
       }),
     ).toBe(true);
+  });
+});
+
+describe("doesSteerProcessingActivityMatchPending", () => {
+  it("settles only the exactly correlated steer when multiple messages share a turn", () => {
+    expect(
+      doesSteerProcessingActivityMatchPending({
+        pendingMessageId: "steer-message-a",
+        processingMessageId: "steer-message-a",
+        legacyTurnMatches: false,
+      }),
+    ).toBe(true);
+    expect(
+      doesSteerProcessingActivityMatchPending({
+        pendingMessageId: "steer-message-b",
+        processingMessageId: "steer-message-a",
+        legacyTurnMatches: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("uses turn correlation only for legacy processing activities without a message id", () => {
+    expect(
+      doesSteerProcessingActivityMatchPending({
+        pendingMessageId: "legacy-steer",
+        processingMessageId: null,
+        legacyTurnMatches: true,
+      }),
+    ).toBe(true);
+    expect(
+      doesSteerProcessingActivityMatchPending({
+        pendingMessageId: "legacy-steer",
+        processingMessageId: null,
+        legacyTurnMatches: false,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("doesSteerFailureActivityMatchPending", () => {
+  const messageId = MessageId.make("same-id-steer-retry");
+  const failure = {
+    id: EventId.make("steer-failure-generation-one"),
+    tone: "error" as const,
+    kind: "provider.turn.steer.failed",
+    summary: "Provider steer failed",
+    payload: { messageId, intentSequence: 41 },
+    turnId: TurnId.make("turn-1"),
+    sequence: 42,
+    createdAt: "2026-03-29T00:01:01.000Z",
+  };
+
+  it("does not let an older same-id failure settle a newer retry generation", () => {
+    expect(
+      doesSteerFailureActivityMatchPending({
+        activity: failure,
+        pendingMessageId: messageId,
+        pendingIntentSequence: 77,
+        dispatchedAt: "2026-03-29T00:02:00.000Z",
+      }),
+    ).toBe(false);
+    expect(
+      doesSteerFailureActivityMatchPending({
+        activity: {
+          ...failure,
+          payload: { messageId, intentSequence: 77 },
+          createdAt: "2026-03-29T00:02:00.000Z",
+        },
+        pendingMessageId: messageId,
+        pendingIntentSequence: 77,
+        dispatchedAt: "2026-03-29T00:02:00.000Z",
+      }),
+    ).toBe(true);
+  });
+
+  it("uses time as the fail-closed generation fence before the dispatch receipt arrives", () => {
+    expect(
+      doesSteerFailureActivityMatchPending({
+        activity: failure,
+        pendingMessageId: messageId,
+        pendingIntentSequence: null,
+        dispatchedAt: "2026-03-29T00:02:00.000Z",
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("readRecoveredSteerMessageId", () => {
+  it("reads the exact message from a Codex recovery receipt", () => {
+    expect(
+      readRecoveredSteerMessageId({
+        activityKind: "provider.turn.steer.recovered",
+        payload: {
+          provider: "codex",
+          messageId: "steer-message-recovered",
+          acceptedTurnId: "turn-stale",
+          recoveredTurnId: "turn-recovered",
+        },
+      }),
+    ).toBe("steer-message-recovered");
+  });
+
+  it("rejects provider lookalikes and generic activities", () => {
+    expect(
+      readRecoveredSteerMessageId({
+        activityKind: "provider.turn.steer.recovered",
+        payload: { provider: "claudeAgent", messageId: "forged-provider" },
+      }),
+    ).toBeNull();
+    expect(
+      readRecoveredSteerMessageId({
+        activityKind: "provider.turn.steer.recovered",
+        payload: {
+          provider: "codex",
+          messageId: "incomplete-receipt",
+          acceptedTurnId: "turn-stale",
+        },
+      }),
+    ).toBeNull();
+    expect(
+      readRecoveredSteerMessageId({
+        activityKind: "task.progress",
+        payload: { provider: "codex", messageId: "wrong-kind" },
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("readDeliveredSteerMessageId", () => {
+  it("accepts only the exact Codex next-turn delivery receipt", () => {
+    expect(
+      readDeliveredSteerMessageId({
+        activityKind: "provider.turn.steer.delivered",
+        payload: {
+          provider: "codex",
+          messageId: "steer-message-delivered",
+          deliveredTurnId: "turn-delivered",
+          delivery: "next-turn",
+        },
+      }),
+    ).toBe("steer-message-delivered");
+
+    expect(
+      readDeliveredSteerMessageId({
+        activityKind: "provider.turn.steer.delivered",
+        payload: {
+          provider: "claudeAgent",
+          messageId: "wrong-provider",
+          deliveredTurnId: "turn-delivered",
+          delivery: "next-turn",
+        },
+      }),
+    ).toBeNull();
+    expect(
+      readDeliveredSteerMessageId({
+        activityKind: "provider.turn.steer.delivered",
+        payload: {
+          provider: "codex",
+          messageId: "wrong-delivery",
+          deliveredTurnId: "turn-delivered",
+          delivery: "active-turn",
+        },
+      }),
+    ).toBeNull();
+    expect(
+      readDeliveredSteerMessageId({
+        activityKind: "provider.turn.steer.delivered",
+        payload: {
+          provider: "codex",
+          messageId: "missing-turn",
+          delivery: "next-turn",
+        },
+      }),
+    ).toBeNull();
+  });
+
+  it("never treats a pre-I/O runtime warning as proof of delivery", () => {
+    expect(
+      readDeliveredSteerMessageId({
+        activityKind: "runtime.warning",
+        payload: {
+          provider: "codex",
+          messageId: "warning-only",
+          delivery: "next-turn",
+        },
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("deriveRetryableSteerReplayCandidates", () => {
+  const sourceMessageId = MessageId.make("durable-retry-message");
+  const failedTurnId = TurnId.make("turn-review");
+  const canonicalMessage = {
+    id: sourceMessageId,
+    role: "user" as const,
+    text: "Please retry this exact prompt",
+    attachments: [
+      {
+        type: "image" as const,
+        id: "durable-image",
+        name: "diagram.png",
+        mimeType: "image/png",
+        sizeBytes: 128,
+        previewUrl: "/attachments/durable-image",
+      },
+    ],
+    turnId: failedTurnId,
+    createdAt: "2026-03-29T00:01:00.000Z",
+    streaming: false,
+  };
+  const retryableFailure = {
+    id: EventId.make("retryable-steer-failure"),
+    tone: "error" as const,
+    kind: "provider.turn.steer.failed",
+    summary: "Codex could not steer this active turn",
+    payload: {
+      provider: "codex",
+      messageId: sourceMessageId,
+      retryableFollowUp: true,
+      codexNonSteerableTurnKind: "review",
+    },
+    turnId: failedTurnId,
+    sequence: 1,
+    createdAt: "2026-03-29T00:01:01.000Z",
+  };
+
+  it("reconstructs one exact same-thread retry with canonical content after reload", () => {
+    const thread = {
+      ...makeThread(),
+      messages: [canonicalMessage],
+      // Repeated delivery of the same durable failure must not manufacture
+      // duplicate shelf rows after reconnect or snapshot replay.
+      activities: [
+        retryableFailure,
+        {
+          ...retryableFailure,
+          id: EventId.make("retryable-steer-failure-replayed"),
+          sequence: 2,
+          createdAt: "2026-03-29T00:01:02.000Z",
+        },
+      ],
+    };
+
+    const candidates = deriveRetryableSteerReplayCandidates({ thread });
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]?.failure).toEqual({
+      messageId: sourceMessageId,
+      intentSequence: null,
+      turnKind: "review",
+    });
+    expect(candidates[0]?.message.text).toBe(canonicalMessage.text);
+    expect(candidates[0]?.message.attachments).toEqual(canonicalMessage.attachments);
+    expect(candidates[0]?.failedAt).toBe("2026-03-29T00:01:02.000Z");
+
+    expect(
+      deriveRetryableSteerReplayCandidates({
+        thread,
+        existingSourceMessageIds: new Set([sourceMessageId]),
+      }),
+    ).toEqual([]);
+  });
+
+  it("ignores warning lookalikes and suppresses failures with a later trusted receipt", () => {
+    const warning = {
+      id: EventId.make("pre-io-runtime-warning"),
+      tone: "info" as const,
+      kind: "runtime.warning",
+      summary: "Provider request will be retried",
+      payload: {
+        provider: "codex",
+        messageId: sourceMessageId,
+        retryableFollowUp: true,
+        delivery: "next-turn",
+      },
+      turnId: failedTurnId,
+      sequence: 2,
+      createdAt: "2026-03-29T00:01:02.000Z",
+    };
+    const delivered = {
+      id: EventId.make("durable-steer-delivery"),
+      tone: "info" as const,
+      kind: "provider.turn.steer.delivered",
+      summary: "Codex accepted the retry as its next turn",
+      payload: {
+        provider: "codex",
+        messageId: sourceMessageId,
+        deliveredTurnId: "turn-retry",
+        delivery: "next-turn",
+      },
+      turnId: TurnId.make("turn-retry"),
+      sequence: 3,
+      createdAt: "2026-03-29T00:01:03.000Z",
+    };
+
+    expect(
+      deriveRetryableSteerReplayCandidates({
+        thread: {
+          ...makeThread(),
+          messages: [canonicalMessage],
+          activities: [warning],
+        },
+      }),
+    ).toEqual([]);
+    expect(
+      deriveRetryableSteerReplayCandidates({
+        thread: {
+          ...makeThread(),
+          messages: [canonicalMessage],
+          activities: [retryableFailure, warning, delivered],
+        },
+      }),
+    ).toEqual([]);
+  });
+
+  it("does not reconstruct an older failure after a same-id retry updated the message", () => {
+    expect(
+      deriveRetryableSteerReplayCandidates({
+        thread: {
+          ...makeThread(),
+          messages: [
+            {
+              ...canonicalMessage,
+              completedAt: "2026-03-29T00:02:00.000Z",
+            },
+          ],
+          activities: [retryableFailure],
+        },
+      }),
+    ).toEqual([]);
+
+    const currentFailure = {
+      ...retryableFailure,
+      id: EventId.make("retryable-steer-failure-generation-two"),
+      payload: { ...retryableFailure.payload, intentSequence: 77 },
+      sequence: 78,
+      createdAt: "2026-03-29T00:02:00.000Z",
+    };
+    expect(
+      deriveRetryableSteerReplayCandidates({
+        thread: {
+          ...makeThread(),
+          messages: [
+            {
+              ...canonicalMessage,
+              completedAt: "2026-03-29T00:02:00.000Z",
+            },
+          ],
+          activities: [retryableFailure, currentFailure],
+        },
+      })[0]?.failure,
+    ).toEqual({ messageId: sourceMessageId, intentSequence: 77, turnKind: "review" });
+  });
+});
+
+describe("shouldBackpressurePendingSteerDispatch", () => {
+  it("preserves all 64 admitted entries and queues every excess steer without eviction", () => {
+    const pending: string[] = [];
+    const backpressured: string[] = [];
+    for (let index = 0; index < 130; index += 1) {
+      const messageId = `steer-${index}`;
+      if (shouldBackpressurePendingSteerDispatch(pending.length)) {
+        backpressured.push(messageId);
+      } else {
+        pending.push(messageId);
+      }
+    }
+
+    expect(pending).toEqual(Array.from({ length: 64 }, (_, index) => `steer-${index}`));
+    expect(backpressured).toEqual(Array.from({ length: 66 }, (_, index) => `steer-${index + 64}`));
+    expect(new Set([...pending, ...backpressured]).size).toBe(130);
+  });
+});
+
+describe("restoreCanonicalRetryImages", () => {
+  it("restores a bounded canonical image into a resendable File", async () => {
+    const restored = await restoreCanonicalRetryImages(
+      [
+        {
+          type: "image",
+          id: "attachment-restored",
+          name: "restored.png",
+          mimeType: "image/png",
+          sizeBytes: 4,
+          previewUrl: "/attachments/attachment-restored",
+        },
+      ],
+      fetchBoundedRetryImage,
+    );
+
+    expect(restored.unavailableCount).toBe(0);
+    expect(restored.images).toHaveLength(1);
+    expect(restored.images[0]).toMatchObject({
+      id: "attachment-restored",
+      name: "restored.png",
+      mimeType: "image/png",
+      sizeBytes: 4,
+      previewUrl: "/attachments/attachment-restored",
+    });
+    expect(restored.images[0]?.file).toBeInstanceOf(File);
+    expect(new Uint8Array(await restored.images[0]!.file.arrayBuffer())).toEqual(
+      new Uint8Array([137, 80, 78, 71]),
+    );
+  });
+
+  it("fails unavailable, rejected, and oversized attachments closed", async () => {
+    const fetcher = vi.fn(fetchUnavailableRetryImage);
+
+    const restored = await restoreCanonicalRetryImages(
+      [
+        {
+          type: "image",
+          id: "attachment-no-preview",
+          name: "no-preview.png",
+          mimeType: "image/png",
+          sizeBytes: 4,
+        },
+        {
+          type: "image",
+          id: "attachment-unreachable",
+          name: "unreachable.png",
+          mimeType: "image/png",
+          sizeBytes: 4,
+          previewUrl: "/attachments/unreachable",
+        },
+        {
+          type: "image",
+          id: "attachment-oversized",
+          name: "oversized.png",
+          mimeType: "image/png",
+          sizeBytes: 4,
+          previewUrl: "/attachments/oversized",
+        },
+      ],
+      fetcher,
+    );
+
+    expect(restored).toEqual({ images: [], unavailableCount: 3 });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("isSteerProcessingActivityTimely", () => {
+  it("accepts exact message correlation despite client/server clock skew", () => {
+    expect(
+      isSteerProcessingActivityTimely({
+        processingMessageId: "exact-message",
+        activityCreatedAt: "2026-01-01T00:00:00.000Z",
+        dispatchedAt: "2026-01-01T00:05:00.000Z",
+      }),
+    ).toBe(true);
+  });
+
+  it("retains the timestamp guard for legacy uncorrelated activities", () => {
+    expect(
+      isSteerProcessingActivityTimely({
+        processingMessageId: null,
+        activityCreatedAt: "2026-01-01T00:00:00.000Z",
+        dispatchedAt: "2026-01-01T00:05:00.000Z",
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("readSteerProcessingMessageId", () => {
+  it("prefers an explicit message id and supports nested runtime metadata", () => {
+    expect(
+      readSteerProcessingMessageId({
+        messageId: "explicit-message",
+        usage: { messageId: "nested-message" },
+      }),
+    ).toBe("explicit-message");
+    expect(readSteerProcessingMessageId({ usage: { messageId: "nested-message" } })).toBe(
+      "nested-message",
+    );
   });
 });
 

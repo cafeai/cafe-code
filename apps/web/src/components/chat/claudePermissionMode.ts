@@ -54,6 +54,33 @@ export const CLAUDE_PERMISSION_MODE_OPTIONS: ReadonlyArray<{
   },
 ];
 
+/** Grok exposes the same five process-native permission modes. Keep a separate
+ * presentation list because Auto is Grok's autonomous policy, not Claude's
+ * classifier-backed mode. The durable Cafe state mapping remains identical. */
+export const GROK_PERMISSION_MODE_OPTIONS: typeof CLAUDE_PERMISSION_MODE_OPTIONS = [
+  CLAUDE_MANUAL_PERMISSION_MODE_OPTION,
+  {
+    id: "acceptEdits",
+    label: "Accept edits",
+    description: "Apply edits automatically and ask before other actions.",
+  },
+  {
+    id: "plan",
+    label: "Plan",
+    description: "Research and propose changes without editing files.",
+  },
+  {
+    id: "auto",
+    label: "Auto",
+    description: "Run autonomously with Grok's native Auto permission mode.",
+  },
+  {
+    id: "bypassPermissions",
+    label: "Bypass permissions",
+    description: "Run without permission checks. Use only in an isolated environment.",
+  },
+];
+
 const CLAUDE_NORMAL_PERMISSION_MODE_CYCLE: ReadonlyArray<ClaudePermissionMode> = [
   "default",
   "acceptEdits",

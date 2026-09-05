@@ -64,7 +64,7 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
     >
       <Sidebar
         side="left"
-        collapsible="icon"
+        collapsible="offcanvas"
         className="cafe-thread-sidebar border-r border-border bg-card text-foreground"
         resizable={{
           minWidth: THREAD_SIDEBAR_MIN_WIDTH,

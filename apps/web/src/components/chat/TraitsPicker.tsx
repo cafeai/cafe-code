@@ -46,6 +46,13 @@ type TraitsPersistence =
 
 const ULTRATHINK_PROMPT_PREFIX = "Ultrathink:\n";
 
+/**
+ * Provider-wide Claude preferences are intentionally menu-only. They are still
+ * fully configurable, but repeating their long values in the composer footer
+ * crowds the primary reasoning and context-window summary.
+ */
+const MENU_ONLY_TRIGGER_DESCRIPTOR_IDS = new Set(["outputStyle", "agentProgressSummaries"]);
+
 function replaceDescriptorCurrentValue(
   descriptors: ReadonlyArray<ProviderOptionDescriptor>,
   descriptorId: string,
@@ -193,6 +200,29 @@ export function shouldRenderTraitsControls(input: {
   allowPromptInjectedEffort?: boolean;
 }): boolean {
   return getTraitsSectionVisibility(input).hasAnyControls;
+}
+
+export function getTraitsTriggerLabel(
+  descriptors: ReadonlyArray<ProviderOptionDescriptor>,
+  primarySelectDescriptor: Extract<ProviderOptionDescriptor, { type: "select" }> | null,
+  ultrathinkPromptControlled: boolean,
+): string {
+  return descriptors
+    .filter((descriptor) => !MENU_ONLY_TRIGGER_DESCRIPTOR_IDS.has(descriptor.id))
+    .map((descriptor) => {
+      if (ultrathinkPromptControlled && descriptor.id === primarySelectDescriptor?.id) {
+        return "Ultrathink";
+      }
+      if (descriptor.type === "boolean") {
+        if (descriptor.id === "fastMode") {
+          return descriptor.currentValue === true ? "Fast" : "Normal";
+        }
+        return `${descriptor.label} ${descriptor.currentValue === true ? "On" : "Off"}`;
+      }
+      return getProviderOptionCurrentLabel(descriptor);
+    })
+    .filter((label): label is string => typeof label === "string" && label.length > 0)
+    .join(" · ");
 }
 
 export interface TraitsMenuContentProps {
@@ -380,22 +410,11 @@ export const TraitsPicker = memo(function TraitsPicker({
     return null;
   }
 
-  const triggerLabel =
-    descriptors
-      .map((descriptor) => {
-        if (ultrathinkPromptControlled && descriptor.id === primarySelectDescriptor?.id) {
-          return "Ultrathink";
-        }
-        if (descriptor.type === "boolean") {
-          if (descriptor.id === "fastMode") {
-            return descriptor.currentValue === true ? "Fast" : "Normal";
-          }
-          return `${descriptor.label} ${descriptor.currentValue === true ? "On" : "Off"}`;
-        }
-        return getProviderOptionCurrentLabel(descriptor);
-      })
-      .filter((label): label is string => typeof label === "string" && label.length > 0)
-      .join(" · ") || "";
+  const triggerLabel = getTraitsTriggerLabel(
+    descriptors,
+    primarySelectDescriptor,
+    ultrathinkPromptControlled,
+  );
 
   const isCodexStyle = provider === "codex";
 

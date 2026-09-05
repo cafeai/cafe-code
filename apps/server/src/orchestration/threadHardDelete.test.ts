@@ -6,6 +6,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import {
@@ -16,8 +17,17 @@ import { ServerConfig } from "../config.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { RepositoryIdentityResolver } from "../project/Services/RepositoryIdentityResolver.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./Layers/ProjectionSnapshotQuery.ts";
+import {
+  OrchestrationEngineService,
+  type OrchestrationEngineShape,
+} from "./Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
-import { hardDeleteThreadLocalData } from "./threadHardDelete.ts";
+import { hydrateLegacyUnsettledCodexSteerIntentsForThread } from "./codexSteerIntentLedger.ts";
+import { hydrateLegacyMessageIdentitiesForThread } from "./messageIdentityLedger.ts";
+import {
+  hardDeleteThreadLocalData,
+  purgeHardDeletedThreadPersistence,
+} from "./threadHardDelete.ts";
 
 const checkpointDeleteCalls: Array<DeleteCheckpointRefsInput> = [];
 
@@ -37,7 +47,32 @@ const repositoryIdentityResolverLayer = Layer.succeed(RepositoryIdentityResolver
   resolve: () => Effect.succeed(null),
 });
 
+const hardDeleteEngineLayer = Layer.effect(
+  OrchestrationEngineService,
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    return {
+      readEvents: () => Stream.empty,
+      dispatch: () => Effect.die("unused"),
+      retireThreadForHardDelete: ({ threadId }) =>
+        sql`
+          INSERT INTO hard_deleted_threads (thread_id, deleted_at)
+          VALUES (${threadId}, '2026-05-22T00:01:00.000Z')
+          ON CONFLICT (thread_id) DO NOTHING
+        `.pipe(Effect.orDie, Effect.asVoid),
+      purgeHardDeletedThread: (input) =>
+        purgeHardDeletedThreadPersistence(input).pipe(
+          Effect.provideService(SqlClient.SqlClient, sql),
+          Effect.orDie,
+        ),
+      diagnosticsSnapshot: Effect.die("unused"),
+      streamDomainEvents: Stream.empty,
+    } satisfies OrchestrationEngineShape;
+  }),
+);
+
 const testLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
+  Layer.provideMerge(hardDeleteEngineLayer),
   Layer.provideMerge(repositoryIdentityResolverLayer),
   Layer.provideMerge(checkpointStoreLayer),
   Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "cafe-hard-delete-" })),
@@ -311,6 +346,113 @@ it.layer(Layer.fresh(testLayer))("hardDeleteThreadLocalData", (it) => {
       `;
 
       yield* sql`
+        INSERT INTO provider_supervisor_sessions (
+          session_id,
+          supervisor_id,
+          owner_id,
+          owner_kind,
+          thread_id,
+          protocol_version,
+          io_generation,
+          raw_byte_cursor,
+          parser_cursor,
+          transfer_state,
+          created_at,
+          updated_at
+        ) VALUES
+          (
+            'supervisor-session-hard-delete',
+            'supervisor-hard-delete',
+            'owner-hard-delete',
+            'backend',
+            ${targetThreadId},
+            1,
+            1,
+            0,
+            0,
+            'attached',
+            ${now},
+            ${now}
+          ),
+          (
+            'supervisor-session-survivor',
+            'supervisor-survivor',
+            'owner-survivor',
+            'backend',
+            ${survivorThreadId},
+            1,
+            1,
+            0,
+            0,
+            'attached',
+            ${now},
+            ${now}
+          )
+      `;
+
+      yield* sql`
+        INSERT INTO provider_subagent_history_roots (
+          thread_id,
+          turn_id,
+          provider_name,
+          provider_instance_id,
+          resume_cursor_json,
+          cwd,
+          created_at,
+          updated_at
+        )
+        VALUES
+          (
+            ${targetThreadId},
+            'turn-hard-delete',
+            'codex',
+            'codex',
+            '{"threadId":"erase"}',
+            '/tmp/erase',
+            ${now},
+            ${now}
+          ),
+          (
+            ${survivorThreadId},
+            'turn-survivor',
+            'codex',
+            'codex',
+            '{"threadId":"keep"}',
+            '/tmp/keep',
+            ${now},
+            ${now}
+          )
+      `;
+
+      yield* sql`
+        INSERT INTO provider_subagent_history_bindings (
+          thread_id,
+          turn_id,
+          subagent_id,
+          history_id,
+          created_at,
+          updated_at
+        )
+        VALUES
+          (
+            ${targetThreadId},
+            'turn-hard-delete',
+            'child-hard-delete',
+            '',
+            ${now},
+            ${now}
+          ),
+          (
+            ${survivorThreadId},
+            'turn-survivor',
+            'child-survivor',
+            '',
+            ${now},
+            ${now}
+          )
+      `;
+
+      yield* sql`
         INSERT INTO projection_pending_approvals (
           request_id,
           thread_id,
@@ -358,8 +500,8 @@ it.layer(Layer.fresh(testLayer))("hardDeleteThreadLocalData", (it) => {
             ${targetThreadId},
             'turn-hard-delete',
             '# Erase',
-            NULL,
-            NULL,
+            ${now},
+            ${targetThreadId},
             ${now},
             ${now}
           ),
@@ -397,8 +539,8 @@ it.layer(Layer.fresh(testLayer))("hardDeleteThreadLocalData", (it) => {
             ${targetThreadId},
             'turn-hard-delete',
             NULL,
-            NULL,
-            NULL,
+            ${targetThreadId},
+            'plan-hard-delete',
             'message-hard-delete',
             'completed',
             ${now},
@@ -467,7 +609,7 @@ it.layer(Layer.fresh(testLayer))("hardDeleteThreadLocalData", (it) => {
             NULL,
             'command-hard-delete',
             'system',
-            '{"text":"erase"}',
+            '{"messageId":"message-event-hard-delete","role":"user","text":"erase","attachments":[]}',
             '{}'
           ),
           (
@@ -481,9 +623,145 @@ it.layer(Layer.fresh(testLayer))("hardDeleteThreadLocalData", (it) => {
             NULL,
             'command-survivor',
             'system',
-            '{"text":"keep"}',
+            '{"messageId":"message-event-survivor","role":"user","text":"keep","attachments":[]}',
             '{}'
           )
+      `;
+
+      yield* sql`
+        INSERT INTO orchestration_message_identity_hydration (
+          thread_id,
+          through_sequence
+        )
+        VALUES
+          (${targetThreadId}, 0),
+          (${survivorThreadId}, 0)
+      `;
+
+      // Exercise all compact steer-ledger cleanup paths. Candidate and barrier
+      // rows reference event sequences, while hydration is standalone state
+      // that hard delete must remove explicitly.
+      yield* sql`
+        INSERT INTO orchestration_events (
+          event_id,
+          aggregate_kind,
+          stream_id,
+          stream_version,
+          event_type,
+          occurred_at,
+          command_id,
+          causation_event_id,
+          correlation_id,
+          actor_kind,
+          payload_json,
+          metadata_json
+        )
+        VALUES
+          (
+            'event-hard-delete-steer',
+            'thread',
+            ${targetThreadId},
+            2,
+            'thread.turn-steer-requested',
+            ${now},
+            'command-hard-delete-steer',
+            NULL,
+            'command-hard-delete-steer',
+            'client',
+            ${JSON.stringify({
+              threadId: targetThreadId,
+              messageId: "message-hard-delete-steer",
+              expectedTurnId: "turn-hard-delete",
+              createdAt: now,
+            })},
+            '{}'
+          ),
+          (
+            'event-hard-delete-accepted',
+            'thread',
+            ${targetThreadId},
+            3,
+            'thread.activity-appended',
+            ${now},
+            'command-hard-delete-accepted',
+            NULL,
+            'command-hard-delete-steer',
+            'server',
+            ${JSON.stringify({
+              threadId: targetThreadId,
+              activity: {
+                id: "activity-hard-delete-accepted",
+                kind: "provider.turn.steer.accepted",
+                turnId: "turn-hard-delete",
+                createdAt: now,
+                payload: {
+                  provider: "codex",
+                  messageId: "message-hard-delete-barrier",
+                  acceptedTurnId: "turn-hard-delete",
+                  clientCorrelationId: null,
+                },
+              },
+            })},
+            '{}'
+          ),
+          (
+            'event-survivor-steer',
+            'thread',
+            ${survivorThreadId},
+            2,
+            'thread.turn-steer-requested',
+            ${now},
+            'command-survivor-steer',
+            NULL,
+            'command-survivor-steer',
+            'client',
+            ${JSON.stringify({
+              threadId: survivorThreadId,
+              messageId: "message-survivor-steer",
+              expectedTurnId: "turn-survivor",
+              createdAt: now,
+            })},
+            '{}'
+          ),
+          (
+            'event-survivor-accepted',
+            'thread',
+            ${survivorThreadId},
+            3,
+            'thread.activity-appended',
+            ${now},
+            'command-survivor-accepted',
+            NULL,
+            'command-survivor-steer',
+            'server',
+            ${JSON.stringify({
+              threadId: survivorThreadId,
+              activity: {
+                id: "activity-survivor-accepted",
+                kind: "provider.turn.steer.accepted",
+                turnId: "turn-survivor",
+                createdAt: now,
+                payload: {
+                  provider: "codex",
+                  messageId: "message-survivor-barrier",
+                  acceptedTurnId: "turn-survivor",
+                  clientCorrelationId: null,
+                },
+              },
+            })},
+            '{}'
+          )
+      `;
+
+      yield* sql`
+        INSERT INTO orchestration_unsettled_codex_steer_hydration (
+          thread_id,
+          tail_floor_sequence,
+          through_sequence
+        )
+        VALUES
+          (${targetThreadId}, 0, 0),
+          (${survivorThreadId}, 0, 0)
       `;
 
       yield* sql`
@@ -512,6 +790,22 @@ it.layer(Layer.fresh(testLayer))("hardDeleteThreadLocalData", (it) => {
       const result = yield* hardDeleteThreadLocalData({ threadId: targetThreadId });
       assert.deepEqual(result, { deleted: true });
 
+      // Model an overlapping older backend attempting lazy hydration after
+      // the permanent tombstone committed. Neither helper may recreate its
+      // standalone watermark row after hard delete.
+      yield* hydrateLegacyMessageIdentitiesForThread(sql, targetThreadId);
+      const [steerState] = yield* sql<{ readonly cutoff: number }>`
+        SELECT legacy_cutoff_sequence AS cutoff
+        FROM orchestration_unsettled_codex_steer_state
+        WHERE singleton_id = 1
+      `;
+      assert.isDefined(steerState);
+      yield* hydrateLegacyUnsettledCodexSteerIntentsForThread(
+        sql,
+        targetThreadId,
+        steerState!.cutoff,
+      );
+
       const deletedAfter = yield* snapshotQuery.getDeletedShellSnapshot();
       assert.deepEqual(deletedAfter.threads, []);
       assert.isFalse(yield* exists(attachmentPath));
@@ -532,16 +826,82 @@ it.layer(Layer.fresh(testLayer))("hardDeleteThreadLocalData", (it) => {
           (SELECT COUNT(*) FROM projection_thread_activities WHERE thread_id = ${targetThreadId}) +
           (SELECT COUNT(*) FROM projection_thread_sessions WHERE thread_id = ${targetThreadId}) +
           (SELECT COUNT(*) FROM provider_session_runtime WHERE thread_id = ${targetThreadId}) +
+          (SELECT COUNT(*) FROM provider_supervisor_sessions WHERE thread_id = ${targetThreadId}) +
+          (SELECT COUNT(*) FROM provider_subagent_history_roots WHERE thread_id = ${targetThreadId}) +
+          (SELECT COUNT(*) FROM provider_subagent_history_bindings WHERE thread_id = ${targetThreadId}) +
           (SELECT COUNT(*) FROM projection_pending_approvals WHERE thread_id = ${targetThreadId}) +
           (SELECT COUNT(*) FROM projection_thread_proposed_plans WHERE thread_id = ${targetThreadId}) +
           (SELECT COUNT(*) FROM projection_turns WHERE thread_id = ${targetThreadId}) +
           (SELECT COUNT(*) FROM checkpoint_diff_blobs WHERE thread_id = ${targetThreadId}) +
+          (SELECT COUNT(*) FROM orchestration_message_identities WHERE thread_id = ${targetThreadId}) +
+          (SELECT COUNT(*) FROM orchestration_message_identity_hydration WHERE thread_id = ${targetThreadId}) +
+          (SELECT COUNT(*) FROM orchestration_unsettled_codex_steer_hydration WHERE thread_id = ${targetThreadId}) +
+          (SELECT COUNT(*) FROM orchestration_unsettled_codex_steer_intents WHERE thread_id = ${targetThreadId}) +
+          (SELECT COUNT(*) FROM orchestration_codex_steer_recovery_barriers WHERE thread_id = ${targetThreadId}) +
+          (SELECT COUNT(*) FROM orchestration_codex_steer_control_barriers WHERE thread_id = ${targetThreadId}) +
+          (SELECT COUNT(*) FROM orchestration_pending_codex_steer_acceptances WHERE thread_id = ${targetThreadId}) +
           (SELECT COUNT(*) FROM orchestration_events WHERE aggregate_kind = 'thread' AND stream_id = ${targetThreadId}) +
           (SELECT COUNT(*) FROM orchestration_command_receipts WHERE aggregate_kind = 'thread' AND aggregate_id = ${targetThreadId})
           AS "count"
       `;
       assert.equal(targetProjectionRows[0]?.count, 0);
       assert.equal(targetDetailRows[0]?.count, 0);
+
+      const targetTombstones = yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS "count"
+        FROM hard_deleted_threads
+        WHERE thread_id = ${targetThreadId}
+      `;
+      assert.equal(targetTombstones[0]?.count, 1);
+
+      const survivorHistoryRows = yield* sql<{ readonly count: number }>`
+        SELECT
+          (SELECT COUNT(*) FROM provider_subagent_history_roots WHERE thread_id = ${survivorThreadId}) +
+          (SELECT COUNT(*) FROM provider_subagent_history_bindings WHERE thread_id = ${survivorThreadId})
+          AS "count"
+      `;
+      assert.equal(survivorHistoryRows[0]?.count, 2);
+
+      const survivorIdentityRows = yield* sql<{
+        readonly messageIdentities: number;
+        readonly messageHydration: number;
+        readonly steerHydration: number;
+        readonly unsettledSteers: number;
+        readonly recoveryBarriers: number;
+        readonly controlBarriers: number;
+        readonly pendingAcceptances: number;
+      }>`
+        SELECT
+          (SELECT COUNT(*) FROM orchestration_message_identities WHERE thread_id = ${survivorThreadId}) AS "messageIdentities",
+          (SELECT COUNT(*) FROM orchestration_message_identity_hydration WHERE thread_id = ${survivorThreadId}) AS "messageHydration",
+          (SELECT COUNT(*) FROM orchestration_unsettled_codex_steer_hydration WHERE thread_id = ${survivorThreadId}) AS "steerHydration",
+          (SELECT COUNT(*) FROM orchestration_unsettled_codex_steer_intents WHERE thread_id = ${survivorThreadId}) AS "unsettledSteers",
+          (SELECT COUNT(*) FROM orchestration_codex_steer_recovery_barriers WHERE thread_id = ${survivorThreadId}) AS "recoveryBarriers",
+          (SELECT COUNT(*) FROM orchestration_codex_steer_control_barriers WHERE thread_id = ${survivorThreadId}) AS "controlBarriers",
+          (SELECT COUNT(*) FROM orchestration_pending_codex_steer_acceptances WHERE thread_id = ${survivorThreadId}) AS "pendingAcceptances"
+      `;
+      // The accepted fixture intentionally lacks an intentSequence, so the
+      // strict compact ledger does not authorize a pending acceptance or
+      // recovery barrier from it. The valid survivor message, hydration
+      // watermarks, and still-unsettled steer must remain untouched.
+      assert.deepEqual(survivorIdentityRows, [
+        {
+          messageIdentities: 1,
+          messageHydration: 1,
+          steerHydration: 1,
+          unsettledSteers: 1,
+          recoveryBarriers: 0,
+          controlBarriers: 0,
+          pendingAcceptances: 0,
+        },
+      ]);
+
+      const survivorSupervisorRows = yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS "count"
+        FROM provider_supervisor_sessions
+        WHERE thread_id = ${survivorThreadId}
+      `;
+      assert.equal(survivorSupervisorRows[0]?.count, 1);
 
       const survivorPlanRows = yield* sql<{ readonly implementationThreadId: string | null }>`
         SELECT implementation_thread_id AS "implementationThreadId"

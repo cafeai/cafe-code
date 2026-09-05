@@ -4,6 +4,7 @@ export const browserApiCorsAllowedHeaders = [
   "b3",
   "traceparent",
   "content-type",
+  "mcp-protocol-version",
 ] as const;
 
 export const browserApiCorsHeaders = {

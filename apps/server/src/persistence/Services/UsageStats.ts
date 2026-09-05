@@ -15,6 +15,7 @@ import {
   ProviderDriverKind,
   UsageStatsDayKey,
   UsageStatsModel,
+  type UsageAccountingSnapshot,
 } from "@cafecode/contracts";
 import * as Schema from "effect/Schema";
 import * as Context from "effect/Context";
@@ -27,6 +28,10 @@ export const UsageStatsDayRow = Schema.Struct({
   generatingMs: NonNegativeInt,
   outputTokens: NonNegativeInt,
   userMessages: NonNegativeInt,
+  inputTokens: NonNegativeInt,
+  cachedInputTokens: NonNegativeInt,
+  cacheWriteInputTokens: NonNegativeInt,
+  reasoningOutputTokens: NonNegativeInt,
 });
 export type UsageStatsDayRow = typeof UsageStatsDayRow.Type;
 
@@ -35,6 +40,10 @@ export const UsageStatsTokenBreakdownDayRow = Schema.Struct({
   provider: ProviderDriverKind,
   model: UsageStatsModel,
   outputTokens: NonNegativeInt,
+  inputTokens: NonNegativeInt,
+  cachedInputTokens: NonNegativeInt,
+  cacheWriteInputTokens: NonNegativeInt,
+  reasoningOutputTokens: NonNegativeInt,
 });
 export type UsageStatsTokenBreakdownDayRow = typeof UsageStatsTokenBreakdownDayRow.Type;
 
@@ -44,6 +53,17 @@ export interface UsageStatsFlushDeltas {
 }
 
 export interface UsageStatsRepositoryShape {
+  /**
+   * Atomically settle a cumulative billing epoch and its daily/model deltas.
+   * Durable revision fencing makes repeated daemon replay and reattachment
+   * harmless. Disabled collection advances only the checkpoint, never totals.
+   */
+  readonly recordAccountingSnapshot: (input: {
+    readonly provider: ProviderDriverKind;
+    readonly snapshot: UsageAccountingSnapshot;
+    readonly day: string;
+    readonly enabled: boolean;
+  }) => Effect.Effect<ReadonlyArray<UsageStatsTokenBreakdownDayRow>, ProjectionRepositoryError>;
   /**
    * List every recorded day ascending. Row counts stay tiny (one per active
    * day), so callers hydrate the whole table into memory at startup.

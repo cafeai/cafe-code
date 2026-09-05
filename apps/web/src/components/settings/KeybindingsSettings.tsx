@@ -22,6 +22,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { copyTextToClipboard } from "../../lib/copyToClipboard";
 import {
   type KeybindingCommand,
   type KeybindingWhenNode,
@@ -1102,7 +1103,7 @@ export function KeybindingsSettingsPanel() {
     if (!keybindingsConfigPath) return;
     if (!canOpenLocalEditor) {
       void Promise.resolve()
-        .then(() => navigator.clipboard.writeText(keybindingsConfigPath))
+        .then(() => copyTextToClipboard(keybindingsConfigPath))
         .then(
           () => {
             toastManager.add({

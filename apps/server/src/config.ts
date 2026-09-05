@@ -79,6 +79,9 @@ export interface ServerConfigShape extends ServerDerivedPaths {
   readonly logWebSocketEvents: boolean;
   readonly providerDaemon?: ProviderDaemonClientConfig | undefined;
   readonly providerSupervisor?: ProviderDaemonClientConfig | undefined;
+  /** Main Cafe backend port for provider-owned MCP clients. Detached provider
+   * runtimes listen elsewhere, so their own `port` is not a valid substitute. */
+  readonly cafeMcpPort?: number | undefined;
 }
 
 export const deriveServerPaths = Effect.fn(function* (

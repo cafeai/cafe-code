@@ -2,6 +2,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import {
   type ClientOrchestrationCommand,
   type OrchestrationCommand,
@@ -10,6 +11,10 @@ import {
 } from "@cafecode/contracts";
 
 import { createAttachmentId, resolveAttachmentPath } from "../attachmentStore.ts";
+import {
+  computeAttachmentContentSha256,
+  insertAttachmentContentCommitment,
+} from "../attachmentContentCommitment.ts";
 import { ServerConfig } from "../config.ts";
 import { parseBase64DataUrl } from "../imageMime.ts";
 import { WorkspacePaths } from "../workspace/Services/WorkspacePaths.ts";
@@ -22,6 +27,7 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
     const serverConfig = yield* ServerConfig;
     const workspacePaths = yield* WorkspacePaths;
     const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
+    const sql = yield* SqlClient.SqlClient;
 
     const normalizeProjectWorkspaceRoot = (workspaceRoot: string) =>
       workspacePaths.normalizeWorkspaceRoot(workspaceRoot).pipe(
@@ -195,7 +201,12 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
                 }),
             ),
           );
-          yield* fileSystem.writeFile(attachmentPath, bytes).pipe(
+          // `wx` keeps Cafe's random storage identity immutable even under an
+          // impossible-in-practice UUID collision. The private commitment is
+          // inserted only after the exact bytes reach disk; if that insert
+          // fails, remove this newly-created file so no uncommitted upload can
+          // later be mistaken for a canonical attachment.
+          yield* fileSystem.writeFile(attachmentPath, bytes, { flag: "wx", mode: 0o600 }).pipe(
             Effect.mapError(
               () =>
                 new OrchestrationDispatchCommandError({
@@ -203,6 +214,19 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
                 }),
             ),
           );
+          const commitmentResult = yield* insertAttachmentContentCommitment({
+            sql,
+            attachmentId,
+            threadId: command.threadId,
+            contentSha256: computeAttachmentContentSha256(bytes),
+            sizeBytes: bytes.byteLength,
+          }).pipe(Effect.result);
+          if (commitmentResult._tag === "Failure") {
+            yield* fileSystem.remove(attachmentPath, { force: true }).pipe(Effect.ignore);
+            return yield* new OrchestrationDispatchCommandError({
+              message: `Failed to secure attachment '${attachment.name}'.`,
+            });
+          }
 
           return persistedAttachment;
         }),

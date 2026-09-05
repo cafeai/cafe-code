@@ -21,12 +21,14 @@ import { Route as SettingsProvidersRouteImport } from './routes/settings.provide
 import { Route as SettingsNotificationsRouteImport } from './routes/settings.notifications'
 import { Route as SettingsKeybindingsRouteImport } from './routes/settings.keybindings'
 import { Route as SettingsGeneralRouteImport } from './routes/settings.general'
-import { Route as SettingsFilesDiffsRouteImport } from './routes/settings.files-diffs'
+import { Route as SettingsFilesRouteImport } from './routes/settings.files'
+import { Route as SettingsDictationRouteImport } from './routes/settings.dictation'
 import { Route as SettingsDiagnosticsRouteImport } from './routes/settings.diagnostics'
 import { Route as SettingsConnectionsRouteImport } from './routes/settings.connections'
 import { Route as SettingsChatThreadsRouteImport } from './routes/settings.chat-threads'
 import { Route as SettingsArchivedRouteImport } from './routes/settings.archived'
 import { Route as SettingsAppearanceRouteImport } from './routes/settings.appearance'
+import { Route as SettingsAmbianceRouteImport } from './routes/settings.ambiance'
 import { Route as ChatDraftDraftIdRouteImport } from './routes/_chat.draft.$draftId'
 import { Route as ChatEnvironmentIdThreadIdRouteImport } from './routes/_chat.$environmentId.$threadId'
 
@@ -89,9 +91,14 @@ const SettingsGeneralRoute = SettingsGeneralRouteImport.update({
   path: '/general',
   getParentRoute: () => SettingsRoute,
 } as any)
-const SettingsFilesDiffsRoute = SettingsFilesDiffsRouteImport.update({
-  id: '/files-diffs',
-  path: '/files-diffs',
+const SettingsFilesRoute = SettingsFilesRouteImport.update({
+  id: '/files',
+  path: '/files',
+  getParentRoute: () => SettingsRoute,
+} as any)
+const SettingsDictationRoute = SettingsDictationRouteImport.update({
+  id: '/dictation',
+  path: '/dictation',
   getParentRoute: () => SettingsRoute,
 } as any)
 const SettingsDiagnosticsRoute = SettingsDiagnosticsRouteImport.update({
@@ -119,6 +126,11 @@ const SettingsAppearanceRoute = SettingsAppearanceRouteImport.update({
   path: '/appearance',
   getParentRoute: () => SettingsRoute,
 } as any)
+const SettingsAmbianceRoute = SettingsAmbianceRouteImport.update({
+  id: '/ambiance',
+  path: '/ambiance',
+  getParentRoute: () => SettingsRoute,
+} as any)
 const ChatDraftDraftIdRoute = ChatDraftDraftIdRouteImport.update({
   id: '/draft/$draftId',
   path: '/draft/$draftId',
@@ -135,12 +147,14 @@ export interface FileRoutesByFullPath {
   '/': typeof ChatIndexRoute
   '/pair': typeof PairRoute
   '/settings': typeof SettingsRouteWithChildren
+  '/settings/ambiance': typeof SettingsAmbianceRoute
   '/settings/appearance': typeof SettingsAppearanceRoute
   '/settings/archived': typeof SettingsArchivedRoute
   '/settings/chat-threads': typeof SettingsChatThreadsRoute
   '/settings/connections': typeof SettingsConnectionsRoute
   '/settings/diagnostics': typeof SettingsDiagnosticsRoute
-  '/settings/files-diffs': typeof SettingsFilesDiffsRoute
+  '/settings/dictation': typeof SettingsDictationRoute
+  '/settings/files': typeof SettingsFilesRoute
   '/settings/general': typeof SettingsGeneralRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
   '/settings/notifications': typeof SettingsNotificationsRoute
@@ -155,12 +169,14 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/pair': typeof PairRoute
   '/settings': typeof SettingsRouteWithChildren
+  '/settings/ambiance': typeof SettingsAmbianceRoute
   '/settings/appearance': typeof SettingsAppearanceRoute
   '/settings/archived': typeof SettingsArchivedRoute
   '/settings/chat-threads': typeof SettingsChatThreadsRoute
   '/settings/connections': typeof SettingsConnectionsRoute
   '/settings/diagnostics': typeof SettingsDiagnosticsRoute
-  '/settings/files-diffs': typeof SettingsFilesDiffsRoute
+  '/settings/dictation': typeof SettingsDictationRoute
+  '/settings/files': typeof SettingsFilesRoute
   '/settings/general': typeof SettingsGeneralRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
   '/settings/notifications': typeof SettingsNotificationsRoute
@@ -178,12 +194,14 @@ export interface FileRoutesById {
   '/_chat': typeof ChatRouteWithChildren
   '/pair': typeof PairRoute
   '/settings': typeof SettingsRouteWithChildren
+  '/settings/ambiance': typeof SettingsAmbianceRoute
   '/settings/appearance': typeof SettingsAppearanceRoute
   '/settings/archived': typeof SettingsArchivedRoute
   '/settings/chat-threads': typeof SettingsChatThreadsRoute
   '/settings/connections': typeof SettingsConnectionsRoute
   '/settings/diagnostics': typeof SettingsDiagnosticsRoute
-  '/settings/files-diffs': typeof SettingsFilesDiffsRoute
+  '/settings/dictation': typeof SettingsDictationRoute
+  '/settings/files': typeof SettingsFilesRoute
   '/settings/general': typeof SettingsGeneralRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
   '/settings/notifications': typeof SettingsNotificationsRoute
@@ -202,12 +220,14 @@ export interface FileRouteTypes {
     | '/'
     | '/pair'
     | '/settings'
+    | '/settings/ambiance'
     | '/settings/appearance'
     | '/settings/archived'
     | '/settings/chat-threads'
     | '/settings/connections'
     | '/settings/diagnostics'
-    | '/settings/files-diffs'
+    | '/settings/dictation'
+    | '/settings/files'
     | '/settings/general'
     | '/settings/keybindings'
     | '/settings/notifications'
@@ -222,12 +242,14 @@ export interface FileRouteTypes {
   to:
     | '/pair'
     | '/settings'
+    | '/settings/ambiance'
     | '/settings/appearance'
     | '/settings/archived'
     | '/settings/chat-threads'
     | '/settings/connections'
     | '/settings/diagnostics'
-    | '/settings/files-diffs'
+    | '/settings/dictation'
+    | '/settings/files'
     | '/settings/general'
     | '/settings/keybindings'
     | '/settings/notifications'
@@ -244,12 +266,14 @@ export interface FileRouteTypes {
     | '/_chat'
     | '/pair'
     | '/settings'
+    | '/settings/ambiance'
     | '/settings/appearance'
     | '/settings/archived'
     | '/settings/chat-threads'
     | '/settings/connections'
     | '/settings/diagnostics'
-    | '/settings/files-diffs'
+    | '/settings/dictation'
+    | '/settings/files'
     | '/settings/general'
     | '/settings/keybindings'
     | '/settings/notifications'
@@ -355,11 +379,18 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SettingsGeneralRouteImport
       parentRoute: typeof SettingsRoute
     }
-    '/settings/files-diffs': {
-      id: '/settings/files-diffs'
-      path: '/files-diffs'
-      fullPath: '/settings/files-diffs'
-      preLoaderRoute: typeof SettingsFilesDiffsRouteImport
+    '/settings/files': {
+      id: '/settings/files'
+      path: '/files'
+      fullPath: '/settings/files'
+      preLoaderRoute: typeof SettingsFilesRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/dictation': {
+      id: '/settings/dictation'
+      path: '/dictation'
+      fullPath: '/settings/dictation'
+      preLoaderRoute: typeof SettingsDictationRouteImport
       parentRoute: typeof SettingsRoute
     }
     '/settings/diagnostics': {
@@ -397,6 +428,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SettingsAppearanceRouteImport
       parentRoute: typeof SettingsRoute
     }
+    '/settings/ambiance': {
+      id: '/settings/ambiance'
+      path: '/ambiance'
+      fullPath: '/settings/ambiance'
+      preLoaderRoute: typeof SettingsAmbianceRouteImport
+      parentRoute: typeof SettingsRoute
+    }
     '/_chat/draft/$draftId': {
       id: '/_chat/draft/$draftId'
       path: '/draft/$draftId'
@@ -429,12 +467,14 @@ const ChatRouteChildren: ChatRouteChildren = {
 const ChatRouteWithChildren = ChatRoute._addFileChildren(ChatRouteChildren)
 
 interface SettingsRouteChildren {
+  SettingsAmbianceRoute: typeof SettingsAmbianceRoute
   SettingsAppearanceRoute: typeof SettingsAppearanceRoute
   SettingsArchivedRoute: typeof SettingsArchivedRoute
   SettingsChatThreadsRoute: typeof SettingsChatThreadsRoute
   SettingsConnectionsRoute: typeof SettingsConnectionsRoute
   SettingsDiagnosticsRoute: typeof SettingsDiagnosticsRoute
-  SettingsFilesDiffsRoute: typeof SettingsFilesDiffsRoute
+  SettingsDictationRoute: typeof SettingsDictationRoute
+  SettingsFilesRoute: typeof SettingsFilesRoute
   SettingsGeneralRoute: typeof SettingsGeneralRoute
   SettingsKeybindingsRoute: typeof SettingsKeybindingsRoute
   SettingsNotificationsRoute: typeof SettingsNotificationsRoute
@@ -446,12 +486,14 @@ interface SettingsRouteChildren {
 }
 
 const SettingsRouteChildren: SettingsRouteChildren = {
+  SettingsAmbianceRoute: SettingsAmbianceRoute,
   SettingsAppearanceRoute: SettingsAppearanceRoute,
   SettingsArchivedRoute: SettingsArchivedRoute,
   SettingsChatThreadsRoute: SettingsChatThreadsRoute,
   SettingsConnectionsRoute: SettingsConnectionsRoute,
   SettingsDiagnosticsRoute: SettingsDiagnosticsRoute,
-  SettingsFilesDiffsRoute: SettingsFilesDiffsRoute,
+  SettingsDictationRoute: SettingsDictationRoute,
+  SettingsFilesRoute: SettingsFilesRoute,
   SettingsGeneralRoute: SettingsGeneralRoute,
   SettingsKeybindingsRoute: SettingsKeybindingsRoute,
   SettingsNotificationsRoute: SettingsNotificationsRoute,

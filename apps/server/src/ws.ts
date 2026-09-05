@@ -1,3 +1,5 @@
+import * as Crypto from "node:crypto";
+
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -19,13 +21,13 @@ import {
   type OrchestrationShellStreamEvent,
   OrchestrationGetSnapshotError,
   ORCHESTRATION_WS_METHODS,
-  type ProviderInstanceId,
   ProjectSearchEntriesError,
   ProjectWriteFileError,
   OrchestrationReplayEventsError,
   FilesystemBrowseError,
   ThreadId,
   ServerProviderRuntimeRestartError,
+  DictationError,
   WS_METHODS,
   WsRpcGroup,
 } from "@cafecode/contracts";
@@ -37,7 +39,9 @@ import { ServerConfig } from "./config.ts";
 import { Keybindings } from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import { normalizeDispatchCommand } from "./orchestration/Normalizer.ts";
+import { dispatchProviderNativeThreadFork } from "./orchestration/threadFork.ts";
 import { OrchestrationEngineService } from "./orchestration/Services/OrchestrationEngine.ts";
+import { ProviderRuntimeIngestionService } from "./orchestration/Services/ProviderRuntimeIngestion.ts";
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ProviderJournalMessageRepairLive } from "./orchestration/Layers/ProviderJournalMessageRepair.ts";
 import { ProviderJournalMessageRepair } from "./orchestration/Services/ProviderJournalMessageRepair.ts";
@@ -99,6 +103,12 @@ import { ensureSystemPromptFile } from "./systemPromptFile.ts";
 import { makeWebSocketConnectionFlowControl } from "./websocket/ConnectionFlowControl.ts";
 import { encodeThreadDetailSnapshotStreamItems } from "./websocket/ThreadDetailSnapshotStream.ts";
 import { addProviderWebSocketDiagnostics } from "@cafecode/shared/providerPipelineDiagnostics";
+import type { AuthenticatedSession } from "./auth/Services/ServerAuth.ts";
+import {
+  OpenAiRealtimeDictation,
+  type OpenAiRealtimeDictationShape,
+} from "./dictation/Services/OpenAiRealtimeDictation.ts";
+import { isLoopbackRemoteAddress } from "./http.ts";
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
 const isWorkspacePathOutsideRootError = Schema.is(WorkspacePathOutsideRootError);
 
@@ -128,7 +138,6 @@ function doesActivityAffectShellStream(
 }
 
 const PROVIDER_STATUS_DEBOUNCE_MS = 200;
-const CODEX_PROMPT_USAGE_REFRESH_THROTTLE_MS = 60_000;
 
 function toAuthAccessStreamEvent(
   change: BootstrapCredentialChange | SessionCredentialChange,
@@ -171,13 +180,18 @@ function toAuthAccessStreamEvent(
 }
 
 const makeWsRpcLayer = (
-  currentSessionId: AuthSessionId,
+  currentSession: AuthenticatedSession,
+  secureSecretTransport: boolean,
+  dictation: OpenAiRealtimeDictationShape,
   orchestrationSubscriptionHub: OrchestrationSubscriptionHubShape,
+  providerMaintenanceRunner: ProviderMaintenanceRunner.ProviderMaintenanceRunnerShape,
 ) =>
   WsRpcGroup.toLayer(
     Effect.gen(function* () {
+      const currentSessionId = currentSession.sessionId;
       const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
       const orchestrationEngine = yield* OrchestrationEngineService;
+      const providerRuntimeIngestion = yield* ProviderRuntimeIngestionService;
       const providerJournalMessageRepair = yield* ProviderJournalMessageRepair;
       const threadDetailSubscriptionRegistry = yield* ThreadDetailSubscriptionRegistry;
       const keybindings = yield* Keybindings;
@@ -187,7 +201,6 @@ const makeWsRpcLayer = (
       const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
       const providerRegistry = yield* ProviderRegistry;
       const providerService = yield* ProviderService;
-      const providerMaintenanceRunner = yield* ProviderMaintenanceRunner.ProviderMaintenanceRunner;
       const config = yield* ServerConfig;
       const lifecycleEvents = yield* ServerLifecycleEvents;
       const serverSettings = yield* ServerSettingsService;
@@ -209,9 +222,6 @@ const makeWsRpcLayer = (
           }).pipe(Effect.as(DEFAULT_AUTOMATIC_GIT_FETCH_INTERVAL)),
         ),
       );
-      const codexPromptUsageRefreshAtRef = yield* Ref.make<ReadonlyMap<ProviderInstanceId, number>>(
-        new Map(),
-      );
       const sourceControlRepositories = yield* SourceControlRepositoryService;
       const bootstrapCredentials = yield* BootstrapCredentialService;
       const sessions = yield* SessionCredentialService;
@@ -222,6 +232,46 @@ const makeWsRpcLayer = (
       const connectionFlowControl = makeWebSocketConnectionFlowControl();
       const serverCommandId = (tag: string) =>
         CommandId.make(`server:${tag}:${crypto.randomUUID()}`);
+
+      const dictationStatus = () =>
+        dictation.getStatus.pipe(
+          Effect.map(({ configured }) => ({
+            configured,
+            canManage: currentSession.role === "owner" && secureSecretTransport,
+          })),
+        );
+
+      const requireSecureDictationTransport: Effect.Effect<void, DictationError> = Effect.suspend(
+        () =>
+          secureSecretTransport
+            ? Effect.void
+            : Effect.fail(
+                new DictationError({
+                  code: "insecure_transport",
+                  message: "Dictation requires HTTPS or a same-machine Cafe connection.",
+                }),
+              ),
+      );
+
+      const requireDictationOwner: Effect.Effect<void, DictationError> = Effect.suspend(() =>
+        currentSession.role === "owner"
+          ? Effect.void
+          : Effect.fail(
+              new DictationError({
+                code: "not_authorized",
+                message: "Only the Cafe owner can manage the dictation credential.",
+              }),
+            ),
+      );
+
+      // OpenAI asks applications to bind ephemeral tokens to a stable,
+      // privacy-preserving end-user identifier. Cafe session IDs are already
+      // high entropy; domain-separated hashing prevents the raw ID from being
+      // disclosed to OpenAI or retained in the dictation service.
+      const dictationSafetyIdentifier = Crypto.createHash("sha256")
+        .update("cafecode:openai-realtime-dictation:v1\0", "utf8")
+        .update(currentSessionId, "utf8")
+        .digest("hex");
 
       const loadAuthAccessSnapshot = () =>
         Effect.all({
@@ -519,107 +569,34 @@ const makeWsRpcLayer = (
           );
         });
 
-      const resolvePromptProviderInstanceId = (
-        command: Extract<
-          OrchestrationCommand,
-          { readonly type: "thread.turn.start" | "thread.turn.steer" }
-        >,
-      ): Effect.Effect<ProviderInstanceId | undefined> => {
-        if (command.type === "thread.turn.start") {
-          const explicitInstanceId =
-            command.modelSelection?.instanceId ??
-            command.bootstrap?.createThread?.modelSelection.instanceId;
-          if (explicitInstanceId !== undefined) {
-            return Effect.succeed(explicitInstanceId);
-          }
-        }
-
-        return projectionSnapshotQuery.getThreadShellById(command.threadId).pipe(
-          Effect.map((thread) =>
-            Option.match(thread, {
-              onNone: () => undefined,
-              onSome: (value) =>
-                value.session?.providerInstanceId ?? value.modelSelection.instanceId,
-            }),
-          ),
-          Effect.catch(() => Effect.sync((): ProviderInstanceId | undefined => undefined)),
-        );
-      };
-
-      const refreshCodexUsageAfterPrompt = (command: OrchestrationCommand): Effect.Effect<void> =>
-        Effect.gen(function* () {
-          if (command.type !== "thread.turn.start" && command.type !== "thread.turn.steer") {
-            return;
-          }
-
-          const instanceId = yield* resolvePromptProviderInstanceId(command);
-          if (instanceId === undefined) {
-            return;
-          }
-
-          const providers = yield* providerRegistry.getProviders;
-          const provider = providers.find((candidate) => candidate.instanceId === instanceId);
-          if (provider?.driver !== "codex") {
-            return;
-          }
-
-          const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
-          const shouldRefresh = yield* Ref.modify(codexPromptUsageRefreshAtRef, (previous) => {
-            const previousRefreshAt = previous.get(instanceId);
-            if (
-              previousRefreshAt !== undefined &&
-              nowMs - previousRefreshAt < CODEX_PROMPT_USAGE_REFRESH_THROTTLE_MS
-            ) {
-              return [false, previous] as const;
-            }
-            const next = new Map(previous);
-            next.set(instanceId, nowMs);
-            return [true, next] as const;
-          });
-          if (!shouldRefresh) {
-            return;
-          }
-
-          // Provider account usage is display metadata, never part of the
-          // prompt-send critical path. Refresh it in the background and let the
-          // normal provider snapshot stream update the renderer when it lands.
-          yield* providerRegistry.refreshInstanceAccountUsage(instanceId).pipe(
-            Effect.catchCause((cause) =>
-              Effect.logWarning("codex prompt usage refresh failed", {
-                commandType: command.type,
-                instanceId,
-                cause: Cause.pretty(cause),
-              }),
-            ),
-            Effect.asVoid,
-          );
-        });
-
       const dispatchNormalizedCommand = (
         normalizedCommand: OrchestrationCommand,
       ): Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError> => {
         const dispatchEffect =
-          normalizedCommand.type === "thread.turn.start" && normalizedCommand.bootstrap
-            ? dispatchBootstrapTurnStart(normalizedCommand)
-            : orchestrationEngine
-                .dispatch(normalizedCommand)
-                .pipe(
-                  Effect.mapError((cause) =>
-                    toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
-                  ),
-                );
+          normalizedCommand.type === "thread.fork"
+            ? dispatchProviderNativeThreadFork({
+                command: normalizedCommand,
+                orchestrationEngine,
+                projectionSnapshotQuery,
+                providerService,
+              })
+            : normalizedCommand.type === "thread.turn.start" && normalizedCommand.bootstrap
+              ? dispatchBootstrapTurnStart(normalizedCommand)
+              : orchestrationEngine
+                  .dispatch(normalizedCommand)
+                  .pipe(
+                    Effect.mapError((cause) =>
+                      toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
+                    ),
+                  );
 
-        return startup.enqueueCommand(dispatchEffect).pipe(
-          Effect.tap(() =>
-            refreshCodexUsageAfterPrompt(normalizedCommand).pipe(
-              Effect.ignoreCause({ log: true }),
-              Effect.forkDetach,
+        return startup
+          .enqueueCommand(dispatchEffect)
+          .pipe(
+            Effect.mapError((cause) =>
+              toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
             ),
-          ),
-          Effect.mapError((cause) =>
-            toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
-          ),
-        );
+          );
       };
 
       const loadServerConfig = Effect.gen(function* () {
@@ -820,15 +797,38 @@ const makeWsRpcLayer = (
         [ORCHESTRATION_WS_METHODS.hardDeleteThread]: (input) =>
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.hardDeleteThread,
-            hardDeleteThreadLocalData(input).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new OrchestrationGetSnapshotError({
-                    message: "Failed to permanently delete thread",
-                    cause,
+            providerService
+              .quiesceThreadForHardDelete(input)
+              .pipe(
+                // ProviderService releases its per-thread lifecycle permit
+                // before this resolves. Only then do we fence the independent
+                // ingestion worker and drain items that raced with adapter
+                // shutdown, avoiding a lock inversion between provider and
+                // orchestration queues.
+                Effect.andThen(providerRuntimeIngestion.retireThreadForHardDelete(input)),
+                Effect.andThen(hardDeleteThreadLocalData(input)),
+                Effect.tap(() => providerRuntimeIngestion.completeThreadHardDelete(input)),
+              )
+              .pipe(
+                Effect.tapError((cause) =>
+                  Effect.logWarning("thread hard delete failed", {
+                    threadId: input.threadId,
+                    failureTag:
+                      typeof cause === "object" && cause !== null && "_tag" in cause
+                        ? String(cause._tag)
+                        : "unknown",
                   }),
+                ),
+                // Filesystem and SQL failures can carry local paths or raw
+                // statement details. Keep those diagnostics server-side and
+                // expose a fixed RPC error to every authenticated client.
+                Effect.mapError(
+                  () =>
+                    new OrchestrationGetSnapshotError({
+                      message: "Failed to permanently delete thread",
+                    }),
+                ),
               ),
-            ),
             { "rpc.aggregate": "orchestration" },
           ),
         [ORCHESTRATION_WS_METHODS.repairAssistantMessageFromProviderJournal]: (input) =>
@@ -880,6 +880,57 @@ const makeWsRpcLayer = (
                   }),
               ),
             ),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [ORCHESTRATION_WS_METHODS.getThreadTurnSubagentDetail]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.getThreadTurnSubagentDetail,
+            Effect.gen(function* () {
+              // This durable projection lookup is the authorization boundary
+              // for the opaque provider id. Never forward an arbitrary id
+              // supplied by a renderer to Codex, even on an authenticated
+              // connection.
+              const authorized = yield* projectionSnapshotQuery
+                .hasThreadTurnSubagentActivity(input)
+                .pipe(
+                  Effect.mapError(
+                    () =>
+                      new OrchestrationGetSnapshotError({
+                        message: "Failed to validate subagent detail access",
+                      }),
+                  ),
+                );
+              if (!authorized) {
+                return yield* new OrchestrationGetSnapshotError({
+                  message: "Subagent details are unavailable for this thread and turn",
+                });
+              }
+
+              const detail = yield* providerService
+                .readSubagentDetail({
+                  threadId: input.threadId,
+                  turnId: input.turnId,
+                  subagentId: input.subagentId,
+                  ...(input.historyId ? { historyId: input.historyId } : {}),
+                })
+                .pipe(
+                  // Provider exceptions can contain rollout data. Collapse
+                  // every failure to a stable public message and deliberately
+                  // omit the original cause from the RPC error and logs.
+                  Effect.mapError(
+                    () =>
+                      new OrchestrationGetSnapshotError({
+                        message: "Failed to load verified subagent details",
+                      }),
+                  ),
+                );
+              return {
+                provider: detail.provider,
+                messages: detail.messages,
+                gaps: detail.gaps,
+                truncated: detail.truncated,
+              };
+            }),
             { "rpc.aggregate": "orchestration" },
           ),
         [ORCHESTRATION_WS_METHODS.getThreadTurnWorkLogPresence]: (input) =>
@@ -965,9 +1016,14 @@ const makeWsRpcLayer = (
         [WS_METHODS.serverRefreshProviders]: (input) =>
           observeRpcEffect(
             WS_METHODS.serverRefreshProviders,
-            (input.instanceId !== undefined
-              ? providerRegistry.refreshInstance(input.instanceId)
-              : providerRegistry.refresh()
+            (input.scope === "models"
+              ? input.instanceId !== undefined
+                ? (providerRegistry.refreshInstanceModels?.(input.instanceId) ??
+                  providerRegistry.getProviders)
+                : providerRegistry.getProviders
+              : input.instanceId !== undefined
+                ? providerRegistry.refreshInstance(input.instanceId)
+                : providerRegistry.refresh()
             ).pipe(Effect.map((providers) => ({ providers }))),
             { "rpc.aggregate": "server" },
           ),
@@ -1068,6 +1124,36 @@ const makeWsRpcLayer = (
             {
               "rpc.aggregate": "server",
             },
+          ),
+        [WS_METHODS.dictationGetStatus]: (_input) =>
+          observeRpcEffect(WS_METHODS.dictationGetStatus, dictationStatus()),
+        [WS_METHODS.dictationSetApiKey]: ({ apiKey }) =>
+          observeRpcEffect(
+            WS_METHODS.dictationSetApiKey,
+            Effect.all([requireSecureDictationTransport, requireDictationOwner]).pipe(
+              Effect.flatMap(() => dictation.setApiKey(apiKey)),
+              Effect.flatMap(dictationStatus),
+            ),
+          ),
+        [WS_METHODS.dictationClearApiKey]: (_input) =>
+          observeRpcEffect(
+            WS_METHODS.dictationClearApiKey,
+            Effect.all([requireSecureDictationTransport, requireDictationOwner]).pipe(
+              Effect.flatMap(() => dictation.clearApiKey),
+              Effect.flatMap(dictationStatus),
+            ),
+          ),
+        [WS_METHODS.dictationCreateClientSecret]: ({ model }) =>
+          observeRpcEffect(
+            WS_METHODS.dictationCreateClientSecret,
+            requireSecureDictationTransport.pipe(
+              Effect.flatMap(() =>
+                dictation.createClientSecret({
+                  safetyIdentifier: dictationSafetyIdentifier,
+                  ...(model === undefined ? {} : { model }),
+                }),
+              ),
+            ),
           ),
         [WS_METHODS.usageStatsGet]: (_input) =>
           observeRpcEffect(WS_METHODS.usageStatsGet, usageStats.get, {
@@ -1215,10 +1301,6 @@ const makeWsRpcLayer = (
               "rpc.aggregate": "vcs",
             },
           ),
-        [WS_METHODS.vcsWorkingTreeDiff]: (input) =>
-          observeRpcEffect(WS_METHODS.vcsWorkingTreeDiff, gitWorkflow.workingTreeDiff(input), {
-            "rpc.aggregate": "vcs",
-          }),
         [WS_METHODS.vcsPull]: (input) =>
           observeRpcEffect(
             WS_METHODS.vcsPull,
@@ -1397,6 +1479,11 @@ const makeWsRpcLayer = (
     }),
   );
 
+// Provider updates mutate process-global package-manager state. Provide the
+// maintenance runner once at the route-layer boundary so every accepted
+// WebSocket shares its coordinator and server-owned worker scope. Providing it
+// inside `makeWsRpcLayer` would recreate the lock set per connection and would
+// tie an admitted update's lifetime to the requesting socket.
 export const websocketRpcRouteLayer = Layer.unwrap(
   Effect.gen(function* () {
     const orchestrationEngine = yield* OrchestrationEngineService;
@@ -1406,6 +1493,12 @@ export const websocketRpcRouteLayer = Layer.unwrap(
       orchestrationEngine,
       initialCursor: initialSnapshot.snapshotSequence,
     });
+    // Resolve the credential-bearing service while constructing the route. If
+    // it were resolved inside each request handler, its dependency would leak
+    // through the router output and could not be safely provided at this
+    // boundary.
+    const dictation = yield* OpenAiRealtimeDictation;
+    const providerMaintenanceRunner = yield* ProviderMaintenanceRunner.ProviderMaintenanceRunner;
     return HttpRouter.add(
       "GET",
       "/ws",
@@ -1414,14 +1507,28 @@ export const websocketRpcRouteLayer = Layer.unwrap(
         const serverAuth = yield* ServerAuth;
         const sessions = yield* SessionCredentialService;
         const session = yield* serverAuth.authenticateWebSocketUpgrade(request);
+        // Cafe's HTTPS sibling terminates TLS and forwards to this listener over
+        // loopback. Trust the observed peer, never client-controlled forwarded
+        // headers, before accepting a permanent key or returning an ephemeral
+        // OpenAI credential. A remote reverse proxy must likewise connect over
+        // a local/IPC boundary; direct non-loopback cleartext always fails shut.
+        const secureSecretTransport = Option.match(request.remoteAddress, {
+          onNone: () => false,
+          onSome: isLoopbackRemoteAddress,
+        });
         const rpcWebSocketHttpEffect = yield* RpcServer.toHttpEffectWebsocket(WsRpcGroup, {
           disableTracing: true,
         }).pipe(
           Effect.provide(
-            makeWsRpcLayer(session.sessionId, orchestrationSubscriptionHub).pipe(
+            makeWsRpcLayer(
+              session,
+              secureSecretTransport,
+              dictation,
+              orchestrationSubscriptionHub,
+              providerMaintenanceRunner,
+            ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               Layer.provide(ProviderJournalMessageRepairLive),
-              Layer.provide(ProviderMaintenanceRunner.layer),
               Layer.provide(
                 SourceControlDiscoveryLayer.layer.pipe(
                   Layer.provide(
@@ -1454,4 +1561,4 @@ export const websocketRpcRouteLayer = Layer.unwrap(
       }).pipe(Effect.catchTag("AuthError", respondToAuthError)),
     );
   }),
-);
+).pipe(Layer.provide(ProviderMaintenanceRunner.layer));

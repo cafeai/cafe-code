@@ -110,7 +110,14 @@ const withInstanceIdentity =
     // does not require Query.interrupt(). Omitting this field silently falls
     // back to "unsupported" at the contract decoder and turns a nudge into a
     // destructive interrupt even though the adapter can queue it safely.
-    runtimeCapabilities: { ...snapshot.runtimeCapabilities, liveSteer: "supported" },
+    runtimeCapabilities: {
+      ...snapshot.runtimeCapabilities,
+      liveSteer: "supported",
+      // Claude `active_goal` is progress telemetry, not a durable public
+      // create/get/update/clear control plane. Keep it in the work log and do
+      // not expose Codex goal controls for Claude instances.
+      threadGoals: "unsupported",
+    },
   });
 
 export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
@@ -233,6 +240,12 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
             Effect.flatMap((enrichedSnapshot) => publishSnapshot(enrichedSnapshot)),
           ),
         refreshInterval: SNAPSHOT_REFRESH_INTERVAL,
+        probePolicy: {
+          // ProviderRegistry performs the one bounded startup refresh for all
+          // instances. The managed provider still owns staggered periodic and
+          // explicit manual refreshes after that admission boundary.
+          initialRefresh: "external",
+        },
       }).pipe(
         Effect.mapError(
           (cause) =>

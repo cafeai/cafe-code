@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, it, assert } from "@effect/vitest";
 import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
@@ -34,8 +35,10 @@ import { createModelCapabilities } from "@cafecode/shared/model";
 import { applyServerSettingsPatch } from "@cafecode/shared/serverSettings";
 
 import {
+  CODEX_CLI_LOGIN_STATUS_TIMEOUT_MESSAGE,
   checkCodexCliProviderStatus,
   checkCodexProviderStatus,
+  isCodexCliLoginStatusProbeInconclusive,
   type CodexAppServerProviderSnapshot,
 } from "./CodexProvider.ts";
 import {
@@ -52,6 +55,8 @@ import {
 } from "./ProviderInstanceRegistryHydration.ts";
 import {
   haveProvidersChanged,
+  INITIAL_PROVIDER_REFRESH_CONCURRENCY,
+  mergeProviderAccountRateLimitSnapshot,
   mergeProviderSnapshot,
   mergeProviderSnapshots,
   ProviderRegistryLive,
@@ -59,7 +64,11 @@ import {
 } from "./ProviderRegistry.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "../../serverSettings.ts";
-import { readProviderStatusCache, resolveProviderStatusCachePath } from "../providerStatusCache.ts";
+import {
+  hydrateCachedProvider,
+  readProviderStatusCache,
+  resolveProviderStatusCachePath,
+} from "../providerStatusCache.ts";
 import type { ProviderInstance } from "../ProviderDriver.ts";
 import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
 import { ProviderInstanceRegistryMutator } from "../Services/ProviderInstanceRegistryMutator.ts";
@@ -358,6 +367,64 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         }),
       );
 
+      it.effect("labels the Codex ent26 plan as an Enterprise subscription", () =>
+        Effect.gen(function* () {
+          const status = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+            Effect.succeed(
+              makeCodexProbeSnapshot({
+                account: {
+                  account: {
+                    type: "chatgpt",
+                    email: "enterprise@example.com",
+                    planType: "ent26",
+                  },
+                  requiresOpenaiAuth: false,
+                },
+              }),
+            ),
+          );
+
+          assert.strictEqual(status.auth.status, "authenticated");
+          assert.strictEqual(status.auth.label, "ChatGPT Enterprise Subscription");
+        }),
+      );
+
+      it.effect("labels the Codex education plan variants without collapsing their SKU", () =>
+        Effect.gen(function* () {
+          const eduPlus = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+            Effect.succeed(
+              makeCodexProbeSnapshot({
+                account: {
+                  account: {
+                    type: "chatgpt",
+                    email: "plus@university.example",
+                    planType: "edu_plus",
+                  },
+                  requiresOpenaiAuth: false,
+                },
+              }),
+            ),
+          );
+          const eduPro = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+            Effect.succeed(
+              makeCodexProbeSnapshot({
+                account: {
+                  account: {
+                    type: "chatgpt",
+                    email: "pro@university.example",
+                    planType: "edu_pro",
+                  },
+                  requiresOpenaiAuth: false,
+                },
+              }),
+            ),
+          );
+
+          assert.strictEqual(eduPlus.auth.label, "ChatGPT Edu Plus Subscription");
+          assert.strictEqual(eduPro.auth.label, "ChatGPT Edu Pro Subscription");
+        }),
+      );
+
       it.effect("returns unauthenticated when app-server requires OpenAI auth", () =>
         Effect.gen(function* () {
           const status = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
@@ -557,6 +624,171 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         ]);
       });
 
+      it("retains cached conclusive auth for bounded inconclusive startup probes", () => {
+        const previousProvider = {
+          instanceId: ProviderInstanceId.make("codex"),
+          driver: ProviderDriverKind.make("codex"),
+          status: "ready",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated", type: "chatgpt", email: "safe@example.com" },
+          checkedAt: "2026-04-14T00:00:00.000Z",
+          version: "0.133.0",
+          models: [],
+          slashCommands: [],
+          skills: [],
+        } as const satisfies ServerProvider;
+        const inconclusiveProvider = {
+          ...previousProvider,
+          status: "warning",
+          auth: { status: "unknown" },
+          checkedAt: "2026-04-14T00:05:00.000Z",
+          message: CODEX_CLI_LOGIN_STATUS_TIMEOUT_MESSAGE,
+          probeDiagnostics: {
+            attemptCount: 1,
+            consecutiveInconclusiveCount: 1,
+            lastOutcome: "inconclusive",
+            lastStartedAt: "2026-04-14T00:04:56.000Z",
+            lastFinishedAt: "2026-04-14T00:05:00.000Z",
+            lastDurationMs: 4_000,
+            periodicIntervalMs: 300_000,
+            periodicPhaseOffsetMs: 42_000,
+            nextScheduledAt: "2026-04-14T00:10:42.000Z",
+          },
+        } as const satisfies ServerProvider;
+
+        const retained = mergeProviderSnapshot(previousProvider, inconclusiveProvider);
+        assert.strictEqual(retained.status, "ready");
+        assert.deepStrictEqual(retained.auth, previousProvider.auth);
+        assert.strictEqual(retained.checkedAt, previousProvider.checkedAt);
+        assert.isUndefined(retained.message);
+        assert.strictEqual(retained.probeDiagnostics?.lastOutcome, "inconclusive");
+        assert.strictEqual(retained.probeDiagnostics?.consecutiveInconclusiveCount, 1);
+
+        // The direct refresh result and the provider change stream can deliver
+        // the exact same observation. It must not consume another allowance.
+        const duplicate = mergeProviderSnapshot(retained, inconclusiveProvider);
+        assert.strictEqual(duplicate.probeDiagnostics?.consecutiveInconclusiveCount, 1);
+
+        const reorderedSchedulelessDuplicate = mergeProviderSnapshot(retained, {
+          ...inconclusiveProvider,
+          probeDiagnostics: {
+            ...inconclusiveProvider.probeDiagnostics,
+            nextScheduledAt: null,
+          },
+        });
+        assert.strictEqual(
+          reorderedSchedulelessDuplicate.probeDiagnostics?.nextScheduledAt,
+          inconclusiveProvider.probeDiagnostics.nextScheduledAt,
+        );
+
+        const conclusiveScheduledProvider = {
+          ...previousProvider,
+          checkedAt: "2026-04-14T00:20:00.000Z",
+          probeDiagnostics: {
+            attemptCount: 3,
+            consecutiveInconclusiveCount: 0,
+            lastOutcome: "ready",
+            lastStartedAt: "2026-04-14T00:19:50.000Z",
+            lastFinishedAt: "2026-04-14T00:20:00.000Z",
+            lastDurationMs: 10_000,
+            periodicIntervalMs: 300_000,
+            periodicPhaseOffsetMs: 42_000,
+            nextScheduledAt: "2026-04-14T00:30:42.000Z",
+          },
+        } as const satisfies ServerProvider;
+        const reorderedEarlierSchedule = mergeProviderSnapshot(conclusiveScheduledProvider, {
+          ...conclusiveScheduledProvider,
+          probeDiagnostics: {
+            ...conclusiveScheduledProvider.probeDiagnostics,
+            nextScheduledAt: "2026-04-14T00:25:42.000Z",
+          },
+        });
+        assert.strictEqual(
+          reorderedEarlierSchedule.probeDiagnostics?.nextScheduledAt,
+          conclusiveScheduledProvider.probeDiagnostics.nextScheduledAt,
+        );
+
+        const retainedAfterSecond = mergeProviderSnapshot(duplicate, {
+          ...inconclusiveProvider,
+          probeDiagnostics: {
+            ...inconclusiveProvider.probeDiagnostics,
+            attemptCount: 2,
+            consecutiveInconclusiveCount: 2,
+            lastStartedAt: "2026-04-14T00:09:56.000Z",
+            lastFinishedAt: "2026-04-14T00:10:00.000Z",
+          },
+        });
+        assert.strictEqual(retainedAfterSecond.status, "ready");
+        assert.strictEqual(retainedAfterSecond.probeDiagnostics?.consecutiveInconclusiveCount, 2);
+
+        // A delayed direct/stream observation from the first attempt must not
+        // look like a provider-scope reset or manufacture a third failure.
+        const retainedAfterStaleObservation = mergeProviderSnapshot(
+          retainedAfterSecond,
+          inconclusiveProvider,
+        );
+        assert.strictEqual(retainedAfterStaleObservation.status, "ready");
+        assert.strictEqual(
+          retainedAfterStaleObservation.probeDiagnostics?.consecutiveInconclusiveCount,
+          2,
+        );
+
+        const hydratedAfterRestart = hydrateCachedProvider({
+          cachedProvider: retainedAfterSecond,
+          fallbackProvider: {
+            ...previousProvider,
+            probeDiagnostics: {
+              attemptCount: 0,
+              consecutiveInconclusiveCount: 0,
+              lastOutcome: "pending",
+              lastStartedAt: null,
+              lastFinishedAt: null,
+              lastDurationMs: null,
+              periodicIntervalMs: 300_000,
+              periodicPhaseOffsetMs: 77_000,
+              nextScheduledAt: null,
+            },
+          },
+        });
+        assert.strictEqual(hydratedAfterRestart.probeDiagnostics?.consecutiveInconclusiveCount, 2);
+        assert.strictEqual(hydratedAfterRestart.probeDiagnostics?.periodicPhaseOffsetMs, 77_000);
+        assert.isNull(hydratedAfterRestart.probeDiagnostics?.nextScheduledAt);
+
+        // Rebuilding the backend/provider resets its local attempt counter.
+        // The cached streak must carry across that reset so the next timeout is
+        // still the third failure rather than another first failure.
+        const degraded = mergeProviderSnapshot(hydratedAfterRestart, {
+          ...inconclusiveProvider,
+          probeDiagnostics: {
+            ...inconclusiveProvider.probeDiagnostics,
+            attemptCount: 1,
+            consecutiveInconclusiveCount: 1,
+            lastStartedAt: "2026-04-14T00:14:56.000Z",
+            lastFinishedAt: "2026-04-14T00:15:00.000Z",
+          },
+        });
+        assert.strictEqual(degraded.status, "warning");
+        assert.strictEqual(degraded.auth.status, "unknown");
+        assert.strictEqual(degraded.message, CODEX_CLI_LOGIN_STATUS_TIMEOUT_MESSAGE);
+        assert.strictEqual(degraded.probeDiagnostics?.consecutiveInconclusiveCount, 3);
+
+        const recovered = mergeProviderSnapshot(degraded, {
+          ...previousProvider,
+          checkedAt: "2026-04-14T00:20:00.000Z",
+          probeDiagnostics: {
+            ...inconclusiveProvider.probeDiagnostics,
+            attemptCount: 2,
+            consecutiveInconclusiveCount: 0,
+            lastOutcome: "ready",
+            lastStartedAt: "2026-04-14T00:19:59.000Z",
+            lastFinishedAt: "2026-04-14T00:20:00.000Z",
+          },
+        });
+        assert.strictEqual(recovered.status, "ready");
+        assert.strictEqual(recovered.probeDiagnostics?.consecutiveInconclusiveCount, 0);
+      });
+
       it("preserves event-sourced account rate limits when a refresh omits them", () => {
         const previousProvider = {
           instanceId: ProviderInstanceId.make("claudeAgent"),
@@ -652,6 +884,116 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           mergeProviderSnapshot(previousProvider, refreshedProvider).accountRateLimits,
           undefined,
         );
+      });
+
+      it("does not preserve Grok usage when a full refresh omits account identity and quota", () => {
+        const previousProvider = {
+          instanceId: ProviderInstanceId.make("grok"),
+          driver: ProviderDriverKind.make("grok"),
+          status: "ready",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated", type: "cached-token" },
+          checkedAt: "2026-08-16T00:00:00.000Z",
+          version: "1.0.4",
+          models: [],
+          slashCommands: [],
+          skills: [],
+          accountRateLimits: {
+            rateLimits: {
+              limitId: "grok",
+              primary: { usedPercent: 1, windowDurationMins: 10_080 },
+            },
+            checkedAt: "2026-08-16T00:00:00.000Z",
+          },
+        } as const satisfies ServerProvider;
+        const { accountRateLimits: _omitted, ...withoutRateLimits } = previousProvider;
+        const refreshedProvider = {
+          ...withoutRateLimits,
+          checkedAt: "2026-08-16T00:05:00.000Z",
+        } satisfies ServerProvider;
+
+        assert.strictEqual(
+          mergeProviderSnapshot(previousProvider, refreshedProvider).accountRateLimits,
+          undefined,
+        );
+      });
+
+      it("preserves live Codex rate limits across a transient same-account probe omission", () => {
+        const previousProvider = {
+          instanceId: ProviderInstanceId.make("codex"),
+          driver: ProviderDriverKind.make("codex"),
+          status: "ready",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated", type: "chatgpt", email: "same@example.test" },
+          checkedAt: "2026-08-12T10:00:00.000Z",
+          version: "0.147.0",
+          models: [],
+          slashCommands: [],
+          skills: [],
+          accountRateLimits: {
+            rateLimits: {
+              limitId: "codex",
+              primary: { usedPercent: 1, windowDurationMins: 10_080 },
+            },
+            checkedAt: "2026-08-12T10:00:00.000Z",
+          },
+        } as const satisfies ServerProvider;
+        const { accountRateLimits: _omitted, ...withoutRateLimits } = previousProvider;
+        const refreshedProvider = {
+          ...withoutRateLimits,
+          checkedAt: "2026-08-12T10:05:00.000Z",
+        } satisfies ServerProvider;
+
+        assert.deepStrictEqual(
+          mergeProviderSnapshot(previousProvider, refreshedProvider).accountRateLimits,
+          previousProvider.accountRateLimits,
+        );
+      });
+
+      it("merges sparse live Codex rate limits into the latest full snapshot", () => {
+        const merged = mergeProviderAccountRateLimitSnapshot({
+          previous: {
+            rateLimits: {
+              limitId: "codex",
+              planType: "pro",
+              primary: { usedPercent: 0, windowDurationMins: 300 },
+              secondary: { usedPercent: 20, windowDurationMins: 10_080 },
+            },
+            rateLimitsByLimitId: {
+              codex: {
+                limitId: "codex",
+                planType: "pro",
+                primary: { usedPercent: 0, windowDurationMins: 300 },
+                secondary: { usedPercent: 20, windowDurationMins: 10_080 },
+              },
+              codex_bengalfox: {
+                limitId: "codex_bengalfox",
+                primary: { usedPercent: 5, windowDurationMins: 60 },
+              },
+            },
+            rateLimitResetCredits: { availableCount: 1 },
+            checkedAt: "2026-08-12T10:00:00.000Z",
+          },
+          limitId: "codex",
+          snapshot: {
+            limitId: "codex",
+            primary: { usedPercent: 1, windowDurationMins: 10_080 },
+          },
+          checkedAt: "2026-08-12T10:01:00.000Z",
+        });
+
+        assert.deepStrictEqual(merged.rateLimits, {
+          limitId: "codex",
+          planType: "pro",
+          primary: { usedPercent: 1, windowDurationMins: 10_080 },
+          secondary: { usedPercent: 20, windowDurationMins: 10_080 },
+        });
+        assert.deepStrictEqual(merged.rateLimitsByLimitId?.codex, merged.rateLimits);
+        assert.strictEqual(merged.rateLimitsByLimitId?.codex_bengalfox?.primary?.usedPercent, 5);
+        assert.deepStrictEqual(merged.rateLimitResetCredits, { availableCount: 1 });
+        assert.strictEqual(merged.checkedAt, "2026-08-12T10:01:00.000Z");
       });
 
       it("fills missing capabilities from the previous provider snapshot", () => {
@@ -882,6 +1224,103 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         }),
       );
 
+      it.effect("bounds initial provider refresh concurrency across instances", () =>
+        Effect.gen(function* () {
+          const externalDriver = ProviderDriverKind.make("externalDriver");
+          const activeRefreshes = yield* Ref.make(0);
+          const maxActiveRefreshes = yield* Ref.make(0);
+          const startedRefreshes = yield* Ref.make(0);
+          const boundReached = yield* Deferred.make<void>();
+          const releaseRefreshes = yield* Deferred.make<void>();
+          const instances = Array.from({ length: 5 }, (_, index) => {
+            const instanceId = ProviderInstanceId.make(`external_provider_${index}`);
+            const provider = {
+              instanceId,
+              driver: externalDriver,
+              status: "ready",
+              enabled: true,
+              installed: true,
+              auth: { status: "authenticated" },
+              checkedAt: "2026-04-14T00:00:00.000Z",
+              version: "1.0.0",
+              models: [],
+              slashCommands: [],
+              skills: [],
+            } as const satisfies ServerProvider;
+            const refresh = Effect.gen(function* () {
+              const active = yield* Ref.updateAndGet(activeRefreshes, (count) => count + 1);
+              yield* Ref.update(maxActiveRefreshes, (maximum) => Math.max(maximum, active));
+              const started = yield* Ref.updateAndGet(startedRefreshes, (count) => count + 1);
+              if (started === INITIAL_PROVIDER_REFRESH_CONCURRENCY) {
+                yield* Deferred.succeed(boundReached, undefined).pipe(Effect.ignore);
+              }
+              yield* Deferred.await(releaseRefreshes);
+              return provider;
+            }).pipe(Effect.ensuring(Ref.update(activeRefreshes, (count) => count - 1)));
+
+            return {
+              instanceId,
+              driverKind: externalDriver,
+              continuationIdentity: {
+                driverKind: externalDriver,
+                continuationKey: `externalDriver:instance:${instanceId}`,
+              },
+              displayName: undefined,
+              enabled: true,
+              snapshot: {
+                maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
+                  provider: externalDriver,
+                  packageName: null,
+                }),
+                getSnapshot: Effect.succeed(provider),
+                refresh,
+                streamChanges: Stream.empty,
+              },
+              adapter: {} as ProviderInstance["adapter"],
+              textGeneration: {} as ProviderInstance["textGeneration"],
+            } satisfies ProviderInstance;
+          });
+          const instanceRegistryLayer = Layer.succeed(ProviderInstanceRegistry, {
+            getInstance: (instanceId) =>
+              Effect.succeed(instances.find((instance) => instance.instanceId === instanceId)),
+            listInstances: Effect.succeed(instances),
+            listUnavailable: Effect.succeed([]),
+            streamChanges: Stream.empty,
+            subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), (pubsub) =>
+              PubSub.subscribe(pubsub),
+            ),
+          });
+          const scope = yield* Scope.make();
+          yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
+          const buildFiber = yield* Layer.build(
+            ProviderRegistryLive.pipe(
+              Layer.provideMerge(instanceRegistryLayer),
+              Layer.provideMerge(
+                ServerConfig.layerTest(process.cwd(), {
+                  prefix: "t3-provider-registry-bounded-initial-refresh-",
+                }),
+              ),
+              Layer.provideMerge(NodeServices.layer),
+            ),
+          ).pipe(Scope.provide(scope), Effect.forkChild);
+
+          yield* Deferred.await(boundReached);
+          yield* Effect.yieldNow;
+          assert.strictEqual(
+            yield* Ref.get(maxActiveRefreshes),
+            INITIAL_PROVIDER_REFRESH_CONCURRENCY,
+          );
+          assert.strictEqual(
+            yield* Ref.get(startedRefreshes),
+            INITIAL_PROVIDER_REFRESH_CONCURRENCY,
+          );
+
+          yield* Deferred.succeed(releaseRefreshes, undefined);
+          yield* Fiber.join(buildFiber);
+          assert.strictEqual(yield* Ref.get(startedRefreshes), instances.length);
+        }),
+      );
+
       it.effect("returns the cached provider list when a manual refresh fails", () =>
         Effect.gen(function* () {
           const codexDriver = ProviderDriverKind.make("codex");
@@ -895,7 +1334,14 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             auth: { status: "authenticated" },
             checkedAt: "2026-04-29T10:00:00.000Z",
             version: "1.0.0",
-            models: [],
+            models: [
+              {
+                slug: "gpt-retired-static-fallback",
+                name: "GPT Retired Static Fallback",
+                isCustom: false,
+                capabilities: null,
+              },
+            ],
             slashCommands: [],
             skills: [],
           } as const satisfies ServerProvider;
@@ -911,6 +1357,17 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               },
               checkedAt: "2026-04-29T10:01:00.000Z",
             },
+          } as const satisfies ServerProvider;
+          const modelRefreshedProvider = {
+            ...cachedProvider,
+            models: [
+              {
+                slug: "gpt-model-refresh-only",
+                name: "GPT Model Refresh Only",
+                isCustom: false,
+                capabilities: null,
+              },
+            ],
           } as const satisfies ServerProvider;
           const instance = {
             instanceId: codexInstanceId,
@@ -929,6 +1386,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               getSnapshot: Effect.succeed(cachedProvider),
               refresh: Effect.die(new Error("simulated refresh failure")),
               refreshAccountUsage: Effect.succeed(usageRefreshedProvider),
+              refreshModels: Effect.succeed(modelRefreshedProvider),
               streamChanges: Stream.empty,
             },
             adapter: {} as ProviderInstance["adapter"],
@@ -969,8 +1427,138 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             assert.deepStrictEqual(yield* registry.refreshInstanceAccountUsage(codexInstanceId), [
               usageRefreshedProvider,
             ]);
+            assert.deepStrictEqual(yield* registry.refreshInstanceModels!(codexInstanceId), [
+              {
+                ...modelRefreshedProvider,
+                accountRateLimits: usageRefreshedProvider.accountRateLimits,
+              },
+            ]);
           }).pipe(Effect.provide(runtimeServices));
         }),
+      );
+
+      it.effect(
+        "keeps the internal model timeout bounded after caller disconnect without syncing a replaced instance",
+        () =>
+          Effect.gen(function* () {
+            const codexDriver = ProviderDriverKind.make("codex");
+            const codexInstanceId = ProviderInstanceId.make("codex");
+            const refreshStarted = yield* Deferred.make<void>();
+            const refreshTimedOut = yield* Deferred.make<void>();
+            const cachedProvider = {
+              instanceId: codexInstanceId,
+              driver: codexDriver,
+              status: "ready",
+              enabled: true,
+              installed: true,
+              auth: { status: "authenticated" },
+              checkedAt: "2026-04-29T10:00:00.000Z",
+              version: "1.0.0",
+              models: [
+                {
+                  slug: "gpt-current",
+                  name: "GPT Current",
+                  isCustom: false,
+                  capabilities: null,
+                },
+              ],
+              slashCommands: [],
+              skills: [],
+            } as const satisfies ServerProvider;
+            const staleModelProvider = {
+              ...cachedProvider,
+              models: [
+                {
+                  slug: "gpt-stale-old-instance",
+                  name: "GPT Stale Old Instance",
+                  isCustom: false,
+                  capabilities: null,
+                },
+              ],
+            } as const satisfies ServerProvider;
+            const makeInstance = (refreshModels: Effect.Effect<ServerProvider>) =>
+              ({
+                instanceId: codexInstanceId,
+                driverKind: codexDriver,
+                continuationIdentity: {
+                  driverKind: codexDriver,
+                  continuationKey: "codex:instance:codex",
+                },
+                displayName: undefined,
+                enabled: true,
+                snapshot: {
+                  maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
+                    provider: codexDriver,
+                    packageName: null,
+                  }),
+                  getSnapshot: Effect.succeed(cachedProvider),
+                  refresh: Effect.succeed(cachedProvider),
+                  refreshModels,
+                  streamChanges: Stream.empty,
+                },
+                adapter: {} as ProviderInstance["adapter"],
+                textGeneration: {} as ProviderInstance["textGeneration"],
+              }) satisfies ProviderInstance;
+            const firstInstance = makeInstance(
+              Deferred.succeed(refreshStarted, undefined).pipe(
+                Effect.andThen(Effect.never),
+                Effect.timeoutOption("15 seconds"),
+                Effect.tap(() => Deferred.succeed(refreshTimedOut, undefined)),
+                Effect.as(staleModelProvider),
+              ),
+            );
+            const replacementInstance = makeInstance(Effect.succeed(cachedProvider));
+            const currentInstanceRef = yield* Ref.make<ProviderInstance>(firstInstance);
+            const instanceRegistryLayer = Layer.succeed(ProviderInstanceRegistry, {
+              getInstance: (instanceId) =>
+                instanceId === codexInstanceId
+                  ? Ref.get(currentInstanceRef).pipe(Effect.map((instance) => instance))
+                  : Effect.succeed(undefined),
+              listInstances: Ref.get(currentInstanceRef).pipe(
+                Effect.map((instance) => [instance] as const),
+              ),
+              listUnavailable: Effect.succeed([]),
+              streamChanges: Stream.empty,
+              subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), (pubsub) =>
+                PubSub.subscribe(pubsub),
+              ),
+            });
+            const scope = yield* Scope.make();
+            yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
+            const runtimeServices = yield* Layer.build(
+              ProviderRegistryLive.pipe(
+                Layer.provideMerge(instanceRegistryLayer),
+                Layer.provideMerge(
+                  ServerConfig.layerTest(process.cwd(), {
+                    prefix: "t3-provider-registry-stale-model-refresh-",
+                  }),
+                ),
+                Layer.provideMerge(NodeServices.layer),
+              ),
+            ).pipe(Scope.provide(scope));
+
+            yield* Effect.gen(function* () {
+              const registry = yield* ProviderRegistry;
+              const refreshFiber = yield* registry.refreshInstanceModels!(codexInstanceId).pipe(
+                Effect.forkChild,
+              );
+              yield* Deferred.await(refreshStarted);
+
+              // Model refresh synchronization deliberately ignores a short-lived
+              // RPC caller disconnect, but that outer uninterruptible boundary
+              // must not mask the driver's own timeout. Start interruption in a
+              // separate fiber because Fiber.interrupt waits for the bounded
+              // critical section to finish.
+              const disconnectFiber = yield* Fiber.interrupt(refreshFiber).pipe(Effect.forkChild);
+              yield* Effect.yieldNow;
+              yield* Ref.set(currentInstanceRef, replacementInstance);
+              yield* TestClock.adjust("15 seconds");
+              yield* Deferred.await(refreshTimedOut);
+              yield* Fiber.join(disconnectFiber);
+
+              assert.deepStrictEqual(yield* registry.getProviders, [cachedProvider]);
+            }).pipe(Effect.provide(runtimeServices));
+          }),
       );
 
       it.effect("keeps consuming registry changes after one sync fails", () =>
@@ -1376,6 +1964,33 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
     });
 
     describe("checkCodexCliProviderStatus", () => {
+      it("classifies only the bounded login-status timeout as inconclusive", () => {
+        const timeoutSnapshot = {
+          instanceId: ProviderInstanceId.make("codex"),
+          driver: ProviderDriverKind.make("codex"),
+          enabled: true,
+          installed: true,
+          version: "0.133.0",
+          status: "warning",
+          auth: { status: "unknown" },
+          checkedAt: "2026-04-10T00:00:00.000Z",
+          message: CODEX_CLI_LOGIN_STATUS_TIMEOUT_MESSAGE,
+          models: [],
+          slashCommands: [],
+          skills: [],
+        } as const satisfies ServerProvider;
+
+        assert.isTrue(isCodexCliLoginStatusProbeInconclusive(timeoutSnapshot));
+        assert.isFalse(
+          isCodexCliLoginStatusProbeInconclusive({
+            ...timeoutSnapshot,
+            status: "error",
+            auth: { status: "unauthenticated" },
+            message: "Codex CLI is not authenticated.",
+          }),
+        );
+      });
+
       it.effect("uses the Codex CLI login status path for lightweight provider status", () =>
         Effect.gen(function* () {
           const status = yield* checkCodexCliProviderStatus(defaultCodexSettings).pipe(
@@ -1383,7 +1998,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               mockSpawnerLayer((args) => {
                 const joined = args.join(" ");
                 if (joined === "--version") {
-                  return { stdout: "codex-cli 0.133.0\n", stderr: "", code: 0 };
+                  return { stdout: "codex-cli 0.153.4\n", stderr: "", code: 0 };
                 }
                 if (joined === "login status") {
                   return { stdout: "", stderr: "Logged in using ChatGPT\n", code: 0 };
@@ -1395,16 +2010,18 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
 
           assert.strictEqual(status.status, "ready");
           assert.strictEqual(status.installed, true);
-          assert.strictEqual(status.version, "0.133.0");
+          assert.strictEqual(status.version, "0.153.4");
           assert.strictEqual(status.auth.status, "authenticated");
           assert.strictEqual(status.auth.type, "chatgpt");
           assert.strictEqual(status.auth.label, "ChatGPT Subscription");
           assert.deepStrictEqual(
             status.models.map((model) => model.slug),
             [
+              "gpt-6-astra",
               "gpt-5.6-sol",
               "gpt-5.6-terra",
               "gpt-5.6-luna",
+              "gpt-daybreak-blue-latest",
               "gpt-5.5",
               "gpt-5.4",
               "gpt-5.4-mini",
@@ -1444,9 +2061,15 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             ["low", "medium", "high", "xhigh", "max"],
           );
           assert.strictEqual(reasoningDescriptor("gpt-5.6-luna").currentValue, "medium");
+          assert.deepStrictEqual(
+            reasoningDescriptor("gpt-daybreak-blue-latest").options.map((option) => option.id),
+            ["low", "medium", "high", "xhigh", "max", "ultra"],
+          );
+          assert.strictEqual(reasoningDescriptor("gpt-daybreak-blue-latest").currentValue, "low");
           assert.strictEqual(hasFastMode("gpt-5.6-sol"), true);
           assert.strictEqual(hasFastMode("gpt-5.6-terra"), true);
           assert.strictEqual(hasFastMode("gpt-5.6-luna"), true);
+          assert.strictEqual(hasFastMode("gpt-daybreak-blue-latest"), false);
           assert.deepStrictEqual(status.skills, []);
         }),
       );
@@ -1809,7 +2432,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             version: "2.1.110",
             slugs: [] as Array<string>,
             upgrade:
-              "Claude Code v2.1.110 is too old for Claude Fable 5. Upgrade to v2.1.170 or newer to access it.",
+              "Claude Code v2.1.110 is too old for Claude Opus 5. Upgrade to v2.1.219 or newer to access it.",
           },
           { version: "2.1.111", slugs: ["claude-opus-4-7"] },
           { version: "2.1.154", slugs: ["claude-opus-4-7", "claude-opus-4-8"] },
@@ -1818,8 +2441,47 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             version: "2.1.197",
             slugs: ["claude-opus-4-7", "claude-opus-4-8", "claude-fable-5", "claude-sonnet-5"],
           },
+          {
+            version: "2.1.218",
+            slugs: ["claude-opus-4-7", "claude-opus-4-8", "claude-fable-5", "claude-sonnet-5"],
+          },
+          {
+            version: "2.1.219",
+            slugs: [
+              "claude-opus-5",
+              "claude-opus-4-7",
+              "claude-opus-4-8",
+              "claude-fable-5",
+              "claude-sonnet-5",
+            ],
+          },
+          {
+            version: "2.1.256",
+            slugs: [
+              "claude-opus-5",
+              "claude-opus-4-7",
+              "claude-opus-4-8",
+              "claude-fable-5",
+              "claude-sonnet-5",
+            ],
+            upgrade:
+              "Claude Code v2.1.256 is too old for Claude Fable 5.1. Upgrade to v2.1.257 or newer to access it.",
+          },
+          {
+            version: "2.1.257",
+            slugs: [
+              "claude-opus-5",
+              "claude-fable-5-1",
+              "claude-opus-4-7",
+              "claude-opus-4-8",
+              "claude-fable-5",
+              "claude-sonnet-5",
+            ],
+          },
         ];
         const gatedSlugs = [
+          "claude-opus-5",
+          "claude-fable-5-1",
           "claude-opus-4-7",
           "claude-opus-4-8",
           "claude-fable-5",
@@ -1866,6 +2528,43 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           ["200k", "1m"],
         );
 
+        const fable51 = getBuiltInClaudeModelsForVersion("2.1.257").find(
+          (model) => model.slug === "claude-fable-5-1",
+        );
+        const fable51Descriptors = fable51?.capabilities?.optionDescriptors ?? [];
+        const fable51Effort = fable51Descriptors.find(
+          (descriptor) => descriptor.type === "select" && descriptor.id === "effort",
+        );
+        const fable51Context = fable51Descriptors.find(
+          (descriptor) => descriptor.type === "select" && descriptor.id === "contextWindow",
+        );
+        assert.deepStrictEqual(
+          fable51Effort?.type === "select"
+            ? {
+                options: fable51Effort.options.map((option) => option.id),
+                default: fable51Effort.options.find((option) => option.isDefault),
+                currentValue: fable51Effort.currentValue,
+              }
+            : undefined,
+          {
+            options: ["low", "medium", "high", "xhigh", "max"],
+            default: { id: "high", label: "High", isDefault: true },
+            currentValue: "high",
+          },
+        );
+        assert.deepStrictEqual(
+          fable51Context?.type === "select"
+            ? {
+                options: fable51Context.options,
+                currentValue: fable51Context.currentValue,
+              }
+            : undefined,
+          {
+            options: [{ id: "1m", label: "1M", isDefault: true }],
+            currentValue: "1m",
+          },
+        );
+
         const sonnet5 = getBuiltInClaudeModelsForVersion("2.1.197").find(
           (model) => model.slug === "claude-sonnet-5",
         );
@@ -1878,6 +2577,68 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             : undefined,
           ["low", "medium", "high", "xhigh", "max", "ultrathink"],
         );
+
+        const opus5 = getBuiltInClaudeModelsForVersion("2.1.219").find(
+          (model) => model.slug === "claude-opus-5",
+        );
+        const opus5Descriptors = opus5?.capabilities?.optionDescriptors ?? [];
+        const opus5Effort = opus5Descriptors.find(
+          (descriptor) => descriptor.type === "select" && descriptor.id === "effort",
+        );
+        const opus5Context = opus5Descriptors.find(
+          (descriptor) => descriptor.type === "select" && descriptor.id === "contextWindow",
+        );
+        assert.deepStrictEqual(
+          opus5Effort?.type === "select"
+            ? opus5Effort.options.find((option) => option.isDefault)
+            : undefined,
+          { id: "high", label: "High", isDefault: true },
+        );
+        assert.deepStrictEqual(
+          opus5Context?.type === "select"
+            ? opus5Context.options.map((option) => option.id)
+            : undefined,
+          ["1m"],
+        );
+        assert.equal(
+          opus5Descriptors.some(
+            (descriptor) => descriptor.type === "boolean" && descriptor.id === "fastMode",
+          ),
+          true,
+        );
+
+        const fastModeSlugs = getBuiltInClaudeModelsForVersion("2.1.219")
+          .filter((model) =>
+            model.capabilities?.optionDescriptors?.some(
+              (descriptor) => descriptor.type === "boolean" && descriptor.id === "fastMode",
+            ),
+          )
+          .map((model) => model.slug);
+        assert.deepStrictEqual(fastModeSlugs, ["claude-opus-5", "claude-opus-4-8"]);
+
+        for (const model of getBuiltInClaudeModelsForVersion("2.1.219")) {
+          const descriptors = model.capabilities?.optionDescriptors ?? [];
+          const outputStyle = descriptors.find(
+            (descriptor) => descriptor.type === "select" && descriptor.id === "outputStyle",
+          );
+          assert.deepStrictEqual(
+            outputStyle?.type === "select"
+              ? outputStyle.options.map((option) => option.id)
+              : undefined,
+            ["providerDefault", "concise"],
+            `${model.slug}: output style`,
+          );
+          assert.equal(
+            descriptors.some(
+              (descriptor) =>
+                descriptor.type === "boolean" &&
+                descriptor.id === "agentProgressSummaries" &&
+                descriptor.currentValue === true,
+            ),
+            true,
+            `${model.slug}: progress summaries`,
+          );
+        }
       });
 
       it("formats Claude subscription labels without probing the provider", () => {

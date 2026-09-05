@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clearThreadUi,
   hydratePersistedProjectState,
+  hydratePersistedUiState,
   markThreadVisited,
   PERSISTED_STATE_KEY,
   type PersistedUiState,
@@ -13,6 +14,7 @@ import {
   setDefaultAdvertisedEndpointKey,
   setNavigationSidebarOpen,
   setProjectExpanded,
+  setSessionRailDocked,
   setThreadPlanSidebarOpen,
   syncProjects,
   syncThreads,
@@ -27,6 +29,7 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
     threadPlanSidebarOpenById: {},
     defaultAdvertisedEndpointKey: null,
     navigationSidebarOpen: true,
+    sessionRailDocked: false,
     ...overrides,
   };
 }
@@ -88,6 +91,17 @@ describe("uiStateStore pure functions", () => {
     expect(collapsed.navigationSidebarOpen).toBe(false);
     expect(expanded.navigationSidebarOpen).toBe(true);
     expect(setNavigationSidebarOpen(expanded, true)).toBe(expanded);
+  });
+
+  it("setSessionRailDocked stores the global composer-vs-side placement", () => {
+    const initialState = makeUiState();
+
+    const docked = setSessionRailDocked(initialState, true);
+    const undocked = setSessionRailDocked(docked, false);
+
+    expect(docked.sessionRailDocked).toBe(true);
+    expect(undocked.sessionRailDocked).toBe(false);
+    expect(setSessionRailDocked(docked, true)).toBe(docked);
   });
 
   it("reorderProjects moves all member keys of a multi-member group together", () => {
@@ -584,6 +598,21 @@ describe("uiStateStore persistence round-trip", () => {
     expect(persisted.navigationSidebarOpen).toBe(false);
   });
 
+  it("persists the global session-rail placement", () => {
+    const state = setSessionRailDocked(makeUiState(), true);
+
+    persistState(state);
+
+    const persisted = JSON.parse(
+      localStorageStub.getItem(PERSISTED_STATE_KEY) ?? "{}",
+    ) as PersistedUiState;
+    const rehydrated = hydratePersistedUiState(persisted);
+
+    expect(persisted.sessionRailDocked).toBe(true);
+    expect(rehydrated.sessionRailDocked).toBe(true);
+    expect(hydratePersistedUiState({}).sessionRailDocked).toBe(false);
+  });
+
   it("persists explicit per-thread plan sidebar choices", () => {
     const thread1 = ThreadId.make("thread-1");
     const thread2 = ThreadId.make("thread-2");
@@ -602,6 +631,40 @@ describe("uiStateStore persistence round-trip", () => {
     expect(persisted.threadPlanSidebarOpenById).toEqual({
       [thread1]: false,
       [thread2]: true,
+    });
+  });
+
+  it("preserves completed-turn read cursors across restart", () => {
+    const threadKey = "environment-primary:thread-1";
+    const visitedAt = "2026-08-25T00:02:37.000Z";
+    const state = makeUiState({
+      threadLastVisitedAtById: {
+        [threadKey]: visitedAt,
+      },
+    });
+
+    persistState(state);
+
+    const persisted = JSON.parse(
+      localStorageStub.getItem(PERSISTED_STATE_KEY) ?? "{}",
+    ) as PersistedUiState;
+    const rehydrated = hydratePersistedUiState(persisted);
+
+    expect(persisted.threadLastVisitedAtById).toEqual({ [threadKey]: visitedAt });
+    expect(rehydrated.threadLastVisitedAtById).toEqual({ [threadKey]: visitedAt });
+  });
+
+  it("rejects malformed completed-turn read cursors during startup hydration", () => {
+    const rehydrated = hydratePersistedUiState({
+      threadLastVisitedAtById: {
+        "environment-primary:valid-thread": "2026-08-25T00:02:37.000Z",
+        "environment-primary:invalid-thread": "not-a-timestamp",
+        "": "2026-08-25T00:02:37.000Z",
+      },
+    });
+
+    expect(rehydrated.threadLastVisitedAtById).toEqual({
+      "environment-primary:valid-thread": "2026-08-25T00:02:37.000Z",
     });
   });
 

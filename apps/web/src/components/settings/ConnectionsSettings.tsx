@@ -360,10 +360,7 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
         ? null
         : currentOriginPairingUrl);
   const revealValue = shareablePairingUrl ?? pairingLink.credential;
-  const canCopyToClipboard =
-    typeof window !== "undefined" &&
-    window.isSecureContext &&
-    navigator.clipboard?.writeText != null;
+  const canCopyToClipboard = typeof window !== "undefined";
 
   const { copyToClipboard } = useCopyToClipboard<"code" | "link">({
     onCopy: (kind) => {

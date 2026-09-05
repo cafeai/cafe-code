@@ -18,6 +18,7 @@ import { ServerConfig } from "../../config.ts";
 import { AuthSessionRepositoryLive } from "../../persistence/Layers/AuthSessions.ts";
 import { AuthSessionRepository } from "../../persistence/Services/AuthSessions.ts";
 import { ServerSecretStore } from "../Services/ServerSecretStore.ts";
+import { installProviderMcpCredentialIssuer } from "../ProviderMcpCredentialBroker.ts";
 import {
   SessionCredentialError,
   SessionCredentialService,
@@ -94,6 +95,12 @@ function toAuthClientSession(input: Omit<AuthClientSession, "current">): AuthCli
   };
 }
 
+const toSessionCredentialError = (message: string) => (cause: unknown) =>
+  new SessionCredentialError({
+    message,
+    cause,
+  });
+
 export const makeSessionCredentialService = Effect.gen(function* () {
   const serverConfig = yield* ServerConfig;
   const secretStore = yield* ServerSecretStore;
@@ -109,12 +116,6 @@ export const makeSessionCredentialService = Effect.gen(function* () {
     serverConfig.httpsEnabled && serverConfig.httpsPort !== undefined
       ? resolveHttpsSessionCookieName({ port: serverConfig.httpsPort })
       : undefined;
-
-  const toSessionCredentialError = (message: string) => (cause: unknown) =>
-    new SessionCredentialError({
-      message,
-      cause,
-    });
 
   const emitUpsert = (clientSession: AuthClientSession) =>
     PubSub.publish(changesPubSub, {
@@ -514,7 +515,7 @@ export const makeSessionCredentialService = Effect.gen(function* () {
       return revokedSessionIds.length;
     }).pipe(Effect.mapError(toSessionCredentialError("Failed to revoke other sessions.")));
 
-  return {
+  const service: SessionCredentialServiceShape = {
     cookieName,
     httpsCookieName,
     issue,
@@ -530,6 +531,9 @@ export const makeSessionCredentialService = Effect.gen(function* () {
     markConnected,
     markDisconnected,
   } satisfies SessionCredentialServiceShape;
+  const uninstallProviderIssuer = installProviderMcpCredentialIssuer(service);
+  yield* Effect.addFinalizer(() => Effect.sync(uninstallProviderIssuer));
+  return service;
 });
 
 export const SessionCredentialServiceLive = Layer.effect(

@@ -1,4 +1,5 @@
 import * as Effect from "effect/Effect";
+import type * as Exit from "effect/Exit";
 import * as Ref from "effect/Ref";
 import * as Semaphore from "effect/Semaphore";
 
@@ -7,6 +8,12 @@ export interface ProviderMaintenanceCommandCoordinatorShape<E> {
     readonly targetKey: string;
     readonly lockKey: string;
     readonly onQueued?: Effect.Effect<void, E, R>;
+    /**
+     * Runs only after this coordinator has admitted the target. This gives a
+     * caller a reliable terminal-cleanup boundary without letting a rejected
+     * duplicate mutate the state owned by the already-running command.
+     */
+    readonly onAcquiredExit?: (exit: Exit.Exit<A, E>) => Effect.Effect<void, never, R>;
     readonly run: Effect.Effect<A, E, R>;
   }) => Effect.Effect<A, E, R>;
 }
@@ -57,6 +64,7 @@ export const makeProviderMaintenanceCommandCoordinator = Effect.fn(
     targetKey,
     lockKey,
     onQueued,
+    onAcquiredExit,
     run,
   }) =>
     Effect.gen(function* () {
@@ -65,13 +73,17 @@ export const makeProviderMaintenanceCommandCoordinator = Effect.fn(
         return yield* Effect.fail(input.makeAlreadyRunningError(targetKey));
       }
 
-      return yield* Effect.gen(function* () {
+      const admittedCommand = Effect.gen(function* () {
         const lock = yield* getLock(lockKey);
         if (onQueued) {
           yield* onQueued;
         }
         return yield* lock.withPermits(1)(run);
-      }).pipe(Effect.ensuring(releaseTarget(targetKey)));
+      });
+
+      return yield* (
+        onAcquiredExit ? admittedCommand.pipe(Effect.onExit(onAcquiredExit)) : admittedCommand
+      ).pipe(Effect.ensuring(releaseTarget(targetKey)));
     });
 
   return {

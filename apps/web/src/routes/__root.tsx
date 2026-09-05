@@ -10,6 +10,8 @@ import {
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { QueryClient, useQueryClient } from "@tanstack/react-query";
 
+import { AmbianceLayer } from "../ambiance/AmbianceLayer";
+import { TaskAtriumOverlay } from "../components/atrium/TaskAtriumOverlay";
 import { APP_DISPLAY_NAME } from "../branding";
 import { AppSidebarLayout } from "../components/AppSidebarLayout";
 import { CommandPalette } from "../components/CommandPalette";
@@ -52,6 +54,7 @@ import {
   applySidebarAccentColor,
   applySidebarStarSpeed,
 } from "../themeAccent";
+import { applyInterfaceScalePercent } from "../interfaceScale";
 import {
   ensureEnvironmentConnectionBootstrapped,
   getPrimaryEnvironmentConnection,
@@ -158,6 +161,8 @@ function RootRouteView() {
         {primaryEnvironmentAuthenticated ? <ServerStateBootstrap /> : null}
         <EnvironmentConnectionManagerBootstrap />
         <AppearanceSettingsSync />
+        <TaskAtriumOverlay />
+        <AmbianceLayer />
         <PowerSaveBlockerSync />
         {primaryEnvironmentAuthenticated ? <EventRouter /> : null}
         {primaryEnvironmentAuthenticated ? <ProviderUpdateLaunchNotification /> : null}
@@ -329,6 +334,7 @@ function PowerSaveBlockerSync() {
 
 function AppearanceSettingsSync() {
   const appAccentColor = useSettings((settings) => settings.appAccentColor);
+  const interfaceScalePercent = useSettings((settings) => settings.interfaceScalePercent);
   const sidebarAccentColor = useSettings((settings) => settings.themeAccentColor);
   const continueBackgroundAnimations = useSettings(
     (settings) => settings.continueBackgroundAnimations,
@@ -341,6 +347,13 @@ function AppearanceSettingsSync() {
       applyAppAccentColor(undefined);
     };
   }, [appAccentColor]);
+
+  useEffect(() => {
+    applyInterfaceScalePercent(interfaceScalePercent);
+    return () => {
+      applyInterfaceScalePercent(undefined);
+    };
+  }, [interfaceScalePercent]);
 
   useEffect(() => {
     applySidebarAccentColor(sidebarAccentColor);

@@ -16,8 +16,6 @@ import type {
   GitResolvePullRequestResult,
   VcsStatusInput,
   VcsStatusResult,
-  VcsWorkingTreeDiffInput,
-  VcsWorkingTreeDiffResult,
   VcsCreateRefResult,
 } from "./git.ts";
 import type { FilesystemBrowseInput, FilesystemBrowseResult } from "./filesystem.ts";
@@ -56,6 +54,8 @@ import type {
   OrchestrationShellStreamItem,
   OrchestrationThreadTurnActivityPage,
   OrchestrationThreadTurnActivityPageInput,
+  OrchestrationThreadTurnSubagentDetail,
+  OrchestrationThreadTurnSubagentDetailInput,
   OrchestrationThreadTurnWorkLogPresenceInput,
   OrchestrationThreadTurnWorkLogPresenceResult,
   ProviderJournalMessageRepairInput,
@@ -376,6 +376,7 @@ export interface DesktopBridge {
   openExternal: (url: string) => Promise<boolean>;
   openPath: (path: string) => Promise<boolean>;
   revealPath: (path: string) => Promise<boolean>;
+  copyText: (text: string) => Promise<void>;
   onMenuAction: (listener: (action: string) => void) => () => void;
   getUpdateState: () => Promise<DesktopUpdateState>;
   setUpdateChannel: (channel: DesktopUpdateChannel) => Promise<DesktopUpdateState>;
@@ -436,6 +437,7 @@ export interface LocalApi {
      */
     refreshProviders: (input?: {
       readonly instanceId?: ProviderInstanceId;
+      readonly scope?: "full" | "models";
     }) => Promise<ServerProviderUpdatedPayload>;
     loginProvider: (input: ServerProviderLoginInput) => Promise<ServerProviderLoginResult>;
     updateProvider: (input: ServerProviderUpdateInput) => Promise<ServerProviderUpdatedPayload>;
@@ -496,7 +498,6 @@ export interface EnvironmentApi {
     init: (input: VcsInitInput) => Promise<void>;
     pull: (input: VcsPullInput) => Promise<VcsPullResult>;
     refreshStatus: (input: VcsStatusInput) => Promise<VcsStatusResult>;
-    workingTreeDiff: (input: VcsWorkingTreeDiffInput) => Promise<VcsWorkingTreeDiffResult>;
     onStatus: (
       input: VcsStatusInput,
       callback: (status: VcsStatusResult) => void,
@@ -518,6 +519,9 @@ export interface EnvironmentApi {
     getThreadTurnActivityPage: (
       input: OrchestrationThreadTurnActivityPageInput,
     ) => Promise<OrchestrationThreadTurnActivityPage>;
+    getThreadTurnSubagentDetail: (
+      input: OrchestrationThreadTurnSubagentDetailInput,
+    ) => Promise<OrchestrationThreadTurnSubagentDetail>;
     getThreadTurnWorkLogPresence: (
       input: OrchestrationThreadTurnWorkLogPresenceInput,
     ) => Promise<OrchestrationThreadTurnWorkLogPresenceResult>;

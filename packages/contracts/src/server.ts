@@ -179,6 +179,7 @@ export const ServerProviderSkill = Schema.Struct({
   name: TrimmedNonEmptyString,
   description: Schema.optional(TrimmedNonEmptyString),
   path: TrimmedNonEmptyString,
+  pluginId: Schema.optional(TrimmedNonEmptyString),
   scope: Schema.optional(TrimmedNonEmptyString),
   enabled: Schema.Boolean,
   displayName: Schema.optional(TrimmedNonEmptyString),
@@ -209,8 +210,14 @@ export type ServerProviderAvailability = typeof ServerProviderAvailability.Type;
 export const ServerProviderLiveSteerSupport = Schema.Literals(["supported", "unsupported"]);
 export type ServerProviderLiveSteerSupport = typeof ServerProviderLiveSteerSupport.Type;
 
+export const ServerProviderThreadGoalSupport = Schema.Literals(["supported", "unsupported"]);
+export type ServerProviderThreadGoalSupport = typeof ServerProviderThreadGoalSupport.Type;
+
 export const ServerProviderRuntimeCapabilities = Schema.Struct({
   liveSteer: ServerProviderLiveSteerSupport.pipe(
+    Schema.withDecodingDefault(Effect.succeed("unsupported" as const)),
+  ),
+  threadGoals: ServerProviderThreadGoalSupport.pipe(
     Schema.withDecodingDefault(Effect.succeed("unsupported" as const)),
   ),
 });
@@ -258,6 +265,69 @@ export const ServerProviderUpdateState = Schema.Struct({
 });
 export type ServerProviderUpdateState = typeof ServerProviderUpdateState.Type;
 
+/**
+ * A deliberately small, redacted account of the provider-status probe loop.
+ *
+ * This structure is safe to include in normal provider snapshots and debug
+ * summaries: it records only timing, scheduling, and classified outcomes. It
+ * must never grow raw stdout/stderr, command lines, filesystem paths, account
+ * identifiers, or credential material.
+ */
+export const ServerProviderProbeOutcome = Schema.Literals([
+  "pending",
+  "ready",
+  "warning",
+  "error",
+  "disabled",
+  "inconclusive",
+]);
+export type ServerProviderProbeOutcome = typeof ServerProviderProbeOutcome.Type;
+
+export const ServerProviderProbeDiagnostics = Schema.Struct({
+  attemptCount: NonNegativeInt,
+  consecutiveInconclusiveCount: NonNegativeInt,
+  lastOutcome: ServerProviderProbeOutcome,
+  lastStartedAt: Schema.NullOr(IsoDateTime),
+  lastFinishedAt: Schema.NullOr(IsoDateTime),
+  lastDurationMs: Schema.NullOr(NonNegativeInt),
+  periodicIntervalMs: Schema.NullOr(NonNegativeInt),
+  periodicPhaseOffsetMs: Schema.NullOr(NonNegativeInt),
+  nextScheduledAt: Schema.NullOr(IsoDateTime),
+});
+export type ServerProviderProbeDiagnostics = typeof ServerProviderProbeDiagnostics.Type;
+
+export const ServerProviderProbePhaseName = Schema.Literals([
+  "prepare-runtime-home",
+  "version",
+  "login-status",
+  "account-usage",
+]);
+export type ServerProviderProbePhaseName = typeof ServerProviderProbePhaseName.Type;
+
+export const ServerProviderProbePhaseOutcome = Schema.Literals([
+  "success",
+  "error",
+  "timeout",
+  "skipped",
+]);
+export type ServerProviderProbePhaseOutcome = typeof ServerProviderProbePhaseOutcome.Type;
+
+/**
+ * Payload-free timing for one allowlisted provider-probe phase. Provider
+ * commands, output, paths, account data, and error messages must never be
+ * added here because ordinary provider snapshots reach renderer diagnostics.
+ */
+export const ServerProviderProbePhaseDiagnostics = Schema.Struct({
+  phase: ServerProviderProbePhaseName,
+  outcome: ServerProviderProbePhaseOutcome,
+  durationMs: NonNegativeInt,
+});
+export type ServerProviderProbePhaseDiagnostics = typeof ServerProviderProbePhaseDiagnostics.Type;
+
+const ServerProviderProbePhaseDiagnosticsList = Schema.Array(
+  ServerProviderProbePhaseDiagnostics,
+).check(Schema.isMaxLength(8));
+
 export const ServerProvider = Schema.Struct({
   // Routing key for the configured instance this snapshot represents. This
   // is the only stable identity consumers may use for provider routing.
@@ -294,6 +364,8 @@ export const ServerProvider = Schema.Struct({
   skills: Schema.Array(ServerProviderSkill).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   accountRateLimits: Schema.optionalKey(ServerProviderAccountRateLimits),
   runtimeCapabilities: Schema.optionalKey(ServerProviderRuntimeCapabilities),
+  probeDiagnostics: Schema.optionalKey(ServerProviderProbeDiagnostics),
+  probePhases: Schema.optionalKey(ServerProviderProbePhaseDiagnosticsList),
   versionAdvisory: Schema.optionalKey(ServerProviderVersionAdvisory),
   updateState: Schema.optionalKey(ServerProviderUpdateState),
 });
@@ -499,6 +571,7 @@ export const ServerRuntimeLayerStatus = Schema.Literals([
   "offline",
   "degraded",
   "unknown",
+  "not-configured",
 ]);
 export type ServerRuntimeLayerStatus = typeof ServerRuntimeLayerStatus.Type;
 

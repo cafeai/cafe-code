@@ -29,33 +29,71 @@ import {
   type ProviderDriverKind,
   type ProviderRuntimeEvent,
   type UsageStatsTokenBreakdownEntry,
+  type UsageAccountingSnapshot,
+  type UsageStatsTokenBreakdownDayEntry,
 } from "@cafecode/contracts";
 import * as Clock from "effect/Clock";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import { UsageAccountingSnapshot as UsageAccountingSnapshotSchema } from "@cafecode/contracts";
 
 import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { UsageStatsRepository } from "../../persistence/Services/UsageStats.ts";
+import { isSqliteLockTimeoutError } from "../../persistence/sqliteLockRetry.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { localDayKey, splitSpanIntoDays } from "../dayBuckets.ts";
-import { selectOutputCounter, tokenDelta } from "../tokenDelta.ts";
+import {
+  selectCounter,
+  tokenDelta,
+  USAGE_TOKEN_FIELDS,
+  type UsageTokenField,
+} from "../tokenDelta.ts";
 import { UsageStatsService, type UsageStatsServiceShape } from "../Services/UsageStatsService.ts";
+import { AuxiliaryUsage } from "../Services/AuxiliaryUsage.ts";
 
 const FLUSH_INTERVAL_MS = 5_000;
 const MODEL_RESOLUTION_TIMEOUT_MS = 1_000;
 const UNKNOWN_USAGE_MODEL = "unknown";
+const decodeAccountingSnapshot = Schema.decodeEffect(UsageAccountingSnapshotSchema);
 
-interface MutableDayTotals {
+type TokenCounts = Record<UsageTokenField, number>;
+
+const zeroCounts = (): TokenCounts => ({
+  outputTokens: 0,
+  inputTokens: 0,
+  cachedInputTokens: 0,
+  cacheWriteInputTokens: 0,
+  reasoningOutputTokens: 0,
+});
+
+const addCounts = (target: TokenCounts, delta: TokenCounts): void => {
+  for (const field of USAGE_TOKEN_FIELDS) target[field] += delta[field];
+};
+
+const hasCounts = (counts: TokenCounts): boolean =>
+  USAGE_TOKEN_FIELDS.some((field) => counts[field] > 0);
+
+interface MutableDayTotals extends TokenCounts {
   generatingMs: number;
-  outputTokens: number;
   userMessages: number;
 }
 
+const zeroDayTotals = (): MutableDayTotals => ({
+  ...zeroCounts(),
+  generatingMs: 0,
+  userMessages: 0,
+});
+
 interface ThreadTracking {
-  watermark: number | undefined;
+  /** Per-counter watermarks; see tokenDelta.ts for the reset semantics. */
+  watermarks: Map<UsageTokenField, number>;
   /**
    * Whether this process saw the session begin. Session-cumulative token
    * counters observed without it (e.g. after reattaching to a provider
@@ -77,8 +115,8 @@ interface ThreadTracking {
   modelResolutionAttempted: boolean;
 }
 
-type PendingTokenBreakdowns = Map<string, Map<ProviderDriverKind, Map<string, number>>>;
-type TokenBreakdownTotals = Map<ProviderDriverKind, Map<string, number>>;
+type PendingTokenBreakdowns = Map<string, Map<ProviderDriverKind, Map<string, TokenCounts>>>;
+type TokenBreakdownTotals = Map<ProviderDriverKind, Map<string, TokenCounts>>;
 
 /**
  * Best-effort output-token extraction from an opaque `turn.completed` usage
@@ -135,18 +173,22 @@ const makeUsageStatsService = Effect.gen(function* () {
   const pending = new Map<string, MutableDayTotals>();
   const pendingTokenBreakdowns: PendingTokenBreakdowns = new Map();
   const tokenBreakdownTotals: TokenBreakdownTotals = new Map();
+  const tokenBreakdownDays: PendingTokenBreakdowns = new Map();
   const threads = new Map<string, ThreadTracking>();
-  const totals: MutableDayTotals = { generatingMs: 0, outputTokens: 0, userMessages: 0 };
+  const totals: MutableDayTotals = zeroDayTotals();
   let tokenBreakdownSnapshot: ReadonlyArray<UsageStatsTokenBreakdownEntry> = [];
   let tokenBreakdownSnapshotDirty = true;
+  let tokenBreakdownDaySnapshot: ReadonlyArray<UsageStatsTokenBreakdownDayEntry> = [];
+  let tokenBreakdownDaySnapshotDirty = true;
   let enabled = true;
 
   const addTokenBreakdownTotal = (
     provider: ProviderDriverKind,
     model: string,
-    outputTokens: number,
+    counts: TokenCounts,
+    day?: string,
   ): void => {
-    if (outputTokens <= 0) {
+    if (!hasCounts(counts)) {
       return;
     }
     let models = tokenBreakdownTotals.get(provider);
@@ -154,8 +196,54 @@ const makeUsageStatsService = Effect.gen(function* () {
       models = new Map();
       tokenBreakdownTotals.set(provider, models);
     }
-    models.set(model, (models.get(model) ?? 0) + outputTokens);
+    let entry = models.get(model);
+    if (entry === undefined) {
+      entry = zeroCounts();
+      models.set(model, entry);
+    }
+    addCounts(entry, counts);
     tokenBreakdownSnapshotDirty = true;
+    if (day !== undefined) {
+      let providers = tokenBreakdownDays.get(day);
+      if (providers === undefined) {
+        providers = new Map();
+        tokenBreakdownDays.set(day, providers);
+      }
+      let dailyModels = providers.get(provider);
+      if (dailyModels === undefined) {
+        dailyModels = new Map();
+        providers.set(provider, dailyModels);
+      }
+      let dailyCounts = dailyModels.get(model);
+      if (dailyCounts === undefined) {
+        dailyCounts = zeroCounts();
+        dailyModels.set(model, dailyCounts);
+      }
+      addCounts(dailyCounts, counts);
+      tokenBreakdownDaySnapshotDirty = true;
+    }
+  };
+
+  // Reuse the hydrated attribution rows rather than adding a database scan
+  // every time Atrium/Settings refreshes. This cached detail remains absent
+  // from the high-frequency fixed-cardinality snapshot stream.
+  const readTokenBreakdownDays = (): ReadonlyArray<UsageStatsTokenBreakdownDayEntry> => {
+    if (tokenBreakdownDaySnapshotDirty) {
+      tokenBreakdownDaySnapshot = Array.from(tokenBreakdownDays.entries())
+        .toSorted(([left], [right]) => left.localeCompare(right))
+        .flatMap(([day, providers]) =>
+          Array.from(providers.entries()).flatMap(([provider, models]) =>
+            Array.from(models.entries(), ([model, counts]) => ({
+              day,
+              provider,
+              model,
+              ...counts,
+            })),
+          ),
+        );
+      tokenBreakdownDaySnapshotDirty = false;
+    }
+    return tokenBreakdownDaySnapshot;
   };
 
   /**
@@ -169,10 +257,10 @@ const makeUsageStatsService = Effect.gen(function* () {
     }
     tokenBreakdownSnapshot = Array.from(tokenBreakdownTotals.entries())
       .flatMap(([provider, models]) =>
-        Array.from(models.entries(), ([model, outputTokens]) => ({
+        Array.from(models.entries(), ([model, counts]) => ({
           provider,
           model,
-          outputTokens,
+          ...counts,
         })),
       )
       .toSorted((left, right) => {
@@ -191,14 +279,16 @@ const makeUsageStatsService = Effect.gen(function* () {
   yield* repository.listDays.pipe(
     Effect.map((rows) => {
       for (const row of rows) {
-        days.set(row.day, {
+        const entry: MutableDayTotals = {
+          ...zeroCounts(),
           generatingMs: row.generatingMs,
-          outputTokens: row.outputTokens,
           userMessages: row.userMessages,
-        });
+        };
+        for (const field of USAGE_TOKEN_FIELDS) entry[field] = row[field];
+        days.set(row.day, entry);
         totals.generatingMs += row.generatingMs;
-        totals.outputTokens += row.outputTokens;
         totals.userMessages += row.userMessages;
+        addCounts(totals, entry);
       }
     }),
     // Hydration failure degrades to session-local counters; flushed deltas
@@ -211,7 +301,9 @@ const makeUsageStatsService = Effect.gen(function* () {
   yield* repository.listTokenBreakdownDays.pipe(
     Effect.map((rows) => {
       for (const row of rows) {
-        addTokenBreakdownTotal(row.provider, row.model, row.outputTokens);
+        const counts = zeroCounts();
+        for (const field of USAGE_TOKEN_FIELDS) counts[field] = row[field];
+        addTokenBreakdownTotal(row.provider, row.model, counts, row.day);
       }
     }),
     // Aggregate usage remains useful if only the attribution ledger is
@@ -228,43 +320,44 @@ const makeUsageStatsService = Effect.gen(function* () {
 
   const addDelta = (day: string, delta: Partial<MutableDayTotals>): void => {
     const generatingMs = delta.generatingMs ?? 0;
-    const outputTokens = delta.outputTokens ?? 0;
     const userMessages = delta.userMessages ?? 0;
-    if (generatingMs <= 0 && outputTokens <= 0 && userMessages <= 0) {
+    const counts = zeroCounts();
+    for (const field of USAGE_TOKEN_FIELDS) counts[field] = delta[field] ?? 0;
+    if (generatingMs <= 0 && userMessages <= 0 && !hasCounts(counts)) {
       return;
     }
     for (const bucket of [days, pending]) {
       let entry = bucket.get(day);
       if (entry === undefined) {
-        entry = { generatingMs: 0, outputTokens: 0, userMessages: 0 };
+        entry = zeroDayTotals();
         bucket.set(day, entry);
       }
       entry.generatingMs += generatingMs;
-      entry.outputTokens += outputTokens;
       entry.userMessages += userMessages;
+      addCounts(entry, counts);
     }
     totals.generatingMs += generatingMs;
-    totals.outputTokens += outputTokens;
     totals.userMessages += userMessages;
+    addCounts(totals, counts);
   };
 
   /**
    * Record the same output-token observation in the aggregate and attribution
    * accumulators. The repository later commits both maps atomically.
    */
-  const addOutputTokenDelta = (
+  const addTokenDeltas = (
     day: string,
-    outputTokens: number,
+    counts: TokenCounts,
     provider: ProviderDriverKind,
     model: string | undefined,
   ): void => {
-    if (outputTokens <= 0) {
+    if (!hasCounts(counts)) {
       return;
     }
-    addDelta(day, { outputTokens });
+    addDelta(day, counts);
 
     const modelKey = model ?? UNKNOWN_USAGE_MODEL;
-    addTokenBreakdownTotal(provider, modelKey, outputTokens);
+    addTokenBreakdownTotal(provider, modelKey, counts, day);
 
     let providers = pendingTokenBreakdowns.get(day);
     if (providers === undefined) {
@@ -276,14 +369,115 @@ const makeUsageStatsService = Effect.gen(function* () {
       models = new Map();
       providers.set(provider, models);
     }
-    models.set(modelKey, (models.get(modelKey) ?? 0) + outputTokens);
+    let entry = models.get(modelKey);
+    if (entry === undefined) {
+      entry = zeroCounts();
+      models.set(modelKey, entry);
+    }
+    addCounts(entry, counts);
   };
+
+  /**
+   * Billing snapshots arrive once per API response/result, never per token.
+   * SQLite owns their durable revision fence. Update the presentation cache
+   * only with increments accepted by that same transaction, and do not queue
+   * them in the legacy flush maps a second time.
+   */
+  type AccountingWork = {
+    readonly provider: ProviderDriverKind;
+    readonly snapshot: UsageAccountingSnapshot;
+    readonly day: string;
+    readonly enabled: boolean;
+    readonly committed: Deferred.Deferred<void>;
+  };
+  const accountingQueue = yield* Queue.bounded<AccountingWork>(128);
+  const pendingAccountingCommits = new Set<Deferred.Deferred<void>>();
+  const handleUsageAccounting = (
+    provider: ProviderDriverKind,
+    snapshot: UsageAccountingSnapshot,
+    observedAtMs: number,
+  ): Effect.Effect<void> =>
+    Effect.gen(function* () {
+      const decoded = yield* decodeAccountingSnapshot(snapshot);
+      if (!Number.isFinite(observedAtMs)) return;
+      const committed = yield* Deferred.make<void>();
+      pendingAccountingCommits.add(committed);
+      yield* Queue.offer(accountingQueue, {
+        provider,
+        snapshot: decoded,
+        day: localDayKey(observedAtMs),
+        enabled,
+        committed,
+      }).pipe(
+        Effect.onInterrupt(() =>
+          Effect.sync(() => {
+            pendingAccountingCommits.delete(committed);
+          }),
+        ),
+      );
+      // The worker belongs to the service scope. A disconnected renderer/helper
+      // can stop waiting without cancelling an already admitted transaction.
+      yield* Deferred.await(committed);
+    }).pipe(
+      Effect.catch(() => Effect.logWarning("usage stats: rejected invalid accounting snapshot")),
+    );
+
+  yield* Effect.forever(
+    Effect.gen(function* () {
+      const work = yield* Queue.take(accountingQueue);
+      let delayMs = 100;
+      let logged = false;
+      while (true) {
+        const result = yield* repository.recordAccountingSnapshot(work).pipe(Effect.result);
+        if (Result.isSuccess(result)) {
+          for (const delta of result.success) {
+            const entry = days.get(delta.day) ?? zeroDayTotals();
+            addCounts(entry, delta);
+            days.set(delta.day, entry);
+            addCounts(totals, delta);
+            addTokenBreakdownTotal(work.provider, delta.model, delta, delta.day);
+          }
+          break;
+        }
+        if (result.failure._tag === "PersistenceDecodeError") {
+          // Invalid metadata or a counter regression is not a transient write
+          // failure. Reject it without advancing its checkpoint or blocking
+          // later valid observations from this or other provider scopes.
+          yield* Effect.logWarning("usage stats: rejected inconsistent accounting snapshot");
+          break;
+        }
+        if (!isSqliteLockTimeoutError(result.failure.cause)) {
+          // Syntax/constraint/I/O failures require repair, not an infinite retry
+          // loop monopolizing all accounting. The durable checkpoint remains
+          // unchanged, so a later valid snapshot or replay can still settle it.
+          yield* Effect.logError("usage stats: accounting persistence failed permanently");
+          break;
+        }
+        if (!logged) {
+          // Keep content/provider identities out of retry diagnostics. Retain the
+          // exact terminal snapshot until the atomic write succeeds, so a brief
+          // SQLite failure cannot silently drop the last usage of a long query.
+          yield* Effect.logWarning("usage stats: accounting settlement is waiting for persistence");
+          logged = true;
+        }
+        yield* Effect.sleep(delayMs);
+        delayMs = Math.min(5_000, delayMs * 2);
+      }
+      yield* Deferred.succeed(work.committed, undefined);
+      pendingAccountingCommits.delete(work.committed);
+    }),
+  ).pipe(Effect.forkScoped);
+
+  const auxiliaryUsage = yield* Effect.serviceOption(AuxiliaryUsage);
+  if (Option.isSome(auxiliaryUsage)) {
+    yield* auxiliaryUsage.value.installSink(handleUsageAccounting);
+  }
 
   const track = (threadId: string): ThreadTracking => {
     let tracking = threads.get(threadId);
     if (tracking === undefined) {
       tracking = {
-        watermark: undefined,
+        watermarks: new Map(),
         witnessedSessionStart: false,
         sawTokenUsageThisTurn: false,
         accrueFromMs: undefined,
@@ -362,6 +556,10 @@ const makeUsageStatsService = Effect.gen(function* () {
 
   const handleProviderEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> => {
     switch (event.type) {
+      case "thread.usage-accounting.updated":
+        // Daemon replay can cross midnight. Bill the local day of the original
+        // host observation, not the backend's later catch-up time.
+        return handleUsageAccounting(event.provider, event.payload, Date.parse(event.createdAt));
       case "session.started":
       case "thread.started": {
         const tracking = track(event.threadId);
@@ -389,24 +587,38 @@ const makeUsageStatsService = Effect.gen(function* () {
       }
 
       case "thread.token-usage.updated": {
+        // Claude message counts describe one request/current context, not a
+        // cumulative bill. Its dedicated accounting stream deduplicates exact
+        // API message IDs and settles full per-model query totals instead.
+        if (event.provider === "claudeAgent") return Effect.void;
         return Effect.gen(function* () {
           const now = yield* Clock.currentTimeMillis;
           const tracking = track(event.threadId);
           tracking.sawTokenUsageThisTurn = true;
-          const counter = selectOutputCounter(event.payload.usage);
-          if (counter === undefined) {
-            return;
+          // Each counter carries its own watermark: providers mix cumulative
+          // and per-request semantics per field, so they cannot share one.
+          const deltas = zeroCounts();
+          for (const field of USAGE_TOKEN_FIELDS) {
+            const counter = selectCounter(event.payload.usage, field);
+            if (counter === undefined) {
+              continue;
+            }
+            const countFirstObservation =
+              counter.kind === "per-message" || tracking.witnessedSessionStart;
+            const result = tokenDelta(
+              tracking.watermarks.get(field),
+              counter.value,
+              countFirstObservation,
+            );
+            tracking.watermarks.set(field, result.watermark);
+            deltas[field] = result.delta;
           }
-          const countFirstObservation =
-            counter.kind === "per-message" || tracking.witnessedSessionStart;
-          const result = tokenDelta(tracking.watermark, counter.value, countFirstObservation);
-          tracking.watermark = result.watermark;
-          if (enabled && result.delta > 0) {
+          if (enabled && hasCounts(deltas)) {
             if (tracking.provider !== event.provider) {
               resetAttribution(tracking, event.provider);
             }
             yield* resolveTrackingModel(event.threadId, event.provider, tracking);
-            addOutputTokenDelta(localDayKey(now), result.delta, event.provider, tracking.model);
+            addTokenDeltas(localDayKey(now), deltas, event.provider, tracking.model);
           }
         });
       }
@@ -417,14 +629,19 @@ const makeUsageStatsService = Effect.gen(function* () {
           const tracking = track(event.threadId);
           accrue(tracking, now);
           tracking.accrueFromMs = undefined;
-          if (!tracking.sawTokenUsageThisTurn) {
+          if (event.provider !== "claudeAgent" && !tracking.sawTokenUsageThisTurn) {
             const outputTokens = turnCompletedOutputTokens(event.payload.usage);
             if (enabled && outputTokens !== undefined && outputTokens > 0) {
               if (tracking.provider !== event.provider) {
                 resetAttribution(tracking, event.provider);
               }
               yield* resolveTrackingModel(event.threadId, event.provider, tracking);
-              addOutputTokenDelta(localDayKey(now), outputTokens, event.provider, tracking.model);
+              addTokenDeltas(
+                localDayKey(now),
+                { ...zeroCounts(), outputTokens },
+                event.provider,
+                tracking.model,
+              );
             }
           }
           tracking.sawTokenUsageThisTurn = false;
@@ -470,17 +687,21 @@ const makeUsageStatsService = Effect.gen(function* () {
     const dayBatch = Array.from(pending.entries(), ([day, delta]) => ({
       day,
       generatingMs: delta.generatingMs,
-      outputTokens: delta.outputTokens,
       userMessages: delta.userMessages,
+      outputTokens: delta.outputTokens,
+      inputTokens: delta.inputTokens,
+      cachedInputTokens: delta.cachedInputTokens,
+      cacheWriteInputTokens: delta.cacheWriteInputTokens,
+      reasoningOutputTokens: delta.reasoningOutputTokens,
     }));
     const tokenBreakdownBatch = Array.from(pendingTokenBreakdowns.entries()).flatMap(
       ([day, providers]) =>
         Array.from(providers.entries()).flatMap(([provider, models]) =>
-          Array.from(models.entries(), ([model, outputTokens]) => ({
+          Array.from(models.entries(), ([model, counts]) => ({
             day,
             provider,
             model,
-            outputTokens,
+            ...counts,
           })),
         ),
     );
@@ -493,14 +714,10 @@ const makeUsageStatsService = Effect.gen(function* () {
           // both snapshots back so retries preserve that same correspondence;
           // live aggregate totals already include these deltas.
           for (const row of dayBatch) {
-            const entry = pending.get(row.day) ?? {
-              generatingMs: 0,
-              outputTokens: 0,
-              userMessages: 0,
-            };
+            const entry = pending.get(row.day) ?? zeroDayTotals();
             entry.generatingMs += row.generatingMs;
-            entry.outputTokens += row.outputTokens;
             entry.userMessages += row.userMessages;
+            for (const field of USAGE_TOKEN_FIELDS) entry[field] += row[field];
             pending.set(row.day, entry);
           }
 
@@ -515,7 +732,12 @@ const makeUsageStatsService = Effect.gen(function* () {
               models = new Map();
               providers.set(row.provider, models);
             }
-            models.set(row.model, (models.get(row.model) ?? 0) + row.outputTokens);
+            let entry = models.get(row.model);
+            if (entry === undefined) {
+              entry = zeroCounts();
+              models.set(row.model, entry);
+            }
+            for (const field of USAGE_TOKEN_FIELDS) entry[field] += row[field];
           }
         }).pipe(
           Effect.flatMap(() => Effect.logError("usage stats: failed to flush deltas", { error })),
@@ -584,17 +806,23 @@ const makeUsageStatsService = Effect.gen(function* () {
       }
     }
     const storedToday = days.get(todayKey);
+    const todayCounts = zeroCounts();
+    if (storedToday !== undefined) {
+      for (const field of USAGE_TOKEN_FIELDS) todayCounts[field] = storedToday[field];
+    }
+    const totalCounts = zeroCounts();
+    for (const field of USAGE_TOKEN_FIELDS) totalCounts[field] = totals[field];
     return {
       totals: {
         generatingMs: totals.generatingMs + liveMs,
-        outputTokens: totals.outputTokens,
         userMessages: totals.userMessages,
+        ...totalCounts,
       },
       today: {
         day: todayKey,
         generatingMs: (storedToday?.generatingMs ?? 0) + todayLiveMs,
-        outputTokens: storedToday?.outputTokens ?? 0,
         userMessages: storedToday?.userMessages ?? 0,
+        ...todayCounts,
       },
       activeSessionCount,
       collectionEnabled: enabled,
@@ -609,12 +837,16 @@ const makeUsageStatsService = Effect.gen(function* () {
 
   const get: UsageStatsServiceShape["get"] = Effect.map(Clock.currentTimeMillis, (now) => {
     const state = liveState(now);
-    const dayRows = Array.from(days.entries(), ([day, dayTotals]) => ({
-      day,
-      generatingMs: dayTotals.generatingMs,
-      outputTokens: dayTotals.outputTokens,
-      userMessages: dayTotals.userMessages,
-    })).toSorted((left, right) => (left.day < right.day ? -1 : 1));
+    const dayRows = Array.from(days.entries(), ([day, dayTotals]) => {
+      const counts = zeroCounts();
+      for (const field of USAGE_TOKEN_FIELDS) counts[field] = dayTotals[field];
+      return {
+        day,
+        generatingMs: dayTotals.generatingMs,
+        userMessages: dayTotals.userMessages,
+        ...counts,
+      };
+    }).toSorted((left, right) => (left.day < right.day ? -1 : 1));
     // Present in-flight time on today's row so the heatmap cell matches the
     // headline counters without the client having to merge anything.
     const withLiveToday =
@@ -623,7 +855,12 @@ const makeUsageStatsService = Effect.gen(function* () {
             (left, right) => (left.day < right.day ? -1 : 1),
           )
         : dayRows;
-    return { ...state, days: withLiveToday, tokenBreakdown: readTokenBreakdown() };
+    return {
+      ...state,
+      days: withLiveToday,
+      tokenBreakdown: readTokenBreakdown(),
+      tokenBreakdownDays: readTokenBreakdownDays(),
+    };
   });
 
   yield* Effect.forkScoped(
@@ -654,6 +891,25 @@ const makeUsageStatsService = Effect.gen(function* () {
   ).pipe(Effect.forkScoped);
 
   yield* Effect.addFinalizer(() => tick.pipe(Effect.ignoreCause({ log: true })));
+
+  // Register after the worker's scoped-fiber finalizer, so orderly shutdown
+  // first gives already-admitted snapshots a bounded chance to commit. Never
+  // hang desktop shutdown behind a broken/locked database. An unclean process
+  // exit cannot promise observations it never durably accepted; committed
+  // checkpoints remain exactly replay-safe on the next backend attachment.
+  yield* Effect.addFinalizer(() =>
+    Effect.forEach(Array.from(pendingAccountingCommits), (committed) => Deferred.await(committed), {
+      concurrency: "unbounded",
+      discard: true,
+    }).pipe(
+      Effect.timeoutOption(2_000),
+      Effect.tap((settled) =>
+        Option.isNone(settled)
+          ? Effect.logWarning("usage stats: shutdown left accounting settlement incomplete")
+          : Effect.void,
+      ),
+    ),
+  );
 
   return {
     get,

@@ -18,6 +18,7 @@ export function runtimeLayerStatusTone(
 ): "default" | "warning" | "danger" {
   switch (status) {
     case "online":
+    case "not-configured":
       return "default";
     case "degraded":
     case "unknown":
@@ -36,6 +37,8 @@ export function runtimeLayerStatusClasses(status: ServerRuntimeLayerStatus): str
     case "offline":
       return "bg-destructive/10 text-destructive";
     case "unknown":
+      return "bg-muted text-muted-foreground";
+    case "not-configured":
       return "bg-muted text-muted-foreground";
   }
 }

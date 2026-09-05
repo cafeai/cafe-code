@@ -87,8 +87,69 @@ describe("ServerProvider", () => {
 
     expect(parsed.slashCommands).toEqual([]);
     expect(parsed.skills).toEqual([]);
+    expect(parsed.probeDiagnostics).toBeUndefined();
     expect(parsed.versionAdvisory).toBeUndefined();
     expect(parsed.updateState).toBeUndefined();
+  });
+
+  it("decodes bounded provider probe diagnostics without retaining unknown sensitive fields", () => {
+    const parsed = decodeServerProvider({
+      instanceId: "codex",
+      driver: "codex",
+      enabled: true,
+      installed: true,
+      version: "1.0.0",
+      status: "ready",
+      auth: { status: "authenticated" },
+      checkedAt: "2026-04-10T00:00:00.000Z",
+      models: [],
+      probeDiagnostics: {
+        attemptCount: 7,
+        consecutiveInconclusiveCount: 1,
+        lastOutcome: "inconclusive",
+        lastStartedAt: "2026-04-10T00:00:00.000Z",
+        lastFinishedAt: "2026-04-10T00:00:04.000Z",
+        lastDurationMs: 4_000,
+        periodicIntervalMs: 300_000,
+        periodicPhaseOffsetMs: 42_000,
+        nextScheduledAt: "2026-04-10T00:05:42.000Z",
+        rawOutput: "SECRET CLI OUTPUT",
+        commandPath: "/private/provider/home/codex",
+      },
+      probePhases: [
+        {
+          phase: "prepare-runtime-home",
+          outcome: "success",
+          durationMs: 42,
+          command: "SECRET PHASE COMMAND",
+        },
+        {
+          phase: "version",
+          outcome: "timeout",
+          durationMs: 5_001,
+          output: "SECRET PHASE OUTPUT",
+        },
+      ],
+    });
+
+    expect(parsed.probeDiagnostics).toEqual({
+      attemptCount: 7,
+      consecutiveInconclusiveCount: 1,
+      lastOutcome: "inconclusive",
+      lastStartedAt: "2026-04-10T00:00:00.000Z",
+      lastFinishedAt: "2026-04-10T00:00:04.000Z",
+      lastDurationMs: 4_000,
+      periodicIntervalMs: 300_000,
+      periodicPhaseOffsetMs: 42_000,
+      nextScheduledAt: "2026-04-10T00:05:42.000Z",
+    });
+    expect(parsed.probePhases).toEqual([
+      { phase: "prepare-runtime-home", outcome: "success", durationMs: 42 },
+      { phase: "version", outcome: "timeout", durationMs: 5_001 },
+    ]);
+    expect(JSON.stringify(parsed)).not.toContain("SECRET CLI OUTPUT");
+    expect(JSON.stringify(parsed)).not.toContain("/private/provider/home/codex");
+    expect(JSON.stringify(parsed)).not.toContain("SECRET PHASE");
   });
 
   it("defaults one-click update support when decoding older advisory snapshots", () => {

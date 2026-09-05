@@ -261,6 +261,7 @@ const STAGED_YARN_PROJECT_FILES = [
   "oxlint-plugin-cafecode/package.json",
   "packages/client-runtime/package.json",
   "packages/contracts/package.json",
+  "packages/effect-acp/package.json",
   "packages/effect-codex-app-server/package.json",
   "packages/shared/package.json",
   "scripts/package.json",
@@ -832,6 +833,31 @@ export function resolveDesktopProductName(version: string): string {
     : (desktopPackageJson.productName ?? "Cafe Code");
 }
 
+export const MAC_MICROPHONE_USAGE_DESCRIPTION =
+  "Cafe Code uses microphone audio only when you start dictation.";
+
+export function resolveMacDesktopBuildConfig(
+  target: string,
+  signed: boolean,
+): Record<string, unknown> {
+  return {
+    mac: {
+      target: target === "dmg" ? [target, "zip"] : [target],
+      icon: "icon.icns",
+      category: "public.app-category.developer-tools",
+      extendInfo: {
+        NSMicrophoneUsageDescription: MAC_MICROPHONE_USAGE_DESCRIPTION,
+      },
+      ...(signed
+        ? {}
+        : {
+            identity: null,
+            hardenedRuntime: false,
+          }),
+    },
+  };
+}
+
 export function resolveLinuxDesktopBuildConfig(target: string): Record<string, unknown> {
   const linux = {
     target: [target],
@@ -919,17 +945,7 @@ const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   }
 
   if (platform === "mac") {
-    buildConfig.mac = {
-      target: target === "dmg" ? [target, "zip"] : [target],
-      icon: "icon.icns",
-      category: "public.app-category.developer-tools",
-      ...(signed
-        ? {}
-        : {
-            identity: null,
-            hardenedRuntime: false,
-          }),
-    };
+    Object.assign(buildConfig, resolveMacDesktopBuildConfig(target, signed));
   }
 
   if (platform === "linux") {

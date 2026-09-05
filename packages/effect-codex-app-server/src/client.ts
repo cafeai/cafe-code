@@ -31,9 +31,21 @@ function truncateDiagnostic(input: string): string {
 export interface CodexAppServerClientOptions {
   readonly logIncoming?: boolean;
   readonly logOutgoing?: boolean;
+  /**
+   * Maximum UTF-8 byte length of one newline-delimited app-server message.
+   * The protocol always applies a finite default when this is omitted.
+   */
+  readonly maxIncomingLineBytes?: number;
   readonly logger?: (
     event: CodexProtocol.CodexAppServerProtocolLogEvent,
   ) => Effect.Effect<void, never>;
+  /**
+   * Observe terminal transport failures even when no request is currently
+   * awaiting a response. Long-lived notification streams otherwise collapse
+   * an oversized or malformed provider message into a later generic process
+   * exit, which hides the actionable protocol boundary from diagnostics.
+   */
+  readonly onTermination?: (error: CodexError.CodexAppServerError) => Effect.Effect<void, never>;
 }
 
 interface CodexAppServerClientRaw {
@@ -251,9 +263,13 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
     ...(terminationError ? { terminationError } : {}),
     ...(options.logIncoming !== undefined ? { logIncoming: options.logIncoming } : {}),
     ...(options.logOutgoing !== undefined ? { logOutgoing: options.logOutgoing } : {}),
+    ...(options.maxIncomingLineBytes !== undefined
+      ? { maxIncomingLineBytes: options.maxIncomingLineBytes }
+      : {}),
     ...(options.logger ? { logger: options.logger } : {}),
     onNotification: dispatchNotification,
     onRequest: dispatchRequest,
+    ...(options.onTermination ? { onTermination: options.onTermination } : {}),
   });
 
   const request = <M extends CodexRpc.ClientRequestMethod>(
