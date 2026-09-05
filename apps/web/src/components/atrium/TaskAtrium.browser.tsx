@@ -232,6 +232,10 @@ const atriumHarness = vi.hoisted(() => {
   };
 });
 
+// Desktop detection is a module-load constant, just as it is in Electron.
+// The separate browser-only overlay test covers the absence of the bridge.
+vi.mock("../../env", () => ({ isElectron: true }));
+
 vi.mock("../../hooks/useSettings", () => ({
   useSettings: (selector: (settings: typeof atriumHarness.settings) => unknown) =>
     selector(atriumHarness.settings),
@@ -890,6 +894,65 @@ async function mountOverlay() {
 const overlay = () => document.querySelector('[data-cafe-task-atrium-overlay="true"]');
 
 describe("TaskAtriumOverlay", () => {
+  it.each([
+    { platform: "Win32", scale: 0.8, inset: 40 },
+    { platform: "Win32", scale: 1.3, inset: 40 },
+    { platform: "MacIntel", scale: 1, inset: 0 },
+    { platform: "Linux x86_64", scale: 1, inset: 0 },
+  ])(
+    "keeps caption controls clear only on Windows desktop ($platform, scale=$scale)",
+    async ({ platform, scale, inset }) => {
+      const root = document.documentElement;
+      const originalFontSize = root.style.fontSize;
+      const originalWco = root.classList.contains("wco");
+      const platformSpy = vi.spyOn(navigator, "platform", "get").mockReturnValue(platform);
+      root.style.fontSize = `${16 * scale}px`;
+      // Chromium's browser runner has no native caption overlay. Enabling its
+      // production visibility class exercises the real CSS with the desktop's
+      // 40px fallback, including non-target hosts where it must do nothing.
+      root.classList.add("wco");
+      useTaskAtriumStore.getState().setOpen(true);
+      const { host, screen } = await mountOverlay();
+      try {
+        await vi.waitFor(() => {
+          expect(overlay()?.className.includes("wco:[--cafe-atrium-titlebar-inset")).toBe(
+            inset > 0,
+          );
+          const close = page.getByRole("button", { name: "Close Task Atrium" }).element();
+          const closeBox = close.getBoundingClientRect();
+          const filters = page.getByRole("group", { name: "Filter by provider" }).element();
+          const filterBox = filters.getBoundingClientRect();
+          expect(closeBox.top).toBeCloseTo(inset + 16 * scale, 1);
+          expect(window.innerWidth - closeBox.right).toBeCloseTo(16 * scale, 1);
+          expect(filterBox.top).toBeGreaterThanOrEqual(inset + 16 * scale - 1);
+          expect(filterBox.right).toBeLessThanOrEqual(closeBox.left);
+          expect(overlay()?.getBoundingClientRect().top).toBe(0);
+          expect(getComputedStyle(overlay()!).getPropertyValue("-webkit-app-region")).toBe(
+            "no-drag",
+          );
+        });
+
+        // Native geometry/visibility changes must update layout without a
+        // React remount, e.g. when entering fullscreen and restoring it.
+        root.classList.remove("wco");
+        await vi.waitFor(() => {
+          const close = page.getByRole("button", { name: "Close Task Atrium" }).element();
+          expect(close.getBoundingClientRect().top).toBeCloseTo(16 * scale, 1);
+        });
+        root.classList.add("wco");
+        await page.getByRole("button", { name: "Close Task Atrium" }).click();
+        await vi.waitFor(() => expect(overlay()).toBeNull());
+      } finally {
+        useTaskAtriumStore.getState().setOpen(false);
+        await screen.unmount();
+        host.remove();
+        root.style.fontSize = originalFontSize;
+        root.classList.toggle("wco", originalWco);
+        platformSpy.mockRestore();
+      }
+    },
+  );
+
   it("stays closed until it is opened", async () => {
     useTaskAtriumStore.getState().setOpen(false);
     const { host, screen } = await mountOverlay();

@@ -2,7 +2,9 @@ import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
 import { X } from "lucide-react";
 import { useEffect } from "react";
 
+import { isElectron } from "../../env";
 import { useSettings } from "../../hooks/useSettings";
+import { cn, isWindowsPlatform } from "../../lib/utils";
 import { TaskAtriumBoard } from "./TaskAtrium";
 import { useTaskAtriumStore } from "./taskAtriumStore";
 
@@ -28,6 +30,7 @@ export function TaskAtriumOverlay() {
   const enabled = useSettings((settings) => settings.ambianceAtriumEnabled);
   const open = useTaskAtriumStore((state) => state.open);
   const setOpen = useTaskAtriumStore((state) => state.setOpen);
+  const reserveNativeTitlebar = isElectron && isWindowsPlatform(navigator.platform);
 
   // Close if the feature is switched off while the panel happens to be open.
   useEffect(() => {
@@ -40,7 +43,16 @@ export function TaskAtriumOverlay() {
     <DialogPrimitive.Root open={open} onOpenChange={setOpen}>
       <DialogPrimitive.Portal>
         <DialogPrimitive.Popup
-          className="fixed inset-0 z-[60] flex flex-col bg-background outline-none [-webkit-app-region:no-drag]"
+          // Native caption buttons sit above renderer content, regardless of
+          // z-index. Reserve the same band for the close button and board so
+          // provider filters cannot collide with either close control. `wco`
+          // tracks native visibility, including entering/leaving fullscreen;
+          // the fallback matches DesktopWindow's 40px caption configuration.
+          className={cn(
+            "fixed inset-0 z-[60] flex flex-col bg-background outline-none [-webkit-app-region:no-drag]",
+            reserveNativeTitlebar &&
+              "wco:[--cafe-atrium-titlebar-inset:calc(env(titlebar-area-y,0px)+env(titlebar-area-height,40px))] pt-[var(--cafe-atrium-titlebar-inset,0px)]",
+          )}
           aria-label="Task Atrium"
           aria-modal="true"
           data-cafe-task-atrium-overlay="true"
@@ -54,7 +66,7 @@ export function TaskAtriumOverlay() {
         >
           <DialogPrimitive.Close
             aria-label="Close Task Atrium"
-            className="absolute right-4 top-4 z-30 flex size-8 items-center justify-center rounded-full border border-white/15 bg-black/35 text-white/80 backdrop-blur-md transition-colors hover:bg-black/50 hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white/60 dark:border-white/15"
+            className="absolute right-4 top-[calc(var(--cafe-atrium-titlebar-inset,0px)+1rem)] z-30 flex size-8 items-center justify-center rounded-full border border-white/15 bg-black/35 text-white/80 backdrop-blur-md transition-colors hover:bg-black/50 hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white/60 dark:border-white/15"
           >
             <X className="size-4" />
           </DialogPrimitive.Close>
