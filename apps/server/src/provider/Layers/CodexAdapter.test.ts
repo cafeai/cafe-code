@@ -2414,6 +2414,80 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       }),
   );
 
+  it.effect("preserves a failed root outcome while later routed child work stays observable", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.take(adapter.streamEvents, 2).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* runtime.emit({
+        id: asEventId("evt-capacity-root-terminal"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-09-05T00:00:00.000Z",
+        method: "turn/completed",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-parent"),
+        payload: {
+          threadId: "provider-thread-1",
+          turn: {
+            id: "turn-parent",
+            status: "failed",
+            items: [],
+            itemsView: "notLoaded",
+            error: {
+              message: "Selected model is at capacity",
+              codexErrorInfo: "serverOverloaded",
+              additionalDetails: null,
+            },
+          },
+        },
+      } satisfies ProviderEvent);
+      yield* runtime.emit({
+        id: asEventId("evt-child-after-capacity-root"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-09-05T00:00:01.000Z",
+        method: "codex.subagent/itemCompleted",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-parent"),
+        itemId: asItemId("child-progress"),
+        payload: {
+          completedAtMs: 1_788_566_401_000,
+          threadId: "provider-child",
+          turnId: "native-child-turn",
+          item: {
+            type: "reasoning",
+            id: "child-progress",
+            summary: ["Finishing child work"],
+            content: [],
+          },
+        },
+      } satisfies ProviderEvent);
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      assert.deepStrictEqual(
+        events.map((event) => event.type),
+        ["turn.completed", "task.progress"],
+      );
+      const terminal = events[0];
+      assert.equal(
+        terminal?.type === "turn.completed" ? terminal.payload.state : undefined,
+        "failed",
+      );
+      assert.equal(
+        terminal?.type === "turn.completed" ? terminal.payload.errorMessage : undefined,
+        "Selected model is at capacity",
+      );
+      const child = events[1];
+      assert.equal(
+        child?.type === "task.progress" ? child.payload.subagent?.threadId : undefined,
+        "provider-child",
+      );
+      assert.equal(child?.turnId, "turn-parent");
+    }),
+  );
+
   it.effect("maps the final Codex notification burst through the canonical bridge", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();

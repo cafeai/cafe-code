@@ -35,6 +35,7 @@ import {
   CODEX_PENDING_STEER_UNRESOLVED_CAPACITY,
   acknowledgeCodexPendingSteerProcessing,
   acknowledgeCodexSteerLifecycleBoundary,
+  acknowledgeCodexTurnStartLifecycleBoundary,
   admitCodexPendingSteerProcessing,
   buildCodexAppServerArgs,
   buildCodexActiveContextCompactionSteerError,
@@ -47,6 +48,9 @@ import {
   claimCodexRestartedSteerProcessingObservation,
   codexAggregateNotificationMethod,
   codexAggregateTurnHasUnfinishedChildren,
+  canReopenCodexAggregateRootCompletion,
+  reconcileCodexAggregateRootCompletion,
+  readCodexAggregateRootCompletion,
   codexChildConversationThreadIdsForTurn,
   codexElapsedDelayMilliseconds,
   codexElapsedDelayRemainingMilliseconds,
@@ -85,6 +89,7 @@ import {
   type CodexInitializedSubagentHistoryReadClient,
   type CodexBoundedThreadSnapshotClient,
   type CodexPendingSteerProcessing,
+  type CodexAggregateRootCompletion,
   type CodexSubagentHistoryReadClient,
 } from "./CodexSessionRuntime.ts";
 import {
@@ -1258,6 +1263,90 @@ describe("Codex child conversation routing", () => {
       ),
       undefined,
     );
+  });
+
+  it.each(["failed", "interrupted", "cancelled"] as const)(
+    "does not defer or reopen a %s root while routed children remain live",
+    (state) => {
+      const completion = readCodexAggregateRootCompletion(
+        {
+          method: "turn/completed",
+          params: {
+            threadId: "native-root",
+            turn: {
+              id: "root-turn",
+              status: state,
+              error: { message: "Selected model is at capacity" },
+            },
+          },
+        },
+        "2026-09-05T00:00:00.000Z",
+      )!;
+      const result = reconcileCodexAggregateRootCompletion({
+        completion,
+        completions: new Map(),
+        managed: new Set(),
+        pending: new Set(),
+        hasUnfinishedChildren: true,
+      });
+      assert.equal(result.action, "terminal");
+      assert.equal(result.pending.size, 0);
+      assert.equal(canReopenCodexAggregateRootCompletion(result.completion), false);
+      assert.equal(
+        result.completion.errorMessage,
+        state === "failed" ? "Selected model is at capacity" : undefined,
+      );
+      const replayedSuccess = reconcileCodexAggregateRootCompletion({
+        ...result,
+        completion: { ...completion, state: "completed" },
+        hasUnfinishedChildren: true,
+      });
+      assert.equal(replayedSuccess.action, "duplicate");
+      assert.equal(replayedSuccess.completion.state, state);
+      assert.equal(replayedSuccess.pending.size, 0);
+    },
+  );
+
+  it("retains successful aggregation but lets failed snapshots release an older deferred root", () => {
+    const completion: CodexAggregateRootCompletion = {
+      turnId: TurnId.make("root-turn"),
+      state: "completed",
+      observedAt: "2026-09-05T00:00:00.000Z",
+    };
+    const deferred = reconcileCodexAggregateRootCompletion({
+      completion,
+      completions: new Map(),
+      managed: new Set(),
+      pending: new Set(),
+      hasUnfinishedChildren: true,
+    });
+    assert.equal(deferred.action, "defer");
+    assert.equal(deferred.pending.has("root-turn"), true);
+    assert.equal(canReopenCodexAggregateRootCompletion(completion), true);
+    const duplicate = reconcileCodexAggregateRootCompletion({
+      ...deferred,
+      completion,
+      hasUnfinishedChildren: true,
+    });
+    assert.equal(duplicate.action, "duplicate");
+    const failed = reconcileCodexAggregateRootCompletion({
+      ...deferred,
+      completion: { ...completion, state: "failed", errorMessage: "Selected model is at capacity" },
+      hasUnfinishedChildren: true,
+    });
+    assert.equal(failed.action, "terminal");
+    assert.equal(failed.pending.size, 0);
+    assert.equal(canReopenCodexAggregateRootCompletion(failed.completion), false);
+    // Repair a stale already-deferred failure without requiring descendants to
+    // stop or treating an unreadable child channel as terminal evidence.
+    const stale = reconcileCodexAggregateRootCompletion({
+      ...failed,
+      completion: failed.completion,
+      pending: new Set(["root-turn"]),
+      hasUnfinishedChildren: true,
+    });
+    assert.equal(stale.action, "terminal");
+    assert.equal(stale.pending.size, 0);
   });
 
   it("tracks aggregate child liveness from the same live-channel events as the TUI", () => {
@@ -2571,6 +2660,237 @@ describe("Codex steer processing diagnostics", () => {
         assert.equal(finalPending?.terminalObservedAt, "2026-05-26T00:00:00.050Z");
         assert.equal(finalPending?.acknowledgedAt, "2026-05-26T00:00:00.100Z");
       }),
+  );
+
+  effectIt.effect("settles a capacity-failed root before publication and a late steer ACK", () =>
+    Effect.gen(function* () {
+      const pending = makePendingSteerProcessingFixture(1);
+      const turnId = pending.turnId;
+      const completion = readCodexAggregateRootCompletion(
+        {
+          method: "turn/completed",
+          params: {
+            threadId: "provider-thread-1",
+            turn: {
+              id: turnId,
+              status: "failed",
+              error: { message: "Selected model is at capacity" },
+            },
+          },
+        },
+        "2026-09-05T00:00:00.050Z",
+      )!;
+      const routes = new Map(["child-a", "child-b", "child-c"].map((id) => [id, turnId]));
+      const decision = reconcileCodexAggregateRootCompletion({
+        completion,
+        completions: new Map(),
+        managed: new Set(),
+        pending: new Set(),
+        hasUnfinishedChildren: codexAggregateTurnHasUnfinishedChildren(routes, new Map(), turnId),
+      });
+      assert.equal(decision.action, "terminal");
+      assert.equal(routes.size, 3);
+      const pendingRef = yield* Ref.make(new Map([[pending.steerId, pending]]));
+      const sessionRef = yield* Ref.make<ProviderSession>({
+        provider: ProviderDriverKind.make("codex"),
+        status: "running",
+        runtimeMode: "full-access",
+        threadId: ThreadId.make("thread-1"),
+        activeTurnId: turnId,
+        createdAt: "2026-09-05T00:00:00.000Z",
+        updatedAt: "2026-09-05T00:00:00.000Z",
+      });
+      const semaphore = yield* Semaphore.make(1);
+      yield* publishCodexTurnCompletionAfterLifecycleBoundary({
+        semaphore,
+        pendingRef,
+        sessionRef,
+        turnId,
+        turnStatus: completion.state,
+        errorMessage: completion.errorMessage,
+        observedAt: completion.observedAt,
+        publish: Effect.gen(function* () {
+          const session = yield* Ref.get(sessionRef);
+          assert.equal(session.status, "error");
+          assert.equal(session.activeTurnId, undefined);
+          assert.equal(session.lastError, "Selected model is at capacity");
+          assert.equal((yield* Ref.get(pendingRef)).get(pending.steerId)?.terminalState, "failed");
+        }),
+      });
+      const acknowledgement = yield* acknowledgeCodexSteerLifecycleBoundary({
+        semaphore,
+        pendingRef,
+        sessionRef,
+        steerId: pending.steerId,
+        expectedTurnId: turnId,
+        turnId,
+        acknowledgedAt: "2026-09-05T00:00:00.100Z",
+        acknowledgedAtMs: 100,
+        ackLatencyMs: 100,
+      });
+      assert.equal(acknowledgement.restoredRunning, false);
+      assert.equal((yield* Ref.get(sessionRef)).activeTurnId, undefined);
+      assert.equal((yield* Ref.get(sessionRef)).lastError, "Selected model is at capacity");
+      assert.equal(canReopenCodexAggregateRootCompletion(decision.completion), false);
+    }),
+  );
+
+  effectIt.effect("keeps root terminal/newer/Stop truth ahead of delayed turn/start ACKs", () =>
+    Effect.gen(function* () {
+      const firstTurnId = TurnId.make("turn-start-ack");
+      for (const scenario of [
+        "ordinary",
+        "old-success-replay",
+        "native-started",
+        "failed",
+        "completed",
+        "interrupted",
+        "cancelled",
+        "terminal-recorded",
+        "newer-active",
+        "provisional-terminal",
+        "closed",
+        "deferred-success",
+      ] as const) {
+        const semaphore = yield* Semaphore.make(1);
+        const requestedRootLifecycleEpoch = Symbol();
+        const rootLifecycleEpochRef = yield* Ref.make<symbol>(requestedRootLifecycleEpoch);
+        const closedRef = yield* Ref.make(false);
+        const completionsRef = yield* Ref.make(new Map<string, CodexAggregateRootCompletion>());
+        const sessionRef = yield* Ref.make<ProviderSession>({
+          provider: ProviderDriverKind.make("codex"),
+          status: "ready",
+          runtimeMode: "full-access",
+          threadId: ThreadId.make("thread-1"),
+          model: "gpt-6-astra",
+          createdAt: "2026-09-05T00:00:00.000Z",
+          updatedAt: "2026-09-05T00:00:00.000Z",
+        });
+        const waiting = yield* Deferred.make<void>();
+        const releaseAck = yield* Deferred.make<void>();
+        const ackFiber = yield* Effect.gen(function* () {
+          yield* Deferred.succeed(waiting, undefined);
+          yield* Deferred.await(releaseAck);
+          return yield* acknowledgeCodexTurnStartLifecycleBoundary({
+            semaphore,
+            completionsRef,
+            rootLifecycleEpochRef,
+            requestedRootLifecycleEpoch,
+            closedRef,
+            sessionRef,
+            turnId: firstTurnId,
+            model: "gpt-5.6-sol",
+            acknowledgedAt: "2026-09-05T00:00:00.100Z",
+          });
+        }).pipe(Effect.forkChild);
+        yield* Deferred.await(waiting);
+        if (scenario === "old-success-replay") {
+          const oldCompletion: CodexAggregateRootCompletion = {
+            turnId: TurnId.make("old-completed-turn"),
+            state: "completed",
+            observedAt: "2026-09-04T00:00:00.000Z",
+          };
+          const replay = reconcileCodexAggregateRootCompletion({
+            completion: { ...oldCompletion, observedAt: "2026-09-05T00:00:00.050Z" },
+            completions: new Map([[String(oldCompletion.turnId), oldCompletion]]),
+            managed: new Set(),
+            pending: new Set(),
+            hasUnfinishedChildren: false,
+          });
+          yield* Ref.set(completionsRef, replay.completions);
+          if (replay.rootLifecycleChanged) yield* Ref.set(rootLifecycleEpochRef, Symbol());
+          assert.equal(replay.rootLifecycleChanged, false);
+        } else if (scenario === "native-started") {
+          yield* Ref.set(rootLifecycleEpochRef, Symbol());
+          yield* Ref.update(
+            sessionRef,
+            (session): ProviderSession => ({
+              ...session,
+              status: "running",
+              activeTurnId: firstTurnId,
+              updatedAt: "2026-09-05T00:00:00.050Z",
+            }),
+          );
+        } else if (scenario === "newer-active") {
+          // The final exact-active compare is still required if the typed
+          // observer made concrete ownership visible before an epoch update.
+          yield* Ref.update(
+            sessionRef,
+            (session): ProviderSession => ({
+              ...session,
+              status: "running",
+              activeTurnId: TurnId.make("newer-concrete-turn"),
+            }),
+          );
+        } else if (scenario === "closed") {
+          yield* Ref.set(closedRef, true);
+          yield* Ref.update(
+            sessionRef,
+            (session): ProviderSession => ({ ...session, status: "closed" }),
+          );
+        } else if (scenario !== "ordinary") {
+          const state =
+            scenario === "failed" ||
+            scenario === "provisional-terminal" ||
+            scenario === "terminal-recorded"
+              ? "failed"
+              : scenario === "interrupted" || scenario === "cancelled"
+                ? scenario
+                : "completed";
+          const concreteTurnId =
+            scenario === "provisional-terminal"
+              ? TurnId.make("concrete-terminal-turn")
+              : firstTurnId;
+          yield* Ref.set(
+            completionsRef,
+            new Map([
+              [
+                String(concreteTurnId),
+                {
+                  turnId: concreteTurnId,
+                  state,
+                  observedAt: "2026-09-05T00:00:00.050Z",
+                },
+              ],
+            ]),
+          );
+          if (scenario === "provisional-terminal" || scenario === "deferred-success")
+            yield* Ref.set(rootLifecycleEpochRef, Symbol());
+          yield* Ref.update(
+            sessionRef,
+            (session): ProviderSession => ({
+              ...session,
+              status:
+                scenario === "deferred-success" || scenario === "terminal-recorded"
+                  ? "running"
+                  : state === "failed"
+                    ? "error"
+                    : "ready",
+              activeTurnId:
+                scenario === "deferred-success" || scenario === "terminal-recorded"
+                  ? firstTurnId
+                  : undefined,
+              lastError: state === "failed" ? "Selected model is at capacity" : undefined,
+              updatedAt: "2026-09-05T00:00:00.050Z",
+            }),
+          );
+        }
+        const beforeAck = yield* Ref.get(sessionRef);
+        yield* Deferred.succeed(releaseAck, undefined);
+        const ordinaryAck = scenario === "ordinary" || scenario === "old-success-replay";
+        assert.equal(yield* Fiber.join(ackFiber), ordinaryAck, scenario);
+        const afterAck = yield* Ref.get(sessionRef);
+        if (ordinaryAck) {
+          assert.equal(afterAck.status, "running");
+          assert.equal(afterAck.activeTurnId, firstTurnId);
+          assert.equal(afterAck.model, "gpt-5.6-sol");
+        } else if (scenario === "native-started") {
+          assert.deepStrictEqual(afterAck, { ...beforeAck, model: "gpt-5.6-sol" });
+        } else {
+          assert.deepStrictEqual(afterAck, beforeAck, scenario);
+        }
+      }
+    }),
   );
 
   effectIt.effect("commits a late T1 completion before publication without clearing live T2", () =>

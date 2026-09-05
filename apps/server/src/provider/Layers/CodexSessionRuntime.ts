@@ -755,7 +755,7 @@ export interface CodexChildConversationLiveness {
   readonly method: string;
 }
 
-interface CodexAggregateRootCompletion {
+export interface CodexAggregateRootCompletion {
   readonly turnId: TurnId;
   readonly state: "completed" | "failed" | "interrupted" | "cancelled";
   readonly errorMessage?: string;
@@ -2852,6 +2852,133 @@ export function codexAggregateTurnHasUnfinishedChildren(
   });
 }
 
+/**
+ * Only successful root completion can wait for independently live descendants.
+ * App-server's failed/interrupted terminal outcomes end that root's input loop
+ * (https://learn.chatgpt.com/docs/app-server#errors); child activity is not proof
+ * that the root can accept turn/steer. Keep child routes/liveness untouched.
+ *
+ * This reducer is shared by live and authoritative snapshot completion. A
+ * failed snapshot can replace an earlier deferred success, while later success
+ * replay cannot replace an already observed failed/interrupted outcome.
+ */
+export function reconcileCodexAggregateRootCompletion(input: {
+  readonly completion: CodexAggregateRootCompletion;
+  readonly completions: ReadonlyMap<string, CodexAggregateRootCompletion>;
+  readonly managed: ReadonlySet<string>;
+  readonly pending: ReadonlySet<string>;
+  readonly hasUnfinishedChildren: boolean;
+}) {
+  const key = String(input.completion.turnId);
+  const previous = input.completions.get(key);
+  const completion = previous && previous.state !== "completed" ? previous : input.completion;
+  const completions = new Map(input.completions);
+  const managed = new Set(input.managed);
+  const pending = new Set(input.pending);
+  let action: "duplicate" | "terminal" | "defer";
+  if (
+    previous &&
+    previous.state !== "completed" &&
+    (input.completion.state === "completed" || !pending.has(key))
+  ) {
+    action = "duplicate";
+  } else if (completion.state !== "completed") {
+    action = "terminal";
+    pending.delete(key);
+    managed.add(key);
+    completions.set(key, completion);
+  } else if (managed.has(key)) {
+    action = "duplicate";
+  } else {
+    completions.set(key, completion);
+    action = input.hasUnfinishedChildren ? "defer" : "terminal";
+    if (action === "defer") {
+      pending.add(key);
+      managed.add(key);
+    }
+  }
+  while (completions.size > 50) completions.delete(completions.keys().next().value!);
+  while (managed.size > 100) managed.delete(managed.values().next().value!);
+  // Successful roots without children remain eligible for later live-child
+  // aggregation, so they are deliberately not in `managed`. Reobserving that
+  // already-known success is still not NEW root lifecycle: fencing a later
+  // turn/start ACK on it would lose missing-turn/started backfill admission.
+  const rootLifecycleChanged =
+    action !== "duplicate" && (previous === undefined || previous.state !== completion.state);
+  return { action, completion, completions, managed, pending, rootLifecycleChanged };
+}
+
+export function canReopenCodexAggregateRootCompletion(
+  completion: CodexAggregateRootCompletion | undefined,
+): completion is CodexAggregateRootCompletion & { readonly state: "completed" } {
+  return completion?.state === "completed";
+}
+
+/**
+ * A turn/start response acknowledges a request, not a new lifecycle edge.
+ * Native turn/started/completed can arrive before its continuation, including
+ * a concrete native id different from the provisional ACK id. An opaque,
+ * process-local root lifecycle epoch fences that case without inventing an id
+ * mapping or treating unrelated child progress as root authority.
+ *
+ * Root lifecycle observations use the same semaphore. The exact terminal map
+ * and closed/active-session compare remain independent guards against replay
+ * and Stop. Never issue a replacement provider request from this boundary.
+ */
+export function acknowledgeCodexTurnStartLifecycleBoundary(input: {
+  readonly semaphore: Semaphore.Semaphore;
+  readonly completionsRef: Ref.Ref<Map<string, CodexAggregateRootCompletion>>;
+  readonly rootLifecycleEpochRef: Ref.Ref<symbol>;
+  readonly requestedRootLifecycleEpoch: symbol;
+  readonly closedRef: Ref.Ref<boolean>;
+  readonly sessionRef: Ref.Ref<ProviderSession>;
+  readonly turnId: TurnId;
+  readonly model?: string | undefined;
+  readonly acknowledgedAt: string;
+}): Effect.Effect<boolean> {
+  return input.semaphore.withPermits(1)(
+    Effect.uninterruptible(
+      Effect.gen(function* () {
+        if (
+          (yield* Ref.get(input.closedRef)) ||
+          (yield* Ref.get(input.completionsRef)).has(String(input.turnId))
+        )
+          return false;
+        const rootLifecycleChanged =
+          (yield* Ref.get(input.rootLifecycleEpochRef)) !== input.requestedRootLifecycleEpoch;
+        return yield* Ref.modify(input.sessionRef, (session) => {
+          if (
+            session.status === "closed" ||
+            (session.activeTurnId !== undefined && session.activeTurnId !== input.turnId)
+          )
+            return [false, session] as const;
+          if (rootLifecycleChanged) {
+            // The same known-live native turn can still accept its request's
+            // model selection metadata. Do not rewrite lifecycle fields or
+            // timestamps, and never apply this to a different/provisional id.
+            return [
+              false,
+              session.status === "running" && session.activeTurnId === input.turnId && input.model
+                ? { ...session, model: input.model }
+                : session,
+            ] as const;
+          }
+          return [
+            true,
+            {
+              ...session,
+              status: "running" as const,
+              activeTurnId: input.turnId,
+              ...(input.model ? { model: input.model } : {}),
+              updatedAt: input.acknowledgedAt,
+            },
+          ] as const;
+        });
+      }),
+    ),
+  );
+}
+
 export function isTerminalCodexChildThreadReadError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   // This is the exact terminal classification used by upstream Codex TUI
@@ -3116,10 +3243,36 @@ function normalizeCodexPendingSteerTerminalState(
 }
 
 function readNotificationErrorMessage(notification: CodexServerNotification): string | undefined {
+  // Terminal turn errors are nested under turn.error, unlike the standalone
+  // error notification. Preserve that provider explanation at the terminal
+  // boundary instead of replacing a capacity failure with an undefined error.
+  const turnError = readRecord(readRecord(readRecord(notification.params)?.turn)?.error);
   return (
+    (typeof turnError?.message === "string" ? turnError.message : undefined) ??
     readNotificationNestedString(notification, "error", "message") ??
     readNotificationParamString(notification, "message")
   );
+}
+
+export function readCodexAggregateRootCompletion(
+  notification: CodexServerNotification,
+  observedAt: string,
+): CodexAggregateRootCompletion | undefined {
+  const turnId = readNotificationTurnId(notification);
+  if (!turnId) return undefined;
+  const status = readNotificationTurnStatus(notification);
+  const errorMessage = status === "failed" ? readNotificationErrorMessage(notification) : undefined;
+  const providerThreadId = readNotificationThreadId(notification);
+  return {
+    turnId,
+    state:
+      status === "failed" || status === "interrupted" || status === "cancelled"
+        ? status
+        : "completed",
+    ...(errorMessage !== undefined ? { errorMessage } : {}),
+    ...(providerThreadId !== undefined ? { providerThreadId } : {}),
+    observedAt,
+  };
 }
 
 function updateSession(
@@ -3712,6 +3865,10 @@ export const makeCodexSessionRuntime = (
     const aggregateManagedTurnIdsRef = yield* Ref.make<ReadonlySet<string>>(new Set());
     const aggregateCompletionWatcherTurnIdsRef = yield* Ref.make<ReadonlySet<string>>(new Set());
     const aggregateLifecycleSemaphore = yield* Semaphore.make(1);
+    // One opaque token, never logged/persisted, changes only on root turn
+    // lifecycle. A long-delayed request can compare its captured token without
+    // retaining notification history or relying on wall-clock ordering.
+    const rootTurnLifecycleEpochRef = yield* Ref.make(Symbol());
     // Request responses and raw notifications are independent Effect fibers.
     // Serialize the two writes that decide steer-vs-terminal ownership so a
     // late ACK can never overwrite an already-authoritative terminal state.
@@ -4317,6 +4474,8 @@ export const makeCodexSessionRuntime = (
             !(
               event.method === "turn/completed" &&
               event.turnId !== undefined &&
+              readNotificationTurnStatus({ method: event.method, params: event.payload }) ===
+                "completed" &&
               aggregateManagedTurnIds.has(String(event.turnId))
             ),
         );
@@ -4339,7 +4498,30 @@ export const makeCodexSessionRuntime = (
           focusTurnId: input.focusTurnId,
           eventCount: unseenEvents.length,
         });
-        yield* Queue.offerAll(events, unseenEvents).pipe(Effect.asVoid);
+        for (const event of unseenEvents) {
+          const notification = { method: event.method, params: event.payload };
+          const state = readNotificationTurnStatus(notification);
+          if (event.method === "turn/completed" && event.turnId && state && state !== "completed") {
+            // Failed/interrupted snapshots must escape a stale aggregate wait,
+            // settle exact-turn steer ACK races, and preserve the failure
+            // before downstream recovery sees the terminal event. Do not run
+            // snapshots through the ordinary live notification handler: that
+            // would falsely treat historical items as live child continuation.
+            if (yield* handleAggregateRootCompletion(notification, event.createdAt)) continue;
+            yield* publishCodexTurnCompletionAfterLifecycleBoundary({
+              semaphore: steerLifecycleSemaphore,
+              pendingRef: pendingSteerProcessingRef,
+              sessionRef,
+              turnId: event.turnId,
+              turnStatus: state,
+              errorMessage: readNotificationErrorMessage(notification),
+              observedAt: event.createdAt,
+              publish: Queue.offer(events, event).pipe(Effect.asVoid),
+            });
+          } else {
+            yield* Queue.offer(events, event);
+          }
+        }
       });
 
     const readAndBackfillSnapshot = (input: {
@@ -4462,11 +4644,15 @@ export const makeCodexSessionRuntime = (
           return;
         }
 
-        if ((yield* Ref.get(pendingAggregateCompletionsRef)).has(String(input.turnId))) {
+        if (
+          input.turn.status === "completed" &&
+          (yield* Ref.get(pendingAggregateCompletionsRef)).has(String(input.turnId))
+        ) {
           // The root provider thread is terminal, but Cafe's visible turn is an
           // aggregate of that root plus routed subagent channels. A root-only
           // thread/read snapshot cannot close the aggregate while child
-          // liveness remains pending.
+          // liveness remains pending. Failed/interrupted root outcomes are
+          // terminal independently of those descendants and must not wait.
           return;
         }
 
@@ -4786,18 +4972,6 @@ export const makeCodexSessionRuntime = (
         return next;
       });
 
-    const recordAggregateRootCompletion = (completion: CodexAggregateRootCompletion) =>
-      Ref.update(aggregateRootCompletionsRef, (current) => {
-        const next = new Map(current);
-        next.set(String(completion.turnId), completion);
-        while (next.size > 50) {
-          const oldest = next.keys().next().value;
-          if (oldest === undefined) break;
-          next.delete(oldest);
-        }
-        return next;
-      });
-
     const finalizeAggregateCompletionIfIdle = (turnId: TurnId) =>
       aggregateLifecycleSemaphore.withPermits(1)(
         Effect.gen(function* () {
@@ -4998,51 +5172,42 @@ export const makeCodexSessionRuntime = (
       observedAt: string,
     ) =>
       Effect.gen(function* () {
-        const turnId = readNotificationTurnId(notification);
-        if (!turnId) return false;
-        const turnStatus = readNotificationTurnStatus(notification);
-        const errorMessage =
-          turnStatus === "failed" ? readNotificationErrorMessage(notification) : undefined;
-        const providerThreadId = readNotificationThreadId(notification);
-        const completion = {
-          turnId,
-          state:
-            turnStatus === "failed"
-              ? "failed"
-              : turnStatus === "interrupted"
-                ? "interrupted"
-                : turnStatus === "cancelled"
-                  ? "cancelled"
-                  : "completed",
-          ...(errorMessage !== undefined ? { errorMessage } : {}),
-          ...(providerThreadId !== undefined ? { providerThreadId } : {}),
-          observedAt,
-        } satisfies CodexAggregateRootCompletion;
+        const completion = readCodexAggregateRootCompletion(notification, observedAt);
+        if (!completion) return false;
+        const { turnId } = completion;
 
         const deferred = yield* aggregateLifecycleSemaphore.withPermits(1)(
           Effect.gen(function* () {
             const key = String(turnId);
-            if ((yield* Ref.get(aggregateManagedTurnIdsRef)).has(key)) {
+            const routes = yield* Ref.get(collabReceiverTurnsRef);
+            const liveness = yield* Ref.get(childConversationLivenessRef);
+            const pending = yield* Ref.get(pendingAggregateCompletionsRef);
+            const result = reconcileCodexAggregateRootCompletion({
+              completion,
+              completions: yield* Ref.get(aggregateRootCompletionsRef),
+              managed: yield* Ref.get(aggregateManagedTurnIdsRef),
+              pending,
+              hasUnfinishedChildren: codexAggregateTurnHasUnfinishedChildren(
+                routes,
+                liveness,
+                turnId,
+              ),
+            });
+            yield* Ref.set(aggregateRootCompletionsRef, result.completions);
+            yield* Ref.set(aggregateManagedTurnIdsRef, result.managed);
+            yield* Ref.set(pendingAggregateCompletionsRef, result.pending);
+            if (result.action === "duplicate") {
               // The aggregate lifecycle already consumed this root terminal
               // event. Suppress reconnect/replay duplicates so they cannot
               // shift the final duration or race a recovered child channel.
               return true;
             }
-            yield* recordAggregateRootCompletion(completion);
-            const routes = yield* Ref.get(collabReceiverTurnsRef);
-            const liveness = yield* Ref.get(childConversationLivenessRef);
-            if (!codexAggregateTurnHasUnfinishedChildren(routes, liveness, turnId)) {
+            if (result.rootLifecycleChanged) yield* Ref.set(rootTurnLifecycleEpochRef, Symbol());
+            if (result.action === "terminal") {
               return false;
             }
 
-            const pending = yield* Ref.get(pendingAggregateCompletionsRef);
             const alreadyPending = pending.has(key);
-            if (!alreadyPending) {
-              const nextPending = new Set(pending);
-              nextPending.add(key);
-              yield* Ref.set(pendingAggregateCompletionsRef, nextPending);
-            }
-            yield* rememberAggregateManagedTurn(turnId);
             yield* Ref.update(sessionRef, (session) =>
               session.activeTurnId !== undefined && session.activeTurnId !== turnId
                 ? session
@@ -5105,10 +5270,12 @@ export const makeCodexSessionRuntime = (
 
             const key = String(parentTurnId);
             const rootCompletion = (yield* Ref.get(aggregateRootCompletionsRef)).get(key);
-            if (!rootCompletion) {
+            if (!canReopenCodexAggregateRootCompletion(rootCompletion)) {
               // Without a root completion observed by this live runtime, this
               // may be historical replay. Keep content, but do not weaken the
               // stale-session guard by reopening from ambiguous evidence.
+              // A failed/interrupted root also remains terminal even while its
+              // descendants legitimately finish and remain observable.
               return false;
             }
 
@@ -5154,6 +5321,25 @@ export const makeCodexSessionRuntime = (
         }),
       );
 
+    const observeRootTurnStarted = (turnId: TurnId | undefined) =>
+      aggregateLifecycleSemaphore.withPermits(1)(
+        Effect.gen(function* () {
+          // Typed and raw notification observers run independently. A delayed
+          // copy of the same start must not undo terminal root evidence already
+          // committed by the other observer; real new turns have their own ids.
+          if (
+            (yield* Ref.get(closedRef)) ||
+            (turnId && (yield* Ref.get(aggregateRootCompletionsRef)).has(String(turnId)))
+          )
+            return;
+          yield* Ref.set(rootTurnLifecycleEpochRef, Symbol());
+          yield* updateSession(sessionRef, {
+            status: "running",
+            ...(turnId ? { activeTurnId: turnId } : {}),
+          });
+        }),
+      );
+
     const reconcileRawNotificationSessionState = (notification: CodexServerNotification) =>
       Effect.gen(function* () {
         if (!(yield* notificationBelongsToCurrentSession(notification))) {
@@ -5172,10 +5358,7 @@ export const makeCodexSessionRuntime = (
           }
           case "turn/started": {
             const turnId = readNotificationTurnId(notification);
-            yield* updateSession(sessionRef, {
-              status: "running",
-              ...(turnId ? { activeTurnId: turnId } : {}),
-            });
+            yield* observeRootTurnStarted(turnId);
             return;
           }
           case "turn/completed": {
@@ -5498,10 +5681,7 @@ export const makeCodexSessionRuntime = (
           if (providerThreadId && payload.threadId !== providerThreadId) {
             return Effect.void;
           }
-          return updateSession(sessionRef, {
-            status: "running",
-            activeTurnId: TurnId.make(payload.turn.id),
-          });
+          return observeRootTurnStarted(TurnId.make(payload.turn.id));
         }),
       ),
     );
@@ -5983,6 +6163,7 @@ export const makeCodexSessionRuntime = (
           });
           const turnStartRequestedAt = yield* nowIso;
           const turnStartRequestedAtMs = yield* Clock.currentTimeMillis;
+          const requestedRootLifecycleEpoch = yield* Ref.get(rootTurnLifecycleEpochRef);
           const rawResponse = yield* client.raw.request("turn/start", params);
           const turnStartAcknowledgedAt = yield* nowIso;
           const turnStartAcknowledgedAtMs = yield* Clock.currentTimeMillis;
@@ -6049,10 +6230,16 @@ export const makeCodexSessionRuntime = (
             message: "Codex app-server accepted turn/start.",
             payload: turnStartDiagnostics,
           });
-          yield* updateSession(sessionRef, {
-            status: "running",
-            activeTurnId: turnId,
-            ...(normalizedModel ? { model: normalizedModel } : {}),
+          yield* acknowledgeCodexTurnStartLifecycleBoundary({
+            semaphore: aggregateLifecycleSemaphore,
+            completionsRef: aggregateRootCompletionsRef,
+            rootLifecycleEpochRef: rootTurnLifecycleEpochRef,
+            requestedRootLifecycleEpoch,
+            closedRef,
+            sessionRef,
+            turnId,
+            model: normalizedModel,
+            acknowledgedAt: turnStartAcknowledgedAt,
           });
           yield* scheduleSendTurnSnapshotBackfill({
             providerThreadId,

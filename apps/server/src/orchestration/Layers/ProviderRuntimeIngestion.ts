@@ -2262,12 +2262,6 @@ const make = Effect.gen(function* () {
       const activeGoalContinuationExpected =
         activeGoalThreadIds.has(thread.id) && !interruptedGoalThreadIds.has(thread.id);
 
-      const explicitTerminalTurnRecovery =
-        event.type === "turn.started" &&
-        event.raw?.source === "codex.app-server.notification" &&
-        event.raw.method === "codex.aggregateTurn/reopened"
-          ? ("live-provider-continuation" as const)
-          : undefined;
       let pendingTurnStartForThread: boolean | undefined;
       const hasPendingTurnStartForThread = () =>
         Effect.gen(function* () {
@@ -2280,6 +2274,31 @@ const make = Effect.gen(function* () {
           pendingTurnStartForThread = Option.isSome(pendingTurnStart);
           return pendingTurnStartForThread;
         });
+      const isCodexAggregateReopenEvent =
+        event.type === "turn.started" &&
+        event.provider === "codex" &&
+        event.raw?.source === "codex.app-server.notification" &&
+        event.raw.method === "codex.aggregateTurn/reopened";
+      // Aggregate continuation is Cafe's provider-runtime marker for a
+      // successfully completed root whose descendants still own work. Older
+      // runtimes also emitted it after failed/interrupted roots, and those
+      // events can survive in the daemon replay journal after an upgrade.
+      // Grant the terminal override only to this exact successful latest turn;
+      // a marker is not permission to erase capacity failures, undo Stop, or
+      // replace newer work. The shell excludes pending turns, so the latest
+      // concrete turn can still be this completed root after newer user intent
+      // has been accepted. A bounded pending-start read protects that intent's
+      // message/plan binding from being consumed by this old root's marker.
+      const explicitTerminalTurnRecovery =
+        isCodexAggregateReopenEvent &&
+        thread.latestTurn?.state === "completed" &&
+        sameId(thread.latestTurn.turnId, eventTurnId) &&
+        thread.session?.status !== "error" &&
+        thread.session?.status !== "interrupted" &&
+        thread.session?.status !== "stopped" &&
+        !(yield* hasPendingTurnStartForThread())
+          ? ("live-provider-continuation" as const)
+          : undefined;
 
       const failedSessionHeartbeatState = (() => {
         if (event.type === "session.started" || event.type === "thread.started") {
@@ -2451,7 +2470,15 @@ const make = Effect.gen(function* () {
         }
       })();
       const shouldApplyThreadLifecycle =
-        !shouldSuppressFailedSessionHeartbeat && passesStrictProviderLifecycleGuard;
+        !shouldSuppressFailedSessionHeartbeat &&
+        passesStrictProviderLifecycleGuard &&
+        // Reject the marker's lifecycle mutation entirely, not only its
+        // terminal override: an unmatched marker must not introduce an unknown
+        // turn or release the goal cancellation barrier below. Independently
+        // authenticated false-orphan recovery retains its existing authority.
+        (!isCodexAggregateReopenEvent ||
+          explicitTerminalTurnRecovery !== undefined ||
+          restoresFalseOrphanTerminal);
       if (event.type === "turn.started" && shouldApplyThreadLifecycle) {
         // Only an accepted concrete provider turn may release a cancellation
         // barrier. Replayed or conflicting turn.started events are content

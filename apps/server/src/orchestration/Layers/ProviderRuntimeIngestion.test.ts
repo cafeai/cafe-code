@@ -436,6 +436,24 @@ describe("ProviderRuntimeIngestion", () => {
       clearProviderSessions: provider.clearSessions,
       receiptBus,
       drain,
+      readTurnStartBinding: (threadId: ThreadId, turnId: TurnId | null) =>
+        Effect.runPromise(
+          sql<{
+            readonly messageId: string | null;
+            readonly sourceProposedPlanThreadId: string | null;
+            readonly sourceProposedPlanId: string | null;
+            readonly requestedAt: string | null;
+          }>`
+            SELECT
+              pending_message_id AS "messageId",
+              source_proposed_plan_thread_id AS "sourceProposedPlanThreadId",
+              source_proposed_plan_id AS "sourceProposedPlanId",
+              requested_at AS "requestedAt"
+            FROM projection_turns
+            WHERE thread_id = ${threadId} AND turn_id IS ${turnId}
+            LIMIT 1
+          `,
+        ).then((rows) => rows[0] ?? null),
       setDurableProviderDaemonCursor: (cursor: number) =>
         Effect.runPromise(
           sql`
@@ -1533,6 +1551,20 @@ describe("ProviderRuntimeIngestion", () => {
         delta: "late provider work",
       },
     });
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-aggregate-after-explicit-stop"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:04.000Z",
+      threadId,
+      turnId,
+      raw: {
+        source: "codex.app-server.notification",
+        method: "codex.aggregateTurn/reopened",
+        payload: {},
+      },
+      payload: {},
+    });
     await harness.drain();
 
     const readModel = await harness.readModel();
@@ -1598,6 +1630,286 @@ describe("ProviderRuntimeIngestion", () => {
         thread.latestTurn.completedAt === null,
     );
     expect(recovered.latestTurn?.completedAt).toBeNull();
+  });
+
+  it.each(["failed", "interrupted", "cancelled"] as const)(
+    "does not reopen a Codex root with %s outcome from a replayed aggregate continuation marker",
+    async (terminalState) => {
+      const harness = await createHarness();
+      const threadId = asThreadId("thread-1");
+      const turnId = asTurnId(`turn-terminal-aggregate-${terminalState}`);
+      const completedAt = "2026-07-14T00:00:01.000Z";
+      harness.emit({
+        type: "turn.started",
+        eventId: asEventId(`evt-terminal-aggregate-start-${terminalState}`),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        turnId,
+        createdAt: "2026-07-14T00:00:00.000Z",
+        payload: {},
+      });
+      await waitForThread(harness.readModel, (thread) => thread.session?.activeTurnId === turnId);
+      harness.emit({
+        type: "turn.completed",
+        eventId: asEventId(`evt-terminal-aggregate-end-${terminalState}`),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        turnId,
+        createdAt: completedAt,
+        payload: {
+          state: terminalState,
+          ...(terminalState === "failed" ? { errorMessage: "Provider capacity unavailable." } : {}),
+        },
+      });
+      const before = await waitForThread(
+        harness.readModel,
+        (thread) =>
+          thread.latestTurn?.state === (terminalState === "failed" ? "error" : "interrupted") &&
+          thread.session?.activeTurnId === null,
+      );
+      // Older runtimes incorrectly retained root liveness while children kept
+      // working. Neither that stale inventory nor its journal marker proves a
+      // failed/cancelled root resumed; a separately validated orphan repair is
+      // the only permitted interrupted-turn exception.
+      harness.setProviderSession({
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        status: "running",
+        runtimeMode: "approval-required",
+        threadId,
+        activeTurnId: turnId,
+        createdAt: "2026-07-14T00:00:00.000Z",
+        updatedAt: "2026-07-14T00:00:02.000Z",
+      });
+      const replay = {
+        type: "turn.started" as const,
+        eventId: asEventId(`evt-terminal-aggregate-replay-${terminalState}`),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        turnId,
+        createdAt: "2026-07-14T00:00:02.000Z",
+        raw: {
+          source: "codex.app-server.notification",
+          method: "codex.aggregateTurn/reopened",
+          payload: {},
+        },
+        payload: {},
+      };
+      harness.emit(replay);
+      harness.emit(replay);
+      await harness.drain();
+      const afterReplay = (await harness.readModel()).threads.find(
+        (thread) => thread.id === threadId,
+      );
+      expect(afterReplay?.session).toEqual(before.session);
+      expect(afterReplay?.latestTurn).toEqual(before.latestTurn);
+
+      const childProgressId = asEventId(`evt-terminal-child-progress-${terminalState}`);
+      harness.emit({
+        type: "task.progress",
+        eventId: childProgressId,
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        turnId,
+        createdAt: "2026-07-14T00:00:03.000Z",
+        payload: {
+          taskId: `child-after-terminal-${terminalState}`,
+          description: "An independently running child is still producing work.",
+        },
+      });
+      await harness.drain();
+      const after = (await harness.readModel()).threads.find((thread) => thread.id === threadId);
+      expect(after?.session).toEqual(before.session);
+      expect(after?.latestTurn).toMatchObject({
+        turnId,
+        state: before.latestTurn?.state,
+      });
+      // Child observability is preserved without granting root input-loop
+      // liveness, even when an older runtime still lists that root as active.
+      expect(after?.activities.some((activity) => activity.id === childProgressId)).toBe(true);
+    },
+  );
+
+  it("does not let an older aggregate continuation replace a newer Codex turn", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const oldTurnId = asTurnId("turn-old-successful-aggregate");
+    const newTurnId = asTurnId("turn-new-provider-work");
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-old-aggregate-start"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      turnId: oldTurnId,
+      createdAt: "2026-07-14T00:00:00.000Z",
+      payload: {},
+    });
+    await waitForThread(harness.readModel, (thread) => thread.session?.activeTurnId === oldTurnId);
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-old-aggregate-end"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      turnId: oldTurnId,
+      createdAt: "2026-07-14T00:00:01.000Z",
+      payload: { state: "completed" },
+    });
+    await waitForThread(harness.readModel, (thread) => thread.latestTurn?.state === "completed");
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-new-work-start"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      turnId: newTurnId,
+      createdAt: "2026-07-14T00:00:02.000Z",
+      payload: {},
+    });
+    const before = await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.activeTurnId === newTurnId,
+    );
+    harness.setProviderSession({
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      status: "running",
+      runtimeMode: "approval-required",
+      threadId,
+      activeTurnId: oldTurnId,
+      createdAt: "2026-07-14T00:00:00.000Z",
+      updatedAt: "2026-07-14T00:00:03.000Z",
+    });
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-old-aggregate-reopened"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      turnId: oldTurnId,
+      createdAt: "2026-07-14T00:00:03.000Z",
+      raw: {
+        source: "codex.app-server.notification",
+        method: "codex.aggregateTurn/reopened",
+        payload: {},
+      },
+      payload: {},
+    });
+    await harness.drain();
+    const after = (await harness.readModel()).threads.find((thread) => thread.id === threadId);
+    expect(after?.session).toEqual(before.session);
+    expect(after?.latestTurn).toEqual(before.latestTurn);
+  });
+
+  it("preserves a newer pending start and its input binding when an older aggregate reopens", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const oldTurnId = asTurnId("turn-old-aggregate-with-plan");
+    const newTurnId = asTurnId("turn-new-pending-plan-implementation");
+    const messageId = asMessageId("msg-new-pending-plan-implementation");
+    const requestedAt = "2026-07-14T00:00:02.000Z";
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-old-pending-aggregate-start"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      turnId: oldTurnId,
+      createdAt: "2026-07-14T00:00:00.000Z",
+      payload: {},
+    });
+    harness.emit({
+      type: "turn.proposed.completed",
+      eventId: asEventId("evt-old-pending-aggregate-plan"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      turnId: oldTurnId,
+      createdAt: "2026-07-14T00:00:01.000Z",
+      payload: { planMarkdown: "# Implement the next step" },
+    });
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-old-pending-aggregate-end"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      turnId: oldTurnId,
+      createdAt: "2026-07-14T00:00:01.000Z",
+      payload: { state: "completed" },
+    });
+    const completed = await waitForThread(
+      harness.readModel,
+      (thread) => thread.latestTurn?.state === "completed" && thread.proposedPlans.length === 1,
+    );
+    const sourcePlan = completed.proposedPlans[0]!;
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-new-pending-plan-implementation"),
+        threadId,
+        message: { messageId, role: "user", text: "Implement the plan.", attachments: [] },
+        sourceProposedPlan: { threadId, planId: sourcePlan.id },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: requestedAt,
+      }),
+    );
+    const before = await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.status === "starting" && thread.session.activeTurnId === null,
+    );
+    const expectedBinding = {
+      messageId,
+      sourceProposedPlanThreadId: threadId,
+      sourceProposedPlanId: sourcePlan.id,
+      requestedAt,
+    };
+    expect(await harness.readTurnStartBinding(threadId, null)).toEqual(expectedBinding);
+
+    // The latest concrete turn is still A while B only has a durable intent.
+    // A delayed aggregate marker must not consume B's pending SQL row or mark
+    // B's source plan implemented before B's real provider turn starts.
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-old-aggregate-during-pending-start"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      turnId: oldTurnId,
+      createdAt: "2026-07-14T00:00:03.000Z",
+      raw: {
+        source: "codex.app-server.notification",
+        method: "codex.aggregateTurn/reopened",
+        payload: {},
+      },
+      payload: {},
+    });
+    await harness.drain();
+    const after = (await harness.readModel()).threads.find((thread) => thread.id === threadId);
+    expect(after?.session).toEqual(before.session);
+    expect(after?.latestTurn).toEqual(before.latestTurn);
+    expect(after?.proposedPlans).toEqual(before.proposedPlans);
+    expect(await harness.readTurnStartBinding(threadId, null)).toEqual(expectedBinding);
+
+    harness.setProviderSession({
+      provider: ProviderDriverKind.make("codex"),
+      status: "running",
+      runtimeMode: "approval-required",
+      threadId,
+      activeTurnId: newTurnId,
+      createdAt: requestedAt,
+      updatedAt: "2026-07-14T00:00:04.000Z",
+    });
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-new-pending-plan-implementation-start"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      turnId: newTurnId,
+      createdAt: "2026-07-14T00:00:04.000Z",
+      payload: {},
+    });
+    await harness.drain();
+    const running = (await harness.readModel()).threads.find((thread) => thread.id === threadId);
+    expect(running?.session?.activeTurnId).toBe(newTurnId);
+    expect(running?.proposedPlans[0]?.implementationThreadId).toBe(threadId);
+    expect(running?.proposedPlans[0]?.implementedAt).not.toBeNull();
+    expect(await harness.readTurnStartBinding(threadId, newTurnId)).toEqual(expectedBinding);
+    expect(await harness.readTurnStartBinding(threadId, null)).toBeNull();
   });
 
   it("clears active turn state when Codex reports an aborted turn", async () => {
