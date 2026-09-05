@@ -1,4 +1,8 @@
-import { ClaudeSettings, ProviderInstanceId } from "@cafecode/contracts";
+import {
+  ClaudeSettings,
+  ProviderInstanceId,
+  type UsageAccountingSnapshot,
+} from "@cafecode/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -6,6 +10,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as Result from "effect/Result";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/unstable/process";
@@ -16,6 +21,7 @@ import { ServerConfig } from "../config.ts";
 import { type TextGenerationShape } from "./TextGeneration.ts";
 import { sanitizeThreadTitle } from "./TextGenerationUtils.ts";
 import { makeClaudeTextGeneration } from "./ClaudeTextGeneration.ts";
+import { AuxiliaryUsage, AuxiliaryUsageLive } from "../usageStats/Services/AuxiliaryUsage.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 const ClaudeTextGenerationTestLayer = ServerConfig.layerTest(process.cwd(), {
@@ -159,6 +165,89 @@ function withFakeClaudeEnv<A, E, R>(
 }
 
 it.layer(ClaudeTextGenerationTestLayer)("ClaudeTextGeneration", (it) => {
+  for (const exitCode of [0, 1]) {
+    it.effect(`records authoritative Claude helper usage when the CLI exits ${exitCode}`, () =>
+      Effect.gen(function* () {
+        const service = yield* AuxiliaryUsage;
+        const recorded: UsageAccountingSnapshot[] = [];
+        yield* service.installSink((provider, snapshot) =>
+          Effect.sync(() => {
+            expect(provider).toBe("claudeAgent");
+            recorded.push(snapshot);
+          }),
+        );
+        const result = yield* withFakeClaudeEnv(
+          {
+            output: JSON.stringify({
+              type: "result",
+              structured_output: { title: "Helper title", branch: "helper-branch" },
+              modelUsage: {
+                "claude-haiku-4-5": {
+                  inputTokens: 10,
+                  cacheReadInputTokens: 20,
+                  cacheCreationInputTokens: 30,
+                  outputTokens: 40,
+                },
+              },
+              usage: { input_tokens: 999, output_tokens: 999 },
+            }),
+            exitCode,
+            stderr: exitCode === 1 ? "provider failed" : "",
+          },
+          (generation) =>
+            generation.generateThreadMetadata({
+              cwd: process.cwd(),
+              message: "Task seed",
+              modelSelection: createModelSelection(
+                ProviderInstanceId.make("claudeAgent"),
+                "claude-sonnet-4-6",
+              ),
+            }),
+        ).pipe(Effect.result);
+        expect(Result.isSuccess(result)).toBe(exitCode === 0);
+        expect(recorded).toHaveLength(1);
+        expect(recorded[0]).toMatchObject({
+          revision: 1,
+          completeness: "complete",
+          models: [{ model: "claude-haiku-4-5", inputTokens: 60, outputTokens: 40 }],
+        });
+      }).pipe(Effect.provide(AuxiliaryUsageLive)),
+    );
+  }
+
+  it.effect("keeps successful Claude output when accounting sink fails", () =>
+    Effect.gen(function* () {
+      const service = yield* AuxiliaryUsage;
+      yield* service.installSink(() => Effect.die("private ledger error"));
+      const generated = yield* withFakeClaudeEnv(
+        {
+          output: JSON.stringify({
+            type: "result",
+            structured_output: { title: "Helper title" },
+            modelUsage: {
+              "claude-haiku-4-5": {
+                inputTokens: 10,
+                cacheReadInputTokens: 0,
+                cacheCreationInputTokens: 0,
+                outputTokens: 40,
+              },
+            },
+          }),
+        },
+        (generation) =>
+          generation.generateThreadTitle({
+            cwd: process.cwd(),
+            message: "Task seed",
+            modelSelection: createModelSelection(
+              ProviderInstanceId.make("claudeAgent"),
+              "claude-haiku-4-5",
+            ),
+          }),
+      );
+      expect(generated.title).toBe("Helper title");
+    }).pipe(Effect.provide(AuxiliaryUsageLive)),
+  );
+
   it.effect("forwards Claude thinking settings for Haiku without passing effort", () =>
     withFakeClaudeEnv(
       {
@@ -220,6 +309,29 @@ it.layer(ClaudeTextGenerationTestLayer)("ClaudeTextGeneration", (it) => {
           });
 
           expect(generated.title).toBe("Improve orchestration flow");
+        }),
+    ),
+  );
+
+  it.effect("generates both first-turn labels from one Claude structured response", () =>
+    withFakeClaudeEnv(
+      {
+        output: JSON.stringify({
+          structured_output: { title: '  "Safer reconnect"  ', branch: "  Feat/Reconnect  " },
+        }),
+        stdinMustContain: "Return a JSON object with keys: title, branch.",
+      },
+      (textGeneration) =>
+        Effect.gen(function* () {
+          const generated = yield* textGeneration.generateThreadMetadata({
+            cwd: process.cwd(),
+            message: "Improve reconnect reliability",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("claudeAgent"),
+              model: "claude-sonnet-4-6",
+            },
+          });
+          expect(generated).toEqual({ title: "Safer reconnect", branch: "feat/reconnect" });
         }),
     ),
   );

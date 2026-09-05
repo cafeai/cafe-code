@@ -63,6 +63,13 @@ export const UsageStatsTokenBreakdownEntry = Schema.Struct({
 });
 export type UsageStatsTokenBreakdownEntry = typeof UsageStatsTokenBreakdownEntry.Type;
 
+/** Daily attribution used for rate-aware graphs; never sent on the live stream. */
+export const UsageStatsTokenBreakdownDayEntry = Schema.Struct({
+  day: UsageStatsDayKey,
+  ...UsageStatsTokenBreakdownEntry.fields,
+});
+export type UsageStatsTokenBreakdownDayEntry = typeof UsageStatsTokenBreakdownDayEntry.Type;
+
 /**
  * Live totals pushed to subscribers at a high cadence. `totals`
  * includes time accrued by in-flight turns up to `asOfMs`; clients
@@ -93,5 +100,8 @@ export const UsageStatsGetResult = Schema.Struct({
     // instead of making the entire Usage page fail schema decoding.
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
+  // Optional for older saved environments. Absence means unavailable daily
+  // attribution, not permission to invent a daily rate from lifetime totals.
+  tokenBreakdownDays: Schema.optional(Schema.Array(UsageStatsTokenBreakdownDayEntry)),
 });
 export type UsageStatsGetResult = typeof UsageStatsGetResult.Type;

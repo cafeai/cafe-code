@@ -33,6 +33,7 @@ import {
   RuntimeTaskId,
   ThreadId,
   ProviderInstanceId,
+  PROVIDER_SESSION_TITLE_MAX_CHARS,
 } from "@cafecode/contracts";
 import { createModelSelection } from "@cafecode/shared/model";
 import { assert, describe, it } from "@effect/vitest";
@@ -733,6 +734,42 @@ describe("ClaudeAdapterLive", () => {
       Effect.provide(harness.layer),
     );
   });
+
+  for (const [name, title, expectedTitle] of [
+    ["existing Cafe label", "Cafe's task label", "Cafe's task label"],
+    ["missing label fallback", undefined, "Cafe Code task"],
+    ["control-only label fallback", "\u0000\n\u202e", "Cafe Code task"],
+    ["safe single-line label", "Task\n\u202e title", "Task title"],
+    [
+      "bounded label",
+      "x".repeat(PROVIDER_SESSION_TITLE_MAX_CHARS + 20),
+      "x".repeat(PROVIDER_SESSION_TITLE_MAX_CHARS),
+    ],
+  ] as const) {
+    it.effect(`seeds fresh Claude native titles with ${name}`, () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          ...(title !== undefined ? { title } : {}),
+          runtimeMode: "full-access",
+        });
+        assert.equal(harness.getLastCreateQueryInput()?.options.title, expectedTitle);
+        // The title is initialization metadata, never appended to user input.
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "Do the requested work." });
+        const message = yield* Effect.promise(() =>
+          readFirstPromptMessage(harness.getLastCreateQueryInput()),
+        );
+        assert.deepEqual(message?.message.content, [
+          { type: "text", text: "Do the requested work." },
+        ]);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+  }
 
   it.effect("can disable Claude subagent progress summary model calls", () => {
     const harness = makeHarness();
@@ -6273,6 +6310,100 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect(
+    "emits deduplicated billing snapshots independently of context and starts a new accounting scope on reset",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const observed = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "thread.usage-accounting.updated"),
+          Stream.take(4),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "hello", attachments: [] });
+        const emitAssistant = (id: string, input: number) =>
+          harness.query.emit({
+            type: "assistant",
+            uuid: `sdk-${id}`,
+            parent_tool_use_id: null,
+            session_id: "sdk-billing-session",
+            message: {
+              id,
+              model: "claude-sonnet-5",
+              role: "assistant",
+              content: [],
+              usage: {
+                input_tokens: input,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                output_tokens: 0,
+              },
+            },
+          } as unknown as SDKMessage);
+        const emitResult = (input: number, output: number) =>
+          harness.query.emit({
+            type: "result",
+            subtype: "success",
+            is_error: false,
+            uuid: `result-${input}`,
+            session_id: "sdk-billing-session",
+            result: "done",
+            stop_reason: "end_turn",
+            num_turns: 1,
+            duration_ms: 1,
+            duration_api_ms: 1,
+            usage: {
+              input_tokens: input,
+              output_tokens: output,
+              cache_read_input_tokens: 0,
+              cache_creation_input_tokens: 0,
+            },
+            modelUsage: {
+              "claude-sonnet-5": {
+                inputTokens: input,
+                outputTokens: output,
+                cacheReadInputTokens: 0,
+                cacheCreationInputTokens: 0,
+              },
+            },
+          } as unknown as SDKMessage);
+        emitAssistant("api-a", 100000);
+        emitAssistant("api-a", 100000);
+        emitAssistant("api-b", 101000);
+        emitResult(201000, 100);
+        harness.query.emit({
+          type: "conversation_reset",
+          new_conversation_id: "30000000-0000-4000-8000-000000000000",
+          session_id: "sdk-billing-session",
+          uuid: "40000000-0000-4000-8000-000000000000",
+        } as SDKMessage);
+        emitResult(300000, 200);
+        const events = yield* Fiber.join(observed);
+        const snapshots = events.map((event) => event.payload);
+        assert.deepEqual(
+          snapshots.map((snapshot) => snapshot.models[0]?.inputTokens),
+          [100000, 201000, 201000, 300000],
+        );
+        assert.deepEqual(
+          snapshots.map((snapshot) => snapshot.models[0]?.outputTokens),
+          [0, 0, 100, 200],
+        );
+        assert.equal(snapshots[0]?.scopeId, snapshots[2]?.scopeId);
+        assert.notEqual(snapshots[0]?.scopeId, snapshots[3]?.scopeId);
+        assert.equal(snapshots[3]?.revision, 1);
+        assert.equal(JSON.stringify(snapshots).includes("sdk-billing-session"), false);
+        assert.equal(JSON.stringify(snapshots).includes("api-a"), false);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
   it.effect("emits Claude context window on result completion usage snapshots", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -7679,6 +7810,7 @@ describe("ClaudeAdapterLive", () => {
       const session = yield* adapter.startSession({
         threadId: RESUME_THREAD_ID,
         provider: ProviderDriverKind.make("claudeAgent"),
+        title: "Recovered Cafe task",
         cwd,
         resumeCursor: {
           threadId: RESUME_THREAD_ID,
@@ -7694,6 +7826,7 @@ describe("ClaudeAdapterLive", () => {
       assert.equal(createInput?.options.resume, undefined);
       assert.equal(createInput?.options.resumeSessionAt, undefined);
       assert.equal(createInput?.options.sessionId, undefined);
+      assert.equal(createInput?.options.title, "Recovered Cafe task");
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -7791,6 +7924,7 @@ describe("ClaudeAdapterLive", () => {
       const session = yield* adapter.startSession({
         threadId: RESUME_THREAD_ID,
         provider: ProviderDriverKind.make("claudeAgent"),
+        title: "Do not replace the persisted native title",
         cwd,
         resumeCursor: {
           threadId: RESUME_THREAD_ID,
@@ -7810,6 +7944,7 @@ describe("ClaudeAdapterLive", () => {
       assert.equal(createInput?.options.resume, sessionId);
       assert.equal(createInput?.options.resumeSessionAt, undefined);
       assert.equal(createInput?.options.sessionId, undefined);
+      assert.equal(createInput?.options.title, undefined);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

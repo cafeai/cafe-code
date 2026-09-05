@@ -15,6 +15,7 @@ import {
   ProviderDriverKind,
   UsageStatsDayKey,
   UsageStatsModel,
+  type UsageAccountingSnapshot,
 } from "@cafecode/contracts";
 import * as Schema from "effect/Schema";
 import * as Context from "effect/Context";
@@ -52,6 +53,17 @@ export interface UsageStatsFlushDeltas {
 }
 
 export interface UsageStatsRepositoryShape {
+  /**
+   * Atomically settle a cumulative billing epoch and its daily/model deltas.
+   * Durable revision fencing makes repeated daemon replay and reattachment
+   * harmless. Disabled collection advances only the checkpoint, never totals.
+   */
+  readonly recordAccountingSnapshot: (input: {
+    readonly provider: ProviderDriverKind;
+    readonly snapshot: UsageAccountingSnapshot;
+    readonly day: string;
+    readonly enabled: boolean;
+  }) => Effect.Effect<ReadonlyArray<UsageStatsTokenBreakdownDayRow>, ProjectionRepositoryError>;
   /**
    * List every recorded day ascending. Row counts stay tiny (one per active
    * day), so callers hydrate the whole table into memory at startup.

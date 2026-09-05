@@ -1,11 +1,54 @@
 import { describe, expect, it } from "vitest";
 import * as Schema from "effect/Schema";
 
-import { ProviderRuntimeEvent } from "./providerRuntime.ts";
+import { ProviderRuntimeEvent, UsageAccountingSnapshot } from "./providerRuntime.ts";
 
 const decodeRuntimeEvent = Schema.decodeUnknownSync(ProviderRuntimeEvent);
 
 describe("ProviderRuntimeEvent", () => {
+  it("bounds independent billing snapshots and rejects unsafe aggregate counts or identifiers", () => {
+    const decode = Schema.decodeUnknownSync(UsageAccountingSnapshot);
+    const model = {
+      model: "claude-sonnet-5",
+      inputTokens: 100,
+      cachedInputTokens: 80,
+      cacheWriteInputTokens: 10,
+      outputTokens: 20,
+      reasoningOutputTokens: 5,
+    };
+    const snapshot = {
+      scopeId: "10000000-0000-4000-8000-000000000000",
+      revision: 1,
+      completeness: "complete",
+      models: [model],
+    };
+    expect(decode(snapshot)).toEqual(snapshot);
+    for (const invalid of [
+      { ...snapshot, scopeId: "provider-account-id" },
+      { ...snapshot, revision: Infinity },
+      { ...snapshot, models: [model, model] },
+      { ...snapshot, models: [{ ...model, cachedInputTokens: 101 }] },
+      { ...snapshot, models: [{ ...model, model: "/private/account/path" }] },
+      {
+        ...snapshot,
+        models: [
+          { ...model, outputTokens: Number.MAX_SAFE_INTEGER },
+          { ...model, model: "claude-haiku-4-5", outputTokens: 1 },
+        ],
+      },
+    ])
+      expect(() => decode(invalid)).toThrow();
+    expect(
+      decodeRuntimeEvent({
+        type: "thread.usage-accounting.updated",
+        provider: "claudeAgent",
+        threadId: "thread-1",
+        eventId: "event-accounting-1",
+        createdAt: "2026-09-05T00:00:00Z",
+        payload: snapshot,
+      }).type,
+    ).toBe("thread.usage-accounting.updated");
+  });
   it("accepts fork-provided driver kinds as branded slugs", () => {
     const parsed = decodeRuntimeEvent({
       type: "session.started",

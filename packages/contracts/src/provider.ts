@@ -60,11 +60,19 @@ export const ProviderSession = Schema.Struct({
 });
 export type ProviderSession = typeof ProviderSession.Type;
 
+/** Native session labels are bounded metadata, never a second prompt channel. */
+export const PROVIDER_SESSION_TITLE_MAX_CHARS = 200;
+
 export const ProviderSessionStartInput = Schema.Struct({
   threadId: ThreadId,
   provider: Schema.optional(ProviderDriverKind),
   // See ProviderSession for the migration story.
   providerInstanceId: Schema.optional(ProviderInstanceId),
+  // Optional for older daemon producers and non-title-aware providers. Only
+  // fresh native sessions may consume it; resume preserves the provider title.
+  title: Schema.optional(
+    TrimmedNonEmptyString.check(Schema.isMaxLength(PROVIDER_SESSION_TITLE_MAX_CHARS)),
+  ),
   cwd: Schema.optional(TrimmedNonEmptyString),
   additionalDirectories: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
   modelSelection: Schema.optional(ModelSelection),

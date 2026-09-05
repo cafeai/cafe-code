@@ -46,6 +46,7 @@ import { increment, orchestrationEventsProcessedTotal } from "../../observabilit
 import { ProviderAdapterProcessError, ProviderAdapterRequestError } from "../../provider/Errors.ts";
 import type { ProviderServiceError } from "../../provider/Errors.ts";
 import { hasLiveProviderRuntimeOwner } from "../../provider/providerRuntimeOwnerEvidence.ts";
+import { makeProviderSessionTitle } from "../../provider/providerSessionTitle.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import {
@@ -1485,6 +1486,9 @@ const make = Effect.gen(function* () {
         threadId,
         ...(preferredProvider ? { provider: preferredProvider } : {}),
         providerInstanceId: desiredInstanceId,
+        ...(preferredProvider === "claudeAgent"
+          ? { title: makeProviderSessionTitle(thread.title) }
+          : {}),
         ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
         ...(effectiveAdditionalDirectories.length > 0
           ? { additionalDirectories: effectiveAdditionalDirectories }
@@ -2174,6 +2178,7 @@ const make = Effect.gen(function* () {
     readonly worktreePath: string | null;
     readonly messageText: string;
     readonly attachments?: ReadonlyArray<ChatAttachment>;
+    readonly generatedBranch?: string;
   }) {
     if (!input.branch || !input.worktreePath) {
       return;
@@ -2186,16 +2191,25 @@ const make = Effect.gen(function* () {
     const cwd = input.worktreePath;
     const attachments = input.attachments ?? [];
     yield* Effect.gen(function* () {
-      const { textGenerationModelSelection: modelSelection } =
-        yield* serverSettingsService.getSettings;
+      const generated =
+        input.generatedBranch !== undefined
+          ? { branch: input.generatedBranch }
+          : yield* Effect.gen(function* () {
+              const { textGenerationModelSelection: modelSelection } =
+                yield* serverSettingsService.getSettings;
+              return yield* textGeneration.generateBranchName({
+                cwd,
+                message: input.messageText,
+                ...(attachments.length > 0 ? { attachments } : {}),
+                modelSelection,
+              });
+            });
 
-      const generated = yield* textGeneration.generateBranchName({
-        cwd,
-        message: input.messageText,
-        ...(attachments.length > 0 ? { attachments } : {}),
-        modelSelection,
-      });
-      if (!generated) return;
+      // A slow helper must not rename a branch or worktree the user has changed
+      // since submission. This check is independent of title replacement because
+      // either metadata field can legitimately change while generation runs.
+      const thread = yield* resolveThread(input.threadId);
+      if (!thread || thread.branch !== oldBranch || thread.worktreePath !== cwd) return;
 
       const targetBranch = buildGeneratedWorktreeBranchName(generated.branch);
       if (targetBranch === oldBranch) return;
@@ -2228,19 +2242,23 @@ const make = Effect.gen(function* () {
       readonly messageText: string;
       readonly attachments?: ReadonlyArray<ChatAttachment>;
       readonly titleSeed?: string;
+      readonly generatedTitle?: string;
     }) {
       const attachments = input.attachments ?? [];
       yield* Effect.gen(function* () {
-        const { textGenerationModelSelection: modelSelection } =
-          yield* serverSettingsService.getSettings;
-
-        const generated = yield* textGeneration.generateThreadTitle({
-          cwd: input.cwd,
-          message: input.messageText,
-          ...(attachments.length > 0 ? { attachments } : {}),
-          modelSelection,
-        });
-        if (!generated) return;
+        const generated =
+          input.generatedTitle !== undefined
+            ? { title: input.generatedTitle }
+            : yield* Effect.gen(function* () {
+                const { textGenerationModelSelection: modelSelection } =
+                  yield* serverSettingsService.getSettings;
+                return yield* textGeneration.generateThreadTitle({
+                  cwd: input.cwd,
+                  message: input.messageText,
+                  ...(attachments.length > 0 ? { attachments } : {}),
+                  modelSelection,
+                });
+              });
 
         const thread = yield* resolveThread(input.threadId);
         if (!thread) return;
@@ -2307,14 +2325,60 @@ const make = Effect.gen(function* () {
         ...(event.payload.titleSeed !== undefined ? { titleSeed: event.payload.titleSeed } : {}),
       };
 
-      yield* maybeGenerateAndRenameWorktreeBranchForFirstTurn({
-        threadId: event.payload.threadId,
-        branch: thread.branch,
-        worktreePath: thread.worktreePath,
-        ...generationInput,
-      }).pipe(Effect.forkScoped);
-
-      if (canReplaceThreadTitle(thread.title, event.payload.titleSeed)) {
+      const shouldGenerateBranch =
+        thread.branch !== null &&
+        thread.worktreePath !== null &&
+        isTemporaryWorktreeBranch(thread.branch);
+      const shouldGenerateTitle = canReplaceThreadTitle(thread.title, event.payload.titleSeed);
+      if (shouldGenerateBranch && shouldGenerateTitle) {
+        // Both labels describe this same first message. One bounded structured
+        // generation avoids paying twice for its prompt, images, and provider
+        // setup context. Applications still catch failures independently, so a
+        // Git failure cannot discard a valid title (or the reverse). Never retry
+        // a failed combined inference as two new paid requests.
+        yield* Effect.gen(function* () {
+          const { textGenerationModelSelection: modelSelection } =
+            yield* serverSettingsService.getSettings;
+          const generated = yield* textGeneration.generateThreadMetadata({
+            cwd: generationCwd,
+            message: message.text,
+            ...(message.attachments?.length ? { attachments: message.attachments } : {}),
+            modelSelection,
+          });
+          yield* Effect.all(
+            [
+              maybeGenerateAndRenameWorktreeBranchForFirstTurn({
+                threadId: event.payload.threadId,
+                branch: thread.branch,
+                worktreePath: thread.worktreePath,
+                ...generationInput,
+                generatedBranch: generated.branch,
+              }),
+              maybeGenerateThreadTitleForFirstTurn({
+                threadId: event.payload.threadId,
+                cwd: generationCwd,
+                ...generationInput,
+                generatedTitle: generated.title,
+              }),
+            ],
+            { concurrency: "unbounded" },
+          );
+        }).pipe(
+          Effect.catchCause(() =>
+            Effect.logWarning("provider command reactor failed to generate first-turn metadata", {
+              threadId: event.payload.threadId,
+            }),
+          ),
+          Effect.forkScoped,
+        );
+      } else if (shouldGenerateBranch) {
+        yield* maybeGenerateAndRenameWorktreeBranchForFirstTurn({
+          threadId: event.payload.threadId,
+          branch: thread.branch,
+          worktreePath: thread.worktreePath,
+          ...generationInput,
+        }).pipe(Effect.forkScoped);
+      } else if (shouldGenerateTitle) {
         yield* maybeGenerateThreadTitleForFirstTurn({
           threadId: event.payload.threadId,
           cwd: generationCwd,

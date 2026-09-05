@@ -6,6 +6,7 @@ import {
   ProviderSendTurnInput,
   ProviderSession,
   ProviderSessionStartInput,
+  PROVIDER_SESSION_TITLE_MAX_CHARS,
 } from "./provider.ts";
 
 const decodeProviderSessionStartInput = Schema.decodeUnknownSync(ProviderSessionStartInput);
@@ -21,6 +22,24 @@ function getOptionValue(
 }
 
 describe("ProviderSessionStartInput", () => {
+  it("accepts optional native title metadata and rejects oversized labels", () => {
+    const input = {
+      threadId: "thread-1",
+      provider: "claudeAgent",
+      runtimeMode: "full-access",
+    };
+    expect(decodeProviderSessionStartInput(input).title).toBeUndefined();
+    expect(decodeProviderSessionStartInput({ ...input, title: "Cafe task" }).title).toBe(
+      "Cafe task",
+    );
+    expect(() =>
+      decodeProviderSessionStartInput({
+        ...input,
+        title: "x".repeat(PROVIDER_SESSION_TITLE_MAX_CHARS + 1),
+      }),
+    ).toThrow();
+  });
+
   it("accepts codex-compatible payloads", () => {
     const parsed = decodeProviderSessionStartInput({
       threadId: "thread-1",

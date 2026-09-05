@@ -22,6 +22,7 @@ import {
   buildCommitMessagePrompt,
   buildPrContentPrompt,
   buildThreadTitlePrompt,
+  buildThreadMetadataPrompt,
 } from "./TextGenerationPrompts.ts";
 import { type TextGenerationShape } from "./TextGeneration.ts";
 import {
@@ -160,7 +161,8 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
       | "generateCommitMessage"
       | "generatePrContent"
       | "generateBranchName"
-      | "generateThreadTitle";
+      | "generateThreadTitle"
+      | "generateThreadMetadata";
   }) =>
     sharedServerMutex.withPermit(
       Effect.gen(function* () {
@@ -270,7 +272,8 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
       | "generateCommitMessage"
       | "generatePrContent"
       | "generateBranchName"
-      | "generateThreadTitle";
+      | "generateThreadTitle"
+      | "generateThreadMetadata";
     readonly cwd: string;
     readonly prompt: string;
     readonly outputSchemaJson: S;
@@ -458,10 +461,29 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
     };
   });
 
+  const generateThreadMetadata: TextGenerationShape["generateThreadMetadata"] = Effect.fn(
+    "OpenCodeTextGeneration.generateThreadMetadata",
+  )(function* (input) {
+    const { prompt, outputSchema } = buildThreadMetadataPrompt(input);
+    const generated = yield* runOpenCodeJson({
+      operation: "generateThreadMetadata",
+      cwd: input.cwd,
+      prompt,
+      outputSchemaJson: outputSchema,
+      attachments: input.attachments,
+      modelSelection: input.modelSelection,
+    });
+    return {
+      title: sanitizeThreadTitle(generated.title),
+      branch: sanitizeBranchFragment(generated.branch),
+    };
+  });
+
   return {
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
+    generateThreadMetadata,
   } satisfies TextGenerationShape;
 });

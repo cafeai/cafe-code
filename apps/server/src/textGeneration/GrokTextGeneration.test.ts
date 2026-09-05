@@ -80,6 +80,26 @@ function readJsonRpcRequests(
 }
 
 it.layer(GrokTextGenerationTestLayer)("GrokTextGeneration", (it) => {
+  it.effect("generates both first-turn labels from one Grok structured response", () =>
+    withFakeAcpGrok(
+      {
+        CAFE_CODE_ACP_PROMPT_RESPONSE_TEXT: JSON.stringify({
+          title: '  "Safer reconnect"  ',
+          branch: "  Feat/Reconnect  ",
+        }),
+      },
+      (textGeneration) =>
+        Effect.gen(function* () {
+          const generated = yield* textGeneration.generateThreadMetadata({
+            cwd: process.cwd(),
+            message: "Improve reconnect reliability",
+            modelSelection: createModelSelection(ProviderInstanceId.make("grok"), "grok-mock-alt"),
+          });
+          expect(generated).toEqual({ title: "Safer reconnect", branch: "feat/reconnect" });
+        }),
+    ),
+  );
+
   it.effect("uses ACP with disabled tool capabilities and forwards the requested model id", () => {
     const requestLogDir = NodeFS.mkdtempSync(
       NodePath.join(NodeOS.tmpdir(), "cafecode-grok-text-log-"),

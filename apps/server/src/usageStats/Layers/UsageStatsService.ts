@@ -29,16 +29,24 @@ import {
   type ProviderDriverKind,
   type ProviderRuntimeEvent,
   type UsageStatsTokenBreakdownEntry,
+  type UsageAccountingSnapshot,
+  type UsageStatsTokenBreakdownDayEntry,
 } from "@cafecode/contracts";
 import * as Clock from "effect/Clock";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import { UsageAccountingSnapshot as UsageAccountingSnapshotSchema } from "@cafecode/contracts";
 
 import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { UsageStatsRepository } from "../../persistence/Services/UsageStats.ts";
+import { isSqliteLockTimeoutError } from "../../persistence/sqliteLockRetry.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { localDayKey, splitSpanIntoDays } from "../dayBuckets.ts";
 import {
@@ -48,10 +56,12 @@ import {
   type UsageTokenField,
 } from "../tokenDelta.ts";
 import { UsageStatsService, type UsageStatsServiceShape } from "../Services/UsageStatsService.ts";
+import { AuxiliaryUsage } from "../Services/AuxiliaryUsage.ts";
 
 const FLUSH_INTERVAL_MS = 5_000;
 const MODEL_RESOLUTION_TIMEOUT_MS = 1_000;
 const UNKNOWN_USAGE_MODEL = "unknown";
+const decodeAccountingSnapshot = Schema.decodeEffect(UsageAccountingSnapshotSchema);
 
 type TokenCounts = Record<UsageTokenField, number>;
 
@@ -163,16 +173,20 @@ const makeUsageStatsService = Effect.gen(function* () {
   const pending = new Map<string, MutableDayTotals>();
   const pendingTokenBreakdowns: PendingTokenBreakdowns = new Map();
   const tokenBreakdownTotals: TokenBreakdownTotals = new Map();
+  const tokenBreakdownDays: PendingTokenBreakdowns = new Map();
   const threads = new Map<string, ThreadTracking>();
   const totals: MutableDayTotals = zeroDayTotals();
   let tokenBreakdownSnapshot: ReadonlyArray<UsageStatsTokenBreakdownEntry> = [];
   let tokenBreakdownSnapshotDirty = true;
+  let tokenBreakdownDaySnapshot: ReadonlyArray<UsageStatsTokenBreakdownDayEntry> = [];
+  let tokenBreakdownDaySnapshotDirty = true;
   let enabled = true;
 
   const addTokenBreakdownTotal = (
     provider: ProviderDriverKind,
     model: string,
     counts: TokenCounts,
+    day?: string,
   ): void => {
     if (!hasCounts(counts)) {
       return;
@@ -189,6 +203,47 @@ const makeUsageStatsService = Effect.gen(function* () {
     }
     addCounts(entry, counts);
     tokenBreakdownSnapshotDirty = true;
+    if (day !== undefined) {
+      let providers = tokenBreakdownDays.get(day);
+      if (providers === undefined) {
+        providers = new Map();
+        tokenBreakdownDays.set(day, providers);
+      }
+      let dailyModels = providers.get(provider);
+      if (dailyModels === undefined) {
+        dailyModels = new Map();
+        providers.set(provider, dailyModels);
+      }
+      let dailyCounts = dailyModels.get(model);
+      if (dailyCounts === undefined) {
+        dailyCounts = zeroCounts();
+        dailyModels.set(model, dailyCounts);
+      }
+      addCounts(dailyCounts, counts);
+      tokenBreakdownDaySnapshotDirty = true;
+    }
+  };
+
+  // Reuse the hydrated attribution rows rather than adding a database scan
+  // every time Atrium/Settings refreshes. This cached detail remains absent
+  // from the high-frequency fixed-cardinality snapshot stream.
+  const readTokenBreakdownDays = (): ReadonlyArray<UsageStatsTokenBreakdownDayEntry> => {
+    if (tokenBreakdownDaySnapshotDirty) {
+      tokenBreakdownDaySnapshot = Array.from(tokenBreakdownDays.entries())
+        .toSorted(([left], [right]) => left.localeCompare(right))
+        .flatMap(([day, providers]) =>
+          Array.from(providers.entries()).flatMap(([provider, models]) =>
+            Array.from(models.entries(), ([model, counts]) => ({
+              day,
+              provider,
+              model,
+              ...counts,
+            })),
+          ),
+        );
+      tokenBreakdownDaySnapshotDirty = false;
+    }
+    return tokenBreakdownDaySnapshot;
   };
 
   /**
@@ -248,7 +303,7 @@ const makeUsageStatsService = Effect.gen(function* () {
       for (const row of rows) {
         const counts = zeroCounts();
         for (const field of USAGE_TOKEN_FIELDS) counts[field] = row[field];
-        addTokenBreakdownTotal(row.provider, row.model, counts);
+        addTokenBreakdownTotal(row.provider, row.model, counts, row.day);
       }
     }),
     // Aggregate usage remains useful if only the attribution ledger is
@@ -302,7 +357,7 @@ const makeUsageStatsService = Effect.gen(function* () {
     addDelta(day, counts);
 
     const modelKey = model ?? UNKNOWN_USAGE_MODEL;
-    addTokenBreakdownTotal(provider, modelKey, counts);
+    addTokenBreakdownTotal(provider, modelKey, counts, day);
 
     let providers = pendingTokenBreakdowns.get(day);
     if (providers === undefined) {
@@ -321,6 +376,102 @@ const makeUsageStatsService = Effect.gen(function* () {
     }
     addCounts(entry, counts);
   };
+
+  /**
+   * Billing snapshots arrive once per API response/result, never per token.
+   * SQLite owns their durable revision fence. Update the presentation cache
+   * only with increments accepted by that same transaction, and do not queue
+   * them in the legacy flush maps a second time.
+   */
+  type AccountingWork = {
+    readonly provider: ProviderDriverKind;
+    readonly snapshot: UsageAccountingSnapshot;
+    readonly day: string;
+    readonly enabled: boolean;
+    readonly committed: Deferred.Deferred<void>;
+  };
+  const accountingQueue = yield* Queue.bounded<AccountingWork>(128);
+  const pendingAccountingCommits = new Set<Deferred.Deferred<void>>();
+  const handleUsageAccounting = (
+    provider: ProviderDriverKind,
+    snapshot: UsageAccountingSnapshot,
+    observedAtMs: number,
+  ): Effect.Effect<void> =>
+    Effect.gen(function* () {
+      const decoded = yield* decodeAccountingSnapshot(snapshot);
+      if (!Number.isFinite(observedAtMs)) return;
+      const committed = yield* Deferred.make<void>();
+      pendingAccountingCommits.add(committed);
+      yield* Queue.offer(accountingQueue, {
+        provider,
+        snapshot: decoded,
+        day: localDayKey(observedAtMs),
+        enabled,
+        committed,
+      }).pipe(
+        Effect.onInterrupt(() =>
+          Effect.sync(() => {
+            pendingAccountingCommits.delete(committed);
+          }),
+        ),
+      );
+      // The worker belongs to the service scope. A disconnected renderer/helper
+      // can stop waiting without cancelling an already admitted transaction.
+      yield* Deferred.await(committed);
+    }).pipe(
+      Effect.catch(() => Effect.logWarning("usage stats: rejected invalid accounting snapshot")),
+    );
+
+  yield* Effect.forever(
+    Effect.gen(function* () {
+      const work = yield* Queue.take(accountingQueue);
+      let delayMs = 100;
+      let logged = false;
+      while (true) {
+        const result = yield* repository.recordAccountingSnapshot(work).pipe(Effect.result);
+        if (Result.isSuccess(result)) {
+          for (const delta of result.success) {
+            const entry = days.get(delta.day) ?? zeroDayTotals();
+            addCounts(entry, delta);
+            days.set(delta.day, entry);
+            addCounts(totals, delta);
+            addTokenBreakdownTotal(work.provider, delta.model, delta, delta.day);
+          }
+          break;
+        }
+        if (result.failure._tag === "PersistenceDecodeError") {
+          // Invalid metadata or a counter regression is not a transient write
+          // failure. Reject it without advancing its checkpoint or blocking
+          // later valid observations from this or other provider scopes.
+          yield* Effect.logWarning("usage stats: rejected inconsistent accounting snapshot");
+          break;
+        }
+        if (!isSqliteLockTimeoutError(result.failure.cause)) {
+          // Syntax/constraint/I/O failures require repair, not an infinite retry
+          // loop monopolizing all accounting. The durable checkpoint remains
+          // unchanged, so a later valid snapshot or replay can still settle it.
+          yield* Effect.logError("usage stats: accounting persistence failed permanently");
+          break;
+        }
+        if (!logged) {
+          // Keep content/provider identities out of retry diagnostics. Retain the
+          // exact terminal snapshot until the atomic write succeeds, so a brief
+          // SQLite failure cannot silently drop the last usage of a long query.
+          yield* Effect.logWarning("usage stats: accounting settlement is waiting for persistence");
+          logged = true;
+        }
+        yield* Effect.sleep(delayMs);
+        delayMs = Math.min(5_000, delayMs * 2);
+      }
+      yield* Deferred.succeed(work.committed, undefined);
+      pendingAccountingCommits.delete(work.committed);
+    }),
+  ).pipe(Effect.forkScoped);
+
+  const auxiliaryUsage = yield* Effect.serviceOption(AuxiliaryUsage);
+  if (Option.isSome(auxiliaryUsage)) {
+    yield* auxiliaryUsage.value.installSink(handleUsageAccounting);
+  }
 
   const track = (threadId: string): ThreadTracking => {
     let tracking = threads.get(threadId);
@@ -405,6 +556,10 @@ const makeUsageStatsService = Effect.gen(function* () {
 
   const handleProviderEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> => {
     switch (event.type) {
+      case "thread.usage-accounting.updated":
+        // Daemon replay can cross midnight. Bill the local day of the original
+        // host observation, not the backend's later catch-up time.
+        return handleUsageAccounting(event.provider, event.payload, Date.parse(event.createdAt));
       case "session.started":
       case "thread.started": {
         const tracking = track(event.threadId);
@@ -432,6 +587,10 @@ const makeUsageStatsService = Effect.gen(function* () {
       }
 
       case "thread.token-usage.updated": {
+        // Claude message counts describe one request/current context, not a
+        // cumulative bill. Its dedicated accounting stream deduplicates exact
+        // API message IDs and settles full per-model query totals instead.
+        if (event.provider === "claudeAgent") return Effect.void;
         return Effect.gen(function* () {
           const now = yield* Clock.currentTimeMillis;
           const tracking = track(event.threadId);
@@ -470,7 +629,7 @@ const makeUsageStatsService = Effect.gen(function* () {
           const tracking = track(event.threadId);
           accrue(tracking, now);
           tracking.accrueFromMs = undefined;
-          if (!tracking.sawTokenUsageThisTurn) {
+          if (event.provider !== "claudeAgent" && !tracking.sawTokenUsageThisTurn) {
             const outputTokens = turnCompletedOutputTokens(event.payload.usage);
             if (enabled && outputTokens !== undefined && outputTokens > 0) {
               if (tracking.provider !== event.provider) {
@@ -696,7 +855,12 @@ const makeUsageStatsService = Effect.gen(function* () {
             (left, right) => (left.day < right.day ? -1 : 1),
           )
         : dayRows;
-    return { ...state, days: withLiveToday, tokenBreakdown: readTokenBreakdown() };
+    return {
+      ...state,
+      days: withLiveToday,
+      tokenBreakdown: readTokenBreakdown(),
+      tokenBreakdownDays: readTokenBreakdownDays(),
+    };
   });
 
   yield* Effect.forkScoped(
@@ -727,6 +891,25 @@ const makeUsageStatsService = Effect.gen(function* () {
   ).pipe(Effect.forkScoped);
 
   yield* Effect.addFinalizer(() => tick.pipe(Effect.ignoreCause({ log: true })));
+
+  // Register after the worker's scoped-fiber finalizer, so orderly shutdown
+  // first gives already-admitted snapshots a bounded chance to commit. Never
+  // hang desktop shutdown behind a broken/locked database. An unclean process
+  // exit cannot promise observations it never durably accepted; committed
+  // checkpoints remain exactly replay-safe on the next backend attachment.
+  yield* Effect.addFinalizer(() =>
+    Effect.forEach(Array.from(pendingAccountingCommits), (committed) => Deferred.await(committed), {
+      concurrency: "unbounded",
+      discard: true,
+    }).pipe(
+      Effect.timeoutOption(2_000),
+      Effect.tap((settled) =>
+        Option.isNone(settled)
+          ? Effect.logWarning("usage stats: shutdown left accounting settlement incomplete")
+          : Effect.void,
+      ),
+    ),
+  );
 
   return {
     get,

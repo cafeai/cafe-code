@@ -1,4 +1,4 @@
-import { ProviderDriverKind } from "@cafecode/contracts";
+import { ProviderDriverKind, type UsageAccountingSnapshot } from "@cafecode/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -50,9 +50,169 @@ const clearUsageStats = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   yield* sql`DELETE FROM usage_stats_token_breakdown_days`;
   yield* sql`DELETE FROM usage_stats_days`;
+  yield* sql`DELETE FROM usage_accounting_checkpoints`;
 });
 
 layer("UsageStatsRepository", (it) => {
+  const accounting = (
+    revision: number,
+    inputTokens: number,
+    outputTokens = 0,
+  ): UsageAccountingSnapshot => ({
+    scopeId: "10000000-0000-4000-8000-000000000000",
+    revision,
+    completeness: "complete",
+    models: [
+      {
+        model: "claude-sonnet-5",
+        inputTokens,
+        cachedInputTokens: 0,
+        cacheWriteInputTokens: 0,
+        outputTokens,
+        reasoningOutputTokens: 0,
+      },
+    ],
+  });
+
+  it.effect(
+    "commits cumulative accounting checkpoints with daily/model deltas and ignores repeated or stale revisions",
+    () =>
+      Effect.gen(function* () {
+        const repository = yield* UsageStatsRepository;
+        yield* clearUsageStats;
+        const record = (snapshot: UsageAccountingSnapshot) =>
+          repository.recordAccountingSnapshot({
+            provider: CLAUDE,
+            snapshot,
+            day: "2026-09-05",
+            enabled: true,
+          });
+        yield* record(accounting(1, 100000));
+        yield* record(accounting(2, 201000, 1000));
+        assert.deepEqual(yield* record(accounting(2, 201000, 1000)), []);
+        assert.deepEqual(yield* record(accounting(1, 100000)), []);
+        assert.equal((yield* repository.listDays)[0]?.inputTokens, 201000);
+        assert.equal((yield* repository.listDays)[0]?.outputTokens, 1000);
+        assert.equal((yield* repository.listTokenBreakdownDays)[0]?.inputTokens, 201000);
+        // A new query's counter scope is independent even when its first value
+        // exceeds the last total observed for the previous resumable session.
+        yield* record({
+          ...accounting(1, 300000),
+          scopeId: "20000000-0000-4000-8000-000000000000",
+        });
+        assert.equal((yield* repository.listDays)[0]?.inputTokens, 501000);
+      }),
+  );
+
+  it.effect("advances disabled accounting checkpoints without charging the disabled interval", () =>
+    Effect.gen(function* () {
+      const repository = yield* UsageStatsRepository;
+      yield* clearUsageStats;
+      yield* repository.recordAccountingSnapshot({
+        provider: CLAUDE,
+        snapshot: accounting(1, 100),
+        day: "2026-09-05",
+        enabled: false,
+      });
+      assert.deepEqual(yield* repository.listDays, []);
+      yield* repository.recordAccountingSnapshot({
+        provider: CLAUDE,
+        snapshot: accounting(2, 150, 20),
+        day: "2026-09-06",
+        enabled: true,
+      });
+      assert.equal((yield* repository.listDays)[0]?.inputTokens, 50);
+      assert.equal((yield* repository.listDays)[0]?.day, "2026-09-06");
+    }),
+  );
+
+  it.effect(
+    "rejects across-day redistribution that would create cache or reasoning larger than its new token delta",
+    () =>
+      Effect.gen(function* () {
+        const repository = yield* UsageStatsRepository;
+        yield* clearUsageStats;
+        yield* repository.recordAccountingSnapshot({
+          provider: CLAUDE,
+          snapshot: accounting(1, 100, 50),
+          day: "2026-09-05",
+          enabled: true,
+        });
+        for (const subset of [{ cachedInputTokens: 80 }, { reasoningOutputTokens: 40 }]) {
+          const next = accounting(2, 100, 50);
+          const invalid = { ...next, models: [{ ...next.models[0]!, ...subset }] };
+          assert.isTrue(
+            Exit.isFailure(
+              yield* Effect.exit(
+                repository.recordAccountingSnapshot({
+                  provider: CLAUDE,
+                  snapshot: invalid,
+                  day: "2026-09-06",
+                  enabled: true,
+                }),
+              ),
+            ),
+          );
+        }
+        const rows = yield* repository.listDays;
+        assert.equal(rows.length, 1);
+        assert.equal(rows[0]?.day, "2026-09-05");
+        assert.equal(rows[0]?.cachedInputTokens, 0);
+      }),
+  );
+
+  it.effect(
+    "rolls back the checkpoint if an aggregate write fails so retry charges exactly once",
+    () =>
+      Effect.gen(function* () {
+        const repository = yield* UsageStatsRepository;
+        const sql = yield* SqlClient.SqlClient;
+        yield* clearUsageStats;
+        yield* sql`CREATE TRIGGER reject_accounting_day BEFORE INSERT ON usage_stats_days BEGIN SELECT RAISE(ABORT, 'test atomic failure'); END`;
+        const input = {
+          provider: CLAUDE,
+          snapshot: accounting(1, 123, 4),
+          day: "2026-09-05",
+          enabled: true,
+        };
+        assert.isTrue(
+          Exit.isFailure(yield* Effect.exit(repository.recordAccountingSnapshot(input))),
+        );
+        assert.equal((yield* sql`SELECT * FROM usage_accounting_checkpoints`).length, 0);
+        yield* sql`DROP TRIGGER reject_accounting_day`;
+        yield* repository.recordAccountingSnapshot(input);
+        yield* repository.recordAccountingSnapshot(input);
+        assert.equal((yield* repository.listDays)[0]?.inputTokens, 123);
+      }),
+  );
+
+  it.effect(
+    "rejects duplicate models, invalid subsets, and counter regressions without modifying accepted totals",
+    () =>
+      Effect.gen(function* () {
+        const repository = yield* UsageStatsRepository;
+        yield* clearUsageStats;
+        const record = (snapshot: UsageAccountingSnapshot) =>
+          repository.recordAccountingSnapshot({
+            provider: CLAUDE,
+            snapshot,
+            day: "2026-09-05",
+            enabled: true,
+          });
+        yield* record(accounting(1, 100, 20));
+        const next = accounting(2, 120, 25);
+        for (const invalid of [
+          accounting(2, 99, 20),
+          { ...next, models: [...next.models, ...next.models] },
+          { ...next, models: [{ ...next.models[0]!, cachedInputTokens: 121 }] },
+          { ...next, models: [] },
+        ])
+          assert.isTrue(Exit.isFailure(yield* Effect.exit(record(invalid))));
+        assert.equal((yield* repository.listDays)[0]?.inputTokens, 100);
+        yield* record(next);
+        assert.equal((yield* repository.listDays)[0]?.inputTokens, 120);
+      }),
+  );
   it.effect("returns no rows before any deltas are flushed", () =>
     Effect.gen(function* () {
       const repository = yield* UsageStatsRepository;

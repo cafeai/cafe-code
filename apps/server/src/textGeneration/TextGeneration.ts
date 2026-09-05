@@ -70,6 +70,14 @@ export interface ThreadTitleGenerationResult {
   title: string;
 }
 
+/** Both labels describe the same first message, so they can share one inference. */
+export type ThreadMetadataGenerationInput = ThreadTitleGenerationInput;
+
+export interface ThreadMetadataGenerationResult {
+  title: string;
+  branch: string;
+}
+
 export interface TextGenerationService {
   generateCommitMessage(
     input: CommitMessageGenerationInput,
@@ -77,6 +85,9 @@ export interface TextGenerationService {
   generatePrContent(input: PrContentGenerationInput): Promise<PrContentGenerationResult>;
   generateBranchName(input: BranchNameGenerationInput): Promise<BranchNameGenerationResult>;
   generateThreadTitle(input: ThreadTitleGenerationInput): Promise<ThreadTitleGenerationResult>;
+  generateThreadMetadata(
+    input: ThreadMetadataGenerationInput,
+  ): Promise<ThreadMetadataGenerationResult>;
 }
 
 /**
@@ -110,6 +121,11 @@ export interface TextGenerationShape {
   readonly generateThreadTitle: (
     input: ThreadTitleGenerationInput,
   ) => Effect.Effect<ThreadTitleGenerationResult, TextGenerationError>;
+
+  /** Generate both first-turn labels without sending the same context twice. */
+  readonly generateThreadMetadata: (
+    input: ThreadMetadataGenerationInput,
+  ) => Effect.Effect<ThreadMetadataGenerationResult, TextGenerationError>;
 }
 
 /**
@@ -123,7 +139,8 @@ type TextGenerationOp =
   | "generateCommitMessage"
   | "generatePrContent"
   | "generateBranchName"
-  | "generateThreadTitle";
+  | "generateThreadTitle"
+  | "generateThreadMetadata";
 
 const resolveInstance = (
   registry: ProviderInstanceRegistryShape,
@@ -161,6 +178,10 @@ export const makeTextGenerationFromRegistry = (
   generateThreadTitle: (input) =>
     resolveInstance(registry, "generateThreadTitle", input.modelSelection.instanceId).pipe(
       Effect.flatMap((textGeneration) => textGeneration.generateThreadTitle(input)),
+    ),
+  generateThreadMetadata: (input) =>
+    resolveInstance(registry, "generateThreadMetadata", input.modelSelection.instanceId).pipe(
+      Effect.flatMap((textGeneration) => textGeneration.generateThreadMetadata(input)),
     ),
 });
 

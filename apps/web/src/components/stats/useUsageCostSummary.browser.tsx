@@ -81,6 +81,8 @@ function UsageSummaryProbe() {
   return (
     <div>
       <span data-summary-output="true">{summary.outputTokens}</span>
+      <span data-summary-range-cost="true">{summary.rangeCost}</span>
+      <span data-summary-unpriced="true">{String(summary.hasUnpriced)}</span>
       <span data-raw-output="true">{summary.raw?.totals.outputTokens ?? "loading"}</span>
       <span data-chart-day-output="true">
         {summary.raw?.days.at(-1)?.outputTokens ?? "loading"}
@@ -144,6 +146,40 @@ describe("useUsageCostSummary", () => {
     clearIntervalSpy.mockRestore();
     visibilitySpy.mockRestore();
     document.body.innerHTML = "";
+  });
+
+  it("uses daily model attribution and marks missing history unpriced", async () => {
+    const usage = createUsage(100_000, 100);
+    usageHarness.getUsageStats.mockResolvedValue({
+      ...usage,
+      tokenBreakdownDays: [
+        {
+          ...usage.tokenBreakdown[0]!,
+          day: usage.today.day,
+          model: "gpt-6-astra",
+          inputTokens: 2_000,
+          cachedInputTokens: 1_000,
+          outputTokens: 100,
+        },
+      ],
+    });
+    const screen = await render(<UsageSummaryProbe />);
+    try {
+      await vi.waitFor(() => {
+        // 1k fresh at $10/M + 1k cached at $1/M + 100 output at $50/M.
+        // The much larger lifetime output must not inflate this day's cost.
+        expect(textNumber('[data-summary-range-cost="true"]')).toBeCloseTo(0.016);
+      });
+      expect(document.querySelector('[data-summary-unpriced="true"]')?.textContent).toBe("false");
+      usageHarness.getUsageStats.mockResolvedValue(usage);
+      activeIntervals.values().next().value?.();
+      await vi.waitFor(() => {
+        expect(textNumber('[data-summary-range-cost="true"]')).toBe(0);
+        expect(document.querySelector('[data-summary-unpriced="true"]')?.textContent).toBe("true");
+      });
+    } finally {
+      await screen.unmount();
+    }
   });
 
   it("refreshes headline and graph data every five seconds without overlapping or leaking", async () => {

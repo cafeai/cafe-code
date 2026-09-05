@@ -5,6 +5,7 @@ import { rollUpCost, type ModelRate } from "@cafecode/shared/modelPricing";
 import { useSettings } from "../../hooks/useSettings";
 import { useCountUp } from "./useCountUp";
 import { useUsageStatsDetail } from "./usageStatsDetailResource";
+import { dailyUsageCost } from "./dailyUsageCost";
 
 /**
  * Lifetime token and cost totals, for surfaces that want the headline figure
@@ -62,23 +63,14 @@ export function useUsageCostSummary(enabled: boolean, dayWindow = 30): UsageCost
   const summary = useMemo(() => {
     if (usage === null) return EMPTY;
     const rollup = rollUpCost(usage.tokenBreakdown, overrides);
-    // Daily rows carry no model dimension, so per-day cost uses the blended
-    // rate implied by the lifetime ledger. Good enough for a sparkline's shape;
-    // the lifetime standard-rate estimate is the headline beside it.
-    const blended = rollup.pricedTokens > 0 ? rollup.cost / rollup.pricedTokens : 0;
-    const daily = usage.days.slice(-dayWindow).map((day) => {
-      const tokens = day.inputTokens + day.outputTokens;
-      return { day: day.day, tokens, cost: tokens * blended };
-    });
+    const daily = dailyUsageCost(usage, overrides).slice(-dayWindow);
     return {
       cost: rollup.cost,
       tokens: usage.totals.inputTokens + usage.totals.outputTokens,
       loaded: true,
-      hasUnpriced: rollup.unpricedTokens > 0,
+      hasUnpriced: rollup.unpricedTokens > 0 || daily.some((day) => day.unpricedTokens > 0),
       daily,
       rangeTokens: daily.reduce((total, day) => total + day.tokens, 0),
-      // Blended, like the daily series it is summed from. The lifetime `cost`
-      // above uses per-model standard rates; this one is scoped to the window.
       rangeCost: daily.reduce((total, day) => total + day.cost, 0),
       outputTokens: usage.totals.outputTokens,
       cachedShare:

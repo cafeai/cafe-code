@@ -5,6 +5,7 @@ import {
   buildCommitMessagePrompt,
   buildPrContentPrompt,
   buildThreadTitlePrompt,
+  buildThreadMetadataPrompt,
 } from "./TextGenerationPrompts.ts";
 import { normalizeCliError, sanitizeThreadTitle } from "./TextGenerationUtils.ts";
 import { TextGenerationError } from "@cafecode/contracts";
@@ -101,6 +102,29 @@ describe("buildBranchNamePrompt", () => {
     expect(result.prompt).toContain("screenshot.png");
     expect(result.prompt).toContain("image/png");
     expect(result.prompt).toContain("12345 bytes");
+  });
+});
+
+describe("buildThreadMetadataPrompt", () => {
+  it("shares one bounded message and attachment section while preserving both naming rules", () => {
+    const result = buildThreadMetadataPrompt({
+      message: "unique request text " + "x".repeat(20_000),
+      attachments: [
+        {
+          type: "image",
+          id: "combined-image",
+          name: "unique-screenshot.png",
+          mimeType: "image/png",
+          sizeBytes: 120,
+        },
+      ],
+    });
+    expect(result.prompt.match(/unique request text/g)).toHaveLength(1);
+    expect(result.prompt.match(/unique-screenshot.png/g)).toHaveLength(1);
+    expect(result.prompt).toContain("keys: title, branch");
+    expect(result.prompt).toContain("3-8 words");
+    expect(result.prompt).toContain("2-6 words");
+    expect(result.prompt.length).toBeLessThan(10_000);
   });
 });
 

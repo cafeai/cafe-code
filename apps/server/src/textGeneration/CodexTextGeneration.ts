@@ -1,4 +1,6 @@
+import { randomUUID } from "node:crypto";
 import * as Effect from "effect/Effect";
+import * as Clock from "effect/Clock";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
@@ -8,13 +10,15 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
-import { type CodexSettings, type ModelSelection } from "@cafecode/contracts";
+import { ProviderDriverKind, type CodexSettings, type ModelSelection } from "@cafecode/contracts";
 import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@cafecode/shared/git";
 
 import { resolveAttachmentPath } from "../attachmentStore.ts";
 import { ServerConfig } from "../config.ts";
 import { expandHomePath } from "../pathExpansion.ts";
 import { TextGenerationError } from "@cafecode/contracts";
+import { AuxiliaryUsage } from "../usageStats/Services/AuxiliaryUsage.ts";
+import { makeCodexAuxiliaryUsageReader } from "./auxiliaryUsage.ts";
 import {
   type BranchNameGenerationInput,
   type ThreadTitleGenerationResult,
@@ -25,6 +29,7 @@ import {
   buildCommitMessagePrompt,
   buildPrContentPrompt,
   buildThreadTitlePrompt,
+  buildThreadMetadataPrompt,
 } from "./TextGenerationPrompts.ts";
 import {
   normalizeCliError,
@@ -52,6 +57,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const commandSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const auxiliaryUsage = yield* Effect.serviceOption(AuxiliaryUsage);
   const serverConfig = yield* Effect.service(ServerConfig);
 
   type MaterializedImageAttachments = {
@@ -105,7 +111,8 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       | "generateCommitMessage"
       | "generatePrContent"
       | "generateBranchName"
-      | "generateThreadTitle",
+      | "generateThreadTitle"
+      | "generateThreadMetadata",
     value: unknown,
   ): Effect.Effect<string, TextGenerationError> =>
     encodeJsonString(value).pipe(
@@ -124,7 +131,8 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       | "generateCommitMessage"
       | "generatePrContent"
       | "generateBranchName"
-      | "generateThreadTitle",
+      | "generateThreadTitle"
+      | "generateThreadMetadata",
     attachments: BranchNameGenerationInput["attachments"],
   ): Effect.fn.Return<MaterializedImageAttachments, TextGenerationError> {
     if (!attachments || attachments.length === 0) {
@@ -168,7 +176,8 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       | "generateCommitMessage"
       | "generatePrContent"
       | "generateBranchName"
-      | "generateThreadTitle";
+      | "generateThreadTitle"
+      | "generateThreadMetadata";
     cwd: string;
     prompt: string;
     outputSchemaJson: S;
@@ -191,6 +200,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
         codexConfig.binaryPath || "codex",
         [
           "exec",
+          "--json",
           "--ephemeral",
           "--skip-git-repo-check",
           "-s",
@@ -230,9 +240,17 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
           ),
         );
 
-      const [stdout, stderr, exitCode] = yield* Effect.all(
+      const usageReader = makeCodexAuxiliaryUsageReader(randomUUID());
+      const [snapshot, stderr, exitCode] = yield* Effect.all(
         [
-          readStreamAsString(operation, child.stdout),
+          child.stdout.pipe(
+            Stream.decodeText(),
+            Stream.runForEach((chunk) => Effect.sync(() => usageReader.push(chunk))),
+            Effect.map(() => usageReader.finish()),
+            Effect.mapError((cause) =>
+              normalizeCliError("codex", operation, cause, "Failed to collect process output"),
+            ),
+          ),
           readStreamAsString(operation, child.stderr),
           child.exitCode.pipe(
             Effect.mapError((cause) =>
@@ -243,18 +261,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
         { concurrency: "unbounded" },
       );
 
-      if (exitCode !== 0) {
-        const stderrDetail = stderr.trim();
-        const stdoutDetail = stdout.trim();
-        const detail = stderrDetail.length > 0 ? stderrDetail : stdoutDetail;
-        return yield* new TextGenerationError({
-          operation,
-          detail:
-            detail.length > 0
-              ? `Codex CLI command failed: ${detail}`
-              : `Codex CLI command failed with code ${exitCode}.`,
-        });
-      }
+      return { snapshot, stderr, exitCode, observedAtMs: yield* Clock.currentTimeMillis };
     });
 
     const cleanup = Effect.all(
@@ -265,7 +272,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
     ).pipe(Effect.asVoid);
 
     return yield* Effect.gen(function* () {
-      yield* runCodexCommand().pipe(
+      const { snapshot, stderr, exitCode, observedAtMs } = yield* runCodexCommand().pipe(
         Effect.scoped,
         Effect.timeoutOption(CODEX_TIMEOUT_MS),
         Effect.flatMap(
@@ -274,10 +281,34 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
               Effect.fail(
                 new TextGenerationError({ operation, detail: "Codex CLI request timed out." }),
               ),
-            onSome: () => Effect.void,
+            onSome: (value) => Effect.succeed(value),
           }),
         ),
       );
+
+      if (Option.isSome(auxiliaryUsage) && snapshot) {
+        // The observation belongs to this invocation even when output parsing
+        // fails. Keep ledger acknowledgement outside the provider timeout and
+        // child scope so accounting latency cannot cause a paid request retry.
+        yield* auxiliaryUsage.value.record(
+          ProviderDriverKind.make("codex"),
+          snapshot,
+          observedAtMs,
+        );
+      }
+
+      if (exitCode !== 0) {
+        // --json stdout includes assistant/tool content. Never copy that stream
+        // into an error merely because the CLI did not provide stderr detail.
+        const detail = stderr.trim();
+        return yield* new TextGenerationError({
+          operation,
+          detail:
+            detail.length > 0
+              ? `Codex CLI command failed: ${detail}`
+              : `Codex CLI command failed with code ${exitCode}.`,
+        });
+      }
 
       const decodeOutput = Schema.decodeEffect(Schema.fromJsonString(outputSchemaJson));
 
@@ -408,10 +439,33 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
     } satisfies ThreadTitleGenerationResult;
   });
 
+  const generateThreadMetadata: TextGenerationShape["generateThreadMetadata"] = Effect.fn(
+    "CodexTextGeneration.generateThreadMetadata",
+  )(function* (input) {
+    const { imagePaths } = yield* materializeImageAttachments(
+      "generateThreadMetadata",
+      input.attachments,
+    );
+    const { prompt, outputSchema } = buildThreadMetadataPrompt(input);
+    const generated = yield* runCodexJson({
+      operation: "generateThreadMetadata",
+      cwd: input.cwd,
+      prompt,
+      outputSchemaJson: outputSchema,
+      imagePaths,
+      modelSelection: input.modelSelection,
+    });
+    return {
+      title: sanitizeThreadTitle(generated.title),
+      branch: sanitizeBranchFragment(generated.branch),
+    };
+  });
+
   return {
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
+    generateThreadMetadata,
   } satisfies TextGenerationShape;
 });

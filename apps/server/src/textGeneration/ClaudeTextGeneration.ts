@@ -7,13 +7,15 @@
  *
  * @module ClaudeTextGeneration
  */
+import { randomUUID } from "node:crypto";
 import * as Effect from "effect/Effect";
+import * as Clock from "effect/Clock";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
-import { type ClaudeSettings, type ModelSelection } from "@cafecode/contracts";
+import { ProviderDriverKind, type ClaudeSettings, type ModelSelection } from "@cafecode/contracts";
 import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@cafecode/shared/git";
 
 import { TextGenerationError } from "@cafecode/contracts";
@@ -23,6 +25,7 @@ import {
   buildCommitMessagePrompt,
   buildPrContentPrompt,
   buildThreadTitlePrompt,
+  buildThreadMetadataPrompt,
 } from "./TextGenerationPrompts.ts";
 import {
   normalizeCliError,
@@ -42,6 +45,8 @@ import {
   resolveClaudeEffort,
 } from "../provider/Layers/ClaudeProvider.ts";
 import { makeClaudeEnvironment } from "../provider/Drivers/ClaudeHome.ts";
+import { AuxiliaryUsage } from "../usageStats/Services/AuxiliaryUsage.ts";
+import { readClaudeAuxiliaryUsage } from "./auxiliaryUsage.ts";
 
 const CLAUDE_TIMEOUT_MS = 180_000;
 
@@ -61,6 +66,7 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
   environment: NodeJS.ProcessEnv = process.env,
 ) {
   const commandSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const auxiliaryUsage = yield* Effect.serviceOption(AuxiliaryUsage);
   const claudeEnvironment = yield* makeClaudeEnvironment(claudeSettings, environment);
 
   const readStreamAsString = <E>(
@@ -83,7 +89,8 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       | "generateCommitMessage"
       | "generatePrContent"
       | "generateBranchName"
-      | "generateThreadTitle",
+      | "generateThreadTitle"
+      | "generateThreadMetadata",
     value: unknown,
     detail: string,
   ): Effect.Effect<string, TextGenerationError> =>
@@ -113,7 +120,8 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       | "generateCommitMessage"
       | "generatePrContent"
       | "generateBranchName"
-      | "generateThreadTitle";
+      | "generateThreadTitle"
+      | "generateThreadMetadata";
     cwd: string;
     prompt: string;
     outputSchemaJson: S;
@@ -198,23 +206,15 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
         { concurrency: "unbounded" },
       );
 
-      if (exitCode !== 0) {
-        const stderrDetail = stderr.trim();
-        const stdoutDetail = stdout.trim();
-        const detail = stderrDetail.length > 0 ? stderrDetail : stdoutDetail;
-        return yield* new TextGenerationError({
-          operation,
-          detail:
-            detail.length > 0
-              ? `Claude CLI command failed: ${detail}`
-              : `Claude CLI command failed with code ${exitCode}.`,
-        });
-      }
-
-      return stdout;
+      return { stdout, stderr, exitCode, observedAtMs: yield* Clock.currentTimeMillis };
     });
 
-    const rawStdout = yield* runClaudeCommand().pipe(
+    const {
+      stdout: rawStdout,
+      stderr,
+      exitCode,
+      observedAtMs,
+    } = yield* runClaudeCommand().pipe(
       Effect.scoped,
       Effect.timeoutOption(CLAUDE_TIMEOUT_MS),
       Effect.flatMap(
@@ -227,6 +227,33 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
         }),
       ),
     );
+
+    if (Option.isSome(auxiliaryUsage)) {
+      const snapshot = readClaudeAuxiliaryUsage(rawStdout, randomUUID());
+      if (snapshot) {
+        // Record before exit/output validation, but outside the provider timeout
+        // and child scope: a slow ledger cannot make an already-finished paid
+        // request time out and trigger the caller's generation fallback/retry.
+        yield* auxiliaryUsage.value.record(
+          ProviderDriverKind.make("claudeAgent"),
+          snapshot,
+          observedAtMs,
+        );
+      }
+    }
+
+    if (exitCode !== 0) {
+      const stderrDetail = stderr.trim();
+      const stdoutDetail = rawStdout.trim();
+      const detail = stderrDetail.length > 0 ? stderrDetail : stdoutDetail;
+      return yield* new TextGenerationError({
+        operation,
+        detail:
+          detail.length > 0
+            ? `Claude CLI command failed: ${detail}`
+            : `Claude CLI command failed with code ${exitCode}.`,
+      });
+    }
 
     const envelope = yield* decodeClaudeOutputEnvelope(rawStdout).pipe(
       Effect.catchTag("SchemaError", (cause) =>
@@ -352,10 +379,28 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
     };
   });
 
+  const generateThreadMetadata: TextGenerationShape["generateThreadMetadata"] = Effect.fn(
+    "ClaudeTextGeneration.generateThreadMetadata",
+  )(function* (input) {
+    const { prompt, outputSchema } = buildThreadMetadataPrompt(input);
+    const generated = yield* runClaudeJson({
+      operation: "generateThreadMetadata",
+      cwd: input.cwd,
+      prompt,
+      outputSchemaJson: outputSchema,
+      modelSelection: input.modelSelection,
+    });
+    return {
+      title: sanitizeThreadTitle(generated.title),
+      branch: sanitizeBranchFragment(generated.branch),
+    };
+  });
+
   return {
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
+    generateThreadMetadata,
   } satisfies TextGenerationShape;
 });

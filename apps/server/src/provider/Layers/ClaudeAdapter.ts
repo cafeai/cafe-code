@@ -6,7 +6,7 @@
  *
  * @module ClaudeAdapterLive
  */
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, realpathSync } from "node:fs";
 import { lstat, mkdir, open, opendir, readFile, rm, writeFile } from "node:fs/promises";
 
@@ -94,6 +94,13 @@ import * as Stream from "effect/Stream";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
+import { makeProviderSessionTitle } from "../providerSessionTitle.ts";
+import {
+  makeClaudeUsageAccounting,
+  observeClaudeAssistantUsage,
+  observeClaudeResultUsage,
+  type ClaudeUsageAccounting,
+} from "../claudeUsageAccounting.ts";
 import {
   getClaudeModelCapabilities,
   normalizeClaudeCliEffort,
@@ -478,6 +485,10 @@ interface ClaudeSessionContext {
   lastFastModeNoticeKey: string | undefined;
   lastKnownContextWindow: number | undefined;
   lastKnownTokenUsage: ThreadTokenUsageSnapshot | undefined;
+  /** Query-local billing epoch, independent of the resumable transcript ID. */
+  usageAccounting: ClaudeUsageAccounting;
+  readonly usageAccountingResetIds: Set<string>;
+  usageAccountingResetOverflow: boolean;
   lastAssistantUuid: string | undefined;
   lastThreadStartedId: string | undefined;
   hasSubmittedUserPrompt: boolean;
@@ -6701,6 +6712,47 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     yield* recordTurnSdkMessage(context, message);
 
     const rawMessageType = sdkMessageType(message);
+    // Account at the SDK boundary, including every intermediate result emitted
+    // while a queued steer keeps the canonical Cafe turn running. Delaying this
+    // until completeTurn would lose the last good totals if a later segment
+    // crashes. Only bounded numeric/model metadata enters this new event.
+    if (rawMessageType === "conversation_reset") {
+      const reset = message as unknown as Record<string, unknown>;
+      const conversationId = reset.new_conversation_id;
+      if (
+        typeof conversationId === "string" &&
+        isUuid(conversationId) &&
+        !context.usageAccountingResetIds.has(conversationId) &&
+        context.usageAccountingResetIds.size < 16_384
+      ) {
+        context.usageAccountingResetIds.add(conversationId);
+        context.usageAccounting = makeClaudeUsageAccounting(randomUUID());
+      } else if (context.usageAccountingResetIds.size >= 16_384) {
+        // Never reuse an old epoch after exhausting reset-identity tracking.
+        // Preserve the last known accounting lower bound until a new query
+        // starts with fresh bounded state instead of guessing counter offsets.
+        context.usageAccountingResetOverflow = true;
+      }
+    }
+    const accounting = context.usageAccountingResetOverflow
+      ? undefined
+      : message.type === "assistant"
+        ? observeClaudeAssistantUsage(context.usageAccounting, message)
+        : message.type === "result"
+          ? observeClaudeResultUsage(context.usageAccounting, message)
+          : undefined;
+    if (accounting) {
+      const stamp = yield* makeEventStamp();
+      yield* offerRuntimeEvent({
+        ...stamp,
+        type: "thread.usage-accounting.updated",
+        provider: PROVIDER,
+        threadId: context.session.threadId,
+        ...(context.turnState ? { turnId: context.turnState.turnId } : {}),
+        payload: accounting,
+        providerRefs: {},
+      });
+    }
     if (rawMessageType === "command_lifecycle") {
       const lifecycleMessage = readClaudeCommandLifecycleMessage(message);
       if (lifecycleMessage) {
@@ -7402,6 +7454,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           : {}),
         ...(Object.keys(settings).length > 0 ? { settings } : {}),
         ...(existingResumeSessionId ? { resume: existingResumeSessionId } : {}),
+        // Agent SDK Options.title suppresses native auto-title generation for
+        // a new session. Cafe already owns its task label, so supply that seed
+        // (or a fixed recovery label) without another model request or prompt
+        // injection. Decide after resume repair: a missing transcript starts
+        // fresh, while a real resume must retain its persisted native title.
+        // Reference: @anthropic-ai/claude-agent-sdk 0.3.260 Options.title.
+        ...(!existingResumeSessionId ? { title: makeProviderSessionTitle(input.title) } : {}),
         // Let upstream Claude Code allocate fresh session IDs. The Agent SDK
         // documents `sessionId` as an optional override whose default is an
         // auto-generated UUID, and its sessions guide recommends capturing the
@@ -7569,6 +7628,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         lastFastModeNoticeKey: undefined,
         lastKnownContextWindow: selectedContextWindowTokens,
         lastKnownTokenUsage: undefined,
+        usageAccounting: makeClaudeUsageAccounting(randomUUID()),
+        usageAccountingResetIds: new Set(),
+        usageAccountingResetOverflow: false,
         lastAssistantUuid: undefined,
         lastThreadStartedId: undefined,
         hasSubmittedUserPrompt: false,

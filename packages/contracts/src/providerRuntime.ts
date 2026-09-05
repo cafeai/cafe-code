@@ -170,6 +170,7 @@ const ProviderRuntimeEventType = Schema.Literals([
   "thread.metadata.updated",
   "vcs.state.changed",
   "thread.token-usage.updated",
+  "thread.usage-accounting.updated",
   "thread.goal.updated",
   "thread.goal.cleared",
   "thread.realtime.started",
@@ -223,6 +224,7 @@ const ThreadStateChangedType = Schema.Literal("thread.state.changed");
 const ThreadMetadataUpdatedType = Schema.Literal("thread.metadata.updated");
 const VcsStateChangedType = Schema.Literal("vcs.state.changed");
 const ThreadTokenUsageUpdatedType = Schema.Literal("thread.token-usage.updated");
+const ThreadUsageAccountingUpdatedType = Schema.Literal("thread.usage-accounting.updated");
 const ThreadGoalUpdatedType = Schema.Literal("thread.goal.updated");
 const ThreadGoalClearedType = Schema.Literal("thread.goal.cleared");
 const ThreadRealtimeStartedType = Schema.Literal("thread.realtime.started");
@@ -378,6 +380,77 @@ const ThreadTokenUsageUpdatedPayload = Schema.Struct({
   usage: ThreadTokenUsageSnapshot,
 });
 export type ThreadTokenUsageUpdatedPayload = typeof ThreadTokenUsageUpdatedPayload.Type;
+
+/**
+ * Billed-throughput observations are independent of current context occupancy.
+ * The host mints a fresh opaque scope for each provider counter epoch. Repeated
+ * snapshots replace that epoch's totals; consumers must never sum revisions.
+ * No provider session/account identifiers or request content belongs here.
+ */
+const UsageAccountingCount = NonNegativeInt.check(
+  Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+);
+export const UsageAccountingModel = Schema.Struct({
+  model: TrimmedNonEmptyString.check(
+    Schema.isMaxLength(256),
+    Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9._[\]-]*$/),
+  ),
+  inputTokens: UsageAccountingCount,
+  cachedInputTokens: UsageAccountingCount,
+  cacheWriteInputTokens: UsageAccountingCount,
+  outputTokens: UsageAccountingCount,
+  reasoningOutputTokens: UsageAccountingCount,
+}).check(
+  Schema.makeFilter(
+    (row) =>
+      row.cachedInputTokens <= row.inputTokens - row.cacheWriteInputTokens &&
+      row.reasoningOutputTokens <= row.outputTokens,
+    { expected: "cache and reasoning counters contained in their input/output totals" },
+  ),
+);
+export type UsageAccountingModel = typeof UsageAccountingModel.Type;
+export const UsageAccountingSnapshot = Schema.Struct({
+  scopeId: Schema.String.check(
+    Schema.isPattern(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/),
+  ),
+  revision: PositiveInt.check(Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER)),
+  models: Schema.Array(UsageAccountingModel).check(Schema.isMaxLength(64)),
+  completeness: Schema.Literals(["complete", "input-only"]),
+}).check(
+  Schema.makeFilter(
+    (snapshot) =>
+      new Set(snapshot.models.map((model) => model.model)).size === snapshot.models.length,
+    { expected: "one accounting entry per distinct model" },
+  ),
+  Schema.makeFilter(
+    (snapshot) => {
+      // Validate aggregate numeric capacity before any consumer adds model rows.
+      // Individually safe integers can still overflow when a fleet is aggregated.
+      const totals = {
+        inputTokens: 0,
+        cachedInputTokens: 0,
+        cacheWriteInputTokens: 0,
+        outputTokens: 0,
+        reasoningOutputTokens: 0,
+      };
+      for (const model of snapshot.models) {
+        for (const field of [
+          "inputTokens",
+          "cachedInputTokens",
+          "cacheWriteInputTokens",
+          "outputTokens",
+          "reasoningOutputTokens",
+        ] as const) {
+          totals[field] += model[field];
+          if (!Number.isSafeInteger(totals[field])) return false;
+        }
+      }
+      return true;
+    },
+    { expected: "safe integer token totals across all accounting models" },
+  ),
+);
+export type UsageAccountingSnapshot = typeof UsageAccountingSnapshot.Type;
 
 const ThreadGoalUpdatedPayload = Schema.Struct({
   goal: ProviderThreadGoal,
@@ -830,6 +903,12 @@ const ProviderRuntimeThreadTokenUsageUpdatedEvent = Schema.Struct({
 export type ProviderRuntimeThreadTokenUsageUpdatedEvent =
   typeof ProviderRuntimeThreadTokenUsageUpdatedEvent.Type;
 
+const ProviderRuntimeThreadUsageAccountingUpdatedEvent = Schema.Struct({
+  ...ProviderRuntimeEventBase.fields,
+  type: ThreadUsageAccountingUpdatedType,
+  payload: UsageAccountingSnapshot,
+});
+
 const ProviderRuntimeThreadGoalUpdatedEvent = Schema.Struct({
   ...ProviderRuntimeEventBase.fields,
   type: ThreadGoalUpdatedType,
@@ -1141,6 +1220,7 @@ export const ProviderRuntimeEventV2 = Schema.Union([
   ProviderRuntimeThreadMetadataUpdatedEvent,
   ProviderRuntimeVcsStateChangedEvent,
   ProviderRuntimeThreadTokenUsageUpdatedEvent,
+  ProviderRuntimeThreadUsageAccountingUpdatedEvent,
   ProviderRuntimeThreadGoalUpdatedEvent,
   ProviderRuntimeThreadGoalClearedEvent,
   ProviderRuntimeThreadRealtimeStartedEvent,

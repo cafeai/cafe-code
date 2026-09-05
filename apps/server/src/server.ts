@@ -61,6 +61,7 @@ import { WebPushNotificationsLive } from "./notifications/WebPushNotifications.t
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
 import { UsageStatsRepositoryLive } from "./persistence/Layers/UsageStats.ts";
 import { UsageStatsServiceLive } from "./usageStats/Layers/UsageStatsService.ts";
+import { AuxiliaryUsageLive } from "./usageStats/Services/AuxiliaryUsage.ts";
 import { ProviderRegistryLive } from "./provider/Layers/ProviderRegistry.ts";
 import { ServerSettingsLive } from "./serverSettings.ts";
 import { ServerClientSettingsLive } from "./serverClientSettings.ts";
@@ -305,6 +306,10 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   Layer.provideMerge(RepositoryIdentityResolverLive),
   Layer.provideMerge(ServerEnvironmentLive),
   Layer.provideMerge(AuthLayerLive),
+).pipe(
+  // One scoped bridge is visible both while provider factories are built and
+  // when the usage accumulator later installs its hydrated ledger callback.
+  Layer.provideMerge(AuxiliaryUsageLive),
 );
 
 const RuntimeCoreWithDiagnosticsLive = RuntimeLayerDiagnostics.layer.pipe(

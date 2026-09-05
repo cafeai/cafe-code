@@ -7,6 +7,7 @@ import { cn } from "../../lib/utils";
 import { PROVIDER_ICON_BY_PROVIDER } from "../chat/providerIconUtils";
 import { UsageAreaChart, type UsageChartSeries } from "../stats/UsageAreaChart";
 import { useCountUp } from "../stats/useCountUp";
+import { dailyUsageCost } from "../stats/dailyUsageCost";
 import { SettingsSection } from "./settingsLayout";
 import {
   formatCompactTokenCount,
@@ -57,9 +58,8 @@ type Mode = "cost" | "tokens";
 /**
  * Chart window. The daily ledger is the only day-indexed data we have, so a
  * range narrows the chart and the in-range subtotal beside it. The headline and
- * the model table stay lifetime figures — those come from the per-model ledger,
- * which carries no day dimension, and silently relabelling them as ranged would
- * be a lie.
+ * the model table stay explicitly lifetime figures. Only the chart uses the
+ * per-day model breakdown; switching ranges must not relabel the headline.
  */
 const RANGES = [
   { key: "7", label: "7 days", days: 7 },
@@ -294,25 +294,30 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
         labels,
         series,
         rangeTokens,
+        hasUnpriced: false,
         format: (value: number) =>
           `${formatFullTokenCount(value)} tokens (${formatCompactTokenCount(value)})`,
       };
     }
 
-    // Daily rows carry no model dimension, so cost per day is approximated with
-    // the blended rate implied by the lifetime ledger. Labelled as an estimate
-    // wherever it is shown, because it is one.
-    const blended = view.rollup.pricedTokens > 0 ? view.rollup.cost / view.rollup.pricedTokens : 0;
+    const pricedDays = usage === null ? [] : dailyUsageCost(usage, overrides);
+    const dailyCosts = new Map(pricedDays.map((day) => [day.day, day]));
     const series: UsageChartSeries[] = [
       {
         key: "cost",
         label: "Estimated cost",
         color: TOKEN_BAND_COLORS.cached,
-        values: days.map((day) => (day.inputTokens + day.outputTokens) * blended),
+        values: days.map((day) => dailyCosts.get(day.day)?.cost ?? 0),
       },
     ];
-    return { labels, series, rangeTokens, format: (value: number) => formatUsd(value) };
-  }, [usage, mode, range, view.rollup]);
+    return {
+      labels,
+      series,
+      rangeTokens,
+      hasUnpriced: days.some((day) => (dailyCosts.get(day.day)?.unpricedTokens ?? 0) > 0),
+      format: (value: number) => formatUsd(value),
+    };
+  }, [usage, mode, range, overrides]);
 
   const share = view.rollup.pricedTokens + view.rollup.unpricedTokens;
   const pricedPercent = share === 0 ? null : (view.rollup.pricedTokens / share) * 100;
@@ -402,6 +407,11 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
             <span data-usage-cost-chart-label="true">
               {mode === "cost" ? "Estimated daily cost (USD)" : "Daily tokens"}
             </span>
+            {chart.hasUnpriced ? (
+              <span className="text-muted-foreground/70">
+                Partial estimate: usage without daily model pricing is excluded.
+              </span>
+            ) : null}
             <div className="flex overflow-hidden rounded-md border border-border/70">
               {RANGES.map((entry) => (
                 <button
@@ -588,6 +598,10 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
           <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground/70">
             Rates come from a bundled table. Add your own in Settings to price a model this build
             does not know.
+          </p>
+          <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground/70">
+            Priced share covers recorded tokens only. Interrupted provider requests may not report
+            all usage, so these totals are estimates, not a complete billing record.
           </p>
         </div>
       </div>
