@@ -10,8 +10,9 @@
  * Each call to `create()` captures the `codexConfig` argument in closures
  * owned by the returned instance. Two instances created with different
  * `homePath`s (e.g. `codex_personal` + `codex_work`) therefore run with
- * fully independent Codex app-server processes and `CODEX_HOME`
- * environments — no shared mutable state.
+ * independent Codex app-server processes and `CODEX_HOME` environments.
+ * Auth overlays deliberately share their source home's rollouts and default
+ * SQLite history index while keeping their credential files private.
  *
  * Resource lifecycle: `create()` runs in a scope handed in by the registry.
  * Closing that scope releases the adapter's child processes, the managed
@@ -65,6 +66,7 @@ import {
   codexContinuationIdentity,
   materializeCodexShadowHome,
   resolveCodexHomeLayout,
+  withCodexHomeLayoutEnvironment,
 } from "./CodexHomeLayout.ts";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 
@@ -207,7 +209,12 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         effectiveHomePath: homeLayout.effectiveHomePath ?? null,
         defaultShadowHomeApplied: layoutConfig !== config,
         authSource,
-        sqliteState: homeLayout.mode === "authOverlay" ? "shadow-local" : "direct",
+        sqliteHomeEnvironment:
+          homeLayout.mode !== "authOverlay"
+            ? "unchanged"
+            : processEnv.CODEX_SQLITE_HOME?.trim()
+              ? "preserved"
+              : "shared-home-default",
       });
       const runtime = resolveProviderRuntimeEnvironment({
         provider: DRIVER_KIND,
@@ -222,7 +229,10 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         binaryPath: runtime.binaryPath,
         homePath: homeLayout.effectiveHomePath ?? "",
       } satisfies CodexSettings;
-      const effectiveEnvironment = runtime.env;
+      // One environment owns every process launched by this instance: live
+      // sessions, bounded history/model reads, health probes, and generation
+      // helpers must agree on the SQLite index for their shared rollouts.
+      const effectiveEnvironment = withCodexHomeLayoutEnvironment(homeLayout, runtime.env);
       const maintenanceCapabilities =
         effectiveConfig.runtimeSource === "bundled"
           ? runtime.maintenanceCapabilities

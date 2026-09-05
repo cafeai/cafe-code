@@ -1729,85 +1729,107 @@ describe("ProviderRuntimeIngestion", () => {
     expect(thread.session?.lastError).toBeNull();
   });
 
-  it("does not let late startup and idle events erase a failed session without a registered runtime", async () => {
-    const harness = await createHarness();
-    const threadId = asThreadId("thread-1");
-    const providerInstanceId = ProviderInstanceId.make("codex");
-    const failureAt = "2026-01-01T00:00:01.000Z";
+  it.each(["thread.state.changed", "session.started", "thread.started"] as const)(
+    "retains a failed session through late startup events until registered %s recovery",
+    async (recoveryEventType) => {
+      const harness = await createHarness();
+      const threadId = asThreadId("thread-1");
+      const providerInstanceId = ProviderInstanceId.make("codex");
+      const failureAt = "2026-01-01T00:00:01.000Z";
 
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.session.set",
-        commandId: CommandId.make("cmd-session-failed-before-late-heartbeats"),
-        threadId,
-        session: {
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-session-failed-before-late-heartbeats"),
           threadId,
-          status: "ready",
-          providerName: "codex",
-          providerInstanceId,
-          runtimeMode: "approval-required",
-          activeTurnId: null,
-          lastError: "Codex session resume failed.",
-          updatedAt: failureAt,
-        },
+          session: {
+            threadId,
+            status: "ready",
+            providerName: "codex",
+            providerInstanceId,
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: "Codex session resume failed.",
+            updatedAt: failureAt,
+          },
+          createdAt: failureAt,
+        }),
+      );
+      harness.clearProviderSessions();
+
+      harness.emit({
+        type: "session.state.changed",
+        eventId: asEventId("evt-stale-session-starting-after-failure"),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId,
+        threadId,
+        createdAt: "2026-01-01T00:00:02.000Z",
+        payload: { state: "starting" },
+      });
+      harness.emit({
+        type: "thread.state.changed",
+        eventId: asEventId("evt-stale-thread-idle-after-failure"),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId,
+        threadId,
+        createdAt: "2026-01-01T00:00:03.000Z",
+        payload: { state: "idle" },
+      });
+      harness.emit({
+        type: "session.started",
+        eventId: asEventId("evt-stale-session-started-after-failure"),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId,
+        threadId,
+        createdAt: "2026-01-01T00:00:04.000Z",
+      });
+      harness.emit({
+        type: "thread.started",
+        eventId: asEventId("evt-stale-thread-started-after-failure"),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId,
+        threadId,
+        createdAt: "2026-01-01T00:00:05.000Z",
+      });
+      await harness.drain();
+
+      let thread = await waitForThread(
+        harness.readModel,
+        (entry) => entry.session?.lastError === "Codex session resume failed.",
+      );
+      expect(thread.session?.status).toBe("ready");
+      expect(thread.session?.activeTurnId).toBeNull();
+
+      harness.setProviderSession({
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId,
+        status: "ready",
+        runtimeMode: "approval-required",
+        threadId,
         createdAt: failureAt,
-      }),
-    );
-    harness.clearProviderSessions();
+        updatedAt: "2026-01-01T00:00:06.000Z",
+      });
+      const recoveryEvent = {
+        eventId: asEventId("evt-authoritative-startup-after-recovery"),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId,
+        threadId,
+        createdAt: "2026-01-01T00:00:06.000Z",
+      };
+      harness.emit(
+        recoveryEventType === "thread.state.changed"
+          ? { ...recoveryEvent, type: recoveryEventType, payload: { state: "idle" } }
+          : { ...recoveryEvent, type: recoveryEventType },
+      );
+      await harness.drain();
 
-    harness.emit({
-      type: "session.state.changed",
-      eventId: asEventId("evt-stale-session-starting-after-failure"),
-      provider: ProviderDriverKind.make("codex"),
-      providerInstanceId,
-      threadId,
-      createdAt: "2026-01-01T00:00:02.000Z",
-      payload: { state: "starting" },
-    });
-    harness.emit({
-      type: "thread.state.changed",
-      eventId: asEventId("evt-stale-thread-idle-after-failure"),
-      provider: ProviderDriverKind.make("codex"),
-      providerInstanceId,
-      threadId,
-      createdAt: "2026-01-01T00:00:03.000Z",
-      payload: { state: "idle" },
-    });
-    await harness.drain();
-
-    let thread = await waitForThread(
-      harness.readModel,
-      (entry) => entry.session?.lastError === "Codex session resume failed.",
-    );
-    expect(thread.session?.status).toBe("ready");
-    expect(thread.session?.activeTurnId).toBeNull();
-
-    harness.setProviderSession({
-      provider: ProviderDriverKind.make("codex"),
-      providerInstanceId,
-      status: "ready",
-      runtimeMode: "approval-required",
-      threadId,
-      createdAt: failureAt,
-      updatedAt: "2026-01-01T00:00:04.000Z",
-    });
-    harness.emit({
-      type: "thread.state.changed",
-      eventId: asEventId("evt-authoritative-thread-idle-after-recovery"),
-      provider: ProviderDriverKind.make("codex"),
-      providerInstanceId,
-      threadId,
-      createdAt: "2026-01-01T00:00:04.000Z",
-      payload: { state: "idle" },
-    });
-    await harness.drain();
-
-    thread = await waitForThread(
-      harness.readModel,
-      (entry) => entry.session?.status === "ready" && entry.session.lastError === null,
-    );
-    expect(thread.session?.lastError).toBeNull();
-  });
+      thread = await waitForThread(
+        harness.readModel,
+        (entry) => entry.session?.status === "ready" && entry.session.lastError === null,
+      );
+      expect(thread.session?.lastError).toBeNull();
+    },
+  );
 
   it("does not clear active turn when session/thread started arrives mid-turn", async () => {
     const harness = await createHarness();

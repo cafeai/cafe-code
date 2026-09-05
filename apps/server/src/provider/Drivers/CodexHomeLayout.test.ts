@@ -12,6 +12,7 @@ import {
   materializeCodexShadowHome,
   resolveCodexHomeLayout,
   shouldShareCodexShadowEntryName,
+  withCodexHomeLayoutEnvironment,
 } from "./CodexHomeLayout.ts";
 const decodeCodexSettingsValue = Schema.decodeSync(CodexSettings);
 
@@ -83,6 +84,81 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
     );
   });
 
+  describe("withCodexHomeLayoutEnvironment", () => {
+    it.effect("pairs overlay SQLite with shared rollouts without changing the auth home", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const sharedHome = path.resolve("shared-codex-home");
+        const shadowHome = path.resolve("private-codex-auth-home");
+        const layout = yield* resolveCodexHomeLayout(
+          decodeCodexSettings({ homePath: sharedHome, shadowHomePath: shadowHome }),
+        );
+        const environment = Object.freeze({
+          CODEX_HOME: shadowHome,
+          CAFE_CODE_TEST_ENVIRONMENT: "preserved",
+        });
+
+        const resolved = withCodexHomeLayoutEnvironment(layout, environment);
+
+        expect(resolved).toEqual({
+          ...environment,
+          CODEX_SQLITE_HOME: sharedHome,
+        });
+        expect(resolved).not.toBe(environment);
+        expect(environment).not.toHaveProperty("CODEX_SQLITE_HOME");
+        expect(layout.effectiveHomePath).toBe(shadowHome);
+      }),
+    );
+
+    it.effect("treats blank SQLite environment values as an absent upstream default", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const layout = yield* resolveCodexHomeLayout(
+          decodeCodexSettings({
+            homePath: path.resolve("shared-codex-home"),
+            shadowHomePath: path.resolve("private-codex-auth-home"),
+          }),
+        );
+        for (const value of [undefined, "", " \t\n "]) {
+          const environment = Object.freeze({ CODEX_SQLITE_HOME: value });
+          expect(withCodexHomeLayoutEnvironment(layout, environment).CODEX_SQLITE_HOME).toBe(
+            layout.sharedHomePath,
+          );
+          expect(environment.CODEX_SQLITE_HOME).toBe(value);
+        }
+      }),
+    );
+
+    it.effect("preserves explicit caller SQLite environment settings exactly", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const layout = yield* resolveCodexHomeLayout(
+          decodeCodexSettings({
+            homePath: path.resolve("shared-codex-home"),
+            shadowHomePath: path.resolve("private-codex-auth-home"),
+          }),
+        );
+        for (const value of [path.resolve("custom-sqlite-home"), " relative-sqlite-home "]) {
+          const environment = Object.freeze({ CODEX_SQLITE_HOME: value });
+          expect(withCodexHomeLayoutEnvironment(layout, environment)).toBe(environment);
+        }
+      }),
+    );
+
+    it.effect("does not change direct-home environments, including blank explicit values", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        for (const homePath of ["", path.resolve("direct-codex-home")]) {
+          const layout = yield* resolveCodexHomeLayout(decodeCodexSettings({ homePath }));
+          for (const value of [undefined, "", " \t ", path.resolve("custom-sqlite-home")]) {
+            const environment = Object.freeze({ CODEX_SQLITE_HOME: value });
+            expect(withCodexHomeLayoutEnvironment(layout, environment)).toBe(environment);
+          }
+        }
+      }),
+    );
+  });
+
   describe("materializeCodexShadowHome", () => {
     it.effect(
       "materializes a shadow home with shared config/session links and refreshed private auth",
@@ -93,9 +169,11 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
           const sharedHome = yield* makeTempDir("t3code-codex-shared-");
           const shadowRoot = yield* makeTempDir("t3code-codex-shadow-root-");
           const shadowHome = path.join(shadowRoot, "shadow");
+          const configuredSqliteHome = path.join(sharedHome, "configured-sqlite");
+          const sharedConfig = `model = "gpt-5-codex"\nsqlite_home = ${JSON.stringify(configuredSqliteHome)}\n`;
 
           yield* fileSystem.makeDirectory(path.join(sharedHome, "sessions"));
-          yield* writeTextFile(path.join(sharedHome, "config.toml"), 'model = "gpt-5-codex"\n');
+          yield* writeTextFile(path.join(sharedHome, "config.toml"), sharedConfig);
           yield* writeTextFile(path.join(sharedHome, "state_5.sqlite"), "shared-state-db");
           yield* writeTextFile(path.join(sharedHome, "state_5.sqlite-wal"), "shared-state-wal");
           yield* writeTextFile(path.join(sharedHome, "logs_2.sqlite"), "shared-logs-db");
@@ -127,6 +205,7 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
           );
 
           yield* materializeCodexShadowHome(layout);
+          const environment = withCodexHomeLayoutEnvironment(layout, {});
 
           const sessionsExists = yield* fileSystem.exists(path.join(shadowHome, "sessions"));
           const configContents = yield* fileSystem.readFileString(
@@ -152,7 +231,10 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
           const authContents = yield* fileSystem.readFileString(path.join(shadowHome, "auth.json"));
 
           expect(sessionsExists).toBe(true);
-          expect(configContents).toBe('model = "gpt-5-codex"\n');
+          // The helper supplies only an environment fallback. The unchanged
+          // upstream config retains its higher-precedence explicit SQLite home.
+          expect(environment.CODEX_SQLITE_HOME).toBe(sharedHome);
+          expect(configContents).toBe(sharedConfig);
           if (process.platform !== "win32") {
             const sessionsTarget = yield* fileSystem.readLink(path.join(shadowHome, "sessions"));
             const configTarget = yield* fileSystem.readLink(path.join(shadowHome, "config.toml"));
@@ -414,7 +496,7 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
   });
 
   describe("entry classification", () => {
-    it("keeps current Codex runtime databases local to the shadow home", () => {
+    it("never links Codex runtime database files into shadow homes", () => {
       expect(isCodexShadowLocalEntryName("state_5.sqlite")).toBe(true);
       expect(isCodexShadowLocalEntryName("state_5.sqlite-wal")).toBe(true);
       expect(isCodexShadowLocalEntryName("future_state.sqlite3")).toBe(true);

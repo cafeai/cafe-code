@@ -3294,6 +3294,55 @@ describe("selectCodexActiveSnapshotTurn", () => {
 });
 
 describe("openCodexThread", () => {
+  it.each(["list_turns", "list_items"])(
+    "preserves the native thread when its SQLite history rejects %s",
+    async (operation) => {
+      const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
+      // Upstream also emits this exact MethodNotFound error for a paginated
+      // rollout whose SQLite metadata is missing or still legacy. It is not
+      // evidence that the native thread disappeared or that a fresh identity
+      // is safe. Its mandatory resume cursor reads also run without an
+      // initialTurnsPage, so dropping pagination is not a proven recovery.
+      const unsupportedHistory = new CodexErrors.CodexAppServerRequestError({
+        code: -32601,
+        errorMessage: `${operation} is not supported yet`,
+      });
+      const client = {
+        raw: {
+          request: (method: "thread/start" | "thread/resume", payload: unknown) => {
+            calls.push({ method, payload });
+            return method === "thread/resume"
+              ? Effect.fail(unsupportedHistory)
+              : Effect.succeed(makeThreadOpenResponse("incorrect-fresh-thread"));
+          },
+        },
+      };
+
+      const failure = await Effect.runPromise(
+        openCodexThread({
+          client,
+          threadId: ThreadId.make("thread-1"),
+          runtimeMode: "full-access",
+          cwd: "/tmp/project",
+          requestedModel: "gpt-5.3-codex",
+          serviceTier: undefined,
+          resumeThreadId: "existing-thread",
+        }).pipe(Effect.flip),
+      );
+
+      assert.equal(failure, unsupportedHistory);
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0]?.method, "thread/resume");
+      assert.equal(Reflect.get(calls[0]!.payload as object, "threadId"), "existing-thread");
+      assert.equal(Reflect.get(calls[0]!.payload as object, "excludeTurns"), true);
+      assert.deepStrictEqual(Reflect.get(calls[0]!.payload as object, "initialTurnsPage"), {
+        itemsView: "notLoaded",
+        limit: 1,
+        sortDirection: "desc",
+      });
+    },
+  );
+
   it("resumes with one metadata-only recent turn instead of the full thread history", async () => {
     const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
     const response = {

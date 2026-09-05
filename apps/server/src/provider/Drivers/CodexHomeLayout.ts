@@ -117,6 +117,31 @@ export const resolveCodexHomeLayout = Effect.fn("resolveCodexHomeLayout")(functi
   };
 });
 
+/**
+ * Keep the SQLite history projection beside the canonical shared rollouts.
+ *
+ * An auth overlay changes CODEX_HOME to isolate credentials, but its sessions
+ * still belong to sharedHomePath. Letting upstream also default SQLite to that
+ * overlay can leave one database marking a migrated rollout as legacy while
+ * another marks it as paginated. Codex then rejects the same thread's resume
+ * cursor with `list_turns is not supported yet` even though pagination exists.
+ *
+ * Codex rust-v0.153.4 (3d2ee51), state/src/lib.rs and core/src/config/mod.rs,
+ * defines CODEX_SQLITE_HOME and resolves sqlite_home config > nonblank env >
+ * CODEX_HOME. Supply only the missing environment default: explicit upstream
+ * config and caller environment remain authoritative. This never copies,
+ * links, rewrites, or removes a database, nor does it change the auth home.
+ */
+export function withCodexHomeLayoutEnvironment(
+  layout: CodexHomeLayout,
+  environment: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  if (layout.mode !== "authOverlay" || environment.CODEX_SQLITE_HOME?.trim()) {
+    return environment;
+  }
+  return { ...environment, CODEX_SQLITE_HOME: layout.sharedHomePath };
+}
+
 export class CodexShadowHomeError extends Schema.TaggedErrorClass<CodexShadowHomeError>()(
   "CodexShadowHomeError",
   {

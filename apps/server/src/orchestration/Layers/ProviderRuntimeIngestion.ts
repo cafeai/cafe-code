@@ -2098,11 +2098,13 @@ const make = Effect.gen(function* () {
   );
 
   /**
-   * A provider process may emit `starting` and thread `idle` notifications
-   * before its resume request fails. Those events remain in the daemon journal
-   * after the failed adapter scope is gone. They are not proof that a usable
-   * session exists, so a previous start failure may be cleared only when the
-   * current ProviderService can name a matching registered session.
+   * A provider process may emit startup/readiness notifications before its
+   * resume request fails. Even `session.started` and `thread.started` only
+   * describe provider initialization, not acceptance of the pending user turn.
+   * Those events remain in the daemon journal after the failed adapter scope
+   * is gone. They are not proof that a usable session exists, so a previous
+   * start failure may be cleared only when the current ProviderService can
+   * name a matching registered session (or fresh user intent is pending).
    */
   const hasRegisteredSessionForFailureRecovery = Effect.fn(
     "hasRegisteredSessionForFailureRecovery",
@@ -2280,6 +2282,13 @@ const make = Effect.gen(function* () {
         });
 
       const failedSessionHeartbeatState = (() => {
+        if (event.type === "session.started" || event.type === "thread.started") {
+          // The resume operation can still fail after these notifications have
+          // entered the daemon journal. Apply the same live-registration guard
+          // as ready/idle rather than erasing the later command failure when
+          // that journal delivery reaches orchestration out of order.
+          return "started";
+        }
         if (
           event.type === "session.state.changed" &&
           (event.payload.state === "starting" || event.payload.state === "ready")
