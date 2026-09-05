@@ -48,6 +48,7 @@ import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
 import { attachmentRelativePath } from "../../attachmentStore.ts";
+import { storeFileAttachment } from "../../fileAttachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderAdapterValidationError } from "../Errors.ts";
@@ -922,6 +923,61 @@ describe("ClaudeAdapterLive", () => {
       Effect.provide(harness.layer),
     );
   });
+
+  it.effect(
+    "delivers file manifests on Claude sends and steers without widening permissions",
+    () => {
+      const baseDir = mkdtempSync(path.join(os.tmpdir(), "claude-file-attachments-"));
+      const harness = makeHarness({ cwd: "/tmp/claude-file-project", baseDir });
+      return Effect.gen(function* () {
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => rmSync(baseDir, { recursive: true, force: true })),
+        );
+        const adapter = yield* ClaudeAdapter;
+        const { attachmentsDir } = yield* ServerConfig;
+        const attachment = yield* Effect.promise(() =>
+          storeFileAttachment({
+            attachmentsDir,
+            threadId: THREAD_ID,
+            name: "reference.tex",
+            mimeType: "text/plain",
+            bytes: Buffer.from("PRIVATE_TEX_BODY_NOT_IN_INITIAL_PROMPT"),
+          }),
+        );
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "approval-required",
+          cwd: "/tmp/claude-file-project",
+        });
+        const turn = yield* adapter.sendTurn({
+          threadId: session.threadId,
+          input: "inspect",
+          attachments: [attachment],
+        });
+        yield* adapter.steerTurn({
+          threadId: session.threadId,
+          expectedTurnId: turn.turnId,
+          input: "include this too",
+          attachments: [attachment],
+        });
+        const messages = yield* Effect.promise(() =>
+          readPromptMessages(harness.getLastCreateQueryInput(), 2),
+        );
+        for (const message of messages) {
+          const serialized = JSON.stringify(message.message.content);
+          assert.include(serialized, "reference.tex");
+          assert.include(serialized, ".provider.tex");
+          assert.notInclude(serialized, "PRIVATE_TEX_BODY_NOT_IN_INITIAL_PROMPT");
+          assert.notInclude(serialized, '"type":"document"');
+        }
+        assert.deepEqual(harness.getLastCreateQueryInput()?.options.additionalDirectories, [
+          "/tmp/claude-file-project",
+        ]);
+        assert.deepEqual(harness.query.interruptCalls, []);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
 
   it.effect("queues Claude steer input into the active streaming prompt", () => {
     const harness = makeHarness();

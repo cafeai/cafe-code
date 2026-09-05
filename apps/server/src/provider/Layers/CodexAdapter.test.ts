@@ -46,6 +46,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as CodexErrors from "effect-codex-app-server/errors";
 
 import { ServerConfig } from "../../config.ts";
+import { storeFileAttachment } from "../../fileAttachmentStore.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderAdapterValidationError } from "../Errors.ts";
 import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
@@ -4171,6 +4172,68 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 });
+
+it.effect(
+  "delivers file manifests on Codex sends and steers without adding sandbox overrides",
+  () => {
+    const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "cafe-codex-file-attachments-"));
+    const runtimeFactory = makeRuntimeFactory();
+    const layer = Layer.effect(
+      CodexAdapter,
+      makeCodexAdapter(decodeCodexSettings({}), {
+        makeRuntime: runtimeFactory.factory,
+      }),
+    ).pipe(
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(providerSessionDirectoryTestLayer),
+      Layer.provideMerge(NodeServices.layer),
+    );
+    return Effect.gen(function* () {
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => fs.rmSync(baseDir, { recursive: true, force: true })),
+      );
+      const adapter = yield* CodexAdapter;
+      const { attachmentsDir } = yield* ServerConfig;
+      const threadId = asThreadId("codex-file-test");
+      const attachment = yield* Effect.promise(() =>
+        storeFileAttachment({
+          attachmentsDir,
+          threadId,
+          name: "source.html",
+          mimeType: "text/html",
+          bytes: Buffer.from("PRIVATE_HTML_BODY_NOT_IN_INITIAL_PROMPT"),
+        }),
+      );
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("codex"),
+        runtimeMode: "approval-required",
+        cwd: process.cwd(),
+      });
+      const runtime = runtimeFactory.lastRuntime;
+      assert.ok(runtime);
+      yield* adapter.sendTurn({ threadId, input: "inspect", attachments: [attachment] });
+      yield* adapter.steerTurn({
+        threadId,
+        expectedTurnId: asTurnId("turn-1"),
+        input: "include this too",
+        attachments: [attachment],
+      });
+      for (const request of [
+        runtime.sendTurnImpl.mock.calls.at(-1)?.[0],
+        runtime.steerTurnImpl.mock.calls.at(-1)?.[0],
+      ]) {
+        assert.match(request?.input ?? "", /source\.html/);
+        assert.match(request?.input ?? "", /\.provider\.html/);
+        assert.doesNotMatch(request?.input ?? "", /PRIVATE_HTML_BODY_NOT_IN_INITIAL_PROMPT/);
+        assert.equal(request?.attachments, undefined);
+        assert.equal("additionalDirectories" in (request ?? {}), false);
+        assert.equal("sandboxPolicy" in (request ?? {}), false);
+      }
+    }).pipe(Effect.provide(layer));
+  },
+);
 
 it.effect("keeps Codex HTTP fallback scoped to the live app-server by default", () =>
   Effect.gen(function* () {

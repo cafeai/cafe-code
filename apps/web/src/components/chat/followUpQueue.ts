@@ -66,6 +66,37 @@ export function canStartQueuedFollowUpTurn(input: QueuedFollowUpStartInput): boo
   );
 }
 
+export interface RunningQueuedFollowUpDispatchInput {
+  phase: SessionPhase;
+  sessionRunning: boolean;
+  automaticSteerRetryBlocked: boolean;
+  isConnecting: boolean;
+  isEnvironmentUnavailable: boolean;
+  isDispatchInFlight: boolean;
+}
+
+/**
+ * Serialize command admission, not provider processing of accepted steers.
+ *
+ * A provider can accept multiple message-correlated follow-ups for one live
+ * turn. The non-cancelable "steering" rows track each accepted message until
+ * that provider processes it; they do not own the next command's send lock.
+ * Keep the actual attachment-upload/command request and queued-turn-start
+ * barriers in isDispatchInFlight so rapid activations cannot reorder input.
+ */
+export function canDispatchRunningQueuedFollowUp(
+  input: RunningQueuedFollowUpDispatchInput,
+): boolean {
+  return (
+    input.phase === "running" &&
+    input.sessionRunning &&
+    !input.automaticSteerRetryBlocked &&
+    !input.isConnecting &&
+    !input.isEnvironmentUnavailable &&
+    !input.isDispatchInFlight
+  );
+}
+
 export interface AutomaticQueuedFollowUpStartInput extends QueuedFollowUpStartInput {
   manualStopBarrierActive: boolean;
 }

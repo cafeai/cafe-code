@@ -1,5 +1,5 @@
 import { memo, type PointerEventHandler } from "react";
-import { ImagePlusIcon } from "lucide-react";
+import { PaperclipIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
 import { Button } from "../ui/button";
 
@@ -25,11 +25,12 @@ export const ComposerAttachImageButton = memo(function ComposerAttachImageButton
       variant="ghost"
       className={cn("shrink-0 text-muted-foreground/70 hover:text-foreground/80", className)}
       disabled={disabled}
-      aria-label="Attach image"
+      aria-label="Attach files or images"
+      title="Upload copies of files or images. Workspace @ references stay linked."
       {...(preserveComposerFocusOnPointerDown ? { onPointerDown: preventPointerFocus } : {})}
       onClick={onClick}
     >
-      <ImagePlusIcon aria-hidden="true" className="size-4" />
+      <PaperclipIcon aria-hidden="true" className="size-4" />
     </Button>
   );
 });

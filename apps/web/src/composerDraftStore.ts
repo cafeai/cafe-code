@@ -42,6 +42,12 @@ import {
 } from "./lib/storage";
 import { getDefaultServerModel } from "./providerModels";
 import { UnifiedSettings } from "@cafecode/contracts/settings";
+import {
+  PersistedComposerFileAttachment,
+  hydrateComposerFile,
+  persistComposerFile,
+  type ComposerFileAttachment,
+} from "./attachments/composerFiles";
 const isRuntimeMode = Schema.is(RuntimeMode);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
 
@@ -64,6 +70,16 @@ const composerDebouncedStorage = createDebouncedStorage(
   ),
   COMPOSER_PERSIST_DEBOUNCE_MS,
 );
+
+/** Attachment metadata is small; flush it before presenting a durable draft copy. */
+export function flushComposerDraftPersistence(): boolean {
+  try {
+    composerDebouncedStorage.flush();
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 // Flush pending composer draft writes before page unload to prevent data loss.
 if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
@@ -89,6 +105,8 @@ export interface ComposerImageAttachment extends Omit<ChatImageAttachment, "prev
 const PersistedComposerThreadDraftState = Schema.Struct({
   prompt: Schema.String,
   attachments: Schema.Array(PersistedComposerImageAttachment),
+  files: Schema.optionalKey(Schema.Array(PersistedComposerFileAttachment)),
+  queueEditingItemId: Schema.optionalKey(Schema.String),
   // Keyed by `ProviderInstanceId` (open branded slug) so custom provider
   // instances (e.g. `codex_personal`) round-trip alongside the built-in
   // `codex` / `claudeAgent` / ... entries. Every prior `ProviderDriverKind`
@@ -206,6 +224,8 @@ const PersistedComposerDraftStoreStorage = Schema.Struct({
 export interface ComposerThreadDraftState {
   prompt: string;
   images: ComposerImageAttachment[];
+  files: ComposerFileAttachment[];
+  queueEditingItemId?: string;
   nonPersistedImageIds: string[];
   persistedAttachments: PersistedComposerImageAttachment[];
   /**
@@ -389,6 +409,25 @@ interface ComposerDraftStoreState {
   addImage: (threadRef: ComposerThreadTarget, image: ComposerImageAttachment) => void;
   addImages: (threadRef: ComposerThreadTarget, images: ComposerImageAttachment[]) => void;
   removeImage: (threadRef: ComposerThreadTarget, imageId: string) => void;
+  setFiles: (threadRef: ComposerThreadTarget, files: ComposerFileAttachment[]) => void;
+  updateFile: (
+    threadRef: ComposerThreadTarget,
+    fileId: string,
+    patch: Partial<ComposerFileAttachment>,
+  ) => void;
+  beginQueueEdit: (
+    threadRef: ComposerThreadTarget,
+    itemId: string,
+    content: {
+      prompt: string;
+      images: ComposerImageAttachment[];
+      files: ComposerFileAttachment[];
+      modelSelection: ModelSelection;
+      runtimeMode: RuntimeMode;
+      interactionMode: ProviderInteractionMode;
+    },
+  ) => boolean;
+  finishQueueEdit: (threadRef: ComposerThreadTarget, retainImages?: boolean) => void;
   clearPersistedAttachments: (threadRef: ComposerThreadTarget) => void;
   syncPersistedAttachments: (
     threadRef: ComposerThreadTarget,
@@ -401,7 +440,11 @@ interface ComposerDraftStoreState {
    */
   restoreComposerContentIfEmpty: (
     threadRef: ComposerThreadTarget,
-    content: { prompt: string; images: ComposerImageAttachment[] },
+    content: {
+      prompt: string;
+      images: ComposerImageAttachment[];
+      files?: ComposerFileAttachment[];
+    },
   ) => boolean;
   clearComposerContent: (threadRef: ComposerThreadTarget) => void;
 }
@@ -554,6 +597,8 @@ const EMPTY_PERSISTED_DRAFT_STORE_STATE = Object.freeze<PersistedComposerDraftSt
 });
 
 const EMPTY_IMAGES: ComposerImageAttachment[] = [];
+const EMPTY_FILES: ComposerFileAttachment[] = [];
+Object.freeze(EMPTY_FILES);
 const EMPTY_IDS: string[] = [];
 const EMPTY_PERSISTED_ATTACHMENTS: PersistedComposerImageAttachment[] = [];
 Object.freeze(EMPTY_IMAGES);
@@ -569,6 +614,7 @@ const EMPTY_COMPOSER_DRAFT_MODEL_STATE = Object.freeze<ComposerDraftModelState>(
 const EMPTY_THREAD_DRAFT = Object.freeze<ComposerThreadDraftState>({
   prompt: "",
   images: EMPTY_IMAGES,
+  files: EMPTY_FILES,
   nonPersistedImageIds: EMPTY_IDS,
   persistedAttachments: EMPTY_PERSISTED_ATTACHMENTS,
   modelSelectionByProvider: EMPTY_MODEL_SELECTION_BY_PROVIDER,
@@ -581,6 +627,7 @@ function createEmptyThreadDraft(): ComposerThreadDraftState {
   return {
     prompt: "",
     images: [],
+    files: [],
     nonPersistedImageIds: [],
     persistedAttachments: [],
     modelSelectionByProvider: {},
@@ -600,6 +647,7 @@ function shouldRemoveDraft(draft: ComposerThreadDraftState): boolean {
   return (
     draft.prompt.length === 0 &&
     draft.images.length === 0 &&
+    draft.files.length === 0 &&
     draft.persistedAttachments.length === 0 &&
     Object.keys(draft.modelSelectionByProvider).length === 0 &&
     draft.activeProvider === null &&
@@ -1259,6 +1307,9 @@ function removeDraftThreadReferences(
     state.draftThreadsByThreadKey;
   const { [threadKey]: removedComposerDraft, ...restDraftsByThreadKey } = state.draftsByThreadKey;
   revokeDraftThreadPreviewUrls(removedComposerDraft);
+  const backupKey = `queue-edit-backup:${threadKey}`;
+  revokeDraftThreadPreviewUrls(restDraftsByThreadKey[backupKey]);
+  delete restDraftsByThreadKey[backupKey];
   return {
     draftsByThreadKey: restDraftsByThreadKey,
     draftThreadsByThreadKey: restDraftThreadsByThreadKey,
@@ -1478,6 +1529,12 @@ function normalizePersistedDraftsByThreadId(
           return normalized ? [normalized] : [];
         })
       : [];
+    const files = Array.isArray(draftCandidate.files)
+      ? draftCandidate.files.flatMap((entry) => {
+          const file = hydrateComposerFile(entry);
+          return file ? [persistComposerFile(file)] : [];
+        })
+      : [];
     const runtimeMode = isRuntimeMode(draftCandidate.runtimeMode)
       ? draftCandidate.runtimeMode
       : null;
@@ -1539,6 +1596,7 @@ function normalizePersistedDraftsByThreadId(
     if (
       promptCandidate.length === 0 &&
       attachments.length === 0 &&
+      files.length === 0 &&
       !hasModelData &&
       !runtimeMode &&
       !interactionMode
@@ -1560,6 +1618,10 @@ function normalizePersistedDraftsByThreadId(
     nextDraftsByThreadKey[normalizedThreadKey] = {
       prompt,
       attachments,
+      files,
+      ...(typeof draftCandidate.queueEditingItemId === "string"
+        ? { queueEditingItemId: draftCandidate.queueEditingItemId }
+        : {}),
       ...(hasModelData
         ? {
             modelSelectionByProvider: compactModelSelectionByProvider(modelSelectionByProvider),
@@ -1641,6 +1703,7 @@ function partializeComposerDraftStoreState(
     if (
       draft.prompt.length === 0 &&
       draft.persistedAttachments.length === 0 &&
+      draft.files.length === 0 &&
       !hasModelData &&
       draft.runtimeMode === null &&
       draft.interactionMode === null
@@ -1650,6 +1713,8 @@ function partializeComposerDraftStoreState(
     const persistedDraft: DeepMutable<PersistedComposerThreadDraftState> = {
       prompt: draft.prompt,
       attachments: draft.persistedAttachments,
+      files: draft.files.map(persistComposerFile),
+      ...(draft.queueEditingItemId ? { queueEditingItemId: draft.queueEditingItemId } : {}),
       ...(hasModelData
         ? {
             modelSelectionByProvider: compactModelSelectionByProvider(
@@ -1877,6 +1942,13 @@ function toHydratedThreadDraft(
   return {
     prompt: persistedDraft.prompt,
     images: hydrateImagesFromPersisted(persistedDraft.attachments),
+    files: (persistedDraft.files ?? []).flatMap((value) => {
+      const file = hydrateComposerFile(value);
+      return file ? [file] : [];
+    }),
+    ...(persistedDraft.queueEditingItemId
+      ? { queueEditingItemId: persistedDraft.queueEditingItemId }
+      : {}),
     nonPersistedImageIds: [],
     persistedAttachments: [...persistedDraft.attachments],
     modelSelectionByProvider,
@@ -2620,6 +2692,95 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             };
           });
         },
+        beginQueueEdit: (threadRef, itemId, content) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef);
+          if (!threadKey) return false;
+          let admitted = false;
+          set((state) => {
+            const existing = state.draftsByThreadKey[threadKey] ?? createEmptyThreadDraft();
+            if (existing.queueEditingItemId) return state;
+            admitted = true;
+            // Store the previous draft in the same durable transaction as the
+            // editing marker. Reload can therefore still offer Save / Cancel.
+            return {
+              draftsByThreadKey: {
+                ...state.draftsByThreadKey,
+                [`queue-edit-backup:${threadKey}`]: existing,
+                [threadKey]: {
+                  ...existing,
+                  prompt: content.prompt,
+                  images: content.images,
+                  files: content.files,
+                  persistedAttachments: [],
+                  nonPersistedImageIds: [],
+                  queueEditingItemId: itemId,
+                  modelSelectionByProvider: {
+                    ...existing.modelSelectionByProvider,
+                    [content.modelSelection.instanceId]: content.modelSelection,
+                  },
+                  activeProvider: content.modelSelection.instanceId,
+                  runtimeMode: content.runtimeMode,
+                  interactionMode: content.interactionMode,
+                },
+              },
+            };
+          });
+          return admitted;
+        },
+        finishQueueEdit: (threadRef, retainImages = false) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef);
+          if (!threadKey) return;
+          set((state) => {
+            const editing = state.draftsByThreadKey[threadKey];
+            if (!editing?.queueEditingItemId) return state;
+            if (!retainImages) revokeDraftThreadPreviewUrls(editing);
+            const backupKey = `queue-edit-backup:${threadKey}`;
+            const next = {
+              ...state.draftsByThreadKey,
+              [threadKey]: state.draftsByThreadKey[backupKey] ?? createEmptyThreadDraft(),
+            };
+            delete next[backupKey];
+            return { draftsByThreadKey: next };
+          });
+        },
+        updateFile: (threadRef, fileId, patch) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef);
+          if (!threadKey) return;
+          set((state) => {
+            // An upload can settle while its owning draft is temporarily
+            // parked behind queue editing. Only those two exact scoped keys
+            // are eligible; removal must never resurrect a file elsewhere.
+            const key = [threadKey, `queue-edit-backup:${threadKey}`].find((candidate) =>
+              state.draftsByThreadKey[candidate]?.files.some((file) => file.id === fileId),
+            );
+            if (!key) return state;
+            const draft = state.draftsByThreadKey[key]!;
+            return {
+              draftsByThreadKey: {
+                ...state.draftsByThreadKey,
+                [key]: {
+                  ...draft,
+                  files: draft.files.map((file) =>
+                    file.id === fileId ? Object.assign({}, file, patch) : file,
+                  ),
+                },
+              },
+            };
+          });
+        },
+        setFiles: (threadRef, files) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef);
+          if (!threadKey) return;
+          set((state) => ({
+            draftsByThreadKey: {
+              ...state.draftsByThreadKey,
+              [threadKey]: {
+                ...(state.draftsByThreadKey[threadKey] ?? createEmptyThreadDraft()),
+                files: [...files],
+              },
+            },
+          }));
+        },
         removeImage: (threadRef, imageId) => {
           const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
           if (threadKey.length === 0) {
@@ -2725,6 +2886,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             if (
               existing.prompt.length > 0 ||
               existing.images.length > 0 ||
+              existing.files.length > 0 ||
               existing.nonPersistedImageIds.length > 0 ||
               existing.persistedAttachments.length > 0
             ) {
@@ -2739,6 +2901,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                   ...existing,
                   prompt: content.prompt,
                   images: [...content.images],
+                  files: [...(content.files ?? [])],
                 },
               },
             };
@@ -2759,6 +2922,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               ...current,
               prompt: "",
               images: [],
+              files: [],
               nonPersistedImageIds: [],
               persistedAttachments: [],
             };

@@ -58,6 +58,7 @@ import {
   toSafeThreadAttachmentSegment,
 } from "../../attachmentStore.ts";
 import { isStaleProvisionalSessionReplay } from "../sessionLifecycle.ts";
+import { readFileAttachmentOwner } from "../../fileAttachmentStore.ts";
 
 export const ORCHESTRATION_PROJECTOR_NAMES = {
   projects: "projection.projects",
@@ -355,9 +356,6 @@ function collectThreadAttachmentRelativePaths(
   const relativePaths = new Set<string>();
   for (const message of messages) {
     for (const attachment of message.attachments ?? []) {
-      if (attachment.type !== "image") {
-        continue;
-      }
       const attachmentThreadSegment = parseThreadSegmentFromAttachmentId(attachment.id);
       if (!attachmentThreadSegment || attachmentThreadSegment !== threadSegment) {
         continue;
@@ -381,15 +379,27 @@ const runAttachmentSideEffects = Effect.fn("runAttachmentSideEffects")(function*
     .pipe(Effect.catch(() => Effect.succeed([] as Array<string>)));
 
   const removeDeletedThreadAttachmentEntry = Effect.fn("removeDeletedThreadAttachmentEntry")(
-    function* (threadSegment: string, entry: string) {
+    function* (
+      threadSegment: string,
+      ownedFileIds: ReadonlySet<string>,
+      protectedFileIds: ReadonlySet<string>,
+      entry: string,
+    ) {
       const normalizedEntry = entry.replace(/^[/\\]+/, "").replace(/\\/g, "/");
       if (normalizedEntry.length === 0 || normalizedEntry.includes("/")) {
         return;
       }
       const attachmentId = parseAttachmentIdFromRelativePath(normalizedEntry);
-      if (!attachmentId) {
+      if (!attachmentId || protectedFileIds.has(attachmentId)) {
         return;
       }
+      // An upload can be between its data and metadata writes. Never infer
+      // generic file ownership from its lossy filename prefix alone.
+      if (
+        /\.(?:bin$|metadata\.|provider[.-])/u.test(normalizedEntry) &&
+        !ownedFileIds.has(attachmentId)
+      )
+        return;
       const attachmentThreadSegment = parseThreadSegmentFromAttachmentId(attachmentId);
       if (!attachmentThreadSegment || attachmentThreadSegment !== threadSegment) {
         return;
@@ -412,9 +422,40 @@ const runAttachmentSideEffects = Effect.fn("runAttachmentSideEffects")(function*
     }
 
     const entries = yield* readAttachmentRootEntries;
+    // Thread segments are display-safe filename prefixes, not ownership
+    // identities: two exact thread ids can sanitize to the same prefix. Read
+    // generic upload ownership once, before deleting any metadata or sidecar.
+    const protectedFileIds = new Set<string>();
+    const ownedFileIds = new Set<string>();
     yield* Effect.forEach(
       entries,
-      (entry) => removeDeletedThreadAttachmentEntry(threadSegment, entry),
+      (entry) =>
+        Effect.gen(function* () {
+          if (!entry.endsWith(".metadata.json")) return;
+          const id = parseAttachmentIdFromRelativePath(entry);
+          if (!id || parseThreadSegmentFromAttachmentId(id) !== threadSegment) return;
+          const owner = yield* Effect.tryPromise(() =>
+            readFileAttachmentOwner(attachmentsRootDir, id),
+          ).pipe(Effect.catch(() => Effect.succeed(null)));
+          if (owner !== threadId) protectedFileIds.add(id);
+          else ownedFileIds.add(id);
+        }),
+      { concurrency: 1 },
+    );
+    // Invalidate generic handles before the final directory inventory. Provider
+    // publishers revalidate the source after publishing and compensate on
+    // failure; this ordering closes the late PDF/text-sidecar publication race.
+    yield* Effect.forEach(
+      ownedFileIds,
+      (id) =>
+        fileSystem.remove(path.join(attachmentsRootDir, `${id}.metadata.json`), { force: true }),
+      { concurrency: 1 },
+    );
+    const currentEntries = yield* readAttachmentRootEntries;
+    yield* Effect.forEach(
+      currentEntries,
+      (entry) =>
+        removeDeletedThreadAttachmentEntry(threadSegment, ownedFileIds, protectedFileIds, entry),
       {
         concurrency: 1,
       },
@@ -424,12 +465,14 @@ const runAttachmentSideEffects = Effect.fn("runAttachmentSideEffects")(function*
   const pruneThreadAttachmentEntry = Effect.fn("pruneThreadAttachmentEntry")(function* (
     threadSegment: string,
     keptThreadRelativePaths: Set<string>,
+    keptAttachmentIds: ReadonlySet<string | null>,
     entry: string,
   ) {
     const relativePath = entry.replace(/^[/\\]+/, "").replace(/\\/g, "/");
     if (relativePath.length === 0 || relativePath.includes("/")) {
       return;
     }
+    if (/\.(?:bin$|metadata\.|provider[.-])/u.test(relativePath)) return;
     const attachmentId = parseAttachmentIdFromRelativePath(relativePath);
     if (!attachmentId) {
       return;
@@ -447,7 +490,7 @@ const runAttachmentSideEffects = Effect.fn("runAttachmentSideEffects")(function*
       return;
     }
 
-    if (!keptThreadRelativePaths.has(relativePath)) {
+    if (!keptThreadRelativePaths.has(relativePath) && !keptAttachmentIds.has(attachmentId)) {
       yield* fileSystem.remove(absolutePath, { force: true });
     }
   });
@@ -467,9 +510,26 @@ const runAttachmentSideEffects = Effect.fn("runAttachmentSideEffects")(function*
     }
 
     const entries = yield* readAttachmentRootEntries;
+    const keptAttachmentIds = new Set(
+      Array.from(keptThreadRelativePaths, parseAttachmentIdFromRelativePath),
+    );
+    // Generic handles can still be referenced by an unsent queue or a parked
+    // composer draft, which the backend cannot inspect. Reverting transcript
+    // messages must not destroy those stable snapshots. Their lifetime ends
+    // with explicit thread deletion; existing image pruning stays unchanged.
+    for (const entry of entries) {
+      if (entry.endsWith(".metadata.json"))
+        keptAttachmentIds.add(parseAttachmentIdFromRelativePath(entry));
+    }
     yield* Effect.forEach(
       entries,
-      (entry) => pruneThreadAttachmentEntry(threadSegment, keptThreadRelativePaths, entry),
+      (entry) =>
+        pruneThreadAttachmentEntry(
+          threadSegment,
+          keptThreadRelativePaths,
+          keptAttachmentIds,
+          entry,
+        ),
       { concurrency: 1 },
     );
   });

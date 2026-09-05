@@ -74,6 +74,7 @@ import {
 import { DEFAULT_UNIFIED_SETTINGS } from "@cafecode/contracts/settings";
 import { removeLocalStorageItem, setLocalStorageItem } from "./hooks/useLocalStorage";
 import { createDebouncedStorage } from "./lib/storage";
+import { composerFileFromAttachment } from "./attachments/composerFiles";
 
 function makeImage(input: {
   id: string;
@@ -148,6 +149,95 @@ function draftFor(threadId: ThreadId, environmentId: EnvironmentId = LEGACY_TEST
 function draftByKey(key: string) {
   return useComposerDraftStore.getState().draftsByThreadKey[key] ?? undefined;
 }
+
+describe("composer file and queue edit durability", () => {
+  const threadId = ThreadId.make("queue-edit-thread");
+  const ref = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+  const file = composerFileFromAttachment(TEST_ENVIRONMENT_ID, threadId, {
+    type: "file",
+    id: "copied-tex",
+    name: "source.tex",
+    mimeType: "text/plain",
+    sizeBytes: 0,
+  });
+  const edit = {
+    prompt: "Queued text",
+    images: [],
+    files: [file],
+    modelSelection: modelSelection(CODEX_DRIVER, "gpt-test"),
+    runtimeMode: "approval-required" as const,
+    interactionMode: "plan" as const,
+  };
+  beforeEach(resetComposerDraftStore);
+
+  it("retains file-only drafts and never overwrites a newer file-only draft on rejection", () => {
+    const store = useComposerDraftStore.getState();
+    store.setFiles(ref, [file]);
+    expect(
+      store.restoreComposerContentIfEmpty(ref, { prompt: "rejected", images: [], files: [] }),
+    ).toBe(false);
+    expect(store.getComposerDraft(ref)?.files).toEqual([file]);
+    store.clearComposerContent(ref);
+    expect(
+      store.restoreComposerContentIfEmpty(ref, { prompt: "", images: [], files: [file] }),
+    ).toBe(true);
+    expect(store.getComposerDraft(ref)?.files).toEqual([file]);
+  });
+
+  it("parks the prior draft and model state, prevents nested edits, and restores it on cancel", () => {
+    const store = useComposerDraftStore.getState();
+    store.setPrompt(ref, "Work in progress");
+    store.setFiles(ref, [file]);
+    store.setModelSelection(ref, modelSelection(CLAUDE_AGENT_DRIVER, "claude-test"));
+    const original = store.getComposerDraft(ref);
+    expect(store.beginQueueEdit(ref, "queue-item", edit)).toBe(true);
+    expect(store.beginQueueEdit(ref, "other-item", edit)).toBe(false);
+    expect(store.getComposerDraft(ref)?.queueEditingItemId).toBe("queue-item");
+    store.setPrompt(ref, "Edited queued text");
+    store.finishQueueEdit(ref);
+    expect(store.getComposerDraft(ref)).toEqual(original);
+  });
+
+  it("round-trips the editable queue and previous file draft without serializing file bytes", () => {
+    const store = useComposerDraftStore.getState();
+    store.setPrompt(ref, "Prior draft");
+    store.setFiles(ref, [file]);
+    store.beginQueueEdit(ref, "queue-item", edit);
+    const options = useComposerDraftStore.persist.getOptions();
+    const persisted = options.partialize!(useComposerDraftStore.getState());
+    const merged = options.merge!(
+      JSON.parse(JSON.stringify(persisted)),
+      useComposerDraftStore.getState(),
+    );
+    useComposerDraftStore.setState(merged);
+    expect(useComposerDraftStore.getState().getComposerDraft(ref)?.files).toEqual([file]);
+    expect(useComposerDraftStore.getState().getComposerDraft(ref)?.queueEditingItemId).toBe(
+      "queue-item",
+    );
+    useComposerDraftStore.getState().finishQueueEdit(ref);
+    expect(useComposerDraftStore.getState().getComposerDraft(ref)?.prompt).toBe("Prior draft");
+    expect(useComposerDraftStore.getState().getComposerDraft(ref)?.files).toEqual([file]);
+  });
+
+  it("settles an in-flight upload into the parked draft and does not resurrect removed files", () => {
+    const store = useComposerDraftStore.getState();
+    store.setFiles(ref, [{ ...file, status: "uploading" }]);
+    store.beginQueueEdit(ref, "queue-item", { ...edit, files: [] });
+    store.updateFile(ref, file.id, { status: "ready", attachment: file.attachment! });
+    store.finishQueueEdit(ref);
+    expect(store.getComposerDraft(ref)?.files[0]?.status).toBe("ready");
+    store.setFiles(ref, []);
+    store.updateFile(ref, file.id, { status: "ready" });
+    expect(store.getComposerDraft(ref)?.files).toEqual([]);
+  });
+  it("removes the parked draft together with its owning thread", () => {
+    const store = useComposerDraftStore.getState();
+    store.setPrompt(ref, "Prior draft");
+    store.beginQueueEdit(ref, "queue-item", edit);
+    store.clearDraftThread(ref);
+    expect(Object.keys(useComposerDraftStore.getState().draftsByThreadKey)).toEqual([]);
+  });
+});
 
 describe("composerDraftStore addImages", () => {
   const threadId = ThreadId.make("thread-dedupe");
@@ -387,6 +477,7 @@ describe("composerDraftStore environment cleanup", () => {
     const emptyDraft = {
       prompt: "",
       images: [],
+      files: [],
       nonPersistedImageIds: [],
       persistedAttachments: [],
       modelSelectionByProvider: {},

@@ -25,6 +25,10 @@ import type { OpencodeClient, Part, PermissionRequest, QuestionRequest } from "@
 import { getModelSelectionStringOptionValue } from "@cafecode/shared/model";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
+import {
+  appendFileAttachmentPrompt,
+  prepareFileAttachmentPrompt,
+} from "../fileAttachmentPrompt.ts";
 import { ServerConfig } from "../../config.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import {
@@ -1164,9 +1168,37 @@ export function makeOpenCodeAdapter(
         });
       }
 
-      const text = input.input?.trim();
+      // File manifests name this backend's local private files. An explicitly
+      // hosted OpenCode endpoint has no proven shared filesystem, even when its
+      // URL happens to resolve to loopback through a tunnel. Never claim that a
+      // remote server received a local path or silently omit the attachment.
+      if (
+        openCodeSettings.serverUrl.trim().length > 0 &&
+        input.attachments?.some((attachment) => attachment.type === "file")
+      ) {
+        return yield* new ProviderAdapterValidationError({
+          provider: PROVIDER,
+          operation: "sendTurn",
+          issue: "File attachments require a locally managed OpenCode runtime.",
+        });
+      }
+      const fileManifest = yield* Effect.tryPromise({
+        try: () =>
+          prepareFileAttachmentPrompt({
+            attachmentsDir: serverConfig.attachmentsDir,
+            threadId: input.threadId,
+            attachments: input.attachments,
+          }),
+        catch: () =>
+          new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "sendTurn",
+            detail: "Failed to prepare a validated file attachment.",
+          }),
+      });
+      const text = appendFileAttachmentPrompt(input.input?.trim(), fileManifest);
       const fileParts = toOpenCodeFileParts({
-        attachments: input.attachments,
+        attachments: input.attachments?.filter((attachment) => attachment.type === "image"),
         resolveAttachmentPath: (attachment) =>
           resolveAttachmentPath({
             attachmentsDir: serverConfig.attachmentsDir,

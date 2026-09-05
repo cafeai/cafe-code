@@ -7,6 +7,7 @@ import { FetchHttpClient, HttpRouter, HttpServer } from "effect/unstable/http";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { ServerConfig } from "./config.ts";
+import { fileAttachmentRouteLayer } from "./fileAttachmentHttp.ts";
 import {
   attachmentsRouteLayer,
   brandingSidebarImageServeRouteLayer,
@@ -347,6 +348,7 @@ export const makeRoutesLayer = Layer.mergeAll(
   authSessionRouteLayer,
   authWebSocketTokenRouteLayer,
   attachmentsRouteLayer,
+  fileAttachmentRouteLayer,
   brandingSidebarImageServeRouteLayer,
   brandingSidebarImageUploadRouteLayer,
   clientDebugLogRouteLayer,

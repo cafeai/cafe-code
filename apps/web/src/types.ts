@@ -17,6 +17,7 @@ import type {
   CheckpointRef,
   ProviderInteractionMode,
   RuntimeMode,
+  ChatFileAttachment,
 } from "@cafecode/contracts";
 
 export type SessionPhase = "disconnected" | "connecting" | "ready" | "running";
@@ -34,7 +35,7 @@ export interface ChatImageAttachment {
   previewUrl?: string;
 }
 
-export type ChatAttachment = ChatImageAttachment;
+export type ChatAttachment = ChatImageAttachment | ChatFileAttachment;
 
 export interface ChatMessage {
   id: MessageId;

@@ -29,6 +29,7 @@ import {
 import { AuthSessionId } from "@cafecode/contracts/auth";
 
 import { ServerConfig } from "../../config.ts";
+import { storeFileAttachment } from "../../fileAttachmentStore.ts";
 import {
   didGrokContextCompact,
   grokPromptSettlementBelongsToContext,
@@ -333,6 +334,48 @@ it("auto-approves only edit-like requests in Cafe's auto-accept mode", () => {
 });
 
 it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
+  it.effect(
+    "delivers generic file manifests through Grok ACP instead of mislabeling them as images",
+    () =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("grok-generic-file");
+        const logDirectory = yield* Effect.promise(() =>
+          NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "grok-file-log-")),
+        );
+        yield* Effect.addFinalizer(() =>
+          Effect.promise(() => NodeFSP.rm(logDirectory, { recursive: true, force: true })),
+        );
+        const logPath = NodePath.join(logDirectory, "request.jsonl");
+        const wrapperPath = yield* Effect.promise(() =>
+          makeMockGrokWrapper({ CAFE_CODE_ACP_REQUEST_LOG_PATH: logPath }),
+        );
+        const adapter = yield* makeTestAdapter(wrapperPath);
+        const { attachmentsDir } = yield* ServerConfig;
+        const attachment = yield* Effect.promise(() =>
+          storeFileAttachment({
+            attachmentsDir,
+            threadId,
+            name: "source.tex",
+            mimeType: "text/plain",
+            bytes: Buffer.from("PRIVATE_GROK_ATTACHMENT_BODY"),
+          }),
+        );
+        yield* adapter.startSession({
+          threadId,
+          provider: ProviderDriverKind.make("grok"),
+          cwd: process.cwd(),
+          runtimeMode: "approval-required",
+          modelSelection: { instanceId: ProviderInstanceId.make("grok"), model: "grok-build" },
+        });
+        yield* adapter.sendTurn({ threadId, attachments: [attachment] });
+        const log = yield* waitForFileContent(logPath, 80, ".provider.tex");
+        assert.include(log, "source.tex");
+        assert.notInclude(log, "PRIVATE_GROK_ATTACHMENT_BODY");
+        assert.notInclude(log, '"type":"image"');
+        yield* adapter.stopSession(threadId);
+      }).pipe(TestClock.withLive),
+  );
+
   it.effect("fails a protected session when Grok reports sandbox enforcement failure", () =>
     Effect.gen(function* () {
       const wrapperPath = yield* Effect.promise(() =>

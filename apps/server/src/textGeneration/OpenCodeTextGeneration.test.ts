@@ -22,6 +22,7 @@ const runtimeMock = {
   state: {
     startCalls: [] as string[],
     promptUrls: [] as string[],
+    promptRequests: [] as Array<{ parts: Array<{ type: string; text?: string; url?: string }> }>,
     authHeaders: [] as Array<string | null>,
     closeCalls: [] as string[],
     promptResult: undefined as
@@ -31,6 +32,7 @@ const runtimeMock = {
   reset() {
     this.state.startCalls.length = 0;
     this.state.promptUrls.length = 0;
+    this.state.promptRequests.length = 0;
     this.state.authHeaders.length = 0;
     this.state.closeCalls.length = 0;
     this.state.promptResult = undefined;
@@ -66,7 +68,10 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
     ({
       session: {
         create: async () => ({ data: { id: `${baseUrl}/session` } }),
-        prompt: async () => {
+        prompt: async (request: {
+          parts: Array<{ type: string; text?: string; url?: string }>;
+        }) => {
+          runtimeMock.state.promptRequests.push(request);
           runtimeMock.state.promptUrls.push(baseUrl);
           runtimeMock.state.authHeaders.push(
             serverPassword ? `Basic ${btoa(`opencode:${serverPassword}`)}` : null,
@@ -162,6 +167,50 @@ const advanceIdleClock = Effect.gen(function* () {
 });
 
 it.layer(OpenCodeTextGenerationTestLayer)("OpenCodeTextGeneration", (it) => {
+  it.effect("uses generic file metadata for labels without sending a whole document part", () =>
+    withOpenCodeTextGeneration(DEFAULT_OPENCODE_SETTINGS, (textGeneration) =>
+      Effect.gen(function* () {
+        runtimeMock.state.promptResult = {
+          data: {
+            parts: [
+              {
+                type: "text",
+                text: JSON.stringify({ title: "Inspect report", branch: "docs/report" }),
+              },
+            ],
+          },
+        };
+        yield* textGeneration.generateThreadMetadata({
+          cwd: process.cwd(),
+          message: "Inspect the report",
+          modelSelection: DEFAULT_TEST_MODEL_SELECTION,
+          attachments: [
+            {
+              type: "file",
+              id: "unread-document-handle",
+              name: "report.pdf",
+              mimeType: "application/pdf",
+              sizeBytes: 25 * 1024 * 1024,
+            },
+            {
+              type: "image",
+              id: "image-handle",
+              name: "preview.png",
+              mimeType: "image/png",
+              sizeBytes: 1,
+            },
+          ],
+        });
+        const request = runtimeMock.state.promptRequests[0]!;
+        const fileParts = request.parts.filter((part) => part.type === "file");
+        expect(fileParts).toHaveLength(1);
+        expect(fileParts[0]?.url).toContain("image-handle");
+        expect(JSON.stringify(request)).not.toContain("unread-document-handle");
+        expect(request.parts.find((part) => part.type === "text")?.text).toContain("report.pdf");
+      }),
+    ),
+  );
+
   it.effect("generates both first-turn labels with one OpenCode prompt", () =>
     withOpenCodeTextGeneration(DEFAULT_OPENCODE_SETTINGS, (textGeneration) =>
       Effect.gen(function* () {

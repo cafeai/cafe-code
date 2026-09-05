@@ -8,6 +8,7 @@ import {
   type OrchestrationCommand,
   OrchestrationDispatchCommandError,
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
+  PROVIDER_SEND_TURN_MAX_TOTAL_ATTACHMENT_BYTES,
 } from "@cafecode/contracts";
 
 import { createAttachmentId, resolveAttachmentPath } from "../attachmentStore.ts";
@@ -16,6 +17,7 @@ import {
   insertAttachmentContentCommitment,
 } from "../attachmentContentCommitment.ts";
 import { ServerConfig } from "../config.ts";
+import { readStoredFileAttachment } from "../fileAttachmentStore.ts";
 import { parseBase64DataUrl } from "../imageMime.ts";
 import { WorkspacePaths } from "../workspace/Services/WorkspacePaths.ts";
 import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
@@ -150,10 +152,69 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
       return command as OrchestrationCommand;
     }
 
+    if (
+      command.message.attachments.reduce((total, attachment) => total + attachment.sizeBytes, 0) >
+      PROVIDER_SEND_TURN_MAX_TOTAL_ATTACHMENT_BYTES
+    ) {
+      return yield* new OrchestrationDispatchCommandError({
+        message: "Attachments must total 80 MiB or less.",
+      });
+    }
+    // Image sizes come from client metadata until decoded. Recheck the actual
+    // byte total while normalizing, so forged size fields cannot evade the cap.
+    let actualTotalBytes = 0;
+    const countBytes = (length: number) =>
+      Effect.suspend(() => {
+        actualTotalBytes += length;
+        return actualTotalBytes > PROVIDER_SEND_TURN_MAX_TOTAL_ATTACHMENT_BYTES
+          ? Effect.fail(
+              new OrchestrationDispatchCommandError({
+                message: "Attachments must total 80 MiB or less.",
+              }),
+            )
+          : Effect.void;
+      });
     const normalizedAttachments = yield* Effect.forEach(
       command.message.attachments,
       (attachment) =>
         Effect.gen(function* () {
+          if (attachment.type === "file") {
+            // Uploads can precede thread creation, but dispatch binds the exact
+            // immutable bytes to the now-materialized thread. Retrying the same
+            // handle is idempotent; altered metadata/content never is.
+            const stored = yield* Effect.tryPromise({
+              try: () =>
+                readStoredFileAttachment({
+                  attachmentsDir: serverConfig.attachmentsDir,
+                  attachment,
+                  threadId: command.threadId,
+                }),
+              catch: () =>
+                new OrchestrationDispatchCommandError({
+                  message: "A file attachment is unavailable or changed. Attach it again.",
+                }),
+            });
+            yield* countBytes(stored.bytes.byteLength);
+            const digest = computeAttachmentContentSha256(stored.bytes);
+            yield* sql`INSERT INTO attachment_content_commitments (attachment_id, thread_id, content_sha256, size_bytes)
+              VALUES (${attachment.id}, ${command.threadId}, ${digest}, ${attachment.sizeBytes})
+              ON CONFLICT (attachment_id) DO NOTHING`;
+            const commitments = yield* sql<{ threadId: string; digest: string; size: number }>`
+              SELECT thread_id AS "threadId", content_sha256 AS digest, size_bytes AS size
+              FROM attachment_content_commitments WHERE attachment_id = ${attachment.id}`;
+            const commitment = commitments[0];
+            if (
+              !commitment ||
+              commitment.threadId !== command.threadId ||
+              commitment.digest !== digest ||
+              commitment.size !== attachment.sizeBytes
+            ) {
+              return yield* new OrchestrationDispatchCommandError({
+                message: "The file attachment does not match its original upload.",
+              });
+            }
+            return attachment;
+          }
           const parsed = parseBase64DataUrl(attachment.dataUrl);
           if (!parsed || !parsed.mimeType.startsWith("image/")) {
             return yield* new OrchestrationDispatchCommandError({
@@ -169,6 +230,7 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
           }
 
           const attachmentId = createAttachmentId(command.threadId);
+          yield* countBytes(bytes.byteLength);
           if (!attachmentId) {
             return yield* new OrchestrationDispatchCommandError({
               message: "Failed to create a safe attachment id.",

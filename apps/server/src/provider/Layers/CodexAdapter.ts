@@ -76,6 +76,10 @@ import {
   type ProviderSubagentPublicMessageInput,
 } from "../subagentDetail.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
+import {
+  appendFileAttachmentPrompt,
+  prepareFileAttachmentPrompt,
+} from "../fileAttachmentPrompt.ts";
 import { ServerConfig } from "../../config.ts";
 import {
   CodexResumeCursorSchema,
@@ -4454,9 +4458,36 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       }),
     );
 
+  // Codex 0.153.4 has native image inputs but no arbitrary local-file input.
+  // Its normal read-only/workspace-write policies permit file reads; a bounded
+  // text manifest therefore needs no new writable root, and the steer request
+  // remains input-only just like the upstream TUI.
+  // https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/protocol/src/protocol.rs#L1200
+  const prepareFileManifest = (
+    input: Pick<ProviderSendTurnInput, "threadId" | "attachments">,
+    method: "turn/start" | "turn/steer",
+  ) =>
+    Effect.tryPromise({
+      try: () =>
+        prepareFileAttachmentPrompt({
+          attachmentsDir: serverConfig.attachmentsDir,
+          threadId: input.threadId,
+          attachments: input.attachments,
+        }),
+      catch: () =>
+        new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method,
+          detail: "Failed to prepare a validated file attachment.",
+        }),
+    });
+
   const resolveAttachment = Effect.fn("resolveAttachment")(function* (
     method: "turn/start" | "turn/steer",
-    attachment: NonNullable<ProviderSendTurnInput["attachments"]>[number],
+    attachment: Extract<
+      NonNullable<ProviderSendTurnInput["attachments"]>[number],
+      { type: "image" }
+    >,
   ) {
     const attachmentPath = resolveAttachmentPath({
       attachmentsDir: serverConfig.attachmentsDir,
@@ -4490,10 +4521,13 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     yield* prepareRuntimeHomeForRequest(input.threadId, "turn/start");
 
     const codexAttachments = yield* Effect.forEach(
-      input.attachments ?? [],
+      (input.attachments ?? []).filter((attachment) => attachment.type === "image"),
       (attachment) => resolveAttachment("turn/start", attachment),
       { concurrency: 1 },
     );
+
+    const fileManifest = yield* prepareFileManifest(input, "turn/start");
+    const prompt = appendFileAttachmentPrompt(input.input, fileManifest);
 
     const session = yield* requireSession(input.threadId);
     const reasoningEffort =
@@ -4502,7 +4536,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         : undefined;
     return yield* session.runtime
       .sendTurn({
-        ...(input.input !== undefined ? { input: input.input } : {}),
+        ...(prompt !== undefined ? { input: prompt } : {}),
         ...(input.modelSelection?.instanceId === boundInstanceId
           ? { model: input.modelSelection.model }
           : {}),
@@ -4586,10 +4620,13 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     yield* prepareRuntimeHomeForRequest(input.threadId, "turn/steer");
 
     const codexAttachments = yield* Effect.forEach(
-      input.attachments ?? [],
+      (input.attachments ?? []).filter((attachment) => attachment.type === "image"),
       (attachment) => resolveAttachment("turn/steer", attachment),
       { concurrency: 1 },
     );
+
+    const fileManifest = yield* prepareFileManifest(input, "turn/steer");
+    const prompt = appendFileAttachmentPrompt(input.input, fileManifest);
 
     const session = yield* requireSession(input.threadId);
     // MessageId is an open Cafe entity id and may be arbitrarily large or
@@ -4604,7 +4641,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       .steerTurn({
         expectedTurnId: input.expectedTurnId,
         ...(clientCorrelationId !== undefined ? { clientCorrelationId } : {}),
-        ...(input.input !== undefined ? { input: input.input } : {}),
+        ...(prompt !== undefined ? { input: prompt } : {}),
         ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
       })
       .pipe(Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "turn/steer", cause)));

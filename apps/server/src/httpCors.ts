@@ -4,6 +4,8 @@ export const browserApiCorsAllowedHeaders = [
   "b3",
   "traceparent",
   "content-type",
+  "x-cafe-thread-id",
+  "x-cafe-attachment-name",
   "mcp-protocol-version",
 ] as const;
 

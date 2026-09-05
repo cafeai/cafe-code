@@ -1,5 +1,6 @@
 import {
   type EnvironmentId,
+  type ChatFileAttachment,
   type MessageId,
   type OrchestrationThreadActivity,
   ProjectId,
@@ -155,8 +156,13 @@ export function mergePendingSteerSnapshotsForInterruptedTurn(
   snapshots: readonly {
     readonly promptText: string;
     readonly images: readonly ComposerImageAttachment[];
+    readonly files?: readonly ChatFileAttachment[];
   }[],
-): { readonly promptText: string; readonly images: ComposerImageAttachment[] } | null {
+): {
+  readonly promptText: string;
+  readonly images: ComposerImageAttachment[];
+  readonly files: ChatFileAttachment[];
+} | null {
   if (snapshots.length === 0) {
     return null;
   }
@@ -172,6 +178,7 @@ export function mergePendingSteerSnapshotsForInterruptedTurn(
     images: snapshots.flatMap((snapshot) =>
       snapshot.images.map((image) => cloneComposerImageForRetry(image)),
     ),
+    files: snapshots.flatMap((snapshot) => snapshot.files ?? []),
   };
 }
 
@@ -443,6 +450,7 @@ export function shouldBackpressurePendingSteerDispatch(
 
 export interface RestoredCanonicalRetryImages {
   readonly images: ComposerImageAttachment[];
+  readonly files: ChatFileAttachment[];
   readonly unavailableCount: number;
 }
 
@@ -458,14 +466,16 @@ export async function restoreCanonicalRetryImages(
   fetcher: typeof globalThis.fetch = globalThis.fetch,
 ): Promise<RestoredCanonicalRetryImages> {
   if (!attachments || attachments.length === 0) {
-    return { images: [], unavailableCount: 0 };
+    return { images: [], files: [], unavailableCount: 0 };
   }
+  const files = attachments.filter((attachment) => attachment.type === "file");
+  const imageAttachments = attachments.filter((attachment) => attachment.type === "image");
   if (typeof fetcher !== "function" || typeof File === "undefined") {
-    return { images: [], unavailableCount: attachments.length };
+    return { images: [], files, unavailableCount: imageAttachments.length };
   }
 
   const results = await Promise.all(
-    attachments.map(async (attachment): Promise<ComposerImageAttachment | null> => {
+    imageAttachments.map(async (attachment): Promise<ComposerImageAttachment | null> => {
       if (
         attachment.type !== "image" ||
         !attachment.previewUrl ||
@@ -498,6 +508,7 @@ export async function restoreCanonicalRetryImages(
   );
   return {
     images: results.filter((image): image is ComposerImageAttachment => image !== null),
+    files,
     unavailableCount: results.filter((image) => image === null).length,
   };
 }
@@ -551,14 +562,19 @@ export function isSteerProcessingActivityTimely(input: {
   return input.processingMessageId !== null || input.activityCreatedAt >= input.dispatchedAt;
 }
 
-export function deriveComposerSendState(options: { prompt: string; imageCount: number }): {
+export function deriveComposerSendState(options: {
+  prompt: string;
+  imageCount: number;
+  fileCount?: number;
+}): {
   trimmedPrompt: string;
   hasSendableContent: boolean;
 } {
   const trimmedPrompt = options.prompt.replaceAll(INLINE_CONTEXT_PLACEHOLDER, "").trim();
   return {
     trimmedPrompt,
-    hasSendableContent: trimmedPrompt.length > 0 || options.imageCount > 0,
+    hasSendableContent:
+      trimmedPrompt.length > 0 || options.imageCount > 0 || (options.fileCount ?? 0) > 0,
   };
 }
 

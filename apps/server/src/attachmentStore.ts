@@ -56,6 +56,8 @@ export function parseThreadSegmentFromAttachmentId(attachmentId: string): string
 
 export function attachmentRelativePath(attachment: ChatAttachment): string {
   switch (attachment.type) {
+    case "file":
+      return `${attachment.id}.bin`;
     case "image": {
       const extension = inferImageExtension({
         mimeType: attachment.mimeType,
@@ -101,7 +103,9 @@ export function parseAttachmentIdFromRelativePath(relativePath: string): string 
   if (!normalized || normalized.includes("/")) {
     return null;
   }
-  const extensionIndex = normalized.lastIndexOf(".");
+  // Generic files have private metadata and provider-readable derivative
+  // suffixes. All are owned by the same server-minted id for delete/revert.
+  const extensionIndex = normalized.indexOf(".");
   if (extensionIndex <= 0) {
     return null;
   }

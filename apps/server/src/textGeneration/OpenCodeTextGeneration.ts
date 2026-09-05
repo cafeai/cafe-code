@@ -289,7 +289,11 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
     }
 
     const fileParts = toOpenCodeFileParts({
-      attachments: input.attachments,
+      // Metadata helpers only need attachment labels (already present in the
+      // bounded prompt). Keep the existing image context, but never ask this
+      // small auxiliary inference to ingest entire arbitrary documents or a
+      // backend-local path that a configured hosted server cannot access.
+      attachments: input.attachments?.filter((attachment) => attachment.type === "image"),
       resolveAttachmentPath: (attachment) =>
         resolveAttachmentPath({ attachmentsDir: serverConfig.attachmentsDir, attachment }),
     });

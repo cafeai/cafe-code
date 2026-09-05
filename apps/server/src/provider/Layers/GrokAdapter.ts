@@ -50,6 +50,7 @@ import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/schema";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
+import { prepareFileAttachmentPrompt } from "../fileAttachmentPrompt.ts";
 import type { SessionCredentialServiceShape } from "../../auth/Services/SessionCredentialService.ts";
 import { readProviderMcpCredentialIssuer } from "../../auth/ProviderMcpCredentialBroker.ts";
 import { ServerConfig, type ServerConfigShape } from "../../config.ts";
@@ -912,7 +913,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
       });
 
     const buildPromptParts = (
-      input: Pick<ProviderSteerTurnInput, "input" | "attachments">,
+      input: Pick<ProviderSteerTurnInput, "threadId" | "input" | "attachments">,
       method: string,
     ) =>
       Effect.gen(function* () {
@@ -921,50 +922,70 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
           return yield* new ProviderAdapterValidationError({
             provider: PROVIDER,
             operation: method,
-            issue: `A Grok prompt accepts at most ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} images.`,
+            issue: `A Grok prompt accepts at most ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} attachments.`,
           });
         }
-        const imagePromptParts = yield* Effect.forEach(input.attachments ?? [], (attachment) =>
-          Effect.gen(function* () {
-            const attachmentPath = resolveAttachmentPath({
+        const fileManifest = yield* Effect.tryPromise({
+          try: () =>
+            prepareFileAttachmentPrompt({
               attachmentsDir: serverConfig.attachmentsDir,
-              attachment,
-            });
-            if (!attachmentPath) {
-              return yield* new ProviderAdapterRequestError({
-                provider: PROVIDER,
-                method,
-                detail: `Invalid attachment id '${attachment.id}'.`,
+              threadId: input.threadId,
+              attachments: input.attachments,
+            }),
+          catch: () =>
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method,
+              detail: "Failed to prepare a validated file attachment.",
+            }),
+        });
+        const imagePromptParts = yield* Effect.forEach(
+          (input.attachments ?? []).filter((attachment) => attachment.type === "image"),
+          (attachment) =>
+            Effect.gen(function* () {
+              const attachmentPath = resolveAttachmentPath({
+                attachmentsDir: serverConfig.attachmentsDir,
+                attachment,
               });
-            }
-            const bytes = yield* fileSystem.readFile(attachmentPath).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ProviderAdapterRequestError({
-                    provider: PROVIDER,
-                    method,
-                    detail: "Failed to read a validated Cafe attachment.",
-                    cause,
-                  }),
-              ),
-            );
-            const attachmentIssue = validateGrokImageAttachmentBytes(attachment, bytes.byteLength);
-            if (attachmentIssue) {
-              return yield* new ProviderAdapterRequestError({
-                provider: PROVIDER,
-                method,
-                detail: attachmentIssue,
-              });
-            }
-            return {
-              type: "image",
-              data: Buffer.from(bytes).toString("base64"),
-              mimeType: attachment.mimeType,
-            } satisfies EffectAcpSchema.ContentBlock;
-          }),
+              if (!attachmentPath) {
+                return yield* new ProviderAdapterRequestError({
+                  provider: PROVIDER,
+                  method,
+                  detail: `Invalid attachment id '${attachment.id}'.`,
+                });
+              }
+              const bytes = yield* fileSystem.readFile(attachmentPath).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapterRequestError({
+                      provider: PROVIDER,
+                      method,
+                      detail: "Failed to read a validated Cafe attachment.",
+                      cause,
+                    }),
+                ),
+              );
+              const attachmentIssue = validateGrokImageAttachmentBytes(
+                attachment,
+                bytes.byteLength,
+              );
+              if (attachmentIssue) {
+                return yield* new ProviderAdapterRequestError({
+                  provider: PROVIDER,
+                  method,
+                  detail: attachmentIssue,
+                });
+              }
+              return {
+                type: "image",
+                data: Buffer.from(bytes).toString("base64"),
+                mimeType: attachment.mimeType,
+              } satisfies EffectAcpSchema.ContentBlock;
+            }),
         );
         const promptParts: Array<EffectAcpSchema.ContentBlock> = [
           ...(text ? [{ type: "text" as const, text }] : []),
+          ...(fileManifest ? [{ type: "text" as const, text: fileManifest }] : []),
           ...imagePromptParts,
         ];
         if (promptParts.length === 0) {

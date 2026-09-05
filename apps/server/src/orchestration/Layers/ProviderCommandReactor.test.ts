@@ -3356,6 +3356,65 @@ describe("ProviderCommandReactor", () => {
     });
   });
 
+  it("delivers two durable steers in order without waiting for provider processing", async () => {
+    const harness = await createHarness({ liveSteer: "supported" });
+    const threadId = ThreadId.make("thread-1");
+    const expectedTurnId = asTurnId("turn-1");
+    await harness.setRunningCodexTurn(expectedTurnId, "2026-01-01T00:00:01.000Z");
+    const firstAck = Effect.runSync(
+      Deferred.make<{ readonly threadId: ThreadId; readonly turnId: TurnId }>(),
+    );
+    harness.steerTurn.mockImplementationOnce(() => Deferred.await(firstAck));
+    const commands = ["first", "second"].map((name, index) => ({
+      type: "thread.turn.steer" as const,
+      commandId: CommandId.make(`cmd-consecutive-steer-${name}`),
+      threadId,
+      message: {
+        messageId: asMessageId(`message-consecutive-steer-${name}`),
+        role: "user" as const,
+        text: `${name} correction`,
+        attachments: [],
+      },
+      createdAt: `2026-01-01T00:00:0${index + 2}.000Z`,
+    }));
+
+    await Effect.runPromise(harness.engine.dispatch(commands[0]!));
+    await waitFor(() => harness.steerTurn.mock.calls.length === 1);
+    await Effect.runPromise(harness.engine.dispatch(commands[1]!));
+    // Admission is durable and ordered, but the first provider ACK is not a
+    // processing barrier for a second message. Replaying the second command
+    // receipt must not append or deliver that input twice.
+    await Effect.runPromise(harness.engine.dispatch(commands[1]!));
+    await waitFor(() => harness.steerTurn.mock.calls.length === 2);
+
+    await Effect.runPromise(Deferred.succeed(firstAck, { threadId, turnId: expectedTurnId }));
+    await harness.drain();
+    await waitFor(async () => {
+      const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+      return (
+        thread?.activities.filter((activity) => activity.kind === "provider.turn.steer.accepted")
+          .length === 2
+      );
+    });
+    expect(harness.steerTurn.mock.calls.map(([input]) => input.messageId)).toEqual(
+      commands.map((command) => command.message.messageId),
+    );
+    expect(
+      harness.steerTurn.mock.calls.every(([input]) => input.expectedTurnId === expectedTurnId),
+    ).toBe(true);
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+    expect(harness.interruptTurn).not.toHaveBeenCalled();
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId)!;
+    expect(
+      thread.messages.filter((message) =>
+        commands.some((command) => command.message.messageId === message.id),
+      ),
+    ).toHaveLength(2);
+    expect(
+      thread.activities.filter((activity) => activity.kind === "provider.turn.steer.accepted"),
+    ).toHaveLength(2);
+  });
+
   it("replays a crash-before-provider-call steer only to its persisted turn", async () => {
     const harness = await createHarness({ liveSteer: "supported", startReactor: false });
     const threadId = ThreadId.make("thread-1");

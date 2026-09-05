@@ -59,7 +59,10 @@
     "electron": "42.2.0",
     "electron-updater": "^6.6.2",
     "node-pty": "^1.1.0",
+    "pdfjs-dist": "6.3.289",
+    "saxes": "6.0.0",
     "web-push": "^3.6.7",
+    "yauzl": "3.3.1",
     "zod": "^4.0.0"
   },
   "devDependencies": {
@@ -69,6 +72,7 @@
     "@effect/language-service": "catalog:",
     "@effect/vitest": "catalog:",
     "@types/node": "catalog:",
+    "@types/yauzl": "2.10.3",
     "effect-acp": "workspace:*",
     "effect-codex-app-server": "workspace:*",
     "tsdown": "catalog:",

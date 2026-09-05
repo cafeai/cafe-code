@@ -3,11 +3,12 @@ import "../index.css";
 
 import {
   EventId,
+  CommandId,
   type DesktopBridge,
   ORCHESTRATION_WS_METHODS,
   EnvironmentId,
   type DesktopSourceUpdateState,
-  type MessageId,
+  MessageId,
   OrchestrationDispatchCommandError,
   type OrchestrationReadModel,
   type ProjectId,
@@ -48,6 +49,7 @@ import { selectBootstrapCompleteForActiveEnvironment, useStore } from "../store"
 import { useUiStateStore } from "../uiStateStore";
 import { useTaskAtriumStore } from "./atrium/taskAtriumStore";
 import { toastManager } from "./ui/toast";
+import { createFollowUpQueuePersistence } from "./chat/followUpQueuePersistence";
 import { createAuthenticatedSessionHandlers } from "../../test/authHttpHandlers";
 import {
   BrowserWsRpcHarness,
@@ -1216,6 +1218,20 @@ async function waitForLayout(): Promise<void> {
   await nextFrame();
   await nextFrame();
   await nextFrame();
+}
+
+function editButton(): HTMLButtonElement | null {
+  return document.querySelector<HTMLButtonElement>('button[aria-label="Edit queued message"]');
+}
+
+function buttonWithText(text: string): HTMLButtonElement | undefined {
+  return Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find(
+    (button) => button.textContent?.trim() === text,
+  );
+}
+
+function queuedSendButtons(): HTMLButtonElement[] {
+  return Array.from(document.querySelectorAll<HTMLButtonElement>(".cafe-followup-steer-button"));
 }
 
 async function setViewport(viewport: ViewportSpec): Promise<void> {
@@ -3785,7 +3801,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         const attachButton = await waitForElement(
           () =>
             document.querySelector<HTMLButtonElement>(
-              '[data-chat-composer-form="true"] button[aria-label="Attach image"]',
+              '[data-chat-composer-form="true"] button[aria-label="Attach files or images"]',
             ),
           "Unable to find composer attach-image button.",
         );
@@ -3794,7 +3810,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           '[data-chat-composer-form="true"] input[type="file"]',
         );
         expect(fileInput).toBeTruthy();
-        expect(fileInput!.accept).toBe("image/*");
+        expect(fileInput!.accept).toBe("");
         expect(fileInput!.multiple).toBe(true);
 
         // Tapping the button forwards to the hidden file input's native picker.
@@ -3859,7 +3875,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         const overlayAttachButton = await waitForElement(
           () =>
             document.querySelector<HTMLButtonElement>(
-              '[data-chat-composer-mobile-pending-actions="true"] button[aria-label="Attach image"]',
+              '[data-chat-composer-mobile-pending-actions="true"] button[aria-label="Attach files or images"]',
             ),
           "Unable to find mobile overlay attach-image button.",
         );
@@ -4625,6 +4641,442 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           "Stop did not return after the post-send double-click guard elapsed.",
         );
       } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("keeps pending and failed document uploads visible and blocks sending until retry succeeds", async () => {
+      let releaseFailure: (() => void) | undefined;
+      const failureGate = new Promise<void>((resolve) => {
+        releaseFailure = resolve;
+      });
+      const contents = "<html>source only</html>";
+      const attachment = {
+        type: "file" as const,
+        id: "retry-upload-copy",
+        name: "source.html",
+        mimeType: "text/html",
+        sizeBytes: contents.length,
+      };
+      let attempts = 0;
+      worker.use(
+        http.post("*/api/attachments", async () => {
+          attempts += 1;
+          if (attempts === 1) {
+            await failureGate;
+            return HttpResponse.json({}, { status: 500 });
+          }
+          return HttpResponse.json(attachment);
+        }),
+      );
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotForTargetUser({
+          targetMessageId: "msg-upload-retry" as MessageId,
+          targetText: "upload retry target",
+        }),
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+            ? { sequence: fixture.snapshot.snapshotSequence + 1 }
+            : undefined,
+      });
+      const draft = () => useComposerDraftStore.getState().getComposerDraft(THREAD_REF);
+      const turnRequests = () =>
+        wsRequests.filter(
+          (request) => request.type === "thread.turn.start" || request.type === "thread.turn.steer",
+        );
+      try {
+        const input = await waitForElement(
+          () =>
+            document.querySelector<HTMLInputElement>(
+              '[data-chat-composer-form="true"] input[type="file"]',
+            ),
+          "Attachment input was not available.",
+        );
+        const transfer = new DataTransfer();
+        transfer.items.add(new File([contents], attachment.name, { type: attachment.mimeType }));
+        input.files = transfer.files;
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, "Read the attached source");
+        await vi.waitFor(() => {
+          expect(attempts).toBe(1);
+          expect(draft()?.files[0]?.status).toBe("uploading");
+        });
+        const form = document.querySelector<HTMLFormElement>('[data-chat-composer-form="true"]')!;
+        form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+        await waitForLayout();
+        expect(turnRequests()).toHaveLength(0);
+        releaseFailure!();
+        await vi.waitFor(() => {
+          expect(draft()?.files[0]?.status).toBe("failed");
+          expect(document.body.textContent).toContain("Upload failed.");
+        });
+        form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+        await waitForLayout();
+        expect(turnRequests()).toHaveLength(0);
+        buttonWithText("Retry upload")!.click();
+        await vi.waitFor(() => {
+          expect(draft()?.files[0]?.status).toBe("ready");
+          expect(attempts).toBe(2);
+        });
+        await vi.waitFor(() =>
+          expect(form.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled).toBe(
+            false,
+          ),
+        );
+        form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+        await vi.waitFor(() => {
+          expect(turnRequests()).toHaveLength(1);
+          expect(turnRequests()[0]).toMatchObject({ message: { attachments: [attachment] } });
+        });
+      } finally {
+        releaseFailure?.();
+        worker.resetHandlers();
+        await mounted.cleanup();
+      }
+    });
+
+    it("uploads a document and saves or cancels queue edits without losing the prior draft", async () => {
+      const activeTurnId = "turn-document-queue-edit" as TurnId;
+      const baseSnapshot = createSnapshotForTargetUser({
+        targetMessageId: "msg-user-document-queue-edit" as MessageId,
+        targetText: "document queue edit target",
+        sessionStatus: "running",
+      });
+      const runningSnapshot: OrchestrationReadModel = {
+        ...baseSnapshot,
+        threads: baseSnapshot.threads.map((thread) =>
+          Object.assign({}, thread, {
+            latestTurn: {
+              turnId: activeTurnId,
+              state: "running" as const,
+              requestedAt: isoAt(1000),
+              startedAt: isoAt(1001),
+              completedAt: null,
+              assistantMessageId: null,
+            },
+            session: {
+              ...thread.session!,
+              activeTurnId,
+              status: "running" as const,
+              updatedAt: isoAt(1001),
+            },
+            updatedAt: isoAt(1001),
+          }),
+        ),
+      };
+      const contents = "\\section{Queued document}";
+      const attachment = {
+        type: "file" as const,
+        id: "uploaded-queued-document",
+        name: "report.tex",
+        mimeType: "text/plain",
+        sizeBytes: new TextEncoder().encode(contents).length,
+      };
+      const uploads: { threadId: string | null; name: string | null; text: string }[] = [];
+      worker.use(
+        http.post("*/api/attachments", async ({ request }) => {
+          uploads.push({
+            threadId: request.headers.get("x-cafe-thread-id"),
+            name: request.headers.get("x-cafe-attachment-name"),
+            text: await request.text(),
+          });
+          return HttpResponse.json(attachment);
+        }),
+      );
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: runningSnapshot,
+        configureFixture: (testFixture) => {
+          testFixture.serverConfig = {
+            ...testFixture.serverConfig,
+            providers: testFixture.serverConfig.providers.map((provider) => ({
+              ...provider,
+              runtimeCapabilities: { liveSteer: "supported", threadGoals: "unsupported" },
+            })),
+          };
+        },
+      });
+      const draft = () => useComposerDraftStore.getState().getComposerDraft(THREAD_REF);
+      const persisted = () => createFollowUpQueuePersistence().load(LOCAL_ENVIRONMENT_ID);
+
+      try {
+        const input = await waitForElement(
+          () =>
+            document.querySelector<HTMLInputElement>(
+              '[data-chat-composer-form="true"] input[type="file"]',
+            ),
+          "Attachment input was not available.",
+        );
+        expect(input.accept).toBe("");
+        const transfer = new DataTransfer();
+        transfer.items.add(new File([contents], attachment.name, { type: attachment.mimeType }));
+        input.files = transfer.files;
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        await vi.waitFor(() => {
+          expect(draft()?.files).toHaveLength(1);
+          expect(draft()?.files[0]?.status).toBe("ready");
+          expect(document.querySelector('[data-file-attachment="true"]')?.textContent).toContain(
+            attachment.name,
+          );
+        });
+        expect(uploads).toEqual([{ threadId: THREAD_ID, name: attachment.name, text: contents }]);
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, "Original queued instruction");
+        const queueButton = await waitForElement(
+          () => document.querySelector<HTMLButtonElement>('button[aria-label="Queue message"]'),
+          "Queue action was not available.",
+        );
+        await vi.waitFor(() => expect(queueButton.disabled).toBe(false));
+        queueButton.click();
+        await vi.waitFor(() => {
+          expect(draft()?.prompt ?? "").toBe("");
+          expect(editButton()).not.toBeNull();
+        });
+        const original = persisted();
+        expect(original.ok).toBe(true);
+        if (!original.ok) throw new Error("Queued fixture was not saved.");
+        const queuedId = original.value.pending[0]!.id;
+        expect(original.value.pending[0]?.files).toEqual([attachment]);
+        expect(
+          document.querySelector('[data-cafe-followup-queue="true"] [data-file-attachment="true"]')
+            ?.textContent,
+        ).toContain(attachment.name);
+
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, "Keep my independent draft");
+        editButton()!.click();
+        await vi.waitFor(() => {
+          expect(buttonWithText("Save to queue")).toBeDefined();
+          expect(draft()?.prompt).toBe("Original queued instruction");
+        });
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, "Discard this edit");
+        buttonWithText("Cancel editing")!.click();
+        await vi.waitFor(() => expect(draft()?.prompt).toBe("Keep my independent draft"));
+        const afterCancel = persisted();
+        expect(afterCancel.ok && afterCancel.value.pending[0]?.promptText).toBe(
+          "Original queued instruction",
+        );
+
+        editButton()!.click();
+        await vi.waitFor(() => expect(draft()?.prompt).toBe("Original queued instruction"));
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, "Saved queued revision");
+        await vi.waitFor(() => expect(buttonWithText("Save to queue")?.disabled).toBe(false));
+        buttonWithText("Save to queue")!.click();
+        await vi.waitFor(() => expect(draft()?.prompt).toBe("Keep my independent draft"));
+        const afterSave = persisted();
+        expect(afterSave.ok && afterSave.value.pending[0]).toMatchObject({
+          id: queuedId,
+          promptText: "Saved queued revision",
+          files: [attachment],
+        });
+        document.querySelector<HTMLButtonElement>(".cafe-followup-steer-button")!.click();
+        await vi.waitFor(() => {
+          const steers = wsRequests.filter((request) => request.type === "thread.turn.steer");
+          expect(steers).toHaveLength(1);
+          expect(steers[0]).toMatchObject({
+            commandId: queuedId,
+            message: {
+              messageId: queuedId,
+              text: "Saved queued revision",
+              attachments: [attachment],
+            },
+          });
+        });
+        expect(draft()?.prompt).toBe("Keep my independent draft");
+        expect(wsRequests.some((request) => request.type === "thread.turn.interrupt")).toBe(false);
+      } finally {
+        worker.resetHandlers();
+        await mounted.cleanup();
+      }
+    });
+
+    it("restores an uncertain queued dispatch as manual-only and removes its exact claim", async () => {
+      const persistence = createFollowUpQueuePersistence();
+      const queuedId = "queued-uncertain-browser-fixture";
+      const queued = {
+        id: queuedId,
+        environmentId: LOCAL_ENVIRONMENT_ID,
+        threadId: THREAD_ID,
+        promptText: "Do not resend this uncertain instruction",
+        images: [],
+        files: [
+          {
+            type: "file" as const,
+            id: "uncertain-file",
+            name: "notes.pdf",
+            mimeType: "application/pdf",
+            sizeBytes: 123,
+          },
+        ],
+        provider: ProviderDriverKind.make("codex"),
+        model: "gpt-5.4",
+        promptEffort: null,
+        modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.4"),
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+        queuedAt: isoAt(1000),
+        blockedReason: null,
+      };
+      expect((await persistence.save(LOCAL_ENVIRONMENT_ID, [queued])).ok).toBe(true);
+      expect(
+        persistence.claim(
+          {
+            environmentId: LOCAL_ENVIRONMENT_ID,
+            threadId: THREAD_ID,
+            itemId: queuedId,
+            commandId: CommandId.make(queuedId),
+            messageId: MessageId.make(queuedId),
+          },
+          queued,
+        ).ok,
+      ).toBe(true);
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotForTargetUser({
+          targetMessageId: "msg-user-uncertain-queue" as MessageId,
+          targetText: "uncertain queued dispatch target",
+          sessionStatus: "ready",
+        }),
+      });
+      try {
+        const shelf = await waitForElement(
+          () => document.querySelector('[data-cafe-followup-queue="true"]'),
+          "Uncertain queue row was not restored.",
+        );
+        expect(shelf.textContent).toContain("Delivery status is unknown");
+        expect(shelf.textContent).toContain("notes.pdf");
+        expect(queuedSendButtons()[0]?.disabled).toBe(true);
+        expect(editButton()).toBeNull();
+        queuedSendButtons()[0]!.click();
+        // Cover the periodic queue watchdog as well as initial render and
+        // direct activation. A saved claim is never an auto-send candidate.
+        await new Promise((resolve) => window.setTimeout(resolve, 1_100));
+        expect(
+          wsRequests.some(
+            (request) =>
+              request.type === "thread.turn.start" || request.type === "thread.turn.steer",
+          ),
+        ).toBe(false);
+        document
+          .querySelector<HTMLButtonElement>('button[aria-label="Remove queued message"]')!
+          .click();
+        await vi.waitFor(() =>
+          expect(document.querySelector('[data-cafe-followup-queue="true"]')).toBeNull(),
+        );
+        expect(createFollowUpQueuePersistence().load(LOCAL_ENVIRONMENT_ID)).toEqual({
+          ok: true,
+          value: { pending: [], claimed: [] },
+        });
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("sends a second queued steer while the first accepted steer is still processing", async () => {
+      const activeTurnId = "turn-consecutive-queued-steers" as TurnId;
+      const baseSnapshot = createSnapshotForTargetUser({
+        targetMessageId: "msg-user-consecutive-queued-steers" as MessageId,
+        targetText: "consecutive queued steers target",
+        sessionStatus: "running",
+      });
+      const runningSnapshot: OrchestrationReadModel = {
+        ...baseSnapshot,
+        threads: baseSnapshot.threads.map((thread) =>
+          Object.assign({}, thread, {
+            latestTurn: {
+              turnId: activeTurnId,
+              state: "running" as const,
+              requestedAt: isoAt(1_000),
+              startedAt: isoAt(1_001),
+              completedAt: null,
+              assistantMessageId: null,
+            },
+            session: { ...thread.session!, activeTurnId, status: "running" as const },
+          }),
+        ),
+      };
+      let releaseFirstRequest: (() => void) | undefined;
+      const firstRequest = new Promise<{ sequence: number }>((resolve) => {
+        releaseFirstRequest = () => resolve({ sequence: runningSnapshot.snapshotSequence + 1 });
+      });
+      let steerRequestCount = 0;
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: runningSnapshot,
+        configureFixture: (testFixture) => {
+          testFixture.serverConfig = {
+            ...testFixture.serverConfig,
+            providers: testFixture.serverConfig.providers.map((provider) => ({
+              ...provider,
+              runtimeCapabilities: { liveSteer: "supported", threadGoals: "unsupported" },
+            })),
+          };
+        },
+        resolveRpc: (body) => {
+          if (body._tag !== ORCHESTRATION_WS_METHODS.dispatchCommand) return undefined;
+          if (body.type === "thread.turn.steer") {
+            steerRequestCount += 1;
+            if (steerRequestCount === 1) return firstRequest;
+          }
+          return { sequence: runningSnapshot.snapshotSequence + steerRequestCount };
+        },
+      });
+      const steerRequests = () =>
+        wsRequests.filter(
+          (request) =>
+            request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+            request.type === "thread.turn.steer",
+        );
+
+      try {
+        // Queue both rows before sending either; the second remains available
+        // throughout the first command's real transport and processing phases.
+        for (const text of ["first queued correction", "second queued correction"]) {
+          useComposerDraftStore.getState().setPrompt(THREAD_REF, text);
+          await vi.waitFor(() => {
+            const button = document.querySelector<HTMLButtonElement>(
+              'button[aria-label="Queue message"]',
+            );
+            expect(button).not.toBeNull();
+            expect(button?.disabled).toBe(false);
+          });
+          document.querySelector<HTMLButtonElement>('button[aria-label="Queue message"]')!.click();
+          await vi.waitFor(() =>
+            expect(
+              useComposerDraftStore.getState().draftsByThreadKey[THREAD_KEY]?.prompt ?? "",
+            ).toBe(""),
+          );
+        }
+        await vi.waitFor(() => expect(queuedSendButtons()).toHaveLength(2));
+        queuedSendButtons()[0]!.click();
+        await vi.waitFor(() => expect(steerRequests()).toHaveLength(1));
+        await vi.waitFor(() => expect(queuedSendButtons()).toHaveLength(1));
+        queuedSendButtons()[0]!.click();
+        await waitForLayout();
+        expect(steerRequests()).toHaveLength(1);
+
+        releaseFirstRequest!();
+        // No provider processing marker is published by this fixture. The
+        // first non-cancelable steering row must not own the send lock anymore.
+        await waitForLayout();
+        expect(document.querySelectorAll('[data-cafe-followup-steering="true"]')).toHaveLength(1);
+        const secondSendButton = queuedSendButtons()[0]!;
+        secondSendButton.click();
+        secondSendButton.click();
+        await vi.waitFor(() => {
+          expect(steerRequests()).toHaveLength(2);
+          expect(document.querySelectorAll('[data-cafe-followup-steering="true"]')).toHaveLength(2);
+        });
+        const messages = steerRequests().map(
+          (request) => request.message as { messageId: string; text: string },
+        );
+        expect(messages.map((message) => message.text)).toEqual([
+          "first queued correction",
+          "second queued correction",
+        ]);
+        expect(new Set(messages.map((message) => message.messageId)).size).toBe(2);
+        expect(wsRequests.some((request) => request.type === "thread.turn.interrupt")).toBe(false);
+      } finally {
+        releaseFirstRequest?.();
         await mounted.cleanup();
       }
     });

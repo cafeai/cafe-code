@@ -95,6 +95,7 @@ import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
 import { makeProviderSessionTitle } from "../providerSessionTitle.ts";
+import { prepareFileAttachmentPrompt } from "../fileAttachmentPrompt.ts";
 import {
   makeClaudeUsageAccounting,
   observeClaudeAssistantUsage,
@@ -211,7 +212,7 @@ type ClaudeSdkEffort = NonNullable<ClaudeQueryOptions["effort"]>;
 type ClaudeSdkThinkingDisplay = "summarized" | "omitted" | null;
 type ClaudeCommandLifecycleState = "queued" | "started" | "completed" | "cancelled" | "discarded";
 type ClaudePromptLifecycleState = "submitted" | ClaudeCommandLifecycleState;
-type ClaudePromptInput = Pick<ProviderSendTurnInput, "input" | "attachments"> &
+type ClaudePromptInput = Pick<ProviderSendTurnInput, "threadId" | "input" | "attachments"> &
   Partial<Pick<ProviderSendTurnInput, "modelSelection">>;
 // The bundled Claude Code binary can emit newer system subtypes before the
 // installed SDK declarations include them. Keep those known runtime shapes in
@@ -3377,6 +3378,29 @@ const buildUserMessageEffect = Effect.fn("buildUserMessageEffect")(function* (
 
   if (text.length > 0) {
     sdkContent.push({ type: "text", text });
+  }
+
+  // Keep uploaded documents out of the initial model context. Claude's public
+  // Read tool can inspect text and PDF paths on demand, with the existing
+  // canUseTool permission boundary for paths outside the project. In particular,
+  // do not grant the whole attachment store through additionalDirectories.
+  // https://code.claude.com/docs/en/tools-reference#read-tool-behavior
+  const fileManifest = yield* Effect.tryPromise({
+    try: () =>
+      prepareFileAttachmentPrompt({
+        attachmentsDir: dependencies.attachmentsDir,
+        threadId: input.threadId,
+        attachments: input.attachments,
+      }),
+    catch: () =>
+      new ProviderAdapterRequestError({
+        provider: PROVIDER,
+        method: dependencies.method,
+        detail: "Failed to prepare a validated file attachment.",
+      }),
+  });
+  if (fileManifest.length > 0) {
+    sdkContent.push({ type: "text", text: fileManifest });
   }
 
   for (const attachment of input.attachments ?? []) {

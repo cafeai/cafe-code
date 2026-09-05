@@ -1,3 +1,4 @@
+import { FileAttachmentPill } from "./FileAttachmentPill";
 import {
   type EnvironmentId,
   type EditorId,
@@ -1100,8 +1101,6 @@ function findAssistantMarkdownCopyRegion(range: Range): HTMLElement | null {
 // TimelineRowContent — the actual row component
 // ---------------------------------------------------------------------------
 
-type TimelineEntry = ReturnType<typeof deriveTimelineEntries>[number];
-type TimelineMessage = Extract<TimelineEntry, { kind: "message" }>["message"];
 type TimelineWorkEntry = Extract<MessagesTimelineRow, { kind: "work" }>["groupedEntries"][number];
 type TimelineRow = MessagesTimelineRow;
 
@@ -1147,7 +1146,10 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
 
 function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
-  const userImages = row.message.attachments ?? [];
+  const userImages =
+    row.message.attachments?.filter((attachment) => attachment.type === "image") ?? [];
+  const userFiles =
+    row.message.attachments?.filter((attachment) => attachment.type === "file") ?? [];
   const copyText = row.message.text.trim().length > 0 ? row.message.text : null;
   const canRevertAgentWork = typeof row.revertTurnCount === "number";
 
@@ -1156,7 +1158,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
       <div className="group relative max-w-[80%] rounded-2xl rounded-br-sm border border-border bg-secondary px-4 py-3">
         {userImages.length > 0 && (
           <div className="mb-2 grid max-w-[420px] grid-cols-2 gap-2">
-            {userImages.map((image: NonNullable<TimelineMessage["attachments"]>[number]) => (
+            {userImages.map((image) => (
               <div
                 key={image.id}
                 className="overflow-hidden rounded-lg border border-border/80 bg-background/70"
@@ -1187,6 +1189,17 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
             ))}
           </div>
         )}
+        {userFiles.length > 0 ? (
+          <div className="mb-2 flex flex-wrap gap-2">
+            {userFiles.map((attachment) => (
+              <FileAttachmentPill
+                key={attachment.id}
+                attachment={attachment}
+                environmentId={ctx.activeThreadEnvironmentId}
+              />
+            ))}
+          </div>
+        ) : null}
         <CollapsibleUserMessageBody
           text={row.message.text}
           skills={ctx.skills}

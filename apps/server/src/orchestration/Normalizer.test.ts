@@ -9,6 +9,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { computeAttachmentContentSha256 } from "../attachmentContentCommitment.ts";
 import { ServerConfig } from "../config.ts";
+import { storeFileAttachment } from "../fileAttachmentStore.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { RepositoryIdentityResolverLive } from "../project/Layers/RepositoryIdentityResolver.ts";
 import { WorkspacePathsLive } from "../workspace/Layers/WorkspacePaths.ts";
@@ -119,6 +120,48 @@ layer("normalizeDispatchCommand attachment commitments", (it) => {
           sizeBytes: bytes.byteLength,
         },
       ]);
+
+      const config = yield* ServerConfig;
+      const file = yield* Effect.promise(() =>
+        storeFileAttachment({
+          attachmentsDir: config.attachmentsDir,
+          threadId,
+          name: "document.tex",
+          mimeType: "text/plain",
+          bytes: Buffer.from("\\section{private}"),
+        }),
+      );
+      const fileCommand = {
+        type: "thread.turn.steer" as const,
+        commandId: CommandId.make("cmd-normalizer-file"),
+        threadId,
+        message: {
+          messageId: MessageId.make("message-file"),
+          role: "user" as const,
+          text: "",
+          attachments: [file],
+        },
+        createdAt: "2026-08-31T00:00:02.000Z",
+      };
+      const normalizedFile = yield* normalizeDispatchCommand(fileCommand);
+      const repeatedFile = yield* normalizeDispatchCommand(fileCommand);
+      assert.deepEqual(normalizedFile, repeatedFile);
+      assert.equal(normalizedFile.type, "thread.turn.steer");
+      if (normalizedFile.type === "thread.turn.steer")
+        assert.deepEqual(normalizedFile.message.attachments, [file]);
+      const crossThread = yield* normalizeDispatchCommand({
+        ...fileCommand,
+        threadId: ThreadId.make("other-thread"),
+      }).pipe(Effect.result);
+      assert.equal(crossThread._tag, "Failure");
+      const renamed = yield* normalizeDispatchCommand({
+        ...fileCommand,
+        message: { ...fileCommand.message, attachments: [{ ...file, name: "forged" }] },
+      }).pipe(Effect.result);
+      assert.equal(renamed._tag, "Failure");
+      const fileRows =
+        yield* sql`SELECT attachment_id FROM attachment_content_commitments WHERE attachment_id = ${file.id}`;
+      assert.equal(fileRows.length, 1);
     }),
   );
 });

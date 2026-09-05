@@ -1383,6 +1383,8 @@ const assertBrowserApiCorsHeaders = (headers: HeaderBag) => {
     "content-type",
     "mcp-protocol-version",
     "traceparent",
+    "x-cafe-attachment-name",
+    "x-cafe-thread-id",
   ]);
 };
 const crossOriginClientOrigin = "http://remote-client.test:3773";
@@ -3061,6 +3063,81 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect(
+    "uploads arbitrary files before thread creation and serves inert authenticated downloads",
+    () =>
+      Effect.gen(function* () {
+        yield* buildAppUnderTest();
+        const cookie = yield* getAuthenticatedSessionCookieHeader();
+        const content = "<script>throw new Error('not executed')</script>\\section{TeX}";
+        const upload = yield* HttpClient.post("/api/attachments", {
+          headers: {
+            cookie,
+            "content-type": "text/html",
+            "x-cafe-thread-id": "draft-files-thread",
+            "x-cafe-attachment-name": "page.html",
+          },
+          body: HttpBody.uint8Array(new TextEncoder().encode(content), "text/html"),
+        });
+        assert.equal(upload.status, 201);
+        const file = (yield* upload.json) as {
+          id: string;
+          type: string;
+          name: string;
+          sizeBytes: number;
+        };
+        assert.equal(file.type, "file");
+        assert.equal(file.name, "page.html");
+        assert.equal(file.sizeBytes, content.length);
+        const response = yield* HttpClient.get(`/api/attachments/${file.id}`, {
+          headers: { cookie, connection: "close" },
+        });
+        assert.equal(response.status, 200);
+        assert.include(response.headers["content-type"], "application/octet-stream");
+        assert.include(response.headers["content-disposition"], "attachment;");
+        assert.equal(response.headers["x-content-type-options"], "nosniff");
+        assert.equal(response.headers["cache-control"], "no-store");
+        assert.equal(yield* response.text, content);
+        const preview = yield* HttpClient.get(`/api/attachments/${file.id}?preview=text`, {
+          headers: { cookie },
+        });
+        assert.deepEqual(yield* preview.json, { text: content, truncated: false });
+        for (const path of [
+          `/attachments/${file.id}`,
+          `/attachments/${file.id}.metadata.json`,
+          `/attachments/${file.id}.bin`,
+        ]) {
+          const denied = yield* HttpClient.get(path, { headers: { cookie } });
+          assert.equal(denied.status, 404);
+        }
+        const unauthenticated = yield* HttpClient.get(`/api/attachments/${file.id}`);
+        assert.equal(unauthenticated.status, 401);
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("rejects file uploads without authentication or a valid target", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+      const denied = yield* HttpClient.post("/api/attachments", { body: HttpBody.text("private") });
+      assert.equal(denied.status, 401);
+      const cookie = yield* getAuthenticatedSessionCookieHeader();
+      const invalid = yield* HttpClient.post("/api/attachments", {
+        headers: { cookie },
+        body: HttpBody.text("private"),
+      });
+      assert.equal(invalid.status, 400);
+      const malformed = yield* HttpClient.post("/api/attachments", {
+        headers: { cookie, "x-cafe-thread-id": "%ZZ", "x-cafe-attachment-name": "file" },
+        body: HttpBody.text("private"),
+      });
+      assert.equal(malformed.status, 400);
+      const traversal = yield* HttpClient.get("/api/attachments/..%2fsecret", {
+        headers: { cookie },
+      });
+      assert.equal(traversal.status, 404);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("uploads and serves authenticated sidebar branding images", () =>
     Effect.gen(function* () {
       yield* buildAppUnderTest();
@@ -3385,6 +3462,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         "content-type",
         "mcp-protocol-version",
         "traceparent",
+        "x-cafe-attachment-name",
+        "x-cafe-thread-id",
       ]);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );

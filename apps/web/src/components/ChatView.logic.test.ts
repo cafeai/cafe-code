@@ -568,6 +568,30 @@ describe("shouldBackpressurePendingSteerDispatch", () => {
 });
 
 describe("restoreCanonicalRetryImages", () => {
+  it("restores canonical document handles without downloading or silently counting them as missing images", async () => {
+    const attachment = {
+      type: "file" as const,
+      id: "copy",
+      name: "source.html",
+      mimeType: "text/html",
+      sizeBytes: 12,
+    };
+    const fetcher = vi.fn(fetchBoundedRetryImage);
+    expect(await restoreCanonicalRetryImages([attachment], fetcher)).toEqual({
+      images: [],
+      files: [attachment],
+      unavailableCount: 0,
+    });
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(
+      deriveComposerSendState({ prompt: "", imageCount: 0, fileCount: 1 }).hasSendableContent,
+    ).toBe(true);
+    expect(
+      mergePendingSteerSnapshotsForInterruptedTurn([
+        { promptText: "", images: [], files: [attachment] },
+      ])?.files,
+    ).toEqual([attachment]);
+  });
   it("restores a bounded canonical image into a resendable File", async () => {
     const restored = await restoreCanonicalRetryImages(
       [
@@ -630,7 +654,7 @@ describe("restoreCanonicalRetryImages", () => {
       fetcher,
     );
 
-    expect(restored).toEqual({ images: [], unavailableCount: 3 });
+    expect(restored).toEqual({ images: [], files: [], unavailableCount: 3 });
     expect(fetcher).toHaveBeenCalledTimes(2);
   });
 });

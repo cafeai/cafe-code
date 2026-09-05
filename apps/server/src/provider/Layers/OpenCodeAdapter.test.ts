@@ -265,6 +265,42 @@ it.layer(IsolatedOpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       ]);
     }),
   );
+  it.effect(
+    "rejects local file handles for an explicitly hosted OpenCode server instead of claiming delivery",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* OpenCodeAdapter;
+        const threadId = asThreadId("hosted-opencode-file");
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          runtimeMode: "full-access",
+        });
+        const error = yield* adapter
+          .sendTurn({
+            threadId,
+            input: "inspect this file",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("opencode"),
+              model: "openai/gpt-5",
+            },
+            attachments: [
+              {
+                type: "file",
+                id: "not-dereferenced",
+                name: "source.html",
+                mimeType: "text/html",
+                sizeBytes: 1,
+              },
+            ],
+          })
+          .pipe(Effect.flip);
+        assert.equal(error._tag, "ProviderAdapterValidationError");
+        assert.match(error.message, /locally managed OpenCode runtime/);
+        assert.deepEqual(runtimeMock.state.promptCalls, []);
+        assert.equal((yield* adapter.listSessions())[0]?.status, "ready");
+      }),
+  );
 
   it.effect("stops a configured-server session without trying to own server lifecycle", () =>
     Effect.gen(function* () {

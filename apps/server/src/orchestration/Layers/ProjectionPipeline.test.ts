@@ -34,6 +34,7 @@ import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQu
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
 import { ServerConfig } from "../../config.ts";
+import { storeFileAttachment } from "../../fileAttachmentStore.ts";
 
 const makeProjectionPipelinePrefixedTestLayer = (prefix: string) =>
   OrchestrationProjectionPipelineLive.pipe(
@@ -2437,6 +2438,18 @@ it.layer(
       yield* fileSystem.writeFileString(removePath, "remove");
       const otherThreadPath = path.join(attachmentsDir, `${otherThreadAttachmentId}.png`);
       yield* fileSystem.writeFileString(otherThreadPath, "other");
+      const pendingFile = yield* Effect.promise(() =>
+        storeFileAttachment({
+          attachmentsDir,
+          threadId,
+          name: "queued.tex",
+          mimeType: "text/plain",
+          bytes: new TextEncoder().encode("queued"),
+        }),
+      );
+      const pendingFilePath = path.join(attachmentsDir, `${pendingFile.id}.bin`);
+      const pendingSidecar = path.join(attachmentsDir, `${pendingFile.id}.provider.tex`);
+      yield* fileSystem.writeFileString(pendingSidecar, "queued");
       assert.isTrue(yield* exists(keepPath));
       assert.isTrue(yield* exists(removePath));
       assert.isTrue(yield* exists(otherThreadPath));
@@ -2460,6 +2473,9 @@ it.layer(
       assert.isTrue(yield* exists(keepPath));
       assert.isFalse(yield* exists(removePath));
       assert.isTrue(yield* exists(otherThreadPath));
+      assert.isTrue(yield* exists(pendingFilePath));
+      assert.isTrue(yield* exists(pendingSidecar));
+      assert.isTrue(yield* exists(path.join(attachmentsDir, `${pendingFile.id}.metadata.json`)));
     }),
   );
 });
@@ -2571,6 +2587,26 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-projection-atta
         yield* fileSystem.makeDirectory(attachmentsDir, { recursive: true });
         yield* fileSystem.writeFileString(threadAttachmentPath, "delete");
         yield* fileSystem.writeFileString(otherThreadAttachmentPath, "other-thread");
+        const ownFile = yield* Effect.promise(() =>
+          storeFileAttachment({
+            attachmentsDir,
+            threadId,
+            name: "own.tex",
+            mimeType: "text/plain",
+            bytes: new TextEncoder().encode("own"),
+          }),
+        );
+        const collisionFile = yield* Effect.promise(() =>
+          storeFileAttachment({
+            attachmentsDir,
+            threadId: "thread-delete-files",
+            name: "other.tex",
+            mimeType: "text/plain",
+            bytes: new TextEncoder().encode("other"),
+          }),
+        );
+        const ownSidecar = path.join(attachmentsDir, `${ownFile.id}.provider.tex`);
+        yield* fileSystem.writeFileString(ownSidecar, "own");
         assert.isTrue(yield* exists(threadAttachmentPath));
         assert.isTrue(yield* exists(otherThreadAttachmentPath));
 
@@ -2592,6 +2628,13 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-projection-atta
 
         assert.isFalse(yield* exists(threadAttachmentPath));
         assert.isTrue(yield* exists(otherThreadAttachmentPath));
+        assert.isFalse(yield* exists(path.join(attachmentsDir, `${ownFile.id}.bin`)));
+        assert.isFalse(yield* exists(path.join(attachmentsDir, `${ownFile.id}.metadata.json`)));
+        assert.isFalse(yield* exists(ownSidecar));
+        assert.isTrue(yield* exists(path.join(attachmentsDir, `${collisionFile.id}.bin`)));
+        assert.isTrue(
+          yield* exists(path.join(attachmentsDir, `${collisionFile.id}.metadata.json`)),
+        );
       }),
     );
   },

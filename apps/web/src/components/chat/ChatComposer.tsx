@@ -1,5 +1,6 @@
 import type {
   ApprovalRequestId,
+  ChatFileAttachment,
   DictationTranscriptionModel,
   EnvironmentId,
   ModelSelection,
@@ -17,6 +18,8 @@ import {
   ProviderInstanceId,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
+  PROVIDER_SEND_TURN_MAX_FILE_BYTES,
+  PROVIDER_SEND_TURN_MAX_TOTAL_ATTACHMENT_BYTES,
 } from "@cafecode/contracts";
 import { createModelSelection, normalizeModelSlug } from "@cafecode/shared/model";
 import {
@@ -48,6 +51,7 @@ import {
   type DraftId,
   type PersistedComposerImageAttachment,
   useComposerDraftStore,
+  flushComposerDraftPersistence,
   useComposerThreadDraft,
   useEffectiveComposerModelState,
 } from "../../composerDraftStore";
@@ -61,6 +65,9 @@ import { type ComposerCommandItem, ComposerCommandMenu } from "./ComposerCommand
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
 import { ComposerAttachImageButton } from "./ComposerAttachImageButton";
+import { FileAttachmentPill } from "./FileAttachmentPill";
+import { uploadFileAttachment } from "../../attachments/fileAttachments";
+import { isComposerImageFile, type ComposerFileAttachment } from "../../attachments/composerFiles";
 import { ComposerDictationButton } from "./ComposerDictationButton";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { ComposerPendingApprovalPanel } from "./ComposerPendingApprovalPanel";
@@ -88,6 +95,8 @@ import {
   ImageIcon,
   LoaderCircleIcon,
   ListTodoIcon,
+  FileIcon,
+  PencilIcon,
   Trash2Icon,
   XIcon,
 } from "lucide-react";
@@ -257,6 +266,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   hasSendableContent: boolean;
   postSubmitInterruptGuardActive: boolean;
   pendingStatusLabel: string | null;
+  isQueueEditing?: boolean;
   dictationAction: ReactNode;
   preserveComposerFocusOnPointerDown?: boolean;
   onArmPostSubmitInterruptGuard: () => void;
@@ -284,6 +294,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         showPlanFollowUpPrompt={props.showPlanFollowUpPrompt}
         promptHasText={props.promptHasText}
         isSendBusy={props.isSendBusy}
+        isQueueEditing={props.isQueueEditing ?? false}
         isConnecting={props.isConnecting}
         isEnvironmentUnavailable={props.isEnvironmentUnavailable}
         isPreparingWorktree={props.isPreparingWorktree}
@@ -339,6 +350,7 @@ export interface ChatComposerHandle {
   getSendContext: () => {
     prompt: string;
     images: ComposerImageAttachment[];
+    files: ComposerFileAttachment[];
     selectedPromptEffort: string | null;
     selectedModelOptionsForDispatch: unknown;
     selectedModelSelection: ModelSelection;
@@ -353,6 +365,10 @@ export interface FollowUpQueueViewItem {
   preview: string;
   promptText: string;
   images: readonly ComposerImageAttachment[];
+  files?: readonly ChatFileAttachment[];
+  environmentId?: EnvironmentId;
+  canEdit?: boolean;
+  canDispatch?: boolean;
   queuedAt: string;
   expanded: boolean;
   canExpand: boolean;
@@ -367,6 +383,8 @@ export interface SteeringFollowUpViewItem {
   preview: string;
   promptText: string;
   dispatchedAt: string;
+  files?: readonly ChatFileAttachment[];
+  environmentId?: EnvironmentId;
 }
 
 function queuedMessageCountLabel(count: number): string | null {
@@ -440,6 +458,7 @@ export function FollowUpQueueShelf(props: {
   onToggleExpanded: (itemId: string) => void;
   onAction: (itemId: string) => void;
   onRemove: (itemId: string) => void;
+  onEdit?: ((itemId: string) => void) | undefined;
   onClear: () => void;
   onExpandImage: (preview: ExpandedImagePreview) => void;
 }) {
@@ -503,13 +522,24 @@ export function FollowUpQueueShelf(props: {
                 Steering
               </span>
             </div>
+            {item.files && item.environmentId && item.files.length > 0 ? (
+              <div className="mt-2 flex flex-wrap gap-1">
+                {item.files.map((attachment) => (
+                  <FileAttachmentPill
+                    key={attachment.id}
+                    attachment={attachment}
+                    environmentId={item.environmentId!}
+                  />
+                ))}
+              </div>
+            ) : null}
           </div>
         ))}
         {props.items.map((item) => {
           const retryStatus = automaticSteerRetryStatus(item);
           return (
             <div key={item.id} className="rounded-xl border border-border/45 bg-background/42 p-2">
-              <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-2">
+              <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto_auto_auto] items-center gap-2">
                 {item.canExpand ? (
                   <button
                     type="button"
@@ -554,10 +584,25 @@ export function FollowUpQueueShelf(props: {
                     size="sm"
                     className="cafe-followup-steer-button h-7 shrink-0 px-2 transition-colors"
                     title={props.actionTitle}
+                    disabled={item.canDispatch === false}
                     onClick={() => props.onAction(item.id)}
                   >
                     {props.actionLabel}
                   </Button>
+                )}
+                {!retryStatus && item.canEdit !== false && props.onEdit ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    className="size-7 shrink-0"
+                    aria-label="Edit queued message"
+                    onClick={() => props.onEdit?.(item.id)}
+                  >
+                    <PencilIcon className="size-3.5" />
+                  </Button>
+                ) : (
+                  <span />
                 )}
                 <Button
                   type="button"
@@ -570,6 +615,17 @@ export function FollowUpQueueShelf(props: {
                   <Trash2Icon className="size-4" />
                 </Button>
               </div>
+              {item.files && item.environmentId && item.files.length > 0 ? (
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {item.files.map((attachment) => (
+                    <FileAttachmentPill
+                      key={attachment.id}
+                      attachment={attachment}
+                      environmentId={item.environmentId!}
+                    />
+                  ))}
+                </div>
+              ) : null}
               {item.canExpand && item.expanded ? (
                 <div className="mt-2 grid gap-2 rounded-lg border border-border/35 bg-background/55 p-2">
                   {item.images.length > 0 ? (
@@ -721,6 +777,10 @@ export interface ChatComposerProps {
   onToggleFollowUpQueueItem: (itemId: string) => void;
   onActivateFollowUpQueueItem: (itemId: string) => void;
   onRemoveFollowUpQueueItem: (itemId: string) => void;
+  onEditFollowUpQueueItem?: (itemId: string) => void;
+  queueEditing?: boolean;
+  onSaveQueueEdit?: () => void;
+  onCancelQueueEdit?: () => void;
   onClearFollowUpQueue: () => void;
   onInterrupt: () => void;
   onImplementPlanInNewThread: () => void;
@@ -848,6 +908,21 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const composerDraft = useComposerThreadDraft(composerDraftTarget);
   const prompt = composerDraft.prompt;
   const composerImages = composerDraft.images;
+  const composerFiles = composerDraft.files;
+  const [fileDraftPersistenceFailed, setFileDraftPersistenceFailed] = useState(false);
+  useEffect(() => {
+    if (composerFiles.length === 0) {
+      setFileDraftPersistenceFailed(false);
+      return;
+    }
+    setFileDraftPersistenceFailed(!flushComposerDraftPersistence());
+  }, [composerFiles]);
+  const blockedComposerFiles = composerFiles.some(
+    (file) =>
+      file.status !== "ready" ||
+      file.environmentId !== environmentId ||
+      file.targetThreadId !== activeThreadId,
+  );
   const nonPersistedComposerImageIds = composerDraft.nonPersistedImageIds;
 
   const setComposerDraftPrompt = useComposerDraftStore((store) => store.setPrompt);
@@ -1206,8 +1281,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       deriveComposerSendState({
         prompt,
         imageCount: composerImages.length,
+        fileCount: composerFiles.length,
       }),
-    [composerImages.length, prompt],
+    [composerImages.length, composerFiles.length, prompt],
   );
   const postSubmitInterruptGuardTarget =
     routeKind === "draft"
@@ -1928,7 +2004,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // Dictation owns its own connecting/recording/finalizing state. Reusing its
   // transcript edit lock as the send button's busy state incorrectly rendered
   // a "Sending" spinner before Cafe had dispatched any message.
-  const isComposerPrimaryActionBusy = isSendBusy;
+  const isComposerPrimaryActionBusy = isSendBusy || blockedComposerFiles;
   const previousComposerEditorDisabledRef = useRef(composerEditorDisabled);
 
   const resolveActiveComposerTrigger = useCallback((): {
@@ -2170,6 +2246,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   const runSubmitComposer = useCallback(
     async (event?: { preventDefault: () => void }) => {
+      if (blockedComposerFiles || props.queueEditing) {
+        event?.preventDefault();
+        return;
+      }
       const keepKeyboardClosed = isOnScreenKeyboardDevice;
       mobileDebugLog("submit-start", { keepKeyboardClosed, ...domSnapshot() });
       try {
@@ -2190,6 +2270,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       onSend,
       requestComposerEditorFocus,
       settlePostSubmitInterruptGuard,
+      blockedComposerFiles,
+      props.queueEditing,
     ],
   );
 
@@ -2214,6 +2296,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   const runSteerComposer = useCallback(
     async (event?: { preventDefault: () => void }) => {
+      if (blockedComposerFiles || props.queueEditing) {
+        event?.preventDefault();
+        return;
+      }
       const keepKeyboardClosed = isOnScreenKeyboardDevice;
       try {
         await onSteer(event);
@@ -2225,7 +2311,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         }
       }
     },
-    [dismissMobileComposerKeyboard, isOnScreenKeyboardDevice, onSteer, requestComposerEditorFocus],
+    [
+      dismissMobileComposerKeyboard,
+      isOnScreenKeyboardDevice,
+      onSteer,
+      requestComposerEditorFocus,
+      blockedComposerFiles,
+      props.queueEditing,
+    ],
   );
 
   const steerComposer = useCallback(
@@ -2349,30 +2442,89 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // ------------------------------------------------------------------
   // Callbacks: images
   // ------------------------------------------------------------------
+  const uploadTailRef = useRef<Promise<void>>(Promise.resolve());
+  const queueFileUpload = (file: ComposerFileAttachment) => {
+    const target = composerDraftTarget;
+    const update = (patch: Partial<ComposerFileAttachment>) => {
+      const store = useComposerDraftStore.getState();
+      // Removed uploads may finish, but must never reappear in a newer draft.
+      store.updateFile(target, file.id, patch);
+    };
+    update({ status: "uploading", error: undefined });
+    uploadTailRef.current = uploadTailRef.current.then(async () => {
+      if (!file.file) return;
+      try {
+        const attachment = await uploadFileAttachment({
+          environmentId: file.environmentId,
+          targetThreadId: file.targetThreadId,
+          file: file.file,
+        });
+        update({ status: "ready", attachment, file: undefined, error: undefined });
+      } catch {
+        update({
+          status: "failed",
+          error: "Upload failed. Retry, or remove this file before sending.",
+        });
+      }
+    });
+  };
+
   const addComposerImages = (files: File[]) => {
     if (!activeThreadId || files.length === 0) return;
+    if (isSendBusy) {
+      toastManager.add({
+        type: "error",
+        title: "Wait for the current submission before adding more files.",
+      });
+      return;
+    }
     if (pendingUserInputs.length > 0) {
       toastManager.add({
         type: "error",
-        title: "Attach images after answering plan questions.",
+        title: "Attach files after answering plan questions.",
       });
       return;
     }
     const nextImages: ComposerImageAttachment[] = [];
-    let nextImageCount = composerImagesRef.current.length;
+    const currentDraft = useComposerDraftStore.getState().getComposerDraft(composerDraftTarget);
+    const nextFiles: ComposerFileAttachment[] = [];
+    let nextImageCount = (currentDraft?.images.length ?? 0) + (currentDraft?.files.length ?? 0);
+    let totalBytes = [...(currentDraft?.images ?? []), ...(currentDraft?.files ?? [])].reduce(
+      (sum, file) => sum + file.sizeBytes,
+      0,
+    );
     let error: string | null = null;
     for (const file of files) {
-      if (!file.type.startsWith("image/")) {
-        error = `Unsupported file type for '${file.name}'. Please attach image files only.`;
-        continue;
-      }
-      if (file.size > PROVIDER_SEND_TURN_MAX_IMAGE_BYTES) {
-        error = `'${file.name}' exceeds the ${IMAGE_SIZE_LIMIT_LABEL} attachment limit.`;
+      const isImage = isComposerImageFile(file);
+      const limit = isImage
+        ? PROVIDER_SEND_TURN_MAX_IMAGE_BYTES
+        : PROVIDER_SEND_TURN_MAX_FILE_BYTES;
+      if (file.size > limit) {
+        error = `'${file.name}' exceeds the ${isImage ? IMAGE_SIZE_LIMIT_LABEL : "25MB"} attachment limit.`;
         continue;
       }
       if (nextImageCount >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
-        error = `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} images per message.`;
+        error = `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} files or images per message.`;
         break;
+      }
+      if (totalBytes + file.size > PROVIDER_SEND_TURN_MAX_TOTAL_ATTACHMENT_BYTES) {
+        error = "Combined attachments exceed the 80MB limit.";
+        continue;
+      }
+      totalBytes += file.size;
+      nextImageCount += 1;
+      if (!isImage) {
+        nextFiles.push({
+          id: randomUUID(),
+          environmentId,
+          targetThreadId: activeThreadId,
+          name: file.name || "file",
+          mimeType: file.type || "application/octet-stream",
+          sizeBytes: file.size,
+          status: "uploading",
+          file,
+        });
+        continue;
       }
       const previewUrl = URL.createObjectURL(file);
       nextImages.push({
@@ -2384,18 +2536,36 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         previewUrl,
         file,
       });
-      nextImageCount += 1;
     }
     if (nextImages.length === 1 && nextImages[0]) {
       addComposerImage(nextImages[0]);
     } else if (nextImages.length > 1) {
       addComposerImagesToDraft(nextImages);
     }
+    if (nextFiles.length > 0) {
+      const store = useComposerDraftStore.getState();
+      store.setFiles(composerDraftTarget, [
+        ...(store.getComposerDraft(composerDraftTarget)?.files ?? []),
+        ...nextFiles,
+      ]);
+      for (const file of nextFiles) queueFileUpload(file);
+    }
     setThreadError(activeThreadId, error);
   };
 
   const removeComposerImage = (imageId: string) => {
+    if (isSendBusy) return;
     removeComposerImageFromDraft(imageId);
+  };
+  const removeComposerFile = (fileId: string) => {
+    if (isSendBusy) return;
+    const store = useComposerDraftStore.getState();
+    store.setFiles(
+      composerDraftTarget,
+      (store.getComposerDraft(composerDraftTarget)?.files ?? []).filter(
+        (entry) => entry.id !== fileId,
+      ),
+    );
   };
 
   // ------------------------------------------------------------------
@@ -2404,10 +2574,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const onComposerPaste = (event: React.ClipboardEvent<HTMLElement>) => {
     const files = Array.from(event.clipboardData.files);
     if (files.length === 0) return;
-    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
-    if (imageFiles.length === 0) return;
     event.preventDefault();
-    addComposerImages(imageFiles);
+    addComposerImages(files);
   };
 
   const onComposerDragEnter = (event: React.DragEvent<HTMLDivElement>) => {
@@ -2571,6 +2739,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       getSendContext: () => ({
         prompt: promptRef.current,
         images: composerImagesRef.current,
+        files: useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)?.files ?? [],
         selectedPromptEffort,
         selectedModelOptionsForDispatch,
         selectedModelSelection,
@@ -2582,6 +2751,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     [
       promptRef,
       composerImagesRef,
+      composerDraftTarget,
       activeThreadId,
       composerEditorDisabled,
       composerFocusRequestRevision,
@@ -2632,13 +2802,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         onToggleExpanded={onToggleFollowUpQueueItem}
         onAction={onActivateFollowUpQueueItem}
         onRemove={onRemoveFollowUpQueueItem}
+        onEdit={props.onEditFollowUpQueueItem}
         onClear={onClearFollowUpQueue}
         onExpandImage={onExpandImage}
       />
       <input
         ref={composerFileInputRef}
         type="file"
-        accept="image/*"
         multiple
         className="hidden"
         tabIndex={-1}
@@ -2853,7 +3023,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     "Type your own answer, or leave this blank to use the selected option"
                   : prompt.trim() || "Ask anything..."}
               </button>
-              {composerImages.length > 0 ? (
+              {composerImages.length + composerFiles.length > 0 ? (
                 // The image preview strip is hidden while collapsed, so surface
                 // a compact count pill to reassure the user their attachments
                 // are still there. Tapping it expands the composer to manage them.
@@ -2862,13 +3032,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   className="inline-flex shrink-0 items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground focus:outline-none"
                   onPointerDown={(event) => event.preventDefault()}
                   onClick={expandMobileComposer}
-                  aria-label={`${composerImages.length} ${
-                    composerImages.length === 1 ? "attachment" : "attachments"
+                  aria-label={`${composerImages.length + composerFiles.length} ${
+                    composerImages.length + composerFiles.length === 1
+                      ? "attachment"
+                      : "attachments"
                   } attached — expand composer`}
                 >
                   <ImageIcon aria-hidden="true" className="size-3" />
-                  {composerImages.length}{" "}
-                  {composerImages.length === 1 ? "attachment" : "attachments"}
+                  {composerImages.length + composerFiles.length}{" "}
+                  {composerImages.length + composerFiles.length === 1
+                    ? "attachment"
+                    : "attachments"}
                 </button>
               ) : null}
             </div>
@@ -2900,6 +3074,101 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               </div>
             )}
 
+            {props.queueEditing ? (
+              <div className="mb-2 flex flex-wrap items-center gap-2 rounded-lg border border-border p-2 text-xs">
+                <span className="grow">Editing queued message. Your previous draft is saved.</span>
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={
+                    isSendBusy || blockedComposerFiles || !composerSendState.hasSendableContent
+                  }
+                  onClick={props.onSaveQueueEdit}
+                >
+                  Save to queue
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  disabled={isSendBusy}
+                  onClick={props.onCancelQueueEdit}
+                >
+                  Cancel editing
+                </Button>
+              </div>
+            ) : null}
+            {composerFiles.length > 0 && !isComposerCollapsedMobile ? (
+              <div className="mb-3 flex flex-wrap gap-2" aria-label="Uploaded file copies">
+                {composerFiles.map((file) =>
+                  file.status === "ready" &&
+                  file.attachment &&
+                  file.environmentId === environmentId &&
+                  file.targetThreadId === activeThreadId ? (
+                    <FileAttachmentPill
+                      key={file.id}
+                      attachment={file.attachment}
+                      environmentId={file.environmentId}
+                      onRemove={() => removeComposerFile(file.id)}
+                    />
+                  ) : (
+                    <div
+                      key={file.id}
+                      className="flex max-w-full items-center gap-2 rounded-lg border border-border px-2 py-1 text-xs"
+                      role="status"
+                    >
+                      {file.status === "uploading" ? (
+                        <LoaderCircleIcon className="size-3 animate-spin" />
+                      ) : (
+                        <FileIcon className="size-3" />
+                      )}
+                      <span className="min-w-0 break-all">
+                        {file.name}
+                        <span className="block text-muted-foreground">
+                          {file.environmentId !== environmentId ||
+                          file.targetThreadId !== activeThreadId
+                            ? "Uploaded to another destination. Remove and select again."
+                            : file.status === "uploading"
+                              ? "Uploading copy…"
+                              : file.error}
+                        </span>
+                      </span>
+                      {file.status === "failed" &&
+                      file.file &&
+                      file.environmentId === environmentId &&
+                      file.targetThreadId === activeThreadId ? (
+                        <Button
+                          type="button"
+                          size="xs"
+                          variant="ghost"
+                          onClick={() => queueFileUpload(file)}
+                        >
+                          Retry upload
+                        </Button>
+                      ) : null}
+                      <Button
+                        type="button"
+                        size="icon-xs"
+                        variant="ghost"
+                        aria-label={`Remove ${file.name}`}
+                        onClick={() => removeComposerFile(file.id)}
+                      >
+                        <XIcon />
+                      </Button>
+                    </div>
+                  ),
+                )}
+                {fileDraftPersistenceFailed ? (
+                  <span role="alert" className="basis-full text-xs text-destructive">
+                    These file handles could not be saved in browser storage. Keep this page open
+                    and free storage before reloading.
+                  </span>
+                ) : null}
+                <span className="basis-full text-[10px] text-muted-foreground">
+                  Uploaded copies · Workspace @ references remain linked.
+                </span>
+              </div>
+            ) : null}
             {!isComposerCollapsedMobile &&
               !isComposerApprovalState &&
               pendingUserInputs.length === 0 &&
@@ -2999,7 +3268,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                                 : "disconnected"
                             }`
                           : phase === "disconnected"
-                            ? "Ask for follow-up changes or attach images"
+                            ? "Ask for follow-up changes or attach files"
                             : "Ask anything, @tag files/folders, $use skills, or / for commands"
                 }
                 disabled={composerEditorDisabled}
@@ -3034,6 +3303,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     }
                     promptHasText={prompt.trim().length > 0}
                     isSendBusy={isComposerPrimaryActionBusy}
+                    isQueueEditing={props.queueEditing ?? false}
                     isConnecting={isConnecting}
                     isEnvironmentUnavailable={environmentUnavailable !== null}
                     isPreparingWorktree={isPreparingWorktree}
@@ -3207,6 +3477,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   showPlanFollowUpPrompt={pendingUserInputs.length === 0 && showPlanFollowUpPrompt}
                   promptHasText={prompt.trim().length > 0}
                   isSendBusy={isComposerPrimaryActionBusy}
+                  isQueueEditing={props.queueEditing ?? false}
                   isConnecting={isConnecting}
                   isEnvironmentUnavailable={environmentUnavailable !== null}
                   isPreparingWorktree={isPreparingWorktree}

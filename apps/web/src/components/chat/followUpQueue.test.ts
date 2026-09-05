@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   canAutoStartQueuedFollowUpTurn,
+  canDispatchRunningQueuedFollowUp,
   canStartQueuedFollowUpTurn,
   canExpandQueuedFollowUpText,
   decideQueuedFollowUpAction,
@@ -22,6 +23,43 @@ describe("followUpQueue", () => {
     blockedReason: string | null;
     promptText?: string;
   };
+
+  describe("running follow-up admission", () => {
+    const runningInput = {
+      phase: "running" as const,
+      sessionRunning: true,
+      automaticSteerRetryBlocked: false,
+      isConnecting: false,
+      isEnvironmentUnavailable: false,
+      isDispatchInFlight: false,
+    };
+
+    it("admits the next steer after the first request settles without waiting for processing", () => {
+      const acceptedMessageIds: string[] = [];
+      const admit = (messageId: string) => {
+        if (canDispatchRunningQueuedFollowUp(runningInput)) {
+          acceptedMessageIds.push(messageId);
+        }
+      };
+
+      admit("first-steer");
+      // There has been no provider-processing or terminal event: the first
+      // accepted row remains pending while a second explicit steer is sent.
+      admit("second-steer");
+      expect(acceptedMessageIds).toEqual(["first-steer", "second-steer"]);
+    });
+
+    it.each([
+      { phase: "ready" as const },
+      { sessionRunning: false },
+      { automaticSteerRetryBlocked: true },
+      { isConnecting: true },
+      { isEnvironmentUnavailable: true },
+      { isDispatchInFlight: true },
+    ])("preserves real dispatch and lifecycle barriers: %j", (barrier) => {
+      expect(canDispatchRunningQueuedFollowUp({ ...runningInput, ...barrier })).toBe(false);
+    });
+  });
 
   it("sends normally when idle even if steer was requested", () => {
     expect(

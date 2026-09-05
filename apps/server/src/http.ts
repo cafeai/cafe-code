@@ -645,7 +645,21 @@ export const attachmentsRouteLayer = HttpRouter.add(
       });
     }
 
+    // The legacy image route must never expose generic-file bytes, private
+    // metadata commitments or provider derivatives. Generic files have their
+    // own authenticated, always-download route with inert text previews.
     const fileSystem = yield* FileSystem.FileSystem;
+    const isLegacyBinary =
+      filePath.endsWith(".bin") &&
+      !(yield* fileSystem.exists(filePath.slice(0, -4) + ".metadata.json"));
+    if (
+      /\.(?:metadata|provider)[.-]/u.test(filePath) ||
+      (!/\.(?:png|jpe?g|gif|webp|avif|bmp|ico|heic|heif|tiff|svg)$/iu.test(filePath) &&
+        !isLegacyBinary)
+    ) {
+      return HttpServerResponse.text("Not Found", { status: 404 });
+    }
+
     const fileInfo = yield* fileSystem
       .stat(filePath)
       .pipe(Effect.catch(() => Effect.succeed(null)));
@@ -656,7 +670,12 @@ export const attachmentsRouteLayer = HttpRouter.add(
     return yield* HttpServerResponse.file(filePath, {
       status: 200,
       headers: {
-        "Cache-Control": "public, max-age=31536000, immutable",
+        "Cache-Control": "private, max-age=31536000, immutable",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+        ...(isLegacyBinary
+          ? { "Content-Type": "application/octet-stream", "Content-Disposition": "attachment" }
+          : {}),
       },
     }).pipe(
       Effect.catch(() =>
