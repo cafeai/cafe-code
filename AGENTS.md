@@ -548,6 +548,7 @@ If Claude behavior is unclear, check the official Claude Agent SDK docs, the ins
 
 ## Persistence And SQLite
 
+- Usage cost estimates use published standard API rates from `packages/shared/src/modelPricing.ts`, with explicit user rate overrides taking precedence. Astra's rates were verified on 2026-09-05 against `https://developers.openai.com/api/docs/models/gpt-6-astra`: USD 10 input, 1 cached input, 12.50 cache writes, and 50 output per million tokens. The current ledger retains aggregate provider/model totals, not individual request input sizes or service tiers; never apply long-context thresholds to lifetime/day totals or infer historical Fast pricing from the current model selection. Shared Settings/Atrium cost copy must disclose that long-context and speed-tier adjustments are excluded. Exact billing estimates would require trustworthy per-request pricing dimensions collected before aggregation; do not guess missing history.
 - Keep provider command ledgers idempotent. Mutating provider daemon RPCs must carry command IDs when replay or retry is possible.
 - Avoid long SQLite transactions around provider I/O, process startup, network calls, or stream consumption.
 - Do not load entire chat histories or event stores on every token/tool call. Use bounded queries, projections, cursors, and summary snapshots.

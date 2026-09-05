@@ -7,9 +7,14 @@
  * unpriced share so a number that only covers part of the spend can never be
  * mistaken for the whole of it.
  *
- * Rates are USD per million tokens, matching how every provider publishes them.
+ * Rates are standard USD per million tokens, matching provider list prices.
  * They move: the bundled table is a convenience so the page works out of the
  * box, not a source of truth, and a user override always wins.
+ * The ledger aggregates requests by model and loses individual prompt sizes
+ * and service tiers. Long-context and speed-tier adjustments cannot be
+ * reconstructed from those totals; consumers must label this as a standard-
+ * rate estimate. In particular, never apply a per-request context threshold
+ * to a model's cumulative input count.
  *
  * Cost is computed from four separate counters because cache reads and cache
  * writes are priced very differently from fresh input — on a long-running
@@ -54,6 +59,12 @@ const BUNDLED_RATES: ReadonlyArray<readonly [prefix: string, rate: ModelRate]> =
   ["claude-fable", { input: 10, cachedInput: 1, cacheWrite: 12.5, output: 50 }],
   ["claude", { input: 3, cachedInput: 0.3, cacheWrite: 3.75, output: 15 }],
   // OpenAI
+  // Verified 2026-09-05: https://developers.openai.com/api/docs/models/gpt-6-astra
+  // Astra has its own rates; it must not inherit the legacy generic GPT rate.
+  // Requests above 272k input use 2x input/cache and 1.5x output rates, and
+  // Fast uses 2x applicable rates. Those request-level dimensions are absent
+  // from the usage ledger, so this entry is explicitly the standard baseline.
+  ["gpt-6-astra", { input: 10, cachedInput: 1, cacheWrite: 12.5, output: 50 }],
   ["gpt-5", { input: 1.25, cachedInput: 0.125, cacheWrite: 1.25, output: 10 }],
   ["gpt-4.1", { input: 2, cachedInput: 0.5, cacheWrite: 2, output: 8 }],
   ["gpt-4o", { input: 2.5, cachedInput: 1.25, cacheWrite: 2.5, output: 10 }],

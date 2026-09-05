@@ -55,6 +55,19 @@ describe("resolveModelRate", () => {
     expect(resolveModelRate("claude-fable-5-1", { "claude-fable": RATE })).toEqual(RATE);
   });
 
+  it("uses Astra's published rates instead of the generic GPT fallback", () => {
+    const expected: ModelRate = { input: 10, cachedInput: 1, cacheWrite: 12.5, output: 50 };
+    expect(resolveModelRate("gpt-6-astra")).toEqual(expected);
+    expect(resolveModelRate("  GPT-6-ASTRA  ")).toEqual(expected);
+    expect(resolveModelRate("gpt-6-astra-20260905")).toEqual(expected);
+  });
+
+  it("preserves exact and family pricing overrides for Astra", () => {
+    const custom: ModelRate = { input: 2, cachedInput: 0.2, cacheWrite: 2.5, output: 8 };
+    expect(resolveModelRate("gpt-6-astra", { "gpt-6-astra": custom })).toEqual(custom);
+    expect(resolveModelRate("gpt-6-astra", { gpt: custom })).toEqual(custom);
+  });
+
   it("prices a model the bundled table has never heard of", () => {
     expect(resolveModelRate("acme-1", { "acme-1": RATE })).toEqual(RATE);
   });
@@ -137,5 +150,25 @@ describe("rollUpCost", () => {
 
   it("has no priced share to report when there is nothing to price", () => {
     expect(pricedShare(rollUpCost([]))).toBeNull();
+  });
+
+  it("estimates Astra cache composition at standard rates even for large lifetime totals", () => {
+    // This row aggregates multiple requests. A lifetime total above 272k is
+    // not evidence that any individual request qualified for long-context
+    // pricing, so it must retain the published standard-rate estimate.
+    const rollup = rollUpCost([
+      {
+        model: "gpt-6-astra",
+        inputTokens: 1_000_000,
+        cachedInputTokens: 600_000,
+        cacheWriteInputTokens: 300_000,
+        outputTokens: 100_000,
+      },
+    ]);
+    // 100k fresh + 600k reads + 300k writes + 100k output.
+    expect(rollup.cost).toBeCloseTo(1 + 0.6 + 3.75 + 5, 6);
+    expect(rollup.cacheSavings).toBeCloseTo(5.4, 6);
+    expect(rollup.pricedTokens).toBe(1_100_000);
+    expect(rollup.unpricedTokens).toBe(0);
   });
 });

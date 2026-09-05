@@ -20,9 +20,9 @@ import {
  *
  * Everything here is derived client-side from recorded counters plus the
  * pricing table; nothing is fetched. The headline is deliberately labelled as a
- * raw API-rate figure, because that is what it is — it is what the tokens would
- * cost billed at list price, not what anyone was actually charged under a
- * subscription.
+ * standard API-rate estimate (or a user-defined rate). The aggregate ledger
+ * does not retain individual request sizes or service tiers, so it cannot
+ * reproduce long-context or speed-tier adjustments or subscription charges.
  *
  * Two honesty rules run through the whole section. Models with no rate are
  * counted but never costed, and the priced share is shown so a partial figure
@@ -354,7 +354,8 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
             <span className="align-super text-base text-muted-foreground">*</span>
           </div>
           <div className="mt-1 text-[11px] text-muted-foreground/70">
-            * estimated in USD if billed at full API rate
+            * USD estimate at standard API rates or your custom rates. Excludes long-context and
+            speed-tier adjustments; not your subscription bill.
           </div>
 
           <div className="mt-5 flex flex-col gap-3">

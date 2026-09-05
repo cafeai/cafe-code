@@ -64,7 +64,7 @@ export function useUsageCostSummary(enabled: boolean, dayWindow = 30): UsageCost
     const rollup = rollUpCost(usage.tokenBreakdown, overrides);
     // Daily rows carry no model dimension, so per-day cost uses the blended
     // rate implied by the lifetime ledger. Good enough for a sparkline's shape;
-    // the exact figure is the headline beside it.
+    // the lifetime standard-rate estimate is the headline beside it.
     const blended = rollup.pricedTokens > 0 ? rollup.cost / rollup.pricedTokens : 0;
     const daily = usage.days.slice(-dayWindow).map((day) => {
       const tokens = day.inputTokens + day.outputTokens;
@@ -78,7 +78,7 @@ export function useUsageCostSummary(enabled: boolean, dayWindow = 30): UsageCost
       daily,
       rangeTokens: daily.reduce((total, day) => total + day.tokens, 0),
       // Blended, like the daily series it is summed from. The lifetime `cost`
-      // above is the exact figure; this one is scoped to the window.
+      // above uses per-model standard rates; this one is scoped to the window.
       rangeCost: daily.reduce((total, day) => total + day.cost, 0),
       outputTokens: usage.totals.outputTokens,
       cachedShare:
