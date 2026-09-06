@@ -10,8 +10,9 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
   approval,
   pendingCount,
 }: ComposerPendingApprovalPanelProps) {
-  const approvalSummary =
-    approval.requestKind === "command"
+  const approvalSummary = approval.networkApproval
+    ? "Network access approval requested"
+    : approval.requestKind === "command"
       ? "Command approval requested"
       : approval.requestKind === "terminal-input"
         ? "Terminal input approval requested"
@@ -28,6 +29,13 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
           <span className="text-xs text-muted-foreground">1/{pendingCount}</span>
         ) : null}
       </div>
+      {approval.networkApproval ? (
+        <p className="mt-2 break-all text-sm">
+          Destination: <strong>{approval.networkApproval.host}</strong> · Protocol:{" "}
+          <strong>{approval.networkApproval.protocol}</strong>. Approval permits this network
+          destination; session approval lasts for this provider session.
+        </p>
+      ) : null}
     </div>
   );
 });

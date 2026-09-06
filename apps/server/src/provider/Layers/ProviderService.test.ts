@@ -13,6 +13,7 @@ import type {
   ProviderSteerTurnInput,
   ProviderTurnSteerResult,
   ProviderTurnStartResult,
+  ServerProviderModel,
 } from "@cafecode/contracts";
 import {
   ApprovalRequestId,
@@ -376,8 +377,14 @@ function makeProviderServiceLayer() {
     [ProviderDriverKind.make("claudeAgent")]: claude.adapter,
     [TEST_DRIVER]: testDriver.adapter,
   });
+  const modelInventory = new Map<ProviderInstanceId, ReadonlyArray<ServerProviderModel>>();
+  const registryWithModels = {
+    ...registry,
+    getModels: (instanceId: ProviderInstanceId) =>
+      registry.getByInstance(instanceId).pipe(Effect.as(modelInventory.get(instanceId) ?? [])),
+  };
 
-  const providerAdapterLayer = Layer.succeed(ProviderAdapterRegistry, registry);
+  const providerAdapterLayer = Layer.succeed(ProviderAdapterRegistry, registryWithModels);
   const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
     Layer.provide(SqlitePersistenceMemory),
   );
@@ -422,6 +429,7 @@ function makeProviderServiceLayer() {
   );
   const layer = it.layer(testLayer);
   const reset = async () => {
+    modelInventory.clear();
     await Effect.runPromise(
       Effect.all([codex.stopAll(), claude.stopAll(), testDriver.stopAll()], { discard: true }),
     );
@@ -437,8 +445,162 @@ function makeProviderServiceLayer() {
     testDriver,
     layer,
     reset,
+    modelInventory,
   };
 }
+
+const imageValidation = makeProviderServiceLayer();
+imageValidation.layer("ProviderService image modality validation", (it) => {
+  beforeEach(imageValidation.reset);
+  const imageAttachment = {
+    type: "image" as const,
+    id: "uploaded-image",
+    name: "image.png",
+    mimeType: "image/png",
+    sizeBytes: 10,
+  };
+  it.effect("rejects a known text-only selected model before provider submission", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const threadId = asThreadId("image-text-only");
+      yield* provider.startSession(threadId, {
+        threadId,
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        runtimeMode: "full-access",
+      });
+      imageValidation.modelInventory.set(codexInstanceId, [
+        {
+          slug: "text-model",
+          name: "Text",
+          isCustom: false,
+          capabilities: { inputModalities: ["text"] },
+        },
+      ]);
+      const attachments = [imageAttachment];
+      const result = yield* provider
+        .sendTurn({
+          threadId,
+          modelSelection: createModelSelection(codexInstanceId, "text-model"),
+          input: "Read this",
+          attachments,
+        })
+        .pipe(Effect.exit);
+      assert.equal(result._tag, "Failure");
+      assert.equal(imageValidation.codex.sendTurn.mock.calls.length, 0);
+      assert.deepEqual(attachments, [imageAttachment]);
+    }),
+  );
+  it.effect("uses the active model for both steer paths, not a future picker selection", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const threadId = asThreadId("image-active-text");
+      yield* provider.startSession(threadId, {
+        threadId,
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        runtimeMode: "full-access",
+      });
+      imageValidation.codex.updateSession(threadId, (current) => ({
+        ...current,
+        status: "running",
+        model: "gpt-5.3-codex-spark",
+        activeTurnId: asTurnId("active"),
+      }));
+      const fallback = yield* provider
+        .sendTurn({
+          threadId,
+          modelSelection: createModelSelection(codexInstanceId, "gpt-6-astra"),
+          input: "Read this",
+          attachments: [imageAttachment],
+        })
+        .pipe(Effect.exit);
+      assert.equal(fallback._tag, "Failure");
+      const steer = yield* provider
+        .steerTurn({
+          threadId,
+          expectedTurnId: asTurnId("active"),
+          input: "Read this",
+          attachments: [imageAttachment],
+        })
+        .pipe(Effect.exit);
+      assert.equal(steer._tag, "Failure");
+      assert.equal(imageValidation.codex.sendTurn.mock.calls.length, 0);
+      assert.equal(imageValidation.codex.steerTurn.mock.calls.length, 0);
+    }),
+  );
+  it.effect(
+    "keeps per-instance model inventories isolated and forwards supported images unchanged",
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const threadId = asThreadId("image-per-instance");
+        yield* provider.startSession(threadId, {
+          threadId,
+          provider: CLAUDE_AGENT_DRIVER,
+          providerInstanceId: claudeAgentInstanceId,
+          runtimeMode: "full-access",
+        });
+        imageValidation.modelInventory.set(codexInstanceId, [
+          {
+            slug: "same-model",
+            name: "Text",
+            isCustom: false,
+            capabilities: { inputModalities: ["text"] },
+          },
+        ]);
+        imageValidation.modelInventory.set(claudeAgentInstanceId, [
+          {
+            slug: "same-model",
+            name: "Vision",
+            isCustom: false,
+            capabilities: { inputModalities: ["text", "image"] },
+          },
+        ]);
+        yield* provider.sendTurn({
+          threadId,
+          modelSelection: createModelSelection(claudeAgentInstanceId, "same-model"),
+          input: "Read this",
+          attachments: [imageAttachment],
+        });
+        assert.deepEqual(imageValidation.claude.sendTurn.mock.calls[0]?.[0].attachments, [
+          imageAttachment,
+        ]);
+        assert.equal(imageValidation.codex.sendTurn.mock.calls.length, 0);
+      }),
+  );
+  it.effect("retains compatibility for unknown models and does not gate ordinary files", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const threadId = asThreadId("image-compatibility");
+      yield* provider.startSession(threadId, {
+        threadId,
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        runtimeMode: "full-access",
+      });
+      yield* provider.sendTurn({
+        threadId,
+        modelSelection: createModelSelection(codexInstanceId, "unknown-model"),
+        attachments: [imageAttachment],
+      });
+      yield* provider.sendTurn({
+        threadId,
+        modelSelection: createModelSelection(codexInstanceId, "gpt-5.3-codex-spark"),
+        attachments: [
+          {
+            type: "file",
+            id: "uploaded-file",
+            name: "data.bin",
+            mimeType: "application/octet-stream",
+            sizeBytes: 1,
+          },
+        ],
+      });
+      assert.equal(imageValidation.codex.sendTurn.mock.calls.length, 2);
+    }),
+  );
+});
 
 it.effect("ProviderServiceLive catches stopAll failures during shutdown", () =>
   Effect.gen(function* () {
@@ -1003,6 +1165,7 @@ it.effect(
           provider: driverKind,
         });
       const registry: ProviderAdapterRegistryShape = {
+        getModels: () => Effect.succeed([]),
         getByInstance: (requestedInstanceId) =>
           requestedInstanceId === instanceId
             ? Effect.succeed(codex.adapter)
@@ -1068,15 +1231,13 @@ it.effect("ProviderServiceLive rejects new sessions for disabled custom instance
     const instanceId = ProviderInstanceId.make("codex_personal");
     const driverKind = ProviderDriverKind.make("codex");
     const codex = makeFakeCodexAdapter();
-    const unsupported = () =>
-      new ProviderUnsupportedError({
-        provider: ProviderDriverKind.make("codex"),
-      });
+    const unsupported = new ProviderUnsupportedError({ provider: driverKind });
     const registry: ProviderAdapterRegistryShape = {
+      getModels: () => Effect.succeed([]),
       getByInstance: (requestedInstanceId) =>
         requestedInstanceId === instanceId
           ? Effect.succeed(codex.adapter)
-          : Effect.fail(unsupported()),
+          : Effect.fail(unsupported),
       getInstanceInfo: (requestedInstanceId) =>
         requestedInstanceId === instanceId
           ? Effect.succeed({
@@ -1089,7 +1250,7 @@ it.effect("ProviderServiceLive rejects new sessions for disabled custom instance
                 continuationKey: "codex:/Users/example/.codex",
               },
             })
-          : Effect.fail(unsupported()),
+          : Effect.fail(unsupported),
       listInstances: () => Effect.succeed([instanceId]),
       listProviders: () => Effect.succeed([CODEX_DRIVER] as const),
       streamChanges: Stream.empty,
@@ -1358,6 +1519,85 @@ it.effect(
 
 routing.layer("ProviderServiceLive routing", (it) => {
   beforeEach(routing.reset);
+
+  it.effect(
+    "deduplicates concurrent private callback ACK retries and rejects altered responses",
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const threadId = asThreadId("private-interaction-retry");
+        yield* provider.startSession(threadId, {
+          threadId,
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          runtimeMode: "full-access",
+        });
+        const input = {
+          threadId,
+          requestId: asRequestId("private-request"),
+          response: {
+            action: "accept" as const,
+            content: { credential: "private-answer", name: "test" },
+          },
+        };
+        yield* Effect.all(
+          [provider.respondToInteraction!(input), provider.respondToInteraction!(input)],
+          { concurrency: 2 },
+        );
+        yield* provider.respondToInteraction!({
+          ...input,
+          response: { action: "accept", content: { name: "test", credential: "private-answer" } },
+        });
+        assert.equal(routing.codex.respondToUserInput.mock.calls.length, 1);
+        const changed = yield* provider.respondToInteraction!({
+          ...input,
+          response: { action: "accept", content: { credential: "changed-private-secret" } },
+        }).pipe(Effect.exit);
+        assert.equal(changed._tag, "Failure");
+        assert.equal(JSON.stringify(changed).includes("changed-private-secret"), false);
+        assert.equal(routing.codex.respondToUserInput.mock.calls.length, 1);
+      }),
+  );
+
+  it.effect(
+    "private callback failures are redacted and do not create successful receipts or resume sessions",
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const threadId = asThreadId("private-interaction-failure");
+        const absent = yield* provider.resolveInteractionUrl!({
+          threadId,
+          requestId: asRequestId("absent"),
+        }).pipe(Effect.exit);
+        assert.equal(absent._tag, "Failure");
+        assert.equal(routing.codex.startSession.mock.calls.length, 0);
+        yield* provider.startSession(threadId, {
+          threadId,
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          runtimeMode: "full-access",
+        });
+        routing.codex.respondToUserInput.mockImplementationOnce(() =>
+          Effect.fail(
+            new ProviderAdapterRequestError({
+              provider: "codex",
+              method: "interaction",
+              detail: "private-upstream-secret",
+            }),
+          ),
+        );
+        const input = {
+          threadId,
+          requestId: asRequestId("retry-after-failure"),
+          response: { action: "decline" as const },
+        };
+        const failed = yield* provider.respondToInteraction!(input).pipe(Effect.exit);
+        assert.equal(failed._tag, "Failure");
+        assert.equal(JSON.stringify(failed).includes("private-upstream-secret"), false);
+        yield* provider.respondToInteraction!(input);
+        assert.equal(routing.codex.respondToUserInput.mock.calls.length, 2);
+      }),
+  );
 
   it.effect("routes provider operations and rollback conversation", () =>
     Effect.gen(function* () {

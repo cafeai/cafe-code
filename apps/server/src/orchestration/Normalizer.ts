@@ -18,6 +18,7 @@ import {
 } from "../attachmentContentCommitment.ts";
 import { ServerConfig } from "../config.ts";
 import { readStoredFileAttachment } from "../fileAttachmentStore.ts";
+import { retainFileAttachmentUpload } from "../fileAttachmentLifecycle.ts";
 import { parseBase64DataUrl } from "../imageMime.ts";
 import { WorkspacePaths } from "../workspace/Services/WorkspacePaths.ts";
 import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
@@ -179,6 +180,20 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
       (attachment) =>
         Effect.gen(function* () {
           if (attachment.type === "file") {
+            // Promote before the first byte read. Cleanup and normalization
+            // share an atomic SQL state fence, so an expired upload cannot be
+            // deleted between verification and its immutable commitment.
+            yield* retainFileAttachmentUpload(sql, {
+              attachmentId: attachment.id,
+              threadId: command.threadId,
+            }).pipe(
+              Effect.mapError(
+                () =>
+                  new OrchestrationDispatchCommandError({
+                    message: "A file attachment expired before sending. Attach it again.",
+                  }),
+              ),
+            );
             // Uploads can precede thread creation, but dispatch binds the exact
             // immutable bytes to the now-materialized thread. Retrying the same
             // handle is idempotent; altered metadata/content never is.

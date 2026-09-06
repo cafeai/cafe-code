@@ -36,6 +36,10 @@ import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import {
+  UsageStatsService,
+  type UsageStatsServiceShape,
+} from "../../usageStats/Services/UsageStatsService.ts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
@@ -287,6 +291,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   async function createHarness(options?: {
+    recordAccounting?: UsageStatsServiceShape["recordAccounting"];
     serverSettings?: Partial<ServerSettings>;
     databasePath?: string;
     /**
@@ -355,6 +360,16 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provideMerge(persistenceLayer),
       Layer.provideMerge(RuntimeReceiptBusLive),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
+      // These projection tests intentionally substitute only the required
+      // settlement boundary; ledger correctness has its own real-SQL suite.
+      Layer.provideMerge(
+        Layer.succeed(UsageStatsService, {
+          recordAccounting: options?.recordAccounting ?? (() => Effect.void),
+          get: Effect.die("unused usage get in ingestion harness"),
+          snapshot: Effect.die("unused usage snapshot in ingestion harness"),
+          flush: Effect.void,
+        }),
+      ),
       Layer.provideMerge(makeTestServerSettingsLayer(options?.serverSettings)),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
       Layer.provideMerge(NodeServices.layer),
@@ -584,6 +599,62 @@ describe("ProviderRuntimeIngestion", () => {
     expect(afterLateEvent?.activities.map((activity) => activity.id)).toEqual([
       asEventId("evt-hard-delete-ingestion-in-flight"),
     ]);
+  });
+
+  it("does not acknowledge billing or later replay cursors until accounting commits", async () => {
+    const entered = Effect.runSync(Deferred.make<void>());
+    const release = Effect.runSync(Deferred.make<void>());
+    let settlements = 0;
+    const harness = await createHarness({
+      recordAccounting: (_provider, _snapshot, observedAtMs) =>
+        Effect.gen(function* () {
+          expect(observedAtMs).toBe(Date.parse("2026-01-01T00:00:00.000Z"));
+          settlements += 1;
+          yield* Deferred.succeed(entered, undefined);
+          yield* Deferred.await(release);
+        }),
+    });
+    await harness.setDurableProviderDaemonCursor(10);
+    const accounting: ProviderRuntimeEvent = attachProviderDaemonRuntimeEventCursor(
+      {
+        type: "thread.usage-accounting.updated",
+        eventId: asEventId("billing-before-cursor"),
+        provider: ProviderDriverKind.make("claudeAgent"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        payload: {
+          scopeId: "10000000-0000-4000-8000-000000000000",
+          revision: 1,
+          completeness: "complete",
+          models: [],
+        },
+      },
+      2000,
+    );
+    harness.emit(accounting);
+    await Effect.runPromise(Deferred.await(entered));
+    // A duplicate plus a later event must remain behind this uncommitted
+    // settlement, including when a checkpoint threshold has already elapsed.
+    harness.emit(accounting);
+    harness.emit(
+      withDaemonCursor(
+        {
+          type: "task.started",
+          eventId: asEventId("after-billing-cursor"),
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          createdAt: "2026-01-01T00:00:01.000Z",
+          payload: { taskId: "after-billing", taskType: "plan" },
+        },
+        4000,
+      ),
+    );
+    await waitForEventLoopTurn();
+    expect(await harness.readDurableProviderDaemonCursor()).toBe(10);
+    await Effect.runPromise(Deferred.succeed(release, undefined));
+    await harness.drain();
+    expect(settlements).toBe(1);
+    expect(await harness.readDurableProviderDaemonCursor()).toBe(4000);
   });
 
   it("yields a Node macrotask while draining synchronous provider catch-up work", async () => {

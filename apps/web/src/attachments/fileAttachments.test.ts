@@ -38,6 +38,83 @@ afterEach(() => {
 });
 
 describe("environment-scoped file attachment transport", () => {
+  it("waits for durable retain acknowledgement before returning a ready upload", async () => {
+    let acknowledge!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => {
+      acknowledge = resolve;
+    });
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(file), {
+          status: 201,
+          headers: { "x-cafe-attachment-lifecycle": "provisional-v1" },
+        }),
+      )
+      .mockReturnValueOnce(pending);
+    vi.stubGlobal("fetch", fetcher);
+    let ready = false;
+    const uploading = uploadFileAttachment({
+      environmentId: EnvironmentId.make("primary"),
+      targetThreadId: ThreadId.make("thread"),
+      file: new File(["hello"], "source.tex"),
+    }).then((value) => {
+      ready = true;
+      return value;
+    });
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
+    expect(ready).toBe(false);
+    expect(fetcher.mock.calls[1]![0]).toBe(
+      `http://127.0.0.1:3773/api/attachments/${file.id}/retain`,
+    );
+    expect(fetcher.mock.calls[1]![1].headers.get("x-cafe-thread-id")).toBe("thread");
+    acknowledge(new Response(null, { status: 204 }));
+    expect(await uploading).toEqual(file);
+  });
+
+  it("discards uploads removed in flight instead of retaining or resurrecting them", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(file), {
+          status: 201,
+          headers: { "x-cafe-attachment-lifecycle": "provisional-v1" },
+        }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetcher);
+    await expect(
+      uploadFileAttachment({
+        environmentId: EnvironmentId.make("primary"),
+        targetThreadId: ThreadId.make("thread"),
+        file: new File(["hello"], "source.tex"),
+        shouldRetain: () => false,
+      }),
+    ).rejects.toThrow("removed");
+    expect(fetcher.mock.calls[1]![0]).toBe(
+      `http://127.0.0.1:3773/api/attachments/${file.id}/discard`,
+    );
+  });
+
+  it("does not expose a ready handle when retention is unavailable", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(file), {
+          status: 201,
+          headers: { "x-cafe-attachment-lifecycle": "provisional-v1" },
+        }),
+      )
+      .mockResolvedValueOnce(new Response("private error", { status: 503 }));
+    vi.stubGlobal("fetch", fetcher);
+    await expect(
+      uploadFileAttachment({
+        environmentId: EnvironmentId.make("primary"),
+        targetThreadId: ThreadId.make("thread"),
+        file: new File(["hello"], "source.tex"),
+      }),
+    ).rejects.toThrow("could not be transferred");
+  });
   it("uploads real bytes with target thread binding and cookies only to the primary backend", async () => {
     const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify(file), { status: 201 }));
     vi.stubGlobal("fetch", fetcher);

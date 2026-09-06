@@ -1,4 +1,8 @@
 import type {
+  ProviderRespondToInteractionInput,
+  ProviderResolveInteractionUrlInput,
+} from "./providerInteraction.ts";
+import type {
   VcsSwitchRefInput,
   VcsSwitchRefResult,
   VcsCreateRefInput,
@@ -474,6 +478,11 @@ export interface LocalApi {
  * `environmentId` rather than reaching through the local desktop bridge.
  */
 export interface EnvironmentApi {
+  /** Private live callback transport. Optional only for older environment clients. */
+  providerInteractions?: {
+    respond: (input: ProviderRespondToInteractionInput) => Promise<void>;
+    resolveUrl: (input: ProviderResolveInteractionUrlInput) => Promise<string>;
+  };
   projects: {
     searchEntries: (input: ProjectSearchEntriesInput) => Promise<ProjectSearchEntriesResult>;
     writeFile: (input: ProjectWriteFileInput) => Promise<ProjectWriteFileResult>;

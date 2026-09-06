@@ -1,6 +1,11 @@
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
+import {
+  ProviderInteractionError,
+  ProviderRespondToInteractionInput,
+  ProviderResolveInteractionUrlInput,
+} from "./providerInteraction.ts";
 
 import { ExternalLauncherError, LaunchEditorInput, LaunchTerminalInput } from "./editor.ts";
 import {
@@ -106,6 +111,8 @@ import { UsageStatsGetResult, UsageStatsSnapshot } from "./usageStats.ts";
 import { VcsError } from "./vcs.ts";
 
 export const WS_METHODS = {
+  providerRespondToInteraction: "provider.respondToInteraction",
+  providerResolveInteractionUrl: "provider.resolveInteractionUrl",
   // Project registry methods
   projectsList: "projects.list",
   projectsAdd: "projects.add",
@@ -230,6 +237,20 @@ export const WsServerRestartProviderRuntimeRpc = Rpc.make(WS_METHODS.serverResta
   success: ServerProviderRuntimeRestartResult,
   error: ServerProviderRuntimeRestartError,
 });
+
+export const WsProviderRespondToInteractionRpc = Rpc.make(WS_METHODS.providerRespondToInteraction, {
+  payload: ProviderRespondToInteractionInput,
+  success: Schema.Void,
+  error: ProviderInteractionError,
+});
+export const WsProviderResolveInteractionUrlRpc = Rpc.make(
+  WS_METHODS.providerResolveInteractionUrl,
+  {
+    payload: ProviderResolveInteractionUrlInput,
+    success: Schema.String.check(Schema.isMaxLength(8192)),
+    error: ProviderInteractionError,
+  },
+);
 
 export const WsServerOpenSystemPromptFileRpc = Rpc.make(WS_METHODS.serverOpenSystemPromptFile, {
   payload: Schema.Struct({}),
@@ -569,6 +590,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerLoginProviderRpc,
   WsServerUpdateProviderRpc,
   WsServerRestartProviderRuntimeRpc,
+  WsProviderRespondToInteractionRpc,
+  WsProviderResolveInteractionUrlRpc,
   WsServerOpenSystemPromptFileRpc,
   WsServerUpsertKeybindingRpc,
   WsServerRemoveKeybindingRpc,

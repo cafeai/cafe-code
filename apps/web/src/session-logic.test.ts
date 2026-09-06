@@ -66,6 +66,19 @@ describe("turn duration formatting", () => {
 });
 
 describe("derivePendingApprovals", () => {
+  it("preserves typed network destinations for informed approvals", () => {
+    const rows = derivePendingApprovals([
+      makeActivity({
+        kind: "approval.requested",
+        payload: {
+          requestId: "network",
+          requestKind: "command",
+          networkApproval: { host: "example.com", protocol: "https" },
+        },
+      }),
+    ]);
+    expect(rows[0]?.networkApproval).toEqual({ host: "example.com", protocol: "https" });
+  });
   it("tracks open approvals and removes resolved ones", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({
@@ -217,6 +230,45 @@ describe("derivePendingApprovals", () => {
     ];
 
     expect(derivePendingApprovals(activities)).toEqual([]);
+  });
+});
+
+describe("private interaction projection", () => {
+  it("restores bounded cards without ordinary questions and removes only the exact resolved request", () => {
+    const requested = makeActivity({
+      id: "interaction-open",
+      kind: "user-input.requested",
+      sequence: 1,
+      payload: {
+        requestId: "interaction",
+        questions: [],
+        isBlocking: true,
+        interaction: {
+          kind: "elicitation",
+          mode: "url",
+          serverName: "connector",
+          message: "External authorization required",
+          urlOrigin: "https://example.com",
+        },
+      },
+    });
+    const unrelated = makeActivity({
+      id: "other-resolved",
+      kind: "user-input.resolved",
+      sequence: 2,
+      payload: { requestId: "other", answers: {} },
+    });
+    expect(derivePendingUserInputs([requested, unrelated])[0]?.interaction).toMatchObject({
+      mode: "url",
+      urlOrigin: "https://example.com",
+    });
+    const resolved = makeActivity({
+      id: "interaction-resolved",
+      kind: "user-input.resolved",
+      sequence: 3,
+      payload: { requestId: "interaction", answers: {} },
+    });
+    expect(derivePendingUserInputs([requested, unrelated, resolved])).toEqual([]);
   });
 });
 

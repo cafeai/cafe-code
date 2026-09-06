@@ -1,5 +1,6 @@
 import * as Option from "effect/Option";
 import * as Arr from "effect/Array";
+import * as Schema from "effect/Schema";
 import {
   ApprovalRequestId,
   isToolLifecycleItemType,
@@ -7,6 +8,8 @@ import {
   type OrchestrationThreadActivity,
   type OrchestrationProposedPlanId,
   ProviderDriverKind,
+  ProviderInteraction,
+  ProviderNetworkApproval,
   type ToolLifecycleItemType,
   type UserInputQuestion,
   type ThreadId,
@@ -31,6 +34,8 @@ import type {
 } from "./types";
 
 export type ProviderPickerKind = ProviderDriverKind;
+const isProviderInteraction = Schema.is(ProviderInteraction);
+const isNetworkApproval = Schema.is(ProviderNetworkApproval);
 
 export const PROVIDER_OPTIONS: Array<{
   value: ProviderPickerKind;
@@ -99,6 +104,7 @@ export interface PendingApproval {
   requestKind: "command" | "terminal-input" | "file-read" | "file-change";
   createdAt: string;
   detail?: string;
+  networkApproval?: ProviderNetworkApproval;
 }
 
 export interface PendingUserInput {
@@ -106,6 +112,7 @@ export interface PendingUserInput {
   createdAt: string;
   questions: ReadonlyArray<UserInputQuestion>;
   isBlocking: boolean;
+  interaction?: ProviderInteraction;
 }
 
 export interface ActivePlanState {
@@ -294,6 +301,9 @@ export function derivePendingApprovals(
         requestKind,
         createdAt: activity.createdAt,
         ...(detail ? { detail } : {}),
+        ...(isNetworkApproval(payload?.networkApproval)
+          ? { networkApproval: payload.networkApproval }
+          : {}),
       });
       continue;
     }
@@ -387,13 +397,17 @@ export function derivePendingUserInputs(
 
     if (activity.kind === "user-input.requested" && requestId) {
       const questions = parseUserInputQuestions(payload);
-      if (!questions) {
+      const interaction = isProviderInteraction(payload?.interaction)
+        ? payload.interaction
+        : undefined;
+      if (!questions && !interaction) {
         continue;
       }
       openByRequestId.set(requestId, {
         requestId,
         createdAt: activity.createdAt,
-        questions,
+        questions: questions ?? [],
+        ...(interaction ? { interaction } : {}),
         // Events written before Codex 0.147 did not carry the field and must
         // remain blocking. Only an explicit false enables auto-resolution.
         isBlocking: payload?.isBlocking !== false,

@@ -42,6 +42,8 @@ import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlError from "effect/unstable/sql/SqlError";
+import * as Option from "effect/Option";
 
 import {
   isProviderSubagentDetailReadFailureReason,
@@ -56,9 +58,16 @@ import {
 } from "../provider/Services/ProviderService.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { SQLITE_BUSY_TIMEOUT_MS } from "../persistence/Layers/Sqlite.ts";
+import { isSqliteLockTimeoutError } from "../persistence/sqliteLockRetry.ts";
+import {
+  settleDurableWrite,
+  singleDurableWriteError,
+  type DurableWriteState,
+} from "../persistence/durableWrite.ts";
 import { ProviderSupervisorRegistry } from "../providerSupervisor/ProviderSupervisorRegistry.ts";
 import {
   makePersistentProviderDaemonEventJournal,
+  InvalidProviderDaemonJournalEvent,
   type ProviderDaemonPersistentEventJournal,
 } from "./EventJournal.ts";
 import {
@@ -829,6 +838,24 @@ const executeRpcRequest = (
       return providerService.respondToRequest(request.payload);
     case "respondToUserInput":
       return providerService.respondToUserInput(request.payload);
+    case "respondToInteraction":
+      return providerService.respondToInteraction
+        ? providerService.respondToInteraction(request.payload)
+        : Effect.fail(
+            new ProviderValidationError({
+              operation: "respondToInteraction",
+              issue: "Private interactions are unavailable.",
+            }),
+          );
+    case "resolveInteractionUrl":
+      return providerService.resolveInteractionUrl
+        ? providerService.resolveInteractionUrl(request.payload)
+        : Effect.fail(
+            new ProviderValidationError({
+              operation: "resolveInteractionUrl",
+              issue: "Private interactions are unavailable.",
+            }),
+          );
     case "snoozeUserInput":
       return providerService.snoozeUserInput(request.payload);
     case "stopSession":
@@ -1317,40 +1344,56 @@ export const runProviderDaemonServer = (
       Effect.forkScoped,
     );
 
+    let journalWriteState: DurableWriteState = "ready";
     const publishRuntimeEventsToJournal = Effect.gen(function* () {
       // The provider daemon journal is the durable handoff between long-lived
       // provider runtime processes and the backend/UI projections. A single bad
       // event, transient SQLite failure, or broken client listener must not kill
       // this bridge: provider adapters can continue producing events for hours,
       // and losing the journal consumer makes turns appear stuck even though the
-      // provider completed. Keep per-event failures local, and restart the
-      // subscription if the stream itself terminates unexpectedly.
+      // provider completed. Hold valid events in this ordered lane until their
+      // write succeeds; never advance to the next event/cursor after a failed
+      // INSERT. Poison input and conclusively hard-deleted threads are the only
+      // rejected events. Permanent storage failure holds the lane and makes
+      // rich health fail visibly, while database-free liveness stays usable.
       while (true) {
         yield* Stream.runForEach(providerService.streamEvents, (event) =>
-          journal.publish(event).pipe(
+          settleDurableWrite({
+            operation: journal.publish(event),
+            name: "provider-journal",
+            onState: (state) => {
+              journalWriteState = state;
+            },
+            classify: (cause) =>
+              Effect.gen(function* () {
+                const error = singleDurableWriteError(cause);
+                if (error instanceof InvalidProviderDaemonJournalEvent) return "reject";
+                if (isSqliteLockTimeoutError(error)) return "retry";
+                // Hard-delete's SQL trigger intentionally rejects late events.
+                // Verify the exact typed thread tombstone before discarding one;
+                // other constraints or an inconclusive lookup must hold the lane.
+                if (SqlError.isSqlError(error) && error.reason._tag === "ConstraintError") {
+                  const retired = yield* sql`
+                  SELECT 1 FROM hard_deleted_threads WHERE thread_id = ${event.threadId} LIMIT 1
+                `.pipe(Effect.option);
+                  if (Option.isSome(retired) && retired.value.length > 0) return "reject";
+                }
+                return "block";
+              }),
+          }).pipe(
             Effect.tap(() => {
               const supervisorCursor = readProviderDaemonRuntimeEventCursor(event);
               return supervisorCursor === undefined
                 ? Effect.void
                 : persistSupervisorBridgeCursor(supervisorCursor);
             }),
-            Effect.tap(() =>
-              Effect.sync(() => options.onRuntimeEventJournaled?.(event)).pipe(Effect.ignoreCause),
+            Effect.tap((record) =>
+              Option.isSome(record)
+                ? Effect.sync(() => options.onRuntimeEventJournaled?.(event)).pipe(
+                    Effect.ignoreCause,
+                  )
+                : Effect.void,
             ),
-            Effect.catchCause((cause) => {
-              if (Cause.hasInterruptsOnly(cause)) {
-                return Effect.failCause(cause);
-              }
-              return Effect.logWarning("provider daemon runtime event journal publish failed", {
-                provider: event.provider,
-                providerInstanceId: event.providerInstanceId,
-                threadId: event.threadId,
-                turnId: event.turnId,
-                eventId: event.eventId,
-                eventType: event.type,
-                cause: Cause.pretty(cause),
-              });
-            }),
             Effect.asVoid,
           ),
         ).pipe(
@@ -1358,9 +1401,7 @@ export const runProviderDaemonServer = (
             if (Cause.hasInterruptsOnly(cause)) {
               return Effect.failCause(cause);
             }
-            return Effect.logWarning("provider daemon runtime event stream stopped", {
-              cause: Cause.pretty(cause),
-            });
+            return Effect.logWarning("provider daemon runtime event stream stopped");
           }),
         );
         yield* Effect.sleep(Duration.millis(500));
@@ -1427,6 +1468,13 @@ export const runProviderDaemonServer = (
         if (url.pathname === PROVIDER_DAEMON_HEALTH_PATH && method === "GET") {
           if (!hasCapability(request, "health")) {
             writeJson(response, 401, { error: "unauthorized" });
+            return;
+          }
+          if (journalWriteState !== "ready") {
+            writeJson(response, 503, {
+              error: "provider-journal-unavailable",
+              state: journalWriteState,
+            });
             return;
           }
           const health = await runProviderEffect(
@@ -1589,6 +1637,11 @@ export const runProviderDaemonServer = (
           }
           const rawBody = await readJsonBody(request);
           const rpcStartedAtMs = performance.now();
+          const privateInteractionRequest =
+            rawBody !== null &&
+            typeof rawBody === "object" &&
+            ((rawBody as { method?: unknown }).method === "respondToInteraction" ||
+              (rawBody as { method?: unknown }).method === "resolveInteractionUrl");
           let rpcMethod: ProviderDaemonRpcRequestValue["method"] | null = null;
           let rpcCommandId: string | undefined;
           let envelope: ProviderDaemonRpcEnvelope;
@@ -1621,6 +1674,16 @@ export const runProviderDaemonServer = (
           } catch (error) {
             envelope = toRpcError(error);
           }
+          // Schema decoders and unexpected adapter defects can echo input.
+          // Redact before metrics/logs, including failures before method decode.
+          if (privateInteractionRequest && !envelope.ok)
+            envelope = {
+              ok: false,
+              error: {
+                tag: "ProviderValidationError",
+                message: "Private interaction is unavailable or invalid.",
+              },
+            };
           const rpcDurationMs = roundMs(performance.now() - rpcStartedAtMs);
           const rpcCompletedAt = await runProviderEffect(
             DateTime.now.pipe(Effect.map(DateTime.formatIso)),

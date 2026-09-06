@@ -17,6 +17,8 @@ import {
   ProviderInterruptTurnInput,
   ProviderRespondToRequestInput,
   ProviderRespondToUserInputInput,
+  ProviderRespondToInteractionInput,
+  ProviderResolveInteractionUrlInput,
   ProviderSessionForkDiscardInput,
   ProviderSessionForkInput,
   ProviderSessionForkResult,
@@ -40,7 +42,8 @@ import {
   type ProviderRuntimeEvent,
   type ProviderSession,
 } from "@cafecode/contracts";
-import { randomUUID } from "node:crypto";
+import { createHmac, randomBytes, randomUUID } from "node:crypto";
+import { modelAcceptsImages, UNSUPPORTED_MODEL_IMAGES_MESSAGE } from "@cafecode/shared/model";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
@@ -88,6 +91,24 @@ import { type EventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import { ProviderEventLoggers } from "./ProviderEventLoggers.ts";
 const isModelSelection = Schema.is(ModelSelection);
 const isProviderAdapterProcessError = Schema.is(ProviderAdapterProcessError);
+const decodePrivateInteractionResponse = Schema.decodeUnknownEffect(
+  ProviderRespondToInteractionInput,
+);
+const privateInteractionFailure = () =>
+  new ProviderValidationError({
+    operation: "ProviderService.interaction",
+    issue: "Interaction is unavailable or its response is invalid.",
+  });
+function canonicalInteractionResponse(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalInteractionResponse);
+  if (value !== null && typeof value === "object")
+    return Object.fromEntries(
+      Object.entries(value)
+        .toSorted(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+        .map(([key, item]) => [key, canonicalInteractionResponse(item)]),
+    );
+  return value;
+}
 // Codex historically rejected missing native threads with "no rollout found".
 // As of rust-v0.149.1, thread-store can instead reject the same stale cursor
 // while resolving its persisted JSONL path. Both errors prove that this known
@@ -1739,6 +1760,25 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const discardSessionFork: ProviderServiceShape["discardSessionFork"] = (input) =>
     sessionForkMutationSemaphore.withPermit(discardSessionForkUnlocked(input));
 
+  const validateImageModel = (
+    instanceId: ProviderInstanceId,
+    model: string | undefined,
+    operation: string,
+  ): Effect.Effect<
+    void,
+    ProviderValidationError | import("../Errors.ts").ProviderUnsupportedError
+  > =>
+    Effect.gen(function* () {
+      // This required registry method reads the exact instance's cached
+      // snapshot. No optional service can silently disable validation in the
+      // production graph, and no provider probe/model request is started here.
+      const models = yield* registry.getModels(instanceId);
+      const entry = models.find((candidate) => candidate.slug === model);
+      if (!modelAcceptsImages(entry?.capabilities, model ?? "")) {
+        return yield* toValidationError(operation, UNSUPPORTED_MODEL_IMAGES_MESSAGE);
+      }
+    });
+
   const sendTurn: ProviderServiceShape["sendTurn"] = Effect.fn("sendTurn")(function* (rawInput) {
     const parsed = yield* decodeInputOrValidationError({
       operation: "ProviderService.sendTurn",
@@ -1776,6 +1816,16 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         "provider.kind": routed.adapter.provider,
         ...(input.modelSelection?.model ? { "provider.model": input.modelSelection.model } : {}),
       });
+      const hasImages = input.attachments.some((attachment) => attachment.type === "image");
+      const inspectLiveSession =
+        hasImages ||
+        (routed.adapter.capabilities.liveSteer === "supported" &&
+          input.allowActiveTurnSteerFallback !== false);
+      const activeSession = inspectLiveSession
+        ? (yield* routed.adapter.listSessions()).find(
+            (session) => session.threadId === input.threadId,
+          )
+        : undefined;
       if (
         routed.adapter.capabilities.liveSteer === "supported" &&
         input.allowActiveTurnSteerFallback !== false
@@ -1788,9 +1838,15 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         // one opt-out is terminal-steer recovery: that durable message is
         // authorized only as a new turn, so its caller deliberately lets the
         // adapter reject a concurrently appearing active turn instead.
-        const activeSessions = yield* routed.adapter.listSessions();
-        const activeSession = activeSessions.find((session) => session.threadId === input.threadId);
         if (activeSession?.status === "running" && activeSession.activeTurnId !== undefined) {
+          if (hasImages)
+            yield* validateImageModel(
+              routed.instanceId,
+              activeSession.model ??
+                activeSession.modelSelection?.model ??
+                readPersistedModelSelection(routed.binding.runtimePayload)?.model,
+              "ProviderService.sendTurn",
+            );
           const turn = yield* routed.adapter.steerTurn({
             threadId: input.threadId,
             expectedTurnId: activeSession.activeTurnId,
@@ -1817,6 +1873,17 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           return turn;
         }
       }
+      if (hasImages)
+        yield* validateImageModel(
+          routed.instanceId,
+          (input.modelSelection?.instanceId === routed.instanceId
+            ? input.modelSelection.model
+            : undefined) ??
+            activeSession?.model ??
+            activeSession?.modelSelection?.model ??
+            readPersistedModelSelection(routed.binding.runtimePayload)?.model,
+          "ProviderService.sendTurn",
+        );
       const turn = yield* routed.adapter.sendTurn(input);
       yield* persistTurnSubagentHistoryRoot({
         binding: routed.binding,
@@ -1893,6 +1960,18 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       yield* Effect.annotateCurrentSpan({
         "provider.kind": routed.adapter.provider,
       });
+      if (input.attachments.some((attachment) => attachment.type === "image")) {
+        const activeSession = (yield* routed.adapter.listSessions()).find(
+          (session) => session.threadId === input.threadId,
+        );
+        yield* validateImageModel(
+          routed.instanceId,
+          activeSession?.model ??
+            activeSession?.modelSelection?.model ??
+            readPersistedModelSelection(routed.binding.runtimePayload)?.model,
+          "ProviderService.steerTurn",
+        );
+      }
       const turn = yield* routed.adapter.steerTurn(input);
       yield* persistTurnSubagentHistoryRoot({
         binding: routed.binding,
@@ -2056,6 +2135,59 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       }
     },
   );
+
+  // Private callback answers may be credentials. Keep only process-local,
+  // keyed digests after success: a lost ACK may retry the exact response, but
+  // neither the command ledger nor error diagnostics may retain its contents.
+  const interactionReceiptKey = randomBytes(32);
+  const interactionReceipts = new Map<string, string>();
+  const interactionResponseLock = yield* Semaphore.make(1);
+  const respondToInteraction = (rawInput: ProviderRespondToInteractionInput) =>
+    interactionResponseLock.withPermits(1)(
+      Effect.gen(function* () {
+        const input = yield* decodePrivateInteractionResponse(rawInput).pipe(
+          Effect.mapError(privateInteractionFailure),
+        );
+        // Sorting object keys makes transport serialization order irrelevant.
+        const serialized = JSON.stringify(canonicalInteractionResponse(input.response));
+        if (Buffer.byteLength(serialized, "utf8") > 64 * 1024)
+          return yield* privateInteractionFailure();
+        const key = JSON.stringify([input.threadId, input.requestId]);
+        const digest = createHmac("sha256", interactionReceiptKey).update(serialized).digest("hex");
+        const prior = interactionReceipts.get(key);
+        if (prior !== undefined) {
+          if (prior !== digest) return yield* privateInteractionFailure();
+          return;
+        }
+        const routed = yield* resolveRoutableSession({
+          threadId: input.threadId,
+          operation: "ProviderService.respondToInteraction",
+          allowRecovery: false,
+        });
+        yield* routed.adapter
+          .respondToUserInput(routed.threadId, input.requestId, {
+            __cafeInteraction: input.response,
+          })
+          .pipe(Effect.mapError(privateInteractionFailure));
+        interactionReceipts.set(key, digest);
+        if (interactionReceipts.size > 1024)
+          interactionReceipts.delete(interactionReceipts.keys().next().value!);
+        // Resolving these already-live Deferred callbacks does not run a provider
+        // prompt. Once released, publish the receipt even if its caller disconnects.
+      }).pipe(Effect.uninterruptible),
+    );
+  const resolveInteractionUrl = (input: ProviderResolveInteractionUrlInput) =>
+    Effect.gen(function* () {
+      const routed = yield* resolveRoutableSession({
+        threadId: input.threadId,
+        operation: "ProviderService.resolveInteractionUrl",
+        allowRecovery: false,
+      });
+      if (!routed.adapter.resolveInteractionUrl) return yield* privateInteractionFailure();
+      return yield* routed.adapter
+        .resolveInteractionUrl(routed.threadId, input.requestId)
+        .pipe(Effect.mapError(privateInteractionFailure));
+    });
 
   const stopSession: ProviderServiceShape["stopSession"] = Effect.fn("stopSession")(
     function* (rawInput) {
@@ -2718,6 +2850,18 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         operation: "ProviderService.snoozeUserInput",
         threadId: input.threadId,
         effect: snoozeUserInput(input),
+      }),
+    respondToInteraction: (input) =>
+      whileThreadAcceptsProviderWork({
+        operation: "ProviderService.respondToInteraction",
+        threadId: input.threadId,
+        effect: respondToInteraction(input),
+      }),
+    resolveInteractionUrl: (input) =>
+      whileThreadAcceptsProviderWork({
+        operation: "ProviderService.resolveInteractionUrl",
+        threadId: input.threadId,
+        effect: resolveInteractionUrl(input),
       }),
     stopSession: (input) =>
       whileThreadAcceptsProviderWork({

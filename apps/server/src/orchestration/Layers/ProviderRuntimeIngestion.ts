@@ -33,6 +33,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { makeDrainableWorker } from "@cafecode/shared/DrainableWorker";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import { UsageStatsService } from "../../usageStats/Services/UsageStatsService.ts";
 import {
   buildCodexSteerClientCorrelationId,
   parseCodexSteerClientCorrelationId,
@@ -539,6 +540,9 @@ function runtimeEventToActivities(
             requestId: toApprovalRequestId(event.requestId),
             ...(requestKind ? { requestKind } : {}),
             requestType: event.payload.requestType,
+            ...(event.payload.networkApproval
+              ? { networkApproval: event.payload.networkApproval }
+              : {}),
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
@@ -646,6 +650,7 @@ function runtimeEventToActivities(
             ...(event.requestId ? { requestId: event.requestId } : {}),
             questions: event.payload.questions,
             isBlocking: event.payload.isBlocking,
+            ...(event.payload.interaction ? { interaction: event.payload.interaction } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -1010,6 +1015,7 @@ const make = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
+  const usageStats = yield* UsageStatsService;
   const receiptBus = yield* RuntimeReceiptBus;
   const projectionStateRepository = yield* ProjectionStateRepository;
   const projectionTurnRepository = yield* ProjectionTurnRepository;
@@ -3210,6 +3216,17 @@ const make = Effect.gen(function* () {
         return;
       }
 
+      if (event.type === "thread.usage-accounting.updated") {
+        // The accounting ledger has its own atomic revision fence. Await it
+        // before either the in-process dedup mark or daemon cursor can advance;
+        // a crash between these writes merely replays an idempotent settlement.
+        // Attribute delayed replay to the original host observation day.
+        yield* usageStats.recordAccounting(
+          event.provider,
+          event.payload,
+          Date.parse(event.createdAt),
+        );
+      }
       yield* processRuntimeEvent(event);
       // Deterministic command IDs protect durable projections. This process-local
       // mark also protects buffered assistant/proposed-plan state that can be

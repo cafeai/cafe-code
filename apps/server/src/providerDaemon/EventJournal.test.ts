@@ -91,6 +91,30 @@ function makeCommandEvent(id: string, output: string): ProviderRuntimeEvent {
 }
 
 describe("ProviderDaemonEventJournal", () => {
+  it("keeps a committed event and later listeners when one listener throws", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const journal = yield* makePersistentProviderDaemonEventJournal({
+          capacity: 10,
+          ownerKey: "provider-daemon",
+        });
+        const delivered: string[] = [];
+        journal.subscribe(() => {
+          throw new Error("private client state");
+        });
+        journal.subscribe((record) => {
+          delivered.push(record.event.eventId);
+        });
+        const first = yield* journal.publish(makeRuntimeEvent("listener-failure-1"));
+        const second = yield* journal.publish(makeRuntimeEvent("listener-failure-2"));
+        expect(first.cursor).toBeLessThan(second.cursor);
+        expect(delivered).toEqual(["listener-failure-1", "listener-failure-2"]);
+        expect((yield* journal.replayAfter(0)).map((record) => record.event.eventId)).toEqual(
+          delivered,
+        );
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+    );
+  });
   it("assigns monotonic cursors and replays events after a cursor", () => {
     const journal = createProviderDaemonEventJournal({ capacity: 10 });
     const first = journal.publish(makeRuntimeEvent("event-1"));

@@ -39,6 +39,11 @@ import {
   type ServerProviderDraft,
 } from "../providerSnapshot.ts";
 import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
+import {
+  normalizeClaudeNativeModels,
+  reconcileClaudeModels,
+  type ClaudeNativeModel,
+} from "../claudeModelMetadata.ts";
 import claudeModelCatalog from "./ClaudeModelCatalog.json" with { type: "json" };
 
 const PROVIDER = ProviderDriverKind.make("claudeAgent");
@@ -375,6 +380,7 @@ type ClaudeCapabilitiesProbe = {
   readonly subscriptionType: string | undefined;
   readonly tokenSource: string | undefined;
   readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
+  readonly models?: ReadonlyArray<ClaudeNativeModel> | undefined;
 };
 
 function parseClaudeInitializationCommands(
@@ -500,6 +506,7 @@ const probeClaudeCapabilities = (
         subscriptionType: account?.subscriptionType,
         tokenSource: account?.tokenSource,
         slashCommands: parseClaudeInitializationCommands(init.commands),
+        models: normalizeClaudeNativeModels(init.models),
       } satisfies ClaudeCapabilitiesProbe;
     });
   }).pipe(
@@ -694,7 +701,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     presentation: CLAUDE_PRESENTATION,
     enabled: claudeSettings.enabled,
     checkedAt,
-    models,
+    models: reconcileClaudeModels(models, capabilities.models, DEFAULT_CLAUDE_MODEL_CAPABILITIES),
     slashCommands: dedupedSlashCommands,
     probe: {
       installed: true,

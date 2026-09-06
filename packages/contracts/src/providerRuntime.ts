@@ -14,6 +14,7 @@ import {
   TurnId,
 } from "./baseSchemas.ts";
 import { ProviderThreadGoal } from "./providerGoal.ts";
+import { ProviderInteraction, ProviderNetworkApproval } from "./providerInteraction.ts";
 import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
 
 const TrimmedNonEmptyStringSchema = TrimmedNonEmptyString;
@@ -552,6 +553,7 @@ export type ContentDeltaPayload = typeof ContentDeltaPayload.Type;
 
 const RequestOpenedPayload = Schema.Struct({
   requestType: CanonicalRequestType,
+  networkApproval: Schema.optional(ProviderNetworkApproval),
   detail: Schema.optional(TrimmedNonEmptyStringSchema),
   args: Schema.optional(Schema.Unknown),
 });
@@ -583,6 +585,7 @@ export type UserInputQuestion = typeof UserInputQuestion.Type;
 
 const UserInputRequestedPayload = Schema.Struct({
   questions: Schema.Array(UserInputQuestion),
+  interaction: Schema.optional(ProviderInteraction),
   // Codex 0.147 makes this explicit. Older providers and persisted events are
   // blocking by default, preserving the pre-0.147 behavior on decode.
   isBlocking: Schema.optional(Schema.Boolean).pipe(

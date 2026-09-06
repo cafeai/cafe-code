@@ -62,10 +62,12 @@ interface Harness {
   readonly service: UsageStatsServiceShape;
   readonly repository: UsageStatsRepositoryShape;
   readonly emitProvider: (event: Record<string, unknown>) => Effect.Effect<void>;
+  readonly emitPresentationOnly: (event: Record<string, unknown>) => Effect.Effect<void>;
   readonly emitDomain: (event: Record<string, unknown>) => Effect.Effect<void>;
   readonly setSessions: (sessions: ReadonlyArray<ProviderSession>) => Effect.Effect<void>;
   readonly setEnabled: (usageStatsEnabled: boolean) => Effect.Effect<void>;
   readonly failNextAccountingWrites: (count: number) => Effect.Effect<void>;
+  readonly failAccountingPermanently: Effect.Effect<void>;
   readonly closeService: Effect.Effect<void>;
   readonly recordAuxiliary: (
     provider: ProviderDriverKind,
@@ -131,6 +133,12 @@ const withHarness = <A, E>(body: (harness: Harness) => Effect.Effect<A, E, Scope
         recordAccountingSnapshot: (input) =>
           Effect.gen(function* () {
             const failures = yield* Ref.get(accountingFailuresRef);
+            if (failures === -1) {
+              return yield* new PersistenceSqlError({
+                operation: "accounting-test",
+                detail: "permanent test failure",
+              });
+            }
             if (failures > 0) {
               yield* Ref.set(accountingFailuresRef, failures - 1);
               return yield* new PersistenceSqlError({
@@ -162,15 +170,34 @@ const withHarness = <A, E>(body: (harness: Harness) => Effect.Effect<A, E, Scope
       const buildService = Effect.map(Layer.build(Layer.fresh(serviceLayer)), (context) =>
         Context.get(context, UsageStatsService),
       );
+      const harnessScope = yield* Scope.Scope;
       const serviceScope = yield* Scope.make();
       yield* Effect.addFinalizer((exit) => Scope.close(serviceScope, exit));
       const service = yield* buildService.pipe(Scope.provide(serviceScope));
+      let currentService = service;
       yield* settle;
 
       return yield* body({
         service,
         repository,
         emitProvider: (event) =>
+          Effect.gen(function* () {
+            const typedEvent = event as unknown as ProviderRuntimeEvent;
+            if (typedEvent.type === "thread.usage-accounting.updated") {
+              // Emulate the required ingestion caller without forcing tests
+              // of retry timing to await the deliberately delayed commit.
+              yield* currentService
+                .recordAccounting(
+                  typedEvent.provider,
+                  typedEvent.payload,
+                  Date.parse(typedEvent.createdAt),
+                )
+                .pipe(Effect.forkScoped);
+            }
+            yield* PubSub.publish(providerPubSub, typedEvent);
+            yield* settle;
+          }).pipe(Scope.provide(harnessScope)),
+        emitPresentationOnly: (event) =>
           PubSub.publish(providerPubSub, event as unknown as ProviderRuntimeEvent).pipe(
             Effect.flatMap(() => settle),
           ),
@@ -180,6 +207,7 @@ const withHarness = <A, E>(body: (harness: Harness) => Effect.Effect<A, E, Scope
           ),
         setSessions: (sessions) => Ref.set(sessionsRef, sessions),
         failNextAccountingWrites: (count) => Ref.set(accountingFailuresRef, count),
+        failAccountingPermanently: Ref.set(accountingFailuresRef, -1),
         closeService: Scope.close(serviceScope, Exit.void),
         recordAuxiliary: auxiliaryUsage.record,
         setEnabled: (usageStatsEnabled) =>
@@ -189,7 +217,12 @@ const withHarness = <A, E>(body: (harness: Harness) => Effect.Effect<A, E, Scope
             ),
             Effect.flatMap(() => settle),
           ),
-        rebuildService: buildService.pipe(Effect.tap(() => settle)),
+        rebuildService: buildService.pipe(
+          Effect.tap((rebuilt) => {
+            currentService = rebuilt;
+            return settle;
+          }),
+        ),
       });
     }),
   ).pipe(Effect.provide(TestClock.layer()));
@@ -281,6 +314,60 @@ const accountingModel = (
 });
 
 describe("UsageStatsService", () => {
+  it.effect("never acknowledges permanent accounting storage failure and bounds shutdown", () =>
+    withHarness((harness) =>
+      Effect.gen(function* () {
+        yield* harness.failAccountingPermanently;
+        let acknowledged = false;
+        const event = accountingEvent(1, [accountingModel(1000, 100)]);
+        const caller = yield* harness.service
+          .recordAccounting(CLAUDE, event.payload as UsageAccountingSnapshot, 0)
+          .pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                acknowledged = true;
+              }),
+            ),
+            Effect.forkChild,
+          );
+        yield* settle;
+        yield* TestClock.adjust(5_000);
+        assert.equal(acknowledged, false);
+        assert.deepEqual(yield* harness.repository.listDays, []);
+        const closing = yield* harness.closeService.pipe(Effect.forkChild);
+        yield* settle;
+        yield* TestClock.adjust(2_000);
+        yield* Fiber.join(closing);
+        assert.equal(acknowledged, false);
+        yield* Fiber.interrupt(caller);
+      }),
+    ),
+  );
+  it.effect(
+    "requires acknowledged ingestion instead of billing from an independent subscriber",
+    () =>
+      withHarness((harness) =>
+        Effect.gen(function* () {
+          const event = accountingEvent(1, [accountingModel(1000, 100)]);
+          yield* harness.emitPresentationOnly(event);
+          assert.equal((yield* harness.service.get).totals.inputTokens, 0);
+          yield* harness.service.recordAccounting(
+            CLAUDE,
+            event.payload as UsageAccountingSnapshot,
+            Date.parse(event.createdAt),
+          );
+          assert.equal((yield* harness.service.get).totals.inputTokens, 1000);
+          // Replay after a cursor/write crash must remain exactly once in SQLite.
+          const rebuilt = yield* harness.rebuildService;
+          yield* rebuilt.recordAccounting(
+            CLAUDE,
+            event.payload as UsageAccountingSnapshot,
+            Date.parse(event.createdAt),
+          );
+          assert.equal((yield* rebuilt.get).totals.inputTokens, 1000);
+        }),
+      ),
+  );
   it.effect("settles acknowledged auxiliary usage through the same durable model/day ledger", () =>
     withHarness((harness) =>
       Effect.gen(function* () {

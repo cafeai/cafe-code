@@ -1,6 +1,7 @@
 import {
   ProviderDaemonRpcRequest,
   ThreadId,
+  ApprovalRequestId,
   type ProviderDaemonRpcRequest as ProviderDaemonRpcRequestValue,
 } from "@cafecode/contracts";
 import * as DateTime from "effect/DateTime";
@@ -26,6 +27,45 @@ const stopRequest = {
 } satisfies ProviderDaemonRpcRequestValue;
 
 describe("ProviderDaemonCommandLedger", () => {
+  it("never persists private interaction answers or authorization URLs", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const ledger = yield* makeProviderDaemonCommandLedger();
+        yield* ledger.runOnce(
+          {
+            method: "respondToInteraction",
+            payload: {
+              threadId: ThreadId.make("thread-1"),
+              requestId: ApprovalRequestId.make("request"),
+              response: { action: "accept", content: { credential: "private-answer" } },
+            },
+          },
+          Effect.succeed({ ok: true, value: null }),
+        );
+        yield* ledger.runOnce(
+          {
+            method: "resolveInteractionUrl",
+            payload: {
+              threadId: ThreadId.make("thread-1"),
+              requestId: ApprovalRequestId.make("request"),
+            },
+          },
+          Effect.succeed({ ok: true, value: "https://example.com/?token=private-token" }),
+        );
+        expect((yield* ledger.snapshot).commandCount).toBe(0);
+        const sql = yield* SqlClient.SqlClient;
+        const rows =
+          yield* sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '%command%'`;
+        for (const row of rows) {
+          const contents = yield* sql.unsafe(
+            `SELECT * FROM "${String(row.name).replaceAll('"', '""')}"`,
+          );
+          expect(JSON.stringify(contents)).not.toContain("private-answer");
+          expect(JSON.stringify(contents)).not.toContain("private-token");
+        }
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+    );
+  });
   it("returns the stored result for duplicate mutating command ids", async () => {
     await Effect.runPromise(
       Effect.gen(function* () {

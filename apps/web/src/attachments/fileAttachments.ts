@@ -100,6 +100,8 @@ export async function uploadFileAttachment(input: {
   targetThreadId: ThreadId;
   file: File;
   signal?: AbortSignal;
+  /** A removed/cleared draft must not retain an upload that finished late. */
+  shouldRetain?: () => boolean;
 }): Promise<ChatFileAttachment> {
   if (input.file.size > PROVIDER_SEND_TURN_MAX_FILE_BYTES)
     throw new Error("Files must be 25 MiB or smaller.");
@@ -117,18 +119,39 @@ export async function uploadFileAttachment(input: {
         ),
       ),
       "x-cafe-thread-id": encodeURIComponent(input.targetThreadId),
+      "x-cafe-attachment-lifecycle": "provisional-v1",
     },
     ...(input.signal ? { signal: input.signal } : {}),
   });
+  let attachment: ChatFileAttachment;
   try {
-    const attachment = decodeAttachment(
+    attachment = decodeAttachment(
       JSON.parse(new TextDecoder().decode(await readBounded(response, 8 * 1024))),
     );
     if (attachment.sizeBytes !== input.file.size) throw new Error("size mismatch");
-    return attachment;
   } catch {
     throw new Error("The server returned an invalid attachment. Please retry the upload.");
   }
+  if (response.headers.get("x-cafe-attachment-lifecycle") === "provisional-v1") {
+    const retain = input.shouldRetain?.() ?? true;
+    // A successful retain is the server's durable promise that an offline
+    // draft/queue may continue referencing these bytes without a TTL. Never
+    // expose a ready handle before this ACK; failures remain retryable files.
+    const acknowledgement = await fileRequest(
+      input.environmentId,
+      `/api/attachments/${encodeURIComponent(attachment.id)}/${retain ? "retain" : "discard"}`,
+      {
+        method: "POST",
+        headers: { "x-cafe-thread-id": encodeURIComponent(input.targetThreadId) },
+        ...(input.signal ? { signal: input.signal } : {}),
+      },
+    );
+    await acknowledgement.body?.cancel();
+    if (acknowledgement.status !== 204)
+      throw new Error("The attachment could not be retained. Please retry the upload.");
+    if (!retain) throw new Error("This file was removed before its upload finished.");
+  }
+  return attachment;
 }
 
 export async function getFileAttachmentPreview(input: {

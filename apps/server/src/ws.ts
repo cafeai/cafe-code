@@ -28,6 +28,7 @@ import {
   ThreadId,
   ServerProviderRuntimeRestartError,
   DictationError,
+  ProviderInteractionError,
   WS_METHODS,
   WsRpcGroup,
 } from "@cafecode/contracts";
@@ -1069,6 +1070,51 @@ const makeWsRpcLayer = (
               "rpc.aggregate": "server",
             },
           ),
+        // Private interaction payloads deliberately bypass orchestration,
+        // command ledgers and argument-bearing diagnostics. Owner access and
+        // secret-safe transport match the credential-management boundary.
+        [WS_METHODS.providerRespondToInteraction]: (input) =>
+          Effect.gen(function* () {
+            if (
+              currentSession.role !== "owner" ||
+              !secureSecretTransport ||
+              !providerService.respondToInteraction
+            ) {
+              return yield* new ProviderInteractionError({
+                message:
+                  "Private interactions require an owner connection over HTTPS or the same machine.",
+              });
+            }
+            yield* providerService.respondToInteraction(input).pipe(
+              Effect.mapError(
+                () =>
+                  new ProviderInteractionError({
+                    message: "Interaction is unavailable or its response is invalid.",
+                  }),
+              ),
+            );
+          }),
+        [WS_METHODS.providerResolveInteractionUrl]: (input) =>
+          Effect.gen(function* () {
+            if (
+              currentSession.role !== "owner" ||
+              !secureSecretTransport ||
+              !providerService.resolveInteractionUrl
+            ) {
+              return yield* new ProviderInteractionError({
+                message:
+                  "Private interactions require an owner connection over HTTPS or the same machine.",
+              });
+            }
+            return yield* providerService.resolveInteractionUrl(input).pipe(
+              Effect.mapError(
+                () =>
+                  new ProviderInteractionError({
+                    message: "The authorization request is no longer available.",
+                  }),
+              ),
+            );
+          }),
         [WS_METHODS.serverOpenSystemPromptFile]: (_input) =>
           observeRpcEffect(
             WS_METHODS.serverOpenSystemPromptFile,

@@ -38,7 +38,6 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
-import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { UsageAccountingSnapshot as UsageAccountingSnapshotSchema } from "@cafecode/contracts";
@@ -47,6 +46,8 @@ import { OrchestrationEngineService } from "../../orchestration/Services/Orchest
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { UsageStatsRepository } from "../../persistence/Services/UsageStats.ts";
 import { isSqliteLockTimeoutError } from "../../persistence/sqliteLockRetry.ts";
+import { settleDurableWrite, singleDurableWriteError } from "../../persistence/durableWrite.ts";
+import { PersistenceDecodeError, PersistenceSqlError } from "../../persistence/Errors.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { localDayKey, splitSpanIntoDays } from "../dayBuckets.ts";
 import {
@@ -425,43 +426,28 @@ const makeUsageStatsService = Effect.gen(function* () {
   yield* Effect.forever(
     Effect.gen(function* () {
       const work = yield* Queue.take(accountingQueue);
-      let delayMs = 100;
-      let logged = false;
-      while (true) {
-        const result = yield* repository.recordAccountingSnapshot(work).pipe(Effect.result);
-        if (Result.isSuccess(result)) {
-          for (const delta of result.success) {
-            const entry = days.get(delta.day) ?? zeroDayTotals();
-            addCounts(entry, delta);
-            days.set(delta.day, entry);
-            addCounts(totals, delta);
-            addTokenBreakdownTotal(work.provider, delta.model, delta, delta.day);
-          }
-          break;
+      const result = yield* settleDurableWrite({
+        name: "usage-accounting",
+        operation: repository.recordAccountingSnapshot(work),
+        classify: (cause) => {
+          const error = singleDurableWriteError(cause);
+          return Effect.succeed(
+            error instanceof PersistenceDecodeError
+              ? "reject"
+              : error instanceof PersistenceSqlError && isSqliteLockTimeoutError(error.cause)
+                ? "retry"
+                : "block",
+          );
+        },
+      });
+      if (Option.isSome(result)) {
+        for (const delta of result.value) {
+          const entry = days.get(delta.day) ?? zeroDayTotals();
+          addCounts(entry, delta);
+          days.set(delta.day, entry);
+          addCounts(totals, delta);
+          addTokenBreakdownTotal(work.provider, delta.model, delta, delta.day);
         }
-        if (result.failure._tag === "PersistenceDecodeError") {
-          // Invalid metadata or a counter regression is not a transient write
-          // failure. Reject it without advancing its checkpoint or blocking
-          // later valid observations from this or other provider scopes.
-          yield* Effect.logWarning("usage stats: rejected inconsistent accounting snapshot");
-          break;
-        }
-        if (!isSqliteLockTimeoutError(result.failure.cause)) {
-          // Syntax/constraint/I/O failures require repair, not an infinite retry
-          // loop monopolizing all accounting. The durable checkpoint remains
-          // unchanged, so a later valid snapshot or replay can still settle it.
-          yield* Effect.logError("usage stats: accounting persistence failed permanently");
-          break;
-        }
-        if (!logged) {
-          // Keep content/provider identities out of retry diagnostics. Retain the
-          // exact terminal snapshot until the atomic write succeeds, so a brief
-          // SQLite failure cannot silently drop the last usage of a long query.
-          yield* Effect.logWarning("usage stats: accounting settlement is waiting for persistence");
-          logged = true;
-        }
-        yield* Effect.sleep(delayMs);
-        delayMs = Math.min(5_000, delayMs * 2);
       }
       yield* Deferred.succeed(work.committed, undefined);
       pendingAccountingCommits.delete(work.committed);
@@ -557,9 +543,10 @@ const makeUsageStatsService = Effect.gen(function* () {
   const handleProviderEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> => {
     switch (event.type) {
       case "thread.usage-accounting.updated":
-        // Daemon replay can cross midnight. Bill the local day of the original
-        // host observation, not the backend's later catch-up time.
-        return handleUsageAccounting(event.provider, event.payload, Date.parse(event.createdAt));
+        // Required billing settlement is owned by ordered runtime ingestion,
+        // not this independent presentation subscriber. Otherwise a crash can
+        // persist the replay cursor before this subscriber commits the usage.
+        return Effect.void;
       case "session.started":
       case "thread.started": {
         const tracking = track(event.threadId);
@@ -912,6 +899,7 @@ const makeUsageStatsService = Effect.gen(function* () {
   );
 
   return {
+    recordAccounting: handleUsageAccounting,
     get,
     snapshot,
     flush,

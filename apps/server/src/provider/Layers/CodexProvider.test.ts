@@ -145,6 +145,28 @@ describe("Codex picker model/list refresh", () => {
     expect(payloads).toEqual([{ limit: 100 }, { limit: 100, cursor: "page-2" }]);
   });
 
+  it("preserves observed input restrictions and the known legacy Spark restriction", async () => {
+    const client = makeModelListClient(() =>
+      Effect.succeed({
+        data: [
+          { ...makeModel("text-only"), inputModalities: ["text"] },
+          { ...makeModel("audio-only"), inputModalities: ["audio"] },
+          { ...makeModel("multimodal"), inputModalities: ["text", "image", "audio"] },
+          makeModel("gpt-5.3-codex-spark"),
+          makeModel("legacy-model"),
+        ],
+      }),
+    );
+    const models = await Effect.runPromise(requestAllCodexModelsWithClient(client));
+    expect(models.map((model) => model.capabilities?.inputModalities)).toEqual([
+      ["text"],
+      [],
+      ["text", "image"],
+      ["text"],
+      ["text", "image"],
+    ]);
+  });
+
   it("discovers visible Astra with its live defaults and modern Fast tier", async () => {
     // Astra's account catalogue now defaults to Medium, while the embedded
     // pre-rollout fallback defaults to Low. Exercise the full discovery path

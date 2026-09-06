@@ -39,6 +39,7 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
   it.effect("initializes, handles typed server requests, and reads account and skills data", () =>
     Effect.gen(function* () {
       const userInputRequests = yield* Ref.make<Array<unknown>>([]);
+      const nativeRequestIds = yield* Ref.make<Array<string | number>>([]);
       const messageDeltas = yield* Ref.make<Array<unknown>>([]);
       const handle = yield* makeHandle();
       const scope = yield* Scope.make();
@@ -48,8 +49,11 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
       const result = yield* Effect.gen(function* () {
         const client = yield* CodexClient.CodexAppServerClient;
 
-        yield* client.handleServerRequest("item/tool/requestUserInput", (payload) =>
+        yield* client.handleServerRequest("item/tool/requestUserInput", (payload, context) =>
           Ref.update(userInputRequests, (current) => [...current, payload]).pipe(
+            Effect.andThen(
+              Ref.update(nativeRequestIds, (current) => [...current, context!.requestId]),
+            ),
             Effect.as({
               answers: {
                 approved: {
@@ -103,6 +107,7 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
       }).pipe(Effect.provide(context), Effect.ensuring(Scope.close(scope, Exit.void)));
 
       assert.equal(result.skills.data[0]?.skills.length, 0);
+      assert.deepEqual(yield* Ref.get(nativeRequestIds), [10_000]);
       assert.deepEqual(yield* Ref.get(userInputRequests), [
         {
           isBlocking: true,

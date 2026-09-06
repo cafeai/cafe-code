@@ -88,6 +88,7 @@ import Migration0070 from "./Migrations/070_UnsettledCodexSteerIntentLedger.ts";
 import Migration0071 from "./Migrations/071_ProviderDaemonHardDeleteIdentity.ts";
 import Migration0072 from "./Migrations/072_CodexSteerControlBarrierLedger.ts";
 import Migration0073 from "./Migrations/073_UsageAccountingCheckpoints.ts";
+import Migration0074 from "./Migrations/074_FileAttachmentUploadLifecycle.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -177,6 +178,7 @@ export const migrationEntries = [
   [71, "ProviderDaemonHardDeleteIdentity", Migration0071],
   [72, "CodexSteerControlBarrierLedger", Migration0072],
   [73, "UsageAccountingCheckpoints", Migration0073],
+  [74, "FileAttachmentUploadLifecycle", Migration0074],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

@@ -10,6 +10,12 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { computeAttachmentContentSha256 } from "../attachmentContentCommitment.ts";
 import { ServerConfig } from "../config.ts";
 import { storeFileAttachment } from "../fileAttachmentStore.ts";
+import {
+  cleanupFileAttachmentUploads,
+  FILE_ATTACHMENT_PROVISIONAL_TTL_MS,
+  publishFileAttachmentUpload,
+  registerFileAttachmentUpload,
+} from "../fileAttachmentLifecycle.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { RepositoryIdentityResolverLive } from "../project/Layers/RepositoryIdentityResolver.ts";
 import { WorkspacePathsLive } from "../workspace/Layers/WorkspacePaths.ts";
@@ -129,8 +135,17 @@ layer("normalizeDispatchCommand attachment commitments", (it) => {
           name: "document.tex",
           mimeType: "text/plain",
           bytes: Buffer.from("\\section{private}"),
+          onAllocated: (attachment) =>
+            Effect.runPromise(
+              registerFileAttachmentUpload(sql, {
+                attachmentId: attachment.id,
+                threadId,
+                nowMs: 0,
+              }).pipe(Effect.asVoid),
+            ),
         }),
       );
+      yield* publishFileAttachmentUpload(sql, file.id, 0);
       const fileCommand = {
         type: "thread.turn.steer" as const,
         commandId: CommandId.make("cmd-normalizer-file"),
@@ -144,6 +159,17 @@ layer("normalizeDispatchCommand attachment commitments", (it) => {
         createdAt: "2026-08-31T00:00:02.000Z",
       };
       const normalizedFile = yield* normalizeDispatchCommand(fileCommand);
+      assert.deepEqual(
+        yield* sql`SELECT * FROM file_attachment_uploads WHERE attachment_id = ${file.id}`,
+        [],
+      );
+      assert.equal(
+        yield* cleanupFileAttachmentUploads(sql, {
+          attachmentsDir: config.attachmentsDir,
+          nowMs: FILE_ATTACHMENT_PROVISIONAL_TTL_MS + 1,
+        }),
+        0,
+      );
       const repeatedFile = yield* normalizeDispatchCommand(fileCommand);
       assert.deepEqual(normalizedFile, repeatedFile);
       assert.equal(normalizedFile.type, "thread.turn.steer");

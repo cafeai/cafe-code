@@ -28,6 +28,8 @@ import {
   RuntimeItemId,
   RuntimeRequestId,
   ProviderApprovalDecision,
+  ProviderInteraction,
+  ProviderNetworkApproval,
   ThreadId,
   type TurnId,
   ProviderSendTurnInput,
@@ -1565,6 +1567,11 @@ function reconcileCodexAuthRecoveryLifecycle(
 }
 
 function sanitizeNativeProviderEventForLog(event: ProviderEvent): ProviderEvent {
+  if (event.method.startsWith("cafecode/interaction/")) {
+    return replaceSensitiveNativeEventPayload(event, {
+      lifecycle: event.method.endsWith("/request") ? "requested" : "resolved",
+    });
+  }
   if (
     event.method === "modelProvider/authRecoveryStarted" ||
     event.method === "modelProvider/authRecoveryCompleted"
@@ -2612,6 +2619,20 @@ function mapToRuntimeEvents(
   }
 
   if (event.kind === "request") {
+    if (event.method === "cafecode/interaction/request") {
+      const interaction = readPayload(
+        ProviderInteraction,
+        readRecordValue(event.payload)?.interaction,
+      );
+      if (!interaction) return [];
+      return [
+        {
+          ...runtimeEventBase(event, canonicalThreadId, { rawPayload: { lifecycle: "requested" } }),
+          type: "user-input.requested",
+          payload: { questions: [], isBlocking: true, interaction },
+        },
+      ];
+    }
     if (event.method === "item/tool/requestUserInput") {
       const payload =
         readPayload(EffectCodexSchema.ServerRequest__ToolRequestUserInputParams, event.payload) ??
@@ -2697,6 +2718,18 @@ function mapToRuntimeEvents(
         type: "request.opened",
         payload: {
           requestType,
+          ...(event.method === "item/commandExecution/requestApproval" &&
+          readPayload(
+            ProviderNetworkApproval,
+            readRecordValue(event.payload)?.networkApprovalContext,
+          )
+            ? {
+                networkApproval: readPayload(
+                  ProviderNetworkApproval,
+                  readRecordValue(event.payload)?.networkApprovalContext,
+                )!,
+              }
+            : {}),
           ...(detail ? { detail } : {}),
           ...(!terminalInputApproval && event.payload !== undefined ? { args: event.payload } : {}),
         },
@@ -2718,6 +2751,29 @@ function mapToRuntimeEvents(
           requestType,
           ...(payload ? { decision: payload.decision } : {}),
           ...(event.payload !== undefined ? { resolution: event.payload } : {}),
+        },
+      },
+    ];
+  }
+
+  if (event.method === "cafecode/interaction/resolved" && event.requestId) {
+    // Never journal credential-bearing form responses or authorization URLs.
+    return [
+      {
+        ...runtimeEventBase(event, canonicalThreadId),
+        type: "user-input.resolved",
+        payload: { answers: {} },
+      },
+    ];
+  }
+  if (event.method === "cafecode/interaction/unsupported") {
+    return [
+      {
+        ...runtimeEventBase(event, canonicalThreadId),
+        type: "runtime.warning",
+        payload: {
+          message:
+            "A provider interaction was declined because its form or permission request exceeds Cafe's supported safe limits.",
         },
       },
     ];
@@ -3448,6 +3504,24 @@ function mapToRuntimeEvents(
           fromModel: payload.fromModel,
           toModel: payload.toModel,
           reason: payload.reason,
+        },
+      },
+    ];
+  }
+
+  if (event.method === "model/verification") {
+    // The current protocol contains a fixed verification enum, not a trusted
+    // URL. Surface the required action without persisting/opening provider
+    // supplied URLs or treating this advisory as proof the turn has failed.
+    const payload = readPayload(EffectCodexSchema.V2ModelVerificationNotification, event.payload);
+    if (!payload?.verifications.includes("trustedAccessForCyber")) return [];
+    return [
+      {
+        ...runtimeEventBase(event, canonicalThreadId),
+        type: "runtime.warning",
+        payload: {
+          message:
+            "This model requires OpenAI Trusted Access verification. Complete verification in your OpenAI account or choose another model.",
         },
       },
     ];
@@ -4900,6 +4974,30 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       ),
     );
 
+  const resolveInteractionUrl: NonNullable<CodexAdapterShape["resolveInteractionUrl"]> = (
+    threadId,
+    requestId,
+  ) =>
+    requireSession(threadId).pipe(
+      Effect.flatMap((session) =>
+        session.runtime.resolveInteractionUrl
+          ? session.runtime
+              .resolveInteractionUrl(requestId)
+              .pipe(
+                Effect.mapError((cause) =>
+                  mapCodexRuntimeError(threadId, "resolveInteractionUrl", cause),
+                ),
+              )
+          : Effect.fail(
+              new ProviderAdapterRequestError({
+                provider: "codex",
+                method: "resolveInteractionUrl",
+                detail: "Authorization request is unavailable.",
+              }),
+            ),
+      ),
+    );
+
   const writeNativeEvent = Effect.fn("writeNativeEvent")(function* (event: ProviderEvent) {
     if (!nativeEventLogger) {
       return;
@@ -5013,6 +5111,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     rollbackThread,
     respondToRequest,
     respondToUserInput,
+    resolveInteractionUrl,
     snoozeUserInput,
     stopSession,
     listSessions,

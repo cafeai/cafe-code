@@ -71,6 +71,7 @@ export interface CodexAppServerClientShape {
     method: M,
     handler: (
       payload: CodexRpc.ServerRequestParamsByMethod[M],
+      context?: { readonly requestId: string | number },
     ) => Effect.Effect<CodexRpc.ServerRequestResponsesByMethod[M], CodexError.CodexAppServerError>,
   ) => Effect.Effect<void>;
   readonly handleServerNotification: <M extends CodexRpc.ServerNotificationMethod>(
@@ -100,6 +101,7 @@ export class CodexAppServerClient extends Context.Service<
 
 type ServerRequestHandler = (
   payload: unknown,
+  context?: { readonly requestId: string | number },
 ) => Effect.Effect<unknown, CodexError.CodexAppServerError>;
 type ServerNotificationHandler = (
   payload: unknown,
@@ -248,7 +250,16 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
       const handler = requestHandlers.get(method);
 
       return decodeOptionalPayload(method, payloadSchema, request.params).pipe(
-        Effect.flatMap((decoded) => runHandler(handler, decoded, method)),
+        // Keep the actual JSON-RPC identity available for unsolicited request
+        // resolution. MCP elicitations have no item id, and guessing one would
+        // let a stale resolution close a different live user prompt.
+        Effect.flatMap((decoded) =>
+          runHandler(
+            handler ? (payload) => handler(payload, { requestId: request.id }) : undefined,
+            decoded,
+            method,
+          ),
+        ),
         Effect.flatMap((result) => encodeOptionalPayload(method, responseSchema, result)),
       );
     }

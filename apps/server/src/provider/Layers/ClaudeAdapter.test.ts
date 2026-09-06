@@ -9364,6 +9364,122 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("rejects pre-aborted Claude questions and approvals without waiting", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "approval-required",
+      });
+      yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+      const canUseTool = harness.getLastCreateQueryInput()!.options.canUseTool!;
+      const controller = new AbortController();
+      controller.abort();
+      for (const tool of ["AskUserQuestion", "Bash"]) {
+        const result = yield* Effect.promise(() =>
+          canUseTool(
+            tool,
+            {},
+            { signal: controller.signal, toolUseID: "aborted", requestId: "aborted" },
+          ),
+        );
+        assert.equal(result?.behavior, "deny");
+      }
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("validates MCP form answers before consuming the Claude callback", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+      const callback = harness.getLastCreateQueryInput()!.options.onElicitation!;
+      const result = callback(
+        {
+          serverName: "mcp",
+          message: "Choose",
+          requestedSchema: {
+            type: "object",
+            properties: { enabled: { type: "boolean" }, count: { type: "integer", minimum: 1 } },
+            required: ["enabled", "count"],
+          },
+        },
+        { signal: new AbortController().signal, requestId: "native-form" },
+      );
+      const opened = yield* Stream.runHead(adapter.streamEvents);
+      assert.equal(opened._tag, "Some");
+      if (opened._tag !== "Some" || opened.value.type !== "user-input.requested") return;
+      assert.equal(opened.value.payload.interaction?.kind, "elicitation");
+      assert.isUndefined(opened.value.raw);
+      const id = ApprovalRequestId.make(String(opened.value.requestId));
+      const invalid = yield* adapter
+        .respondToUserInput(THREAD_ID, id, {
+          __cafeInteraction: { action: "accept", content: { enabled: "true", count: 2 } },
+        })
+        .pipe(Effect.exit);
+      assert.equal(invalid._tag, "Failure");
+      yield* adapter.respondToUserInput(THREAD_ID, id, {
+        __cafeInteraction: { action: "accept", content: { enabled: true, count: 2 } },
+      });
+      assert.deepEqual(yield* Effect.promise(() => result), {
+        action: "accept",
+        content: { enabled: true, count: 2 },
+      });
+      const closed = yield* Stream.runHead(adapter.streamEvents);
+      assert.equal(closed._tag, "Some");
+      if (closed._tag === "Some" && closed.value.type === "user-input.resolved")
+        assert.deepEqual(closed.value.payload.answers, { __cafeInteraction: { action: "accept" } });
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("keeps MCP authorization URLs transient and revokes them on cancellation", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+      const callback = harness.getLastCreateQueryInput()!.options.onElicitation!;
+      const controller = new AbortController();
+      const url = "https://auth.example.test/authorize?token=private-token";
+      const result = callback(
+        { serverName: "mcp", message: "Authenticate", mode: "url", url },
+        { signal: controller.signal, requestId: "native-url" },
+      );
+      const opened = yield* Stream.runHead(adapter.streamEvents);
+      if (opened._tag !== "Some" || opened.value.type !== "user-input.requested")
+        return assert.fail("Expected elicitation request");
+      assert.notInclude(JSON.stringify(opened.value), "private-token");
+      const id = ApprovalRequestId.make(String(opened.value.requestId));
+      assert.equal(yield* adapter.resolveInteractionUrl!(THREAD_ID, id), url);
+      controller.abort();
+      assert.deepEqual(yield* Effect.promise(() => result), { action: "cancel" });
+      assert.equal(
+        (yield* adapter.resolveInteractionUrl!(THREAD_ID, id).pipe(Effect.exit))._tag,
+        "Failure",
+      );
+      assert.deepEqual(
+        yield* Effect.promise(() =>
+          callback(
+            { serverName: "mcp", message: "Bad", mode: "url", url: "javascript:alert(1)" },
+            { signal: new AbortController().signal, requestId: "bad-url" },
+          ),
+        ),
+        { action: "decline" },
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.effect("writes provider-native observability records when enabled", () => {
     const nativeEvents: Array<{
       event?: {

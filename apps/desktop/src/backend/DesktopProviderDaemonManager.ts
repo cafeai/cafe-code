@@ -32,6 +32,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Schedule from "effect/Schedule";
 import * as Semaphore from "effect/Semaphore";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -55,6 +56,9 @@ const PROVIDER_DAEMON_READINESS_TIMEOUT_MS = 30_000;
 const PROVIDER_DAEMON_READINESS_INTERVAL_MS = 100;
 const PROVIDER_DAEMON_PROTOCOL_VERSION = 1;
 const PROVIDER_DAEMON_SPAWN_ATTEMPTS = 2;
+// Each HTTP observation already has a five-second deadline. One retry absorbs
+// a short SQLite/transport stall while keeping adoption below startup's budget.
+const PROVIDER_DAEMON_ADOPTION_RETRY_DELAY_MS = 250;
 
 const DESKTOP_PROVIDER_DAEMON_ENV_NAMES = [
   "CAFE_CODE_PORT",
@@ -169,6 +173,15 @@ class ProviderDaemonHealthError extends Data.TaggedError("ProviderDaemonHealthEr
 }> {
   override get message() {
     return this.cause instanceof Error ? this.cause.message : String(this.cause);
+  }
+}
+
+/** Marker contents and filesystem failures may contain paths or capabilities. */
+class ProviderDaemonMarkerInspectionError extends Data.TaggedError(
+  "ProviderDaemonMarkerInspectionError",
+)<{}> {
+  override get message() {
+    return "Existing provider daemon marker inspection was inconclusive; its files and any running process were preserved. Retry connection.";
   }
 }
 
@@ -343,19 +356,29 @@ async function issueProviderDaemonLease(
 
 const readMarker = (
   markerPath: string,
-): Effect.Effect<Option.Option<ProviderDaemonMarkerValue>, never, FileSystem.FileSystem> =>
+): Effect.Effect<
+  Option.Option<ProviderDaemonMarkerValue>,
+  ProviderDaemonMarkerInspectionError,
+  FileSystem.FileSystem
+> =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
-    const exists = yield* fileSystem.exists(markerPath).pipe(Effect.orElseSucceed(() => false));
+    // Only a conclusive absence permits a fresh spawn. Read/decode failure of
+    // an observed marker is not evidence that its daemon exited: falling through
+    // would unlink its IPC socket and eventually reap its still-running PID.
+    const exists = yield* fileSystem
+      .exists(markerPath)
+      .pipe(Effect.mapError(() => new ProviderDaemonMarkerInspectionError()));
     if (!exists) {
       return Option.none();
     }
-    const raw = yield* fileSystem.readFileString(markerPath).pipe(Effect.option);
-    if (Option.isNone(raw)) {
-      return Option.none();
-    }
-    const parsed = yield* decodeProviderDaemonMarkerJson(raw.value).pipe(Effect.option);
-    return parsed;
+    const raw = yield* fileSystem
+      .readFileString(markerPath)
+      .pipe(Effect.mapError(() => new ProviderDaemonMarkerInspectionError()));
+    return yield* decodeProviderDaemonMarkerJson(raw).pipe(
+      Effect.map(Option.some),
+      Effect.mapError(() => new ProviderDaemonMarkerInspectionError()),
+    );
   });
 
 const writeMarker = (input: {
@@ -422,8 +445,8 @@ const writeCredential = (input: {
 
 // Reads the provider daemon token written by `writeCredential`. `encrypted`
 // reflects the marker's `credentialEncrypted` flag; a mismatch (or a genuine
-// decrypt failure) resolves to `None`, which the caller treats as a missing
-// credential and respawns cleanly.
+// decrypt failure) resolves to `None`, which the caller treats as inconclusive
+// and preserves the live owner rather than replacing its credential/process.
 const readCredential = (
   credentialPath: string,
   encrypted: boolean,
@@ -600,6 +623,34 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
   ): Effect.Effect<Option.Option<ProviderDaemonClientConfig>> =>
     Effect.gen(function* () {
       const adoptionStartedAtMs = performance.now();
+      const preserveInconclusiveOwner = (phase: "credential" | "health" | "lease") =>
+        Effect.gen(function* () {
+          // A live PID plus an unreadable response is not evidence that this
+          // daemon is obsolete. Keep its marker/credential and do not fall
+          // through to spawn's process reaper. A later ensureRunning retries
+          // adoption of the exact same identity, without replaying any prompt.
+          const message = `Existing provider daemon ${phase} observation was inconclusive; its running process was preserved. Retry connection.`;
+          yield* Ref.update(state, (current) => ({
+            ...current,
+            status: "error" as const,
+            pid: Option.some(marker.pid),
+            lastError: Option.some(message),
+          }));
+          yield* publishDebugSnapshot;
+          yield* logWarning("provider daemon adoption deferred", { phase });
+          return yield* Effect.die(new Error(message));
+        });
+      const observeForAdoption = <A>(read: () => Promise<A>) =>
+        Effect.tryPromise({
+          try: read,
+          catch: (cause) => new ProviderDaemonHealthError({ cause }),
+        }).pipe(
+          Effect.retry({
+            times: 1,
+            schedule: Schedule.spaced(PROVIDER_DAEMON_ADOPTION_RETRY_DELAY_MS),
+          }),
+          Effect.option,
+        );
       const cafeMcpPort = yield* Ref.get(cafeMcpPortRef);
       const transport = marker.transport ?? "tcp";
       const socketPath = marker.socketPath;
@@ -620,17 +671,14 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
         Effect.provideService(ElectronSafeStorage.ElectronSafeStorage, safeStorage),
       );
       if (Option.isNone(token)) {
-        yield* removeMarker(environment.providerDaemonMarkerPath);
-        yield* removeCredential(credentialPath);
-        return Option.none();
+        return yield* preserveInconclusiveOwner("credential");
       }
       const rootEndpoint = markerEndpoint(marker, token.value);
-      const health = yield* Effect.tryPromise({
-        try: () => fetchProviderDaemonHealth(rootEndpoint),
-        catch: (cause) => new ProviderDaemonHealthError({ cause }),
-      }).pipe(Effect.option);
+      const health = yield* observeForAdoption(() => fetchProviderDaemonHealth(rootEndpoint));
+      if (Option.isNone(health)) {
+        return yield* preserveInconclusiveOwner("health");
+      }
       if (
-        Option.isNone(health) ||
         health.value.pid !== marker.pid ||
         health.value.mode !== "provider-daemon" ||
         health.value.version !== environment.appVersion ||
@@ -652,13 +700,9 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
         return Option.none();
       }
 
-      const lease = yield* Effect.tryPromise({
-        try: () => issueProviderDaemonLease(rootEndpoint),
-        catch: (cause) => new ProviderDaemonHealthError({ cause }),
-      }).pipe(Effect.option);
+      const lease = yield* observeForAdoption(() => issueProviderDaemonLease(rootEndpoint));
       if (Option.isNone(lease)) {
-        yield* removeMarker(environment.providerDaemonMarkerPath);
-        return Option.none();
+        return yield* preserveInconclusiveOwner("lease");
       }
       const endpoint: ProviderDaemonClientConfig = {
         ...rootEndpoint,
@@ -873,6 +917,19 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
 
     const marker = yield* readMarker(environment.providerDaemonMarkerPath).pipe(
       Effect.provideService(FileSystem.FileSystem, fileSystem),
+      Effect.catch((error) =>
+        Ref.update(state, (latest) => ({
+          ...latest,
+          status: "error" as const,
+          lastError: Option.some(error.message),
+        })).pipe(
+          Effect.andThen(publishDebugSnapshot),
+          Effect.andThen(logWarning("provider daemon adoption deferred", { phase: "marker" })),
+          // Keep this outside spawnDaemon's retry block. Retrying or replacing
+          // a provider process cannot repair an inconclusive marker observation.
+          Effect.andThen(Effect.die(error)),
+        ),
+      ),
     );
     if (Option.isSome(marker)) {
       const adopted = yield* adoptMarker(marker.value);

@@ -6,6 +6,7 @@ export const browserApiCorsAllowedHeaders = [
   "content-type",
   "x-cafe-thread-id",
   "x-cafe-attachment-name",
+  "x-cafe-attachment-lifecycle",
   "mcp-protocol-version",
 ] as const;
 

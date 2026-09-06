@@ -71,6 +71,17 @@ const makeProviderAdapterRegistry = Effect.fn("makeProviderAdapterRegistry")(fun
       Effect.map((instances) => instances.map((instance) => instance.instanceId)),
     );
 
+  const getModels: ProviderAdapterRegistryShape["getModels"] = (instanceId) =>
+    registry
+      .getInstance(instanceId)
+      .pipe(
+        Effect.flatMap((instance) =>
+          instance === undefined
+            ? Effect.fail(new ProviderUnsupportedError({ provider: instanceId }))
+            : instance.snapshot.getSnapshot.pipe(Effect.map((snapshot) => snapshot.models)),
+        ),
+      );
+
   const listProviders: ProviderAdapterRegistryShape["listProviders"] = () =>
     registry.listInstances.pipe(
       Effect.map((instances) => {
@@ -91,6 +102,7 @@ const makeProviderAdapterRegistry = Effect.fn("makeProviderAdapterRegistry")(fun
   return {
     getByInstance,
     getInstanceInfo,
+    getModels,
     listInstances,
     listProviders,
     // Proxy directly — the facade has no state of its own; the instance

@@ -72,6 +72,7 @@ import { ComposerDictationButton } from "./ComposerDictationButton";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { ComposerPendingApprovalPanel } from "./ComposerPendingApprovalPanel";
 import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
+import type { ComposerInteractionCallbacks } from "./ComposerInteractionCard";
 import { ComposerPlanFollowUpBanner } from "./ComposerPlanFollowUpBanner";
 import { ComposerTaskProgress } from "./ComposerTaskProgress";
 import { resolveComposerMenuActiveItemId } from "./composerMenuHighlight";
@@ -685,7 +686,7 @@ export function FollowUpQueueShelf(props: {
 // Props
 // --------------------------------------------------------------------------
 
-export interface ChatComposerProps {
+export interface ChatComposerProps extends ComposerInteractionCallbacks {
   composerDraftTarget: ScopedThreadRef | DraftId;
   environmentId: EnvironmentId;
   routeKind: "server" | "draft";
@@ -884,6 +885,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     onInterrupt,
     onImplementPlanInNewThread,
     onRespondToApproval,
+    onRespondToInteraction,
+    onResolveInteractionUrl,
     onSelectActivePendingUserInputOption,
     onAdvanceActivePendingUserInput,
     onPreviousActivePendingUserInputQuestion,
@@ -2458,6 +2461,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           environmentId: file.environmentId,
           targetThreadId: file.targetThreadId,
           file: file.file,
+          // A draft can move behind a queue-edit backup while its upload is in
+          // flight. Check exact file/env/thread identity across durable drafts,
+          // including that backup, without letting a removed file reappear.
+          shouldRetain: () =>
+            Object.values(useComposerDraftStore.getState().draftsByThreadKey).some((draft) =>
+              draft.files.some(
+                (entry) =>
+                  entry.id === file.id &&
+                  entry.environmentId === file.environmentId &&
+                  entry.targetThreadId === file.targetThreadId,
+              ),
+            ),
         });
         update({ status: "ready", attachment, file: undefined, error: undefined });
       } catch {
@@ -2907,6 +2922,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   onAdvance={onAdvanceActivePendingUserInput}
                   autoResolutionSnoozed={activePendingAutoResolutionSnoozed}
                   onSnoozeAutoResolution={onSnoozeActivePendingUserInput}
+                  {...(onRespondToInteraction ? { onRespondToInteraction } : {})}
+                  {...(onResolveInteractionUrl ? { onResolveInteractionUrl } : {})}
                 />
               </div>
             ) : showPlanFollowUpPrompt && activeProposedPlan ? (
@@ -2949,8 +2966,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 onAdvance={onAdvanceActivePendingUserInput}
                 autoResolutionSnoozed={activePendingAutoResolutionSnoozed}
                 onSnoozeAutoResolution={onSnoozeActivePendingUserInput}
+                {...(onRespondToInteraction ? { onRespondToInteraction } : {})}
+                {...(onResolveInteractionUrl ? { onResolveInteractionUrl } : {})}
               />
-              <div className="px-3 pb-3 sm:px-4">
+              <div
+                className="px-3 pb-3 sm:px-4"
+                hidden={Boolean(activePendingUserInput?.interaction)}
+              >
                 <div
                   data-chat-composer-mobile-pending-compact="true"
                   className={cn(
@@ -3052,7 +3074,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             className={cn(
               "relative px-3 pb-2 sm:px-4",
               hasComposerHeader ? "pt-2.5 sm:pt-3" : "pt-3.5 sm:pt-4",
-              isComposerCollapsedMobile && "hidden",
+              (isComposerCollapsedMobile || activePendingUserInput?.interaction) && "hidden",
             )}
           >
             {composerMenuOpen && !isComposerApprovalState && (
@@ -3324,7 +3346,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               while the composer is collapsed (keyboard down) for parity with
               desktop; it is hidden only while the on-screen keyboard is open
               (the editor overlay provides the primary action then). */}
-          {showMobileComposerActionsOverlay ||
+          {activePendingUserInput?.interaction ||
+          showMobileComposerActionsOverlay ||
           (isComposerCollapsedMobile &&
             !showCollapsedMobilePromptRow) ? null : activePendingApproval ? (
             <div className="flex min-w-0 items-center justify-end gap-2 px-2.5 pb-2.5 sm:px-3 sm:pb-3">

@@ -44,6 +44,7 @@ import {
   ProviderEventLoggers,
 } from "../src/provider/Layers/ProviderEventLoggers.ts";
 import { ProviderService } from "../src/provider/Services/ProviderService.ts";
+import { UsageStatsService } from "../src/usageStats/Services/UsageStatsService.ts";
 import { CheckpointReactorLive } from "../src/orchestration/Layers/CheckpointReactor.ts";
 import { RepositoryIdentityResolverLive } from "../src/project/Layers/RepositoryIdentityResolver.ts";
 import { OrchestrationEngineLive } from "../src/orchestration/Layers/OrchestrationEngine.ts";
@@ -377,6 +378,15 @@ export const makeOrchestrationIntegrationHarness = (
     const layer = Layer.empty.pipe(
       Layer.provideMerge(runtimeServicesLayer),
       Layer.provideMerge(orchestrationReactorLayer),
+      Layer.provideMerge(
+        Layer.succeed(UsageStatsService, {
+          // This opt-in provider lifecycle harness does not collect real billing.
+          recordAccounting: () => Effect.void,
+          get: Effect.die("usage reads are outside the integration harness"),
+          snapshot: Effect.die("usage reads are outside the integration harness"),
+          flush: Effect.void,
+        }),
+      ),
       Layer.provide(persistenceLayer),
       Layer.provideMerge(RepositoryIdentityResolverLive),
       Layer.provideMerge(ServerSettingsService.layerTest()),

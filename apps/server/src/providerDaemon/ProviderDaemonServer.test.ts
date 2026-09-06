@@ -17,11 +17,15 @@ import {
 } from "@cafecode/contracts";
 import { assert, describe, expect, it, vi } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlError from "effect/unstable/sql/SqlError";
 import { EventEmitter } from "node:events";
 
 import { ProviderAdapterRegistry } from "../provider/Services/ProviderAdapterRegistry.ts";
@@ -122,6 +126,7 @@ const mockProviderAdapterRegistryLayer = Layer.effect(
     return {
       getByInstance: () => Effect.die("unexpected getByInstance"),
       getInstanceInfo: () => Effect.die("unexpected getInstanceInfo"),
+      getModels: () => Effect.succeed([]),
       listInstances: () => Effect.succeed([ProviderInstanceId.make("codex")]),
       listProviders: () => Effect.succeed([ProviderDriverKind.make("codex")]),
       streamChanges: Stream.fromPubSub(changes),
@@ -1225,6 +1230,107 @@ describe("ProviderDaemonServer", () => {
         assert.equal(timing?.inputByteLength, 42);
       }).pipe(Effect.scoped, Effect.provide(layer));
     }),
+  );
+
+  it.effect(
+    "retains ordered events across a transient insert failure and exposes degraded health",
+    () =>
+      Effect.gen(function* () {
+        const events = yield* Deferred.make<ReadonlyArray<ProviderRuntimeEvent>>();
+        const failedWrite = yield* Deferred.make<void>();
+        const completed = yield* Deferred.make<void>();
+        const delivered: string[] = [];
+        const streamingProviderServiceLayer = Layer.succeed(ProviderService, {
+          ...mockProviderService,
+          streamEvents: Stream.fromEffect(Deferred.await(events)).pipe(
+            Stream.flatMap(Stream.fromIterable),
+            Stream.concat(Stream.never),
+          ),
+        } satisfies ProviderServiceShape);
+        const layer = Layer.mergeAll(
+          streamingProviderServiceLayer,
+          ProviderRuntimeInventoryLocalLive.pipe(Layer.provide(mockProviderAdapterRegistryLayer)),
+          mockServerSettingsLayer,
+          ProviderSupervisorRegistryLive,
+        ).pipe(Layer.provideMerge(SqlitePersistenceMemory));
+        yield* Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          let insertAttempts = 0;
+          // Inject one typed SQLite lock at the exact body INSERT, while keeping
+          // real transactions/replay/health reads on the in-memory database.
+          const faultSql = new Proxy(sql, {
+            apply(target, thisArg, args) {
+              const template = args[0] as TemplateStringsArray;
+              if (
+                Array.isArray(template) &&
+                template.join("?").includes("INSERT INTO provider_daemon_events")
+              ) {
+                insertAttempts += 1;
+                if (insertAttempts === 1)
+                  return Deferred.succeed(failedWrite, undefined).pipe(
+                    Effect.andThen(
+                      Effect.fail(
+                        new SqlError.SqlError({
+                          reason: new SqlError.LockTimeoutError({
+                            operation: "execute",
+                            cause: "private sql parameters",
+                          }),
+                        }),
+                      ),
+                    ),
+                  );
+              }
+              return Reflect.apply(target, thisArg, args);
+            },
+          });
+          const port = yield* startProviderDaemonServerOnEphemeralPort({
+            host: "127.0.0.1",
+            token: TEST_TOKEN,
+            version: "0.0.0-test",
+            onRuntimeEventJournaled: (event) => {
+              delivered.push(event.eventId);
+              if (delivered.length === 2) Effect.runSync(Deferred.succeed(completed, undefined));
+            },
+          }).pipe(Effect.provideService(SqlClient.SqlClient, faultSql));
+          yield* Deferred.succeed(
+            events,
+            [1, 2].map((index) => ({
+              type: "turn.completed" as const,
+              eventId: asEventId(`ordered-journal-${index}`),
+              provider: ProviderDriverKind.make("codex"),
+              threadId: ThreadId.make("ordered-journal-thread"),
+              createdAt: "2026-01-01T00:00:00.000Z",
+              payload: { state: "completed" as const },
+            })),
+          );
+          yield* Deferred.await(failedWrite);
+          const read = (route: string) =>
+            Effect.promise(() =>
+              fetch(`http://127.0.0.1:${port}${route}`, {
+                headers: { authorization: `Bearer ${TEST_TOKEN}` },
+              }),
+            );
+          const unavailable = yield* read("/api/provider-daemon/health");
+          assert.equal(unavailable.status, 503);
+          assert.deepEqual(yield* Effect.promise(() => unavailable.json()), {
+            error: "provider-journal-unavailable",
+            state: "retrying",
+          });
+          assert.equal((yield* read(PROVIDER_DAEMON_LIVENESS_PATH)).status, 200);
+          assert.deepEqual(delivered, []);
+          assert.equal(insertAttempts, 1);
+          yield* TestClock.adjust(100);
+          yield* Deferred.await(completed);
+          assert.deepEqual(delivered, ["ordered-journal-1", "ordered-journal-2"]);
+          assert.equal(insertAttempts, 3);
+          const healthy = yield* read("/api/provider-daemon/health");
+          assert.equal(healthy.status, 200);
+          assert.equal(
+            decodeProviderDaemonHealth(yield* Effect.promise(() => healthy.json())).eventCursor,
+            2,
+          );
+        }).pipe(Effect.scoped, Effect.provide(layer));
+      }),
   );
 
   it.effect("keeps journaling runtime events after one malformed event", () =>

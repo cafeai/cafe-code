@@ -32,7 +32,13 @@ import {
   checkClaudeProviderStatus,
   makePendingClaudeProvider,
   probeClaudeCapabilities,
+  getClaudeModelCapabilities,
 } from "../Layers/ClaudeProvider.ts";
+import {
+  findClaudeNativeModel,
+  reconcileClaudeModelCapabilities,
+  type ClaudeNativeModel,
+} from "../claudeModelMetadata.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import {
@@ -194,11 +200,23 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
           }
         });
 
+      const nativeModelsRef = yield* Ref.make<ReadonlyArray<ClaudeNativeModel> | undefined>(
+        undefined,
+      );
       const adapterOptions = {
         instanceId,
         environment: effectiveEnvironment,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
         onAuthStatusChanged,
+        getModelCapabilities: (model: string) =>
+          Ref.get(nativeModelsRef).pipe(
+            Effect.map((models) =>
+              reconcileClaudeModelCapabilities(
+                getClaudeModelCapabilities(model),
+                findClaudeNativeModel(models, model),
+              ),
+            ),
+          ),
       };
       const adapter = yield* makeClaudeAdapter(effectiveConfig, adapterOptions);
       const textGeneration = yield* makeClaudeTextGeneration(effectiveConfig, effectiveEnvironment);
@@ -210,6 +228,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         timeToLive: CAPABILITIES_PROBE_TTL,
         lookup: () =>
           probeClaudeCapabilities(effectiveConfig, effectiveEnvironment).pipe(
+            Effect.tap((result) => Ref.set(nativeModelsRef, result?.models)),
             Effect.provideService(Path.Path, path),
           ),
       });

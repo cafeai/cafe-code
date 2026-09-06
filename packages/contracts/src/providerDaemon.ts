@@ -1,4 +1,8 @@
 import * as Schema from "effect/Schema";
+import {
+  ProviderRespondToInteractionInput,
+  ProviderResolveInteractionUrlInput,
+} from "./providerInteraction.ts";
 
 import {
   IsoDateTime,
@@ -534,6 +538,15 @@ export const ProviderDaemonRpcRequest = Schema.Union([
     commandId: Schema.optional(ProviderDaemonCommandId),
     payload: ProviderSnoozeUserInputInput,
   }),
+  // Deliberately no commandId: these private callbacks must never be journaled.
+  Schema.Struct({
+    method: Schema.Literal("respondToInteraction"),
+    payload: ProviderRespondToInteractionInput,
+  }),
+  Schema.Struct({
+    method: Schema.Literal("resolveInteractionUrl"),
+    payload: ProviderResolveInteractionUrlInput,
+  }),
   Schema.Struct({
     method: Schema.Literal("stopSession"),
     commandId: Schema.optional(ProviderDaemonCommandId),
@@ -597,6 +610,8 @@ export const ProviderDaemonRpcResultByMethod = {
   respondToRequest: Schema.Void,
   respondToUserInput: Schema.Void,
   snoozeUserInput: Schema.Void,
+  respondToInteraction: Schema.Void,
+  resolveInteractionUrl: Schema.String.check(Schema.isMaxLength(8192)),
   stopSession: Schema.Void,
   quiesceThreadForHardDelete: Schema.Void,
   restartProviderRuntime: ProviderDaemonRuntimeRestartResult,

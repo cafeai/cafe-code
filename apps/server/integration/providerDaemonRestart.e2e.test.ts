@@ -35,11 +35,6 @@ interface SpawnedDaemon {
   readonly logs: () => string;
 }
 
-function shortTempRoot(): string {
-  const suffix = crypto.randomBytes(6).toString("hex");
-  return path.join("/tmp", `ccpd-e2e-${process.pid}-${suffix}`);
-}
-
 function makeToken(): string {
   return crypto.randomBytes(32).toString("hex");
 }
@@ -63,24 +58,15 @@ function collectChildLogs(child: ChildProcess): () => string {
   return () => output;
 }
 
-function providerRuntimeChildEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, ELECTRON_RUN_AS_NODE: "1" };
-  for (const name of [
-    "CAFE_CODE_PORT",
-    "CAFE_CODE_MODE",
-    "CAFE_CODE_NO_BROWSER",
-    "CAFE_CODE_HOST",
-    "CAFE_CODE_DEV_URL",
-    "CAFE_CODE_DESKTOP_DEV",
-    "CAFE_CODE_DESKTOP_WS_URL",
-    "CAFE_CODE_DESKTOP_LAN_ACCESS",
-    "CAFE_CODE_DESKTOP_LAN_HOST",
-    "CAFE_CODE_DESKTOP_HTTPS_ENDPOINTS",
-    "VITE_DEV_SERVER_URL",
-  ]) {
-    delete env[name];
-  }
-  return env;
+function providerRuntimeChildEnv(cafeCodeHome: string): NodeJS.ProcessEnv {
+  // This macOS/Linux canary must never inherit provider credentials, Node
+  // hooks, a live Cafe endpoint, or the developer's provider-home directories.
+  // Explicitly disabled settings below provide a second independent boundary.
+  return {
+    PATH: path.dirname(process.execPath),
+    HOME: cafeCodeHome,
+    ELECTRON_RUN_AS_NODE: "1",
+  };
 }
 
 function spawnProviderDaemon(input: {
@@ -106,7 +92,7 @@ function spawnProviderDaemon(input: {
     [backendEntryPath(), "provider-daemon", "--bootstrap-fd", "3"],
     {
       cwd: path.resolve(import.meta.dirname, ".."),
-      env: providerRuntimeChildEnv(),
+      env: providerRuntimeChildEnv(input.cafeCodeHome),
       stdio: ["ignore", "pipe", "pipe", "pipe"],
     },
   );
@@ -150,15 +136,6 @@ async function waitForHealth(spawned: SpawnedDaemon): Promise<ProviderDaemonHeal
   throw new Error(`Provider daemon health did not become ready: ${detail}\n${spawned.logs()}`);
 }
 
-function isPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 async function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
   if (child.exitCode !== null || child.signalCode !== null) {
     return true;
@@ -187,56 +164,55 @@ async function stopChild(child: ChildProcess | undefined): Promise<void> {
   }
 }
 
-async function terminatePid(pid: number | undefined): Promise<void> {
-  if (pid === undefined || pid <= 0 || pid === process.pid || !isPidAlive(pid)) {
-    return;
-  }
-  try {
-    process.kill(pid, "SIGTERM");
-  } catch {
-    return;
-  }
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < EXIT_TIMEOUT_MS) {
-    if (!isPidAlive(pid)) {
-      return;
-    }
-    await sleep(100);
-  }
-  try {
-    process.kill(pid, "SIGKILL");
-  } catch {
-    return;
-  }
-}
-
-describe.skipIf(!RUN_REAL_PROCESS_E2E)("provider daemon detached supervisor e2e", () => {
-  it("adopts the same detached supervisor after daemon restart", async () => {
-    const baseDir = shortTempRoot();
+describe.skipIf(!RUN_REAL_PROCESS_E2E)("provider daemon isolated restart e2e", () => {
+  it("retains local ownership and authenticates the replacement process after restart", async () => {
+    // Keep the IPC path short enough for macOS sockaddr_un. mkdtemp gives the
+    // cleanup an exclusively owned directory rather than a guessed location.
+    const baseDir = await fs.mkdtemp(path.join("/tmp", "ccpd-e2e-"));
     const socketPath = path.join(baseDir, "provider-daemon.sock");
     let firstDaemon: SpawnedDaemon | undefined;
     let secondDaemon: SpawnedDaemon | undefined;
-    let supervisorPid: number | undefined;
 
     try {
-      await fs.mkdir(baseDir, { recursive: true, mode: 0o700 });
+      await fs.chmod(baseDir, 0o700);
+      await fs.mkdir(path.join(baseDir, "userdata"), { mode: 0o700 });
+      await fs.writeFile(
+        path.join(baseDir, "userdata", "settings.json"),
+        JSON.stringify({
+          providers: {
+            codex: { enabled: false },
+            claudeAgent: { enabled: false },
+            grok: { enabled: false },
+            opencode: { enabled: false },
+          },
+        }),
+        { mode: 0o600, flag: "wx" },
+      );
 
       firstDaemon = spawnProviderDaemon({ cafeCodeHome: baseDir, socketPath });
       const firstHealth = await waitForHealth(firstDaemon);
-      supervisorPid = firstHealth.upstreamSupervisor?.pid;
 
       assert.equal(firstHealth.mode, "provider-daemon");
-      assert.equal(firstHealth.upstreamSupervisor?.reachable, true);
-      assert.equal(firstHealth.upstreamSupervisor?.mode, "provider-supervisor");
-      assert.equal(firstHealth.supervisorProcess?.status, "spawned");
-      assert.equal(firstHealth.supervisorProcess?.adoptedExistingProcess, false);
-      assert.equal(firstHealth.supervisorProcess?.pid, supervisorPid);
-      assert.isDefined(supervisorPid);
-      const detachedSupervisorPid = supervisorPid;
-      assert.isTrue(isPidAlive(detachedSupervisorPid));
+      assert.equal(firstHealth.pid, firstDaemon.child.pid);
+      assert.equal(firstHealth.activeSessionCount, 0);
+      // Automatic supervisor handoff is deliberately disabled by the CLI.
+      // This canary verifies the architecture actually shipped, not an older
+      // experimental detached-supervisor mode that must remain quarantined.
+      assert.isUndefined(firstHealth.upstreamSupervisor);
+      assert.isUndefined(firstHealth.supervisorProcess);
+      const unauthorized = await requestProviderDaemonJson(
+        {
+          ...firstDaemon.endpoint,
+          token: makeToken(),
+        },
+        PROVIDER_DAEMON_HEALTH_PATH,
+        { timeoutMs: 1_000 },
+      );
+      assert.equal(unauthorized.statusCode, 401);
 
       const firstDaemonPid = firstHealth.pid;
       await stopChild(firstDaemon.child);
+      assert.isTrue(firstDaemon.child.exitCode !== null || firstDaemon.child.signalCode !== null);
       await fs.rm(socketPath, { force: true });
 
       secondDaemon = spawnProviderDaemon({ cafeCodeHome: baseDir, socketPath });
@@ -244,17 +220,21 @@ describe.skipIf(!RUN_REAL_PROCESS_E2E)("provider daemon detached supervisor e2e"
 
       assert.equal(secondHealth.mode, "provider-daemon");
       assert.notEqual(secondHealth.pid, firstDaemonPid);
-      assert.equal(secondHealth.upstreamSupervisor?.reachable, true);
-      assert.equal(secondHealth.upstreamSupervisor?.mode, "provider-supervisor");
-      assert.equal(secondHealth.upstreamSupervisor?.pid, detachedSupervisorPid);
-      assert.equal(secondHealth.supervisorProcess?.status, "adopted");
-      assert.equal(secondHealth.supervisorProcess?.adoptedExistingProcess, true);
-      assert.equal(secondHealth.supervisorProcess?.pid, detachedSupervisorPid);
-      assert.isTrue(isPidAlive(detachedSupervisorPid));
+      assert.equal(secondHealth.pid, secondDaemon.child.pid);
+      assert.equal(secondHealth.activeSessionCount, 0);
+      assert.isUndefined(secondHealth.upstreamSupervisor);
+      assert.isUndefined(secondHealth.supervisorProcess);
+      // The same isolated socket/home must not make the previous generation's
+      // capability valid for its replacement process.
+      const staleCapability = await requestProviderDaemonJson(
+        firstDaemon.endpoint,
+        PROVIDER_DAEMON_HEALTH_PATH,
+        { timeoutMs: 1_000 },
+      );
+      assert.equal(staleCapability.statusCode, 401);
     } finally {
       await stopChild(secondDaemon?.child);
       await stopChild(firstDaemon?.child);
-      await terminatePid(supervisorPid);
       await fs.rm(baseDir, { recursive: true, force: true });
     }
   }, 60_000);

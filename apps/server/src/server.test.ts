@@ -721,6 +721,7 @@ const buildAppUnderTest = (options?: {
             ...options?.layers?.clientSettings,
           }),
           Layer.mock(UsageStatsService)({
+            recordAccounting: () => Effect.void,
             get: Effect.succeed({
               totals: {
                 generatingMs: 0,
@@ -1383,6 +1384,7 @@ const assertBrowserApiCorsHeaders = (headers: HeaderBag) => {
     "content-type",
     "mcp-protocol-version",
     "traceparent",
+    "x-cafe-attachment-lifecycle",
     "x-cafe-attachment-name",
     "x-cafe-thread-id",
   ]);
@@ -3115,6 +3117,58 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect("retains acknowledged offline uploads and discards only exact provisional owners", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+      const cookie = yield* getAuthenticatedSessionCookieHeader();
+      const upload = () =>
+        HttpClient.post("/api/attachments", {
+          headers: {
+            cookie,
+            "x-cafe-thread-id": "future-retained",
+            "x-cafe-attachment-name": "file.tex",
+            "x-cafe-attachment-lifecycle": "provisional-v1",
+          },
+          body: HttpBody.text("private document"),
+        });
+      const first = yield* upload();
+      assert.equal(first.headers["x-cafe-attachment-lifecycle"], "provisional-v1");
+      const retained = (yield* first.json) as { id: string };
+      const second = yield* upload();
+      const provisional = (yield* second.json) as { id: string };
+      const action = (id: string, mode: "retain" | "discard", threadId = "future-retained") =>
+        HttpClient.post(`/api/attachments/${id}/${mode}`, {
+          headers: { cookie, "x-cafe-thread-id": threadId },
+        });
+      assert.equal((yield* action(retained.id, "retain", "other-thread")).status, 404);
+      assert.equal((yield* action(retained.id, "retain")).status, 204);
+      assert.equal((yield* action(retained.id, "discard")).status, 204);
+      assert.equal(
+        (yield* HttpClient.get(`/api/attachments/${retained.id}`, { headers: { cookie } })).status,
+        200,
+      );
+      assert.equal((yield* action(provisional.id, "discard", "other-thread")).status, 204);
+      assert.equal(
+        (yield* HttpClient.get(`/api/attachments/${provisional.id}`, { headers: { cookie } }))
+          .status,
+        200,
+      );
+      assert.equal((yield* action(provisional.id, "discard")).status, 204);
+      assert.equal((yield* action(provisional.id, "retain")).status, 404);
+      assert.equal(
+        (yield* HttpClient.get(`/api/attachments/${provisional.id}`, { headers: { cookie } }))
+          .status,
+        404,
+      );
+      assert.equal(
+        (yield* HttpClient.post(`/api/attachments/${retained.id}/retain`, {
+          headers: { "x-cafe-thread-id": "future-retained" },
+        })).status,
+        401,
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("rejects file uploads without authentication or a valid target", () =>
     Effect.gen(function* () {
       yield* buildAppUnderTest();
@@ -3462,6 +3516,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         "content-type",
         "mcp-protocol-version",
         "traceparent",
+        "x-cafe-attachment-lifecycle",
         "x-cafe-attachment-name",
         "x-cafe-thread-id",
       ]);

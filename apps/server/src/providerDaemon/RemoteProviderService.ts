@@ -65,6 +65,7 @@ const decodeAdapterCapabilities = Schema.decodeUnknownSync(ProviderDaemonAdapter
 const decodeInstanceRoutingInfo = Schema.decodeUnknownSync(ProviderDaemonInstanceRoutingInfo);
 const encodeRpcRequestJson = Schema.encodeSync(Schema.fromJsonString(ProviderDaemonRpcRequest));
 const VOID_RPC_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
+  "respondToInteraction",
   "discardSessionFork",
   "interruptTurn",
   "respondToRequest",
@@ -549,6 +550,9 @@ const makeRemoteProviderService = Effect.gen(function* () {
     interruptTurn: (input) => guardedRpc({ method: "interruptTurn", payload: input }),
     respondToRequest: (input) => guardedRpc({ method: "respondToRequest", payload: input }),
     respondToUserInput: (input) => guardedRpc({ method: "respondToUserInput", payload: input }),
+    respondToInteraction: (input) => guardedRpc({ method: "respondToInteraction", payload: input }),
+    resolveInteractionUrl: (input) =>
+      guardedRpc({ method: "resolveInteractionUrl", payload: input }),
     snoozeUserInput: (input) => guardedRpc({ method: "snoozeUserInput", payload: input }),
     stopSession: (input) => guardedRpc({ method: "stopSession", payload: input }),
     quiesceThreadForHardDelete: (input) =>

@@ -17,6 +17,7 @@ import {
   getProviderOptionBooleanSelectionValue,
   getProviderOptionStringSelectionValue,
   isClaudeUltrathinkPrompt,
+  modelAcceptsImages,
   normalizeModelSlug,
   resolveModelSlugForProvider,
   resolveSelectableModel,
@@ -41,6 +42,30 @@ const codexCaps: ModelCapabilities = createModelCapabilities({
       type: "boolean",
     },
   ],
+});
+
+describe("native input capabilities", () => {
+  it("respects explicit modalities, including an empty or audio-only supported subset", () => {
+    expect(modelAcceptsImages({ inputModalities: ["text"] }, "future-model")).toBe(false);
+    expect(modelAcceptsImages({ inputModalities: [] }, "future-model")).toBe(false);
+    expect(modelAcceptsImages({ inputModalities: ["image"] }, "future-model")).toBe(true);
+    expect(modelAcceptsImages(undefined, "legacy-model")).toBe(true);
+    expect(modelAcceptsImages(undefined, "openai/gpt-5.3-codex-spark")).toBe(false);
+    expect(modelAcceptsImages({ inputModalities: ["image"] }, "gpt-5.3-codex-spark")).toBe(true);
+  });
+
+  it("copies native metadata without inventing capabilities for older catalogs", () => {
+    const modalities: ("text" | "image")[] = ["text", "image", "image"];
+    const capabilities = createModelCapabilities({
+      optionDescriptors: [],
+      inputModalities: modalities,
+      supportsAutoMode: false,
+    });
+    modalities.length = 0;
+    expect(capabilities.inputModalities).toEqual(["text", "image"]);
+    expect(capabilities.supportsAutoMode).toBe(false);
+    expect(createModelCapabilities({ optionDescriptors: [] }).inputModalities).toBeUndefined();
+  });
 });
 
 const claudeCaps: ModelCapabilities = createModelCapabilities({

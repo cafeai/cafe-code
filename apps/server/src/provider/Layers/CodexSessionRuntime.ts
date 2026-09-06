@@ -22,6 +22,12 @@ import {
   TurnId,
 } from "@cafecode/contracts";
 import { normalizeModelSlug } from "@cafecode/shared/model";
+import { validateInteractionResponse } from "@cafecode/shared/providerInteraction";
+import {
+  registerCodexInteractions,
+  settleCodexInteractionBoundary,
+  type CodexPendingInteraction,
+} from "./CodexInteractions.ts";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
@@ -508,6 +514,9 @@ export interface CodexSessionRuntimeShape {
   readonly snoozeUserInput: (
     requestId: ApprovalRequestId,
   ) => Effect.Effect<void, CodexSessionRuntimeError>;
+  readonly resolveInteractionUrl?: (
+    requestId: ApprovalRequestId,
+  ) => Effect.Effect<string, CodexSessionRuntimeError>;
   readonly events: Stream.Stream<ProviderEvent, never>;
   readonly close: Effect.Effect<void>;
 }
@@ -3115,6 +3124,9 @@ export function sanitizeCodexProtocolDiagnosticPayload(input: {
 
   const payload = readRecord(input.payload);
   const method = payload ? readString(payload.method) : undefined;
+  if (method === "mcpServer/elicitation/request" || method === "item/permissions/requestApproval") {
+    return { method, diagnosticClass: "private-interaction-redacted", stage: input.stage };
+  }
   if (
     method !== "modelProvider/authRecoveryStarted" &&
     method !== "modelProvider/authRecoveryCompleted"
@@ -3854,6 +3866,9 @@ export const makeCodexSessionRuntime = (
     const pendingApprovalsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingApproval>());
     const approvalCorrelationsRef = yield* Ref.make(new Map<string, ApprovalCorrelation>());
     const pendingUserInputsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingUserInput>());
+    const pendingInteractionsRef = yield* Ref.make(
+      new Map<ApprovalRequestId, CodexPendingInteraction>(),
+    );
     const collabReceiverTurnsRef = yield* Ref.make(new Map<string, TurnId>());
     const childConversationLivenessRef = yield* Ref.make(
       new Map<string, CodexChildConversationLiveness>(),
@@ -5455,6 +5470,26 @@ export const makeCodexSessionRuntime = (
 
     const handleRawNotification = (notification: CodexServerNotification) =>
       Effect.gen(function* () {
+        // Native cancellation wins even for child-owned or standalone MCP
+        // requests. Compare the actual RPC id and provider thread, never an
+        // item-id guess or the currently focused Cafe thread.
+        if (
+          notification.method === "serverRequest/resolved" ||
+          notification.method === "turn/completed"
+        ) {
+          const params = readRecord(notification.params);
+          const providerThreadId = readNotificationThreadId(notification);
+          const nativeTurnId = readNotificationTurnId(notification);
+          if (providerThreadId)
+            yield* settleCodexInteractionBoundary(yield* Ref.get(pendingInteractionsRef), {
+              providerThreadId,
+              ...(notification.method === "serverRequest/resolved" &&
+              (typeof params?.requestId === "string" || typeof params?.requestId === "number")
+                ? { nativeRequestId: params.requestId }
+                : {}),
+              ...(notification.method === "turn/completed" && nativeTurnId ? { nativeTurnId } : {}),
+            });
+        }
         const observation = yield* observeNotification(notification);
         yield* updateActiveContextCompactionsFromNotification(
           notification,
@@ -5895,6 +5930,23 @@ export const makeCodexSessionRuntime = (
       }),
     );
 
+    yield* registerCodexInteractions({
+      client,
+      pending: pendingInteractionsRef,
+      emit: (event) => emitEvent({ ...event, threadId: options.threadId }),
+      resolveTurn: (providerThreadId, nativeTurnId) =>
+        Effect.gen(function* () {
+          const primary = yield* currentSessionProviderThreadId;
+          if (primary === providerThreadId)
+            return nativeTurnId ? TurnId.make(nativeTurnId) : undefined;
+          const parentTurnId = (yield* Ref.get(collabReceiverTurnsRef)).get(providerThreadId);
+          if (!parentTurnId)
+            return yield* CodexErrors.CodexAppServerRequestError.internalError(
+              "Interactive request has no registered thread owner",
+            );
+          return parentTurnId;
+        }),
+    });
     yield* client.handleUnknownServerRequest((method) =>
       Effect.fail(CodexErrors.CodexAppServerRequestError.methodNotFound(method)),
     );
@@ -6128,6 +6180,9 @@ export const makeCodexSessionRuntime = (
       }
       yield* settlePendingApprovals("cancel");
       yield* settlePendingUserInputs({});
+      for (const pending of (yield* Ref.get(pendingInteractionsRef)).values()) {
+        yield* Deferred.succeed(pending.answers, { __cafeInteraction: { action: "cancel" } });
+      }
       yield* updateSession(sessionRef, {
         status: "closed",
         activeTurnId: undefined,
@@ -6793,6 +6848,16 @@ export const makeCodexSessionRuntime = (
         }),
       respondToUserInput: (requestId, answers) =>
         Effect.gen(function* () {
+          const interaction = (yield* Ref.get(pendingInteractionsRef)).get(requestId);
+          if (interaction) {
+            if (!validateInteractionResponse(interaction.interaction, answers)) {
+              return yield* CodexErrors.CodexAppServerRequestError.internalError(
+                "Invalid interaction response",
+              );
+            }
+            yield* Deferred.succeed(interaction.answers, answers);
+            return;
+          }
           const pending = (yield* Ref.get(pendingUserInputsRef)).get(requestId);
           if (!pending) {
             return yield* new CodexSessionRuntimePendingUserInputNotFoundError({
@@ -6817,6 +6882,13 @@ export const makeCodexSessionRuntime = (
               answers: codexAnswers,
             },
           });
+        }),
+      resolveInteractionUrl: (requestId) =>
+        Effect.gen(function* () {
+          const pending = (yield* Ref.get(pendingInteractionsRef)).get(requestId);
+          if (!pending?.url || (yield* Deferred.isDone(pending.answers)))
+            return yield* new CodexSessionRuntimePendingUserInputNotFoundError({ requestId });
+          return pending.url;
         }),
       snoozeUserInput: (requestId) =>
         Effect.gen(function* () {

@@ -83,8 +83,17 @@ const makeFakeInstance = (
         provider: driverKind,
         packageName: null,
       }),
-      getSnapshot: Effect.succeed({} as unknown as ServerProvider),
-      refresh: Effect.succeed({} as unknown as ServerProvider),
+      getSnapshot: Effect.succeed({
+        models: [
+          {
+            slug: `${driverKindString}-model`,
+            name: "Fixture model",
+            isCustom: false,
+            capabilities: null,
+          },
+        ],
+      } as unknown as ServerProvider),
+      refresh: Effect.die("Inventory reads must not refresh a provider"),
       streamChanges: Stream.empty,
     },
     adapter,
@@ -114,6 +123,20 @@ const layer = Layer.mergeAll(
 );
 
 it.layer(layer)("ProviderAdapterRegistryLive", (it) => {
+  it("reads model inventory only from the exact instance's cached snapshot", () =>
+    Effect.gen(function* () {
+      const registry = yield* ProviderAdapterRegistry;
+      const codex = yield* registry.getModels(defaultInstanceIdForDriver(CODEX_DRIVER));
+      const claude = yield* registry.getModels(defaultInstanceIdForDriver(CLAUDE_AGENT_DRIVER));
+      assert.deepEqual(
+        codex.map((model) => model.slug),
+        ["codex-model"],
+      );
+      assert.deepEqual(
+        claude.map((model) => model.slug),
+        ["claudeAgent-model"],
+      );
+    }));
   it("resolves adapters and routing metadata from provider instances", () =>
     Effect.gen(function* () {
       const registry = yield* ProviderAdapterRegistry;

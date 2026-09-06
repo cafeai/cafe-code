@@ -4,6 +4,10 @@
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "exports": {
+    "./providerInteraction": {
+      "types": "./src/providerInteraction.ts",
+      "import": "./src/providerInteraction.ts"
+    },
     "./model": {
       "types": "./src/model.ts",
       "import": "./src/model.ts"

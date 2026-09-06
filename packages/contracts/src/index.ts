@@ -9,6 +9,7 @@ export * from "./provider.ts";
 export * from "./providerGoal.ts";
 export * from "./providerInstance.ts";
 export * from "./providerRuntime.ts";
+export * from "./providerInteraction.ts";
 export * from "./providerPipelineDiagnostics.ts";
 export * from "./providerDaemon.ts";
 export * from "./providerSupervisor.ts";

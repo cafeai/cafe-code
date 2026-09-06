@@ -37,6 +37,11 @@ class ProviderDaemonEventDecodeError extends Data.TaggedError("ProviderDaemonEve
   readonly cause: unknown;
 }> {}
 
+/** Content-free poison-input marker, distinct from failures of durable storage. */
+export class InvalidProviderDaemonJournalEvent extends Data.TaggedError(
+  "InvalidProviderDaemonJournalEvent",
+)<{}> {}
+
 export interface ProviderDaemonEventJournalSnapshot {
   readonly eventCursor: number;
   readonly retainedEventCount: number;
@@ -611,8 +616,17 @@ export const makePersistentProviderDaemonEventJournal = (options?: {
 
     const publish = (event: ProviderRuntimeEventValue): Effect.Effect<ProviderDaemonEventRecord> =>
       Effect.gen(function* () {
-        const compactedEvent = compactEventForJournal(event);
-        const eventId = runtimeEventId(compactedEvent);
+        const { compactedEvent, eventId, eventJson } = yield* Effect.try({
+          try: () => {
+            const compactedEvent = compactEventForJournal(event);
+            return {
+              compactedEvent,
+              eventId: runtimeEventId(compactedEvent),
+              eventJson: encodeProviderRuntimeEventJson(compactedEvent),
+            };
+          },
+          catch: () => new InvalidProviderDaemonJournalEvent(),
+        }).pipe(Effect.orDie);
         if (eventIdIndexReady) {
           const existingRows = (yield* sql`
             SELECT
@@ -648,7 +662,7 @@ export const makePersistentProviderDaemonEventJournal = (options?: {
               VALUES (
                 ${ownerKey},
                 ${emittedAt},
-                ${encodeProviderRuntimeEventJson(compactedEvent)}
+                ${eventJson}
               )
               RETURNING
                 cursor,
@@ -675,12 +689,22 @@ export const makePersistentProviderDaemonEventJournal = (options?: {
         }
         const record = rowToRecord(row);
         for (const listener of listeners) {
-          listener(record);
+          // Publication is already durable. A disconnected/broken subscriber
+          // must not turn success into a retried INSERT or starve other clients.
+          yield* Effect.sync(() => listener(record)).pipe(
+            Effect.catchCause(() =>
+              Effect.logWarning("provider journal listener failed after commit"),
+            ),
+          );
         }
         eventsSincePrune += 1;
         if (eventsSincePrune >= pruneInterval) {
           eventsSincePrune = 0;
-          yield* pruneToCapacity();
+          yield* pruneToCapacity().pipe(
+            Effect.catchCause(() =>
+              Effect.logWarning("provider journal retention maintenance failed"),
+            ),
+          );
         }
         return record;
       });

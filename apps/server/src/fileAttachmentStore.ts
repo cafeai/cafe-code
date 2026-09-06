@@ -109,6 +109,8 @@ export async function storeFileAttachment(input: {
   name: string;
   mimeType: string;
   bytes: Uint8Array;
+  /** Register a server-minted cleanup identity before either private file exists. */
+  onAllocated?: (attachment: ChatFileAttachment) => Promise<void>;
 }): Promise<ChatFileAttachment> {
   if (input.bytes.byteLength > PROVIDER_SEND_TURN_MAX_FILE_BYTES)
     throw new FileAttachmentError("too-large");
@@ -126,6 +128,7 @@ export async function storeFileAttachment(input: {
   let createdData = false;
   let createdMetadata = false;
   try {
+    await input.onAllocated?.(attachment);
     await mkdir(input.attachmentsDir, { recursive: true, mode: 0o700 });
     await verifyRoot(input.attachmentsDir);
     const data = await open(paths.data, "wx", 0o600);
@@ -235,6 +238,27 @@ export async function removeNewFileAttachment(
   const paths = fileAttachmentStoragePaths(attachmentsDir, attachment.id);
   await unlink(paths.data).catch(() => undefined);
   await unlink(paths.metadata).catch(() => undefined);
+}
+
+/**
+ * Used only after the SQL lifecycle ledger has exclusively claimed this exact
+ * server-minted id. Unlike upload compensation, failed removal must propagate:
+ * retaining the deleting row makes cleanup retryable after a crash or I/O error.
+ */
+export async function removeClaimedFileAttachment(attachmentsDir: string, id: string) {
+  const paths = fileAttachmentStoragePaths(attachmentsDir, id);
+  await verifyRoot(attachmentsDir);
+  for (const path of [paths.data, paths.metadata]) {
+    try {
+      await unlink(path);
+    } catch (error) {
+      if (
+        !(typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT")
+      ) {
+        throw new FileAttachmentError("unavailable");
+      }
+    }
+  }
 }
 
 /** Pure inert preview, never HTML/Markdown interpretation, scripts, or external resources. */

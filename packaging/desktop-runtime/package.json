@@ -24,7 +24,7 @@
     "zod": "^4.0.0"
   },
   "devDependencies": {
-    "electron": "42.2.0",
+    "electron": "42.5.1",
     "electron-builder": "26.15.3"
   }
 }

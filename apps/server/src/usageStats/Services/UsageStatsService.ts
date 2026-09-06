@@ -7,11 +7,26 @@
  *
  * @module UsageStatsService
  */
-import type { UsageStatsGetResult, UsageStatsSnapshot } from "@cafecode/contracts";
+import type {
+  ProviderDriverKind,
+  UsageAccountingSnapshot,
+  UsageStatsGetResult,
+  UsageStatsSnapshot,
+} from "@cafecode/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 
 export interface UsageStatsServiceShape {
+  /**
+   * Settle a cumulative billing snapshot before acknowledging its replay cursor.
+   * Completion means its atomic checkpoint/deltas committed (or invalid input
+   * was conclusively rejected). Storage failures must never acknowledge it.
+   */
+  readonly recordAccounting: (
+    provider: ProviderDriverKind,
+    snapshot: UsageAccountingSnapshot,
+    observedAtMs: number,
+  ) => Effect.Effect<void>;
   /**
    * Lifetime totals, full per-day history for the activity heatmap, and
    * provider/model output-token attribution. Served entirely from memory.

@@ -18,6 +18,7 @@ import {
   type ForkSessionOptions,
   type ForkSessionResult,
   type CanUseTool,
+  type OnElicitation,
   type FastModeDisabledReason,
   type FastModeState,
   query,
@@ -37,12 +38,18 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { parseCliArgs } from "@cafecode/shared/cliArgs";
 import {
+  getSafeInteractionUrl,
+  normalizeElicitationRequest,
+  validateInteractionResponse,
+} from "@cafecode/shared/providerInteraction";
+import {
   ApprovalRequestId,
   type CanonicalItemType,
   type CanonicalRequestType,
   type ClaudeSettings,
   EventId,
   type ModelSelection,
+  type ModelCapabilities,
   type ProviderApprovalDecision,
   ProviderDriverKind,
   type ProviderInteractionMode,
@@ -56,6 +63,7 @@ import {
   type ThreadTokenUsageSnapshot,
   type ProviderSteerTurnInput,
   type ProviderUserInputAnswers,
+  type ProviderElicitation,
   type RuntimeSessionState,
   type RuntimeMode,
   type RuntimeContentStreamKind,
@@ -95,6 +103,8 @@ import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
 import { makeProviderSessionTitle } from "../providerSessionTitle.ts";
+import { awaitClaudeDecision } from "../claudeDecision.ts";
+import { recoverClaudeResume } from "../claudeResumeRecovery.ts";
 import { prepareFileAttachmentPrompt } from "../fileAttachmentPrompt.ts";
 import {
   makeClaudeUsageAccounting,
@@ -383,6 +393,9 @@ interface PendingApproval {
 interface PendingUserInput {
   readonly questions: ReadonlyArray<UserInputQuestion>;
   readonly answers: Deferred.Deferred<ProviderUserInputAnswers>;
+  readonly interaction?: ProviderElicitation;
+  /** Authorization URLs are live capabilities, never durable event fields. */
+  readonly interactionUrl?: string;
 }
 
 interface ToolInFlight {
@@ -514,6 +527,8 @@ interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
 export interface ClaudeAdapterLiveOptions {
   readonly instanceId?: ProviderInstanceId;
   readonly environment?: NodeJS.ProcessEnv;
+  /** Read only the owning driver's already-observed initialization metadata. */
+  readonly getModelCapabilities?: (model: string) => Effect.Effect<ModelCapabilities>;
   readonly createQuery?: (input: {
     readonly prompt: AsyncIterable<SDKUserMessage>;
     readonly options: ClaudeQueryOptions;
@@ -1965,37 +1980,6 @@ function hasDurableClaudeSessionId(message: SDKMessage): boolean {
   );
 }
 
-function safeParseJsonObject(value: string): Record<string, unknown> | undefined {
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function transcriptLineHasClaudeMessageUuid(line: string, messageUuid: string): boolean {
-  const parsed = safeParseJsonObject(line);
-  return parsed?.uuid === messageUuid;
-}
-
-function transcriptFileContainsClaudeMessageUuid(input: {
-  readonly fileSystem: FileSystem.FileSystem;
-  readonly filePath: string;
-  readonly messageUuid: string;
-}): Effect.Effect<boolean, never> {
-  return input.fileSystem.readFileString(input.filePath).pipe(
-    Effect.map((contents) =>
-      contents
-        .split(/\r?\n/)
-        .some((line) => transcriptLineHasClaudeMessageUuid(line, input.messageUuid)),
-    ),
-    Effect.catch(() => Effect.succeed(false)),
-  );
-}
-
 function toMessage(cause: unknown, fallback: string): string {
   if (cause instanceof Error && cause.message.length > 0) {
     return cause.message;
@@ -2035,7 +2019,10 @@ function getEffectiveClaudeAgentEffort(effort: string | null | undefined): Claud
   return normalized ? (normalized as ClaudeSdkEffort) : null;
 }
 
-export function resolveClaudeModelSessionOptions(modelSelection: ModelSelection | undefined): {
+export function resolveClaudeModelSessionOptions(
+  modelSelection: ModelSelection | undefined,
+  nativeCapabilities?: ModelCapabilities,
+): {
   readonly apiModelId: string | undefined;
   readonly selectedContextWindowTokens: number | undefined;
   readonly effectiveEffort: ClaudeSdkEffort | null;
@@ -2046,7 +2033,7 @@ export function resolveClaudeModelSessionOptions(modelSelection: ModelSelection 
     readonly outputStyle?: "Concise";
   };
 } {
-  const caps = getClaudeModelCapabilities(modelSelection?.model);
+  const caps = nativeCapabilities ?? getClaudeModelCapabilities(modelSelection?.model);
   const descriptors = getProviderOptionDescriptors({
     caps,
     selections: modelSelection?.options,
@@ -2804,293 +2791,6 @@ function makeClaudeSubagentHistorySessionStore(input: {
     },
   };
 }
-
-function pathExists(
-  fileSystem: FileSystem.FileSystem,
-  filePath: string,
-): Effect.Effect<boolean, never> {
-  return fileSystem.exists(filePath).pipe(Effect.catch(() => Effect.succeed(false)));
-}
-
-function copyRegularFileIfMissing(input: {
-  readonly fileSystem: FileSystem.FileSystem;
-  readonly path: Path.Path;
-  readonly sourcePath: string;
-  readonly targetPath: string;
-}): Effect.Effect<boolean, never> {
-  return Effect.gen(function* () {
-    if (yield* pathExists(input.fileSystem, input.targetPath)) {
-      return false;
-    }
-    const sourceInfo = yield* input.fileSystem
-      .stat(input.sourcePath)
-      .pipe(Effect.catch(() => Effect.succeed(null)));
-    if (sourceInfo?.type !== "File") {
-      return false;
-    }
-    yield* input.fileSystem
-      .makeDirectory(input.path.dirname(input.targetPath), { recursive: true })
-      .pipe(Effect.catch(() => Effect.void));
-    return yield* input.fileSystem
-      .copy(input.sourcePath, input.targetPath, {
-        overwrite: false,
-        preserveTimestamps: true,
-      })
-      .pipe(
-        Effect.as(true),
-        Effect.catch(() => Effect.succeed(false)),
-      );
-  });
-}
-
-function copyDirectoryIfMissing(input: {
-  readonly fileSystem: FileSystem.FileSystem;
-  readonly path: Path.Path;
-  readonly sourcePath: string;
-  readonly targetPath: string;
-}): Effect.Effect<boolean, never> {
-  return Effect.gen(function* () {
-    if (yield* pathExists(input.fileSystem, input.targetPath)) {
-      return false;
-    }
-    const sourceInfo = yield* input.fileSystem
-      .stat(input.sourcePath)
-      .pipe(Effect.catch(() => Effect.succeed(null)));
-    if (sourceInfo?.type !== "Directory") {
-      return false;
-    }
-    yield* input.fileSystem
-      .makeDirectory(input.path.dirname(input.targetPath), { recursive: true })
-      .pipe(Effect.catch(() => Effect.void));
-    return yield* input.fileSystem
-      .copy(input.sourcePath, input.targetPath, {
-        overwrite: false,
-        preserveTimestamps: true,
-      })
-      .pipe(
-        Effect.as(true),
-        Effect.catch(() => Effect.succeed(false)),
-      );
-  });
-}
-
-function isDirectory(
-  fileSystem: FileSystem.FileSystem,
-  filePath: string,
-): Effect.Effect<boolean, never> {
-  return fileSystem.stat(filePath).pipe(
-    Effect.map((info) => info.type === "Directory"),
-    Effect.catch(() => Effect.succeed(false)),
-  );
-}
-
-const ensureClaudeResumeArtifactsForCwd = Effect.fn(
-  "ClaudeAdapter.ensureClaudeResumeArtifactsForCwd",
-)(function* (input: {
-  readonly fileSystem: FileSystem.FileSystem;
-  readonly path: Path.Path;
-  readonly env: NodeJS.ProcessEnv;
-  readonly cwd: string | undefined;
-  readonly resumeSessionId: string | undefined;
-}): Effect.fn.Return<
-  | {
-      readonly checked: false;
-      readonly reason: "missing-cwd-or-session";
-    }
-  | {
-      readonly checked: true;
-      readonly sessionFileExists: boolean;
-      readonly targetSessionFile: string;
-      readonly targetProjectDirectory: string;
-      readonly copiedFile: boolean;
-      readonly copiedDirectory: boolean;
-      readonly sourceProjectDirectory?: string;
-    },
-  never
-> {
-  if (!input.cwd || !input.resumeSessionId) {
-    return {
-      checked: false,
-      reason: "missing-cwd-or-session",
-    };
-  }
-
-  const { fileSystem, path } = input;
-  const resumeSessionId = input.resumeSessionId;
-  const projectsDirectory = path.join(resolveClaudeConfigDirectory(path, input.env), "projects");
-  if (!(yield* pathExists(fileSystem, projectsDirectory))) {
-    const targetProjectDirectory = path.join(
-      projectsDirectory,
-      claudeProjectDirectoryName(path, input.cwd),
-    );
-    return {
-      checked: true,
-      sessionFileExists: false,
-      targetSessionFile: path.join(targetProjectDirectory, `${resumeSessionId}.jsonl`),
-      targetProjectDirectory,
-      copiedFile: false,
-      copiedDirectory: false,
-    };
-  }
-
-  const targetProjectDirectory = path.join(
-    projectsDirectory,
-    claudeProjectDirectoryName(path, input.cwd),
-  );
-  const targetSessionFile = path.join(targetProjectDirectory, `${resumeSessionId}.jsonl`);
-  const targetSessionDirectory = path.join(targetProjectDirectory, resumeSessionId);
-
-  const result = yield* Effect.gen(function* () {
-    const targetSessionFileExists = yield* pathExists(fileSystem, targetSessionFile);
-    if (targetSessionFileExists) {
-      return {
-        checked: true as const,
-        sessionFileExists: true,
-        targetSessionFile,
-        targetProjectDirectory,
-        copiedFile: false,
-        copiedDirectory: false,
-      };
-    }
-
-    const projectEntries = yield* fileSystem.readDirectory(projectsDirectory);
-    for (const entryName of projectEntries) {
-      const sourceProjectDirectory = path.join(projectsDirectory, entryName);
-      if (sourceProjectDirectory === targetProjectDirectory) {
-        continue;
-      }
-      if (!(yield* isDirectory(fileSystem, sourceProjectDirectory))) {
-        continue;
-      }
-
-      const sourceSessionFile = path.join(sourceProjectDirectory, `${resumeSessionId}.jsonl`);
-      const sourceSessionDirectory = path.join(sourceProjectDirectory, resumeSessionId);
-      const sourceSessionFileExists = yield* pathExists(fileSystem, sourceSessionFile);
-      const sourceSessionDirectoryExists = yield* pathExists(fileSystem, sourceSessionDirectory);
-      if (!sourceSessionFileExists && !sourceSessionDirectoryExists) {
-        continue;
-      }
-
-      const copiedFile = sourceSessionFileExists
-        ? yield* copyRegularFileIfMissing({
-            fileSystem,
-            path,
-            sourcePath: sourceSessionFile,
-            targetPath: targetSessionFile,
-          })
-        : false;
-      const copiedDirectory = sourceSessionDirectoryExists
-        ? yield* copyDirectoryIfMissing({
-            fileSystem,
-            path,
-            sourcePath: sourceSessionDirectory,
-            targetPath: targetSessionDirectory,
-          })
-        : false;
-      if (!copiedFile && !copiedDirectory) {
-        return {
-          checked: true as const,
-          sessionFileExists: yield* pathExists(fileSystem, targetSessionFile),
-          targetSessionFile,
-          targetProjectDirectory,
-          copiedFile,
-          copiedDirectory,
-          sourceProjectDirectory,
-        };
-      }
-
-      return {
-        checked: true as const,
-        sessionFileExists: yield* pathExists(fileSystem, targetSessionFile),
-        targetSessionFile,
-        targetProjectDirectory,
-        copiedFile,
-        copiedDirectory,
-        sourceProjectDirectory,
-      };
-    }
-    return {
-      checked: true as const,
-      sessionFileExists: yield* pathExists(fileSystem, targetSessionFile),
-      targetSessionFile,
-      targetProjectDirectory,
-      copiedFile: false,
-      copiedDirectory: false,
-    };
-  }).pipe(
-    Effect.catchCause((cause) =>
-      Effect.logWarning("claude.resume.artifacts.copy-failed", {
-        sessionId: input.resumeSessionId,
-        cwd: input.cwd,
-        cause: Cause.pretty(cause),
-      }).pipe(
-        Effect.as({
-          checked: true as const,
-          sessionFileExists: false,
-          targetSessionFile,
-          targetProjectDirectory,
-          copiedFile: false,
-          copiedDirectory: false,
-        }),
-      ),
-    ),
-  );
-
-  const copiedSourceProjectDirectory =
-    "sourceProjectDirectory" in result ? result.sourceProjectDirectory : undefined;
-  if (copiedSourceProjectDirectory !== undefined && (result.copiedFile || result.copiedDirectory)) {
-    yield* Effect.logInfo("claude.resume.artifacts.copied-for-cwd", {
-      sessionId: input.resumeSessionId,
-      sourceProjectDirectory: copiedSourceProjectDirectory,
-      targetProjectDirectory: result.targetProjectDirectory,
-      copiedFile: result.copiedFile,
-      copiedDirectory: result.copiedDirectory,
-      sessionFileExists: result.sessionFileExists,
-    });
-  }
-
-  return result;
-});
-
-const findClaudeSessionIdByMessageUuid = Effect.fn(
-  "ClaudeAdapter.findClaudeSessionIdByMessageUuid",
-)(function* (input: {
-  readonly fileSystem: FileSystem.FileSystem;
-  readonly path: Path.Path;
-  readonly projectDirectory: string;
-  readonly messageUuid: string | undefined;
-}): Effect.fn.Return<string | undefined, never> {
-  if (!input.messageUuid) {
-    return undefined;
-  }
-
-  const entries = yield* input.fileSystem
-    .readDirectory(input.projectDirectory)
-    .pipe(Effect.catch(() => Effect.succeed([] as ReadonlyArray<string>)));
-  for (const entryName of entries.toSorted()) {
-    if (!entryName.endsWith(".jsonl")) {
-      continue;
-    }
-
-    const sessionId = entryName.slice(0, -".jsonl".length);
-    if (!isUuid(sessionId)) {
-      continue;
-    }
-
-    const filePath = input.path.join(input.projectDirectory, entryName);
-    if (
-      yield* transcriptFileContainsClaudeMessageUuid({
-        fileSystem: input.fileSystem,
-        filePath,
-        messageUuid: input.messageUuid,
-      })
-    ) {
-      return sessionId;
-    }
-  }
-
-  return undefined;
-});
 
 function classifyToolItemType(toolName: string): CanonicalItemType {
   const normalized = toolName.toLowerCase();
@@ -6908,6 +6608,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
     }
     context.pendingApprovals.clear();
+    for (const pending of context.pendingUserInputs.values()) {
+      yield* Deferred.succeed(pending.answers, { __cafeInteraction: { action: "cancel" } });
+    }
+    context.pendingUserInputs.clear();
     context.promptLifecycleByUuid.clear();
 
     if (context.turnState) {
@@ -7047,6 +6751,82 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
       const contextRef = yield* Ref.make<ClaudeSessionContext | undefined>(undefined);
 
+      const onElicitationEffect = Effect.fn("claude.onElicitation")(function* (
+        request: Parameters<OnElicitation>[0],
+        callback: Parameters<OnElicitation>[1],
+      ) {
+        const context = yield* Ref.get(contextRef);
+        if (!context || context.stopped || callback.signal.aborted)
+          return { action: "cancel" as const };
+        const interaction = normalizeElicitationRequest({
+          ...request,
+          mode: request.mode ?? "form",
+        });
+        if (!interaction || pendingUserInputs.size >= 64) return { action: "decline" as const };
+        const interactionUrl =
+          interaction.mode === "url" ? getSafeInteractionUrl(request.url) : null;
+        if (interaction.mode === "url" && !interactionUrl) return { action: "decline" as const };
+        const requestId = ApprovalRequestId.make(yield* Random.nextUUIDv4);
+        const answers = yield* Deferred.make<ProviderUserInputAnswers>();
+        pendingUserInputs.set(requestId, {
+          questions: [],
+          answers,
+          interaction,
+          ...(interactionUrl ? { interactionUrl } : {}),
+        });
+        const requestedStamp = yield* makeEventStamp();
+        const received = yield* awaitClaudeDecision({
+          signal: callback.signal,
+          decision: answers,
+          cancelled: { __cafeInteraction: { action: "cancel" } },
+          publish: offerRuntimeEvent({
+            type: "user-input.requested",
+            ...requestedStamp,
+            provider: PROVIDER,
+            threadId: context.session.threadId,
+            ...(context.turnState ? { turnId: asCanonicalTurnId(context.turnState.turnId) } : {}),
+            requestId: asRuntimeRequestId(requestId),
+            payload: { questions: [], isBlocking: true, interaction },
+            providerRefs: nativeProviderRefs(context),
+          }),
+          onClose: () => {
+            pendingUserInputs.delete(requestId);
+          },
+        });
+        const response =
+          callback.signal.aborted || context.stopped
+            ? { action: "cancel" as const }
+            : (validateInteractionResponse(interaction, received) ?? { action: "cancel" as const });
+        const resolvedStamp = yield* makeEventStamp();
+        yield* offerRuntimeEvent({
+          type: "user-input.resolved",
+          ...resolvedStamp,
+          provider: PROVIDER,
+          threadId: context.session.threadId,
+          ...(context.turnState ? { turnId: asCanonicalTurnId(context.turnState.turnId) } : {}),
+          requestId: asRuntimeRequestId(requestId),
+          // Form answers and authorization capabilities go only to the waiting
+          // SDK callback, never into logs or the durable resolution event.
+          payload: { answers: { __cafeInteraction: { action: response.action } } },
+          providerRefs: nativeProviderRefs(context),
+        });
+        return {
+          action: response.action,
+          ...(response.content
+            ? {
+                content: Object.fromEntries(
+                  Object.entries(response.content).map(([key, value]) => [
+                    key,
+                    typeof value === "object" ? [...value] : value,
+                  ]),
+                ),
+              }
+            : {}),
+        };
+      });
+      const onElicitation: OnElicitation = (request, callback) =>
+        runPromise(onElicitationEffect(request, callback));
+
       /**
        * Handle AskUserQuestion tool calls by emitting a `user-input.requested`
        * runtime event and waiting for the user to respond via `respondToUserInput`.
@@ -7091,7 +6871,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
         // Emit user-input.requested so the UI can present the questions.
         const requestedStamp = yield* makeEventStamp();
-        yield* offerRuntimeEvent({
+        const publish = offerRuntimeEvent({
           type: "user-input.requested",
           eventId: requestedStamp.eventId,
           provider: PROVIDER,
@@ -7118,23 +6898,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         });
 
         pendingUserInputs.set(requestId, pendingInput);
-
-        // Handle abort (e.g. turn interrupted while waiting for user input).
-        const onAbort = () => {
-          if (!pendingUserInputs.has(requestId)) {
-            return;
-          }
-          aborted = true;
-          pendingUserInputs.delete(requestId);
-          runFork(Deferred.succeed(answersDeferred, {} as ProviderUserInputAnswers));
-        };
-        callbackOptions.signal.addEventListener("abort", onAbort, {
-          once: true,
+        const answers = yield* awaitClaudeDecision({
+          signal: callbackOptions.signal,
+          decision: answersDeferred,
+          cancelled: {} as ProviderUserInputAnswers,
+          publish,
+          onAbort: () => {
+            aborted = true;
+          },
+          onClose: () => {
+            pendingUserInputs.delete(requestId);
+          },
         });
-
-        // Block until the user provides answers.
-        const answers = yield* Deferred.await(answersDeferred);
-        pendingUserInputs.delete(requestId);
 
         // Emit user-input.resolved so the UI knows the interaction completed.
         const resolvedStamp = yield* makeEventStamp();
@@ -7161,7 +6936,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           },
         });
 
-        if (aborted) {
+        if (aborted || context.stopped || callbackOptions.signal.aborted) {
           return {
             behavior: "deny",
             message: "User cancelled tool execution.",
@@ -7185,7 +6960,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         callbackOptions: Parameters<CanUseTool>[2],
       ) {
         const context = yield* Ref.get(contextRef);
-        if (!context) {
+        if (!context || context.stopped || callbackOptions.signal.aborted) {
           return {
             behavior: "deny",
             message: "Claude session context is unavailable.",
@@ -7196,6 +6971,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // user via the user-input runtime event channel, regardless of
         // runtime mode (plan mode relies on this heavily).
         if (toolName === "AskUserQuestion") {
+          if (pendingUserInputs.size >= 64)
+            return {
+              behavior: "deny",
+              message: "Too many pending user-input requests.",
+            } satisfies PermissionResult;
           return yield* handleAskUserQuestion(context, toolInput, callbackOptions);
         }
 
@@ -7239,6 +7019,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           } satisfies PermissionResult;
         }
 
+        if (pendingApprovals.size >= 64)
+          return {
+            behavior: "deny",
+            message: "Too many pending approval requests.",
+          } satisfies PermissionResult;
         const requestId = ApprovalRequestId.make(yield* Random.nextUUIDv4);
         const requestType = classifyRequestType(toolName);
         const toolDetail = summarizeToolRequest(toolName, toolInput);
@@ -7256,7 +7041,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         };
 
         const requestedStamp = yield* makeEventStamp();
-        yield* offerRuntimeEvent({
+        const publish = offerRuntimeEvent({
           type: "request.opened",
           eventId: requestedStamp.eventId,
           provider: PROVIDER,
@@ -7289,21 +7074,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         });
 
         pendingApprovals.set(requestId, pendingApproval);
-
-        const onAbort = () => {
-          if (!pendingApprovals.has(requestId)) {
-            return;
-          }
-          pendingApprovals.delete(requestId);
-          runFork(Deferred.succeed(decisionDeferred, "cancel"));
-        };
-
-        callbackOptions.signal.addEventListener("abort", onAbort, {
-          once: true,
+        const decision = yield* awaitClaudeDecision<ProviderApprovalDecision>({
+          signal: callbackOptions.signal,
+          decision: decisionDeferred,
+          cancelled: "cancel",
+          publish,
+          onClose: () => {
+            pendingApprovals.delete(requestId);
+          },
         });
-
-        const decision = yield* Deferred.await(decisionDeferred);
-        pendingApprovals.delete(requestId);
 
         const resolvedStamp = yield* makeEventStamp();
         yield* offerRuntimeEvent({
@@ -7330,7 +7109,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           },
         });
 
-        if (decision === "accept" || decision === "acceptForSession") {
+        if (
+          (decision === "accept" || decision === "acceptForSession") &&
+          !callbackOptions.signal.aborted &&
+          !context.stopped
+        ) {
           const sessionPermissionUpdates =
             decision === "acceptForSession"
               ? pendingApproval.suggestions?.filter(
@@ -7374,7 +7157,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         effectiveEffort,
         agentProgressSummaries,
         settings,
-      } = resolveClaudeModelSessionOptions(modelSelection);
+      } = resolveClaudeModelSessionOptions(
+        modelSelection,
+        modelSelection?.model && options?.getModelCapabilities
+          ? yield* options.getModelCapabilities(modelSelection.model)
+          : undefined,
+      );
       const fastMode = settings.fastMode === true;
       const permissionMode = runtimeModeToClaudePermissionMode(input.runtimeMode);
       const initialPermissionMode = resolveClaudePermissionMode({
@@ -7387,68 +7175,39 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       ].filter((directory, index, directories) => directories.indexOf(directory) === index);
 
       const initialResumeSessionId = durableResumeState?.resume;
-      let resumeArtifactStatus =
-        initialResumeSessionId === undefined
-          ? undefined
-          : yield* ensureClaudeResumeArtifactsForCwd({
-              fileSystem,
-              path,
-              env: claudeEnvironment,
-              cwd: input.cwd,
-              resumeSessionId: initialResumeSessionId,
-            });
-      if (resumeArtifactStatus?.checked === true && !resumeArtifactStatus.sessionFileExists) {
-        const repairedResumeSessionId = yield* findClaudeSessionIdByMessageUuid({
-          fileSystem,
-          path,
-          projectDirectory: resumeArtifactStatus.targetProjectDirectory,
-          messageUuid: durableResumeState?.resumeSessionAt,
-        });
-
-        if (repairedResumeSessionId !== undefined && durableResumeState !== undefined) {
-          // `resumeSessionAt` is an explicit Claude Agent SDK checkpoint. It is
-          // not needed for normal Claude CLI-style follow-ups and can make
-          // current Claude Code reject otherwise valid sessions when Cafe has a
-          // stale resume id. Repair from the transcript that actually contains
-          // the stored assistant message, then resume by session id only.
-          yield* Effect.logWarning("claude.resume.cursor.repaired-missing-session", {
-            threadId,
-            staleResumeSessionId: initialResumeSessionId,
-            repairedResumeSessionId,
-            resumeSessionAt: durableResumeState?.resumeSessionAt ?? "",
-            cwd: input.cwd ?? "",
-            targetProjectDirectory: resumeArtifactStatus.targetProjectDirectory,
-          });
-          const { resumeSessionAt: _ignoredResumeSessionAt, ...resumeStateWithoutCheckpoint } =
-            durableResumeState;
-          durableResumeState = {
-            ...resumeStateWithoutCheckpoint,
-            resume: repairedResumeSessionId,
-          };
-          resumeArtifactStatus = yield* ensureClaudeResumeArtifactsForCwd({
-            fileSystem,
-            path,
-            env: claudeEnvironment,
-            cwd: input.cwd,
-            resumeSessionId: repairedResumeSessionId,
-          });
+      // Recovery is bounded and distinguishes proven absence from inaccessible
+      // or unsafe storage. Never discard a durable conversation on I/O failure.
+      if (durableResumeState?.resume && input.cwd) {
+        const recovery = yield* Effect.promise((signal) =>
+          recoverClaudeResume({
+            configDirectory: resolveClaudeConfigDirectory(path, claudeEnvironment),
+            projectKey:
+              claudeEnvironment.CLAUDE_CODE_PROJECT_DIR_NAME?.trim() ||
+              claudeProjectDirectoryName(path, input.cwd!),
+            sessionId: durableResumeState!.resume!,
+            ...(durableResumeState?.resumeSessionAt
+              ? { checkpoint: durableResumeState.resumeSessionAt }
+              : {}),
+            signal,
+          }),
+        );
+        if (recovery.status === "inconclusive") {
+          return yield* Effect.fail(
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "session/resume",
+              detail:
+                "Could not safely inspect the saved Claude conversation. Its identity was preserved; check storage access and retry.",
+            }),
+          );
         }
-      }
-
-      if (resumeArtifactStatus?.checked === true && !resumeArtifactStatus.sessionFileExists) {
-        // Claude's sessions guide documents resume as loading the local
-        // transcript under ~/.claude/projects/<encoded-cwd>/<session-id>.jsonl.
-        // Passing a durable Cafe cursor whose transcript file is absent makes
-        // current Claude Code fail before the model turn starts. Drop that
-        // stale cursor and start a fresh upstream session; the user's prompt is
-        // still sent once, but without a doomed `--resume`.
-        yield* Effect.logWarning("claude.resume.cursor.dropped-missing-transcript", {
-          threadId,
-          resumeSessionId: initialResumeSessionId,
-          cwd: input.cwd ?? "",
-          targetSessionFile: resumeArtifactStatus.targetSessionFile,
-        });
-        durableResumeState = undefined;
+        if (recovery.status === "missing") {
+          yield* Effect.logWarning("claude.resume.cursor.dropped-missing-transcript", { threadId });
+          durableResumeState = undefined;
+        } else if (recovery.sessionId !== durableResumeState.resume) {
+          const { resumeSessionAt: _checkpoint, ...rest } = durableResumeState;
+          durableResumeState = { ...rest, resume: recovery.sessionId };
+        }
       }
 
       const existingResumeSessionId = durableResumeState?.resume;
@@ -7512,6 +7271,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // task/tool lifecycle frames, which makes long turns look silent.
         agentProgressSummaries,
         canUseTool,
+        onElicitation,
         stderr: (data: string) => {
           const lines = splitClaudeStderrLines(data);
           if (lines.length === 0) {
@@ -7558,8 +7318,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         "claude.resume.session_id": existingResumeSessionId ?? initialResumeSessionId ?? "",
         "claude.resume.session_at_ignored": durableResumeState?.resumeSessionAt ?? "",
         "claude.resume.turn_count": durableResumeState?.turnCount ?? -1,
-        "claude.resume.target_session_file":
-          resumeArtifactStatus?.checked === true ? resumeArtifactStatus.targetSessionFile : "",
         "claude.query.cwd": input.cwd ?? "",
         "claude.query.model": apiModelId ?? "",
         "claude.query.effort": effectiveEffort ?? "",
@@ -7771,14 +7529,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
     }
 
-    const artifactStatus = yield* ensureClaudeResumeArtifactsForCwd({
-      fileSystem,
-      path,
-      env: claudeEnvironment,
-      cwd,
-      resumeSessionId: source.resumeSessionId,
-    });
-    if (!artifactStatus.checked || !artifactStatus.sessionFileExists) {
+    const artifactStatus = yield* Effect.promise((signal) =>
+      recoverClaudeResume({
+        configDirectory: resolveClaudeConfigDirectory(path, claudeEnvironment),
+        projectKey:
+          claudeEnvironment.CLAUDE_CODE_PROJECT_DIR_NAME?.trim() ||
+          claudeProjectDirectoryName(path, cwd),
+        sessionId: source.resumeSessionId!,
+        signal,
+      }),
+    );
+    if (artifactStatus.status !== "found") {
       return yield* new ProviderAdapterValidationError({
         provider: PROVIDER,
         operation: "forkSession",
@@ -8334,8 +8095,31 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
     }
 
+    if (pending.interaction && !validateInteractionResponse(pending.interaction, answers)) {
+      return yield* new ProviderAdapterRequestError({
+        provider: PROVIDER,
+        method: "item/tool/respondToUserInput",
+        detail: "The response does not match the pending provider interaction.",
+      });
+    }
     context.pendingUserInputs.delete(requestId);
     yield* Deferred.succeed(pending.answers, answers);
+  });
+
+  const resolveInteractionUrl = Effect.fn("ClaudeAdapter.resolveInteractionUrl")(function* (
+    threadId: ThreadId,
+    requestId: ApprovalRequestId,
+  ) {
+    const context = yield* requireSession(threadId);
+    const pending = context.pendingUserInputs.get(requestId);
+    if (pending?.interaction?.mode !== "url" || !pending.interactionUrl) {
+      return yield* new ProviderAdapterRequestError({
+        provider: PROVIDER,
+        method: "interaction/resolveUrl",
+        detail: "The provider interaction is no longer available.",
+      });
+    }
+    return pending.interactionUrl;
   });
 
   const stopSession: ClaudeAdapterShape["stopSession"] = Effect.fn("stopSession")(
@@ -8462,6 +8246,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     rollbackThread,
     respondToRequest,
     respondToUserInput,
+    resolveInteractionUrl,
     stopSession,
     listSessions,
     hasSession,

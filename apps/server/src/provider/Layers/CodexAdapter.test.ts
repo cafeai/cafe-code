@@ -1245,6 +1245,87 @@ function startLifecycleRuntime() {
 }
 
 lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
+  it.effect("maps private interaction lifecycle without raw schema or answer payloads", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.take(adapter.streamEvents, 2).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      const base = {
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        requestId: ApprovalRequestId.make("private-request"),
+      };
+      yield* runtime.emit({
+        ...base,
+        id: asEventId("private-requested"),
+        kind: "request",
+        method: "cafecode/interaction/request",
+        payload: {
+          interaction: {
+            kind: "elicitation",
+            mode: "form",
+            serverName: "connector",
+            message: "Complete form",
+            fields: [{ id: "credential", title: "Credential", type: "string", required: true }],
+          },
+        },
+      });
+      yield* runtime.emit({
+        ...base,
+        id: asEventId("private-resolved"),
+        kind: "notification",
+        method: "cafecode/interaction/resolved",
+        payload: {},
+      });
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      assert.equal(events[0]?.type, "user-input.requested");
+      if (events[0]?.type === "user-input.requested") {
+        assert.deepEqual(events[0].payload.questions, []);
+        assert.equal(events[0].payload.interaction?.kind, "elicitation");
+        assert.deepEqual(events[0].raw?.payload, { lifecycle: "requested" });
+      }
+      assert.equal(events[1]?.type, "user-input.resolved");
+      if (events[1]?.type === "user-input.resolved")
+        assert.deepEqual(events[1].payload.answers, {});
+    }),
+  );
+
+  it.effect("preserves the authoritative network host and protocol on command approvals", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+      yield* runtime.emit({
+        id: asEventId("network-approval"),
+        kind: "request",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        requestId: ApprovalRequestId.make("network-request"),
+        requestKind: "command",
+        method: "item/commandExecution/requestApproval",
+        payload: {
+          threadId: "native",
+          turnId: "turn-1",
+          itemId: "command",
+          command: "fetch",
+          networkApprovalContext: { host: "example.com", protocol: "https" },
+        },
+      });
+      const event = yield* Fiber.join(eventFiber);
+      assert.equal(event._tag, "Some");
+      if (event._tag === "Some" && event.value.type === "request.opened")
+        assert.deepEqual(event.value.payload.networkApproval, {
+          host: "example.com",
+          protocol: "https",
+        });
+      else assert.fail("Expected network approval");
+    }),
+  );
   it.effect("delegates requestUserInput auto-resolution snooze to the live runtime", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
@@ -1796,6 +1877,34 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         firstEvent.value.payload.message,
         "Automatic approval review denied the requested action.",
       );
+    }),
+  );
+
+  it.effect("surfaces account verification as an actionable non-terminal notice", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+      yield* runtime.emit({
+        id: asEventId("evt-model-verification"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "model/verification",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        payload: {
+          threadId: "provider-thread-1",
+          turnId: "turn-1",
+          verifications: ["trustedAccessForCyber"],
+        },
+      } satisfies ProviderEvent);
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+      assert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some") return;
+      assert.equal(firstEvent.value.type, "runtime.warning");
+      if (firstEvent.value.type !== "runtime.warning") return;
+      assert.match(firstEvent.value.payload.message, /Trusted Access verification/);
+      assert.match(firstEvent.value.payload.message, /choose another model/);
     }),
   );
 

@@ -19,7 +19,11 @@
  *
  * @module ProviderAdapterRegistry
  */
-import type { ProviderDriverKind, ProviderInstanceId } from "@cafecode/contracts";
+import type {
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ServerProviderModel,
+} from "@cafecode/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as PubSub from "effect/PubSub";
@@ -57,6 +61,11 @@ export interface ProviderAdapterRegistryShape {
   readonly getInstanceInfo: (
     instanceId: ProviderInstanceId,
   ) => Effect.Effect<ProviderInstanceRoutingInfo, ProviderUnsupportedError>;
+
+  /** Read the exact instance's existing model inventory; never refresh/probe. */
+  readonly getModels: (
+    instanceId: ProviderInstanceId,
+  ) => Effect.Effect<ReadonlyArray<ServerProviderModel>, ProviderUnsupportedError>;
 
   /**
    * List all live instance ids. Excludes unavailable/shadow instances —

@@ -106,6 +106,8 @@ export interface WsRpcClient {
     ) => ReturnType<RpcUnaryMethod<typeof WS_METHODS.dictationCreateClientSecret>>;
   };
   readonly server: {
+    readonly respondToInteraction: RpcUnaryMethod<typeof WS_METHODS.providerRespondToInteraction>;
+    readonly resolveInteractionUrl: RpcUnaryMethod<typeof WS_METHODS.providerResolveInteractionUrl>;
     readonly getConfig: RpcUnaryNoArgMethod<typeof WS_METHODS.serverGetConfig>;
     /**
      * Refresh provider snapshots. Pass `{ instanceId }` to refresh a single
@@ -260,6 +262,10 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
         ),
     },
     server: {
+      respondToInteraction: (input) =>
+        transport.request((client) => client[WS_METHODS.providerRespondToInteraction](input)),
+      resolveInteractionUrl: (input) =>
+        transport.request((client) => client[WS_METHODS.providerResolveInteractionUrl](input)),
       getConfig: () => transport.request((client) => client[WS_METHODS.serverGetConfig]({})),
       refreshProviders: (input) =>
         transport.request((client) => client[WS_METHODS.serverRefreshProviders](input ?? {})),

@@ -759,6 +759,29 @@ describe("buildCodexAppServerArgs", () => {
 });
 
 describe("Codex protocol diagnostic redaction", () => {
+  it("never logs authorization links, schema defaults or answers from private interaction diagnostics", () => {
+    for (const method of ["mcpServer/elicitation/request", "item/permissions/requestApproval"]) {
+      for (const stage of ["decoded", "decode_failed"] as const) {
+        const redacted = sanitizeCodexProtocolDiagnosticPayload({
+          direction: "incoming",
+          stage,
+          payload: {
+            method,
+            params: {
+              url: "https://example.com/?token=private",
+              requestedSchema: { default: "private-default" },
+            },
+            cause: "private-answer",
+          },
+        });
+        assert.doesNotMatch(
+          JSON.stringify(redacted),
+          /token=private|private-default|private-answer/u,
+        );
+        assert.equal((redacted as { method: string }).method, method);
+      }
+    }
+  });
   it("redacts raw wire content and valid decoded auth recovery payloads", () => {
     const raw = sanitizeCodexProtocolDiagnosticPayload({
       direction: "incoming",

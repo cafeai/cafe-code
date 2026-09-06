@@ -59,6 +59,7 @@ export const makeAdapterRegistryMock = (adapters: KindAdapterMap): ProviderAdapt
 
   return {
     getByInstance,
+    getModels: (instanceId) => getByInstance(instanceId).pipe(Effect.as([])),
     getInstanceInfo: (instanceId) => {
       const adapter = byInstanceId.get(instanceId);
       if (!adapter) {

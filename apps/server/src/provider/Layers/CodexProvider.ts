@@ -647,6 +647,14 @@ function mapCodexModelCapabilities(
     model.serviceTiers?.some((tier) => tier.id === "priority") === true ||
     (model.additionalSpeedTiers ?? []).includes("fast");
   return createModelCapabilities({
+    // Official model/list defaults omitted modalities to text and image for
+    // older servers; an explicit text-only response must survive the mapping.
+    inputModalities: (
+      model.inputModalities ??
+      (model.model === "gpt-5.3-codex-spark" ? ["text"] : ["text", "image"])
+    ).filter(
+      (modality): modality is "text" | "image" => modality === "text" || modality === "image",
+    ),
     optionDescriptors: [
       ...(reasoningOptions.length > 0
         ? [

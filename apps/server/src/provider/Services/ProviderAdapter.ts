@@ -184,6 +184,12 @@ export interface ProviderAdapterShape<TError> {
     requestId: ApprovalRequestId,
   ) => Effect.Effect<void, TError>;
 
+  /** Resolve a private authorization URL only while its exact callback is live. */
+  readonly resolveInteractionUrl?: (
+    threadId: ThreadId,
+    requestId: ApprovalRequestId,
+  ) => Effect.Effect<string, TError>;
+
   /**
    * Stop one provider session.
    */

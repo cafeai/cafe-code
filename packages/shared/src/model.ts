@@ -19,11 +19,40 @@ export interface SelectableModelOption {
 
 export function createModelCapabilities(input: {
   optionDescriptors: ReadonlyArray<ProviderOptionDescriptor>;
+  inputModalities?: ReadonlyArray<"text" | "image"> | undefined;
+  supportsAutoMode?: boolean | undefined;
 }): ModelCapabilities {
   return {
     optionDescriptors: input.optionDescriptors.map(cloneDescriptor),
+    ...(input.inputModalities !== undefined
+      ? { inputModalities: [...new Set(input.inputModalities)] }
+      : {}),
+    ...(input.supportsAutoMode !== undefined ? { supportsAutoMode: input.supportsAutoMode } : {}),
   };
 }
+
+/**
+ * Provider metadata wins; older catalogs omit modalities and retain image
+ * compatibility. Spark is the documented text-only fallback when no native
+ * capability record exists. Validation never changes models or drops files.
+ */
+export function modelAcceptsImages(
+  capabilities: ModelCapabilities | null | undefined,
+  model: string,
+): boolean {
+  if (capabilities?.inputModalities !== undefined) {
+    return capabilities.inputModalities.includes("image");
+  }
+  return (
+    model
+      .trim()
+      .toLowerCase()
+      .replace(/^openai\//u, "") !== "gpt-5.3-codex-spark"
+  );
+}
+
+export const UNSUPPORTED_MODEL_IMAGES_MESSAGE =
+  "This model does not accept images. Choose an image-capable model or remove the images; your draft has been kept.";
 
 function getRawSelectionValueById(
   selections: ReadonlyArray<ProviderOptionSelection> | null | undefined,

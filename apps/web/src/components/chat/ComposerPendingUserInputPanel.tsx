@@ -7,8 +7,12 @@ import {
 } from "../../pendingUserInput";
 import { CheckIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
+import {
+  ComposerInteractionCard,
+  type ComposerInteractionCallbacks,
+} from "./ComposerInteractionCard";
 
-interface PendingUserInputPanelProps {
+interface PendingUserInputPanelProps extends ComposerInteractionCallbacks {
   pendingUserInputs: PendingUserInput[];
   respondingRequestIds: ApprovalRequestId[];
   answers: Record<string, PendingUserInputDraftAnswer>;
@@ -31,10 +35,22 @@ export const ComposerPendingUserInputPanel = memo(function ComposerPendingUserIn
   onAdvance,
   autoResolutionSnoozed,
   onSnoozeAutoResolution,
+  onRespondToInteraction,
+  onResolveInteractionUrl,
 }: PendingUserInputPanelProps) {
   if (pendingUserInputs.length === 0) return null;
   const activePrompt = pendingUserInputs[0];
   if (!activePrompt) return null;
+  if (activePrompt.interaction)
+    return (
+      <ComposerInteractionCard
+        key={activePrompt.requestId}
+        requestId={activePrompt.requestId}
+        interaction={activePrompt.interaction}
+        {...(onRespondToInteraction ? { onRespondToInteraction } : {})}
+        {...(onResolveInteractionUrl ? { onResolveInteractionUrl } : {})}
+      />
+    );
 
   return (
     <ComposerPendingUserInputCard

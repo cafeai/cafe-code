@@ -17,6 +17,8 @@ import type {
   ProviderInstanceId,
   ProviderRespondToRequestInput,
   ProviderRespondToUserInputInput,
+  ProviderRespondToInteractionInput,
+  ProviderResolveInteractionUrlInput,
   ProviderSnoozeUserInputInput,
   ProviderRuntimeEvent,
   ProviderSendTurnInput,
@@ -117,6 +119,14 @@ export interface ProviderServiceShape {
   readonly respondToUserInput: (
     input: ProviderRespondToUserInputInput,
   ) => Effect.Effect<void, ProviderServiceError>;
+
+  /** Ephemeral, authenticated callbacks; intentionally outside durable command replay. */
+  readonly respondToInteraction?: (
+    input: ProviderRespondToInteractionInput,
+  ) => Effect.Effect<void, ProviderServiceError>;
+  readonly resolveInteractionUrl?: (
+    input: ProviderResolveInteractionUrlInput,
+  ) => Effect.Effect<string, ProviderServiceError>;
 
   /** Disable automatic resolution for one provider user-input request. */
   readonly snoozeUserInput: (

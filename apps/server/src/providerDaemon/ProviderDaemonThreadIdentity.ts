@@ -18,6 +18,8 @@ export function providerDaemonRequestThreadIds(
     case "interruptTurn":
     case "respondToRequest":
     case "respondToUserInput":
+    case "respondToInteraction":
+    case "resolveInteractionUrl":
     case "snoozeUserInput":
     case "stopSession":
     case "quiesceThreadForHardDelete":
