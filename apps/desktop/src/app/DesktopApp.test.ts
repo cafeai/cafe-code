@@ -1,6 +1,7 @@
 import type { ProviderDaemonClientConfig, ProviderDaemonLiveness } from "@cafecode/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import * as Duration from "effect/Duration";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
@@ -12,7 +13,10 @@ import type {
   DesktopProviderDaemonManagerShape,
   DesktopProviderDaemonSnapshot,
 } from "../backend/DesktopProviderDaemonManager.ts";
-import { runProviderDaemonHealthWatchdog } from "./DesktopApp.ts";
+import {
+  runProviderDaemonHealthWatchdog,
+  startBackendAfterProviderDaemonReady,
+} from "./DesktopApp.ts";
 
 const endpoint: ProviderDaemonClientConfig = {
   httpBaseUrl: "http://provider-daemon.local",
@@ -56,6 +60,95 @@ function daemonSnapshot(): DesktopProviderDaemonSnapshot {
     lastRecoveryReason: Option.none(),
   };
 }
+
+describe("DesktopApp provider daemon bootstrap credentials", () => {
+  it.effect(
+    "starts the backend only with the final lease after a failed provisional daemon attempt",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const quitting = yield* Ref.make(false);
+          const finalReady = yield* Deferred.make<ProviderDaemonClientConfig>();
+          // Model the real manager's publication order: attempt A exposes a root
+          // endpoint, fails, and attempt B exposes a different root on the same
+          // socket before its final authenticated lease becomes available.
+          const firstRoot = { ...endpoint, token: "first-attempt-root-token", leaseId: undefined };
+          const secondRoot = {
+            ...endpoint,
+            token: "second-attempt-root-token",
+            leaseId: undefined,
+          };
+          const currentConfig = yield* Ref.make<ProviderDaemonClientConfig>(firstRoot);
+          const bootstraps: ProviderDaemonClientConfig[] = [];
+          const backendStart = Ref.get(currentConfig).pipe(
+            Effect.tap((config) =>
+              Effect.sync(() => {
+                bootstraps.push(config);
+              }),
+            ),
+            Effect.asVoid,
+          );
+          const startup = yield* startBackendAfterProviderDaemonReady({
+            providerDaemonReady: Deferred.await(finalReady),
+            startBackend: backendStart,
+            quitting,
+          }).pipe(Effect.forkChild);
+
+          yield* Effect.yieldNow;
+          assert.deepStrictEqual(bootstraps, []);
+          yield* Ref.set(currentConfig, secondRoot);
+          yield* Effect.yieldNow;
+          assert.deepStrictEqual(bootstraps, []);
+
+          yield* Ref.set(currentConfig, endpoint);
+          yield* Deferred.succeed(finalReady, endpoint);
+          assert.deepStrictEqual(yield* Fiber.join(startup), endpoint);
+          assert.deepStrictEqual(bootstraps, [endpoint]);
+          assert.equal(bootstraps[0]?.leaseId, endpoint.leaseId);
+        }),
+      ),
+  );
+
+  it.effect("does not start the backend when the final daemon attempt fails", () =>
+    Effect.gen(function* () {
+      const quitting = yield* Ref.make(false);
+      let backendStarts = 0;
+      const result = yield* startBackendAfterProviderDaemonReady({
+        providerDaemonReady: Effect.die(new Error("Daemon readiness exhausted")),
+        startBackend: Effect.sync(() => {
+          backendStarts += 1;
+        }),
+        quitting,
+      }).pipe(Effect.exit);
+      assert.equal(result._tag, "Failure");
+      assert.equal(backendStarts, 0);
+    }),
+  );
+
+  it.effect(
+    "does not start a backend if shutdown was requested while daemon readiness was pending",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const quitting = yield* Ref.make(false);
+          const finalReady = yield* Deferred.make<ProviderDaemonClientConfig>();
+          let backendStarts = 0;
+          const startup = yield* startBackendAfterProviderDaemonReady({
+            providerDaemonReady: Deferred.await(finalReady),
+            startBackend: Effect.sync(() => {
+              backendStarts += 1;
+            }),
+            quitting,
+          }).pipe(Effect.forkChild);
+          yield* Effect.yieldNow;
+          yield* Ref.set(quitting, true);
+          yield* Deferred.succeed(finalReady, endpoint);
+          yield* Fiber.join(startup);
+          assert.equal(backendStarts, 0);
+        }),
+      ),
+  );
+});
 
 describe("DesktopApp provider daemon watchdog", () => {
   it.effect("preserves a live daemon across sustained liveness probe failures", () =>

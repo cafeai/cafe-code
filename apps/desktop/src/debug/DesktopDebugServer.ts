@@ -1072,6 +1072,11 @@ function summarizeProviderDaemonHealthForCompactDebug(
               decodedRecordCount: readNumber(backendBridge?.decodedRecordCount),
               decodeFailureCount: readNumber(backendBridge?.decodeFailureCount),
               acceptedRecordCount: readNumber(backendBridge?.acceptedRecordCount),
+              authenticationFailureCount: readNumber(backendBridge?.authenticationFailureCount),
+              lastAuthenticationFailureStatus: readNumber(
+                backendBridge?.lastAuthenticationFailureStatus,
+              ),
+              authenticationRetryDelayMs: readNumber(backendBridge?.authenticationRetryDelayMs),
             },
             subscriptions: {
               cursor: readNumber(subscriptions?.cursor),

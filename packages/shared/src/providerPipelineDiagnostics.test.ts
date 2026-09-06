@@ -20,6 +20,34 @@ import {
 describe("provider pipeline diagnostics", () => {
   beforeEach(() => resetProviderPipelineDiagnosticsForTest());
 
+  it("retains authentication failure totals separately from the current retry delay", () => {
+    addProviderBackendBridgeDiagnostics({ authenticationFailureCount: 1 });
+    setProviderBackendBridgeDiagnostics({
+      lastAuthenticationFailureStatus: 401,
+      authenticationRetryDelayMs: 30_000,
+    });
+    expect(snapshotProviderPipelineDiagnostics().backendBridge).toMatchObject({
+      authenticationFailureCount: 1,
+      lastAuthenticationFailureStatus: 401,
+      authenticationRetryDelayMs: 30_000,
+    });
+
+    // Recovery clears the current wait, not the evidence of a prior rejected
+    // credential. Process-wide reset is reserved for isolated test fixtures.
+    setProviderBackendBridgeDiagnostics({ authenticationRetryDelayMs: 0 });
+    expect(snapshotProviderPipelineDiagnostics().backendBridge).toMatchObject({
+      authenticationFailureCount: 1,
+      lastAuthenticationFailureStatus: 401,
+      authenticationRetryDelayMs: 0,
+    });
+    resetProviderPipelineDiagnosticsForTest();
+    expect(snapshotProviderPipelineDiagnostics().backendBridge).toMatchObject({
+      authenticationFailureCount: 0,
+      lastAuthenticationFailureStatus: 0,
+      authenticationRetryDelayMs: 0,
+    });
+  });
+
   it("accounts for queue admission and release with bounded numeric fields", () => {
     recordProviderCompaction({
       originalBytes: 2_147_130,

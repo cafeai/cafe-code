@@ -15,6 +15,17 @@ export interface ProviderDaemonHttpResponse {
   readonly body: string;
 }
 
+/** An HTTP rejection, never the response body or authenticated request options. */
+export class ProviderDaemonHttpStatusError extends Error {
+  readonly statusCode: number;
+
+  constructor(statusCode: number) {
+    super(`provider daemon stream failed with HTTP ${statusCode}`);
+    this.name = "ProviderDaemonHttpStatusError";
+    this.statusCode = statusCode;
+  }
+}
+
 export interface ProviderDaemonJsonRequestOptions {
   readonly method?: "GET" | "POST";
   readonly body?: string;
@@ -25,6 +36,8 @@ export interface ProviderDaemonJsonRequestOptions {
 
 export interface ProviderDaemonNdjsonRequestOptions {
   readonly headers?: Record<string, string>;
+  /** Called after a successful HTTP handshake, even when the journal is idle. */
+  readonly onOpen?: () => void;
   readonly onLine: (line: string) => void | Promise<void>;
   readonly maxLineBytes?: number;
   readonly maxPendingBytes?: number;
@@ -194,10 +207,17 @@ export function streamProviderDaemonNdjson(
       }),
       (response) => {
         if ((response.statusCode ?? 0) < 200 || (response.statusCode ?? 0) >= 300) {
-          settleReject(
-            new Error(`provider daemon stream failed with HTTP ${response.statusCode ?? 0}`),
-          );
+          settleReject(new ProviderDaemonHttpStatusError(response.statusCode ?? 0));
           response.resume();
+          return;
+        }
+
+        try {
+          options.onOpen?.();
+        } catch (cause) {
+          response.destroy();
+          request.destroy();
+          settleReject(cause);
           return;
         }
 

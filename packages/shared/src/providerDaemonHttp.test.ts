@@ -5,7 +5,11 @@ import * as http from "node:http";
 import type { ProviderDaemonClientConfig } from "@cafecode/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { requestProviderDaemonJson, streamProviderDaemonNdjson } from "./providerDaemonHttp.ts";
+import {
+  ProviderDaemonHttpStatusError,
+  requestProviderDaemonJson,
+  streamProviderDaemonNdjson,
+} from "./providerDaemonHttp.ts";
 
 const servers: http.Server[] = [];
 
@@ -103,6 +107,51 @@ describe("requestProviderDaemonJson", () => {
 });
 
 describe("streamProviderDaemonNdjson", () => {
+  it.each([401, 403, 500])(
+    "preserves HTTP %s without exposing or decoding its body",
+    async (status) => {
+      const secret = "synthetic-response-secret-never-in-errors";
+      const fixture = await serve((_request, response) => {
+        response.writeHead(status, { "content-type": "application/json" });
+        response.end(JSON.stringify({ error: secret }));
+      });
+      let openCount = 0;
+      let lineCount = 0;
+      const error = await streamProviderDaemonNdjson(fixture.endpoint, "/events", {
+        onOpen: () => {
+          openCount += 1;
+        },
+        onLine: () => {
+          lineCount += 1;
+        },
+      }).catch((cause: unknown) => cause);
+
+      expect(error).toBeInstanceOf(ProviderDaemonHttpStatusError);
+      expect(error).toMatchObject({ statusCode: status });
+      expect(String(error)).not.toContain(secret);
+      expect(JSON.stringify(error)).not.toContain(fixture.endpoint.token);
+      expect(openCount).toBe(0);
+      expect(lineCount).toBe(0);
+    },
+  );
+
+  it("announces a successful handshake even when the event stream is empty", async () => {
+    const fixture = await serve((_request, response) => {
+      response.writeHead(200, { "content-type": "application/x-ndjson" });
+      response.end();
+    });
+    let openCount = 0;
+    await streamProviderDaemonNdjson(fixture.endpoint, "/events", {
+      onOpen: () => {
+        openCount += 1;
+      },
+      onLine: () => {
+        throw new Error("empty stream must not decode a record");
+      },
+    });
+    expect(openCount).toBe(1);
+  });
+
   it.each([
     { maxLineBytes: Number.NaN },
     { maxLineBytes: Number.POSITIVE_INFINITY },

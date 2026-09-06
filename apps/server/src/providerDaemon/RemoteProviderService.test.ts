@@ -1,7 +1,15 @@
 import { ProviderInstanceId, ThreadId, TurnId } from "@cafecode/contracts";
 import { assert, describe, it } from "@effect/vitest";
+import { ProviderDaemonHttpStatusError } from "@cafecode/shared/providerDaemonHttp";
+import {
+  resetProviderPipelineDiagnosticsForTest,
+  snapshotProviderPipelineDiagnostics,
+} from "@cafecode/shared/providerPipelineDiagnostics";
+import * as Cause from "effect/Cause";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as TestClock from "effect/testing/TestClock";
 
 import {
   attachCommandIdToMutatingProviderDaemonRequest,
@@ -9,10 +17,14 @@ import {
   isRetryableProviderDaemonControlError,
   isVoidProviderDaemonRpcMethod,
   ProviderDaemonRpcResponseError,
+  ProviderDaemonAuthenticationError,
+  PROVIDER_DAEMON_AUTHENTICATION_RETRY_MS,
   providerDaemonReplayCursorForHealth,
   providerDaemonRequestThreadIds,
   remoteProviderCursorProjectorForConfig,
   requestProviderDaemonRpcJsonWithStableRetry,
+  recoverRemoteSessionInventory,
+  retryRemoteProviderEventStream,
   resolveProviderDaemonReplayCursor,
   toRemoteRequestError,
 } from "./RemoteProviderService.ts";
@@ -22,6 +34,157 @@ import {
 } from "./ProviderDaemonRuntimeCursor.ts";
 
 describe("RemoteProviderService", () => {
+  it.each([401, 403] as const)(
+    "rejects HTTP %s before reading the RPC body without retrying",
+    async (status) => {
+      let attempts = 0;
+      let bodyReads = 0;
+      const error = await requestProviderDaemonRpcJsonWithStableRetry(
+        {
+          httpBaseUrl: "http://127.0.0.1:3774",
+          token: "synthetic-secret-capability-never-in-errors",
+        },
+        {
+          method: "restartProviderRuntime",
+          payload: { instanceId: ProviderInstanceId.make("codex") },
+        },
+        async () => {
+          attempts += 1;
+          return {
+            statusCode: status,
+            get body(): string {
+              bodyReads += 1;
+              throw new Error("synthetic-private-body-must-not-be-decoded");
+            },
+          };
+        },
+      ).catch((cause: unknown) => cause);
+
+      assert.instanceOf(error, ProviderDaemonAuthenticationError);
+      assert.equal(error.statusCode, status);
+      assert.equal(attempts, 1);
+      assert.equal(bodyReads, 0);
+      assert.notInclude(String(error), "synthetic-secret");
+      assert.notInclude(JSON.stringify(error), "synthetic-private");
+      assert.isFalse(isRetryableProviderDaemonControlError(error));
+    },
+  );
+
+  it("preserves non-auth HTTP responses for existing envelope handling", async () => {
+    const response = { statusCode: 503, body: '{"ok":false}' };
+    assert.strictEqual(
+      await requestProviderDaemonRpcJsonWithStableRetry(
+        { httpBaseUrl: "http://127.0.0.1:3774", token: "synthetic-test-capability" },
+        { method: "listSessions", payload: {} },
+        async () => response,
+      ),
+      response,
+    );
+  });
+
+  it("normalizes stream authentication status into a fixed typed error and numeric diagnostics", () => {
+    resetProviderPipelineDiagnosticsForTest();
+    const error = toRemoteRequestError("streamEvents", new ProviderDaemonHttpStatusError(403));
+    assert.equal(error.remoteErrorTag, "ProviderDaemonAuthenticationError");
+    assert.instanceOf(error.cause, ProviderDaemonAuthenticationError);
+    assert.equal(error.cause.statusCode, 403);
+    assert.equal(snapshotProviderPipelineDiagnostics().backendBridge.authenticationFailureCount, 1);
+    assert.equal(
+      snapshotProviderPipelineDiagnostics().backendBridge.lastAuthenticationFailureStatus,
+      403,
+    );
+  });
+
+  it.effect("does not convert an authentication failure into authoritative empty inventory", () =>
+    Effect.gen(function* () {
+      const error = toRemoteRequestError(
+        "listSessions",
+        new ProviderDaemonAuthenticationError(401),
+      );
+      let reconciliationRan = false;
+      const exit = yield* recoverRemoteSessionInventory(Effect.fail(error)).pipe(
+        Effect.tap(() =>
+          Effect.sync(() => {
+            reconciliationRan = true;
+          }),
+        ),
+        Effect.exit,
+      );
+      assert.isTrue(Exit.isFailure(exit));
+      if (Exit.isFailure(exit)) {
+        assert.equal(exit.cause.reasons.find(Cause.isDieReason)?.defect, error);
+      }
+      assert.isFalse(reconciliationRan);
+      assert.deepEqual(yield* recoverRemoteSessionInventory(Effect.succeed([])), []);
+      assert.deepEqual(
+        yield* recoverRemoteSessionInventory(Effect.fail(new Error("synthetic ordinary failure"))),
+        [],
+      );
+    }),
+  );
+
+  it.effect("retries rejected immutable stream credentials only after the bounded auth delay", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        resetProviderPipelineDiagnosticsForTest();
+        let attempts = 0;
+        const firstAttempt = yield* Deferred.make<void>();
+        yield* retryRemoteProviderEventStream({
+          afterCursor: () => 17,
+          read: Effect.gen(function* () {
+            attempts += 1;
+            yield* Deferred.succeed(firstAttempt, undefined);
+            return yield* Effect.fail(
+              toRemoteRequestError("streamEvents", new ProviderDaemonHttpStatusError(401)),
+            );
+          }),
+        }).pipe(Effect.forkScoped);
+        yield* Deferred.await(firstAttempt);
+        yield* TestClock.adjust(PROVIDER_DAEMON_AUTHENTICATION_RETRY_MS - 1);
+        assert.equal(attempts, 1);
+        assert.equal(
+          snapshotProviderPipelineDiagnostics().backendBridge.authenticationRetryDelayMs,
+          PROVIDER_DAEMON_AUTHENTICATION_RETRY_MS,
+        );
+        yield* TestClock.adjust(1);
+        assert.equal(attempts, 2);
+        assert.equal(
+          snapshotProviderPipelineDiagnostics().backendBridge.authenticationFailureCount,
+          2,
+        );
+      }),
+    ),
+  );
+
+  it.effect(
+    "keeps ordinary stream reconnect timing even when error text mentions authentication",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          let attempts = 0;
+          const firstAttempt = yield* Deferred.make<void>();
+          yield* retryRemoteProviderEventStream({
+            afterCursor: () => 17,
+            read: Effect.gen(function* () {
+              attempts += 1;
+              yield* Deferred.succeed(firstAttempt, undefined);
+              return yield* Effect.fail(
+                toRemoteRequestError(
+                  "streamEvents",
+                  new Error("authentication HTTP 401 text is not status evidence"),
+                ),
+              );
+            }),
+          }).pipe(Effect.forkScoped);
+          yield* Deferred.await(firstAttempt);
+          yield* TestClock.adjust(499);
+          assert.equal(attempts, 1);
+          yield* TestClock.adjust(1);
+          assert.equal(attempts, 2);
+        }),
+      ),
+  );
+
   it.each([
     { code: "ECONNRESET", message: "socket hang up" },
     { code: "EPIPE", message: "write EPIPE" },

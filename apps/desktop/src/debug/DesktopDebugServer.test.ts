@@ -346,7 +346,12 @@ const makeLargeProviderDaemonSnapshot = () => ({
         laggingDisconnectCount: 7,
         secret: "daemon stream secret",
       },
-      backendBridge: {},
+      backendBridge: {
+        authenticationFailureCount: 2,
+        lastAuthenticationFailureStatus: 401,
+        authenticationRetryDelayMs: 30_000,
+        credential: "daemon bridge credential secret",
+      },
       subscriptions: {},
       webSocket: {},
     },
@@ -390,6 +395,10 @@ describe("DesktopDebugServer compact snapshots", () => {
     assert.equal(compactJson.includes("nested-dictation-response-secret"), false);
     assert.equal(compactJson.includes("nested-dictation-error-secret"), false);
     assert.equal(compactJson.includes("daemon stream secret"), false);
+    assert.equal(compactJson.includes("daemon bridge credential secret"), false);
+    assert.equal(compactJson.includes('"authenticationFailureCount":2'), true);
+    assert.equal(compactJson.includes('"lastAuthenticationFailureStatus":401'), true);
+    assert.equal(compactJson.includes('"authenticationRetryDelayMs":30000'), true);
     assert.equal(compactJson.includes('"laggingDisconnectCount":7'), true);
     assert.equal(compactJson.includes('"lastDurationMs":5123'), true);
     assert.equal(compactJson.includes("gpt-5.6-sol"), true);

@@ -40,6 +40,11 @@ export const ProviderPipelineBackendBridgeDiagnostics = Schema.Struct({
   decodedRecordCount: NonNegativeInt,
   decodeFailureCount: NonNegativeInt,
   acceptedRecordCount: NonNegativeInt,
+  // Optional for mixed-version desktop/backend compatibility. These are
+  // transport observations only, never credentials or provider account state.
+  authenticationFailureCount: Schema.optional(NonNegativeInt),
+  lastAuthenticationFailureStatus: Schema.optional(NonNegativeInt),
+  authenticationRetryDelayMs: Schema.optional(NonNegativeInt),
 });
 
 export const ProviderPipelineSubscriptionDiagnostics = Schema.Struct({

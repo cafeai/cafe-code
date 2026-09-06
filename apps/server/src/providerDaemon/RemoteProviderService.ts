@@ -15,11 +15,15 @@ import {
   type ProviderDaemonClientConfig,
 } from "@cafecode/contracts";
 import {
+  ProviderDaemonHttpStatusError,
   requestProviderDaemonJson,
   streamProviderDaemonNdjson,
 } from "@cafecode/shared/providerDaemonHttp";
 import { PROVIDER_PIPELINE_POLICY } from "@cafecode/shared/providerPipelinePolicy";
-import { addProviderBackendBridgeDiagnostics } from "@cafecode/shared/providerPipelineDiagnostics";
+import {
+  addProviderBackendBridgeDiagnostics,
+  setProviderBackendBridgeDiagnostics,
+} from "@cafecode/shared/providerPipelineDiagnostics";
 import * as crypto from "node:crypto";
 import * as Cause from "effect/Cause";
 import * as Duration from "effect/Duration";
@@ -94,6 +98,11 @@ const MUTATING_RPC_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
 ]);
 const PROVIDER_DAEMON_REPLAY_OVERLAP_EVENTS = 1_000;
 const PROVIDER_DAEMON_REPLAY_HEALTH_TIMEOUT_MS = 5_000;
+// A bridge's capability is immutable for its lifetime. A rejected capability
+// cannot heal through rapid reconnects; retain a slow, bounded retry so a
+// temporarily rejecting endpoint can recover without a log/connection storm.
+export const PROVIDER_DAEMON_AUTHENTICATION_RETRY_MS = 30_000;
+const PROVIDER_DAEMON_STREAM_RETRY_MS = 500;
 
 function providerDaemonUrl(config: ProviderDaemonClientConfig, path: string): URL {
   return new URL(
@@ -119,7 +128,50 @@ export class ProviderDaemonRpcResponseError extends Error {
   }
 }
 
+export class ProviderDaemonAuthenticationError extends ProviderDaemonRpcResponseError {
+  readonly statusCode: 401 | 403;
+
+  constructor(statusCode: 401 | 403) {
+    super(
+      "ProviderDaemonAuthenticationError",
+      `Cafe lost authorization to its local provider daemon (HTTP ${statusCode}); restart Cafe Code to reconnect.`,
+    );
+    this.name = "ProviderDaemonAuthenticationError";
+    this.statusCode = statusCode;
+  }
+}
+
+function requireAuthorizedDaemonResponse(statusCode: number): void {
+  // An authentication response is not an RPC envelope. In particular, never
+  // decode or attach its body to a schema error that could echo response data.
+  if (statusCode === 401 || statusCode === 403) {
+    throw new ProviderDaemonAuthenticationError(statusCode);
+  }
+}
+
+function remoteAuthenticationStatus(cause: unknown): 401 | 403 | undefined {
+  if (cause instanceof ProviderDaemonAuthenticationError) return cause.statusCode;
+  if (
+    cause instanceof ProviderAdapterRequestError &&
+    cause.cause instanceof ProviderDaemonAuthenticationError
+  ) {
+    return cause.cause.statusCode;
+  }
+  return undefined;
+}
+
 export function toRemoteRequestError(method: string, cause: unknown): ProviderAdapterRequestError {
+  if (
+    cause instanceof ProviderDaemonHttpStatusError &&
+    (cause.statusCode === 401 || cause.statusCode === 403)
+  ) {
+    cause = new ProviderDaemonAuthenticationError(cause.statusCode);
+  }
+  const authenticationStatus = remoteAuthenticationStatus(cause);
+  if (authenticationStatus !== undefined) {
+    addProviderBackendBridgeDiagnostics({ authenticationFailureCount: 1 });
+    setProviderBackendBridgeDiagnostics({ lastAuthenticationFailureStatus: authenticationStatus });
+  }
   return new ProviderAdapterRequestError({
     provider: "provider-daemon",
     method,
@@ -193,11 +245,14 @@ export async function requestProviderDaemonRpcJsonWithStableRetry<
 ) {
   const requestWithCommandId = attachCommandIdToMutatingProviderDaemonRequest(request);
   const body = encodeRpcRequestJson(requestWithCommandId);
-  const attempt = () =>
-    requestJson(daemonConfig, PROVIDER_DAEMON_RPC_PATH, {
+  const attempt = async () => {
+    const response = await requestJson(daemonConfig, PROVIDER_DAEMON_RPC_PATH, {
       method: "POST",
       body,
     });
+    requireAuthorizedDaemonResponse(response.statusCode);
+    return response;
+  };
 
   try {
     return await attempt();
@@ -268,6 +323,7 @@ async function readEventStream(
   const url = providerDaemonUrl(daemonConfig, PROVIDER_DAEMON_EVENTS_PATH);
   url.searchParams.set("after", String(Math.max(0, Math.trunc(afterCursor))));
   await streamProviderDaemonNdjson(daemonConfig, `${url.pathname}${url.search}`, {
+    onOpen: () => setProviderBackendBridgeDiagnostics({ authenticationRetryDelayMs: 0 }),
     onLine: async (line) => onRecord(decodeEventRecordJson(line)),
   });
 }
@@ -283,11 +339,70 @@ async function readRemoteHealth(
     // backend readiness for an unhealthy daemon.
     timeoutMs: PROVIDER_DAEMON_REPLAY_HEALTH_TIMEOUT_MS,
   });
+  requireAuthorizedDaemonResponse(response.statusCode);
   if (response.statusCode < 200 || response.statusCode >= 300) {
     throw new Error(`provider daemon health failed with HTTP ${response.statusCode}`);
   }
   return decodeHealthJson(response.body);
 }
+
+/**
+ * Keep authentication failures inconclusive at the inventory boundary. The
+ * established service interface has no typed inventory-error channel; a defect
+ * deliberately escapes its compatibility fallback instead of manufacturing an
+ * authoritative empty list that startup reconciliation could use to orphan
+ * live turns. Ordinary failures retain the existing compatibility behavior.
+ */
+export const recoverRemoteSessionInventory = <A, E extends { readonly message: string }, R>(
+  read: Effect.Effect<ReadonlyArray<A>, E, R>,
+): Effect.Effect<ReadonlyArray<A>, never, R> =>
+  read.pipe(
+    Effect.catch((error) =>
+      remoteAuthenticationStatus(error) !== undefined
+        ? Effect.die(error)
+        : Effect.logWarning("provider daemon listSessions failed", {
+            detail: error.message,
+          }).pipe(Effect.as([])),
+    ),
+  );
+
+/** Retry only the event subscription; never reload credentials or replay RPCs. */
+export const retryRemoteProviderEventStream = <R>(input: {
+  readonly read: Effect.Effect<void, ProviderAdapterRequestError, R>;
+  readonly afterCursor: () => number;
+}): Effect.Effect<never, never, R> =>
+  Effect.gen(function* () {
+    while (true) {
+      const retryDelayMs = yield* input.read.pipe(
+        Effect.as(PROVIDER_DAEMON_STREAM_RETRY_MS),
+        Effect.catchCause((cause) => {
+          const status = cause.reasons
+            .filter(Cause.isFailReason)
+            .map((reason) => remoteAuthenticationStatus(reason.error))
+            .find((candidate) => candidate !== undefined);
+          if (status !== undefined) {
+            setProviderBackendBridgeDiagnostics({
+              authenticationRetryDelayMs: PROVIDER_DAEMON_AUTHENTICATION_RETRY_MS,
+            });
+            return Effect.logWarning("provider daemon event stream authentication rejected", {
+              phase: "authentication",
+              httpStatus: status,
+              retryDelayMs: PROVIDER_DAEMON_AUTHENTICATION_RETRY_MS,
+            }).pipe(Effect.as(PROVIDER_DAEMON_AUTHENTICATION_RETRY_MS));
+          }
+          // This gauge describes the current retry policy, not historical
+          // authentication state; the cumulative count and last status retain
+          // that history if a subsequent attempt fails for another reason.
+          setProviderBackendBridgeDiagnostics({ authenticationRetryDelayMs: 0 });
+          return Effect.logWarning("provider daemon event stream disconnected", {
+            cursor: input.afterCursor(),
+            cause: Cause.pretty(cause),
+          }).pipe(Effect.as(PROVIDER_DAEMON_STREAM_RETRY_MS));
+        }),
+      );
+      yield* Effect.sleep(Duration.millis(retryDelayMs));
+    }
+  });
 
 function isProviderDaemonQuarantineGap(event: ProviderRuntimeEvent): boolean {
   if (event.type !== "runtime.warning") return false;
@@ -485,56 +600,47 @@ const makeRemoteProviderService = Effect.gen(function* () {
     });
   }
 
-  yield* Effect.gen(function* () {
-    while (true) {
-      yield* Effect.tryPromise({
-        try: () =>
-          readEventStream(daemonConfig, eventCursor, async (record) => {
-            if (isProviderDaemonQuarantineGap(record.event)) {
-              // The daemon made a durable payload-free forward-progress
-              // decision. Re-read live session inventory before advancing the
-              // bridge cursor so the backend does not infer session truth from
-              // the missing incompatible event.
-              await publishRuntimeEvent(
-                rpc(daemonConfig, { method: "listSessions", payload: {} }).pipe(
-                  Effect.tap((sessions) =>
-                    Effect.logWarning("provider daemon event quarantine gap reconciled", {
-                      cursor: record.cursor,
-                      activeSessionCount: sessions.length,
-                    }),
-                  ),
-                  Effect.catch(() => Effect.void),
-                ),
-              );
-              eventCursor = Math.max(eventCursor, record.cursor);
-              return;
-            }
-            if (hardDeleteRetiredThreadIds.has(String(record.event.threadId))) {
-              eventCursor = Math.max(eventCursor, record.cursor);
-              return;
-            }
+  yield* retryRemoteProviderEventStream({
+    afterCursor: () => eventCursor,
+    read: Effect.tryPromise({
+      try: () =>
+        readEventStream(daemonConfig, eventCursor, async (record) => {
+          if (isProviderDaemonQuarantineGap(record.event)) {
+            // The daemon made a durable payload-free forward-progress
+            // decision. Re-read live session inventory before advancing the
+            // bridge cursor so the backend does not infer session truth from
+            // the missing incompatible event.
             await publishRuntimeEvent(
-              PubSub.publish(
-                runtimeEventPubSub,
-                attachProviderDaemonRuntimeEventCursor(record.event, record.cursor),
+              rpc(daemonConfig, { method: "listSessions", payload: {} }).pipe(
+                Effect.tap((sessions) =>
+                  Effect.logWarning("provider daemon event quarantine gap reconciled", {
+                    cursor: record.cursor,
+                    activeSessionCount: sessions.length,
+                  }),
+                ),
+                Effect.catch(() => Effect.void),
               ),
             );
-            addProviderBackendBridgeDiagnostics({ acceptedRecordCount: 1 });
-            // A cursor is durable progress only after downstream acceptance.
-            // Advancing first can permanently skip a record after a crash.
             eventCursor = Math.max(eventCursor, record.cursor);
-          }),
-        catch: (cause) => toRemoteRequestError("streamEvents", cause),
-      }).pipe(
-        Effect.catchCause((cause) =>
-          Effect.logWarning("provider daemon event stream disconnected", {
-            cursor: eventCursor,
-            cause: Cause.pretty(cause),
-          }),
-        ),
-      );
-      yield* Effect.sleep(Duration.millis(500));
-    }
+            return;
+          }
+          if (hardDeleteRetiredThreadIds.has(String(record.event.threadId))) {
+            eventCursor = Math.max(eventCursor, record.cursor);
+            return;
+          }
+          await publishRuntimeEvent(
+            PubSub.publish(
+              runtimeEventPubSub,
+              attachProviderDaemonRuntimeEventCursor(record.event, record.cursor),
+            ),
+          );
+          addProviderBackendBridgeDiagnostics({ acceptedRecordCount: 1 });
+          // A cursor is durable progress only after downstream acceptance.
+          // Advancing first can permanently skip a record after a crash.
+          eventCursor = Math.max(eventCursor, record.cursor);
+        }),
+      catch: (cause) => toRemoteRequestError("streamEvents", cause),
+    }),
   }).pipe(Effect.forkScoped);
 
   const service: ProviderServiceShape = {
@@ -568,11 +674,7 @@ const makeRemoteProviderService = Effect.gen(function* () {
         Effect.map((sessions) =>
           sessions.filter((session) => !hardDeleteRetiredThreadIds.has(String(session.threadId))),
         ),
-        Effect.catch((error) =>
-          Effect.logWarning("provider daemon listSessions failed", {
-            detail: error.message,
-          }).pipe(Effect.as([])),
-        ),
+        recoverRemoteSessionInventory,
       ),
     getCapabilities: (instanceId) =>
       guardedRpc({ method: "getCapabilities", payload: { instanceId } }).pipe(

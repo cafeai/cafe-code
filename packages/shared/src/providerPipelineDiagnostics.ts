@@ -9,7 +9,9 @@ type DaemonStreamDelta = Partial<ProviderPipelineDiagnostics["daemonStream"]>;
 type BackendBridgeDelta = Partial<ProviderPipelineDiagnostics["backendBridge"]>;
 type SubscriptionValues = Partial<ProviderPipelineDiagnostics["subscriptions"]>;
 type WebSocketDelta = Partial<ProviderPipelineDiagnostics["webSocket"]>;
-type MutableMetrics<T> = { -readonly [K in keyof T]: T[K] };
+// Wire schemas may omit newer counters when an older process reports health,
+// but this process initializes every counter before it can be incremented.
+type MutableMetrics<T> = { -readonly [K in keyof T]-?: NonNullable<T[K]> };
 
 const eventLoopLagSamples: number[] = [];
 let eventLoopMonitorStarted = false;
@@ -40,6 +42,9 @@ const backendBridge: MutableMetrics<ProviderPipelineDiagnostics["backendBridge"]
   decodedRecordCount: 0,
   decodeFailureCount: 0,
   acceptedRecordCount: 0,
+  authenticationFailureCount: 0,
+  lastAuthenticationFailureStatus: 0,
+  authenticationRetryDelayMs: 0,
 };
 const subscriptions: MutableMetrics<ProviderPipelineDiagnostics["subscriptions"]> = {
   cursor: 0,

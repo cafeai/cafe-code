@@ -35,7 +35,6 @@ const DEFAULT_DESKTOP_BACKEND_HTTPS_PORT = 3775;
 const MAX_TCP_PORT = 65_535;
 const DESKTOP_BACKEND_PORT_PROBE_HOSTS = ["127.0.0.1", "0.0.0.0", "::"] as const;
 const DESKTOP_SHUTDOWN_BACKEND_STOP_TIMEOUT = Duration.seconds(5);
-const PROVIDER_DAEMON_STARTING_ENDPOINT_POLL_INTERVAL = Duration.millis(10);
 const PROVIDER_DAEMON_HEALTH_CHECK_INTERVAL = Duration.seconds(5);
 const PROVIDER_DAEMON_LIVENESS_WARNING_THRESHOLD = 3;
 const PROVIDER_DAEMON_RECOVERY_BACKEND_STOP_TIMEOUT = Duration.seconds(10);
@@ -196,23 +195,31 @@ const handleFatalStartupError = Effect.fn("desktop.startup.handleFatalStartupErr
 const fatalStartupCause = <E>(stage: string, cause: Cause.Cause<E>) =>
   handleFatalStartupError(stage, Cause.pretty(cause)).pipe(Effect.andThen(Effect.failCause(cause)));
 
-const waitForProviderDaemonStartingEndpoint = Effect.fn(
-  "desktop.bootstrap.waitForProviderDaemonStartingEndpoint",
-)(function* (
-  providerDaemonManager: DesktopProviderDaemonManager.DesktopProviderDaemonManagerShape,
-  readyFiber: Fiber.Fiber<ProviderDaemonClientConfig, never>,
-) {
-  const waitForCurrentConfig = Effect.gen(function* () {
-    while (true) {
-      const currentConfig = yield* providerDaemonManager.currentConfig;
-      if (Option.isSome(currentConfig)) {
-        return currentConfig.value;
-      }
-      yield* Effect.sleep(PROVIDER_DAEMON_STARTING_ENDPOINT_POLL_INTERVAL);
-    }
-  });
-
-  return yield* Effect.raceFirst(waitForCurrentConfig, Fiber.join(readyFiber));
+/**
+ * Bootstrap credentials belong to the daemon attempt that actually became
+ * ready. `currentConfig` can expose an earlier starting attempt's root token;
+ * a readiness/lease failure replaces that attempt on the same IPC socket with
+ * a different token. Starting the backend before `ensureRunning` finishes
+ * strands its immutable bootstrap credential, even though the replacement
+ * daemon and its desktop watchdog are healthy.
+ *
+ * Daemon health and lease issuance do not require the main backend listener.
+ * Only harmless desktop setup may overlap this wait. A failed final attempt
+ * must propagate to normal startup error handling without starting a backend,
+ * refreshing credentials from files, or replaying user prompts.
+ */
+export const startBackendAfterProviderDaemonReady = Effect.fn(
+  "desktop.bootstrap.startBackendAfterProviderDaemonReady",
+)(function* (input: {
+  readonly providerDaemonReady: Effect.Effect<ProviderDaemonClientConfig>;
+  readonly startBackend: Effect.Effect<void>;
+  readonly quitting: Ref.Ref<boolean>;
+}) {
+  const endpoint = yield* input.providerDaemonReady;
+  if (!(yield* Ref.get(input.quitting))) {
+    yield* input.startBackend;
+  }
+  return endpoint;
 });
 
 /**
@@ -385,13 +392,6 @@ const bootstrap = Effect.gen(function* () {
     yield* providerDaemonManager.configureCafeMcpPort(backendConfig.port);
   }
   const providerDaemonReadyFiber = yield* Effect.forkScoped(providerDaemonManager.ensureRunning);
-  const providerDaemonEndpoint = yield* waitForProviderDaemonStartingEndpoint(
-    providerDaemonManager,
-    providerDaemonReadyFiber,
-  );
-  yield* logBootstrapInfo("bootstrap provider daemon endpoint prepared", {
-    endpoint: providerDaemonEndpoint.httpBaseUrl,
-  });
   if (serverExposureState.endpointUrl) {
     yield* logBootstrapInfo("bootstrap enabled network access", {
       endpointUrl: serverExposureState.endpointUrl,
@@ -405,13 +405,16 @@ const bootstrap = Effect.gen(function* () {
   yield* installDesktopIpcHandlers;
   yield* logBootstrapInfo("bootstrap ipc handlers registered");
 
-  if (!(yield* Ref.get(state.quitting))) {
-    yield* backendManager.start;
-    yield* logBootstrapInfo("bootstrap backend start requested");
-  }
-  const providerDaemon = yield* Fiber.join(providerDaemonReadyFiber);
-  yield* logBootstrapInfo("bootstrap provider daemon ready", {
-    endpoint: providerDaemon.httpBaseUrl,
+  yield* startBackendAfterProviderDaemonReady({
+    providerDaemonReady: Fiber.join(providerDaemonReadyFiber).pipe(
+      Effect.tap((endpoint) =>
+        logBootstrapInfo("bootstrap provider daemon ready", { endpoint: endpoint.httpBaseUrl }),
+      ),
+    ),
+    startBackend: backendManager.start.pipe(
+      Effect.andThen(logBootstrapInfo("bootstrap backend start requested")),
+    ),
+    quitting: state.quitting,
   });
   yield* runProviderDaemonHealthWatchdog({
     backendManager,
