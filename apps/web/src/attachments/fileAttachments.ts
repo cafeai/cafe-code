@@ -11,30 +11,36 @@ import {
   readSavedEnvironmentBearerToken,
   resolveEnvironmentHttpUrl,
 } from "../environments/runtime/catalog";
+import { FileAttachmentRequestError } from "./fileAttachmentErrors";
 
 const decodeAttachment = Schema.decodeUnknownSync(ChatFileAttachment);
 const MAX_PREVIEW_RESPONSE_BYTES = 400 * 1024;
 
-async function fileRequest(environmentId: EnvironmentId, pathname: string, init: RequestInit = {}) {
+async function fileRequest(
+  environmentId: EnvironmentId,
+  pathname: string,
+  init: RequestInit = {},
+  searchParams?: Record<string, string>,
+) {
   const primary = getPrimaryKnownEnvironment()?.environmentId === environmentId;
   const bearer = primary ? null : await readSavedEnvironmentBearerToken(environmentId);
-  if (!primary && !bearer)
-    throw new Error("Reconnect to this environment before using attachments.");
+  if (!primary && !bearer) throw new FileAttachmentRequestError("environment-unavailable");
   const requestHeaders = new Headers(init.headers);
   if (bearer) requestHeaders.set("authorization", `Bearer ${bearer}`);
   const signal = init.signal
     ? AbortSignal.any([init.signal, AbortSignal.timeout(60_000)])
     : AbortSignal.timeout(60_000);
+  // Both environment resolvers assign URL.pathname rather than concatenate a
+  // URL string. Passing "?preview=text" inside pathname encodes the question
+  // mark into the attachment ID, producing a local 404 for a valid upload.
+  // Keep path and query structured identically on both routing branches.
   const url = primary
-    ? resolvePrimaryEnvironmentHttpUrl(pathname)
-    : (() => {
-        const [path, query] = pathname.split("?");
-        return resolveEnvironmentHttpUrl({
-          environmentId,
-          pathname: path!,
-          ...(query ? { searchParams: Object.fromEntries(new URLSearchParams(query)) } : {}),
-        });
-      })();
+    ? resolvePrimaryEnvironmentHttpUrl(pathname, searchParams)
+    : resolveEnvironmentHttpUrl({
+        environmentId,
+        pathname,
+        ...(searchParams ? { searchParams } : {}),
+      });
   let response: Response;
   try {
     response = await fetch(url, {
@@ -45,25 +51,23 @@ async function fileRequest(environmentId: EnvironmentId, pathname: string, init:
       signal,
     });
   } catch {
-    throw new Error(
-      signal.aborted
-        ? "Attachment transfer was cancelled or timed out. Please retry."
-        : "Could not transfer the attachment. Check the connection and retry.",
-    );
+    throw new FileAttachmentRequestError(signal.aborted ? "cancelled" : "transfer-failed");
   }
   if (!response.ok) {
     // A remote backend is not trusted to supply displayable error strings.
-    await response.body?.cancel();
-    throw new Error(
+    // A body cleanup failure must not discard a known HTTP classification and
+    // replace it with an arbitrary browser/remote exception.
+    await response.body?.cancel().catch(() => undefined);
+    throw new FileAttachmentRequestError(
       response.status === 413
-        ? "Files must be 25 MiB or smaller."
+        ? "too-large"
         : response.status === 401 || response.status === 403
-          ? "Reconnect with owner access to use attachments."
+          ? "owner-access"
           : response.status === 429
-            ? "Several files are being processed. Please try again shortly."
+            ? "busy"
             : response.status === 404
-              ? "This attachment is unavailable. Remove it and attach the file again."
-              : "The attachment could not be transferred. Please retry.",
+              ? "unavailable"
+              : "transfer-failed",
     );
   }
   return response;
@@ -162,8 +166,9 @@ export async function getFileAttachmentPreview(input: {
   const attachment = decodeAttachment(input.attachment);
   const response = await fileRequest(
     input.environmentId,
-    `/api/attachments/${encodeURIComponent(attachment.id)}?preview=text`,
+    `/api/attachments/${encodeURIComponent(attachment.id)}`,
     input.signal ? { signal: input.signal } : {},
+    { preview: "text" },
   );
   try {
     const value: unknown = JSON.parse(
@@ -181,7 +186,7 @@ export async function getFileAttachmentPreview(input: {
       throw new Error("invalid preview");
     return { text: value.text, truncated: value.truncated };
   } catch {
-    throw new Error("This file could not be previewed. You can still download it.");
+    throw new FileAttachmentRequestError("invalid-preview");
   }
 }
 
@@ -196,7 +201,7 @@ export async function downloadFileAttachment(input: {
   );
   const bytes = await readBounded(response, PROVIDER_SEND_TURN_MAX_FILE_BYTES);
   if (bytes.length !== attachment.sizeBytes)
-    throw new Error("The attachment download was incomplete. Please retry.");
+    throw new FileAttachmentRequestError("incomplete-download");
   // Never navigate to server-provided URLs or render executable HTML/SVG. The
   // local blob always has an inert MIME type and an explicit download intent.
   const url = URL.createObjectURL(

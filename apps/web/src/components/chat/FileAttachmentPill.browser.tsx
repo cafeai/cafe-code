@@ -8,6 +8,7 @@ import {
   downloadFileAttachment,
   getFileAttachmentPreview,
 } from "../../attachments/fileAttachments";
+import { FileAttachmentRequestError } from "../../attachments/fileAttachmentErrors";
 
 vi.mock("../../attachments/fileAttachments", () => ({
   downloadFileAttachment: vi.fn(),
@@ -71,6 +72,76 @@ describe("inert file attachment pills", () => {
         )
         .toBeInTheDocument();
       await expect.element(page.getByLabelText("Download source.html")).toBeEnabled();
+      await page.getByLabelText("Download source.html").click();
+      expect(downloadFileAttachment).toHaveBeenCalledWith({ environmentId, attachment });
+      expect(document.querySelector('[data-file-attachment] [role="status"]')).toBeNull();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it.each([
+    {
+      code: "owner-access" as const,
+      message: "Reconnect with owner access to use attachments.",
+    },
+    {
+      code: "unavailable" as const,
+      message: "This attachment is unavailable. Remove it and attach the file again.",
+    },
+    {
+      code: "busy" as const,
+      message: "Several files are being processed. Please try again shortly.",
+    },
+  ])(
+    "distinguishes a $code failure and permits a successful preview retry",
+    async ({ code, message }) => {
+      vi.mocked(getFileAttachmentPreview)
+        .mockRejectedValueOnce(new FileAttachmentRequestError(code))
+        .mockResolvedValueOnce({ text: "Preview recovered", truncated: false });
+      const screen = await render(
+        <FileAttachmentPill environmentId={environmentId} attachment={attachment} />,
+      );
+      try {
+        await page.getByRole("button", { name: "source.html", exact: true }).click();
+        await expect.element(page.getByRole("status")).toHaveTextContent(message);
+        await expect.element(page.getByLabelText("Download source.html")).toBeEnabled();
+
+        await page.getByRole("button", { name: "source.html", exact: true }).click();
+        await expect.element(page.getByText("Preview recovered")).toBeInTheDocument();
+        expect(document.querySelector('[data-file-attachment] [role="status"]')).toBeNull();
+        expect(getFileAttachmentPreview).toHaveBeenCalledTimes(2);
+      } finally {
+        await screen.unmount();
+      }
+    },
+  );
+
+  it("redacts arbitrary preview and download exceptions without suggesting a reconnect", async () => {
+    const privateFailure = new Error(
+      "Bearer private-token /private/credentials <img src=x onerror=alert(1)>",
+    );
+    vi.mocked(getFileAttachmentPreview).mockRejectedValue(privateFailure);
+    vi.mocked(downloadFileAttachment).mockRejectedValue(privateFailure);
+    const screen = await render(
+      <FileAttachmentPill environmentId={environmentId} attachment={attachment} />,
+    );
+    try {
+      await page.getByRole("button", { name: "source.html", exact: true }).click();
+      await expect
+        .element(page.getByRole("status"))
+        .toHaveTextContent("This file could not be previewed. You can still download it.");
+      await expect.element(page.getByLabelText("Download source.html")).toBeEnabled();
+      await page.getByLabelText("Download source.html").click();
+      await expect
+        .element(page.getByRole("status"))
+        .toHaveTextContent("This file could not be downloaded. Please try again.");
+      const pill = document.querySelector("[data-file-attachment]");
+      expect(pill?.textContent).not.toMatch(/private-token|credentials|Reconnect|onerror/);
+      expect(pill?.querySelector("img, script, iframe")).toBeNull();
+      await expect
+        .element(page.getByRole("button", { name: "source.html", exact: true }))
+        .toBeEnabled();
     } finally {
       await screen.unmount();
     }

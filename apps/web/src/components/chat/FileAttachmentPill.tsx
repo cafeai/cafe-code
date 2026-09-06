@@ -5,6 +5,7 @@ import {
   downloadFileAttachment,
   getFileAttachmentPreview,
 } from "../../attachments/fileAttachments";
+import { getFileAttachmentErrorMessage } from "../../attachments/fileAttachmentErrors";
 import { Button } from "../ui/button";
 
 /** No file URL is navigable here: active formats are downloaded or escaped as plain text. */
@@ -31,8 +32,17 @@ export function FileAttachmentPill({
         if (result) setPreview(result);
         else setError("No text preview for this format. Download the file to inspect it.");
       }
-    } catch {
-      setError("This file could not be retrieved. Reconnect to its environment and try again.");
+    } catch (cause) {
+      // Transport failures carry locally owned, allowlisted categories. Do not
+      // display arbitrary exception text here: it may contain a remote server's
+      // response, credentials, or private paths. A failed preview also does not
+      // prove the upload/download failed or that this environment disconnected.
+      setError(
+        getFileAttachmentErrorMessage(cause) ??
+          (action === "preview"
+            ? "This file could not be previewed. You can still download it."
+            : "This file could not be downloaded. Please try again."),
+      );
     } finally {
       setBusy(false);
     }

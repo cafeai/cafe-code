@@ -1,17 +1,15 @@
 import { EnvironmentId, ThreadId, PROVIDER_SEND_TURN_MAX_FILE_BYTES } from "@cafecode/contracts";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   uploadFileAttachment,
   getFileAttachmentPreview,
   downloadFileAttachment,
 } from "./fileAttachments";
+import { FileAttachmentRequestError, getFileAttachmentErrorMessage } from "./fileAttachmentErrors";
 
-const mocks = vi.hoisted(() => ({ bearer: vi.fn(), primary: vi.fn() }));
+const mocks = vi.hoisted(() => ({ bearer: vi.fn() }));
 vi.mock("../environments/primary", () => ({
   getPrimaryKnownEnvironment: () => ({ environmentId: "primary" }),
-}));
-vi.mock("../environments/primary/target", () => ({
-  resolvePrimaryEnvironmentHttpUrl: (path: string) => `http://127.0.0.1:3773${path}`,
 }));
 vi.mock("../environments/runtime/catalog", () => ({
   readSavedEnvironmentBearerToken: mocks.bearer,
@@ -32,12 +30,47 @@ const file = {
   mimeType: "text/plain",
   sizeBytes: 5,
 };
+beforeEach(() => {
+  // Exercise the actual primary URL builder: concatenating strings in a mock
+  // hid the regression where the preview query became part of the pathname.
+  vi.stubGlobal("window", {
+    location: { origin: "http://127.0.0.1:3773", href: "http://127.0.0.1:3773/" },
+  });
+});
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
 
 describe("environment-scoped file attachment transport", () => {
+  it.each(["primary", "remote"])(
+    "keeps the preview query separate from the attachment ID on %s",
+    async (environment) => {
+      mocks.bearer.mockResolvedValue("private-test-bearer");
+      const fetcher = vi
+        .fn()
+        .mockResolvedValue(new Response(JSON.stringify({ text: "hello", truncated: false })));
+      vi.stubGlobal("fetch", fetcher);
+      await expect(
+        getFileAttachmentPreview({
+          environmentId: EnvironmentId.make(environment),
+          attachment: file,
+        }),
+      ).resolves.toEqual({ text: "hello", truncated: false });
+      const [requestedUrl, request] = fetcher.mock.calls[0]!;
+      const url = new URL(requestedUrl);
+      expect(url.origin).toBe(
+        environment === "primary" ? "http://127.0.0.1:3773" : "https://remote.example",
+      );
+      expect(url.pathname).toBe(`/api/attachments/${file.id}`);
+      expect(url.search).toBe("?preview=text");
+      expect(request.credentials).toBe(environment === "primary" ? "include" : "omit");
+      expect(request.headers.get("authorization")).toBe(
+        environment === "primary" ? null : "Bearer private-test-bearer",
+      );
+    },
+  );
+
   it("waits for durable retain acknowledgement before returning a ready upload", async () => {
     let acknowledge!: (response: Response) => void;
     const pending = new Promise<Response>((resolve) => {
@@ -196,6 +229,52 @@ describe("environment-scoped file attachment transport", () => {
     expect(await getFileAttachmentPreview(input)).toBeNull();
   });
 
+  it.each([
+    [401, "owner-access"],
+    [403, "owner-access"],
+    [404, "unavailable"],
+    [413, "too-large"],
+    [429, "busy"],
+    [500, "transfer-failed"],
+  ] as const)(
+    "classifies preview HTTP %i without exposing the response body",
+    async (status, code) => {
+      const response = new Response("private remote body /private/credentials", { status });
+      // An already locked/failed response body must not hide the HTTP failure.
+      vi.spyOn(response.body!, "cancel").mockRejectedValue(new Error("private cleanup failure"));
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+      await expect(
+        getFileAttachmentPreview({
+          environmentId: EnvironmentId.make("primary"),
+          attachment: file,
+        }),
+      ).rejects.toEqual(new FileAttachmentRequestError(code));
+    },
+  );
+
+  it("does not expose arbitrary exceptions or an overwritten classified error message", () => {
+    expect(getFileAttachmentErrorMessage(new Error("private browser failure"))).toBeNull();
+    expect(getFileAttachmentErrorMessage({ code: "owner-access", message: "private" })).toBeNull();
+    const error = new FileAttachmentRequestError("busy");
+    error.message = "private wrapper detail";
+    expect(getFileAttachmentErrorMessage(error)).toBe(
+      "Several files are being processed. Please try again shortly.",
+    );
+  });
+
+  it("distinguishes network failure from missing saved-environment authentication", async () => {
+    const fetcher = vi.fn().mockRejectedValue(new Error("private network details"));
+    vi.stubGlobal("fetch", fetcher);
+    await expect(
+      getFileAttachmentPreview({ environmentId: EnvironmentId.make("primary"), attachment: file }),
+    ).rejects.toEqual(new FileAttachmentRequestError("transfer-failed"));
+    mocks.bearer.mockResolvedValue(null);
+    await expect(
+      getFileAttachmentPreview({ environmentId: EnvironmentId.make("remote"), attachment: file }),
+    ).rejects.toEqual(new FileAttachmentRequestError("environment-unavailable"));
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
   it("downloads exact bytes as an inert local blob and refuses truncated downloads", async () => {
     const fetcher = vi
       .fn()
@@ -205,7 +284,7 @@ describe("environment-scoped file attachment transport", () => {
     const link = { href: "", download: "", rel: "", click: vi.fn(), remove: vi.fn() };
     const createObjectURL = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:inert-file");
     vi.stubGlobal("document", { createElement: vi.fn(() => link), body: { append: vi.fn() } });
-    vi.stubGlobal("window", { setTimeout: vi.fn() });
+    vi.stubGlobal("window", { ...window, setTimeout: vi.fn() });
     try {
       const input = { environmentId: EnvironmentId.make("primary"), attachment: file };
       await downloadFileAttachment(input);
