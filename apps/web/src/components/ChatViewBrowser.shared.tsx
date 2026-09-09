@@ -5574,6 +5574,125 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       }
     });
 
+    it("parks a rejected automatic file steer and retries only the exact message on explicit request", async () => {
+      const activeTurnId = "turn-rejected-automatic-steer" as TurnId;
+      const messageId = MessageId.make("message-rejected-automatic-steer");
+      const text = "Keep this exact prompt and attached source";
+      const attachments = [
+        {
+          type: "file" as const,
+          id: "durable-file",
+          name: "source.tex",
+          mimeType: "text/plain",
+          sizeBytes: 42,
+        },
+      ];
+      const baseSnapshot = createSnapshotForTargetUser({
+        targetMessageId: MessageId.make("original-user"),
+        targetText: "Original request",
+        sessionStatus: "running",
+      });
+      const snapshot: OrchestrationReadModel = {
+        ...baseSnapshot,
+        threads: baseSnapshot.threads.map((thread) => ({
+          ...thread,
+          messages: [
+            ...thread.messages,
+            {
+              ...createUserMessage({ id: messageId, text, offsetSeconds: 2_000 }),
+              attachments,
+              turnId: activeTurnId,
+            },
+          ],
+          activities: [
+            {
+              id: EventId.make("compact-steer-failure"),
+              tone: "error",
+              kind: "provider.turn.steer.failed",
+              summary: "Steer postponed during compaction",
+              payload: {
+                provider: "codex",
+                messageId,
+                retryableFollowUp: true,
+                codexNonSteerableTurnKind: "compact",
+              },
+              turnId: activeTurnId,
+              sequence: 1,
+              createdAt: isoAt(2_001),
+            },
+          ],
+          latestTurn: {
+            turnId: activeTurnId,
+            state: "running",
+            requestedAt: isoAt(1_900),
+            startedAt: isoAt(1_901),
+            completedAt: null,
+            assistantMessageId: null,
+          },
+          session: { ...thread.session!, status: "running", activeTurnId, updatedAt: isoAt(2_002) },
+          updatedAt: isoAt(2_002),
+        })),
+      };
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot,
+        configureFixture: (testFixture) => {
+          testFixture.serverConfig = {
+            ...testFixture.serverConfig,
+            providers: testFixture.serverConfig.providers.map((provider) => ({
+              ...provider,
+              runtimeCapabilities: { liveSteer: "supported", threadGoals: "unsupported" },
+            })),
+          };
+        },
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+          body.type === "thread.turn.steer"
+            ? failBrowserWsRpc(
+                new OrchestrationDispatchCommandError({
+                  message: "Message identity is already bound to different content in this thread.",
+                }),
+              )
+            : undefined,
+      });
+      const steerRequests = () =>
+        wsRequests.filter(
+          (request) =>
+            request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+            request.type === "thread.turn.steer",
+        );
+      try {
+        await expect.element(page.getByRole("button", { name: "Retry delivery" })).toBeEnabled();
+        expect(steerRequests()).toHaveLength(1);
+        expect(document.body.textContent).toContain("1 steer needs attention");
+        expect(document.body.textContent).not.toContain("1 steer waiting for compact");
+        // Repeated provider snapshots used to repeatedly remove/reinsert the
+        // row and create a fresh command for the same permanent rejection.
+        for (let revision = 1; revision <= 3; revision += 1) {
+          const thread = fixture.snapshot.threads[0]!;
+          const snapshotSequence = fixture.snapshot.snapshotSequence + 1;
+          const nextThread = { ...thread, updatedAt: isoAt(2_010 + revision) };
+          fixture.snapshot = { ...fixture.snapshot, snapshotSequence, threads: [nextThread] };
+          rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+            kind: "snapshot",
+            snapshot: { snapshotSequence, thread: nextThread },
+          });
+          await waitForLayout();
+        }
+        expect(steerRequests()).toHaveLength(1);
+        await page.getByRole("button", { name: "Retry delivery" }).click();
+        await expect.element(page.getByRole("button", { name: "Retry delivery" })).toBeEnabled();
+        expect(steerRequests()).toHaveLength(2);
+        for (const request of steerRequests()) {
+          expect(request.message).toEqual({ messageId, role: "user", text, attachments });
+        }
+        await waitForLayout();
+        expect(steerRequests()).toHaveLength(2);
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
     it("reconstructs more than 64 durable steer retries once after a reload", async () => {
       const activeTurnId = "turn-reload-retry-review" as TurnId;
       const baseSnapshot = createSnapshotForTargetUser({

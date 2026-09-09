@@ -370,12 +370,14 @@ export interface FollowUpQueueViewItem {
   environmentId?: EnvironmentId;
   canEdit?: boolean;
   canDispatch?: boolean;
+  canRetryDelivery?: boolean;
   queuedAt: string;
   expanded: boolean;
   canExpand: boolean;
   blockedReason: string | null;
   automaticSteerRetry?: {
     readonly nonSteerableTurnKind: "review" | "compact" | null;
+    readonly dispatchFailed?: true;
   } | null;
 }
 
@@ -400,6 +402,7 @@ function queuedAutomaticSteerCountLabel(items: readonly FollowUpQueueViewItem[])
   }
 
   if (automaticSteerItems.length === 1) {
+    if (automaticSteerItems[0]?.blockedReason) return "1 steer needs attention";
     const kind = automaticSteerItems[0]?.automaticSteerRetry?.nonSteerableTurnKind;
     return kind === "compact"
       ? "1 steer waiting for compact"
@@ -421,6 +424,14 @@ function automaticSteerRetryStatus(item: FollowUpQueueViewItem): {
   readonly label: string;
   readonly title: string;
 } | null {
+  if (item.automaticSteerRetry && item.blockedReason !== null) {
+    return {
+      ariaLabel: "Steer delivery paused",
+      label: "Delivery paused",
+      title:
+        "Your message and attachments are preserved. Review the delivery error before retrying.",
+    };
+  }
   const kind = item.automaticSteerRetry?.nonSteerableTurnKind ?? null;
   if (kind === null && item.automaticSteerRetry != null) {
     return {
@@ -570,7 +581,19 @@ export function FollowUpQueueShelf(props: {
                 >
                   {item.preview}
                 </button>
-                {retryStatus ? (
+                {item.automaticSteerRetry?.dispatchFailed ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 shrink-0 px-2"
+                    title="Retry delivery of this exact message and its attachments."
+                    disabled={item.canRetryDelivery !== true}
+                    onClick={() => props.onAction(item.id)}
+                  >
+                    Retry delivery
+                  </Button>
+                ) : retryStatus ? (
                   <span
                     className="h-7 shrink-0 whitespace-nowrap rounded-md border border-border/60 px-2 py-1 text-muted-foreground/85 text-xs"
                     aria-label={retryStatus.ariaLabel}

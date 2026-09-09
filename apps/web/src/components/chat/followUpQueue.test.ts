@@ -28,6 +28,7 @@ describe("followUpQueue", () => {
     const runningInput = {
       phase: "running" as const,
       sessionRunning: true,
+      firstItemBlocked: false,
       automaticSteerRetryBlocked: false,
       isConnecting: false,
       isEnvironmentUnavailable: false,
@@ -52,6 +53,7 @@ describe("followUpQueue", () => {
     it.each([
       { phase: "ready" as const },
       { sessionRunning: false },
+      { firstItemBlocked: true },
       { automaticSteerRetryBlocked: true },
       { isConnecting: true },
       { isEnvironmentUnavailable: true },

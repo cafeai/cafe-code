@@ -215,7 +215,11 @@ import {
   useServerKeybindings,
   useServerTerminal,
 } from "~/rpc/serverState";
-import { describeSendFailureMessage, sanitizeThreadErrorMessage } from "~/rpc/transportError";
+import {
+  describeSendFailureMessage,
+  isIndeterminateTransportError,
+  sanitizeThreadErrorMessage,
+} from "~/rpc/transportError";
 import { retainThreadDetailSubscription } from "../environments/runtime/service";
 import { RightPanelSheet } from "./RightPanelSheet";
 import { deriveDebugWaitReasons } from "./chat/debugWaitReasons";
@@ -463,6 +467,8 @@ interface FollowUpQueueItem extends ComposerSendSnapshot {
   automaticSteerRetry?: {
     readonly nonSteerableTurnKind: CodexNonSteerableTurnKind | null;
     readonly sourceMessageId: MessageId;
+    /** Only an explicit retry may clear a settled dispatch failure. */
+    readonly dispatchFailed?: true;
   } | null;
 }
 
@@ -2559,6 +2565,39 @@ export default function ChatView(props: ChatViewProps) {
     isEnvironmentUnavailable: activeEnvironmentUnavailable,
     isDispatchInFlight: followUpQueueDispatchInFlight || activeQueuedFollowUpPendingDispatch,
   });
+  const canRetryAutomaticSteerItem = useCallback(
+    (item: FollowUpQueueItem): boolean => {
+      if (
+        !item.automaticSteerRetry?.dispatchFailed ||
+        !activeThread ||
+        item.environmentId !== activeThread.environmentId ||
+        item.threadId !== activeThread.id ||
+        item.dispatchState === "claimed" ||
+        queueEditingItemId ||
+        sendInFlightRef.current ||
+        queueDispatchInFlightRef.current ||
+        activeQueuedFollowUpPendingDispatch ||
+        isComposerConnecting ||
+        activeEnvironmentUnavailable ||
+        resolveAutomaticSteerRetryBlocker({ item, thread: activeThread, phase: followUpQueuePhase })
+      ) {
+        return false;
+      }
+      return followUpQueuePhase === "running"
+        ? activeThread.session?.status === "running" && activeProviderLiveSteerAvailable
+        : !followUpQueueVisibleWorking;
+    },
+    [
+      activeThread,
+      queueEditingItemId,
+      activeQueuedFollowUpPendingDispatch,
+      isComposerConnecting,
+      activeEnvironmentUnavailable,
+      followUpQueuePhase,
+      activeProviderLiveSteerAvailable,
+      followUpQueueVisibleWorking,
+    ],
+  );
   const followUpQueueViewItems = useMemo<readonly FollowUpQueueViewItem[]>(
     () =>
       activeFollowUpQueue.map((item) => ({
@@ -2574,6 +2613,7 @@ export default function ChatView(props: ChatViewProps) {
           !sendInFlightRef.current &&
           !queueDispatchInFlightRef.current,
         canDispatch: item.dispatchState !== "claimed" && !queueEditingItemId,
+        canRetryDelivery: canRetryAutomaticSteerItem(item),
         queuedAt: item.queuedAt,
         expanded: item.expanded,
         canExpand:
@@ -2584,7 +2624,7 @@ export default function ChatView(props: ChatViewProps) {
         automaticSteerRetry:
           item.automaticSteerRetry === undefined ? null : item.automaticSteerRetry,
       })),
-    [activeFollowUpQueue, queueEditingItemId],
+    [activeFollowUpQueue, queueEditingItemId, canRetryAutomaticSteerItem, dispatchGateRevision],
   );
   const steeringFollowUpViewItems = useMemo<readonly SteeringFollowUpViewItem[]>(
     () =>
@@ -2604,6 +2644,10 @@ export default function ChatView(props: ChatViewProps) {
   const canActivateRunningFollowUpQueueAction = canDispatchRunningQueuedFollowUp({
     phase: followUpQueuePhase,
     sessionRunning: activeThread?.session?.status === "running",
+    firstItemBlocked: Boolean(
+      firstActiveFollowUpQueueItem?.automaticSteerRetry &&
+      firstActiveFollowUpQueueItem.blockedReason !== null,
+    ),
     automaticSteerRetryBlocked: firstActiveAutomaticSteerRetryBlocker !== null,
     isConnecting: isComposerConnecting,
     isEnvironmentUnavailable: activeEnvironmentUnavailable,
@@ -4088,7 +4132,11 @@ export default function ChatView(props: ChatViewProps) {
   };
 
   const dispatchFollowUpTurnStart = async (item: FollowUpQueueItem) => {
-    if (item.dispatchState === "claimed") return;
+    if (
+      item.dispatchState === "claimed" ||
+      (item.automaticSteerRetry && item.blockedReason !== null)
+    )
+      return;
     if (
       useComposerDraftStore
         .getState()
@@ -4256,7 +4304,23 @@ export default function ChatView(props: ChatViewProps) {
         [item.threadId]: [
           {
             ...item,
-            blockedReason: queuedFollowUpError,
+            blockedReason:
+              item.automaticSteerRetry && isIndeterminateTransportError(err)
+                ? "Delivery status is unknown. Inspect the timeline before removing this queued message."
+                : queuedFollowUpError,
+            ...(item.automaticSteerRetry
+              ? isIndeterminateTransportError(err)
+                ? {
+                    dispatchState: "claimed" as const,
+                    claimedDispatch: { commandId: commandIdForSend, messageId: messageIdForSend },
+                  }
+                : {
+                    automaticSteerRetry: {
+                      ...item.automaticSteerRetry,
+                      dispatchFailed: true as const,
+                    },
+                  }
+              : {}),
             ...(!item.automaticSteerRetry
               ? {
                   dispatchState: "claimed" as const,
@@ -4268,6 +4332,18 @@ export default function ChatView(props: ChatViewProps) {
         ],
       }));
       setThreadError(item.threadId, queuedFollowUpError);
+      if (item.automaticSteerRetry) {
+        recordFollowUpQueueDebugAttempt(
+          "automatic-steer-retry",
+          isIndeterminateTransportError(err)
+            ? "dispatch-unknown-blocked"
+            : "dispatch-failed-blocked",
+          {
+            threadId: item.threadId,
+            itemId: item.id,
+          },
+        );
+      }
     } finally {
       setQueueDispatchInFlight(false);
       if (isVisibleThread) {
@@ -4291,7 +4367,11 @@ export default function ChatView(props: ChatViewProps) {
   ) => {
     const api = readEnvironmentApi(environmentId);
     if (!api || !activeThread) return;
-    if (options?.queuedItem?.dispatchState === "claimed") return;
+    if (
+      options?.queuedItem?.dispatchState === "claimed" ||
+      (options?.queuedItem?.automaticSteerRetry && options.queuedItem.blockedReason !== null)
+    )
+      return;
     if (useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)?.queueEditingItemId)
       return;
     if (sendInFlightRef.current || queueDispatchInFlightRef.current) return;
@@ -4448,6 +4528,27 @@ export default function ChatView(props: ChatViewProps) {
           [options.queuedItem!.threadId]: [
             {
               ...options.queuedItem!,
+              // The RPC layer already exhausts its exact-command reconnect
+              // recovery before rejecting. Re-admitting this unchanged row
+              // on every render would create new command IDs indefinitely.
+              // Preserve the durable source message and require explicit retry.
+              ...(options.queuedItem!.automaticSteerRetry
+                ? isIndeterminateTransportError(err)
+                  ? {
+                      dispatchState: "claimed" as const,
+                      claimedDispatch: { commandId: commandIdForSend, messageId: messageIdForSend },
+                      blockedReason:
+                        "Delivery status is unknown. Inspect the timeline before removing this queued message.",
+                    }
+                  : {
+                      blockedReason:
+                        "Delivery paused. Your message and attachments are preserved. You can retry delivery.",
+                      automaticSteerRetry: {
+                        ...options.queuedItem!.automaticSteerRetry,
+                        dispatchFailed: true as const,
+                      },
+                    }
+                : {}),
               ...(claim
                 ? {
                     dispatchState: "claimed" as const,
@@ -4460,6 +4561,18 @@ export default function ChatView(props: ChatViewProps) {
             ...(existing[options.queuedItem!.threadId] ?? EMPTY_FOLLOW_UP_QUEUE),
           ],
         }));
+        if (options.queuedItem.automaticSteerRetry) {
+          recordFollowUpQueueDebugAttempt(
+            "automatic-steer-retry",
+            isIndeterminateTransportError(err)
+              ? "dispatch-unknown-blocked"
+              : "dispatch-failed-blocked",
+            {
+              threadId: options.queuedItem.threadId,
+              itemId: options.queuedItem.id,
+            },
+          );
+        }
       } else if (promptRef.current.length === 0 && composerImagesRef.current.length === 0) {
         restoreComposerSnapshotForRetry(snapshot);
       }
@@ -5126,6 +5239,32 @@ export default function ChatView(props: ChatViewProps) {
       item.dispatchState === "claimed"
     )
       return;
+
+    if (item.automaticSteerRetry?.dispatchFailed) {
+      if (!canRetryAutomaticSteerItem(item)) return;
+      // Retrying is a new delivery attempt for the exact durable input, never
+      // an edited/new message. The server remains the final content-identity
+      // and retry-authority guard, including races with another renderer.
+      const retryItem: FollowUpQueueItem = {
+        ...item,
+        blockedReason: null,
+        automaticSteerRetry: {
+          sourceMessageId: item.automaticSteerRetry.sourceMessageId,
+          nonSteerableTurnKind: item.automaticSteerRetry.nonSteerableTurnKind,
+        },
+      };
+      recordFollowUpQueueDebugAttempt("manual-steer-retry", "dispatch-requested", {
+        threadId: item.threadId,
+        itemId: item.id,
+      });
+      updateManualStopBarrier(item.threadId, null);
+      if (followUpQueuePhase === "running") {
+        void dispatchSteerSnapshot(retryItem, { queuedItem: retryItem });
+      } else {
+        void dispatchFollowUpTurnStartRef.current?.(retryItem);
+      }
+      return;
+    }
 
     // Clicking a specific queued row is explicit delivery intent and is the
     // renderer equivalent of upstream's interrupt-and-submit path.

@@ -514,277 +514,346 @@ describe("OrchestrationEngine", () => {
     await system.dispose();
   });
 
-  it("binds client MessageIds once while permitting one server-authorized exact steer retry", async () => {
-    const createdAt = now();
-    const system = await createOrchestrationSystem();
-    const { engine } = system;
-    const threadId = ThreadId.make("thread-message-identity");
-    const messageId = asMessageId("message-stable-retry");
-    const originalAttachment = {
-      type: "image" as const,
-      id: "attachment-original",
-      name: "evidence.png",
-      mimeType: "image/png",
-      sizeBytes: 512,
-    } as unknown as ChatAttachment;
-    const reuploadedAttachment = {
-      ...originalAttachment,
-      id: "attachment-reuploaded",
-      mimeType: "IMAGE/PNG",
-    } as unknown as ChatAttachment;
-    const changedBytesAttachment = {
-      ...originalAttachment,
-      id: "attachment-changed-bytes",
-    } as unknown as ChatAttachment;
+  it.each([
+    { attachmentType: "image", nonSteerableTurnKind: "compact", reuseHandle: false },
+    { attachmentType: "file", nonSteerableTurnKind: "compact", reuseHandle: true },
+    { attachmentType: "file", nonSteerableTurnKind: "review", reuseHandle: false },
+  ] as const)(
+    "binds client MessageIds once while permitting one server-authorized exact steer retry ($attachmentType/$nonSteerableTurnKind)",
+    async ({ attachmentType, nonSteerableTurnKind, reuseHandle }) => {
+      const createdAt = now();
+      const system = await createOrchestrationSystem();
+      const { engine } = system;
+      const threadId = ThreadId.make("thread-message-identity");
+      const messageId = asMessageId("message-stable-retry");
+      const originalAttachment = {
+        type: attachmentType,
+        id: "attachment-original",
+        name: attachmentType === "image" ? "evidence.png" : "evidence.tex",
+        mimeType: attachmentType === "image" ? "image/png" : "application/x-tex",
+        sizeBytes: 512,
+      } as unknown as ChatAttachment;
+      const reuploadedAttachment = {
+        ...originalAttachment,
+        id: "attachment-reuploaded",
+        mimeType: originalAttachment.mimeType.toUpperCase(),
+      } as unknown as ChatAttachment;
+      const changedBytesAttachment = {
+        ...originalAttachment,
+        id: "attachment-changed-bytes",
+      } as unknown as ChatAttachment;
+      const retryAttachment = reuseHandle ? originalAttachment : reuploadedAttachment;
 
-    await system.run(
-      engine.dispatch({
-        type: "project.create",
-        commandId: CommandId.make("cmd-project-message-identity"),
-        projectId: asProjectId("project-message-identity"),
-        title: "Message identity",
-        workspaceRoot: "/tmp/project-message-identity",
-        defaultModelSelection: {
-          instanceId: ProviderInstanceId.make("codex"),
-          model: "gpt-5-codex",
-        },
-        createdAt,
-      }),
-    );
-    await system.run(
-      engine.dispatch({
-        type: "thread.create",
-        commandId: CommandId.make("cmd-thread-message-identity"),
+      await system.run(
+        engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("cmd-project-message-identity"),
+          projectId: asProjectId("project-message-identity"),
+          title: "Message identity",
+          workspaceRoot: "/tmp/project-message-identity",
+          defaultModelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          createdAt,
+        }),
+      );
+      await system.run(
+        engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("cmd-thread-message-identity"),
+          threadId,
+          projectId: asProjectId("project-message-identity"),
+          title: "Message identity",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+        }),
+      );
+      const originalBytes = Buffer.alloc(originalAttachment.sizeBytes, 0x61);
+      const changedBytes = Buffer.alloc(originalAttachment.sizeBytes, 0x62);
+      await system.run(
+        Effect.forEach(
+          [originalAttachment, reuploadedAttachment],
+          (attachment) =>
+            insertAttachmentContentCommitment({
+              sql: system.sql,
+              attachmentId: attachment.id,
+              threadId,
+              contentSha256: computeAttachmentContentSha256(originalBytes),
+              sizeBytes: attachment.sizeBytes,
+            }),
+          { concurrency: 1, discard: true },
+        ),
+      );
+      await system.run(
+        insertAttachmentContentCommitment({
+          sql: system.sql,
+          attachmentId: changedBytesAttachment.id,
+          threadId,
+          contentSha256: computeAttachmentContentSha256(changedBytes),
+          sizeBytes: changedBytesAttachment.sizeBytes,
+        }),
+      );
+
+      const originalCommand = {
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-message-identity-original"),
         threadId,
-        projectId: asProjectId("project-message-identity"),
-        title: "Message identity",
-        modelSelection: {
-          instanceId: ProviderInstanceId.make("codex"),
-          model: "gpt-5-codex",
+        message: {
+          messageId,
+          role: "user",
+          text: "retry this exact input",
+          attachments: [originalAttachment],
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
-        branch: null,
-        worktreePath: null,
-        createdAt,
-      }),
-    );
-    const originalBytes = Buffer.alloc(originalAttachment.sizeBytes, 0x61);
-    const changedBytes = Buffer.alloc(originalAttachment.sizeBytes, 0x62);
-    await system.run(
-      Effect.forEach(
-        [originalAttachment, reuploadedAttachment],
-        (attachment) =>
-          insertAttachmentContentCommitment({
-            sql: system.sql,
-            attachmentId: attachment.id,
-            threadId,
-            contentSha256: computeAttachmentContentSha256(originalBytes),
-            sizeBytes: attachment.sizeBytes,
+        runtimeMode: "approval-required" as const,
+        createdAt: "2026-01-01T00:00:01.000Z",
+      } satisfies OrchestrationCommand;
+      const first = await system.run(engine.dispatch(originalCommand));
+      const exactReceiptReplay = await system.run(engine.dispatch(originalCommand));
+      expect(exactReceiptReplay).toEqual(first);
+
+      const unmarkedReuse = await system.run(
+        Effect.exit(
+          engine.dispatch({
+            ...originalCommand,
+            commandId: CommandId.make("cmd-message-identity-unmarked-reuse"),
           }),
-        { concurrency: 1, discard: true },
-      ),
-    );
-    await system.run(
-      insertAttachmentContentCommitment({
-        sql: system.sql,
-        attachmentId: changedBytesAttachment.id,
-        threadId,
-        contentSha256: computeAttachmentContentSha256(changedBytes),
-        sizeBytes: changedBytesAttachment.sizeBytes,
-      }),
-    );
+        ),
+      );
+      expect(unmarkedReuse._tag).toBe("Failure");
 
-    const originalCommand = {
-      type: "thread.turn.start",
-      commandId: CommandId.make("cmd-message-identity-original"),
-      threadId,
-      message: {
-        messageId,
-        role: "user",
-        text: "retry this exact input",
-        attachments: [originalAttachment],
-      },
-      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-      runtimeMode: "approval-required" as const,
-      createdAt: "2026-01-01T00:00:01.000Z",
-    } satisfies OrchestrationCommand;
-    const first = await system.run(engine.dispatch(originalCommand));
-    const exactReceiptReplay = await system.run(engine.dispatch(originalCommand));
-    expect(exactReceiptReplay).toEqual(first);
+      const changedContentReuse = await system.run(
+        Effect.exit(
+          engine.dispatch({
+            ...originalCommand,
+            commandId: CommandId.make("cmd-message-identity-changed-content"),
+            message: {
+              ...originalCommand.message,
+              text: "replace the original input",
+            },
+          }),
+        ),
+      );
+      expect(changedContentReuse._tag).toBe("Failure");
 
-    const unmarkedReuse = await system.run(
-      Effect.exit(
+      await system.run(
         engine.dispatch({
-          ...originalCommand,
-          commandId: CommandId.make("cmd-message-identity-unmarked-reuse"),
-        }),
-      ),
-    );
-    expect(unmarkedReuse._tag).toBe("Failure");
-
-    const changedContentReuse = await system.run(
-      Effect.exit(
-        engine.dispatch({
-          ...originalCommand,
-          commandId: CommandId.make("cmd-message-identity-changed-content"),
-          message: {
-            ...originalCommand.message,
-            text: "replace the original input",
+          type: "thread.activity.append",
+          commandId: CommandId.make("server:message-identity-retryable"),
+          threadId,
+          activity: {
+            id: EventId.make("activity-message-identity-retryable"),
+            tone: "info",
+            kind: "provider.turn.steer.failed",
+            summary: "Provider steer queued",
+            payload: {
+              provider: "codex",
+              messageId,
+              retryableFollowUp: true,
+              codexNonSteerableTurnKind: nonSteerableTurnKind,
+            },
+            turnId: null,
+            createdAt: "2026-01-01T00:00:02.000Z",
           },
-        }),
-      ),
-    );
-    expect(changedContentReuse._tag).toBe("Failure");
-
-    await system.run(
-      engine.dispatch({
-        type: "thread.activity.append",
-        commandId: CommandId.make("server:message-identity-retryable"),
-        threadId,
-        activity: {
-          id: EventId.make("activity-message-identity-retryable"),
-          tone: "info",
-          kind: "provider.turn.steer.failed",
-          summary: "Provider steer queued",
-          payload: {
-            provider: "codex",
-            messageId,
-            retryableFollowUp: true,
-          },
-          turnId: null,
           createdAt: "2026-01-01T00:00:02.000Z",
-        },
-        createdAt: "2026-01-01T00:00:02.000Z",
-      }),
-    );
+        }),
+      );
 
-    // Equal metadata cannot authorize different image bytes.
-    const changedBytesReuse = await system.run(
-      Effect.exit(
+      // A retryable provider failure does not authorize changing the canonical
+      // message, even when the exact committed handle and bytes are reused.
+      for (const [change, changedMessage] of [
+        ["text", { ...originalCommand.message, text: "replace the original input" }],
+        [
+          "type",
+          {
+            ...originalCommand.message,
+            attachments: [
+              {
+                ...originalAttachment,
+                type: attachmentType === "image" ? "file" : "image",
+              } as ChatAttachment,
+            ],
+          },
+        ],
+        [
+          "name",
+          {
+            ...originalCommand.message,
+            attachments: [{ ...originalAttachment, name: "different-name.tex" }],
+          },
+        ],
+        [
+          "mime",
+          {
+            ...originalCommand.message,
+            attachments: [{ ...originalAttachment, mimeType: "application/octet-stream" }],
+          },
+        ],
+        [
+          "size",
+          {
+            ...originalCommand.message,
+            attachments: [{ ...originalAttachment, sizeBytes: originalAttachment.sizeBytes + 1 }],
+          },
+        ],
+        [
+          "missing-commitment",
+          {
+            ...originalCommand.message,
+            attachments: [{ ...originalAttachment, id: "attachment-without-commitment" }],
+          },
+        ],
+      ] as const) {
+        const changedIdentity = await system.run(
+          Effect.exit(
+            engine.dispatch({
+              ...originalCommand,
+              commandId: CommandId.make(`cmd-message-identity-changed-${change}-after-failure`),
+              message: changedMessage,
+            }),
+          ),
+        );
+        expect(changedIdentity._tag, change).toBe("Failure");
+      }
+
+      // Equal metadata cannot authorize different bytes for either attachment
+      // variant. Generic files retain their handle; reuploads still require the
+      // same private commitment, not merely a matching filename and byte count.
+      const changedBytesReuse = await system.run(
+        Effect.exit(
+          engine.dispatch({
+            ...originalCommand,
+            commandId: CommandId.make("cmd-message-identity-changed-bytes"),
+            message: {
+              ...originalCommand.message,
+              attachments: [changedBytesAttachment],
+            },
+            createdAt: "2026-01-01T00:00:02.500Z",
+          }),
+        ),
+      );
+      expect(changedBytesReuse._tag).toBe("Failure");
+
+      const authorizedRetry = await system.run(
         engine.dispatch({
           ...originalCommand,
-          commandId: CommandId.make("cmd-message-identity-changed-bytes"),
+          type: "thread.turn.steer",
+          commandId: CommandId.make("cmd-message-identity-authorized-retry"),
           message: {
             ...originalCommand.message,
-            attachments: [changedBytesAttachment],
+            attachments: [retryAttachment],
           },
-          createdAt: "2026-01-01T00:00:02.500Z",
+          createdAt: "2026-01-01T00:00:03.000Z",
         }),
-      ),
-    );
-    expect(changedBytesReuse._tag).toBe("Failure");
+      );
+      expect(authorizedRetry.sequence).toBeGreaterThan(first.sequence);
 
-    const authorizedRetry = await system.run(
-      engine.dispatch({
-        ...originalCommand,
-        commandId: CommandId.make("cmd-message-identity-authorized-retry"),
-        message: {
-          ...originalCommand.message,
-          attachments: [reuploadedAttachment],
-        },
-        createdAt: "2026-01-01T00:00:03.000Z",
-      }),
-    );
-    expect(authorizedRetry.sequence).toBeGreaterThan(first.sequence);
+      // The retry's new message event consumes the older failure marker, so a
+      // third command cannot replay the same identity before another failure.
+      const consumedMarkerReuse = await system.run(
+        Effect.exit(
+          engine.dispatch({
+            ...originalCommand,
+            commandId: CommandId.make("cmd-message-identity-consumed-marker"),
+            message: {
+              ...originalCommand.message,
+              attachments: [retryAttachment],
+            },
+            createdAt: "2026-01-01T00:00:04.000Z",
+          }),
+        ),
+      );
+      expect(consumedMarkerReuse._tag).toBe("Failure");
 
-    // The retry's new message event consumes the older failure marker, so a
-    // third command cannot replay the same identity before another failure.
-    const consumedMarkerReuse = await system.run(
-      Effect.exit(
+      await system.run(
         engine.dispatch({
-          ...originalCommand,
-          commandId: CommandId.make("cmd-message-identity-consumed-marker"),
-          message: {
-            ...originalCommand.message,
-            attachments: [reuploadedAttachment],
+          type: "thread.activity.append",
+          commandId: CommandId.make("server:message-identity-second-retryable"),
+          threadId,
+          activity: {
+            id: EventId.make("activity-message-identity-second-retryable"),
+            tone: "info",
+            kind: "provider.turn.steer.failed",
+            summary: "Provider steer queued",
+            payload: {
+              provider: "codex",
+              messageId,
+              retryableFollowUp: true,
+            },
+            turnId: null,
+            createdAt: "2026-01-01T00:00:05.000Z",
           },
-          createdAt: "2026-01-01T00:00:04.000Z",
-        }),
-      ),
-    );
-    expect(consumedMarkerReuse._tag).toBe("Failure");
-
-    await system.run(
-      engine.dispatch({
-        type: "thread.activity.append",
-        commandId: CommandId.make("server:message-identity-second-retryable"),
-        threadId,
-        activity: {
-          id: EventId.make("activity-message-identity-second-retryable"),
-          tone: "info",
-          kind: "provider.turn.steer.failed",
-          summary: "Provider steer queued",
-          payload: {
-            provider: "codex",
-            messageId,
-            retryableFollowUp: true,
-          },
-          turnId: null,
           createdAt: "2026-01-01T00:00:05.000Z",
-        },
-        createdAt: "2026-01-01T00:00:05.000Z",
-      }),
-    );
-    await system.run(
-      engine.dispatch({
-        type: "thread.activity.append",
-        commandId: CommandId.make("server:message-identity-delivered"),
-        threadId,
-        activity: {
-          id: EventId.make("activity-message-identity-delivered"),
-          tone: "info",
-          kind: "provider.turn.steer.delivered",
-          summary: "Provider steer delivered",
-          payload: {
-            provider: "codex",
-            messageId,
-            delivery: "next-turn",
-          },
-          turnId: null,
-          createdAt: "2026-01-01T00:00:06.000Z",
-        },
-        createdAt: "2026-01-01T00:00:06.000Z",
-      }),
-    );
-    const deliveredReuse = await system.run(
-      Effect.exit(
+        }),
+      );
+      await system.run(
         engine.dispatch({
-          ...originalCommand,
-          commandId: CommandId.make("cmd-message-identity-after-delivery"),
+          type: "thread.activity.append",
+          commandId: CommandId.make("server:message-identity-delivered"),
+          threadId,
+          activity: {
+            id: EventId.make("activity-message-identity-delivered"),
+            tone: "info",
+            kind: "provider.turn.steer.delivered",
+            summary: "Provider steer delivered",
+            payload: {
+              provider: "codex",
+              messageId,
+              delivery: "next-turn",
+            },
+            turnId: null,
+            createdAt: "2026-01-01T00:00:06.000Z",
+          },
+          createdAt: "2026-01-01T00:00:06.000Z",
+        }),
+      );
+      const deliveredReuse = await system.run(
+        Effect.exit(
+          engine.dispatch({
+            ...originalCommand,
+            commandId: CommandId.make("cmd-message-identity-after-delivery"),
+            message: {
+              ...originalCommand.message,
+              attachments: [reuploadedAttachment],
+            },
+            createdAt: "2026-01-01T00:00:07.000Z",
+          }),
+        ),
+      );
+      expect(deliveredReuse._tag).toBe("Failure");
+
+      // Internal terminal recovery is the only unconditional reuse path. The
+      // client schema cannot author terminalRecovery, and the server command is
+      // still protected by its deterministic receipt identity.
+      const terminalRecovery = await system.run(
+        engine.dispatch({
+          type: "thread.turn.steer",
+          commandId: CommandId.make("server:message-identity-terminal-recovery"),
+          threadId,
           message: {
             ...originalCommand.message,
             attachments: [reuploadedAttachment],
           },
-          createdAt: "2026-01-01T00:00:07.000Z",
+          terminalRecovery: {
+            staleTurnId: asTurnId("turn-message-identity-stale"),
+            intentSequence: 1,
+          },
+          createdAt: "2026-01-01T00:00:08.000Z",
         }),
-      ),
-    );
-    expect(deliveredReuse._tag).toBe("Failure");
+      );
+      expect(terminalRecovery.sequence).toBeGreaterThan(authorizedRetry.sequence);
 
-    // Internal terminal recovery is the only unconditional reuse path. The
-    // client schema cannot author terminalRecovery, and the server command is
-    // still protected by its deterministic receipt identity.
-    const terminalRecovery = await system.run(
-      engine.dispatch({
-        type: "thread.turn.steer",
-        commandId: CommandId.make("server:message-identity-terminal-recovery"),
-        threadId,
-        message: {
-          ...originalCommand.message,
-          attachments: [reuploadedAttachment],
-        },
-        terminalRecovery: {
-          staleTurnId: asTurnId("turn-message-identity-stale"),
-          intentSequence: 1,
-        },
-        createdAt: "2026-01-01T00:00:08.000Z",
-      }),
-    );
-    expect(terminalRecovery.sequence).toBeGreaterThan(authorizedRetry.sequence);
-
-    await system.dispose();
-  });
+      await system.dispose();
+    },
+  );
 
   it("keeps attachment byte commitments across restart and fails legacy identities closed", async () => {
     const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "cafe-message-commitment-restart-"));
