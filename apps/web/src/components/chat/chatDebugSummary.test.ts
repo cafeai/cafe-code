@@ -47,4 +47,30 @@ describe("chat diagnostic projections", () => {
     expect(result["constructor"]).toBe(1);
     expect(Object.getPrototypeOf(result)).toBeNull();
   });
+
+  it("reports only bounded counts for inline questions, not titles or suggestions", () => {
+    const activity: OrchestrationThreadActivity = {
+      id: EventId.make("question-event"),
+      kind: "provider.async-questions",
+      tone: "info",
+      summary: "PRIVATE_QUESTION",
+      turnId: null,
+      createdAt: "2026-09-10T00:00:00.000Z",
+      payload: {
+        PRIVATE_KEY: "PRIVATE_VALUE",
+        itemId: "PRIVATE_ITEM",
+        questions: Array.from({ length: 20 }, () => ({
+          title: "PRIVATE_QUESTION",
+          options: Array.from({ length: 40 }, () => "PRIVATE_SUGGESTION"),
+        })),
+      },
+    };
+    const summary = summarizeDebugActivity(activity);
+    expect(JSON.parse(summary.payloadPreview)).toEqual({ questionCount: 16, optionCount: 512 });
+    expect(summary.payloadKeys).toEqual(["optionCount", "questionCount"]);
+    expect(JSON.stringify(summary)).not.toContain("PRIVATE_");
+    expect(summarizeDebugActivity({ ...activity, payload: null }).payloadPreview).toBe(
+      '{"questionCount":0,"optionCount":0}',
+    );
+  });
 });

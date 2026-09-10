@@ -109,6 +109,8 @@ import { BranchToolbar } from "./BranchToolbar";
 import { resolveShortcutCommand } from "../keybindings";
 import PlanSidebar from "./PlanSidebar";
 import { SessionRail } from "./chat/SessionRail";
+import { ComposerAsyncQuestionsPanel } from "./chat/ComposerAsyncQuestionsPanel";
+import { persistExactAsyncQuestionAnswer } from "./chat/asyncQuestions";
 import { ChevronDownIcon, TriangleAlertIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
 import { stackedThreadToast, toastManager } from "./ui/toast";
@@ -4057,12 +4059,34 @@ export default function ChatView(props: ChatViewProps) {
     scheduleComposerFocus();
   };
 
-  const enqueueFollowUpSnapshot = async (snapshot: ComposerSendSnapshot) => {
-    if (!activeThread || sendInFlightRef.current || queueDispatchInFlightRef.current) return;
+  const enqueueFollowUpSnapshot = async (
+    snapshot: ComposerSendSnapshot,
+    options: { readonly preserveComposer?: boolean; readonly id?: string } = {},
+  ): Promise<boolean> => {
+    if (!activeThread || sendInFlightRef.current || queueDispatchInFlightRef.current) return false;
+    // Async answers use a stable, scoped question identity as the durable queue
+    // and eventual command/message id. A lost local ACK therefore cannot turn
+    // an explicit answer into two provider submissions after reload.
+    if (options.id) {
+      const committed = activeThread.messages.find((message) => message.id === options.id);
+      if (committed) return committed.text === outgoingTextForSnapshot(snapshot);
+      const saved = queuePersistence.load(activeThread.environmentId);
+      if (!saved.ok) {
+        setThreadError(activeThread.id, saved.error);
+        return false;
+      }
+      const existing = [...saved.value.pending, ...saved.value.claimed].find(
+        (item) => item.threadId === activeThread.id && item.id === options.id,
+      );
+      // An uncertain answer receipt permits only an exact text retry. A second
+      // view must never overwrite another answer or reuse its accepted command
+      // identity with changed text, even when that item is already claimed.
+      if (existing) return existing.promptText === snapshot.promptText;
+    }
     const queuedAt = new Date().toISOString();
     const item: FollowUpQueueItem = {
       ...snapshot,
-      id: newMessageId(),
+      id: options.id ?? newMessageId(),
       environmentId: activeThread.environmentId,
       threadId: activeThread.id,
       queuedAt,
@@ -4070,14 +4094,26 @@ export default function ChatView(props: ChatViewProps) {
       blockedReason: null,
     };
     setSendInFlight(true);
-    const saved = await persistFollowUpQueues(activeThread.environmentId, {
-      [item.threadId]: [item],
-    });
+    const save = () =>
+      persistFollowUpQueues(activeThread.environmentId, { [item.threadId]: [item] });
+    const saved = options.id
+      ? await persistExactAsyncQuestionAnswer({
+          id: item.id,
+          threadId: item.threadId,
+          text: item.promptText,
+          save,
+          read: () => queuePersistence.load(item.environmentId),
+        })
+      : await save();
     setSendInFlight(false);
     if (!saved.ok) {
       setThreadError(activeThread.id, saved.error);
-      return;
+      return false;
     }
+    if (options.id && saved.value === "claimed") return true;
+    // The saved queue remains authoritative if routing changed during storage
+    // I/O. Its normal hydration owns the next view's environment-specific state.
+    if (currentRouteThreadKeyRef.current !== routeThreadKey) return true;
     setFollowUpQueueByThreadId((current) => ({
       ...current,
       [activeThread.id]: [
@@ -4086,7 +4122,45 @@ export default function ChatView(props: ChatViewProps) {
       ],
     }));
     setThreadError(activeThread.id, null);
-    clearActiveComposerContent();
+    if (!options.preserveComposer) clearActiveComposerContent();
+    return true;
+  };
+
+  const enqueueAsyncQuestionAnswer = async (text: string, messageId: string): Promise<boolean> => {
+    if (
+      !activeThread ||
+      !isServerThread ||
+      isComposerConnecting ||
+      activeEnvironmentUnavailable ||
+      currentRouteThreadKeyRef.current !== routeThreadKey
+    )
+      return false;
+    const sendCtx = readComposerHandle(composerRef)?.getSendContext();
+    if (
+      !sendCtx ||
+      sendCtx.selectedProvider !== "codex" ||
+      activeThread.session?.provider !== "codex"
+    )
+      return false;
+    // Read only provider/model choices. Do not inspect or move main-draft
+    // attachments, pending uploads, cursor state, or queue-editing state. This
+    // enters the ordinary durable queue directly, bypassing slash-command
+    // parsing; its dispatcher selects start/steer from authoritative lifecycle.
+    return enqueueFollowUpSnapshot(
+      {
+        promptText: text,
+        images: [],
+        files: [],
+        provider: sendCtx.selectedProvider,
+        model: sendCtx.selectedModel,
+        providerModels: sendCtx.selectedProviderModels,
+        promptEffort: sendCtx.selectedPromptEffort,
+        modelSelection: sendCtx.selectedModelSelection,
+        runtimeMode,
+        interactionMode,
+      },
+      { preserveComposer: true, id: messageId },
+    );
   };
 
   const removeFollowUpQueueItem = (targetThreadId: ThreadId, itemId: string, revoke: boolean) => {
@@ -6395,6 +6469,17 @@ export default function ChatView(props: ChatViewProps) {
               isGitRepo ? "pb-1" : "pb-3 sm:pb-4",
             )}
           >
+            {isServerThread && activeThread.session?.provider === "codex" && (
+              <ComposerAsyncQuestionsPanel
+                environmentId={activeThread.environmentId}
+                threadId={activeThread.id}
+                activities={activeThread.activities}
+                deliveryDisabled={
+                  isSendBusy || isComposerConnecting || activeEnvironmentUnavailable
+                }
+                onAnswer={enqueueAsyncQuestionAnswer}
+              />
+            )}
             <div className="relative isolate">
               <ComposerBannerStack className="relative z-0" items={composerBannerItems} />
               <div className="relative z-10">

@@ -4,6 +4,7 @@ import * as Schema from "effect/Schema";
 import {
   ClientSettingsPatch,
   ClientSettingsSchema,
+  CLAUDE_MAX_CONCURRENT_SUBAGENTS,
   CODEX_MAX_CONCURRENT_SUBAGENTS,
   CodexSettings,
   ClaudeSettings,
@@ -47,7 +48,7 @@ import {
 const decodeClientSettings = Schema.decodeSync(ClientSettingsSchema);
 const decodeClientSettingsPatch = Schema.decodeUnknownSync(ClientSettingsPatch);
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
-const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
+const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
 const decodeGrokSettings = Schema.decodeSync(GrokSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 
@@ -459,6 +460,38 @@ describe("provider settings", () => {
 
   it("leaves the Codex auto-compact limit unset for upstream resolution", () => {
     expect(decodeCodexSettings({}).autoCompactTokenLimit).toBeUndefined();
+  });
+
+  it("leaves the Claude Agent-tool limit unset for inherited provider resolution", () => {
+    expect(decodeClaudeSettings({}).maxConcurrentSubagents).toBeUndefined();
+  });
+
+  it.each([1, 20, CLAUDE_MAX_CONCURRENT_SUBAGENTS])(
+    "decodes a valid Claude Agent-tool concurrency limit of %i",
+    (maxConcurrentSubagents) => {
+      expect(decodeClaudeSettings({ maxConcurrentSubagents }).maxConcurrentSubagents).toBe(
+        maxConcurrentSubagents,
+      );
+      expect(
+        decodeServerSettingsPatch({ providers: { claudeAgent: { maxConcurrentSubagents } } }),
+      ).toEqual({ providers: { claudeAgent: { maxConcurrentSubagents } } });
+    },
+  );
+
+  it.each([
+    0,
+    -1,
+    1.5,
+    CLAUDE_MAX_CONCURRENT_SUBAGENTS + 1,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    "20",
+    null,
+  ])("rejects an invalid Claude Agent-tool concurrency limit of %s", (maxConcurrentSubagents) => {
+    expect(() => decodeClaudeSettings({ maxConcurrentSubagents })).toThrow();
+    expect(() =>
+      decodeServerSettingsPatch({ providers: { claudeAgent: { maxConcurrentSubagents } } }),
+    ).toThrow();
   });
 
   it("decodes a configured Codex auto-compact token limit", () => {

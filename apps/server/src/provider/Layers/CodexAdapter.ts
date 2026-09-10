@@ -954,6 +954,18 @@ function itemTitle(itemType: CanonicalItemType, item: CodexLifecycleItem): strin
 }
 
 function itemDetail(item: CodexLifecycleItem): string | undefined {
+  if (item.type === "agentMessage") {
+    // App-server's item/completed text is the accumulated assistant source,
+    // not a work-log label (https://learn.chatgpt.com/docs/app-server#items).
+    // Ingestion verifies its exact UTF-16 prefix against streamed deltas before
+    // using it to repair an incomplete projection. Trimming here changes that
+    // commitment and can strand a valid streamed prefix such as " The". Even
+    // removing one trailing newline makes a fully streamed completion shorter
+    // than its commitment and prevents it from repairing a lagging projection.
+    // Keep source whitespace; only an entirely blank item is non-renderable.
+    return trimText(item.text) === undefined ? undefined : item.text;
+  }
+
   if (item.type === "subAgentActivity") {
     const action =
       item.kind === "started"

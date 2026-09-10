@@ -69,6 +69,57 @@ describe("ProviderSettingsForm helpers", () => {
     expect(markup).toContain('id="provider-instance-codex-maxConcurrentSubagents-description"');
   });
 
+  it("derives, renders and clears the optional Claude Agent-tool concurrency override", () => {
+    const claude = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("claudeAgent")];
+    expect(claude).toBeDefined();
+    const field = deriveProviderSettingsFields(claude!).find(
+      (candidate) => candidate.key === "maxConcurrentSubagents",
+    );
+    expect(field).toMatchObject({
+      control: "number",
+      step: 1,
+      minimum: 1,
+      maximum: 64,
+      integerOnly: true,
+      clearWhenEmpty: "omit",
+    });
+    expect(field?.defaultNumberValue).toBeUndefined();
+    const markup = renderToStaticMarkup(
+      createElement(ProviderSettingsForm, {
+        definition: claude!,
+        value: undefined,
+        idPrefix: "provider-instance-claude",
+        variant: "dialog",
+        onChange: () => undefined,
+      }),
+    );
+    expect(markup).toMatch(
+      /<input[^>]*id="provider-instance-claude-maxConcurrentSubagents"[^>]*type="number"[^>]*step="1"[^>]*min="1"[^>]*max="64"[^>]*aria-describedby="provider-instance-claude-maxConcurrentSubagents-description"[^>]*>/,
+    );
+    expect(markup).toContain("CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS");
+    expect(markup).toContain(
+      "Saving provider settings reloads this instance; change between sessions.",
+    );
+    expect(markup).toContain("not all running work");
+    expect(
+      nextProviderConfigWithFieldValue(
+        { homePath: "/test-home", maxConcurrentSubagents: 12 },
+        field!,
+        "",
+      ),
+    ).toEqual({ homePath: "/test-home" });
+    expect(nextProviderConfigWithFieldValue({}, field!, "64")).toEqual({
+      maxConcurrentSubagents: 64,
+    });
+    for (const invalid of ["0", "65", "1.5", "not-a-number"]) {
+      expect(
+        nextProviderConfigWithFieldValue({ maxConcurrentSubagents: 12 }, field!, invalid),
+      ).toEqual({
+        maxConcurrentSubagents: 12,
+      });
+    }
+  });
+
   it("sources labels and descriptions from schema annotations", () => {
     const claude = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("claudeAgent")];
     expect(claude).toBeDefined();

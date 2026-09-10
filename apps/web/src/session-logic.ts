@@ -586,6 +586,9 @@ export function deriveWorkLogEntries(
       (activity) => activity.kind !== "task.started" || isUserVisibleTaskStartedActivity(activity),
     )
     .filter((activity) => activity.kind !== "context-window.updated")
+    // These structured prompts have their own nonblocking composer surface.
+    // They must not create a duplicate generic work-log row or waiting state.
+    .filter((activity) => activity.kind !== "provider.async-questions")
     .filter((activity) => activity.summary !== "Checkpoint captured")
     .filter((activity) => !isPlanBoundaryToolActivity(activity))
     .filter((activity) => !isRetryableSteerDeliveryActivity(activity))

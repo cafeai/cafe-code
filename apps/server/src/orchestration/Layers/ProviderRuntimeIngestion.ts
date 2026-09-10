@@ -1,7 +1,11 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as Crypto from "node:crypto";
+
 import {
   ApprovalRequestId,
   type AssistantDeliveryMode,
   CommandId,
+  EventId,
   MessageId,
   type OrchestrationEvent,
   type OrchestrationMessage,
@@ -19,6 +23,7 @@ import {
   type ProviderRuntimeEvent,
 } from "@cafecode/contracts";
 import { readCafeCodeEnv } from "@cafecode/shared/compatEnv";
+import { normalizeCodexAsyncQuestions } from "@cafecode/shared/codexAsyncQuestions";
 import { PROVIDER_PIPELINE_POLICY } from "@cafecode/shared/providerPipelinePolicy";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
@@ -900,6 +905,10 @@ function runtimeEventToActivities(
     }
 
     case "item.completed": {
+      const asyncQuestionsActivity = codexAsyncQuestionsActivity(event);
+      if (asyncQuestionsActivity !== null) {
+        return [{ ...asyncQuestionsActivity, ...maybeSequence }];
+      }
       if (!isToolLifecycleItemType(event.payload.itemType)) {
         return [];
       }
@@ -961,6 +970,91 @@ function readUnknownRecord(value: unknown): Readonly<Record<string, unknown>> | 
     return null;
   }
   return value as Readonly<Record<string, unknown>>;
+}
+
+/**
+ * Codex 0.154's request_user_input_async handler emits a completed final-answer
+ * agentMessage with delivery=async and structured question metadata. This is
+ * ordinary assistant content: persist a bounded presentation hint, never a
+ * pending approval, callback, or user-input lifecycle transition.
+ */
+function codexAsyncQuestionsActivity(
+  event: Extract<ProviderRuntimeEvent, { readonly type: "item.completed" }>,
+): OrchestrationThreadActivity | null {
+  if (
+    event.provider !== "codex" ||
+    event.payload.itemType !== "assistant_message" ||
+    event.payload.status !== "completed" ||
+    event.raw?.source !== "codex.app-server.notification" ||
+    event.raw.method !== "item/completed" ||
+    event.compaction !== undefined
+  ) {
+    // Journal compaction can shorten strings or replace nested arrays. Even
+    // otherwise valid-looking suggestions must not turn a truncated provider
+    // label into a user action; the existing assistant text remains visible.
+    return null;
+  }
+
+  const data = readUnknownRecord(event.payload.data);
+  const item = readUnknownRecord(data?.item);
+  const providerThreadId = data?.threadId;
+  const providerTurnId = data?.turnId;
+  const itemId = item?.id;
+  if (
+    typeof providerThreadId !== "string" ||
+    providerThreadId.length === 0 ||
+    providerThreadId.length > 512 ||
+    typeof providerTurnId !== "string" ||
+    providerTurnId.length === 0 ||
+    providerTurnId.length > 512 ||
+    providerTurnId !== event.turnId ||
+    typeof itemId !== "string" ||
+    itemId.length === 0 ||
+    itemId.length > 512 ||
+    itemId !== event.itemId ||
+    item?.type !== "agentMessage" ||
+    item.delivery !== "async" ||
+    item.phase !== "final_answer" ||
+    typeof item.text !== "string" ||
+    !hasRenderableAssistantText(item.text)
+  ) {
+    // CodexSessionRuntime routes a child's outer turn to its parent while
+    // retaining the original native turn inside data. Requiring exact native
+    // turn identity excludes child questions from the parent's suggestions
+    // without consulting a mutable current session during historical replay.
+    return null;
+  }
+
+  const questions = normalizeCodexAsyncQuestions(item.questions);
+  if (questions.length === 0) return null;
+
+  // Native item identity survives completion replay and snapshot backfill
+  // even when a new daemon event id or timestamp is minted. Length-delimited
+  // tuple encoding and domain separation bind the presentation to its exact
+  // provider instance, Cafe thread, and native thread/turn/item. Do not hash
+  // question text: a changed duplicate must never reopen the same item.
+  const digest = Crypto.createHash("sha256")
+    .update(
+      JSON.stringify([
+        "cafecode.codex-async-questions.v1",
+        event.providerInstanceId ?? event.provider,
+        event.threadId,
+        providerThreadId,
+        providerTurnId,
+        itemId,
+      ]),
+      "utf8",
+    )
+    .digest("hex");
+  return {
+    id: EventId.make(`codex-async-questions:${digest}`),
+    createdAt: event.createdAt,
+    tone: "info",
+    kind: "provider.async-questions",
+    summary: "Follow-up questions",
+    payload: { itemId, questions },
+    turnId: event.turnId ?? null,
+  };
 }
 
 /**
@@ -1825,6 +1919,27 @@ const make = Effect.gen(function* () {
           ? input.fallbackText
           : undefined
         : input.fallbackText;
+      if (
+        streamObserved &&
+        hasRenderableAssistantText(input.fallbackText) &&
+        canonicalFinalText === undefined
+      ) {
+        // A lossy provider mapping (even trimming a final newline) can make an
+        // otherwise authoritative completion fail this exact-text boundary.
+        // Keep the strict commitment check and make the refusal observable
+        // without retaining provider text, digests or conversation identities.
+        // This is completion-only, not per-token work; consuming the commitment
+        // below and canonical-event deduplication bound repeated observations.
+        yield* Effect.logWarning("provider.assistantCompletion/textMismatch", {
+          provider: input.event.provider,
+          reason:
+            input.fallbackText!.length < streamCommitment.value.codeUnitLength
+              ? "completion-shorter-than-stream"
+              : "completion-prefix-mismatch",
+          streamedCodeUnits: streamCommitment.value.codeUnitLength,
+          completionCodeUnits: input.fallbackText!.length,
+        });
+      }
       const text = completedAssistantTextDelta({
         bufferedText,
         fallbackText: input.fallbackText,
@@ -3043,7 +3158,10 @@ const make = Effect.gen(function* () {
       yield* Effect.forEach(enrichedActivities.activities, (activity) =>
         orchestrationEngine.dispatch({
           type: "thread.activity.append",
-          commandId: providerCommandId(event, "thread-activity-append", activity.id),
+          commandId:
+            activity.kind === "provider.async-questions"
+              ? CommandId.make(`provider-async-questions:${activity.id}`)
+              : providerCommandId(event, "thread-activity-append", activity.id),
           threadId: thread.id,
           activity,
           createdAt: activity.createdAt,

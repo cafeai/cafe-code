@@ -12,6 +12,7 @@ import {
   ProviderRuntimeEvent,
   ProviderSession,
   ProviderInstanceId,
+  RuntimeItemId,
   RuntimeTaskId,
 } from "@cafecode/contracts";
 import {
@@ -31,6 +32,7 @@ import * as Deferred from "effect/Deferred";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
@@ -106,6 +108,43 @@ const asEventId = (value: string): EventId => EventId.make(value);
 const asMessageId = (value: string): MessageId => MessageId.make(value);
 const asThreadId = (value: string): ThreadId => ThreadId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
+
+function codexAsyncQuestionCompletion(
+  itemId: string,
+  questions: unknown,
+): Extract<ProviderRuntimeEvent, { readonly type: "item.completed" }> {
+  const data = {
+    threadId: "provider-root-thread",
+    turnId: "turn-async-questions",
+    item: {
+      id: itemId,
+      type: "agentMessage",
+      delivery: "async",
+      phase: "final_answer",
+      text: "Which approach should I use? Work continues while you decide.",
+      questions,
+      ignoredPrivateField: "private-question-extra-sentinel",
+    },
+  };
+  return {
+    type: "item.completed",
+    eventId: asEventId(`evt-async-questions-${itemId}`),
+    provider: ProviderDriverKind.make("codex"),
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    createdAt: "2026-01-01T00:00:00.000Z",
+    threadId: asThreadId("thread-1"),
+    turnId: asTurnId(data.turnId),
+    itemId: RuntimeItemId.make(itemId),
+    providerRefs: { providerTurnId: data.turnId, providerItemId: asItemId(itemId) },
+    raw: { source: "codex.app-server.notification", method: "item/completed", payload: data },
+    payload: {
+      itemType: "assistant_message",
+      status: "completed",
+      detail: data.item.text,
+      data,
+    },
+  };
+}
 
 type LegacyProviderRuntimeEvent = {
   readonly type: string;
@@ -291,6 +330,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   async function createHarness(options?: {
+    logMessages?: unknown[];
     recordAccounting?: UsageStatsServiceShape["recordAccounting"];
     serverSettings?: Partial<ServerSettings>;
     databasePath?: string;
@@ -374,7 +414,17 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
       Layer.provideMerge(NodeServices.layer),
     );
-    runtime = ManagedRuntime.make(layer);
+    runtime = ManagedRuntime.make(
+      options?.logMessages
+        ? layer.pipe(
+            Layer.provide(
+              Logger.layer([Logger.make(({ message }) => options.logMessages!.push(message))], {
+                mergeWithExisting: false,
+              }),
+            ),
+          )
+        : layer,
+    );
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
     const ingestion = await runtime.runPromise(Effect.service(ProviderRuntimeIngestionService));
@@ -2433,6 +2483,151 @@ describe("ProviderRuntimeIngestion", () => {
     expect(message?.streaming).toBe(false);
   });
 
+  it("projects bounded root Codex async questions without opening a user-input callback", async () => {
+    const logMessages: unknown[] = [];
+    const harness = await createHarness({ logMessages });
+    const event = codexAsyncQuestionCompletion("async-root", [
+      { title: "Which approach?", options: ["Minimal", "Complete", "Minimal", 42] },
+      { title: "Any other constraints?" },
+      { title: "", options: ["invalid"] },
+      { title: "x".repeat(4_097), options: ["oversized"] },
+      { title: "Malformed suggestions", options: "not-an-array" },
+    ]);
+    harness.emit(event);
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.kind === "provider.async-questions"),
+    );
+    const activity = thread.activities.find((entry) => entry.kind === "provider.async-questions");
+    expect(activity).toMatchObject({
+      kind: "provider.async-questions",
+      summary: "Follow-up questions",
+      tone: "info",
+      turnId: "turn-async-questions",
+      payload: {
+        itemId: "async-root",
+        questions: [
+          { title: "Which approach?", options: ["Minimal", "Complete"] },
+          { title: "Any other constraints?", options: [] },
+        ],
+      },
+    });
+    expect(activity?.id).toMatch(/^codex-async-questions:[a-f0-9]{64}$/);
+    expect(Object.keys(activity?.payload as object).toSorted()).toEqual(["itemId", "questions"]);
+    expect(thread.activities.some((entry) => entry.kind.startsWith("user-input."))).toBe(false);
+    expect(thread.activities.some((entry) => entry.kind.startsWith("approval."))).toBe(false);
+    expect(thread.session?.status).toBe("ready");
+    expect(thread.session?.activeTurnId).toBeNull();
+    expect(thread.messages.find((entry) => entry.id === "assistant:async-root")?.text).toBe(
+      "Which approach should I use? Work continues while you decide.",
+    );
+    expect(JSON.stringify(activity)).not.toContain("private-question-extra-sentinel");
+    expect(JSON.stringify(logMessages)).not.toContain("Which approach?");
+    expect(JSON.stringify(logMessages)).not.toContain("private-question-extra-sentinel");
+  });
+
+  it("does not reopen Codex async questions when completion gets a new replay event identity", async () => {
+    const harness = await createHarness();
+    const first = codexAsyncQuestionCompletion("async-replay", [
+      { title: "Which approach?", options: ["Minimal", "Complete"] },
+    ]);
+    harness.emit(first);
+    const initialThread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.kind === "provider.async-questions"),
+    );
+    const initial = initialThread.activities.find(
+      (activity) => activity.kind === "provider.async-questions",
+    );
+
+    // A backfill or replay can mint a new runtime id/time for the same native
+    // item. Even changed duplicate metadata must retain the original activity
+    // and receipt, otherwise a previously answered card would reopen.
+    const replay = codexAsyncQuestionCompletion("async-replay", [
+      { title: "Changed duplicate", options: ["New suggestion"] },
+    ]);
+    harness.emit({
+      ...replay,
+      eventId: asEventId("evt-async-questions-replayed-different-id"),
+      createdAt: "2026-01-01T00:01:00.000Z",
+    });
+    harness.emit({
+      type: "runtime.warning",
+      eventId: asEventId("evt-async-questions-replay-drained"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: first.createdAt,
+      threadId: first.threadId,
+      payload: { message: "Replay drained" },
+    });
+    const replayedThread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.id === "evt-async-questions-replay-drained"),
+    );
+    expect(
+      replayedThread.activities.filter((entry) => entry.kind === "provider.async-questions"),
+    ).toEqual([initial]);
+  });
+
+  it("ignores child, malformed, incomplete, and compacted Codex async-question metadata", async () => {
+    const harness = await createHarness();
+    const valid = codexAsyncQuestionCompletion("async-invalid", [
+      { title: "Which approach?", options: ["Minimal", "Complete"] },
+    ]);
+    const data = valid.payload.data as {
+      threadId: string;
+      turnId: string;
+      item: Record<string, unknown>;
+    };
+    const candidates: ReadonlyArray<Partial<typeof valid>> = [
+      // Child assistant output is routed onto the parent canonical turn, but
+      // its native turn/thread remains in the original app-server payload.
+      { payload: { ...valid.payload, data: { ...data, threadId: "child", turnId: "child-turn" } } },
+      { provider: ProviderDriverKind.make("claude") },
+      { raw: { ...valid.raw!, source: "codex.app-server.request" } },
+      { raw: { ...valid.raw!, method: "item/started" } },
+      { payload: { ...valid.payload, status: "inProgress" } },
+      {
+        payload: { ...valid.payload, data: { ...data, item: { ...data.item, id: "wrong-item" } } },
+      },
+      { payload: { ...valid.payload, data: { ...data, item: { ...data.item, text: "" } } } },
+      { payload: { ...valid.payload, data: { ...data, item: { ...data.item, delivery: null } } } },
+      {
+        payload: {
+          ...valid.payload,
+          data: { ...data, item: { ...data.item, questions: [null, {}] } },
+        },
+      },
+      {
+        compaction: {
+          version: 1,
+          originalEncodedBytes: 300_000,
+          compactedEncodedBytes: 10_000,
+          sha256: "a".repeat(64),
+          truncatedStrings: 1,
+          omittedArrayItems: 0,
+          omittedObjectKeys: 0,
+          depthOmissions: 0,
+        },
+      },
+    ];
+    for (const [index, override] of candidates.entries()) {
+      harness.emit({ ...valid, ...override, eventId: asEventId(`evt-async-invalid-${index}`) });
+    }
+    harness.emit({
+      type: "runtime.warning",
+      eventId: asEventId("evt-async-invalid-drained"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: valid.createdAt,
+      threadId: valid.threadId,
+      payload: { message: "Invalid metadata drained" },
+    });
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.id === "evt-async-invalid-drained"),
+    );
+    expect(thread.activities.some((entry) => entry.kind === "provider.async-questions")).toBe(
+      false,
+    );
+    expect(thread.activities.some((entry) => entry.kind.startsWith("user-input."))).toBe(false);
+  });
+
   it("keeps interleaved Codex root and subagent assistant streams isolated", async () => {
     const harness = await createHarness({ serverSettings: { enableAssistantStreaming: true } });
     const now = "2026-01-01T00:00:00.000Z";
@@ -2902,6 +3097,138 @@ describe("ProviderRuntimeIngestion", () => {
     expect(message?.streaming).toBe(false);
   });
 
+  it("repairs exact late assistant completion without reopening an older terminal turn", async () => {
+    const logMessages: unknown[] = [];
+    const harness = await createHarness({
+      serverSettings: { enableAssistantStreaming: true },
+      logMessages,
+    });
+    const threadId = asThreadId("thread-1");
+    const oldTurnId = asTurnId("turn-late-assistant-old");
+    const newTurnId = asTurnId("turn-late-assistant-new");
+    const itemId = RuntimeItemId.make("item-late-assistant");
+    const messageId = "assistant:item-late-assistant";
+    const startedAt = "2026-01-01T00:00:01.000Z";
+    const completedAt = "2026-01-01T00:00:02.000Z";
+    const newStartedAt = "2026-01-01T00:00:03.000Z";
+    const lateAt = "2026-01-01T00:00:04.000Z";
+    const finalText = "The complete paragraph retains its final newline.\n";
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-late-assistant-old-start"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      turnId: oldTurnId,
+      createdAt: startedAt,
+    });
+    await waitForThread(harness.readModel, (thread) => thread.session?.activeTurnId === oldTurnId);
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-late-assistant-old-complete"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      turnId: oldTurnId,
+      createdAt: completedAt,
+      payload: { state: "completed" },
+    });
+    await waitForThread(harness.readModel, (thread) => thread.latestTurn?.state === "completed");
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-late-assistant-new-start"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      turnId: newTurnId,
+      createdAt: newStartedAt,
+    });
+    const before = await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.activeTurnId === newTurnId,
+    );
+    const readOldTurn = () =>
+      runtime!.runPromise(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          return yield* sql<{ readonly state: string; readonly completedAt: string | null }>`
+            SELECT state, completed_at AS "completedAt"
+            FROM projection_turns
+            WHERE thread_id = ${threadId} AND turn_id = ${oldTurnId}
+          `;
+        }),
+      );
+    const oldTurnBefore = await readOldTurn();
+    expect(oldTurnBefore).toEqual([{ state: "completed", completedAt }]);
+
+    // Late child/root output may still name the terminal turn while a newer
+    // turn runs. The first tiny chunk becomes a non-streaming snapshot row;
+    // later appends intentionally cannot reopen it. Exact item completion is
+    // the content-only repair boundary, including every final whitespace unit.
+    for (const [index, delta] of ["The", finalText.slice(3)].entries()) {
+      harness.emit({
+        type: "content.delta",
+        eventId: asEventId(`evt-late-assistant-delta-${index}`),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        turnId: oldTurnId,
+        itemId,
+        createdAt: lateAt,
+        payload: { streamKind: "assistant_text", delta },
+      });
+    }
+    await harness.drain();
+    const fragmented = await waitForThread(harness.readModel, (thread) =>
+      thread.messages.some((message) => message.id === messageId),
+    );
+    expect(fragmented.messages.find((message) => message.id === messageId)).toMatchObject({
+      text: "The",
+      streaming: false,
+      createdAt: completedAt,
+      updatedAt: completedAt,
+    });
+
+    const completion: ProviderRuntimeEvent = {
+      type: "item.completed",
+      eventId: asEventId("evt-late-assistant-item-complete"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      turnId: oldTurnId,
+      itemId,
+      createdAt: lateAt,
+      payload: { itemType: "assistant_message", status: "completed", detail: finalText },
+    };
+    harness.emit(completion);
+    const repaired = await waitForThread(harness.readModel, (thread) =>
+      thread.messages.some((message) => message.id === messageId && message.text === finalText),
+    );
+    expect(repaired.messages.find((message) => message.id === messageId)).toMatchObject({
+      turnId: oldTurnId,
+      text: finalText,
+      streaming: false,
+      createdAt: completedAt,
+      updatedAt: completedAt,
+    });
+    expect(repaired.session).toEqual(before.session);
+    expect(repaired.latestTurn).toEqual(before.latestTurn);
+    expect(await readOldTurn()).toEqual(oldTurnBefore);
+
+    // Replaying the same completion cannot append the answer twice or produce
+    // a mismatch warning merely because the old turn remains terminal.
+    harness.emit(completion);
+    await harness.drain();
+    const replayed = await harness.readModel();
+    expect(
+      replayed.threads
+        .find((thread) => thread.id === threadId)
+        ?.messages.find((message) => message.id === messageId)?.text,
+    ).toBe(finalText);
+    expect(
+      logMessages.filter(
+        (message) =>
+          Array.isArray(message) && message[0] === "provider.assistantCompletion/textMismatch",
+      ),
+    ).toEqual([]);
+  });
+
   it("consolidates a completed assistant stream without appending it twice", async () => {
     const harness = await createHarness({ serverSettings: { enableAssistantStreaming: true } });
     const now = "2026-01-01T00:00:00.000Z";
@@ -3061,61 +3388,92 @@ describe("ProviderRuntimeIngestion", () => {
     expect(message?.streaming).toBe(false);
   });
 
-  it("does not replace streamed output with a divergent completed item", async () => {
-    const harness = await createHarness({ serverSettings: { enableAssistantStreaming: true } });
-    const now = "2026-01-01T00:00:00.000Z";
-    const turnId = asTurnId("turn-divergent-completion");
-    const itemId = asItemId("item-divergent-completion");
-    const streamedText = "Streamed provider text.";
+  it.each([
+    { finalText: "Different completed provider text.", reason: "completion-prefix-mismatch" },
+    { finalText: "Streamed", reason: "completion-shorter-than-stream" },
+  ])(
+    "preserves streamed output and reports only counts for $reason",
+    async ({ finalText, reason }) => {
+      const logMessages: unknown[] = [];
+      const harness = await createHarness({
+        serverSettings: { enableAssistantStreaming: true },
+        logMessages,
+      });
+      const now = "2026-01-01T00:00:00.000Z";
+      const turnId = asTurnId("turn-divergent-completion");
+      const itemId = RuntimeItemId.make("item-divergent-completion");
+      const streamedText = "Streamed provider text.";
 
-    harness.emit({
-      type: "content.delta",
-      eventId: asEventId("evt-divergent-completion-delta"),
-      provider: ProviderDriverKind.make("codex"),
-      createdAt: now,
-      threadId: asThreadId("thread-1"),
-      turnId,
-      itemId,
-      payload: {
-        streamKind: "assistant_text",
-        delta: streamedText,
-      },
-    });
-    await waitForThread(harness.readModel, (entry) =>
-      entry.messages.some(
-        (message: ProviderRuntimeTestMessage) =>
-          message.id === "assistant:item-divergent-completion" && message.streaming,
-      ),
-    );
+      harness.emit({
+        type: "content.delta",
+        eventId: asEventId("evt-divergent-completion-delta"),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: now,
+        threadId: asThreadId("thread-1"),
+        turnId,
+        itemId,
+        payload: {
+          streamKind: "assistant_text",
+          delta: streamedText,
+        },
+      });
+      await waitForThread(harness.readModel, (entry) =>
+        entry.messages.some(
+          (message: ProviderRuntimeTestMessage) =>
+            message.id === "assistant:item-divergent-completion" && message.streaming,
+        ),
+      );
 
-    harness.emit({
-      type: "item.completed",
-      eventId: asEventId("evt-divergent-completion-completed"),
-      provider: ProviderDriverKind.make("codex"),
-      createdAt: now,
-      threadId: asThreadId("thread-1"),
-      turnId,
-      itemId,
-      payload: {
-        itemType: "assistant_message",
-        status: "completed",
-        detail: "Different completed provider text.",
-      },
-    });
+      const completion: ProviderRuntimeEvent = {
+        type: "item.completed",
+        eventId: asEventId("evt-divergent-completion-completed"),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: now,
+        threadId: asThreadId("thread-1"),
+        turnId,
+        itemId,
+        payload: {
+          itemType: "assistant_message",
+          status: "completed",
+          detail: finalText,
+        },
+      };
+      harness.emit(completion);
 
-    const thread = await waitForThread(harness.readModel, (entry) =>
-      entry.messages.some(
-        (message: ProviderRuntimeTestMessage) =>
-          message.id === "assistant:item-divergent-completion" && !message.streaming,
-      ),
-    );
-    expect(
-      thread.messages.find(
-        (message: ProviderRuntimeTestMessage) =>
-          message.id === "assistant:item-divergent-completion",
-      )?.text,
-    ).toBe(streamedText);
-  });
+      const thread = await waitForThread(harness.readModel, (entry) =>
+        entry.messages.some(
+          (message: ProviderRuntimeTestMessage) =>
+            message.id === "assistant:item-divergent-completion" && !message.streaming,
+        ),
+      );
+      expect(
+        thread.messages.find(
+          (message: ProviderRuntimeTestMessage) =>
+            message.id === "assistant:item-divergent-completion",
+        )?.text,
+      ).toBe(streamedText);
+      harness.emit(completion);
+      await harness.drain();
+      // Exact payload equality is also the privacy assertion: no source text,
+      // native identifiers, paths or commitment digests enter the diagnostic.
+      expect(
+        logMessages.filter(
+          (message) =>
+            Array.isArray(message) && message[0] === "provider.assistantCompletion/textMismatch",
+        ),
+      ).toEqual([
+        [
+          "provider.assistantCompletion/textMismatch",
+          {
+            provider: "codex",
+            reason,
+            streamedCodeUnits: streamedText.length,
+            completionCodeUnits: finalText.length,
+          },
+        ],
+      ]);
+    },
+  );
 
   it("ignores Codex snapshot backfill assistant completions that duplicate live assistant output", async () => {
     const harness = await createHarness({ serverSettings: { enableAssistantStreaming: false } });

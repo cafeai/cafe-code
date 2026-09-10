@@ -8,12 +8,18 @@ describe("parseRequestEntries", () => {
       export type ClientRequest =
         { "method": "initialize", id: RequestId, params: InitializeParams, }
         | { "method": "account/logout", id: RequestId, params: undefined, }
+        | { "method": "account/rateLimits/read", id: RequestId, params?: GetAccountRateLimitsParams | undefined, }
         | { "method": "account/usage/read", id: RequestId, params?: GetAccountTokenUsageParams | undefined, };
     `);
 
     expect(entries).toEqual([
       { method: "initialize", paramsType: "InitializeParams" },
       { method: "account/logout", paramsType: "undefined" },
+      {
+        method: "account/rateLimits/read",
+        paramsType: "GetAccountRateLimitsParams",
+        paramsOptional: true,
+      },
       {
         method: "account/usage/read",
         paramsType: "GetAccountTokenUsageParams",

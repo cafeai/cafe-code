@@ -1,5 +1,6 @@
 import * as Deferred from "effect/Deferred";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Effect from "effect/Effect";
@@ -23,6 +24,7 @@ const mockPeerPath = Effect.map(Effect.service(Path.Path), (path) =>
 const encodeUnknownJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 const encoder = new TextEncoder();
 const encodeJsonl = (value: unknown) => encoder.encode(`${encodeUnknownJsonString(value)}\n`);
+const decodeJson = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
 
 it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
   const makeHandle = () =>
@@ -35,6 +37,49 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
       });
       return yield* spawner.spawn(command);
     });
+
+  it.effect("preserves optional Codex 0.154 usage-read capabilities on the typed wire", () =>
+    Effect.gen(function* () {
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      const client = yield* CodexClient.make(stdio);
+
+      // The upstream request now has an optional object, while its exported
+      // JSON schema wraps that object in NullableGetAccountRateLimitsParams.
+      // Exercise the generated typed client so neither omission nor the new
+      // flags can accidentally be erased by method/schema resolution.
+      const legacyRead = yield* client
+        .request("account/rateLimits/read", undefined)
+        .pipe(Effect.forkScoped);
+      assert.deepEqual(decodeJson(yield* Queue.take(output)), {
+        id: 1,
+        method: "account/rateLimits/read",
+      });
+      yield* Queue.offer(input, encodeJsonl({ id: 1, result: { rateLimits: {} } }));
+      assert.deepEqual(yield* Fiber.join(legacyRead), { rateLimits: {} });
+
+      const capabilities = {
+        excludeResetCreditDetails: true,
+        supportsLunaReserve: false,
+      };
+      const usageRead = yield* client
+        .request("account/rateLimits/read", capabilities)
+        .pipe(Effect.forkScoped);
+      assert.deepEqual(decodeJson(yield* Queue.take(output)), {
+        id: 2,
+        method: "account/rateLimits/read",
+        params: capabilities,
+      });
+      const result = {
+        ordinaryUsageAllowed: false,
+        rateLimits: { normalModelSlug: "gpt-5.6-luna" },
+        rateLimitsByLimitId: {
+          "luna-reserve": { normalModelSlug: "gpt-5.6-luna" },
+        },
+      };
+      yield* Queue.offer(input, encodeJsonl({ id: 2, result }));
+      assert.deepEqual(yield* Fiber.join(usageRead), result);
+    }),
+  );
 
   it.effect("initializes, handles typed server requests, and reads account and skills data", () =>
     Effect.gen(function* () {

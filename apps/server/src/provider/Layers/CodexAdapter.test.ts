@@ -47,6 +47,7 @@ import * as CodexErrors from "effect-codex-app-server/errors";
 
 import { ServerConfig } from "../../config.ts";
 import { storeFileAttachment } from "../../fileAttachmentStore.ts";
+import { AssistantStreamTextCommitment } from "../../orchestration/providerAssistantStreamCommitment.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderAdapterValidationError } from "../Errors.ts";
 import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
@@ -1688,6 +1689,60 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       assert.equal(firstEvent.value.itemId, "msg_1");
       assert.equal(firstEvent.value.turnId, "turn-1");
       assert.equal(firstEvent.value.payload.itemType, "assistant_message");
+    }),
+  );
+
+  it.effect("preserves completed assistant whitespace for exact streamed-prefix verification", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const fixtures = [
+        { streamedPrefix: " \tThe", text: " \tThe complete answer.\r\n " },
+        { streamedPrefix: "The complete answer.\n", text: "The complete answer.\n" },
+        { streamedPrefix: "The complete answer.\r\n ", text: "The complete answer.\r\n " },
+        { streamedPrefix: "", text: " \t\r\n " },
+      ];
+
+      for (const [index, fixture] of fixtures.entries()) {
+        const eventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+        const itemId = asItemId(`msg-whitespace-${index}`);
+        yield* runtime.emit({
+          id: asEventId(`evt-msg-whitespace-${index}`),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "item/completed",
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-1"),
+          itemId,
+          payload: {
+            completedAtMs: 1_778_000_000_000,
+            threadId: "thread-1",
+            turnId: "turn-1",
+            item: { type: "agentMessage", id: itemId, text: fixture.text },
+          },
+        });
+        const event = yield* Fiber.join(eventFiber);
+        assert.equal(event._tag, "Some");
+        if (event._tag !== "Some" || event.value.type !== "item.completed") {
+          assert.fail("Expected canonical completed assistant item");
+        }
+        const detail = event.value.payload.detail;
+        if (fixture.text.trim().length === 0) {
+          assert.equal(detail, undefined);
+          continue;
+        }
+        assert.equal(detail, fixture.text);
+        assert.equal(event.value.itemId, itemId);
+        assert.equal(event.value.turnId, "turn-1");
+
+        // Exercise the same exact commitment used by ingestion: display-only
+        // trimming must not make a valid full completion look divergent, while
+        // a changed leading character must still fail the security boundary.
+        const commitment = new AssistantStreamTextCommitment();
+        commitment.append(fixture.streamedPrefix);
+        assert.equal(commitment.matchesPrefixOf(detail!), true);
+        assert.equal(commitment.matchesPrefixOf(`X${detail!.slice(1)}`), false);
+      }
     }),
   );
 

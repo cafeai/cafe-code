@@ -583,7 +583,10 @@ export type CodexAutoCompactTokenLimit = typeof CodexAutoCompactTokenLimit.Type;
 
 // Codex counts only spawned agent threads against this limit; the primary
 // thread is separate. The provider default is model/backend-specific, so Cafe
-// leaves this setting absent unless the user explicitly overrides it.
+// leaves this setting absent unless the user explicitly overrides it. The
+// rust-v0.154.0 config audit confirms that upstream accepts positive usize
+// values without this upper bound; 64 is Cafe's own resource safety ceiling,
+// not a provider default (codex-rs/config/src/config_toml.rs, AgentsToml).
 export const CODEX_MAX_CONCURRENT_SUBAGENTS = 64;
 export const CodexMaxConcurrentSubagents = Schema.Int.check(
   Schema.isBetween({ minimum: 1, maximum: CODEX_MAX_CONCURRENT_SUBAGENTS }),
@@ -645,7 +648,7 @@ export const CodexSettings = makeProviderSettingsSchema(
       Schema.annotateKey({
         title: "Maximum concurrent subagents",
         description:
-          "Optional maximum number of spawned Codex agent threads that may be open concurrently. Enter 1–64, or leave blank to let the selected Codex model and backend choose; Cafe's current default Sol backend uses 3 spawned slots. The primary agent is not counted.",
+          "Optional maximum number of spawned Codex agent threads that may be open concurrently. Enter 1–64, or leave blank to use Codex's model, backend, and configuration defaults. Without an upstream override, V2 provides 3 spawned slots and V1 provides 6. The primary agent is not counted.",
         providerSettingsForm: {
           control: "number",
           step: 1,
@@ -685,6 +688,18 @@ export const CodexSettings = makeProviderSettingsSchema(
 );
 export type CodexSettings = typeof CodexSettings.Type;
 
+// Claude Code exposes this through CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS,
+// not an Agent SDK query option. Upstream defaults to 20 and accepts positive
+// whole numbers; 64 is Cafe's resource safety ceiling. This governs Agent-tool
+// admission only: resumes, manual forks, workflows/teams and ultracode have
+// different semantics, so it must not be presented as a total-work hard cap.
+// https://code.claude.com/docs/en/sub-agents#concurrent-subagent-limit
+export const CLAUDE_MAX_CONCURRENT_SUBAGENTS = 64;
+export const ClaudeMaxConcurrentSubagents = Schema.Int.check(
+  Schema.isBetween({ minimum: 1, maximum: CLAUDE_MAX_CONCURRENT_SUBAGENTS }),
+);
+export type ClaudeMaxConcurrentSubagents = typeof ClaudeMaxConcurrentSubagents.Type;
+
 export const ClaudeSettings = makeProviderSettingsSchema(
   {
     enabled: Schema.Boolean.pipe(
@@ -722,6 +737,22 @@ export const ClaudeSettings = makeProviderSettingsSchema(
       Schema.withDecodingDefault(Effect.succeed([])),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
+    maxConcurrentSubagents: Schema.optionalKey(ClaudeMaxConcurrentSubagents).pipe(
+      Schema.annotateKey({
+        title: "Agent-tool concurrency limit",
+        description:
+          "Optional CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS override on Claude Code 2.1.217+. Enter 1–64, or leave blank to preserve the inherited environment and provider default (20). Saving provider settings reloads this instance; change between sessions. Limits Agent-tool spawning, not all running work: resumes and manual forks can exceed it, ultracode is exempt, and workflows/teams use separate limits.",
+        providerSettingsForm: {
+          control: "number",
+          step: 1,
+          minimum: 1,
+          maximum: CLAUDE_MAX_CONCURRENT_SUBAGENTS,
+          integerOnly: true,
+          placeholder: "Inherited / provider default",
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
     launchArgs: Schema.String.pipe(
       Schema.withDecodingDefault(Effect.succeed("")),
       Schema.annotateKey({
@@ -735,7 +766,7 @@ export const ClaudeSettings = makeProviderSettingsSchema(
     ),
   },
   {
-    order: ["runtimeSource", "binaryPath", "homePath", "launchArgs"],
+    order: ["runtimeSource", "binaryPath", "homePath", "maxConcurrentSubagents", "launchArgs"],
   },
 );
 export type ClaudeSettings = typeof ClaudeSettings.Type;
@@ -929,6 +960,7 @@ const ClaudeSettingsPatch = Schema.Struct({
   runtimeSource: Schema.optionalKey(ProviderCliRuntimeSource),
   homePath: Schema.optionalKey(TrimmedString),
   customModels: Schema.optionalKey(Schema.Array(Schema.String)),
+  maxConcurrentSubagents: Schema.optionalKey(ClaudeMaxConcurrentSubagents),
   launchArgs: Schema.optionalKey(TrimmedString),
 });
 
