@@ -131,6 +131,57 @@ const TEST_ENVIRONMENT_ID = EnvironmentId.make("environment-local");
 const OTHER_TEST_ENVIRONMENT_ID = EnvironmentId.make("environment-remote");
 const LEGACY_TEST_ENVIRONMENT_ID = EnvironmentId.make("__legacy__");
 
+describe("thread subagent policy persistence", () => {
+  beforeEach(resetComposerDraftStore);
+  it("round-trips the exact environment and instance without leaking into sticky defaults", () => {
+    const ref = scopeThreadRef(TEST_ENVIRONMENT_ID, ThreadId.make("same-thread"));
+    const sibling = scopeThreadRef(OTHER_TEST_ENVIRONMENT_ID, ref.threadId);
+    const options = [
+      { id: "reasoningEffort", value: "high" },
+      { id: "threadSubagentLimit", value: "4" },
+    ];
+    const store = useComposerDraftStore.getState();
+    store.setProviderModelOptions(ref, CODEX_DRIVER, options, {
+      instanceId: CODEX_ZKM_INSTANCE,
+      model: "gpt-test",
+      persistSticky: true,
+    });
+    expect(
+      store.getComposerDraft(ref)?.modelSelectionByProvider[CODEX_ZKM_INSTANCE]?.options,
+    ).toEqual(options);
+    expect(store.getComposerDraft(sibling)).toBeNull();
+    expect(
+      useComposerDraftStore.getState().stickyModelSelectionByProvider[CODEX_ZKM_INSTANCE]?.options,
+    ).toEqual([options[0]]);
+    store.setStickyModelSelection(createModelSelection(CODEX_ZKM_INSTANCE, "gpt-test", options));
+    expect(
+      useComposerDraftStore.getState().stickyModelSelectionByProvider[CODEX_ZKM_INSTANCE]?.options,
+    ).toEqual([options[0]]);
+    const persistence = useComposerDraftStore.persist.getOptions();
+    useComposerDraftStore.setState(
+      persistence.merge!(
+        JSON.parse(JSON.stringify(persistence.partialize!(useComposerDraftStore.getState()))),
+        useComposerDraftStore.getState(),
+      ),
+    );
+    expect(
+      store.getComposerDraft(ref)?.modelSelectionByProvider[CODEX_ZKM_INSTANCE]?.options,
+    ).toEqual(options);
+    store.setProviderModelOptions(
+      ref,
+      CODEX_DRIVER,
+      [{ id: "threadSubagentLimit", value: "inherit" }],
+      { instanceId: CODEX_ZKM_INSTANCE, model: "gpt-test", persistSticky: true },
+    );
+    expect(
+      store.getComposerDraft(ref)?.modelSelectionByProvider[CODEX_ZKM_INSTANCE]?.options,
+    ).toEqual([{ id: "threadSubagentLimit", value: "inherit" }]);
+    expect(
+      useComposerDraftStore.getState().stickyModelSelectionByProvider[CODEX_ZKM_INSTANCE]?.options,
+    ).toBeUndefined();
+  });
+});
+
 function threadKeyFor(
   threadId: ThreadId,
   environmentId: EnvironmentId = LEGACY_TEST_ENVIRONMENT_ID,

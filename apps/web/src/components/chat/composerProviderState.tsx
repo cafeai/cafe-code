@@ -10,6 +10,7 @@ import {
   getProviderOptionCurrentValue,
   getProviderOptionDescriptors,
   isClaudeUltrathinkPrompt,
+  preserveThreadSubagentLimitOption,
 } from "@cafecode/shared/model";
 import type { ReactNode } from "react";
 
@@ -75,7 +76,10 @@ export function getComposerProviderState(input: ComposerProviderStateInput): Com
     provider,
     promptEffort,
     traitsTriggerLabel: traitsTriggerLabel || null,
-    modelOptionsForDispatch: buildProviderOptionSelectionsFromDescriptors(descriptors),
+    modelOptionsForDispatch: preserveThreadSubagentLimitOption(
+      buildProviderOptionSelectionsFromDescriptors(descriptors),
+      provider === "codex" || provider === "claudeAgent" ? modelOptions : undefined,
+    ),
     ...(ultrathinkActive
       ? {
           composerFrameClassName: "ultrathink-frame",

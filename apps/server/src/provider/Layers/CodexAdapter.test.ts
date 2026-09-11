@@ -610,6 +610,7 @@ validationLayer("CodexAdapterLive validation", (it) => {
       });
 
       assert.deepStrictEqual(validationRuntimeFactory.factory.mock.calls[0]?.[0], {
+        threadSubagentLimit: null,
         appServerCwd: path.join(process.cwd(), "userdata"),
         binaryPath: "codex",
         cwd: process.cwd(),
@@ -1112,6 +1113,53 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
         serviceTier: "priority",
       });
     }).pipe(Effect.provide(customLayer));
+  });
+
+  it.effect("isolates thread subagent limits and restores the configured instance default", () => {
+    const factory = makeRuntimeFactory();
+    const layer = Layer.effect(
+      CodexAdapter,
+      makeCodexAdapter(decodeCodexSettings({ maxConcurrentSubagents: 12 }), {
+        makeRuntime: factory.factory,
+      }),
+    ).pipe(
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(providerSessionDirectoryTestLayer),
+      Layer.provideMerge(NodeServices.layer),
+    );
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      for (const [id, value, expected] of [
+        ["override", "4", 4],
+        ["sibling", undefined, 12],
+        ["reset", "inherit", 12],
+      ] as const) {
+        yield* adapter.startSession({
+          threadId: asThreadId(id),
+          runtimeMode: "full-access",
+          modelSelection: createModelSelection(
+            ProviderInstanceId.make("codex"),
+            "gpt-5.3-codex",
+            value === undefined ? undefined : [{ id: "threadSubagentLimit", value }],
+          ),
+        });
+        assert.equal(factory.lastRuntime?.options.maxConcurrentSubagents, expected);
+        assert.equal(factory.lastRuntime?.options.threadSubagentLimit, value === "4" ? 4 : null);
+      }
+      const runtimeBeforeInvalid = factory.lastRuntime;
+      const result = yield* Effect.result(
+        adapter.startSession({
+          threadId: asThreadId("override"),
+          runtimeMode: "full-access",
+          modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.3-codex", [
+            { id: "threadSubagentLimit", value: "65" },
+          ]),
+        }),
+      );
+      assert.equal(result._tag, "Failure");
+      assert.equal(factory.lastRuntime, runtimeBeforeInvalid);
+    }).pipe(Effect.provide(layer));
   });
 
   it.effect(

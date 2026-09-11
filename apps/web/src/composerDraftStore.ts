@@ -27,7 +27,11 @@ import {
 import * as Schema from "effect/Schema";
 import * as Equal from "effect/Equal";
 import { DeepMutable } from "effect/Types";
-import { createModelSelection, normalizeModelSlug } from "@cafecode/shared/model";
+import {
+  createModelSelection,
+  normalizeModelSlug,
+  omitThreadSubagentLimitOption,
+} from "@cafecode/shared/model";
 import { useMemo } from "react";
 import { getLocalStorageItemWithLegacy } from "./hooks/useLocalStorage";
 import { resolveAppModelSelection, resolveAppModelSelectionForInstance } from "./modelSelection";
@@ -2302,7 +2306,11 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             }
             const nextMap: Partial<Record<ProviderInstanceId, ModelSelection>> = {
               ...state.stickyModelSelectionByProvider,
-              [normalized.instanceId]: normalized,
+              [normalized.instanceId]: createModelSelection(
+                normalized.instanceId,
+                normalized.model,
+                omitThreadSubagentLimitOption(normalized.options),
+              ),
             };
             if (Equal.equals(state.stickyModelSelectionByProvider, nextMap)) {
               return state.stickyActiveProvider === normalized.instanceId
@@ -2532,16 +2540,17 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             let nextStickyMap = state.stickyModelSelectionByProvider;
             let nextStickyActiveProvider = state.stickyActiveProvider;
             if (options?.persistSticky === true) {
+              const stickyProviderOpts = omitThreadSubagentLimitOption(providerOpts);
               nextStickyMap = { ...state.stickyModelSelectionByProvider };
               const stickyBase =
                 nextStickyMap[instanceKey] ??
                 base.modelSelectionByProvider[instanceKey] ??
                 createModelSelection(instanceKey, fallbackModel);
-              if (providerOpts) {
+              if (stickyProviderOpts) {
                 nextStickyMap[instanceKey] = createModelSelection(
                   instanceKey,
                   stickyBase.model,
-                  providerOpts,
+                  stickyProviderOpts,
                 );
               } else if ((stickyBase.options?.length ?? 0) > 0) {
                 const { options: _, ...rest } = stickyBase;

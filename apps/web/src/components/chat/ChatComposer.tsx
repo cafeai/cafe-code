@@ -80,6 +80,7 @@ import { searchSlashCommandItems } from "./composerSlashCommandSearch";
 import { getComposerProviderState, renderProviderTraitsMenuContent } from "./composerProviderState";
 import { ContextWindowMeter } from "./ContextWindowMeter";
 import { ThreadGoalFooterButton } from "./ThreadGoalControl";
+import { ThreadAgentControl } from "./ThreadAgentControl";
 import { buildExpandedImagePreview, type ExpandedImagePreview } from "./ExpandedImagePreview";
 import { basenameOfPath } from "../../vscode-icons";
 import { cn, randomUUID } from "~/lib/utils";
@@ -3424,6 +3425,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   onInstanceModelChange={onProviderModelSelect}
                 />
 
+                {(selectedProvider === "codex" || selectedProvider === "claudeAgent") && (
+                  <ThreadAgentControl
+                    key={`${environmentId}:${draftId ?? activeThreadId}:${selectedInstanceId}`}
+                    environmentId={environmentId}
+                    draftTarget={composerDraftTarget}
+                    serverThreadRef={routeKind === "server" ? routeThreadRef : null}
+                    provider={selectedProvider}
+                    modelSelection={selectedModelSelection}
+                  />
+                )}
                 {isComposerFooterCompact ? (
                   <CompactComposerControlsMenu
                     showPlanSidebar={showPlanSidebarToggle}

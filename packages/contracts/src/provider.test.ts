@@ -14,6 +14,24 @@ const decodeProviderSendTurnInput = Schema.decodeUnknownSync(ProviderSendTurnInp
 const decodeProviderSession = Schema.decodeUnknownSync(ProviderSession);
 const decodeProviderEvent = Schema.decodeUnknownSync(ProviderEvent);
 
+it("keeps legacy session snapshots readable and bounds materialized thread limits", () => {
+  const base = {
+    provider: "codex",
+    status: "ready",
+    runtimeMode: "full-access",
+    threadId: "thread-limit",
+    createdAt: "2026-09-11T00:00:00.000Z",
+    updatedAt: "2026-09-11T00:00:00.000Z",
+  };
+  expect(decodeProviderSession(base).threadSubagentLimit).toBeUndefined();
+  for (const value of [null, 1, 64])
+    expect(decodeProviderSession({ ...base, threadSubagentLimit: value }).threadSubagentLimit).toBe(
+      value,
+    );
+  for (const value of [0, 65, 1.5, "4"])
+    expect(() => decodeProviderSession({ ...base, threadSubagentLimit: value })).toThrow();
+});
+
 function getOptionValue(
   options: ReadonlyArray<{ id: string; value: unknown }> | undefined,
   id: string,

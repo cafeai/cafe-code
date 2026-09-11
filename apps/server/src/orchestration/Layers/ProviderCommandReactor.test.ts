@@ -15,7 +15,7 @@ import {
   ProviderInstanceId,
   PROVIDER_SESSION_TITLE_MAX_CHARS,
 } from "@cafecode/contracts";
-import { createModelSelection } from "@cafecode/shared/model";
+import { createModelSelection, resolveThreadSubagentLimit } from "@cafecode/shared/model";
 import {
   ApprovalRequestId,
   CommandId,
@@ -269,6 +269,10 @@ describe("ProviderCommandReactor", () => {
           ? { model: inputModelSelection?.model ?? modelSelection.model }
           : {}),
         ...(inputModelSelection ? { modelSelection: inputModelSelection } : {}),
+        threadSubagentLimit: resolveThreadSubagentLimit(
+          inputModelSelection,
+          providerInstanceId ?? ProviderInstanceId.make(provider),
+        ),
         threadId,
         resumeCursor: resumeCursor ?? { opaque: `resume-${sessionIndex}` },
         createdAt: now,
@@ -1773,6 +1777,97 @@ describe("ProviderCommandReactor", () => {
     expect(harness.generateBranchName).not.toHaveBeenCalled();
     expect(harness.generateThreadTitle).not.toHaveBeenCalled();
   });
+
+  it.each(["codex", "claudeAgent"])(
+    "defers %s thread limits during active work and resumes once idle",
+    async (driver) => {
+      const instanceId = ProviderInstanceId.make(driver);
+      const initial = createModelSelection(
+        instanceId,
+        driver === "codex" ? "gpt-5-codex" : "claude-opus-4-6",
+      );
+      const harness = await createHarness({
+        threadModelSelection: initial,
+        liveSteer: "supported",
+      });
+      const threadId = ThreadId.make("thread-1");
+      const createdAt = "2026-01-01T00:00:00.000Z";
+      const send = async (index: number) => {
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make(`limit-turn-${index}`),
+            threadId,
+            message: {
+              messageId: asMessageId(`limit-message-${index}`),
+              role: "user",
+              text: "continue",
+              attachments: [],
+            },
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            runtimeMode: "approval-required",
+            createdAt,
+          }),
+        );
+        await waitFor(() => harness.sendTurn.mock.calls.length === index);
+      };
+      await send(1);
+      const active = harness.runtimeSessions[0]!;
+      harness.runtimeSessions[0] = {
+        ...active,
+        status: "running",
+        activeTurnId: asTurnId("limit-active"),
+      };
+      const changed = createModelSelection(instanceId, initial.model, [
+        { id: "threadSubagentLimit", value: "4" },
+      ]);
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("limit-change"),
+          threadId,
+          modelSelection: changed,
+        }),
+      );
+      await harness.drain();
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      expect(harness.interruptTurn).not.toHaveBeenCalled();
+      expect(harness.runtimeSessions[0]?.threadSubagentLimit).toBeNull();
+      expect(
+        (await harness.readModel()).threads.find((thread) => thread.id === threadId)
+          ?.modelSelection,
+      ).toEqual(changed);
+
+      harness.runtimeSessions[0] = { ...active, status: "ready" };
+      await harness.markThreadReady();
+      await send(2);
+      expect(harness.startSession).toHaveBeenCalledTimes(2);
+      expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+        modelSelection: changed,
+        resumeCursor: active.resumeCursor,
+      });
+      expect(harness.runtimeSessions[0]?.threadSubagentLimit).toBe(4);
+      await harness.markThreadReady();
+      await send(3);
+      expect(harness.startSession).toHaveBeenCalledTimes(2);
+
+      const inherited = createModelSelection(instanceId, initial.model, [
+        { id: "threadSubagentLimit", value: "inherit" },
+      ]);
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("limit-reset"),
+          threadId,
+          modelSelection: inherited,
+        }),
+      );
+      await harness.markThreadReady();
+      await send(4);
+      expect(harness.startSession).toHaveBeenCalledTimes(3);
+      expect(harness.runtimeSessions[0]?.threadSubagentLimit).toBeNull();
+    },
+  );
 
   it("forwards provider model options through session start and turn send", async () => {
     const harness = await createHarness();

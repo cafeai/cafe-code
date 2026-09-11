@@ -84,6 +84,7 @@ import {
   getProviderOptionCurrentValue,
   getProviderOptionDescriptors,
   resolvePromptInjectedEffort,
+  resolveThreadSubagentLimit,
 } from "@cafecode/shared/model";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
@@ -6822,6 +6823,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         });
       }
 
+      // Reject malformed resource policy before replacing any live session.
+      const threadSubagentLimit = yield* Effect.try({
+        try: () => resolveThreadSubagentLimit(input.modelSelection, boundInstanceId),
+        catch: () =>
+          new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "startSession",
+            issue: "Invalid thread subagent limit.",
+          }),
+      });
       const existingContext = sessions.get(input.threadId);
       if (existingContext) {
         yield* Effect.logWarning("claude.session.replacing", {
@@ -7330,6 +7341,19 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const existingResumeSessionId = durableResumeState?.resume;
       const resumeBaseTurnCount = durableResumeState?.turnCount ?? 0;
 
+      const threadEnvironment = { ...claudeEnvironment };
+      if (threadSubagentLimit !== null) {
+        // Node selects only one casing of duplicate Windows environment keys.
+        // Remove inherited aliases so this exact thread's override wins.
+        if (process.platform === "win32") {
+          for (const key of Object.keys(threadEnvironment)) {
+            if (key.toUpperCase() === "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS") {
+              delete threadEnvironment[key];
+            }
+          }
+        }
+        threadEnvironment.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS = String(threadSubagentLimit);
+      }
       const queryOptions: ClaudeQueryOptions = {
         ...(input.cwd ? { cwd: input.cwd } : {}),
         ...(apiModelId ? { model: apiModelId } : {}),
@@ -7416,7 +7440,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             ),
           );
         },
-        env: claudeEnvironment,
+        env: threadEnvironment,
         ...(claudeAdditionalDirectories.length > 0
           ? { additionalDirectories: [...claudeAdditionalDirectories] }
           : {}),
@@ -7477,6 +7501,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             }
           : undefined;
       const session: ProviderSession = {
+        threadSubagentLimit,
         threadId,
         provider: PROVIDER,
         providerInstanceId: boundInstanceId,

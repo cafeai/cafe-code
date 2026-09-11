@@ -22,7 +22,44 @@ import {
   resolveModelSlugForProvider,
   resolveSelectableModel,
   trimOrNull,
+  resolveThreadSubagentLimit,
+  preserveThreadSubagentLimitOption,
+  omitThreadSubagentLimitOption,
 } from "./model.ts";
+
+describe("thread subagent resource policy", () => {
+  const instance = ProviderInstanceId.make("codex-work");
+  const selection = (value: string | boolean) =>
+    createModelSelection(instance, "model", [{ id: "threadSubagentLimit", value }]);
+  it("inherits unless the exact instance has an explicit bounded override", () => {
+    expect(resolveThreadSubagentLimit(undefined, instance)).toBeNull();
+    expect(resolveThreadSubagentLimit(selection("inherit"), instance)).toBeNull();
+    expect(resolveThreadSubagentLimit(selection("64"), instance)).toBe(64);
+    expect(resolveThreadSubagentLimit(selection("1"), instance)).toBe(1);
+    expect(
+      resolveThreadSubagentLimit(selection("64"), ProviderInstanceId.make("other")),
+    ).toBeNull();
+  });
+  it.each(["0", "65", "128", "1.5", "01", "-1", " 2", "1e1", "", true])(
+    "rejects malformed launch policy %s",
+    (value) => {
+      expect(() => resolveThreadSubagentLimit(selection(value), instance)).toThrow(RangeError);
+    },
+  );
+  it("rejects duplicate policy entries and separates thread options from sticky traits", () => {
+    const policy = { id: "threadSubagentLimit", value: "4" };
+    const effort = { id: "reasoningEffort", value: "high" };
+    expect(() =>
+      resolveThreadSubagentLimit(
+        createModelSelection(instance, "model", [policy, policy]),
+        instance,
+      ),
+    ).toThrow(RangeError);
+    expect(preserveThreadSubagentLimitOption([effort], [policy])).toEqual([effort, policy]);
+    expect(omitThreadSubagentLimitOption([effort, policy])).toEqual([effort]);
+    expect(omitThreadSubagentLimitOption([policy])).toBeUndefined();
+  });
+});
 
 const codexCaps: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [

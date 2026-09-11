@@ -567,6 +567,67 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect(
+    "isolates thread subagent limits from sibling Claude sessions and rejects invalid replacement",
+    () => {
+      const inheritedEnvironment = {
+        CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: "8",
+        claude_code_max_concurrent_subagents: "63",
+      };
+      const harness = makeHarness({
+        claudeConfig: { maxConcurrentSubagents: 12 },
+        environment: inheritedEnvironment,
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        for (const [id, value, expected] of [
+          ["override", "4", "4"],
+          ["sibling", undefined, "12"],
+          ["reset", "inherit", "12"],
+        ] as const) {
+          const session = yield* adapter.startSession({
+            threadId: ThreadId.make(id),
+            runtimeMode: "full-access",
+            modelSelection: createModelSelection(
+              ProviderInstanceId.make("claudeAgent"),
+              "claude-opus-4-6",
+              value === undefined ? undefined : [{ id: "threadSubagentLimit", value }],
+            ),
+          });
+          assert.equal(
+            harness.getLastCreateQueryInput()?.options.env?.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS,
+            expected,
+          );
+          assert.equal(session.threadSubagentLimit, value === "4" ? 4 : null);
+          if (process.platform === "win32" && value === "4") {
+            assert.isUndefined(
+              harness.getLastCreateQueryInput()?.options.env?.claude_code_max_concurrent_subagents,
+            );
+          }
+        }
+        assert.equal(inheritedEnvironment.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS, "8");
+        assert.equal(inheritedEnvironment.claude_code_max_concurrent_subagents, "63");
+        const closeCalls = harness.query.closeCalls;
+        const result = yield* Effect.result(
+          adapter.startSession({
+            threadId: ThreadId.make("override"),
+            runtimeMode: "full-access",
+            modelSelection: createModelSelection(
+              ProviderInstanceId.make("claudeAgent"),
+              "claude-opus-4-6",
+              [{ id: "threadSubagentLimit", value: "65" }],
+            ),
+          }),
+        );
+        assert.equal(result._tag, "Failure");
+        assert.equal(harness.query.closeCalls, closeCalls);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
   it.effect("runs Claude SDK sessions with the configured Claude HOME", () => {
     const harness = makeHarness({ claudeConfig: { homePath: "~/.claude-work" } });
     return Effect.gen(function* () {

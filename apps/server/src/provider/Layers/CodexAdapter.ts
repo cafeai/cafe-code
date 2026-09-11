@@ -58,6 +58,7 @@ import * as EffectCodexSchema from "effect-codex-app-server/schema";
 import {
   getModelSelectionBooleanOptionValue,
   getModelSelectionStringOptionValue,
+  resolveThreadSubagentLimit,
 } from "@cafecode/shared/model";
 import { summarizeToolArguments } from "@cafecode/shared/toolActivity";
 
@@ -4310,6 +4311,15 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           });
         }
 
+        const threadSubagentLimit = yield* Effect.try({
+          try: () => resolveThreadSubagentLimit(input.modelSelection, boundInstanceId),
+          catch: () =>
+            new ProviderAdapterValidationError({
+              provider: PROVIDER,
+              operation: "startSession",
+              issue: "Invalid thread subagent limit.",
+            }),
+        });
         const existing = sessions.get(input.threadId);
         if (existing && !existing.stopped) {
           yield* Effect.suspend(() => stopSessionInternal(existing));
@@ -4331,8 +4341,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ? { additionalDirectories: input.additionalDirectories }
             : {}),
           binaryPath: codexConfig.binaryPath,
-          ...(codexConfig.maxConcurrentSubagents !== undefined
-            ? { maxConcurrentSubagents: codexConfig.maxConcurrentSubagents }
+          threadSubagentLimit,
+          ...((threadSubagentLimit ?? codexConfig.maxConcurrentSubagents) !== undefined
+            ? { maxConcurrentSubagents: threadSubagentLimit ?? codexConfig.maxConcurrentSubagents }
             : {}),
           ...(options?.environment ? { environment: options.environment } : {}),
           ...(codexConfig.homePath ? { homePath: codexConfig.homePath } : {}),

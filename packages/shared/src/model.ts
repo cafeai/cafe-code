@@ -1,5 +1,7 @@
 import {
   DEFAULT_MODEL,
+  MAX_THREAD_SUBAGENT_LIMIT,
+  THREAD_SUBAGENT_LIMIT_OPTION_ID,
   DEFAULT_MODEL_BY_PROVIDER,
   MODEL_SLUG_ALIASES_BY_PROVIDER,
   type ModelCapabilities,
@@ -11,6 +13,54 @@ import {
 } from "@cafecode/contracts";
 
 const DEFAULT_PROVIDER_DRIVER_KIND = ProviderDriverKind.make("codex");
+
+export function readThreadSubagentLimitOption(
+  options: ReadonlyArray<ProviderOptionSelection> | null | undefined,
+): number | null {
+  const entries = options?.filter((entry) => entry.id === THREAD_SUBAGENT_LIMIT_OPTION_ID) ?? [];
+  if (entries.length !== 1) return null;
+  const value = entries[0]!.value;
+  if (typeof value !== "string" || !/^[1-9]\d?$/.test(value)) return null;
+  const limit = Number(value);
+  return limit <= MAX_THREAD_SUBAGENT_LIMIT ? limit : null;
+}
+
+/** Validate only the selected instance's override before creating its process. */
+export function resolveThreadSubagentLimit(
+  selection: ModelSelection | null | undefined,
+  instanceId: ProviderInstanceId,
+): number | null {
+  if (selection?.instanceId !== instanceId) return null;
+  const entries =
+    selection.options?.filter((entry) => entry.id === THREAD_SUBAGENT_LIMIT_OPTION_ID) ?? [];
+  if (entries.length === 0 || (entries.length === 1 && entries[0]!.value === "inherit"))
+    return null;
+  const limit = readThreadSubagentLimitOption(selection.options);
+  if (limit === null)
+    throw new RangeError("Thread subagent limit must be an integer from 1 to 64.");
+  return limit;
+}
+
+export function preserveThreadSubagentLimitOption(
+  next: ReadonlyArray<ProviderOptionSelection> | undefined,
+  previous: ReadonlyArray<ProviderOptionSelection> | null | undefined,
+): ReadonlyArray<ProviderOptionSelection> | undefined {
+  const retained = previous?.filter((entry) => entry.id === THREAD_SUBAGENT_LIMIT_OPTION_ID) ?? [];
+  return retained.length === 0
+    ? next
+    : [
+        ...(next ?? []).filter((entry) => entry.id !== THREAD_SUBAGENT_LIMIT_OPTION_ID),
+        ...retained,
+      ];
+}
+
+/** Thread resource policy must never become a default for unrelated chats. */
+export function omitThreadSubagentLimitOption(
+  options: ReadonlyArray<ProviderOptionSelection> | null | undefined,
+): ReadonlyArray<ProviderOptionSelection> | undefined {
+  const remaining = options?.filter((entry) => entry.id !== THREAD_SUBAGENT_LIMIT_OPTION_ID);
+  return remaining?.length ? remaining : undefined;
+}
 
 export interface SelectableModelOption {
   slug: string;
