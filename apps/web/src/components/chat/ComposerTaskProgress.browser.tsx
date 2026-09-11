@@ -54,6 +54,35 @@ describe("ComposerTaskProgress", () => {
     document.body.innerHTML = "";
   });
 
+  it("returns from the session rail with a closed popup and accepts the first press", async () => {
+    const plan: ComposerTaskProgressPlan = {
+      steps: [{ step: "Review the change", status: "inProgress" }],
+    };
+    const mounted = await mountProgress(plan);
+    try {
+      const trigger = page.getByRole("button", {
+        name: "Task progress: step 1 of 1. Show task list",
+      });
+      trigger.element().focus();
+      await userEvent.keyboard("{Enter}");
+      await vi.waitFor(() => expect(progressPopup()).not.toBeNull());
+      await mounted.screen.rerender(<ComposerTaskProgress plan={plan} sessionRailVisible />);
+      expect(progressTrigger()).toBeNull();
+      await mounted.screen.rerender(
+        <ComposerTaskProgress plan={plan} sessionRailVisible={false} />,
+      );
+      await vi.waitFor(() =>
+        expect(progressTrigger()?.getAttribute("aria-expanded")).toBe("false"),
+      );
+      expect(progressPopup()).toBeNull();
+      trigger.element().focus();
+      await userEvent.keyboard("{Enter}");
+      await vi.waitFor(() => expect(progressPopup()).not.toBeNull());
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
   it("stays hidden when there is no task plan", async () => {
     const withoutPlan = await mountProgress(null);
     try {

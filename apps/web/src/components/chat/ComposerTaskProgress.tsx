@@ -1,5 +1,5 @@
 import { BotIcon } from "lucide-react";
-import { memo, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 
 import type { WorkLogEntry } from "../../session-logic";
 import { type SubagentRosterEntry } from "../subagents/SubagentRosterRow";
@@ -39,6 +39,14 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
   const [open, setOpen] = useState(false);
   const openModeRef = useRef<"hover" | "press" | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    if (props.sessionRailVisible) {
+      // Docking hides this component without unmounting its state. Clear the
+      // pinned preview so the first press after undocking opens it normally.
+      openModeRef.current = null;
+      setOpen(false);
+    }
+  }, [props.sessionRailVisible]);
   const subagents = (props.subagents ?? []).filter(
     (entry): entry is SubagentRosterEntry => entry.subagent !== undefined,
   );
