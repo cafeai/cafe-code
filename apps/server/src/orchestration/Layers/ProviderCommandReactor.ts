@@ -20,6 +20,7 @@ import {
   type RuntimeMode,
   TurnId,
 } from "@cafecode/contracts";
+import { omitThreadSubagentLimitOption, resolveThreadSubagentLimit } from "@cafecode/shared/model";
 import {
   isTemporaryWorktreeBranch,
   LEGACY_WORKTREE_BRANCH_PREFIX,
@@ -82,6 +83,10 @@ import {
   decideCodexSteerRecovery,
 } from "../codexSteerRecovery.ts";
 const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
+
+function withoutThreadLimit(selection: ModelSelection | undefined) {
+  return selection && { ...selection, options: omitThreadSubagentLimitOption(selection.options) };
+}
 const isProviderAdapterProcessError = Schema.is(ProviderAdapterProcessError);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
 const RAW_PROVIDER_PROCESS_FAILURE_PATTERN =
@@ -1445,6 +1450,18 @@ const make = Effect.gen(function* () {
       });
     }
     const preferredProvider: ProviderDriverKind = desiredDriverKind;
+    const desiredThreadSubagentLimit =
+      preferredProvider === "codex" || preferredProvider === "claudeAgent"
+        ? yield* Effect.try({
+            try: () => resolveThreadSubagentLimit(desiredModelSelection, desiredInstanceId),
+            catch: () =>
+              new ProviderAdapterRequestError({
+                provider: preferredProvider,
+                method: "thread.turn.start",
+                detail: "Thread subagent limit must be an integer from 1 to 64.",
+              }),
+          })
+        : null;
     const requestedInstanceChange = desiredInstanceId !== currentInstanceId;
     const currentInfo = requestedInstanceChange
       ? activeSession === undefined
@@ -1588,12 +1605,25 @@ const make = Effect.gen(function* () {
       const restartResumeModelSelectionChanged =
         sessionModelSwitch === "restart-resume" &&
         requestedModelSelection !== undefined &&
-        !Equal.equals(activeSession.modelSelection, requestedModelSelection);
+        !Equal.equals(
+          withoutThreadLimit(activeSession.modelSelection),
+          withoutThreadLimit(requestedModelSelection),
+        );
       const shouldRestartForModelSelectionChange =
         restartResumeModelSelectionChanged ||
         (preferredProvider === "claudeAgent" &&
           requestedModelSelection !== undefined &&
-          !Equal.equals(previousModelSelection, requestedModelSelection));
+          !Equal.equals(
+            withoutThreadLimit(previousModelSelection),
+            withoutThreadLimit(requestedModelSelection),
+          ));
+      const threadSubagentLimitChanged =
+        (preferredProvider === "codex" || preferredProvider === "claudeAgent") &&
+        (activeSession.threadSubagentLimit ?? null) !== desiredThreadSubagentLimit;
+      // This process setting is deferred while the provider owns active work.
+      // The next idle start/resume reconciles it from the durable thread options.
+      const deferThreadSubagentLimitChange =
+        activeSession.status === "running" || activeSession.activeTurnId !== undefined;
 
       if (
         !runtimeModeChanged &&
@@ -1603,7 +1633,8 @@ const make = Effect.gen(function* () {
         !instanceChanged &&
         !providerResumeIdentityChanged &&
         !shouldRestartForModelChange &&
-        !shouldRestartForModelSelectionChange
+        !shouldRestartForModelSelectionChange &&
+        (!threadSubagentLimitChanged || deferThreadSubagentLimitChange)
       ) {
         return activeSession;
       }

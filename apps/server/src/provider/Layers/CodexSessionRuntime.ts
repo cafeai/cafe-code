@@ -365,6 +365,7 @@ export function buildCodexAppServerArgs(
 }
 
 export interface CodexSessionRuntimeOptions {
+  readonly threadSubagentLimit?: number | null;
   readonly threadId: ThreadId;
   readonly providerInstanceId?: ProviderInstanceId;
   readonly binaryPath: string;
@@ -4000,6 +4001,7 @@ export const makeCodexSessionRuntime = (
 
     const sessionCreatedAt = yield* nowIso;
     const initialSession = {
+      threadSubagentLimit: options.threadSubagentLimit ?? null,
       provider: PROVIDER,
       ...(options.providerInstanceId ? { providerInstanceId: options.providerInstanceId } : {}),
       status: "connecting",

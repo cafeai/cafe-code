@@ -24,6 +24,12 @@ import {
 } from "./orchestration.ts";
 import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
 
+export const THREAD_SUBAGENT_LIMIT_OPTION_ID = "threadSubagentLimit";
+export const MAX_THREAD_SUBAGENT_LIMIT = 64;
+export const ThreadSubagentLimit = Schema.Int.check(
+  Schema.isBetween({ minimum: 1, maximum: MAX_THREAD_SUBAGENT_LIMIT }),
+);
+
 const ProviderSessionStatus = Schema.Literals([
   "connecting",
   "ready",
@@ -51,6 +57,9 @@ export const ProviderSession = Schema.Struct({
   // with the process that is actually materialized instead of relying on a
   // renderer draft or an in-memory command cache after backend recovery.
   modelSelection: Schema.optional(ModelSelection),
+  // Null means this session inherited its provider-instance policy. Omission
+  // keeps older daemon snapshots readable until their next safe reconnect.
+  threadSubagentLimit: Schema.optional(Schema.NullOr(ThreadSubagentLimit)),
   threadId: ThreadId,
   resumeCursor: Schema.optional(Schema.Unknown),
   activeTurnId: Schema.optional(TurnId),

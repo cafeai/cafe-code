@@ -13,6 +13,7 @@ import {
   getProviderOptionCurrentValue,
   getProviderOptionDescriptors,
   isClaudeUltrathinkPrompt,
+  preserveThreadSubagentLimitOption,
 } from "@cafecode/shared/model";
 import { memo, useCallback, useState } from "react";
 import type { VariantProps } from "class-variance-authority";
@@ -285,7 +286,12 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
     allowPromptInjectedEffort,
   });
   const updateDescriptors = (nextDescriptors: ReadonlyArray<ProviderOptionDescriptor>) => {
-    updateModelOptions(buildProviderOptionSelectionsFromDescriptors(nextDescriptors));
+    updateModelOptions(
+      preserveThreadSubagentLimitOption(
+        buildProviderOptionSelectionsFromDescriptors(nextDescriptors),
+        modelOptions,
+      ),
+    );
   };
 
   const handleSelectChange = (

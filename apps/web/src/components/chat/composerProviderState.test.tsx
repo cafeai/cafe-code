@@ -249,3 +249,21 @@ describe("provider traits render guards", () => {
     expect(renderProviderTraitsMenuContent(args)).toBeNull();
   });
 });
+
+describe("composer thread subagent policy", () => {
+  it.each(["codex", "claudeAgent"])(
+    "retains the %s override in turn dispatch even without a trait descriptor",
+    (provider) => {
+      for (const value of ["4", "inherit"]) {
+        const state = getComposerProviderState({
+          provider: ProviderDriverKind.make(provider),
+          model: "model",
+          models: [],
+          prompt: "",
+          modelOptions: [{ id: "threadSubagentLimit", value }],
+        });
+        expect(state.modelOptionsForDispatch).toContainEqual({ id: "threadSubagentLimit", value });
+      }
+    },
+  );
+});
