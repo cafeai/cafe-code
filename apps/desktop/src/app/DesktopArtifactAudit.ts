@@ -68,13 +68,30 @@ function validDependencyMap(value: unknown): boolean {
   );
 }
 
+const DEFAULT_UPDATE_TARGET = { provider: "github", owner: "cafeai", repo: "cafe-code" };
+
+function readUpdateTarget(value: unknown): Record<string, unknown> | undefined {
+  const target = readRecord(value);
+  return target?.provider === "github" &&
+    typeof target.owner === "string" &&
+    /^[a-z0-9][a-z0-9-]{0,38}$/iu.test(target.owner) &&
+    typeof target.repo === "string" &&
+    /^[a-z0-9_.-]{1,100}$/iu.test(target.repo) &&
+    target.repo !== "." &&
+    target.repo !== ".."
+    ? target
+    : undefined;
+}
+
 export function isDesktopRuntimeManifestValid(value: unknown): boolean {
   const manifest = readRecord(value);
   if (
     manifest?.name !== "@cafecode/desktop-runtime" ||
     manifest.private !== true ||
     manifest.main !== "apps/desktop/dist-electron/main.cjs" ||
-    !validDependencyMap(manifest.dependencies)
+    !validDependencyMap(manifest.dependencies) ||
+    (manifest.cafeCodeUpdateTarget !== undefined &&
+      readUpdateTarget(manifest.cafeCodeUpdateTarget) === undefined)
   ) {
     return false;
   }
@@ -106,11 +123,53 @@ export function containsDesktopArtifactResidue(path: string, source?: string): b
   );
 }
 
-export function isDesktopUpdateMetadataValid(source: string): boolean {
+export function isDesktopUpdateMetadataValid(
+  source: string,
+  expectedTarget: unknown = DEFAULT_UPDATE_TARGET,
+): boolean {
+  const target = readUpdateTarget(expectedTarget);
+  if (!target || source.length > 16_384) return false;
+
+  // Accept only the flat scalar metadata emitted by our builder configuration.
+  // Duplicate keys, aliases, nested values, and endpoint overrides must fail.
+  const fields = new Map<string, string>();
+  const allowedFields = new Set([
+    "provider",
+    "owner",
+    "repo",
+    "channel",
+    "releaseType",
+    "updaterCacheDirName",
+  ]);
+  for (const line of source.split(/\r?\n/u)) {
+    if (line.trim() === "") continue;
+    const match = /^([a-zA-Z]+):[ \t]*(\S(?:.*\S)?)[ \t]*$/u.exec(line);
+    if (!match) return false;
+    const [, key, raw] = match;
+    if (!key || !raw || !allowedFields.has(key) || fields.has(key)) return false;
+    let value = raw;
+    if (raw.startsWith('"')) {
+      try {
+        const parsed: unknown = JSON.parse(raw);
+        if (typeof parsed !== "string") return false;
+        value = parsed;
+      } catch {
+        return false;
+      }
+    } else if (raw.startsWith("'")) {
+      if (!/^'(?:[^']|'')*'$/u.test(raw)) return false;
+      value = raw.slice(1, -1).replaceAll("''", "'");
+    } else if (!/^[a-z0-9_@./-]+$/iu.test(raw)) {
+      return false;
+    }
+    fields.set(key, value);
+  }
   return (
-    /^provider:\s*github\s*$/mu.test(source) &&
-    /^owner:\s*cafeai\s*$/mu.test(source) &&
-    /^repo:\s*cafe-code\s*$/mu.test(source)
+    fields.get("provider") === target.provider &&
+    fields.get("owner") === target.owner &&
+    fields.get("repo") === target.repo &&
+    (!fields.has("channel") || ["latest", "nightly"].includes(fields.get("channel")!)) &&
+    (!fields.has("releaseType") || ["release", "prerelease"].includes(fields.get("releaseType")!))
   );
 }
 
@@ -167,7 +226,10 @@ export async function auditPackagedDesktopArtifact(
   ]);
   if (resourceEntries.some((entry) => !expectedTopLevelEntries.has(entry.name))) return false;
   if (
-    !isDesktopUpdateMetadataValid(await readFile(join(resourcesPath, "app-update.yml"), "utf8"))
+    !isDesktopUpdateMetadataValid(
+      await readFile(join(resourcesPath, "app-update.yml"), "utf8"),
+      readRecord(manifest)?.cafeCodeUpdateTarget,
+    )
   ) {
     return false;
   }
