@@ -102,7 +102,10 @@ view state is dropped. While the panel is closed, the projection is the empty sn
 Adoption proposal: [Cafe issue #90](https://github.com/cafeai/cafe-code/issues/90), based on Cafe dev `99fbaec8`.
 Independent review checked projection fidelity, bounded output, graph relationships and selection cleanup.
 The projection/layout unit tests pass 22/22; component Chromium tests pass 11/11, including identifier
-delimiter collisions. Full repository checks and the forced desktop build are pending final validation.
+delimiter collisions. Final validation passed `yarn fmt`, `yarn lint`, `yarn typecheck`
+(10 tasks), `yarn test --concurrency=2` (10 tasks; server 2,004 passed and the existing
+POSIX bootstrap FIFO skip), all 317 Chromium tests, and `yarn build:desktop --force`
+(3 tasks). Generated server, desktop and renderer bundles were checked after the build.
 
 The captures show the real dialog and stylesheet with synthetic events. No provider, backend or user
 account was involved. The temporary capture harness was removed after the media was inspected.
