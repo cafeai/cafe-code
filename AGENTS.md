@@ -69,6 +69,8 @@ If a tradeoff is required, choose correctness, durability, and debuggability ove
 
 ## Security Requirements
 
+- Bind desktop IPC authority to both the exact registered `webContents` and its configured renderer origin (or exact production file). Reject other loopback ports, deceptive loopback hostnames, child frames, and destroyed senders. Keep the trusted renderer on this navigation scope. Sender-aware handlers receive the already-validated event; use strict payload decoding for capability-bearing APIs and reject extra fields before running the handler.
+
 - Write all code as if it will run in a security-conscious environment where adversaries will constantly try to attack local transports, provider sessions, provider credentials, persisted command ledgers, and debug surfaces.
 - Local provider daemon and supervisor transports must be loopback-only or IPC by default, authenticated with high-entropy capability tokens, and must never be exposed on a non-loopback interface without an explicit authenticated design.
 - Secrets such as provider daemon tokens, Codex auth, Claude credentials, OpenCode server passwords, saved-environment bearer sessions, and app bootstrap credentials must be stored as private files with restrictive permissions where the platform supports them. Never persist secrets in logs, debug JSON, process argv, browser local storage, or user-visible error strings.

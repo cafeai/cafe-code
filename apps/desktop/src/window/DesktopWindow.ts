@@ -274,12 +274,23 @@ const make = Effect.gen(function* () {
         sandbox: true,
       },
     });
-    yield* desktopIpc.trustWebContents(window.webContents);
-
     const rendererUrl = environment.isDevelopment
       ? new URL(yield* resolveDesktopDevServerUrl(environment))
       : backendHttpUrl;
+    yield* desktopIpc.trustWebContents(window.webContents, rendererUrl.href);
     installTrustedAudioPermissionPolicy(window.webContents, rendererUrl);
+    const guardRendererNavigation = (
+      event: Electron.Event<Electron.WebContentsWillNavigateEventParams>,
+    ) => {
+      if (
+        event.isMainFrame &&
+        !DesktopIpc.isTrustedDesktopIpcNavigation(event.url, rendererUrl.href)
+      ) {
+        event.preventDefault();
+      }
+    };
+    window.webContents.on("will-navigate", guardRendererNavigation);
+    window.webContents.on("will-redirect", guardRendererNavigation);
 
     window.webContents.on("context-menu", (event, params) => {
       event.preventDefault();
