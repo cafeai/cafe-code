@@ -25,4 +25,5 @@ export * from "./editor.ts";
 export * from "./project.ts";
 export * from "./filesystem.ts";
 export * from "./usageStats.ts";
+export * from "./workspaceObservatory.ts";
 export * from "./rpc.ts";

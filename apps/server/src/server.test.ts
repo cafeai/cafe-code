@@ -58,6 +58,9 @@ import {
 import { OtlpSerialization, OtlpTracer } from "effect/unstable/observability";
 import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
 import * as Socket from "effect/unstable/socket/Socket";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { vi } from "vitest";
 
 const TEST_EPOCH = DateTime.makeUnsafe("1970-01-01T00:00:00.000Z");
@@ -133,6 +136,8 @@ import {
 } from "./environment/Services/ServerEnvironment.ts";
 import { WorkspaceEntriesLive } from "./workspace/Layers/WorkspaceEntries.ts";
 import { WorkspaceFileSystemLive } from "./workspace/Layers/WorkspaceFileSystem.ts";
+import { makeWorkspaceObservatory } from "./workspace/Layers/WorkspaceObservatory.ts";
+import { WorkspaceObservatory } from "./workspace/Services/WorkspaceObservatory.ts";
 import { WorkspacePathsLive } from "./workspace/Layers/WorkspacePaths.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as VcsDriver from "./vcs/VcsDriver.ts";
@@ -446,6 +451,13 @@ const makeBrowserOtlpPayload = (spanName: string) =>
 
 const buildAppUnderTest = (options?: {
   config?: Partial<ServerConfigShape>;
+  /**
+   * Synthetic workspace-root resolver for the read-only observatory. Supplying
+   * one is the only way a test can make the observatory observe anything, which
+   * mirrors production: the root always comes from the server side, never from
+   * the caller.
+   */
+  workspaceObservatoryRoot?: (projectId: string) => string | null;
   layers?: {
     keybindings?: Partial<KeybindingsShape>;
     providerRegistry?: Partial<ProviderRegistryShape>;
@@ -621,6 +633,15 @@ const buildAppUnderTest = (options?: {
         Layer.provide(workspaceEntriesLayer),
       ),
       ProjectFaviconResolverLive,
+      // Without an injected resolver this harness registers no projects, so
+      // every observatory request is denied as an unknown project. Path and
+      // payload behaviour is covered in depth by
+      // `workspace/Layers/WorkspaceObservatory.test.ts`.
+      Layer.succeed(WorkspaceObservatory)(
+        makeWorkspaceObservatory((projectId) =>
+          Effect.succeed(options?.workspaceObservatoryRoot?.(projectId) ?? null),
+        ),
+      ),
     );
     const gitWorkflowLayer = GitWorkflowService.layer.pipe(
       Layer.provideMerge(vcsDriverRegistryLayer),
@@ -5592,6 +5613,103 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         dispatchedCommands.map((command) => command.type),
         ["thread.create", "thread.delete"],
       );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+  /**
+   * End-to-end check of the read-only observatory over the real authenticated
+   * websocket RPC path, against a synthetic temporary workspace this test
+   * creates and removes. No real user project is involved.
+   */
+  it.effect("serves bounded read-only workspace views over authenticated ws rpc", () =>
+    Effect.gen(function* () {
+      const observedProjectId = ProjectId.make("project-observatory-rpc");
+      const fixtureRoot = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), "cafe-observatory-rpc-")),
+      );
+      const workspaceRoot = join(fixtureRoot, "workspace");
+      yield* Effect.promise(async () => {
+        await mkdir(join(workspaceRoot, "src"), { recursive: true });
+        await mkdir(join(fixtureRoot, "outside"), { recursive: true });
+        await writeFile(join(workspaceRoot, "README.md"), "# Synthetic fixture", "utf8");
+        await writeFile(join(workspaceRoot, "src", "index.ts"), "export const value = 1;", "utf8");
+        await writeFile(join(workspaceRoot, ".env"), "API_KEY=synthetic-not-real", "utf8");
+        await writeFile(join(workspaceRoot, "session.pem"), "synthetic-not-a-key", "utf8");
+        await writeFile(join(fixtureRoot, "outside", "secret.txt"), "outside content", "utf8");
+      });
+
+      yield* buildAppUnderTest({
+        workspaceObservatoryRoot: (projectId) =>
+          projectId === observedProjectId ? workspaceRoot : null,
+      });
+      const wsUrl = yield* getWsServerUrl("/ws");
+
+      const listing = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[WS_METHODS.workspaceObservatoryTree]({ projectId: observedProjectId }),
+        ),
+      );
+      assert.equal(listing.relativePath, "");
+      const listedNames = listing.entries.map((entry) => entry.name);
+      assert.include(listedNames, "README.md");
+      assert.include(listedNames, "src");
+      // Private-looking files are withheld from the listing and reported as such.
+      assert.equal(listedNames.includes(".env"), false);
+      assert.equal(listedNames.includes("session.pem"), false);
+      assert.equal(listing.redacted, true);
+
+      const file = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[WS_METHODS.workspaceObservatoryReadFile]({
+            projectId: observedProjectId,
+            relativePath: "src/index.ts",
+          }),
+        ),
+      );
+      assert.equal(file.relativePath, "src/index.ts");
+      assert.equal(file.content, "export const value = 1;");
+      assert.equal(file.truncated, false);
+
+      const denialMessageFor = (relativePath: string, projectId = observedProjectId) =>
+        Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[WS_METHODS.workspaceObservatoryReadFile]({ projectId, relativePath }),
+          ),
+        ).pipe(
+          Effect.map(() => null),
+          Effect.catch((cause: { message?: string }) => Effect.succeed(cause.message ?? "")),
+        );
+
+      // A private file named directly is refused, not returned.
+      const envDenial = yield* denialMessageFor(".env");
+      assert.equal(envDenial, "Hidden, generated, or sensitive workspace items are not displayed.");
+      const pemDenial = yield* denialMessageFor("session.pem");
+      assert.equal(pemDenial, "Hidden, generated, or sensitive workspace items are not displayed.");
+
+      // Escaping the root, malformed input, and an unregistered project are all
+      // refused with coarse messages that never echo a filesystem path back.
+      const outsideDenial = yield* denialMessageFor("../outside/secret.txt");
+      assert.equal(outsideDenial, "Workspace path must stay within the project root.");
+      const absoluteDenial = yield* denialMessageFor(join(fixtureRoot, "outside", "secret.txt"));
+      assert.equal(absoluteDenial, "Workspace path must stay within the project root.");
+      const streamDenial = yield* denialMessageFor("README.md:hidden");
+      assert.equal(streamDenial, "Workspace path must stay within the project root.");
+      const unknownProjectDenial = yield* denialMessageFor(
+        "README.md",
+        ProjectId.make("project-never-registered"),
+      );
+      assert.equal(unknownProjectDenial, "Project is not part of this connected environment.");
+      for (const message of [
+        envDenial,
+        pemDenial,
+        outsideDenial,
+        absoluteDenial,
+        streamDenial,
+        unknownProjectDenial,
+      ]) {
+        assert.equal((message ?? "").includes(fixtureRoot), false);
+        assert.equal((message ?? "").includes("secret"), false);
+      }
+      yield* Effect.promise(() => rm(fixtureRoot, { recursive: true, force: true }));
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 });

@@ -71,6 +71,7 @@ import { ProjectFaviconResolverLive } from "./project/Layers/ProjectFaviconResol
 import { RepositoryIdentityResolverLive } from "./project/Layers/RepositoryIdentityResolver.ts";
 import { WorkspaceEntriesLive } from "./workspace/Layers/WorkspaceEntries.ts";
 import { WorkspaceFileSystemLive } from "./workspace/Layers/WorkspaceFileSystem.ts";
+import { WorkspaceObservatoryLive } from "./workspace/Layers/WorkspaceObservatory.ts";
 import { WorkspacePathsLive } from "./workspace/Layers/WorkspacePaths.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "./vcs/VcsDriverRegistry.ts";
@@ -275,7 +276,12 @@ const ServerClientSettingsLayerLive = ServerClientSettingsLive.pipe(
 
 const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   // Core Services
-  Layer.provideMerge(ThreadDetailSubscriptionRegistryLive),
+  // The read-only workspace observatory resolves its authoritative workspace
+  // root from the orchestration projection, so it is layered above
+  // `OrchestrationLayerLive` rather than inside `WorkspaceLayerLive`.
+  Layer.provideMerge(
+    Layer.mergeAll(ThreadDetailSubscriptionRegistryLive, WorkspaceObservatoryLive),
+  ),
   Layer.provideMerge(CheckpointingLayerLive),
   Layer.provideMerge(SourceControlProviderRegistryLayerLive),
   Layer.provideMerge(GitLayerLive),

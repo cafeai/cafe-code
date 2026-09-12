@@ -43,6 +43,10 @@ const rpcClientMock = {
     searchEntries: vi.fn(),
     writeFile: vi.fn(),
   },
+  workspaceObservatory: {
+    tree: vi.fn(),
+    readFile: vi.fn(),
+  },
   filesystem: {
     browse: vi.fn(),
   },
@@ -494,6 +498,33 @@ describe("wsApi", () => {
       cwd: "/tmp/project",
       relativePath: "plan.md",
       contents: "# Plan\n",
+    });
+  });
+
+  it("forwards observatory requests with the selected project and exact file spelling", async () => {
+    const projectId = ProjectId.make("project-observatory");
+    const tree = { relativePath: "", entries: [], truncated: false, redacted: false };
+    const file = {
+      relativePath: " README.md",
+      content: "# Exact file\n",
+      truncated: false,
+      redacted: false,
+    };
+    rpcClientMock.workspaceObservatory.tree.mockResolvedValue(tree);
+    rpcClientMock.workspaceObservatory.readFile.mockResolvedValue(file);
+
+    const api = createEnvironmentApi(rpcClientMock as never);
+    const observatory = api.workspaceObservatory;
+    expect(observatory).toBeDefined();
+    if (!observatory) throw new Error("The environment API must expose the observatory.");
+    await expect(observatory.tree({ projectId })).resolves.toEqual(tree);
+    await expect(observatory.readFile({ projectId, relativePath: " README.md" })).resolves.toEqual(
+      file,
+    );
+    expect(rpcClientMock.workspaceObservatory.tree).toHaveBeenCalledWith({ projectId });
+    expect(rpcClientMock.workspaceObservatory.readFile).toHaveBeenCalledWith({
+      projectId,
+      relativePath: " README.md",
     });
   });
 

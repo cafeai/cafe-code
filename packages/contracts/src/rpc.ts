@@ -108,6 +108,13 @@ import {
   SourceControlRepositoryLookupInput,
 } from "./sourceControl.ts";
 import { UsageStatsGetResult, UsageStatsSnapshot } from "./usageStats.ts";
+import {
+  WorkspaceObservatoryError,
+  WorkspaceObservatoryFileInput,
+  WorkspaceObservatoryFileResult,
+  WorkspaceObservatoryTreeInput,
+  WorkspaceObservatoryTreeResult,
+} from "./workspaceObservatory.ts";
 import { VcsError } from "./vcs.ts";
 
 export const WS_METHODS = {
@@ -119,6 +126,9 @@ export const WS_METHODS = {
   projectsRemove: "projects.remove",
   projectsSearchEntries: "projects.searchEntries",
   projectsWriteFile: "projects.writeFile",
+  // Read-only workspace observatory methods
+  workspaceObservatoryTree: "workspaceObservatory.tree",
+  workspaceObservatoryReadFile: "workspaceObservatory.readFile",
 
   // Shell methods
   shellOpenInEditor: "shell.openInEditor",
@@ -369,6 +379,18 @@ export const WsProjectsWriteFileRpc = Rpc.make(WS_METHODS.projectsWriteFile, {
   error: ProjectWriteFileError,
 });
 
+export const WsWorkspaceObservatoryTreeRpc = Rpc.make(WS_METHODS.workspaceObservatoryTree, {
+  payload: WorkspaceObservatoryTreeInput,
+  success: WorkspaceObservatoryTreeResult,
+  error: WorkspaceObservatoryError,
+});
+
+export const WsWorkspaceObservatoryReadFileRpc = Rpc.make(WS_METHODS.workspaceObservatoryReadFile, {
+  payload: WorkspaceObservatoryFileInput,
+  success: WorkspaceObservatoryFileResult,
+  error: WorkspaceObservatoryError,
+});
+
 export const WsShellOpenInEditorRpc = Rpc.make(WS_METHODS.shellOpenInEditor, {
   payload: LaunchEditorInput,
   error: ExternalLauncherError,
@@ -613,6 +635,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsSourceControlCloneRepositoryRpc,
   WsProjectsSearchEntriesRpc,
   WsProjectsWriteFileRpc,
+  WsWorkspaceObservatoryTreeRpc,
+  WsWorkspaceObservatoryReadFileRpc,
   WsShellOpenInEditorRpc,
   WsShellOpenTerminalRpc,
   WsFilesystemBrowseRpc,
