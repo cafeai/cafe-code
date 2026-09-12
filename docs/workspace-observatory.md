@@ -109,7 +109,7 @@ Final validation passed: `yarn fmt`, `yarn lint`, `yarn typecheck` (10 tasks),
 `yarn test --concurrency=2` (10 tasks; server 2,046 passed and 2 expected skips),
 all 323 Chromium tests, and `yarn build:desktop --force` (3 tasks). The API fixture
 also verifies exact project and path forwarding in its 25 passing tests. The two
-server skips are the existing provider test and the POSIX-only FIFO case above.
+server skips are the existing bootstrap FIFO test and the POSIX-only FIFO case above.
 The generated server, desktop and renderer bundles were checked after the build.
 
 ## Review media
