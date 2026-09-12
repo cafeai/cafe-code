@@ -108,6 +108,7 @@ import { shouldSurfaceProviderAccountRateLimits } from "../lib/codexRateLimits";
 import { BranchToolbar } from "./BranchToolbar";
 import { resolveShortcutCommand } from "../keybindings";
 import PlanSidebar from "./PlanSidebar";
+import { WorkflowObservatoryDialog } from "./workflow/WorkflowObservatoryDialog";
 import { SessionRail } from "./chat/SessionRail";
 import { ComposerAsyncQuestionsPanel } from "./chat/ComposerAsyncQuestionsPanel";
 import { persistExactAsyncQuestionAnswer } from "./chat/asyncQuestions";
@@ -3476,6 +3477,17 @@ export default function ChatView(props: ChatViewProps) {
   const closePlanSidebar = useCallback(() => {
     setPlanSidebarOpenForCurrentThread(false);
   }, [setPlanSidebarOpenForCurrentThread]);
+
+  // The workflow panel is a read-only overlay. It keeps its own open state so
+  // it cannot change the plan sidebar layout, and it closes on a thread or
+  // environment switch so no stale projection stays on screen.
+  const [workflowObservatoryOpen, setWorkflowObservatoryOpen] = useState(false);
+  const openWorkflowObservatory = useCallback(() => {
+    setWorkflowObservatoryOpen(true);
+  }, []);
+  useEffect(() => {
+    setWorkflowObservatoryOpen(false);
+  }, [environmentId, routeThreadKey]);
   const showSessionRail = useCallback(() => {
     setSessionRailDocked(true);
   }, [setSessionRailDocked]);
@@ -6569,6 +6581,7 @@ export default function ChatView(props: ChatViewProps) {
                   handleRuntimeModeChange={handleRuntimeModeChange}
                   handleInteractionModeChange={handleInteractionModeChange}
                   togglePlanSidebar={togglePlanSidebar}
+                  {...(activeThread ? { onOpenWorkflowObservatory: openWorkflowObservatory } : {})}
                   onOpenGoalDialog={openThreadGoalDialog}
                   focusComposer={focusComposer}
                   scheduleComposerFocus={scheduleComposerFocus}
@@ -6668,6 +6681,25 @@ export default function ChatView(props: ChatViewProps) {
             onClose={closePlanSidebar}
           />
         </RightPanelSheet>
+      ) : null}
+
+      {activeThread ? (
+        <WorkflowObservatoryDialog
+          activePlan={activePlan}
+          activities={threadActivities}
+          environmentId={activeThread.environmentId}
+          latestTurn={activeLatestTurn}
+          modelLabel={activeThread.modelSelection?.model ?? null}
+          onOpenChange={setWorkflowObservatoryOpen}
+          open={workflowObservatoryOpen}
+          providerLabel={selectedProvider}
+          {...(activeLatestTurn?.turnId && activeLatestTurn.state !== "running"
+            ? { subagentOptions: { terminalTurnIds: new Set([activeLatestTurn.turnId]) } }
+            : {})}
+          threadId={activeThread.id}
+          threadTitle={activeThread.title}
+          timestampFormat={timestampFormat}
+        />
       ) : null}
 
       {expandedImage && (
