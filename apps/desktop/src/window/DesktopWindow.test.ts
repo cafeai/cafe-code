@@ -73,6 +73,7 @@ function makeFakeBrowserWindow() {
     openDevTools: webContents.openDevTools,
     setPermissionCheckHandler,
     setPermissionRequestHandler,
+    onWebContents: webContents.on,
   };
 }
 
@@ -122,6 +123,7 @@ const electronThemeLayer = Layer.succeed(ElectronTheme.ElectronTheme, {
 const desktopIpcLayer = Layer.succeed(DesktopIpc.DesktopIpc, {
   trustWebContents: () => Effect.void,
   handle: () => Effect.void,
+  handleFromSender: () => Effect.void,
   handleSync: () => Effect.void,
 } satisfies DesktopIpc.DesktopIpcShape);
 
@@ -174,6 +176,42 @@ function makeTestLayer(input: {
 }
 
 describe("DesktopWindow", () => {
+  it.effect("pins main-frame navigation without blocking child-frame redirects", () =>
+    Effect.gen(function* () {
+      const fakeWindow = makeFakeBrowserWindow();
+      const createCount = yield* Ref.make(0);
+      const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+      const layer = makeTestLayer({ window: fakeWindow.window, createCount, mainWindow });
+      yield* Effect.gen(function* () {
+        const desktopWindow = yield* DesktopWindow.DesktopWindow;
+        yield* desktopWindow.handleBackendReady;
+        for (const name of ["will-navigate", "will-redirect"]) {
+          const handler = fakeWindow.onWebContents.mock.calls.find(
+            ([event]) => event === name,
+          )?.[1];
+          assert.isFunction(handler);
+          const untrustedMain = {
+            url: "https://other.example/",
+            isMainFrame: true,
+            preventDefault: vi.fn(),
+          };
+          handler(untrustedMain);
+          assert.equal(untrustedMain.preventDefault.mock.calls.length, 1);
+          const trustedMain = {
+            url: "http://127.0.0.1:5733/chat",
+            isMainFrame: true,
+            preventDefault: vi.fn(),
+          };
+          handler(trustedMain);
+          assert.equal(trustedMain.preventDefault.mock.calls.length, 0);
+          const child = { ...untrustedMain, isMainFrame: false, preventDefault: vi.fn() };
+          handler(child);
+          assert.equal(child.preventDefault.mock.calls.length, 0);
+        }
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
   it.effect("does not open a development window until the backend is ready", () =>
     Effect.gen(function* () {
       const fakeWindow = makeFakeBrowserWindow();
