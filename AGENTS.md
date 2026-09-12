@@ -219,6 +219,8 @@ If a tradeoff is required, choose correctness, durability, and debuggability ove
 
 ## Current Runtime Architecture
 
+- Desktop artifact builds record the resolved GitHub update target in the staged runtime manifest. The packaged audit must bind `app-update.yml` to that target, never to the launch environment or a hard-coded fork. Legacy manifests without the field retain the official upstream target. Reject malformed targets, duplicate metadata keys, YAML aliases/nesting, and endpoint overrides; preserve the existing packaging and signing paths on every platform.
+
 - Backend startup must await the final successful `ProviderDaemonManager.ensureRunning` result, including its authenticated lease, before launching the backend. A provisional `currentConfig` can belong to a daemon attempt that is subsequently replaced on the same socket; inheriting it strands the backend with a rejected credential even though the replacement daemon is healthy. IPC/settings preparation may overlap daemon readiness, but provider-capable backend work must not. Startup failure or quitting during readiness must never launch the backend. Keep regression coverage for a superseded first attempt, final readiness failure, and cancellation, and preserve the separate stop-backend -> recover-daemon -> start-backend watchdog ordering.
 - Daemon marker existence/read/decode errors are inconclusive ownership, not absence. Fail with a content-free marker-inspection error before entering spawn/unlink/reaping paths; only confirmed marker absence permits a fresh daemon. A later retry can adopt the same live owner after the filesystem recovers.
 
