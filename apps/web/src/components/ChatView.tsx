@@ -161,6 +161,8 @@ import {
 } from "./chat/followUpQueue";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
+import { WorkspaceObservatory } from "./WorkspaceObservatory";
+import { Button } from "./ui/button";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
 import type { SubagentDetailSelection } from "./chat/SubagentDetailView";
 import { useTaskAtriumStore } from "./atrium/taskAtriumStore";
@@ -2333,6 +2335,7 @@ export default function ChatView(props: ChatViewProps) {
     if (!completionSummary) return null;
     return deriveCompletionDividerAfterEntryId(timelineEntries, activeLatestTurn);
   }, [activeLatestTurn, completionSummary, latestTurnSettled, timelineEntries]);
+  const [workspaceObservatoryOpen, setWorkspaceObservatoryOpen] = useState(false);
   const gitCwd = activeThread?.worktreePath ?? activeProject?.cwd ?? null;
   const gitStatusQuery = useGitStatus({ environmentId, cwd: gitCwd });
   const keybindings = useServerKeybindings();
@@ -6577,6 +6580,17 @@ export default function ChatView(props: ChatViewProps) {
                 />
               </div>
             </div>
+            <div className="flex justify-end px-3 pb-1">
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                data-testid="open-workspace-observatory"
+                onClick={() => setWorkspaceObservatoryOpen(true)}
+              >
+                Workspace observatory
+              </Button>
+            </div>
             {isGitRepo && (
               <BranchToolbar
                 environmentId={activeThread.environmentId}
@@ -6617,6 +6631,14 @@ export default function ChatView(props: ChatViewProps) {
               onPrepared={handlePreparedPullRequestThread}
             />
           ) : null}
+
+          <WorkspaceObservatory
+            open={workspaceObservatoryOpen}
+            environmentId={activeThread.environmentId}
+            projectId={activeProject?.id ?? null}
+            {...(activeProject?.name ? { projectName: activeProject.name } : {})}
+            onOpenChange={setWorkspaceObservatoryOpen}
+          />
         </div>
         {/* end chat column */}
 

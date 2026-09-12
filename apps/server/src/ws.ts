@@ -29,6 +29,7 @@ import {
   ServerProviderRuntimeRestartError,
   DictationError,
   ProviderInteractionError,
+  WorkspaceObservatoryError,
   WS_METHODS,
   WsRpcGroup,
 } from "@cafecode/contracts";
@@ -67,6 +68,7 @@ import { redactServerSettingsForClient, ServerSettingsService } from "./serverSe
 import { ServerClientSettingsService } from "./serverClientSettings.ts";
 import { WorkspaceEntries } from "./workspace/Services/WorkspaceEntries.ts";
 import { WorkspaceFileSystem } from "./workspace/Services/WorkspaceFileSystem.ts";
+import { WorkspaceObservatory } from "./workspace/Services/WorkspaceObservatory.ts";
 import { WorkspacePathOutsideRootError } from "./workspace/Services/WorkspacePaths.ts";
 import { VcsStatusBroadcaster } from "./vcs/VcsStatusBroadcaster.ts";
 import { VcsProvisioningService } from "./vcs/VcsProvisioningService.ts";
@@ -210,6 +212,7 @@ const makeWsRpcLayer = (
       const startup = yield* ServerRuntimeStartup;
       const workspaceEntries = yield* WorkspaceEntries;
       const workspaceFileSystem = yield* WorkspaceFileSystem;
+      const workspaceObservatory = yield* WorkspaceObservatory;
       const projectSetupScriptRunner = yield* ProjectSetupScriptRunner;
       const repositoryIdentityResolver = yield* RepositoryIdentityResolver;
       const serverEnvironment = yield* ServerEnvironment;
@@ -1305,6 +1308,32 @@ const makeWsRpcLayer = (
                 });
               }),
             ),
+            { "rpc.aggregate": "workspace" },
+          ),
+        [WS_METHODS.workspaceObservatoryTree]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.workspaceObservatoryTree,
+            // Denial detail is a fixed, coarse sentence chosen by the
+            // observatory; it never echoes a filesystem path back to a caller.
+            workspaceObservatory
+              .tree(input)
+              .pipe(
+                Effect.mapError(
+                  (cause) => new WorkspaceObservatoryError({ message: cause.detail }),
+                ),
+              ),
+            { "rpc.aggregate": "workspace" },
+          ),
+        [WS_METHODS.workspaceObservatoryReadFile]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.workspaceObservatoryReadFile,
+            workspaceObservatory
+              .readFile(input)
+              .pipe(
+                Effect.mapError(
+                  (cause) => new WorkspaceObservatoryError({ message: cause.detail }),
+                ),
+              ),
             { "rpc.aggregate": "workspace" },
           ),
         [WS_METHODS.shellOpenInEditor]: (input) =>

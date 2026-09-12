@@ -29,6 +29,12 @@ import type {
   ProjectWriteFileInput,
   ProjectWriteFileResult,
 } from "./project.ts";
+import type {
+  WorkspaceObservatoryFileInput,
+  WorkspaceObservatoryFileResult,
+  WorkspaceObservatoryTreeInput,
+  WorkspaceObservatoryTreeResult,
+} from "./workspaceObservatory.ts";
 import type { ProviderInstanceId } from "./providerInstance.ts";
 import type {
   ServerConfig,
@@ -489,6 +495,14 @@ export interface EnvironmentApi {
   };
   filesystem: {
     browse: (input: FilesystemBrowseInput) => Promise<FilesystemBrowseResult>;
+  };
+  /**
+   * Read-only previews of the selected project's working tree. Optional so
+   * older environment clients that predate the observatory stay usable.
+   */
+  workspaceObservatory?: {
+    tree: (input: WorkspaceObservatoryTreeInput) => Promise<WorkspaceObservatoryTreeResult>;
+    readFile: (input: WorkspaceObservatoryFileInput) => Promise<WorkspaceObservatoryFileResult>;
   };
   sourceControl: {
     lookupRepository: (
