@@ -105,7 +105,12 @@ Independent review repaired exact path decoding, environment/project session-key
 quadratic credential-name matching. The 128 KiB non-assignment regression took 2.26 seconds before
 the repair and passes a generous one-second ceiling after it. Text masking remains best effort.
 
-Full repository checks and the forced desktop build are pending final publication validation.
+Final validation passed: `yarn fmt`, `yarn lint`, `yarn typecheck` (10 tasks),
+`yarn test --concurrency=2` (10 tasks; server 2,046 passed and 2 expected skips),
+all 323 Chromium tests, and `yarn build:desktop --force` (3 tasks). The API fixture
+also verifies exact project and path forwarding in its 25 passing tests. The two
+server skips are the existing provider test and the POSIX-only FIFO case above.
+The generated server, desktop and renderer bundles were checked after the build.
 
 ## Review media
 
