@@ -18,6 +18,7 @@ import {
 } from "../config.ts";
 import { runProviderDaemonServerForever } from "../providerDaemon/ProviderDaemonServer.ts";
 import { ProviderDaemonRuntimeLive } from "../providerDaemon/ProviderDaemonRuntime.ts";
+import { lowerProviderDaemonPriority } from "../providerDaemon/ProviderDaemonPriority.ts";
 import { PROVIDER_SUPERVISOR_PROTOCOL_VERSION } from "../providerDaemon/ProviderSupervisorProcessManager.ts";
 import { ObservabilityLive } from "../observability/Layers/Observability.ts";
 import packageJson from "../../package.json" with { type: "json" };
@@ -102,6 +103,11 @@ export const runProviderDaemonCommand = (flags: { readonly bootstrapFd: Option.O
       return yield* new ProviderDaemonCliError({
         message: `provider-daemon received invalid bootstrap mode ${bootstrap.mode}.`,
       });
+    }
+
+    const priority = yield* Effect.sync(() => lowerProviderDaemonPriority());
+    if (priority === "unavailable") {
+      yield* Effect.logWarning("provider.daemon.priority.unavailable");
     }
 
     const baseConfig = yield* resolveProviderDaemonServerConfig({
