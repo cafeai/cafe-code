@@ -5150,6 +5150,28 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             '{}',
             9,
             '2026-04-06T00:00:09.000Z'
+          ),
+          (
+            'hidden-async-questions',
+            'thread-turn-visible-page',
+            'turn-visible-page',
+            'info',
+            'provider.async-questions',
+            'Follow-up questions',
+            '{"itemId":"async-mixed","questions":[{"title":"Which approach?","options":["Minimal"]}]}',
+            10,
+            '2026-04-06T00:00:10.000Z'
+          ),
+          (
+            'hidden-only-async-questions',
+            'thread-turn-visible-page',
+            'turn-questions-only',
+            'info',
+            'provider.async-questions',
+            'Follow-up questions',
+            '{"itemId":"async-only","questions":[{"title":"Any constraints?","options":[]}]}',
+            11,
+            '2026-04-06T00:00:11.000Z'
           )
       `;
 
@@ -5171,12 +5193,22 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         turnIds: [
           TurnId.make("turn-visible-page"),
           TurnId.make("turn-hidden-only"),
+          TurnId.make("turn-questions-only"),
           TurnId.make("turn-without-activity"),
           TurnId.make("turn-visible-page"),
         ],
       });
 
       assert.deepStrictEqual(presence.turnIdsWithWorkLog, [TurnId.make("turn-visible-page")]);
+
+      const questionOnlyPage = yield* snapshotQuery.getThreadTurnActivityPage({
+        threadId: ThreadId.make("thread-turn-visible-page"),
+        turnId: TurnId.make("turn-questions-only"),
+        offset: 0,
+        limit: 10,
+      });
+      assert.equal(questionOnlyPage.totalCount, 0);
+      assert.deepStrictEqual(questionOnlyPage.activities, []);
     }),
   );
 

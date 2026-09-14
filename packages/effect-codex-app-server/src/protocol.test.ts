@@ -100,6 +100,63 @@ it("tracks Codex 0.152 auth recovery and shell-command timeout additions", () =>
   );
 });
 
+it("keeps Codex 0.154 usage-read capabilities optional without accepting null flags", () => {
+  const isUsageRead = Schema.is(CodexSchema.CLIENT_REQUEST_PARAMS["account/rateLimits/read"]);
+
+  // The generated nullable wrapper is a schema-file convention, not the
+  // public TypeScript RPC input: callers may omit the object, but must provide
+  // actual booleans when explicitly declaring a supported client capability.
+  assert.equal(isUsageRead(undefined), true);
+  assert.equal(isUsageRead({}), true);
+  assert.equal(isUsageRead({ supportsLunaReserve: false, excludeResetCreditDetails: true }), true);
+  assert.equal(isUsageRead(null), false);
+  assert.equal(isUsageRead({ supportsLunaReserve: "true" }), false);
+  assert.equal(isUsageRead({ excludeResetCreditDetails: null }), false);
+});
+
+it("decodes Codex 0.154 reasoning controls without broadening conversation input", () => {
+  const decodeHistoryItem = Schema.decodeUnknownSync(
+    CodexSchema.V2ThreadResumeParams__ResponseItem,
+  );
+  const control = { type: "configuration_update", reasoning: { effort: "high" } } as const;
+  assert.deepEqual(decodeHistoryItem(control), control);
+
+  // Upstream defines this as a durable history control rather than ordinary
+  // user input or a terminal item. Keep incomplete controls out of the history
+  // schema, and never admit them to Cafe's normal turn input union.
+  assert.equal(
+    Schema.is(CodexSchema.V2ThreadResumeParams__ResponseItem)({ type: "configuration_update" }),
+    false,
+  );
+  assert.equal(Schema.is(CodexSchema.V2TurnStartParams__UserInput)(control), false);
+});
+
+it("distinguishes Codex 0.154 MCP tool-discovery failure from an empty or older catalog", () => {
+  const decodeStatus = Schema.decodeUnknownSync(
+    CodexSchema.V2ListMcpServerStatusResponse__McpServerStatus,
+  );
+  const legacy = {
+    name: "test-server",
+    tools: {},
+    resources: [],
+    resourceTemplates: [],
+    authStatus: "unknown" as const,
+  };
+
+  // A failed discovery and an intentionally empty inventory both have zero
+  // tools. Preserve the explicit failure field, including null on a healthy
+  // catalog, while accepting installed CLIs that predate the added field.
+  assert.deepEqual(decodeStatus(legacy), legacy);
+  assert.deepEqual(decodeStatus({ ...legacy, toolsError: null }), {
+    ...legacy,
+    toolsError: null,
+  });
+  assert.deepEqual(decodeStatus({ ...legacy, toolsError: "Tool discovery failed." }), {
+    ...legacy,
+    toolsError: "Tool discovery failed.",
+  });
+});
+
 it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
   it.effect(
     "encodes requests without a jsonrpc field and routes inbound requests and notifications",

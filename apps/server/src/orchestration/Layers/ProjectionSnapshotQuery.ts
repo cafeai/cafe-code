@@ -584,11 +584,15 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
    * user input. `payload.subagent` is a reserved structured-lifecycle marker;
    * fail closed for every non-null JSON value so malformed provider metadata
    * cannot make a subagent row leak back into the ordinary Work Log.
+   * Async questions likewise render beside assistant messages, so their
+   * presentation metadata must not create empty historical Work Log pages.
+   * They retain the normal bounded thread-detail activity hydration window.
    */
   const historicalWorkLogActivityPredicate = sql.and([
     "kind != 'context-window.updated'",
     "kind != 'checkpoint.captured'",
     "kind != 'task.started'",
+    "kind != 'provider.async-questions'",
     "summary != 'Checkpoint captured'",
     "(kind != 'tool.started' OR json_extract(payload_json, '$.itemType') = 'context_compaction')",
     "NOT (kind IN ('task.started', 'task.progress', 'task.completed') AND json_type(payload_json, '$.subagent') IS NOT NULL)",

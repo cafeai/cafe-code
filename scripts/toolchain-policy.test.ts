@@ -75,6 +75,27 @@ describe("repository toolchain policy", () => {
     expect(readFileSync(patchPath, "utf8")).toContain("RequestHooks");
   });
 
+  it("keeps the server, scripts, and staged Claude SDK on one exact version", () => {
+    const sdkName = "@anthropic-ai/claude-agent-sdk";
+    const packagePaths = [
+      "apps/server/package.json",
+      "scripts/package.json",
+      "packaging/desktop-runtime/package.json",
+    ];
+    const pins = packagePaths.map(
+      (packagePath) => readStringMap(readJson(packagePath).dependencies)[sdkName],
+    );
+
+    // The general staged-graph check compares the desktop runtime with the
+    // server, but cannot detect the scripts workspace retaining an older SDK.
+    // All three must move together so source tools and shipped sessions use
+    // the same vetted lifecycle contract; ranges and absent pins fail too.
+    for (const [index, pin] of pins.entries()) {
+      expect(pin, packagePaths[index]).toMatch(/^\d+\.\d+\.\d+$/);
+      expect(pin, packagePaths[index]).toBe(pins[0]);
+    }
+  });
+
   it("keeps the staged desktop dependency graph in a checked-in workspace", () => {
     const rootPackage = readJson("package.json");
     const desktopPackage = readJson("apps/desktop/package.json");

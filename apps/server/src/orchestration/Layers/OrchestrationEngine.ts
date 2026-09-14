@@ -94,7 +94,7 @@ function parseRecordJson(value: string): Readonly<Record<string, unknown>> | nul
 }
 
 interface RetryAttachmentIdentity {
-  readonly type: "image";
+  readonly type: "image" | "file";
   readonly id: string;
   readonly name: string;
   readonly mimeType: string;
@@ -104,7 +104,7 @@ interface RetryAttachmentIdentity {
 function readRetryAttachmentIdentity(value: unknown): RetryAttachmentIdentity | null {
   const record = readRecord(value);
   if (
-    record?.type !== "image" ||
+    (record?.type !== "image" && record?.type !== "file") ||
     typeof record.id !== "string" ||
     typeof record.name !== "string" ||
     typeof record.mimeType !== "string" ||
@@ -113,7 +113,7 @@ function readRetryAttachmentIdentity(value: unknown): RetryAttachmentIdentity | 
     return null;
   }
   return {
-    type: "image",
+    type: record.type,
     id: record.id,
     name: record.name,
     mimeType: record.mimeType.toLowerCase(),
@@ -123,8 +123,11 @@ function readRetryAttachmentIdentity(value: unknown): RetryAttachmentIdentity | 
 
 /**
  * Bind stable message fields and pair the old/new server attachment handles.
- * Reload recovery intentionally assigns a fresh storage id, so the ids cannot
- * be equal; the caller separately compares their private byte commitments.
+ * Image reload recovery assigns a fresh storage id, while generic files can
+ * retain the original upload handle. Both variants require the same exact
+ * type/name/MIME/size identity and private byte commitments, even when their
+ * ids are equal. Otherwise a compact/review rejection can strand an unchanged
+ * generic attachment, or a same-byte file can be substituted for an image.
  */
 function readMatchingRetryAttachmentPairs(
   command: UserTurnMessageCommand,

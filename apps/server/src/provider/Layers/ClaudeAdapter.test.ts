@@ -20,6 +20,7 @@ import type {
   PermissionResult,
   SDKControlInterruptResponse,
   SDKMessage,
+  SDKResultSuccess,
   SDKUserMessage,
   SessionMessage,
 } from "@anthropic-ai/claude-agent-sdk";
@@ -181,6 +182,37 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
       },
     };
   }
+}
+
+/** Complete terminal fixture: avoid disguising incomplete results with casts. */
+function makeSuccessfulClaudeResult(sessionId: string): SDKResultSuccess {
+  return {
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    duration_ms: 1,
+    duration_api_ms: 1,
+    num_turns: 1,
+    result: "",
+    stop_reason: "end_turn",
+    total_cost_usd: 0,
+    usage: {
+      cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 },
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+      inference_geo: "global",
+      input_tokens: 0,
+      iterations: [],
+      output_tokens: 0,
+      server_tool_use: { web_fetch_requests: 0, web_search_requests: 0 },
+      service_tier: "standard",
+      speed: "standard",
+    },
+    modelUsage: {},
+    permission_denials: [],
+    session_id: sessionId,
+    uuid: "00000000-0000-4000-8000-000000000000",
+  };
 }
 
 function makeHarness(config?: {
@@ -1707,6 +1739,178 @@ describe("ClaudeAdapterLive", () => {
       Effect.provide(harness.layer),
     );
   });
+
+  for (const frameType of ["assistant", "stream_event"] as const) {
+    it.effect(`tracks successive synthetic-turn answer switches on ${frameType} frames`, () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        const nativeSessionId = "claude-synthetic-answer-switch";
+        const foreignUuid = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+
+        // A provider-initiated rescue/background reply starts a synthetic Cafe
+        // turn. Its identity is not an input Cafe submitted or may cancel.
+        harness.query.emit({
+          type: "assistant",
+          session_id: nativeSessionId,
+          uuid: "synthetic-first-reply",
+          user_message_uuid: foreignUuid,
+          user_message_uuids: [foreignUuid],
+          parent_tool_use_id: null,
+          message: { id: "synthetic-message", content: [] },
+        } as unknown as SDKMessage);
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        const turnId = (yield* adapter.listSessions())[0]?.activeTurnId;
+        if (!turnId) throw new Error("Expected a provider-initiated active turn.");
+        for (const input of ["first folded user input", "second folded user input"]) {
+          yield* adapter.steerTurn({
+            threadId: session.threadId,
+            expectedTurnId: turnId,
+            input,
+            attachments: [],
+          });
+        }
+        const messages = yield* Effect.promise(() =>
+          readPromptMessages(harness.getLastCreateQueryInput(), 2),
+        );
+        const [first, later] = messages.map((message) => message.uuid);
+        if (!first || !later) throw new Error("Expected UUID-stamped folded inputs.");
+
+        for (const [index, messageUuid] of [first, later].entries()) {
+          // A meta result must not fall back to retiring an unrelated queued
+          // input. It is deferred while Cafe still owns that input. The newer
+          // SDK then stamps the next reply when a folded human send takes over;
+          // do not gate that acknowledgement on the first reply of Cafe's turn.
+          harness.query.emit({
+            ...makeSuccessfulClaudeResult(nativeSessionId),
+            uuid:
+              index === 0
+                ? "00000000-0000-4000-8000-000000000301"
+                : "00000000-0000-4000-8000-000000000302",
+            user_message_uuid: foreignUuid,
+            user_message_uuids: [foreignUuid],
+          });
+          yield* Effect.yieldNow;
+          yield* Effect.yieldNow;
+          assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, turnId);
+          harness.query.emit({
+            type: frameType,
+            session_id: nativeSessionId,
+            uuid: `folded-reply-${index}`,
+            parent_tool_use_id: null,
+            user_message_uuid: messageUuid,
+            user_message_uuids: [foreignUuid, first, ...(index > 0 ? [later] : [])],
+            ...(frameType === "assistant"
+              ? { message: { id: `folded-message-${index}`, content: [] } }
+              : { event: { type: "message_start", message: { id: `folded-message-${index}` } } }),
+          } as unknown as SDKMessage);
+          harness.query.emit({
+            type: "command_lifecycle",
+            command_uuid: messageUuid,
+            state: "completed",
+            session_id: nativeSessionId,
+            uuid: `folded-completed-${index}`,
+          } as unknown as SDKMessage);
+          yield* Effect.yieldNow;
+          yield* Effect.yieldNow;
+          // Even the final completed command cannot use the older meta result
+          // to terminalize a response segment that has since started replying.
+          assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, turnId);
+          assert.equal((yield* adapter.readThread(session.threadId)).turns.length, 0);
+        }
+
+        harness.query.emit({
+          ...makeSuccessfulClaudeResult(nativeSessionId),
+          uuid: "00000000-0000-4000-8000-000000000303",
+          user_message_uuid: later,
+          user_message_uuids: [foreignUuid, first, later],
+        });
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        assert.equal((yield* adapter.listSessions())[0]?.status, "ready");
+        const snapshot = yield* adapter.readThread(session.threadId);
+        assert.equal(snapshot.turns.length, 1);
+        assert.equal(snapshot.turns[0]?.id, turnId);
+        assert.deepEqual(harness.query.interruptCalls, []);
+        assert.deepEqual(harness.query.cancelAsyncMessageCalls, []);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+  }
+
+  it.effect(
+    "correlates result-only zero-inference successes without consuming another input",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        const turn = yield* adapter.sendTurn({
+          threadId: session.threadId,
+          input: "/help",
+          attachments: [],
+        });
+        yield* adapter.steerTurn({
+          threadId: session.threadId,
+          expectedTurnId: turn.turnId,
+          input: "/status",
+          attachments: [],
+        });
+        const messages = yield* Effect.promise(() =>
+          readPromptMessages(harness.getLastCreateQueryInput(), 2),
+        );
+        const [first, later] = messages.map((message) => message.uuid);
+        if (!first || !later) throw new Error("Expected UUID-stamped command inputs.");
+        const nativeSessionId = "claude-zero-inference-results";
+        const firstResult = {
+          ...makeSuccessfulClaudeResult(nativeSessionId),
+          uuid: "00000000-0000-4000-8000-000000000304",
+          duration_api_ms: 0,
+          num_turns: 0,
+          user_message_uuid: first,
+        } satisfies SDKMessage;
+        // SDK 0.3.265 fixes the singular stamp even when no API request/reply
+        // exists. Neither a missing plural stamp nor a replay licenses consuming
+        // the next owned input. These fixtures never execute provider commands.
+        harness.query.emit(firstResult);
+        harness.query.emit(firstResult);
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, turn.turnId);
+        assert.equal((yield* adapter.readThread(session.threadId)).turns.length, 0);
+        harness.query.emit({
+          ...makeSuccessfulClaudeResult(nativeSessionId),
+          uuid: "00000000-0000-4000-8000-000000000305",
+          duration_api_ms: 0,
+          num_turns: 0,
+          user_message_uuid: later,
+        });
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        assert.equal((yield* adapter.listSessions())[0]?.status, "ready");
+        const snapshot = yield* adapter.readThread(session.threadId);
+        assert.equal(snapshot.turns.length, 1);
+        assert.equal(snapshot.turns[0]?.id, turn.turnId);
+        assert.equal(snapshot.turns[0]?.items.length, 0);
+        assert.deepEqual(harness.query.interruptCalls, []);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
 
   it.effect("rejects Claude steer input for a stale active turn id", () => {
     const harness = makeHarness();
@@ -6934,6 +7138,205 @@ describe("ClaudeAdapterLive", () => {
           assert.equal(deltaEvent.payload.delta, "Late text");
           assert.equal(String(deltaEvent.turnId), String(turn.turnId));
         }
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect(
+    "repairs each completed Claude block without conflating wrapper and API identities",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const collected = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil((event) => event.type === "turn.completed"),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({ threadId: session.threadId, input: "hello", attachments: [] });
+        let sequence = 0;
+        const stream = (event: unknown) =>
+          harness.query.emit({
+            type: "stream_event",
+            session_id: "sdk-block-snapshots",
+            uuid: `stream-${sequence++}`,
+            parent_tool_use_id: null,
+            event,
+          } as SDKMessage);
+        const snapshot = (uuid: string, id: string, text: string) =>
+          harness.query.emit({
+            type: "assistant",
+            session_id: "sdk-block-snapshots",
+            uuid,
+            parent_tool_use_id: null,
+            message: { id, content: [{ type: "text", text }] },
+          } as SDKMessage);
+        stream({ type: "message_start", message: { id: "api-one" } });
+        for (const [index, prefix, full] of [
+          [0, "First paragraph.", "First paragraph."],
+          [1, "The", "The second paragraph.\n"],
+          [2, "", "Third paragraph without deltas."],
+          [3, "\ud83d", "\ud83d\ude00 split surrogate remains exact."],
+        ] as const) {
+          stream({ type: "content_block_start", index, content_block: { type: "text", text: "" } });
+          if (prefix)
+            stream({
+              type: "content_block_delta",
+              index,
+              delta: { type: "text_delta", text: prefix },
+            });
+          // Each frame carries only its own block, even with the same message.id.
+          snapshot(`wrapper-${index}`, "api-one", full);
+          snapshot(`wrapper-${index}`, "api-one", full);
+          stream({ type: "content_block_stop", index });
+        }
+        stream({ type: "message_stop" });
+        stream({ type: "message_start", message: { id: "api-two" } });
+        stream({
+          type: "content_block_start",
+          index: 0,
+          content_block: { type: "text", text: "" },
+        });
+        stream({
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: "The" },
+        });
+        snapshot("wrapper-next-api", "api-two", "The next API message.");
+        stream({ type: "content_block_stop", index: 0 });
+        harness.query.emit(makeSuccessfulClaudeResult("sdk-block-snapshots"));
+        const events = Array.from(yield* Fiber.join(collected));
+        const textByItem = new Map<string, string>();
+        for (const event of events) {
+          if (event.type === "content.delta" && event.payload.streamKind === "assistant_text") {
+            const key = String(event.itemId);
+            textByItem.set(key, (textByItem.get(key) ?? "") + event.payload.delta);
+          }
+        }
+        assert.deepEqual(
+          [...textByItem.values()],
+          [
+            "First paragraph.",
+            "The second paragraph.\n",
+            "Third paragraph without deltas.",
+            "\ud83d\ude00 split surrogate remains exact.",
+            "The next API message.",
+          ],
+        );
+        const completions = events.filter(
+          (event): event is Extract<ProviderRuntimeEvent, { type: "item.completed" }> =>
+            event.type === "item.completed" && event.payload.itemType === "assistant_message",
+        );
+        assert.equal(completions.length, 5);
+        assert.deepEqual(
+          completions.map((event) => event.payload.detail),
+          [...textByItem.values()],
+        );
+        assert.equal(
+          events.some((event) => event.type === "runtime.warning"),
+          false,
+        );
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect(
+    "does not repair Claude text from a different native message or a nonmatching prefix",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const collected = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil((event) => event.type === "turn.completed"),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({ threadId: session.threadId, input: "hello", attachments: [] });
+        let sequence = 0;
+        const stream = (event: unknown) =>
+          harness.query.emit({
+            type: "stream_event",
+            session_id: "sdk-safe-blocks",
+            uuid: `stream-${sequence++}`,
+            parent_tool_use_id: null,
+            event,
+          } as SDKMessage);
+        const snapshot = (uuid: string, id: string, text: string) =>
+          harness.query.emit({
+            type: "assistant",
+            session_id: "sdk-safe-blocks",
+            uuid,
+            parent_tool_use_id: null,
+            message: { id, content: [{ type: "text", text }] },
+          } as SDKMessage);
+        // Distinct invalid Unicode code units must remain distinct identities;
+        // UTF-8 replacement would incorrectly collapse both to U+FFFD.
+        stream({ type: "message_start", message: { id: "api-\ud800" } });
+        stream({
+          type: "content_block_start",
+          index: 0,
+          content_block: { type: "text", text: "" },
+        });
+        stream({
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: "The" },
+        });
+        snapshot("wrapper-\ud800", "api-\ud801", "The unrelated message.");
+        snapshot("wrapper-\ud801", "api-\ud800", "The original message.");
+        stream({ type: "content_block_stop", index: 0 });
+        stream({
+          type: "content_block_start",
+          index: 1,
+          content_block: { type: "text", text: "" },
+        });
+        stream({
+          type: "content_block_delta",
+          index: 1,
+          delta: { type: "text_delta", text: "Preserved prefix" },
+        });
+        snapshot("wrapper-conflict", "api-\ud800", "Unrelated replacement must not overwrite");
+        stream({ type: "content_block_stop", index: 1 });
+        harness.query.emit(makeSuccessfulClaudeResult("sdk-safe-blocks"));
+        const events = Array.from(yield* Fiber.join(collected));
+        const textByItem = new Map<string, string>();
+        for (const event of events) {
+          if (event.type === "content.delta" && event.payload.streamKind === "assistant_text") {
+            const key = String(event.itemId);
+            textByItem.set(key, (textByItem.get(key) ?? "") + event.payload.delta);
+          }
+        }
+        assert.deepEqual(
+          [...textByItem.values()],
+          ["The original message.", "The unrelated message.", "Preserved prefix"],
+        );
+        const warnings = events.filter((event) => event.type === "runtime.warning");
+        assert.equal(warnings.length, 1);
+        assert.equal(JSON.stringify(warnings).includes("Unrelated replacement"), false);
+        assert.equal(JSON.stringify(warnings).includes("Preserved prefix"), false);
+        assert.equal(
+          events.filter(
+            (event) =>
+              event.type === "item.completed" && event.payload.itemType === "assistant_message",
+          ).length,
+          3,
+        );
       }).pipe(
         Effect.provideService(Random.Random, makeDeterministicRandomService()),
         Effect.provide(harness.layer),

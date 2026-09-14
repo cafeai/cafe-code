@@ -69,6 +69,7 @@ export function canStartQueuedFollowUpTurn(input: QueuedFollowUpStartInput): boo
 export interface RunningQueuedFollowUpDispatchInput {
   phase: SessionPhase;
   sessionRunning: boolean;
+  firstItemBlocked: boolean;
   automaticSteerRetryBlocked: boolean;
   isConnecting: boolean;
   isEnvironmentUnavailable: boolean;
@@ -90,6 +91,7 @@ export function canDispatchRunningQueuedFollowUp(
   return (
     input.phase === "running" &&
     input.sessionRunning &&
+    !input.firstItemBlocked &&
     !input.automaticSteerRetryBlocked &&
     !input.isConnecting &&
     !input.isEnvironmentUnavailable &&

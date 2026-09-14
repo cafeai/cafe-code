@@ -617,7 +617,6 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerVirtualDesktopRpc,
   WsServerUpdateMcpClientRpc,
   WsServerRefreshProvidersRpc,
-  WsServerUsageResetRpc,
   WsServerLoginProviderRpc,
   WsServerUpdateProviderRpc,
   WsServerRestartProviderRuntimeRpc,

@@ -344,6 +344,10 @@ interface ClaudeTurnState {
   readonly items: Array<unknown>;
   readonly assistantTextBlocks: Map<number, AssistantTextBlockState>;
   readonly assistantTextBlockOrder: Array<AssistantTextBlockState>;
+  /** Native API message ids scope indexes; wrapper UUIDs identify individual snapshots. */
+  assistantNativeMessageKey?: string | undefined;
+  readonly pendingAssistantSnapshots: Array<AssistantTextBlockState>;
+  readonly reportedAssistantSnapshotKeys: Set<string>;
   readonly capturedProposedPlanKeys: Set<string>;
   readonly reportedSubagentRetryKeys: Set<string>;
   /**
@@ -377,6 +381,10 @@ interface ClaudeDeferredTurnResult {
 interface AssistantTextBlockState {
   readonly itemId: string;
   readonly blockIndex: number;
+  readonly nativeMessageKey?: string;
+  /** Commit exact UTF-16 units without retaining a second copy of streamed prose. */
+  readonly streamedTextHash: ReturnType<typeof createHash>;
+  streamedTextLength: number;
   emittedTextDelta: boolean;
   fallbackText: string;
   streamClosed: boolean;
@@ -1834,10 +1842,16 @@ function acknowledgeKnownClaudePromptsStarted(
   context: ClaudeSessionContext,
   message: ClaudePromptCorrelation,
 ): void {
+  // SDK 0.3.265+ can stamp another reply when a synthetic/auto-resume turn
+  // folds in a different host message. Inspect every primary reply, not just
+  // the first frame of a Cafe turn: Cafe's turn can span several native response
+  // segments, and an upstream meta UUID is never proof of owned user input.
+  // The public 0.3.266 SDKAssistantMessage / SDKPartialAssistantMessage types
+  // describe this switch rule; the SDK forwards the native stamps unchanged.
   for (const messageUuid of knownClaudePromptUuids(context, message) ?? []) {
     const current = context.promptLifecycleByUuid.get(messageUuid);
-    // Only outstanding submitted/queued inputs may advance. Replayed first
-    // frames for already-started or retired input cannot revive old work.
+    // Only outstanding submitted/queued inputs may advance. Replayed reply
+    // stamps for already-started or retired input cannot revive old work.
     if (current !== "submitted" && current !== "queued") continue;
     context.promptLifecycleByUuid.set(messageUuid, "started");
     // A reply or correlated thinking frame proves a later response segment
@@ -1853,8 +1867,11 @@ function acknowledgeKnownClaudePromptsStarted(
  * later inputs folded into this response between tool rounds. The singular
  * `user_message_uuid` represents only one member, not every answered steer.
  * Source: SDKAssistantMessage / SDKPartialAssistantMessage / SDKResultMessage
- * in @anthropic-ai/claude-agent-sdk@0.3.260/sdk.d.ts and upstream changelog:
- * https://github.com/anthropics/claude-agent-sdk-typescript/blob/a96f6b5cbea197f23a3372709e3e549e8495fd63/CHANGELOG.md
+ * in @anthropic-ai/claude-agent-sdk@0.3.266/sdk.d.ts and upstream changelog:
+ * https://github.com/anthropics/claude-agent-sdk-typescript/blob/main/CHANGELOG.md
+ * Since 0.3.265 this includes host inputs folded into synthetic/auto-resume
+ * turns, and a zero-inference success (for example a slash command) still
+ * carries its singular UUID. Neither path requires an earlier reply frame.
  * Older CLIs and error results can omit correlation, so the compatibility path
  * retires the oldest input Claude has acknowledged as started. A final fallback
  * handles pre-2.1.206 runtimes that do not emit command lifecycle frames at all.
@@ -2973,6 +2990,8 @@ function makeClaudeTurnState(input: {
     items: [],
     assistantTextBlocks: new Map(),
     assistantTextBlockOrder: [],
+    pendingAssistantSnapshots: [],
+    reportedAssistantSnapshotKeys: new Set(),
     capturedProposedPlanKeys: new Set(),
     reportedSubagentRetryKeys: new Set(),
     reportedSubagentMessageKeys: new Set(),
@@ -3687,7 +3706,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     const existing = turnState.assistantTextBlocks.get(blockIndex);
-    if (existing && !existing.completionEmitted) {
+    if (
+      existing &&
+      !existing.completionEmitted &&
+      existing.nativeMessageKey === turnState.assistantNativeMessageKey
+    ) {
       if (existing.fallbackText.length === 0 && options?.fallbackText) {
         existing.fallbackText = options.fallbackText;
       }
@@ -3700,6 +3723,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const block: AssistantTextBlockState = {
       itemId: yield* Random.nextUUIDv4,
       blockIndex,
+      ...(turnState.assistantNativeMessageKey
+        ? { nativeMessageKey: turnState.assistantNativeMessageKey }
+        : {}),
+      streamedTextHash: createHash("sha256"),
+      streamedTextLength: 0,
       emittedTextDelta: false,
       fallbackText: options?.fallbackText ?? "",
       streamClosed: options?.streamClosed ?? false,
@@ -3707,6 +3735,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     };
     turnState.assistantTextBlocks.set(blockIndex, block);
     turnState.assistantTextBlockOrder.push(block);
+    turnState.pendingAssistantSnapshots.push(block);
+    // Only unmatched snapshots need correlation state. Normal producers keep
+    // this queue at one entry; bound it even if a faulty producer omits frames.
+    if (turnState.pendingAssistantSnapshots.length > CLAUDE_SUBAGENT_MESSAGE_DEDUPE_LIMIT) {
+      turnState.pendingAssistantSnapshots.shift();
+    }
     return { blockIndex, block };
   });
 
@@ -3802,6 +3836,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           }
         : {}),
     });
+    // Completed blocks are no longer part of result-time draining. Release
+    // their potentially large snapshot text now; only the bounded unmatched
+    // snapshot queue may keep a small identity/commitment record alive.
+    const completedIndex = turnState.assistantTextBlockOrder.indexOf(block);
+    if (completedIndex >= 0) {
+      turnState.assistantTextBlockOrder.splice(completedIndex, 1);
+    }
+    block.fallbackText = "";
   });
 
   const backfillAssistantTextBlocksFromSnapshot = Effect.fn(
@@ -3817,32 +3859,95 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return;
     }
 
-    const orderedBlocks = turnState.assistantTextBlockOrder.map((block) => ({
-      blockIndex: block.blockIndex,
-      block,
-    }));
+    if (message.type !== "assistant") {
+      return;
+    }
+    const snapshotKey = createHash("sha256")
+      .update("claude-assistant-snapshot-v1\0")
+      .update(Buffer.from(message.uuid, "utf16le"))
+      .digest("hex");
+    if (
+      !rememberBoundedClaudeKey(
+        turnState.reportedAssistantSnapshotKeys,
+        snapshotKey,
+        CLAUDE_SUBAGENT_MESSAGE_DEDUPE_LIMIT,
+      )
+    ) {
+      return;
+    }
+    const nativeMessageKey =
+      typeof message.message.id === "string"
+        ? createHash("sha256").update(Buffer.from(message.message.id, "utf16le")).digest("hex")
+        : undefined;
 
-    for (const [position, text] of snapshotTextBlocks.entries()) {
-      const existingEntry = orderedBlocks[position];
-      const entry =
-        existingEntry ??
-        (yield* createSyntheticAssistantTextBlock(context, text).pipe(
-          Effect.map((created) => {
-            if (!created) {
-              return undefined;
-            }
-            orderedBlocks.push(created);
-            return created;
-          }),
-        ));
+    // SDK assistant frames carry ONE completed content block, not the entire
+    // Cafe turn. Several such frames share an API message.id but have distinct
+    // wrapper UUIDs. Match only one unclaimed block in that native message;
+    // never index into the accumulated turn's first text block.
+    // https://code.claude.com/docs/en/agent-sdk/streaming-output#message-flow
+    for (const text of snapshotTextBlocks) {
+      const candidates = turnState.pendingAssistantSnapshots.filter(
+        (block) =>
+          block.nativeMessageKey === nativeMessageKey ||
+          (block.nativeMessageKey === undefined &&
+            turnState.assistantNativeMessageKey === undefined),
+      );
+      if (candidates.length > 1 || (candidates.length > 0 && snapshotTextBlocks.length > 1)) {
+        yield* emitRuntimeWarning(
+          context,
+          "Claude assistant snapshot could not be matched to a unique text block; streamed text was preserved.",
+          { candidateCount: candidates.length, textBlockCount: snapshotTextBlocks.length },
+        );
+        return;
+      }
+      const existingBlock = candidates[0];
+      const entry = existingBlock
+        ? { block: existingBlock }
+        : yield* createSyntheticAssistantTextBlock(context, text);
       if (!entry) {
         continue;
       }
-
-      if (entry.block.fallbackText.length === 0) {
-        entry.block.fallbackText = text;
+      const pendingIndex = turnState.pendingAssistantSnapshots.indexOf(entry.block);
+      if (pendingIndex >= 0) {
+        turnState.pendingAssistantSnapshots.splice(pendingIndex, 1);
       }
-
+      if (entry.block.completionEmitted) {
+        // Older producers can deliver the snapshot after block_stop. Its exact
+        // item has already closed; do not create a duplicate or mutate another.
+        continue;
+      }
+      const prefixMatches =
+        entry.block.streamedTextLength <= text.length &&
+        createHash("sha256")
+          .update(Buffer.from(text.slice(0, entry.block.streamedTextLength), "utf16le"))
+          .digest("hex") === entry.block.streamedTextHash.copy().digest("hex");
+      if (!prefixMatches) {
+        entry.block.fallbackText = "";
+        yield* emitRuntimeWarning(
+          context,
+          "Claude assistant snapshot did not match its streamed text; streamed text was preserved.",
+          { streamedLength: entry.block.streamedTextLength, snapshotLength: text.length },
+        );
+        continue;
+      }
+      entry.block.fallbackText = text;
+      const missingSuffix = text.slice(entry.block.streamedTextLength);
+      if (entry.block.emittedTextDelta && missingSuffix.length > 0) {
+        const stamp = yield* makeEventStamp();
+        entry.block.streamedTextHash.update(Buffer.from(missingSuffix, "utf16le"));
+        entry.block.streamedTextLength += missingSuffix.length;
+        yield* offerRuntimeEvent({
+          type: "content.delta",
+          eventId: stamp.eventId,
+          provider: PROVIDER,
+          createdAt: stamp.createdAt,
+          threadId: context.session.threadId,
+          turnId: turnState.turnId,
+          itemId: asRuntimeItemId(entry.block.itemId),
+          payload: { streamKind: "assistant_text", delta: missingSuffix },
+          providerRefs: nativeProviderRefs(context),
+        });
+      }
       if (entry.block.streamClosed && !entry.block.completionEmitted) {
         yield* completeAssistantTextBlock(context, entry.block, {
           rawMethod: "claude/assistant",
@@ -4199,7 +4304,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // Clear any remaining stale entries (e.g. from interrupted content blocks).
     context.inFlightTools.clear();
 
-    for (const block of turnState.assistantTextBlockOrder) {
+    // Completion removes its own entry, so iterate a stable copy of the drain.
+    for (const block of turnState.assistantTextBlockOrder.slice()) {
       yield* completeAssistantTextBlock(context, block, {
         force: true,
         rawMethod: "claude/result",
@@ -4214,6 +4320,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // whose identifiers are scoped to one Claude response segment.
     turnState.assistantTextBlocks.clear();
     turnState.assistantTextBlockOrder.splice(0);
+    turnState.pendingAssistantSnapshots.splice(0);
+    turnState.assistantNativeMessageKey = undefined;
+    turnState.reportedAssistantSnapshotKeys.clear();
     turnState.reportedSubagentMessageKeys.clear();
     turnState.nextSyntheticAssistantBlockIndex = -1;
   });
@@ -4372,6 +4481,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     if (isClaudeNestedStreamHidden(context, parentToolUseId)) {
       return;
     }
+    if (!isNestedAgentStream && event.type === "message_start" && context.turnState) {
+      context.turnState.assistantNativeMessageKey =
+        typeof event.message.id === "string"
+          ? createHash("sha256").update(Buffer.from(event.message.id, "utf16le")).digest("hex")
+          : undefined;
+    }
     if (!isNestedAgentStream) {
       const normalizedUsage = normalizeClaudeMessageTokenUsage(
         claudeStreamEventUsagePayload(message),
@@ -4419,6 +4534,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               : undefined;
         if (assistantBlockEntry?.block && event.delta.type === "text_delta") {
           assistantBlockEntry.block.emittedTextDelta = true;
+          assistantBlockEntry.block.streamedTextHash.update(Buffer.from(deltaText, "utf16le"));
+          assistantBlockEntry.block.streamedTextLength += deltaText.length;
         }
         const stamp = yield* makeEventStamp();
         yield* offerRuntimeEvent({

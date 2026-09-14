@@ -7,6 +7,53 @@ import { render } from "vitest-browser-react";
 import { FollowUpQueueShelf } from "./ChatComposer";
 
 describe("FollowUpQueueShelf", () => {
+  it.each([true, false])("exposes explicit paused retry with allowed=%s", async (allowed) => {
+    const onAction = vi.fn();
+    const screen = await render(
+      <FollowUpQueueShelf
+        items={[
+          {
+            id: "failed-steer",
+            preview: "Exact saved input",
+            promptText: "Exact saved input",
+            images: [],
+            queuedAt: "2026-09-09T00:00:00.000Z",
+            expanded: false,
+            canExpand: false,
+            blockedReason: "Delivery paused. Your message and attachments are preserved.",
+            canRetryDelivery: allowed,
+            automaticSteerRetry: { nonSteerableTurnKind: "compact", dispatchFailed: true },
+          },
+        ]}
+        actionLabel="Send"
+        actionTitle="Send message"
+        onToggleExpanded={vi.fn()}
+        onAction={onAction}
+        onRemove={vi.fn()}
+        onClear={vi.fn()}
+        onExpandImage={vi.fn()}
+      />,
+    );
+    try {
+      const retry = page.getByRole("button", { name: "Retry delivery" });
+      expect(document.body.textContent).toContain("1 steer needs attention");
+      expect(document.body.textContent).not.toContain("Waiting for compact");
+      await expect
+        .element(page.getByRole("button", { name: "Send", exact: true }))
+        .not.toBeInTheDocument();
+      if (allowed) {
+        await expect.element(retry).toBeEnabled();
+        await retry.click();
+        expect(onAction).toHaveBeenCalledExactlyOnceWith("failed-steer");
+      } else {
+        await expect.element(retry).toBeDisabled();
+        expect(onAction).not.toHaveBeenCalled();
+      }
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("renders queue controls and expands bounded prompt details", async () => {
     const onToggleExpanded = vi.fn();
     const onAction = vi.fn();

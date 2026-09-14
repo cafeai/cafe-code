@@ -332,17 +332,41 @@ export function summarizeDebugMessage(message: ChatMessage) {
 }
 
 export function summarizeDebugActivity(activity: OrchestrationThreadActivity) {
+  const payload = activityPayloadForDebug(activity);
   return {
     id: activity.id,
     kind: activity.kind,
     tone: activity.tone,
     summaryLength: activity.summary.length,
-    summaryPreview: truncateDebugText(activity.summary),
+    summaryPreview:
+      activity.kind === "provider.async-questions"
+        ? "Optional Codex questions"
+        : truncateDebugText(activity.summary),
     turnId: activity.turnId,
     sequence: activity.sequence ?? null,
     createdAt: activity.createdAt,
-    payloadKeys: payloadKeys(activity.payload),
-    payloadPreview: stringifyDebugPreview(activity.payload),
+    payloadKeys: payloadKeys(payload),
+    payloadPreview: stringifyDebugPreview(payload),
+  };
+}
+
+/**
+ * Inline question metadata is authenticated transcript content, not diagnostic
+ * text. Redact before building either regular or continuation snapshots, even
+ * though the desktop's compact endpoint also strips its preview fields. Only
+ * bounded counts leave this boundary; do not serialize provider titles/options
+ * or an unknown payload key into a raw renderer debug snapshot.
+ */
+function activityPayloadForDebug(activity: OrchestrationThreadActivity): unknown {
+  if (activity.kind !== "provider.async-questions") return activity.payload;
+  const value = readDebugRecord(activity.payload)?.questions;
+  const questions = Array.isArray(value) ? value.slice(0, 16) : [];
+  return {
+    questionCount: questions.length,
+    optionCount: questions.reduce((count: number, question: unknown) => {
+      const options = readDebugRecord(question)?.options;
+      return count + (Array.isArray(options) ? Math.min(options.length, 32) : 0);
+    }, 0),
   };
 }
 
@@ -468,6 +492,7 @@ function summarizeDebugContinuationActivity(
   latestTurnCompletedAt: string | null,
   earliestCompletionSignalAt: string | null,
 ) {
+  const payload = activityPayloadForDebug(activity);
   const tokenUsage =
     activity.kind === "context-window.updated"
       ? summarizeDebugContextWindowUsagePayload(activity.payload)
@@ -488,9 +513,10 @@ function summarizeDebugContinuationActivity(
     ),
     kind: activity.kind,
     tone: activity.tone,
-    summary: activity.summary,
-    payloadKeys: payloadKeys(activity.payload),
-    payloadPreview: stringifyDebugPreview(activity.payload, 500),
+    summary:
+      activity.kind === "provider.async-questions" ? "Optional Codex questions" : activity.summary,
+    payloadKeys: payloadKeys(payload),
+    payloadPreview: stringifyDebugPreview(payload, 500),
     tokenUsage,
   };
 }

@@ -57,7 +57,7 @@ export default defineConfig({
     tailwindcss(),
   ],
   optimizeDeps: {
-    include: ["@pierre/diffs", "effect/Array", "effect/Order"],
+    include: ["@pierre/diffs", "@noble/hashes/sha2.js", "effect/Array", "effect/Order"],
   },
   define: {
     // In dev mode, tell the renderer where the WebSocket server lives
