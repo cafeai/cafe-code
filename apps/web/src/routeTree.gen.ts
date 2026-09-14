@@ -19,11 +19,13 @@ import { Route as SettingsSourceControlRouteImport } from './routes/settings.sou
 import { Route as SettingsRecentlyDeletedRouteImport } from './routes/settings.recently-deleted'
 import { Route as SettingsProvidersRouteImport } from './routes/settings.providers'
 import { Route as SettingsNotificationsRouteImport } from './routes/settings.notifications'
+import { Route as SettingsMcpRouteImport } from './routes/settings.mcp'
 import { Route as SettingsKeybindingsRouteImport } from './routes/settings.keybindings'
 import { Route as SettingsGeneralRouteImport } from './routes/settings.general'
 import { Route as SettingsFilesRouteImport } from './routes/settings.files'
 import { Route as SettingsDictationRouteImport } from './routes/settings.dictation'
 import { Route as SettingsDiagnosticsRouteImport } from './routes/settings.diagnostics'
+import { Route as SettingsDesktopControlRouteImport } from './routes/settings.desktop-control'
 import { Route as SettingsConnectionsRouteImport } from './routes/settings.connections'
 import { Route as SettingsChatThreadsRouteImport } from './routes/settings.chat-threads'
 import { Route as SettingsArchivedRouteImport } from './routes/settings.archived'
@@ -81,6 +83,11 @@ const SettingsNotificationsRoute = SettingsNotificationsRouteImport.update({
   path: '/notifications',
   getParentRoute: () => SettingsRoute,
 } as any)
+const SettingsMcpRoute = SettingsMcpRouteImport.update({
+  id: '/mcp',
+  path: '/mcp',
+  getParentRoute: () => SettingsRoute,
+} as any)
 const SettingsKeybindingsRoute = SettingsKeybindingsRouteImport.update({
   id: '/keybindings',
   path: '/keybindings',
@@ -104,6 +111,11 @@ const SettingsDictationRoute = SettingsDictationRouteImport.update({
 const SettingsDiagnosticsRoute = SettingsDiagnosticsRouteImport.update({
   id: '/diagnostics',
   path: '/diagnostics',
+  getParentRoute: () => SettingsRoute,
+} as any)
+const SettingsDesktopControlRoute = SettingsDesktopControlRouteImport.update({
+  id: '/desktop-control',
+  path: '/desktop-control',
   getParentRoute: () => SettingsRoute,
 } as any)
 const SettingsConnectionsRoute = SettingsConnectionsRouteImport.update({
@@ -152,11 +164,13 @@ export interface FileRoutesByFullPath {
   '/settings/archived': typeof SettingsArchivedRoute
   '/settings/chat-threads': typeof SettingsChatThreadsRoute
   '/settings/connections': typeof SettingsConnectionsRoute
+  '/settings/desktop-control': typeof SettingsDesktopControlRoute
   '/settings/diagnostics': typeof SettingsDiagnosticsRoute
   '/settings/dictation': typeof SettingsDictationRoute
   '/settings/files': typeof SettingsFilesRoute
   '/settings/general': typeof SettingsGeneralRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
+  '/settings/mcp': typeof SettingsMcpRoute
   '/settings/notifications': typeof SettingsNotificationsRoute
   '/settings/providers': typeof SettingsProvidersRoute
   '/settings/recently-deleted': typeof SettingsRecentlyDeletedRoute
@@ -174,11 +188,13 @@ export interface FileRoutesByTo {
   '/settings/archived': typeof SettingsArchivedRoute
   '/settings/chat-threads': typeof SettingsChatThreadsRoute
   '/settings/connections': typeof SettingsConnectionsRoute
+  '/settings/desktop-control': typeof SettingsDesktopControlRoute
   '/settings/diagnostics': typeof SettingsDiagnosticsRoute
   '/settings/dictation': typeof SettingsDictationRoute
   '/settings/files': typeof SettingsFilesRoute
   '/settings/general': typeof SettingsGeneralRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
+  '/settings/mcp': typeof SettingsMcpRoute
   '/settings/notifications': typeof SettingsNotificationsRoute
   '/settings/providers': typeof SettingsProvidersRoute
   '/settings/recently-deleted': typeof SettingsRecentlyDeletedRoute
@@ -199,11 +215,13 @@ export interface FileRoutesById {
   '/settings/archived': typeof SettingsArchivedRoute
   '/settings/chat-threads': typeof SettingsChatThreadsRoute
   '/settings/connections': typeof SettingsConnectionsRoute
+  '/settings/desktop-control': typeof SettingsDesktopControlRoute
   '/settings/diagnostics': typeof SettingsDiagnosticsRoute
   '/settings/dictation': typeof SettingsDictationRoute
   '/settings/files': typeof SettingsFilesRoute
   '/settings/general': typeof SettingsGeneralRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
+  '/settings/mcp': typeof SettingsMcpRoute
   '/settings/notifications': typeof SettingsNotificationsRoute
   '/settings/providers': typeof SettingsProvidersRoute
   '/settings/recently-deleted': typeof SettingsRecentlyDeletedRoute
@@ -225,11 +243,13 @@ export interface FileRouteTypes {
     | '/settings/archived'
     | '/settings/chat-threads'
     | '/settings/connections'
+    | '/settings/desktop-control'
     | '/settings/diagnostics'
     | '/settings/dictation'
     | '/settings/files'
     | '/settings/general'
     | '/settings/keybindings'
+    | '/settings/mcp'
     | '/settings/notifications'
     | '/settings/providers'
     | '/settings/recently-deleted'
@@ -247,11 +267,13 @@ export interface FileRouteTypes {
     | '/settings/archived'
     | '/settings/chat-threads'
     | '/settings/connections'
+    | '/settings/desktop-control'
     | '/settings/diagnostics'
     | '/settings/dictation'
     | '/settings/files'
     | '/settings/general'
     | '/settings/keybindings'
+    | '/settings/mcp'
     | '/settings/notifications'
     | '/settings/providers'
     | '/settings/recently-deleted'
@@ -271,11 +293,13 @@ export interface FileRouteTypes {
     | '/settings/archived'
     | '/settings/chat-threads'
     | '/settings/connections'
+    | '/settings/desktop-control'
     | '/settings/diagnostics'
     | '/settings/dictation'
     | '/settings/files'
     | '/settings/general'
     | '/settings/keybindings'
+    | '/settings/mcp'
     | '/settings/notifications'
     | '/settings/providers'
     | '/settings/recently-deleted'
@@ -365,6 +389,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SettingsNotificationsRouteImport
       parentRoute: typeof SettingsRoute
     }
+    '/settings/mcp': {
+      id: '/settings/mcp'
+      path: '/mcp'
+      fullPath: '/settings/mcp'
+      preLoaderRoute: typeof SettingsMcpRouteImport
+      parentRoute: typeof SettingsRoute
+    }
     '/settings/keybindings': {
       id: '/settings/keybindings'
       path: '/keybindings'
@@ -398,6 +429,13 @@ declare module '@tanstack/react-router' {
       path: '/diagnostics'
       fullPath: '/settings/diagnostics'
       preLoaderRoute: typeof SettingsDiagnosticsRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/desktop-control': {
+      id: '/settings/desktop-control'
+      path: '/desktop-control'
+      fullPath: '/settings/desktop-control'
+      preLoaderRoute: typeof SettingsDesktopControlRouteImport
       parentRoute: typeof SettingsRoute
     }
     '/settings/connections': {
@@ -472,11 +510,13 @@ interface SettingsRouteChildren {
   SettingsArchivedRoute: typeof SettingsArchivedRoute
   SettingsChatThreadsRoute: typeof SettingsChatThreadsRoute
   SettingsConnectionsRoute: typeof SettingsConnectionsRoute
+  SettingsDesktopControlRoute: typeof SettingsDesktopControlRoute
   SettingsDiagnosticsRoute: typeof SettingsDiagnosticsRoute
   SettingsDictationRoute: typeof SettingsDictationRoute
   SettingsFilesRoute: typeof SettingsFilesRoute
   SettingsGeneralRoute: typeof SettingsGeneralRoute
   SettingsKeybindingsRoute: typeof SettingsKeybindingsRoute
+  SettingsMcpRoute: typeof SettingsMcpRoute
   SettingsNotificationsRoute: typeof SettingsNotificationsRoute
   SettingsProvidersRoute: typeof SettingsProvidersRoute
   SettingsRecentlyDeletedRoute: typeof SettingsRecentlyDeletedRoute
@@ -491,11 +531,13 @@ const SettingsRouteChildren: SettingsRouteChildren = {
   SettingsArchivedRoute: SettingsArchivedRoute,
   SettingsChatThreadsRoute: SettingsChatThreadsRoute,
   SettingsConnectionsRoute: SettingsConnectionsRoute,
+  SettingsDesktopControlRoute: SettingsDesktopControlRoute,
   SettingsDiagnosticsRoute: SettingsDiagnosticsRoute,
   SettingsDictationRoute: SettingsDictationRoute,
   SettingsFilesRoute: SettingsFilesRoute,
   SettingsGeneralRoute: SettingsGeneralRoute,
   SettingsKeybindingsRoute: SettingsKeybindingsRoute,
+  SettingsMcpRoute: SettingsMcpRoute,
   SettingsNotificationsRoute: SettingsNotificationsRoute,
   SettingsProvidersRoute: SettingsProvidersRoute,
   SettingsRecentlyDeletedRoute: SettingsRecentlyDeletedRoute,

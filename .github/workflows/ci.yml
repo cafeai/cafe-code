@@ -48,6 +48,12 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-yarn-${{ hashFiles('yarn.lock') }}-
 
+      - name: Install Linux desktop build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config libwayland-dev wayland-protocols libxkbcommon-dev libpng-dev libjson-c-dev libegl1-mesa-dev libx11-dev libxcursor-dev libxext-dev libxi-dev libxfixes-dev libxrandr-dev libxss-dev libxtst-dev libgbm-dev libgles2-mesa-dev libpango1.0-dev libglib2.0-dev
+
       - name: Install dependencies
         run: corepack yarn install --immutable
 
@@ -79,6 +85,12 @@ jobs:
       - name: Browser tests
         if: runner.os == 'Linux'
         run: corepack yarn workspace @cafecode/web test:browser
+
+      - name: Isolated MCP bridge artifacts
+        if: runner.os == 'Linux'
+        env:
+          CAFE_CODE_MCP_BRIDGE_E2E: "1"
+        run: corepack yarn workspace @cafeai/cafe-code exec vitest run --config vitest.e2e.config.ts integration/CafeMcpBridge.e2e.test.ts
 
   native-artifacts:
     name: Native artifact (${{ matrix.name }})
@@ -120,6 +132,12 @@ jobs:
             .turbo
           key: ${{ runner.os }}-${{ runner.arch }}-yarn-${{ hashFiles('yarn.lock') }}-${{ hashFiles('turbo.json') }}
 
+      - name: Install Linux desktop build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config libwayland-dev wayland-protocols libxkbcommon-dev libpng-dev libjson-c-dev libegl1-mesa-dev libx11-dev libxcursor-dev libxext-dev libxi-dev libxfixes-dev libxrandr-dev libxss-dev libxtst-dev libgbm-dev libgles2-mesa-dev libpango1.0-dev libglib2.0-dev
+
       - name: Install dependencies
         run: corepack yarn install --immutable
 
@@ -159,6 +177,12 @@ jobs:
             ~/.yarn/berry
             .turbo
           key: ${{ runner.os }}-${{ runner.arch }}-yarn-${{ hashFiles('yarn.lock') }}-${{ hashFiles('turbo.json') }}
+
+      - name: Install Linux desktop build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config libwayland-dev wayland-protocols libxkbcommon-dev libpng-dev libjson-c-dev libegl1-mesa-dev libx11-dev libxcursor-dev libxext-dev libxi-dev libxfixes-dev libxrandr-dev libxss-dev libxtst-dev libgbm-dev libgles2-mesa-dev libpango1.0-dev libglib2.0-dev
 
       - name: Install dependencies
         run: corepack yarn install --immutable

@@ -13,6 +13,8 @@ import { ServerSettingsService } from "../serverSettings.ts";
 import { WorkspacePaths } from "../workspace/Services/WorkspacePaths.ts";
 import { makeCafeMcpServer } from "./CafeMcpServer.ts";
 
+// Cafe management only. Desktop Control must use a separate endpoint and
+// session credential, so this owner credential/toggle cannot grant desktop input.
 export const CAFE_MCP_PATH = "/mcp";
 
 export const cafeMcpRouteLayer = HttpRouter.add(
@@ -21,6 +23,12 @@ export const cafeMcpRouteLayer = HttpRouter.add(
   Effect.gen(function* () {
     const request = yield* HttpServerRequest.HttpServerRequest;
     const serverAuth = yield* ServerAuth;
+    if (!request.headers.authorization?.startsWith("Bearer ")) {
+      return yield* new AuthError({
+        message: "Cafe Code MCP requires a bearer session.",
+        status: 401,
+      });
+    }
     const session = yield* serverAuth.authenticateHttpRequest(request);
     if (session.role !== "owner") {
       return yield* new AuthError({
@@ -34,6 +42,9 @@ export const cafeMcpRouteLayer = HttpRouter.add(
     const providerRegistry = yield* ProviderRegistry;
     const providerService = yield* ProviderService;
     const serverSettings = yield* ServerSettingsService;
+    if (!(yield* serverSettings.getSettings).mcpEnabled) {
+      return HttpServerResponse.jsonUnsafe({ error: "Cafe Code MCP is off." }, { status: 403 });
+    }
     const startup = yield* ServerRuntimeStartup;
     const workspacePaths = yield* WorkspacePaths;
     const webRequest = yield* HttpServerRequest.toWeb(request);

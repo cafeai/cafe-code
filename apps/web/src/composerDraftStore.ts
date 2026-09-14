@@ -1161,7 +1161,7 @@ function resolveComposerDraftKey(
   return threadKey.length > 0 ? threadKey : null;
 }
 
-function resolveComposerThreadId(
+export function resolveComposerThreadId(
   state: ComposerThreadLookupState,
   target: ComposerThreadTarget,
 ): ThreadId | null {

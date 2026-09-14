@@ -81,6 +81,11 @@ jobs:
           node-version: 24.13.1
       - run: corepack enable
       - run: corepack yarn install --immutable
+      - name: Install Linux native desktop build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config libwayland-dev wayland-protocols libxkbcommon-dev libpng-dev libjson-c-dev libegl1-mesa-dev libx11-dev libxcursor-dev libxext-dev libxi-dev libxfixes-dev libxrandr-dev libxss-dev libxtst-dev libgbm-dev libgles2-mesa-dev libpango1.0-dev libglib2.0-dev
       - run: corepack yarn ${{ matrix.build }}
       # Each smoke installs/launches in a test-owned environment, verifies
       # readiness rather than merely absence of errors, and cleans up its PIDs.

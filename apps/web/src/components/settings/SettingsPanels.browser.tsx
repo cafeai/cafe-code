@@ -540,6 +540,7 @@ const createDesktopBridgeStub = (overrides?: {
   };
 
   return {
+    openVirtualDesktop: async () => undefined,
     getAppBranding: vi.fn().mockReturnValue(null),
     getLocalEnvironmentBootstrap: () => ({
       label: "Local environment",

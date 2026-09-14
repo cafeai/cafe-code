@@ -18,6 +18,32 @@ const processSnapshot = (
 });
 
 describe("killall process matching", () => {
+  it("recognizes Cafe desktop workers and viewers without matching other compositors", () => {
+    assert.equal(
+      classifyCafeKillallProcess(
+        processSnapshot(
+          "/run/user/1000/cafe-desktops-fixture/cafe-desktop-native.abcdef0123456789 worker /private/bootstrap.json",
+        ),
+      ),
+      "virtual-desktop",
+    );
+    assert.equal(
+      classifyCafeKillallProcess(
+        processSnapshot("/resources/cafe-desktop-native viewer /private/viewer.json"),
+      ),
+      "virtual-desktop",
+    );
+    assert.equal(
+      classifyCafeKillallProcess(processSnapshot("/usr/bin/sway --config /my/config")),
+      null,
+    );
+    assert.equal(
+      classifyCafeKillallProcess(
+        processSnapshot("/resources/cafe-desktop-native request /private/connection.json"),
+      ),
+      null,
+    );
+  });
   it("parses POSIX process rows", () => {
     const processes = parsePosixProcessList(`
         101     1 /usr/bin/node /repo/cafe-code/apps/server/dist/bin.mjs serve

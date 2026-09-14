@@ -5027,6 +5027,9 @@ describe("ProviderCommandReactor", () => {
         detail: expect.stringContaining("without a provider instance id"),
       },
     });
+    // The failed attempt must be newer than its original intent; otherwise
+    // queued initialization events can erase the visible rejection.
+    expect(Date.parse(thread!.session!.updatedAt)).toBeGreaterThan(Date.parse(now));
   });
 
   it("reacts to thread.approval.respond by forwarding provider approval response", async () => {

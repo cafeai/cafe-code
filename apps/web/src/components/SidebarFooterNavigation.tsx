@@ -1,3 +1,4 @@
+import { VirtualDesktopsNavigation } from "./virtualDesktop/VirtualDesktops";
 import { SettingsIcon } from "lucide-react";
 import { memo } from "react";
 
@@ -64,6 +65,7 @@ export const SidebarFooterNavigation = memo(function SidebarFooterNavigation({
         </SidebarMenuItem>
       )}
 
+      <VirtualDesktopsNavigation />
       <SidebarMenuItem className="flex w-full items-center gap-1">
         <SidebarMenuButton
           size="sm"

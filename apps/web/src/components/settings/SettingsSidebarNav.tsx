@@ -12,12 +12,16 @@ import {
   KeyboardIcon,
   MessageSquareIcon,
   MicIcon,
+  MonitorIcon,
   MonitorSmartphoneIcon,
   PaletteIcon,
+  PlugIcon,
   Settings2Icon,
   Trash2Icon,
 } from "lucide-react";
 import { useCanGoBack, useNavigate } from "@tanstack/react-router";
+import { usePrimaryEnvironmentId } from "~/environments/primary";
+import { useVirtualDesktops } from "../virtualDesktop/useVirtualDesktops";
 
 import {
   SidebarContent,
@@ -40,6 +44,8 @@ export type SettingsSectionPath =
   | "/settings/keybindings"
   | "/settings/notifications"
   | "/settings/providers"
+  | "/settings/mcp"
+  | "/settings/desktop-control"
   | "/settings/source-control"
   | "/settings/connections"
   | "/settings/dictation"
@@ -82,6 +88,8 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<SettingsNavGroup> = [
     label: "AI & Integrations",
     items: [
       { label: "Providers", to: "/settings/providers", icon: BotIcon },
+      { label: "MCP", to: "/settings/mcp", icon: PlugIcon },
+      { label: "Desktop control", to: "/settings/desktop-control", icon: MonitorIcon },
       { label: "Dictation", to: "/settings/dictation", icon: MicIcon },
       { label: "Source Control", to: "/settings/source-control", icon: GitBranchIcon },
       { label: "WebUI", to: "/settings/connections", icon: MonitorSmartphoneIcon },
@@ -105,6 +113,8 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<SettingsNavGroup> = [
 ];
 
 export function SettingsSidebarNav({ pathname }: { pathname: string }) {
+  const environmentId = usePrimaryEnvironmentId();
+  const desktops = useVirtualDesktops(environmentId);
   const navigate = useNavigate();
   const canGoBack = useCanGoBack();
   const { isMobile, setOpenMobile } = useSidebar();
@@ -138,6 +148,10 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
             </SidebarGroupLabel>
             <SidebarMenu>
               {group.items.map((item) => {
+                // Backend capability also covers browser access to a Linux environment.
+                // Missing prerequisites must leave its setup tab discoverable.
+                if (item.to === "/settings/desktop-control" && !desktops.data?.supported)
+                  return null;
                 const Icon = item.icon;
                 const isActive =
                   pathname === item.to || (item.activePaths?.includes(pathname) ?? false);

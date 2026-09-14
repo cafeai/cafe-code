@@ -1492,6 +1492,71 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect(
+    "rejects Cafe owner credentials at Desktop Control and desktop-shaped credentials at Cafe management",
+    () =>
+      Effect.gen(function* () {
+        yield* buildAppUnderTest({
+          layers: {
+            serverSettings: {
+              getSettings: Effect.succeed({
+                ...DEFAULT_SERVER_SETTINGS,
+                virtualDesktopsEnabled: true,
+                desktopControlMcpEnabled: true,
+              }),
+            },
+          },
+        });
+        const bearer = yield* getAuthenticatedBearerSessionToken();
+        const request = (url: string, token: string) =>
+          HttpClient.post(url, {
+            headers: {
+              accept: "application/json, text/event-stream",
+              authorization: `Bearer ${token}`,
+              "content-type": "application/json",
+            },
+            body: HttpBody.jsonUnsafe({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+          });
+        assert.equal(
+          (yield* request("/mcp/desktop", bearer)).status,
+          process.platform === "linux" ? 401 : 403,
+        );
+        assert.equal((yield* request("/mcp", "a".repeat(64))).status, 401);
+        assert.equal((yield* request("/api/virtual-desktops/connect", bearer)).status, 403);
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("blocks the next MCP request when disabled without restarting the server", () =>
+    Effect.gen(function* () {
+      let enabled = true;
+      yield* buildAppUnderTest({
+        layers: {
+          serverSettings: {
+            getSettings: Effect.sync(() => ({ ...DEFAULT_SERVER_SETTINGS, mcpEnabled: enabled })),
+          },
+        },
+      });
+      const token = yield* getAuthenticatedBearerSessionToken();
+      const request = () =>
+        HttpClient.post("/mcp", {
+          headers: {
+            accept: "application/json, text/event-stream",
+            authorization: `Bearer ${token}`,
+            "content-type": "application/json",
+            "mcp-protocol-version": "2025-06-18",
+          },
+          body: HttpBody.jsonUnsafe({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+        });
+      assert.equal((yield* request()).status, 200);
+      enabled = false;
+      const blocked = yield* request();
+      assert.equal(blocked.status, 403);
+      assert.deepEqual(yield* blocked.json, { error: "Cafe Code MCP is off." });
+      enabled = true;
+      assert.equal((yield* request()).status, 200);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("serves static index content for GET / when staticDir is configured", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -2638,6 +2703,43 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.deepStrictEqual(states.reread, { configured: true, canManage: true });
       assert.deepStrictEqual(states.cleared, { configured: false, canManage: true });
       assert.notInclude(JSON.stringify(states), permanentKey);
+    }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
+  );
+
+  it.effect("rejects MCP installation and toggling from a paired non-owner", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+      const pairing = yield* HttpClient.post("/api/auth/pairing-token", {
+        headers: { cookie: yield* getAuthenticatedSessionCookieHeader() },
+      });
+      const { credential } = (yield* pairing.json) as { credential: string };
+      const cookie = yield* getAuthenticatedSessionCookieHeader(credential);
+      const wsUrl = appendSessionCookieToWsUrl(
+        yield* getWsServerUrl("/ws", { authenticated: false }),
+        cookie,
+      );
+      yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.gen(function* () {
+            const status = yield* client[WS_METHODS.serverGetMcpStatus]({});
+            assert.isFalse(status.canManage);
+            assert.isFalse(status.canInstall);
+            assert.deepEqual(status.clients, []);
+            assert.equal(
+              (yield* Effect.exit(
+                client[WS_METHODS.serverUpdateMcpClient]({ client: "codex", operation: "install" }),
+              ))._tag,
+              "Failure",
+            );
+            assert.equal(
+              (yield* Effect.exit(
+                client[WS_METHODS.serverUpdateSettings]({ patch: { mcpEnabled: false } }),
+              ))._tag,
+              "Failure",
+            );
+          }),
+        ),
+      );
     }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
   );
 

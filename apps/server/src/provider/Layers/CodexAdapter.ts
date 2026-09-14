@@ -1,3 +1,9 @@
+import {
+  readDesktopSessionBroker,
+  type DesktopSessionBinding,
+} from "../../virtualDesktop/sessionBroker.ts";
+import { preflightDesktopMcp } from "../../virtualDesktop/codexConfiguration.ts";
+import { readDesktopObservationItem } from "@cafecode/shared/desktopObservation";
 // @effect-diagnostics nodeBuiltinImport:off
 /**
  * CodexAdapterLive - Scoped live implementation for the Codex provider adapter.
@@ -36,6 +42,7 @@ import {
   type ProviderSessionForkResult,
   RuntimeTaskId,
   type RuntimeSubagentPresentation,
+  VirtualDesktopError,
 } from "@cafecode/contracts";
 import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
@@ -175,6 +182,8 @@ export interface CodexAdapterLiveOptions {
 }
 
 interface CodexAdapterSessionContext {
+  readonly startInput: Parameters<CodexAdapterShape["startSession"]>[0];
+  readonly desktopBinding?: DesktopSessionBinding | undefined;
   readonly threadId: ThreadId;
   readonly scope: Scope.Closeable;
   readonly runtime: CodexSessionRuntimeShape;
@@ -1564,6 +1573,47 @@ function reconcileCodexAuthRecoveryLifecycle(
       reason: terminal.reason,
     }),
   ];
+}
+
+export function redactDesktopToolEvent(event: ProviderEvent): ProviderEvent {
+  // Tool images, typed text, app titles and launch arguments belong only in the
+  // model's native MCP exchange. Cover both item notifications and nested
+  // thread/turn snapshots, including projected child-agent notifications.
+  let changed = false;
+  const redact = (value: unknown, depth: number): unknown => {
+    if (depth > 8) return value;
+    if (Array.isArray(value)) return value.map((v) => redact(v, depth + 1));
+    const item = readRecordValue(value);
+    if (!item) return value;
+    if (item.type === "mcpToolCall" && item.server === "cafe-desktop") {
+      changed = true;
+      const observation = readDesktopObservationItem(item)?.reference;
+      return {
+        id: item.id,
+        type: item.type,
+        server: item.server,
+        tool: item.tool,
+        status: item.status,
+        duration: item.duration,
+        arguments: {},
+        // Retain only the schema-decoded artifact reference. Codex's supported
+        // structuredContent field correlates it with this exact tool item,
+        // including historical resumes; image content and other results stay private.
+        result: observation
+          ? { content: [], structuredContent: { desktopObservation: observation } }
+          : null,
+        error: item.error ? { message: "Desktop operation failed." } : null,
+      };
+    }
+    const copy = { ...item };
+    for (const key of ["item", "items", "turn", "turns", "thread"])
+      if (key in copy) copy[key] = redact(copy[key], depth + 1);
+    return copy;
+  };
+  const payload = redact(event.payload, 0);
+  if (!changed) return event;
+  const { message: _message, textDelta: _textDelta, ...safe } = event;
+  return { ...safe, payload };
 }
 
 function sanitizeNativeProviderEventForLog(event: ProviderEvent): ProviderEvent {
@@ -4305,8 +4355,51 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
 
         yield* prepareRuntimeHomeForSession(input.threadId, "startSession");
 
+        const desktopBroker = readDesktopSessionBroker();
+        const desktopBinding = desktopBroker
+          ? yield* Effect.tryPromise({
+              try: () => desktopBroker.bind(input.threadId),
+              catch: () =>
+                new ProviderAdapterProcessError({
+                  provider: PROVIDER,
+                  threadId: input.threadId,
+                  detail: "Could not attach Desktop Control to this conversation.",
+                }),
+            })
+          : undefined;
+        let bindingTransferred = false;
+        yield* Effect.addFinalizer(() =>
+          bindingTransferred || !desktopBinding
+            ? Effect.void
+            : Effect.promise(() => desktopBinding.dispose()),
+        );
+        if (desktopBinding && !options?.makeRuntime)
+          yield* Effect.tryPromise({
+            try: () =>
+              preflightDesktopMcp({
+                binaryPath: codexConfig.binaryPath,
+                ...(codexConfig.homePath ? { homePath: codexConfig.homePath } : {}),
+                ...(options?.environment ? { environment: options.environment } : {}),
+                directories: [serverConfig.stateDir, input.cwd ?? process.cwd()],
+              }),
+            catch: () =>
+              new ProviderAdapterProcessError({
+                provider: PROVIDER,
+                threadId: input.threadId,
+                detail:
+                  "Codex Desktop Control configuration could not be verified. Remove any existing cafe-desktop registration and check the CLI.",
+              }),
+          });
         const currentTransportPolicy = toRuntimeTransportPolicy(yield* Ref.get(transportPolicyRef));
         const runtimeInput: CodexSessionRuntimeOptions = {
+          ...(desktopBinding
+            ? {
+                desktopMcp: {
+                  bridgePath: desktopBinding.bridgePath,
+                  connectionPath: desktopBinding.connectionPath,
+                },
+              }
+            : {}),
           threadId: input.threadId,
           providerInstanceId: boundInstanceId,
           cwd: input.cwd ?? process.cwd(),
@@ -4340,6 +4433,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             : {}),
         };
         const sessionScope = yield* Scope.make("sequential");
+        if (desktopBinding)
+          yield* Scope.addFinalizer(
+            sessionScope,
+            Effect.promise(() => desktopBinding.dispose()),
+          );
         let sessionScopeTransferred = false;
         yield* Effect.addFinalizer(() =>
           sessionScopeTransferred ? Effect.void : Scope.close(sessionScope, Exit.void),
@@ -4365,8 +4463,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         // rows without persisting native thread/turn identity.
         const activeAuthRecoveryTasksById = new Map<string, TurnId | null>();
 
-        const eventFiber = yield* Stream.runForEach(runtime.events, (event) =>
+        const eventFiber = yield* Stream.runForEach(runtime.events, (rawEvent) =>
           Effect.gen(function* () {
+            const event = redactDesktopToolEvent(rawEvent);
             yield* writeNativeEvent(event).pipe(
               Effect.catchCause((cause) =>
                 Effect.logWarning("codex.runtime.bridge.native-log-write-failed", {
@@ -4404,6 +4503,28 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               ),
             );
 
+            if (
+              desktopBinding &&
+              runtimeEvents.some((v) => v.threadId === input.threadId && v.type === "turn.started")
+            )
+              yield* Effect.tryPromise({
+                try: () => desktopBinding.startTurn(),
+                catch: () => new Error("Desktop turn ownership unavailable."),
+              }).pipe(
+                // Native goal continuations can start without sendTurn. They
+                // must acquire the same root lease; an unavailable desktop
+                // cancels this turn instead of overlapping another owner.
+                Effect.catch(() => runtime.interruptTurn().pipe(Effect.ignore)),
+              );
+            if (
+              desktopBinding &&
+              runtimeEvents.some(
+                (v) =>
+                  v.threadId === input.threadId &&
+                  (v.type === "turn.completed" || v.type === "session.exited"),
+              )
+            )
+              yield* Effect.promise(() => desktopBinding.endTurn());
             if (runtimeEvents.length === 0) {
               const context = bridgeEventLogContext(event, {
                 stage: "map",
@@ -4481,7 +4602,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                 return Effect.failCause(cause);
               }
               return Effect.logWarning("codex.runtime.bridge.event-failed", {
-                ...bridgeEventLogContext(event, {
+                ...bridgeEventLogContext(rawEvent, {
                   stage: "event",
                   cause: Cause.pretty(cause),
                 }),
@@ -4517,7 +4638,19 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ),
         );
 
+        if (desktopBinding && started.activeTurnId)
+          yield* Effect.tryPromise({
+            try: () => desktopBinding.startTurn(),
+            catch: () =>
+              new ProviderAdapterProcessError({
+                provider: PROVIDER,
+                threadId: input.threadId,
+                detail: "The resumed turn could not acquire its desktop.",
+              }),
+          });
         sessions.set(input.threadId, {
+          startInput: input,
+          desktopBinding,
           threadId: input.threadId,
           scope: sessionScope,
           runtime,
@@ -4527,6 +4660,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           stopped: false,
         });
         sessionScopeTransferred = true;
+        bindingTransferred = true;
 
         return started;
       }),
@@ -4603,7 +4737,53 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     const fileManifest = yield* prepareFileManifest(input, "turn/start");
     const prompt = appendFileAttachmentPrompt(input.input, fileManifest);
 
-    const session = yield* requireSession(input.threadId);
+    let session = yield* requireSession(input.threadId);
+    const broker = readDesktopSessionBroker();
+    if (broker) {
+      const signature = yield* Effect.tryPromise({
+        try: () => broker.signature(input.threadId),
+        catch: () =>
+          new ProviderAdapterProcessError({
+            provider: PROVIDER,
+            threadId: input.threadId,
+            detail: "Could not reconcile Desktop Control.",
+          }),
+      });
+      if (signature !== session.desktopBinding?.signature) {
+        const current = yield* session.runtime.getSession;
+        if (current.status !== "running" && !current.activeTurnId) {
+          if (!isCodexResumeCursorSchema(current.resumeCursor))
+            return yield* new ProviderAdapterProcessError({
+              provider: PROVIDER,
+              threadId: input.threadId,
+              detail:
+                "Desktop selection cannot change until Codex provides a durable resume cursor. Retry after the session is ready.",
+            });
+          // -c is read at process startup. Close the old scope before resuming
+          // the exact native cursor; never start two owners of one Codex thread.
+          yield* startSession({
+            ...session.startInput,
+            resumeCursor: current.resumeCursor,
+          });
+          session = yield* requireSession(input.threadId);
+        }
+      }
+    }
+    if (session.desktopBinding)
+      yield* Effect.tryPromise({
+        try: () => session.desktopBinding!.startTurn(),
+        catch: (cause) =>
+          new ProviderAdapterProcessError({
+            provider: PROVIDER,
+            threadId: input.threadId,
+            // Only the desktop boundary's bounded, server-authored errors are
+            // safe to show. Never surface a native exception or credential path.
+            detail:
+              cause instanceof VirtualDesktopError
+                ? cause.message
+                : "This desktop is unavailable or controlled by another conversation.",
+          }),
+      });
     const reasoningEffort =
       input.modelSelection?.instanceId === boundInstanceId
         ? getModelSelectionStringOptionValue(input.modelSelection, "reasoningEffort")
@@ -4623,7 +4803,14 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
         ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
       })
-      .pipe(Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "turn/start", cause)));
+      .pipe(
+        Effect.onError(() =>
+          session.desktopBinding
+            ? Effect.promise(() => session.desktopBinding!.endTurn())
+            : Effect.void,
+        ),
+        Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "turn/start", cause)),
+      );
   });
 
   const forkSession: NonNullable<CodexAdapterShape["forkSession"]> = Effect.fn("forkSession")(
@@ -4647,6 +4834,17 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           mapCodexRuntimeError(input.sourceThreadId, "thread/fork", cause),
         ),
       );
+      const desktops = readDesktopSessionBroker();
+      if (desktops)
+        yield* Effect.tryPromise({
+          try: () => desktops.inherit(input.sourceThreadId, input.targetThreadId),
+          catch: () =>
+            new ProviderAdapterProcessError({
+              provider: PROVIDER,
+              threadId: input.sourceThreadId,
+              detail: "The fork could not inherit its desktop selection.",
+            }),
+        }).pipe(Effect.onError(() => source.runtime.discardFork(resumeCursor).pipe(Effect.ignore)));
       return {
         operationId: input.operationId,
         sourceThreadId: input.sourceThreadId,
@@ -4688,6 +4886,17 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           mapCodexRuntimeError(fork.sourceThreadId, "thread/delete", cause),
         ),
       );
+    const desktops = readDesktopSessionBroker();
+    if (desktops)
+      yield* Effect.tryPromise({
+        try: () => desktops.detach(fork.targetThreadId),
+        catch: () =>
+          new ProviderAdapterProcessError({
+            provider: PROVIDER,
+            threadId: fork.targetThreadId,
+            detail: "The discarded fork's desktop selection could not be cleared.",
+          }),
+      });
   });
 
   const steerTurn: CodexAdapterShape["steerTurn"] = Effect.fn("steerTurn")(function* (input) {
@@ -4735,6 +4944,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   const interruptTurn: CodexAdapterShape["interruptTurn"] = (threadId, turnId) =>
     Effect.gen(function* () {
       const session = yield* requireSession(threadId);
+      if (session.desktopBinding) yield* Effect.promise(() => session.desktopBinding!.endTurn());
       yield* session.runtime.interruptTurn(turnId);
       // Codex app-server can remain superficially healthy after an interrupt:
       // it may still ACK a later `turn/start` while never delivering the
@@ -4839,6 +5049,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               Effect.flatMap((transportPolicy) => {
                 const runtimeTransportPolicy = toRuntimeTransportPolicy(transportPolicy);
                 return readTransient({
+                  ...(readDesktopSessionBroker()
+                    ? { desktopMcp: readDesktopSessionBroker()!.disabledBinding() }
+                    : {}),
                   binaryPath: codexConfig.binaryPath,
                   appServerCwd: serverConfig.stateDir,
                   ...(codexConfig.maxConcurrentSubagents !== undefined
@@ -5049,6 +5262,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     // projected. Its queue is adapter-owned, so closing the session scope does
     // not discard the resulting canonical task terminals.
     session.stopped = true;
+    if (session.desktopBinding) yield* Effect.promise(() => session.desktopBinding!.dispose());
     sessions.delete(session.threadId);
     yield* session.runtime.close.pipe(Effect.ignore);
     yield* Fiber.interrupt(session.eventFiber).pipe(Effect.ignore);

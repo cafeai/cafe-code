@@ -1,6 +1,12 @@
+import {
+  VirtualDesktopRequest,
+  VirtualDesktopState,
+  VirtualDesktopError,
+} from "./virtualDesktop.ts";
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
+import { CafeMcpClientUpdate, CafeMcpError, CafeMcpStatus } from "./mcp.ts";
 import {
   ProviderInteractionError,
   ProviderRespondToInteractionInput,
@@ -143,6 +149,9 @@ export const WS_METHODS = {
 
   // Server meta
   serverGetConfig: "server.getConfig",
+  serverVirtualDesktop: "server.virtualDesktop",
+  serverGetMcpStatus: "server.getMcpStatus",
+  serverUpdateMcpClient: "server.updateMcpClient",
   serverRefreshProviders: "server.refreshProviders",
   serverLoginProvider: "server.loginProvider",
   serverUpdateProvider: "server.updateProvider",
@@ -199,6 +208,24 @@ export const WsServerGetConfigRpc = Rpc.make(WS_METHODS.serverGetConfig, {
   payload: Schema.Struct({}),
   success: ServerConfig,
   error: Schema.Union([ClientSettingsError, KeybindingsConfigError, ServerSettingsError]),
+});
+
+export const WsServerVirtualDesktopRpc = Rpc.make(WS_METHODS.serverVirtualDesktop, {
+  payload: VirtualDesktopRequest,
+  success: VirtualDesktopState,
+  error: VirtualDesktopError,
+});
+
+export const WsServerGetMcpStatusRpc = Rpc.make(WS_METHODS.serverGetMcpStatus, {
+  payload: Schema.Struct({}),
+  success: CafeMcpStatus,
+  error: CafeMcpError,
+});
+
+export const WsServerUpdateMcpClientRpc = Rpc.make(WS_METHODS.serverUpdateMcpClient, {
+  payload: CafeMcpClientUpdate,
+  success: CafeMcpStatus,
+  error: CafeMcpError,
 });
 
 export const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProviders, {
@@ -586,7 +613,11 @@ export const WsSubscribeUsageStatsRpc = Rpc.make(WS_METHODS.subscribeUsageStats,
 
 export const WsRpcGroup = RpcGroup.make(
   WsServerGetConfigRpc,
+  WsServerGetMcpStatusRpc,
+  WsServerVirtualDesktopRpc,
+  WsServerUpdateMcpClientRpc,
   WsServerRefreshProvidersRpc,
+  WsServerUsageResetRpc,
   WsServerLoginProviderRpc,
   WsServerUpdateProviderRpc,
   WsServerRestartProviderRuntimeRpc,

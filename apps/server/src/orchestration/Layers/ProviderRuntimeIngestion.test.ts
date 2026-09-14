@@ -2090,12 +2090,23 @@ describe("ProviderRuntimeIngestion", () => {
     expect(thread.session?.status).toBe("stopped");
     expect(thread.session?.lastError).toBe("provider crashed");
 
+    // Recovery must describe a newly ready runtime, not the registered mock
+    // session that predated the crash or a replay of its initialization.
+    const recoveredAt = "2026-01-01T00:00:01.000Z";
+    harness.setProviderSession({
+      provider: ProviderDriverKind.make("codex"),
+      status: "ready",
+      runtimeMode: "approval-required",
+      threadId: asThreadId("thread-1"),
+      createdAt: recoveredAt,
+      updatedAt: recoveredAt,
+    });
     harness.emit({
       type: "session.state.changed",
       eventId: asEventId("evt-session-state-ready"),
       provider: ProviderDriverKind.make("codex"),
       threadId: asThreadId("thread-1"),
-      createdAt: "2026-01-01T00:00:00.000Z",
+      createdAt: recoveredAt,
       payload: {
         state: "ready",
       },
@@ -2211,6 +2222,116 @@ describe("ProviderRuntimeIngestion", () => {
         (entry) => entry.session?.status === "ready" && entry.session.lastError === null,
       );
       expect(thread.session?.lastError).toBeNull();
+    },
+  );
+
+  it.each([
+    ["2026-01-01T00:00:01.000Z", "2026-01-01T00:00:01.000Z"],
+    ["2026-01-01T00:00:03.000Z", "2026-01-01T00:00:01.000Z"],
+    ["2026-01-01T00:00:01.000Z", "2026-01-01T00:00:03.000Z"],
+  ])(
+    "keeps a rejected turn visible with a registered session (event %s, session %s)",
+    async (eventAt, sessionAt) => {
+      const harness = await createHarness();
+      const threadId = asThreadId("thread-1");
+      const failureAt = "2026-01-01T00:00:02.000Z";
+      const detail =
+        "Another conversation controls this desktop. Wait for its turn to finish or select another desktop.";
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("desktop-send-rejected"),
+          threadId,
+          session: {
+            threadId,
+            status: "ready",
+            providerName: "codex",
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: detail,
+            updatedAt: failureAt,
+          },
+          createdAt: failureAt,
+        }),
+      );
+      harness.setProviderSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        status: "ready",
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: sessionAt,
+      });
+      const common = { provider: ProviderDriverKind.make("codex"), threadId, createdAt: eventAt };
+      harness.emit({
+        ...common,
+        type: "session.state.changed",
+        eventId: asEventId("late-starting"),
+        payload: { state: "starting" },
+      });
+      harness.emit({
+        ...common,
+        type: "session.state.changed",
+        eventId: asEventId("late-ready"),
+        payload: { state: "ready" },
+      });
+      harness.emit({
+        ...common,
+        type: "thread.state.changed",
+        eventId: asEventId("late-idle"),
+        payload: { state: "idle" },
+      });
+      harness.emit({
+        ...common,
+        type: "session.started",
+        eventId: asEventId("late-session-started"),
+      });
+      harness.emit({
+        ...common,
+        type: "thread.started",
+        eventId: asEventId("late-thread-started"),
+      });
+      await harness.drain();
+      const rejected = (await harness.readModel()).threads.find((thread) => thread.id === threadId);
+      expect(rejected?.session).toMatchObject({
+        status: "ready",
+        activeTurnId: null,
+        lastError: detail,
+        updatedAt: failureAt,
+      });
+
+      // A new explicit send still clears the old failure and can start normally.
+      const retryAt = "2026-01-01T00:00:04.000Z";
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("desktop-send-retry"),
+          threadId,
+          message: {
+            messageId: MessageId.make("retry-message"),
+            role: "user",
+            text: "Retry",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: retryAt,
+        }),
+      );
+      harness.emit({
+        ...common,
+        type: "turn.started",
+        eventId: asEventId("retry-started"),
+        turnId: asTurnId("retry-turn"),
+        createdAt: retryAt,
+      });
+      await harness.drain();
+      const retried = (await harness.readModel()).threads.find((thread) => thread.id === threadId);
+      expect(retried?.session).toMatchObject({
+        status: "running",
+        activeTurnId: "retry-turn",
+        lastError: null,
+      });
     },
   );
 

@@ -106,6 +106,35 @@ import type { SubagentDetailSelection } from "./SubagentDetailView";
 
 const MESSAGE_CREATED_AT = "2026-04-13T12:00:00.000Z";
 
+it("opens an observation directly from its completed timeline tool call", async () => {
+  const entry = {
+    id: "desktop-observe",
+    createdAt: MESSAGE_CREATED_AT,
+    label: "MCP tool call",
+    tone: "tool" as const,
+    itemType: "mcp_tool_call" as const,
+    desktopObservation: { pending: false },
+  };
+  const view = await render(
+    <MessagesTimeline
+      {...buildProps()}
+      activeThreadId={ThreadId.make("desktop-thread")}
+      timelineEntries={[{ id: entry.id, kind: "work", createdAt: MESSAGE_CREATED_AT, entry }]}
+    />,
+  );
+  try {
+    await page.getByRole("button", { name: "View desktop screenshot" }).click();
+    await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+    await expect
+      .element(
+        page.getByText("This call did not save a screenshot. Older calls cannot be restored."),
+      )
+      .toBeVisible();
+  } finally {
+    await view.unmount();
+  }
+});
+
 function buildProps() {
   return {
     isWorking: false,

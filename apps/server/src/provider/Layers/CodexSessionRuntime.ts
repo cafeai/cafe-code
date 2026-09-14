@@ -1,4 +1,8 @@
 import {
+  desktopMcpOverride,
+  type DesktopMcpLaunch,
+} from "../../virtualDesktop/codexConfiguration.ts";
+import {
   ApprovalRequestId,
   CODEX_MAX_CONCURRENT_SUBAGENTS,
   DEFAULT_MODEL,
@@ -284,6 +288,7 @@ export interface CodexTransportPolicy {
 }
 
 export interface CodexAppServerLaunchOptions {
+  readonly desktopMcp?: DesktopMcpLaunch | undefined;
   readonly maxConcurrentSubagents?: number | undefined;
   readonly transportPolicy?: CodexTransportPolicy | undefined;
 }
@@ -336,6 +341,7 @@ export function buildCodexAppServerArgs(
     "-c",
     CODEX_UPDATE_PLAN_CONFIG_OVERRIDE,
     ...concurrencyArgs,
+    ...(options.desktopMcp ? ["-c", desktopMcpOverride(options.desktopMcp)] : []),
   ] as const;
 
   if (options.transportPolicy?.responsesWebsockets !== "disabled") {
@@ -365,6 +371,7 @@ export function buildCodexAppServerArgs(
 }
 
 export interface CodexSessionRuntimeOptions {
+  readonly desktopMcp?: DesktopMcpLaunch | undefined;
   readonly threadId: ThreadId;
   readonly providerInstanceId?: ProviderInstanceId;
   readonly binaryPath: string;
@@ -3802,6 +3809,7 @@ export const readCodexSubagentThreadWithInitializedClient = Effect.fn(
 });
 
 export interface CodexTransientSubagentHistoryReadOptions {
+  readonly desktopMcp?: DesktopMcpLaunch | undefined;
   readonly binaryPath: string;
   readonly appServerCwd: string;
   readonly rootProviderThreadId: string;
@@ -3829,6 +3837,7 @@ export const readCodexSubagentThreadTransient = Effect.fn(
           command: options.binaryPath,
           args: buildCodexAppServerArgs({
             maxConcurrentSubagents: options.maxConcurrentSubagents,
+            desktopMcp: options.desktopMcp,
             transportPolicy: options.transportPolicy,
           }),
           cwd: options.appServerCwd,
@@ -3909,6 +3918,7 @@ export const makeCodexSessionRuntime = (
       ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
     };
     const appServerArgs = buildCodexAppServerArgs({
+      desktopMcp: options.desktopMcp,
       maxConcurrentSubagents: options.maxConcurrentSubagents,
       transportPolicy: options.transportPolicy,
     });

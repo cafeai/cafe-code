@@ -1,4 +1,9 @@
 import type {
+  VirtualDesktopRequest,
+  VirtualDesktopState,
+  VirtualDesktopConnect,
+} from "./virtualDesktop.ts";
+import type {
   ProviderRespondToInteractionInput,
   ProviderResolveInteractionUrlInput,
 } from "./providerInteraction.ts";
@@ -352,6 +357,7 @@ export const DesktopRendererDebugSnapshotSchema = Schema.Record(Schema.String, S
 export type DesktopRendererDebugSnapshot = typeof DesktopRendererDebugSnapshotSchema.Type;
 
 export interface DesktopBridge {
+  openVirtualDesktop: (input: VirtualDesktopConnect) => Promise<void>;
   getAppBranding: () => DesktopAppBranding | null;
   getLocalEnvironmentBootstrap: () => DesktopEnvironmentBootstrap | null;
   getDebugEndpointState: () => Promise<DesktopDebugEndpointState>;
@@ -433,6 +439,9 @@ export interface LocalApi {
     removeSavedEnvironmentSecret: (environmentId: EnvironmentId) => Promise<void>;
   };
   server: {
+    virtualDesktop: (input: VirtualDesktopRequest) => Promise<VirtualDesktopState>;
+    getMcpStatus: () => Promise<CafeMcpStatus>;
+    updateMcpClient: (input: CafeMcpClientUpdate) => Promise<CafeMcpStatus>;
     getConfig: () => Promise<ServerConfig>;
     /**
      * Refresh provider snapshots. When `input.instanceId` is supplied only that
@@ -556,3 +565,4 @@ export interface EnvironmentApi {
     ) => () => void;
   };
 }
+import type { CafeMcpClientUpdate, CafeMcpStatus } from "./mcp.ts";

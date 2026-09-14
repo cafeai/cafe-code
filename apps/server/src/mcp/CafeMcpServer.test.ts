@@ -232,6 +232,8 @@ describe("Cafe Code MCP server", () => {
         "restart_provider_and_resume",
       ]),
     );
+    // Cafe's owner credential must not discover the separate desktop catalog.
+    expect(tools.tools.some((tool) => tool.name.startsWith("desktop_"))).toBe(false);
   });
 
   it("creates threads with project provider defaults and sends durable messages", async () => {

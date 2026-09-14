@@ -1,3 +1,5 @@
+import { VIRTUAL_DESKTOP_DAEMON_PATH } from "@cafecode/contracts";
+import { stopDesktopWorkers } from "./VirtualDesktopCleanup.ts";
 // @effect-diagnostics nodeBuiltinImport:off
 import * as fs from "node:fs/promises";
 import * as crypto from "node:crypto";
@@ -1085,6 +1087,37 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
             try: () => fetchProviderDaemonHealth(endpoint),
             catch: (cause) => new ProviderDaemonHealthError({ cause }),
           }).pipe(Effect.option, Effect.map(Option.getOrUndefined)));
+    // Explicit quit-and-stop closes Cafe-owned desktops. Watchdog recovery uses
+    // its separate path below and preserves workers for adoption.
+    if (process.platform === "linux") {
+      const stopped = endpoint
+        ? yield* Effect.tryPromise({
+            try: async () =>
+              (
+                await requestProviderDaemonJson(endpoint, VIRTUAL_DESKTOP_DAEMON_PATH, {
+                  method: "POST",
+                  body: JSON.stringify({ operation: "terminate-all" }),
+                  timeoutMs: 15_000,
+                })
+              ).statusCode === 200,
+            catch: () => new Error("Desktop shutdown did not complete."),
+          }).pipe(Effect.catch(() => Effect.succeed(false)))
+        : false;
+      if (!stopped) {
+        const recovered = yield* Effect.tryPromise({
+          try: () =>
+            stopDesktopWorkers(
+              path.join(environment.baseDir, "userdata"),
+              environment.backendEntryPath,
+            ),
+          catch: () => new Error("Desktop cleanup unavailable."),
+        }).pipe(Effect.catch(() => Effect.succeed(false)));
+        if (!recovered)
+          yield* logWarning(
+            "virtual desktop shutdown incomplete; explicit cafe-code killall can recover owned workers",
+          );
+      }
+    }
     const supervisorPid = latestHealth?.upstreamSupervisor?.pid;
     if (supervisorPid !== undefined && supervisorPid !== Option.getOrUndefined(current.pid)) {
       yield* terminateExternalPid(supervisorPid);

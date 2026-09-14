@@ -16,7 +16,8 @@ import { FileAttachmentRequestError } from "./fileAttachmentErrors";
 const decodeAttachment = Schema.decodeUnknownSync(ChatFileAttachment);
 const MAX_PREVIEW_RESPONSE_BYTES = 400 * 1024;
 
-async function fileRequest(
+/** Shared authenticated file transport for attachments and private desktop PNGs. */
+export async function fileRequest(
   environmentId: EnvironmentId,
   pathname: string,
   init: RequestInit = {},
@@ -73,7 +74,7 @@ async function fileRequest(
   return response;
 }
 
-async function readBounded(response: Response, limit: number): Promise<Uint8Array> {
+export async function readBounded(response: Response, limit: number): Promise<Uint8Array> {
   const reader = response.body?.getReader();
   if (!reader) return new Uint8Array();
   const chunks: Uint8Array[] = [];

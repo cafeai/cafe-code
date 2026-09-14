@@ -466,7 +466,11 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
           id="processed"
           label="Processed tokens"
           rawTokens={processedDisplay}
-          detail={view.hasInputDetail ? undefined : "output only before token detail"}
+          detail={
+            view.hasInputDetail
+              ? "Includes cached input read again on each request"
+              : "output only before token detail"
+          }
         />
         <StatTile
           id="cached"

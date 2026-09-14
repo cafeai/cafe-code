@@ -103,6 +103,7 @@ import {
   type TimelineScrollDebugListState,
 } from "./timelineScrollDebug";
 import { useHistoricalWorkLogPresence } from "./useHistoricalWorkLogPresence";
+import { DesktopObservation } from "../virtualDesktop/DesktopObservation";
 import { SubagentRosterRow, type SubagentRosterEntry } from "../subagents/SubagentRosterRow";
 import { SubagentDetailView, type SubagentDetailSelection } from "./SubagentDetailView";
 
@@ -2325,6 +2326,23 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
 });
 
 const OrdinaryWorkEntryRow = memo(function OrdinaryWorkEntryRow(props: {
+  workEntry: TimelineWorkEntry;
+  workspaceRoot: string | undefined;
+}) {
+  const { activeThreadEnvironmentId, activeThreadId, timestampFormat } = use(TimelineRowCtx);
+  if (props.workEntry.desktopObservation && activeThreadId)
+    return (
+      <DesktopObservation
+        entry={props.workEntry}
+        environmentId={activeThreadEnvironmentId}
+        threadId={activeThreadId}
+        timestampFormat={timestampFormat}
+      />
+    );
+  return <OrdinaryWorkEntryContent {...props} />;
+});
+
+const OrdinaryWorkEntryContent = memo(function OrdinaryWorkEntryContent(props: {
   workEntry: TimelineWorkEntry;
   workspaceRoot: string | undefined;
 }) {

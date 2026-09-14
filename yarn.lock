@@ -440,9 +440,11 @@ __metadata:
     effect-codex-app-server: "workspace:*"
     electron: "npm:42.5.1"
     electron-updater: "npm:^6.6.2"
+    jsonc-parser: "npm:3.3.1"
     node-pty: "npm:^1.1.0"
     pdfjs-dist: "npm:6.3.289"
     saxes: "npm:6.0.0"
+    toml: "npm:4.3.0"
     tsdown: "catalog:"
     typescript: "catalog:"
     vitest: "catalog:"
@@ -496,9 +498,11 @@ __metadata:
     electron: "npm:42.5.1"
     electron-builder: "npm:26.15.3"
     electron-updater: "npm:^6.6.2"
+    jsonc-parser: "npm:3.3.1"
     node-pty: "npm:^1.1.0"
     pdfjs-dist: "npm:6.3.289"
     saxes: "npm:6.0.0"
+    toml: "npm:4.3.0"
     web-push: "npm:^3.6.7"
     yauzl: "npm:3.3.1"
     zod: "npm:^4.0.0"
@@ -5640,6 +5644,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"jsonc-parser@npm:3.3.1":
+  version: 3.3.1
+  resolution: "jsonc-parser@npm:3.3.1"
+  checksum: 10c0/269c3ae0a0e4f907a914bf334306c384aabb9929bd8c99f909275ebd5c2d3bc70b9bcd119ad794f339dec9f24b6a4ee9cd5a8ab2e6435e730ad4075388fc2ab6
+  languageName: node
+  linkType: hard
+
 "jsonfile@npm:^4.0.0":
   version: 4.0.0
   resolution: "jsonfile@npm:4.0.0"
@@ -8522,7 +8533,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"toml@npm:^4.1.1":
+"toml@npm:4.3.0, toml@npm:^4.1.1":
   version: 4.3.0
   resolution: "toml@npm:4.3.0"
   checksum: 10c0/4a0ad64d4ef0b47f672a7b6bd7e776b9e03ad845998968fb105f8d561c3648eaff0217baca3f562d17e865e5bd7393441a8e54528920f0c171e41fdc8dfb39d6

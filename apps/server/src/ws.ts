@@ -1,3 +1,5 @@
+import { makeDesktopService } from "./virtualDesktop/service.ts";
+import { VirtualDesktopError } from "@cafecode/contracts";
 import * as Crypto from "node:crypto";
 
 import * as Cause from "effect/Cause";
@@ -186,6 +188,8 @@ const makeWsRpcLayer = (
   dictation: OpenAiRealtimeDictationShape,
   orchestrationSubscriptionHub: OrchestrationSubscriptionHubShape,
   providerMaintenanceRunner: ProviderMaintenanceRunner.ProviderMaintenanceRunnerShape,
+  mcpManagement: McpManagementShape,
+  desktops: Effect.Success<typeof makeDesktopService>,
 ) =>
   WsRpcGroup.toLayer(
     Effect.gen(function* () {
@@ -203,6 +207,11 @@ const makeWsRpcLayer = (
       const providerRegistry = yield* ProviderRegistry;
       const providerService = yield* ProviderService;
       const config = yield* ServerConfig;
+      const mcpAccess = {
+        canManage: currentSession.role === "owner" && secureSecretTransport,
+        canInstall:
+          currentSession.role === "owner" && secureSecretTransport && config.mode === "desktop",
+      };
       const lifecycleEvents = yield* ServerLifecycleEvents;
       const serverSettings = yield* ServerSettingsService;
       const clientSettings = yield* ServerClientSettingsService;
@@ -1143,6 +1152,26 @@ const makeWsRpcLayer = (
             }),
             { "rpc.aggregate": "server" },
           ),
+        [WS_METHODS.serverVirtualDesktop]: (input) =>
+          mcpAccess.canManage
+            ? desktops.manage(input)
+            : Effect.fail(
+                new VirtualDesktopError({
+                  code: "not_authorized",
+                  message: "Only an owner can manage virtual desktops.",
+                }),
+              ),
+        [WS_METHODS.serverGetMcpStatus]: () => mcpManagement.status(mcpAccess),
+        [WS_METHODS.serverUpdateMcpClient]: (input) =>
+          Effect.gen(function* () {
+            if (!mcpAccess.canInstall)
+              return yield* new CafeMcpError({
+                code: "not_authorized",
+                message: "Install Cafe MCP from an owner connection in the local desktop app.",
+              });
+            yield* mcpManagement.updateClient(input);
+            return yield* mcpManagement.status(mcpAccess);
+          }),
         [WS_METHODS.serverGetSettings]: (_input) =>
           observeRpcEffect(
             WS_METHODS.serverGetSettings,
@@ -1154,7 +1183,30 @@ const makeWsRpcLayer = (
         [WS_METHODS.serverUpdateSettings]: ({ patch }) =>
           observeRpcEffect(
             WS_METHODS.serverUpdateSettings,
-            serverSettings.updateSettings(patch).pipe(Effect.map(redactServerSettingsForClient)),
+            Effect.gen(function* () {
+              if (
+                (patch.mcpEnabled !== undefined ||
+                  patch.virtualDesktopsEnabled !== undefined ||
+                  patch.desktopControlMcpEnabled !== undefined ||
+                  patch.desktopObservationRetention !== undefined ||
+                  patch.desktopDefaultResolution !== undefined) &&
+                !mcpAccess.canManage
+              ) {
+                return yield* new ServerSettingsError({
+                  settingsPath: "settings.json",
+                  detail: "Only an owner connection can change Cafe MCP access.",
+                });
+              }
+              const updated = yield* serverSettings.updateSettings(patch);
+              if (
+                patch.virtualDesktopsEnabled !== undefined ||
+                patch.desktopControlMcpEnabled !== undefined ||
+                patch.desktopObservationRetention !== undefined ||
+                patch.desktopDefaultResolution !== undefined
+              )
+                yield* desktops.syncPolicy.pipe(Effect.catch(() => Effect.void));
+              return redactServerSettingsForClient(updated);
+            }),
             {
               "rpc.aggregate": "server",
             },
@@ -1545,6 +1597,8 @@ export const websocketRpcRouteLayer = Layer.unwrap(
     // boundary.
     const dictation = yield* OpenAiRealtimeDictation;
     const providerMaintenanceRunner = yield* ProviderMaintenanceRunner.ProviderMaintenanceRunner;
+    const mcpManagement = yield* McpManagement;
+    const desktops = yield* makeDesktopService;
     return HttpRouter.add(
       "GET",
       "/ws",
@@ -1572,6 +1626,8 @@ export const websocketRpcRouteLayer = Layer.unwrap(
               dictation,
               orchestrationSubscriptionHub,
               providerMaintenanceRunner,
+              mcpManagement,
+              desktops,
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               Layer.provide(ProviderJournalMessageRepairLive),
@@ -1607,4 +1663,6 @@ export const websocketRpcRouteLayer = Layer.unwrap(
       }).pipe(Effect.catchTag("AuthError", respondToAuthError)),
     );
   }),
-).pipe(Layer.provide(ProviderMaintenanceRunner.layer));
+).pipe(Layer.provide(ProviderMaintenanceRunner.layer), Layer.provide(McpManagementLive));
+import { CafeMcpError, ServerSettingsError } from "@cafecode/contracts";
+import { McpManagement, McpManagementLive, type McpManagementShape } from "./mcp/McpManagement.ts";

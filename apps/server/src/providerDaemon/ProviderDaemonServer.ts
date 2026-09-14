@@ -1,3 +1,9 @@
+import {
+  DESKTOP_DAEMON_PATH,
+  DesktopInternalRequest,
+  dispatchDesktopRequest,
+} from "../virtualDesktop/service.ts";
+import { VirtualDesktopError } from "@cafecode/contracts";
 // @effect-diagnostics nodeBuiltinImport:off
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
@@ -82,6 +88,7 @@ import {
 import { ProviderRuntimeInventory } from "./ProviderRuntimeInventory.ts";
 import { purgeProviderDaemonThreadPersistence } from "./ProviderDaemonThreadPurge.ts";
 
+const decodeDesktopInternalRequest = Schema.decodeUnknownSync(DesktopInternalRequest);
 const MAX_RPC_BODY_BYTES = 5 * 1024 * 1024;
 const PROVIDER_DAEMON_EVENT_JOURNAL_CAPACITY = 50_000;
 const PROVIDER_DAEMON_HEALTH_EVENT_DIAGNOSTICS_WINDOW = 100;
@@ -1439,6 +1446,34 @@ export const runProviderDaemonServer = (
       const method = request.method ?? "GET";
       const url = new URL(request.url ?? "/", `http://${host}:${port}`);
       void (async () => {
+        if (url.pathname === DESKTOP_DAEMON_PATH && method === "POST") {
+          if (!hasCapability(request, "rpc")) {
+            writeJson(response, 401, { error: "unauthorized" });
+            return;
+          }
+          const cancellation = new AbortController();
+          response.once("close", () => {
+            if (!response.writableEnded) cancellation.abort();
+          });
+          try {
+            const input = decodeDesktopInternalRequest(await readJsonBody(request));
+            writeJson(response, 200, await dispatchDesktopRequest(input, cancellation.signal));
+          } catch (error) {
+            writeJson(
+              response,
+              400,
+              error instanceof VirtualDesktopError
+                ? { _tag: error._tag, code: error.code, message: error.message }
+                : {
+                    _tag: "VirtualDesktopError",
+                    code: "invalid_request",
+                    message: "Invalid desktop request.",
+                  },
+            );
+          }
+          return;
+        }
+
         if (url.pathname === PROVIDER_DAEMON_LIVENESS_PATH && method === "GET") {
           if (!hasCapability(request, "health")) {
             writeJson(response, 401, { error: "unauthorized" });

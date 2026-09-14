@@ -901,13 +901,16 @@ const make = Effect.gen(function* () {
   const setThreadSessionErrorOnTurnStartFailure = Effect.fnUntraced(function* (input: {
     readonly threadId: ThreadId;
     readonly detail: string;
-    readonly createdAt: string;
   }) {
     const thread = yield* resolveThread(input.threadId);
     const session = thread?.session;
     if (!session) {
       return;
     }
+    // A rejection happens after provider initialization. Dating it with the
+    // original intent makes queued ready/start notifications look newer than
+    // the failure and lets ingestion erase the error before it is displayed.
+    const failedAt = DateTime.formatIso(yield* DateTime.now);
     yield* setThreadSession({
       threadId: input.threadId,
       session: {
@@ -915,9 +918,9 @@ const make = Effect.gen(function* () {
         status: session.status === "stopped" ? "stopped" : "ready",
         activeTurnId: null,
         lastError: input.detail,
-        updatedAt: input.createdAt,
+        updatedAt: failedAt,
       },
-      createdAt: input.createdAt,
+      createdAt: failedAt,
     });
   });
 
@@ -2395,7 +2398,6 @@ const make = Effect.gen(function* () {
       return setThreadSessionErrorOnTurnStartFailure({
         threadId: event.payload.threadId,
         detail,
-        createdAt: event.payload.createdAt,
       }).pipe(
         Effect.flatMap(() =>
           appendProviderFailureActivity({

@@ -1782,6 +1782,48 @@ describe("deriveWorkLogEntries", () => {
     });
   });
 
+  it("keeps each observation tied to its own completed tool item through work-log coalescing", () => {
+    const reference = {
+      id: "24ff9ac9-1d98-4bb9-9d3f-1e868663a064",
+      capturedAt: "2026-09-09T00:00:00.000Z",
+      width: 1280,
+      height: 800,
+      frame: 4,
+      humanControl: false,
+      storage: "saved",
+    };
+    const activities = ["first", "second"].flatMap((id) =>
+      ["started", "completed"].map((lifecycle) =>
+        makeActivity({
+          id: `${id}-${lifecycle}`,
+          kind: `tool.${lifecycle}`,
+          summary: "MCP tool call",
+          payload: {
+            itemType: "mcp_tool_call",
+            itemId: id,
+            data: {
+              item: {
+                id,
+                type: "mcpToolCall",
+                server: "cafe-desktop",
+                tool: "observe",
+                status: lifecycle === "completed" ? "completed" : "inProgress",
+                result:
+                  lifecycle === "completed" && id === "first"
+                    ? { content: [], structuredContent: { desktopObservation: reference } }
+                    : null,
+              },
+            },
+          },
+        }),
+      ),
+    );
+    const entries = deriveWorkLogEntries(activities, undefined);
+    expect(entries).toHaveLength(2);
+    expect(entries[0]?.desktopObservation).toEqual({ reference, pending: false });
+    expect(entries[1]?.desktopObservation).toEqual({ pending: false });
+  });
+
   it("recovers Grok output-side queries and nested tool arguments from retained payloads", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

@@ -1,3 +1,6 @@
+import { desktopConnectRouteLayer } from "./virtualDesktop/connect.ts";
+import { desktopMcpRouteLayer } from "./virtualDesktop/http.ts";
+import { DesktopRuntimeLive } from "./virtualDesktop/runtime.ts";
 import * as NodeHttp from "node:http";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -8,6 +11,8 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { ServerConfig } from "./config.ts";
 import { fileAttachmentRouteLayer } from "./fileAttachmentHttp.ts";
+import { desktopObservationRouteLayer } from "./virtualDesktop/observationHttp.ts";
+import { desktopPreviewRouteLayer } from "./virtualDesktop/previewHttp.ts";
 import {
   attachmentsRouteLayer,
   brandingSidebarImageServeRouteLayer,
@@ -281,6 +286,7 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   Layer.provideMerge(GitLayerLive),
   Layer.provideMerge(VcsLayerLive),
   Layer.provideMerge(ProviderRuntimeLayerLive),
+  Layer.provideMerge(DesktopRuntimeLive),
   Layer.provideMerge(PersistenceLayerLive),
   Layer.provideMerge(KeybindingsLive),
   Layer.provideMerge(ProviderRegistryLive),
@@ -306,8 +312,8 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   Layer.provideMerge(ProjectFaviconResolverLive),
   Layer.provideMerge(RepositoryIdentityResolverLive),
   Layer.provideMerge(ServerEnvironmentLive),
-  Layer.provideMerge(AuthLayerLive),
 ).pipe(
+  Layer.provideMerge(AuthLayerLive),
   // One scoped bridge is visible both while provider factories are built and
   // when the usage accumulator later installs its hydrated ledger callback.
   Layer.provideMerge(AuxiliaryUsageLive),
@@ -349,10 +355,14 @@ export const makeRoutesLayer = Layer.mergeAll(
   authWebSocketTokenRouteLayer,
   attachmentsRouteLayer,
   fileAttachmentRouteLayer,
+  desktopObservationRouteLayer,
+  desktopPreviewRouteLayer,
   brandingSidebarImageServeRouteLayer,
   brandingSidebarImageUploadRouteLayer,
   clientDebugLogRouteLayer,
   cafeMcpRouteLayer,
+  desktopMcpRouteLayer,
+  desktopConnectRouteLayer,
   orchestrationDispatchRouteLayer,
   orchestrationSnapshotRouteLayer,
   otlpTracesProxyRouteLayer,

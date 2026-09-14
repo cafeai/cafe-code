@@ -16,6 +16,7 @@ import {
   type TurnId,
 } from "@cafecode/contracts";
 import { summarizeToolArguments } from "@cafecode/shared/toolActivity";
+import { readDesktopObservationItem } from "@cafecode/shared/desktopObservation";
 
 import {
   deriveSubagentActivities,
@@ -67,6 +68,7 @@ export interface WorkLogEntry {
   toolTitle?: string;
   itemType?: ToolLifecycleItemType;
   requestKind?: PendingApproval["requestKind"];
+  desktopObservation?: NonNullable<ReturnType<typeof readDesktopObservationItem>>;
   subagent?: {
     /** Stable provider child identity and deterministic avatar seed. */
     id: string;
@@ -890,6 +892,8 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   };
   const itemType = extractWorkLogItemType(payload);
   const requestKind = extractWorkLogRequestKind(payload);
+  const observation = readDesktopObservationItem(asRecord(payload?.data)?.item);
+  if (observation) entry.desktopObservation = observation;
   if (detail) {
     entry.detail = detail;
   }

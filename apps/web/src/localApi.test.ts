@@ -169,6 +169,7 @@ function createLocalStorageStub(): Storage {
 
 function makeDesktopBridge(overrides: Partial<DesktopBridge> = {}): DesktopBridge {
   return {
+    openVirtualDesktop: async () => undefined,
     getAppBranding: () => null,
     getLocalEnvironmentBootstrap: () => null,
     getDebugEndpointState: async () => ({ enabled: false, url: null }),

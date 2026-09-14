@@ -2110,11 +2110,14 @@ const make = Effect.gen(function* () {
    * Those events remain in the daemon journal after the failed adapter scope
    * is gone. They are not proof that a usable session exists, so a previous
    * start failure may be cleared only when the current ProviderService can
-   * name a matching registered session (or fresh user intent is pending).
+   * name a matching registered session newer than the failure (or fresh user
+   * intent is pending). An already-ready process can reject turn admission,
+   * such as when another conversation still owns its selected desktop.
    */
   const hasRegisteredSessionForFailureRecovery = Effect.fn(
     "hasRegisteredSessionForFailureRecovery",
-  )(function* (event: ProviderRuntimeEvent) {
+  )(function* (event: ProviderRuntimeEvent, failedAt: string) {
+    if (!(Date.parse(event.createdAt) > Date.parse(failedAt))) return false;
     const sessions = yield* providerService.listSessions().pipe(
       Effect.catchCause((cause) =>
         Effect.logWarning("provider runtime ingestion could not verify failed-session recovery", {
@@ -2133,6 +2136,7 @@ const make = Effect.gen(function* () {
         session.provider === event.provider &&
         (event.providerInstanceId === undefined ||
           session.providerInstanceId === event.providerInstanceId) &&
+        Date.parse(session.updatedAt) > Date.parse(failedAt) &&
         (session.status === "ready" || session.status === "running"),
     );
   });
@@ -2332,7 +2336,7 @@ const make = Effect.gen(function* () {
       const shouldSuppressFailedSessionHeartbeat = isNonConclusiveFailedSessionHeartbeat
         ? !(
             (yield* hasPendingTurnStartForThread()) ||
-            (yield* hasRegisteredSessionForFailureRecovery(event))
+            (yield* hasRegisteredSessionForFailureRecovery(event, thread.session!.updatedAt))
           )
         : false;
       if (shouldSuppressFailedSessionHeartbeat) {

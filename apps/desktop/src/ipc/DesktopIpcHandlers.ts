@@ -1,3 +1,4 @@
+import { openVirtualDesktop } from "./methods/virtualDesktop.ts";
 import * as Effect from "effect/Effect";
 
 import * as DesktopIpc from "./DesktopIpc.ts";
@@ -69,6 +70,7 @@ export const installDesktopIpcHandlers = Effect.gen(function* () {
   yield* ipc.handle(openPath);
   yield* ipc.handle(revealPath);
   yield* ipc.handle(copyText);
+  yield* ipc.handle(openVirtualDesktop);
 
   yield* ipc.handle(getUpdateState);
   yield* ipc.handle(setUpdateChannel);

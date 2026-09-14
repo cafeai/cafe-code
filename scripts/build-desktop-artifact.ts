@@ -950,6 +950,9 @@ const createBuildConfig = Effect.fn("createBuildConfig")(function* (
 
   if (platform === "linux") {
     Object.assign(buildConfig, resolveLinuxDesktopBuildConfig(target));
+    // Native workers outlive an AppImage mount. Start from a real executable
+    // resource; the server copies it into its private runtime before spawning.
+    buildConfig.asarUnpack = ["apps/server/dist/cafe-desktop-native"];
   }
 
   if (platform === "win") {

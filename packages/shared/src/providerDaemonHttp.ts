@@ -27,6 +27,7 @@ export class ProviderDaemonHttpStatusError extends Error {
 }
 
 export interface ProviderDaemonJsonRequestOptions {
+  readonly signal?: AbortSignal;
   readonly method?: "GET" | "POST";
   readonly body?: string;
   readonly headers?: Record<string, string>;
@@ -133,7 +134,10 @@ export function requestProviderDaemonJson(
       reject(cause);
     };
     const request = http.request(
-      requestOptions(endpoint, path, method, headers, "fresh"),
+      {
+        ...requestOptions(endpoint, path, method, headers, "fresh"),
+        ...(options.signal ? { signal: options.signal } : {}),
+      },
       (response) => {
         const chunks: Buffer[] = [];
         let responseBytes = 0;

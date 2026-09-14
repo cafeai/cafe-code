@@ -4,6 +4,14 @@
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "exports": {
+    "./desktopObservation": {
+      "types": "./src/desktopObservation.ts",
+      "import": "./src/desktopObservation.ts"
+    },
+    "./desktopRuntime": {
+      "types": "./src/desktopRuntime.ts",
+      "import": "./src/desktopRuntime.ts"
+    },
     "./providerInteraction": {
       "types": "./src/providerInteraction.ts",
       "import": "./src/providerInteraction.ts"
