@@ -952,6 +952,19 @@ const ThreadTurnStartBootstrap = Schema.Struct({
 
 export type ThreadTurnStartBootstrap = typeof ThreadTurnStartBootstrap.Type;
 
+/**
+ * Server-only compare-and-recover authority. The source sequence names an
+ * immutable, server-authored ownership-loss observation; admission and the
+ * provider reactor both check the durable controls after that observation.
+ * This field intentionally does not exist on ClientThreadTurnStartCommand.
+ */
+export const ThreadTurnRuntimeRecovery = Schema.Struct({
+  sourceEventSequence: NonNegativeInt,
+  turnId: TurnId,
+  sessionUpdatedAt: IsoDateTime,
+});
+export type ThreadTurnRuntimeRecovery = typeof ThreadTurnRuntimeRecovery.Type;
+
 export const ThreadTurnStartCommand = Schema.Struct({
   type: Schema.Literal("thread.turn.start"),
   commandId: CommandId,
@@ -970,6 +983,7 @@ export const ThreadTurnStartCommand = Schema.Struct({
   ),
   bootstrap: Schema.optional(ThreadTurnStartBootstrap),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  runtimeRecovery: Schema.optional(ThreadTurnRuntimeRecovery),
   createdAt: IsoDateTime,
 });
 
@@ -1476,6 +1490,7 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
   ),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  runtimeRecovery: Schema.optional(ThreadTurnRuntimeRecovery),
   terminalSteerRecovery: Schema.optional(
     Schema.Struct({
       staleTurnId: TurnId,

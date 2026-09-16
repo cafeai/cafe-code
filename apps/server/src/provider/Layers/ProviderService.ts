@@ -81,6 +81,7 @@ import { ProviderService, type ProviderServiceShape } from "../Services/Provider
 import {
   makeProviderRuntimeOwnerPayload,
   PROVIDER_RUNTIME_OWNER_HEARTBEAT_INTERVAL_MS,
+  PROVIDER_RUNTIME_OWNERSHIP_LOST_REASON,
   type ProviderRuntimeOwnerEvidence,
 } from "../providerRuntimeOwnerEvidence.ts";
 import {
@@ -90,6 +91,7 @@ import {
 import { type EventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import { ProviderEventLoggers } from "./ProviderEventLoggers.ts";
 const isModelSelection = Schema.is(ModelSelection);
+const isTurnId = Schema.is(TurnId);
 const isProviderAdapterProcessError = Schema.is(ProviderAdapterProcessError);
 const decodePrivateInteractionResponse = Schema.decodeUnknownEffect(
   ProviderRespondToInteractionInput,
@@ -154,6 +156,9 @@ const ProviderRuntimeRestartInput = ServerProviderRuntimeRestartInput;
 const ProviderForkSessionInput = ProviderSessionForkInput;
 const ProviderDiscardSessionForkInput = ProviderSessionForkDiscardInput;
 const PROVIDER_ADAPTER_EVENT_STREAM_RESTART_DELAY = Duration.millis(500);
+// Inventory is process-local for supported adapters. Bound unexpected adapter
+// stalls so one instance cannot park the owner repair loop indefinitely.
+const PROVIDER_ORPHAN_INVENTORY_TIMEOUT = Duration.seconds(5);
 const PROVIDER_SUBAGENT_HISTORY_CURSOR_MAX_UTF8_BYTES = 64 * 1024;
 const PROVIDER_SUBAGENT_HISTORY_CWD_MAX_CODE_UNITS = 32 * 1024;
 const THREAD_LIFECYCLE_LOCK_STRIPE_COUNT = 256;
@@ -991,6 +996,190 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     Effect.map((map) => Array.from(map.entries())),
   );
 
+  const isOwnedActiveBinding = (binding: ProviderRuntimeBinding): boolean => {
+    const payload = binding.runtimePayload;
+    return (
+      (binding.status === "starting" || binding.status === "running") &&
+      isRecord(payload) &&
+      payload.runtimeOwnerId === runtimeOwner.runtimeOwnerId &&
+      payload.runtimeOwnerPid === runtimeOwner.runtimeOwnerPid &&
+      payload.runtimeOwnerStartedAt === runtimeOwner.runtimeOwnerStartedAt
+    );
+  };
+
+  const isSameBindingGeneration = (
+    before: ProviderRuntimeBinding,
+    current: ProviderRuntimeBinding,
+  ): boolean => {
+    const previousPayload = before.runtimePayload;
+    const currentPayload = current.runtimePayload;
+    return (
+      isOwnedActiveBinding(current) &&
+      before.provider === current.provider &&
+      before.providerInstanceId === current.providerInstanceId &&
+      before.status === current.status &&
+      isRecord(previousPayload) &&
+      isRecord(currentPayload) &&
+      previousPayload.activeTurnId === currentPayload.activeTurnId &&
+      previousPayload.lastRuntimeEvent === currentPayload.lastRuntimeEvent &&
+      previousPayload.lastRuntimeEventAt === currentPayload.lastRuntimeEventAt &&
+      previousPayload.runtimeOwnerHeartbeatAt === currentPayload.runtimeOwnerHeartbeatAt
+    );
+  };
+
+  /**
+   * Closing a configured instance also closes its event source. Its final
+   * session-exited notification can therefore disappear before this service
+   * sees it, even though this process and its persisted owner lease survive.
+   * Only this exact process incarnation may repair those abandoned bindings;
+   * another daemon's stale heartbeat is never authority to stop its work.
+   *
+   * The periodic call repairs missed registry notifications as well. All
+   * observations are bounded, and an inventory failure remains inconclusive.
+   * No provider is restarted and no user input is replayed at this boundary.
+   */
+  const reconcileOwnedSessionBindings = (instanceIds?: ReadonlySet<ProviderInstanceId>) =>
+    Effect.gen(function* () {
+      const bindings = yield* directory.listBindings();
+      const candidatesByInstance = new Map<ProviderInstanceId, ProviderRuntimeBinding[]>();
+      for (const binding of bindings) {
+        const instanceId = binding.providerInstanceId;
+        if (
+          instanceId === undefined ||
+          !isOwnedActiveBinding(binding) ||
+          (instanceIds !== undefined && !instanceIds.has(instanceId))
+        ) {
+          continue;
+        }
+        const candidates = candidatesByInstance.get(instanceId) ?? [];
+        candidates.push(binding);
+        candidatesByInstance.set(instanceId, candidates);
+      }
+
+      for (const [instanceId, candidates] of candidatesByInstance) {
+        yield* Effect.gen(function* () {
+          const currentIds = yield* registry
+            .listInstances()
+            .pipe(Effect.timeout(PROVIDER_ORPHAN_INVENTORY_TIMEOUT));
+          // Only a successful registry read can prove removal. A failed
+          // getByInstance or adapter inventory must never become an empty set.
+          const adapter = currentIds.includes(instanceId)
+            ? yield* registry
+                .getByInstance(instanceId)
+                .pipe(Effect.timeout(PROVIDER_ORPHAN_INVENTORY_TIMEOUT))
+            : undefined;
+          const sessions =
+            adapter === undefined
+              ? []
+              : yield* adapter
+                  .listSessions()
+                  .pipe(Effect.timeout(PROVIDER_ORPHAN_INVENTORY_TIMEOUT));
+          const presentThreadIds = new Set(sessions.map((session) => session.threadId));
+          for (const candidate of candidates) {
+            if (presentThreadIds.has(candidate.threadId)) continue;
+            yield* withThreadLifecycleLock(
+              candidate.threadId,
+              Effect.gen(function* () {
+                if ((yield* Ref.get(hardDeleteRetiredThreadIds)).has(candidate.threadId)) return;
+                const current = Option.getOrUndefined(
+                  yield* directory.getBinding(candidate.threadId),
+                );
+                if (current === undefined || !isSameBindingGeneration(candidate, current)) return;
+
+                // Start/Stop/provider-switch mutations use this same permit.
+                // Re-read registry identity and session presence after taking
+                // it: an inventory collected before a replacement started is
+                // insufficient evidence to terminalize that new generation.
+                if (adapter === undefined) {
+                  if (
+                    (yield* registry
+                      .listInstances()
+                      .pipe(Effect.timeout(PROVIDER_ORPHAN_INVENTORY_TIMEOUT))).includes(instanceId)
+                  ) {
+                    return;
+                  }
+                } else {
+                  const currentAdapter = yield* registry
+                    .getByInstance(instanceId)
+                    .pipe(Effect.timeout(PROVIDER_ORPHAN_INVENTORY_TIMEOUT));
+                  if (currentAdapter !== adapter) return;
+                  if (
+                    yield* adapter
+                      .hasSession(candidate.threadId)
+                      .pipe(Effect.timeout(PROVIDER_ORPHAN_INVENTORY_TIMEOUT))
+                  ) {
+                    return;
+                  }
+                }
+                // Shared persistence can also change independently of local
+                // adapter I/O. Recheck the exact owner/turn/lifecycle evidence
+                // after that I/O and preserve every different generation.
+                const latest = Option.getOrUndefined(
+                  yield* directory.getBinding(candidate.threadId),
+                );
+                if (latest === undefined || !isSameBindingGeneration(candidate, latest)) return;
+
+                const createdAt = yield* nowIso;
+                const activeTurnId = isRecord(latest.runtimePayload)
+                  ? latest.runtimePayload.activeTurnId
+                  : undefined;
+                const event: ProviderRuntimeEvent = {
+                  type: "session.exited",
+                  eventId: EventId.make(randomUUID()),
+                  provider: latest.provider,
+                  providerInstanceId: instanceId,
+                  threadId: latest.threadId,
+                  ...(isTurnId(activeTurnId) ? { turnId: activeTurnId } : {}),
+                  createdAt,
+                  payload: {
+                    reason: PROVIDER_RUNTIME_OWNERSHIP_LOST_REASON,
+                  },
+                };
+                // The durable stopped boundary must succeed before publishing
+                // terminal truth. Leaving the cursor untouched allows normal
+                // subsequent recovery to resume the provider conversation.
+                yield* directory.upsert({
+                  threadId: latest.threadId,
+                  provider: latest.provider,
+                  providerInstanceId: instanceId,
+                  status: "stopped",
+                  runtimePayload: {
+                    activeTurnId: null,
+                    lastError: null,
+                    lastRuntimeEvent: event.type,
+                    lastRuntimeEventAt: createdAt,
+                  },
+                });
+                runtimeOwnerHeartbeatWrittenAt.delete(latest.threadId);
+                // A ready-but-idle adapter also needs durable cleanup, but it
+                // has no interrupted work for orchestration to recover.
+                if (latest.status !== "starting" && event.turnId === undefined) return;
+                yield* increment(providerRuntimeEventsTotal, {
+                  provider: latest.provider,
+                  eventType: event.type,
+                });
+                yield* publishRuntimeEvent(event);
+              }),
+            );
+          }
+        }).pipe(
+          // Raw adapter failures may contain paths, credentials or provider
+          // output. A fixed observation is sufficient; retry next cycle.
+          Effect.catchCause((cause) =>
+            Cause.hasInterruptsOnly(cause)
+              ? Effect.failCause(cause)
+              : Effect.logWarning("provider.runtime.owned-session-reconciliation-inconclusive"),
+          ),
+        );
+      }
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.failCause(cause)
+          : Effect.logWarning("provider.runtime.owned-session-reconciliation-failed"),
+      ),
+    );
+
   const quiesceThreadForHardDelete: ProviderServiceShape["quiesceThreadForHardDelete"] = Effect.fn(
     "quiesceThreadForHardDelete",
   )(function* (rawInput) {
@@ -1176,6 +1365,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       }
     }
     yield* Ref.set(subscribedAdapters, next);
+    const retiredInstanceIds = new Set(
+      Array.from(previous).flatMap(([id, adapter]) => (next.get(id) !== adapter ? [id] : [])),
+    );
+    if (retiredInstanceIds.size > 0) {
+      yield* reconcileOwnedSessionBindings(retiredInstanceIds);
+    }
   });
 
   const instanceChanges = yield* registry.subscribeChanges;
@@ -2330,7 +2525,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
   const readAdapterSessions = Effect.gen(function* () {
     const currentAdapters = yield* getAdapterEntries;
-    return yield* Effect.forEach(currentAdapters, ([instanceId, adapter]) =>
+    const sessions = yield* Effect.forEach(currentAdapters, ([instanceId, adapter]) =>
       adapter.listSessions().pipe(
         Effect.map((sessions) =>
           sessions.map((session) => ({
@@ -2340,9 +2535,13 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         ),
       ),
     ).pipe(Effect.map((sessionsByProvider) => sessionsByProvider.flatMap((sessions) => sessions)));
+    return { sessions, adapters: new Map(currentAdapters) };
   });
 
-  const refreshRuntimeOwnerHeartbeats = (sessions: ReadonlyArray<ProviderSession>) =>
+  const refreshRuntimeOwnerHeartbeats = (
+    sessions: ReadonlyArray<ProviderSession>,
+    observedAdapters: ReadonlyMap<ProviderInstanceId, ProviderAdapterShape<ProviderAdapterError>>,
+  ) =>
     runtimeOwnerHeartbeatSemaphore.withPermit(
       Effect.gen(function* () {
         const observedAtMs = yield* Clock.currentTimeMillis;
@@ -2366,7 +2565,32 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           (session) =>
             persistUnlessThreadRetired(
               session.threadId,
-              upsertSessionBinding(session, session.threadId),
+              Effect.gen(function* () {
+                const instanceId = session.providerInstanceId;
+                if (instanceId === undefined) return;
+                const currentAdapter = yield* registry.getByInstance(instanceId);
+                if (currentAdapter !== observedAdapters.get(instanceId)) return;
+                const binding = Option.getOrUndefined(
+                  yield* directory.getBinding(session.threadId),
+                );
+                const payload = binding?.runtimePayload;
+                // Inventory can finish after Stop, orphan repair, or a newer
+                // turn start. Never let that delayed heartbeat resurrect the
+                // old turn or borrow a replacement/foreign runtime's lease.
+                if (
+                  binding === undefined ||
+                  binding.status !== "running" ||
+                  binding.provider !== session.provider ||
+                  binding.providerInstanceId !== instanceId ||
+                  !isRecord(payload) ||
+                  payload.activeTurnId !== session.activeTurnId ||
+                  (payload.runtimeOwnerId !== undefined &&
+                    payload.runtimeOwnerId !== runtimeOwner.runtimeOwnerId)
+                ) {
+                  return;
+                }
+                yield* upsertSessionBinding(session, session.threadId);
+              }),
             ).pipe(
               Effect.catchCause((cause) =>
                 Effect.logWarning("provider.runtime.owner-heartbeat-write-failed", {
@@ -2384,7 +2608,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
   const listSessions: ProviderServiceShape["listSessions"] = Effect.fn("listSessions")(
     function* () {
-      const activeSessions = yield* readAdapterSessions;
+      const { sessions: activeSessions, adapters } = yield* readAdapterSessions;
       const persistedBindings = yield* directory.listThreadIds().pipe(
         Effect.flatMap((threadIds) =>
           Effect.forEach(
@@ -2445,7 +2669,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         }
         sessions.push(Object.assign({}, session, overrides));
       }
-      yield* refreshRuntimeOwnerHeartbeats(sessions);
+      yield* refreshRuntimeOwnerHeartbeats(sessions, adapters);
       return sessions;
     },
   );
@@ -2454,8 +2678,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     while (true) {
       yield* Effect.sleep(Duration.millis(PROVIDER_RUNTIME_OWNER_HEARTBEAT_INTERVAL_MS));
       yield* Effect.gen(function* () {
-        const sessions = yield* readAdapterSessions;
-        yield* refreshRuntimeOwnerHeartbeats(sessions);
+        yield* reconcileOwnedSessionBindings();
+        const { sessions, adapters } = yield* readAdapterSessions.pipe(
+          Effect.timeout(PROVIDER_ORPHAN_INVENTORY_TIMEOUT),
+        );
+        yield* refreshRuntimeOwnerHeartbeats(sessions, adapters);
       }).pipe(
         Effect.catchCause((cause) =>
           Effect.logWarning("provider.runtime.owner-heartbeat-cycle-failed", {

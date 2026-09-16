@@ -27,18 +27,31 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   type ClaudeSettings,
   type CodexSettings,
+  type ProviderInstanceConfig,
   ProviderDriverKind,
   type ProviderInstanceConfigMap,
   ProviderInstanceId,
+  type ProviderSession,
+  type ServerProvider,
+  ThreadId,
+  TurnId,
 } from "@cafecode/contracts";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as PubSub from "effect/PubSub";
+import * as Queue from "effect/Queue";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 
 import { ServerConfig } from "../../config.ts";
 import { ClaudeDriver } from "../Drivers/ClaudeDriver.ts";
 import { CodexDriver } from "../Drivers/CodexDriver.ts";
+import type { ProviderDriver } from "../ProviderDriver.ts";
+import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "./ProviderEventLoggers.ts";
 import { makeProviderInstanceRegistry } from "./ProviderInstanceRegistryLive.ts";
 
@@ -67,6 +80,273 @@ const makeClaudeConfig = (overrides: Partial<ClaudeSettings>): ClaudeSettings =>
   customModels: [],
   launchArgs: "",
   ...overrides,
+});
+
+/** An entirely in-memory driver: unexpected provider I/O fails the test. */
+const unexpectedRegistryProviderOperation = () =>
+  Effect.die(new Error("Unexpected provider operation in registry test"));
+
+const makeLifecycleDriver = Effect.gen(function* () {
+  const counters = { created: 0, closed: 0, subscribers: 0, refreshes: 0 };
+  const subscribed = yield* Deferred.make<void>();
+  const publications = yield* Queue.unbounded<Effect.Effect<boolean>>();
+  const driverKind = ProviderDriverKind.make("registry_fixture");
+  const driver: ProviderDriver<{ readonly binaryPath: string }> = {
+    driverKind,
+    metadata: { displayName: "Registry fixture" },
+    configSchema: Schema.Struct({ binaryPath: Schema.String }),
+    defaultConfig: () => ({ binaryPath: "fixture" }),
+    create: (input) =>
+      Effect.gen(function* () {
+        counters.created += 1;
+        const sessions = new Map<ThreadId, ProviderSession>();
+        const changes = yield* PubSub.unbounded<ServerProvider>();
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            counters.closed += 1;
+            sessions.clear();
+          }).pipe(Effect.andThen(PubSub.shutdown(changes))),
+        );
+        const initialSnapshot: ServerProvider = {
+          instanceId: input.instanceId,
+          driver: driverKind,
+          displayName: input.displayName,
+          accentColor: input.accentColor,
+          enabled: input.enabled,
+          installed: true,
+          version: "1.0.0",
+          status: "ready",
+          auth: { status: "authenticated" },
+          checkedAt: "2026-09-16T00:00:00.000Z",
+          models: [],
+          slashCommands: [],
+          skills: [],
+        };
+        yield* Queue.offer(publications, PubSub.publish(changes, initialSnapshot));
+        const adapter: ProviderAdapterShape<never> = {
+          provider: driverKind,
+          capabilities: { sessionModelSwitch: "in-session", liveSteer: "supported" },
+          startSession: (start) =>
+            Effect.sync(() => {
+              const session: ProviderSession = {
+                provider: driverKind,
+                providerInstanceId: input.instanceId,
+                threadId: start.threadId,
+                runtimeMode: start.runtimeMode,
+                status: "running",
+                activeTurnId: TurnId.make("registry-active-turn"),
+                createdAt: "2026-09-16T00:00:00.000Z",
+                updatedAt: "2026-09-16T00:00:00.000Z",
+              };
+              sessions.set(start.threadId, session);
+              return session;
+            }),
+          listSessions: () => Effect.sync(() => [...sessions.values()]),
+          hasSession: (id) => Effect.sync(() => sessions.has(id)),
+          stopSession: (id) =>
+            Effect.sync(() => {
+              sessions.delete(id);
+            }),
+          stopAll: () => Effect.sync(() => sessions.clear()),
+          sendTurn: unexpectedRegistryProviderOperation,
+          steerTurn: unexpectedRegistryProviderOperation,
+          interruptTurn: unexpectedRegistryProviderOperation,
+          respondToRequest: unexpectedRegistryProviderOperation,
+          respondToUserInput: unexpectedRegistryProviderOperation,
+          readThread: unexpectedRegistryProviderOperation,
+          rollbackThread: unexpectedRegistryProviderOperation,
+          streamEvents: Stream.never,
+        };
+        const refresh = Effect.sync(() => {
+          counters.refreshes += 1;
+          return initialSnapshot;
+        });
+        return {
+          instanceId: input.instanceId,
+          driverKind,
+          continuationIdentity: { driverKind, continuationKey: "registry-fixture" },
+          displayName: input.displayName,
+          accentColor: input.accentColor,
+          enabled: input.enabled,
+          adapter,
+          snapshot: {
+            maintenanceCapabilities: { provider: driverKind, packageName: null, update: null },
+            getSnapshot: Effect.succeed(initialSnapshot),
+            refresh,
+            refreshAccountUsage: refresh,
+            refreshModels: refresh,
+            streamChanges: Stream.unwrap(
+              Effect.gen(function* () {
+                const subscription = yield* PubSub.subscribe(changes);
+                counters.subscribers += 1;
+                yield* Effect.addFinalizer(() =>
+                  Effect.sync(() => {
+                    counters.subscribers -= 1;
+                  }),
+                );
+                yield* Deferred.succeed(subscribed, undefined);
+                return Stream.fromSubscription(subscription);
+              }),
+            ),
+          },
+          textGeneration: {
+            generateCommitMessage: unexpectedRegistryProviderOperation,
+            generatePrContent: unexpectedRegistryProviderOperation,
+            generateBranchName: unexpectedRegistryProviderOperation,
+            generateThreadTitle: unexpectedRegistryProviderOperation,
+            generateThreadMetadata: unexpectedRegistryProviderOperation,
+          },
+        };
+      }),
+  };
+  return { driver, counters, subscribed, publications };
+});
+
+describe("ProviderInstanceRegistryLive — non-runtime settings", () => {
+  it.effect("retires the previous runtime when its driver changes", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeLifecycleDriver;
+      const id = ProviderInstanceId.make("registry_fixture");
+      const { registry, mutator } = yield* makeProviderInstanceRegistry({
+        drivers: [fixture.driver],
+        configMap: { [id]: { driver: fixture.driver.driverKind } },
+      });
+      const initial = (yield* registry.getInstance(id))!;
+      yield* initial.adapter.startSession({
+        threadId: ThreadId.make("registry-running-thread"),
+        runtimeMode: "full-access",
+      });
+      // A different, unavailable driver must never inherit the old driver's
+      // running process under the same routing id.
+      yield* mutator.reconcile({ [id]: { driver: ProviderDriverKind.make("other_driver") } });
+      expect(yield* registry.getInstance(id)).toBeUndefined();
+      expect(yield* initial.adapter.listSessions()).toEqual([]);
+      expect(fixture.counters.closed).toBe(1);
+      expect(yield* registry.listUnavailable).toMatchObject([{ driver: "other_driver" }]);
+    }),
+  );
+
+  it.effect(
+    "preserves an active session and one subscription across presentation and default changes",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* makeLifecycleDriver;
+        const id = ProviderInstanceId.make("registry_fixture");
+        const initialEntry: ProviderInstanceConfig = {
+          driver: fixture.driver.driverKind,
+          displayName: "Initial",
+          accentColor: "#111111",
+          config: { binaryPath: "fixture" },
+        };
+        const { registry, mutator } = yield* makeProviderInstanceRegistry({
+          drivers: [fixture.driver],
+          configMap: { [id]: initialEntry },
+        });
+        const initial = (yield* registry.getInstance(id))!;
+        const session = yield* initial.adapter.startSession({
+          threadId: ThreadId.make("registry-running-thread"),
+          runtimeMode: "full-access",
+        });
+        const observed = yield* Queue.unbounded<ServerProvider>();
+        const watch = yield* initial.snapshot.streamChanges.pipe(
+          Stream.runForEach((snapshot) => Queue.offer(observed, snapshot)),
+          Effect.forkChild,
+        );
+        yield* Deferred.await(fixture.subscribed);
+        // Both merged stream branches must subscribe before the first rename.
+        yield* Effect.yieldNow;
+        const updates: readonly Partial<ProviderInstanceConfig>[] = [
+          { displayName: "Renamed" },
+          { accentColor: "#222222" },
+          { defaultModel: "gpt-6-astra" },
+          { defaultModelOptions: [{ id: "reasoningEffort", value: "max" }] },
+          { defaultModelOptions: [{ id: "reasoningEffort", value: "ultra" }] },
+          { displayName: undefined, accentColor: undefined },
+        ];
+        let entry = initialEntry;
+        for (const update of updates) {
+          entry = Object.assign({}, entry, update);
+          yield* mutator.reconcile({ [id]: entry });
+          const current = (yield* registry.getInstance(id))!;
+          expect(current).toBe(initial);
+          expect(current.adapter).toBe(initial.adapter);
+          expect(current.snapshot).toBe(initial.snapshot);
+          expect(yield* current.adapter.listSessions()).toEqual([session]);
+          expect(current.displayName).toBe(entry.displayName);
+          expect(current.accentColor).toBe(entry.accentColor);
+          expect(yield* current.snapshot.getSnapshot).toMatchObject({
+            displayName: entry.displayName ?? fixture.driver.metadata.displayName,
+            accentColor: entry.accentColor,
+          });
+          if ("displayName" in update || "accentColor" in update) {
+            expect(yield* Queue.take(observed)).toMatchObject({
+              displayName: entry.displayName ?? fixture.driver.metadata.displayName,
+              accentColor: entry.accentColor,
+            });
+          }
+        }
+        expect(fixture.counters).toEqual({ created: 1, closed: 0, subscribers: 1, refreshes: 0 });
+        // The underlying driver still stamps its original name. Every refresh
+        // and delayed source event must be overlaid with current presentation,
+        // including removing a previously configured name/color.
+        for (const refresh of [
+          initial.snapshot.refresh,
+          initial.snapshot.refreshAccountUsage!,
+          initial.snapshot.refreshModels!,
+        ]) {
+          expect(yield* refresh).toMatchObject({
+            displayName: "Registry fixture",
+            accentColor: undefined,
+          });
+        }
+        const publishOriginalSnapshot = yield* Queue.take(fixture.publications);
+        yield* publishOriginalSnapshot;
+        expect(yield* Queue.take(observed)).toMatchObject({
+          displayName: "Registry fixture",
+          accentColor: undefined,
+        });
+        yield* mutator.reconcile({});
+        yield* Fiber.join(watch);
+        expect(fixture.counters.closed).toBe(1);
+        expect(fixture.counters.subscribers).toBe(0);
+      }),
+  );
+
+  for (const [field, change] of [
+    ["config", { config: { binaryPath: "replacement" } }],
+    [
+      "environment",
+      { environment: [{ name: "REGISTRY_FIXTURE", value: "changed", sensitive: false }] },
+    ],
+    ["enabled", { enabled: false }],
+  ] as const) {
+    it.effect(`still replaces the runtime when ${field} changes`, () =>
+      Effect.gen(function* () {
+        const fixture = yield* makeLifecycleDriver;
+        const id = ProviderInstanceId.make("registry_fixture");
+        const entry: ProviderInstanceConfig = {
+          driver: fixture.driver.driverKind,
+          config: { binaryPath: "fixture" },
+        };
+        const { registry, mutator } = yield* makeProviderInstanceRegistry({
+          drivers: [fixture.driver],
+          configMap: { [id]: entry },
+        });
+        const initial = (yield* registry.getInstance(id))!;
+        yield* initial.adapter.startSession({
+          threadId: ThreadId.make("registry-running-thread"),
+          runtimeMode: "full-access",
+        });
+        yield* mutator.reconcile({ [id]: { ...entry, ...change } });
+        const current = (yield* registry.getInstance(id))!;
+        expect(current.adapter).not.toBe(initial.adapter);
+        expect(yield* initial.adapter.listSessions()).toEqual([]);
+        expect(yield* current.adapter.listSessions()).toEqual([]);
+        expect(fixture.counters.created).toBe(2);
+        expect(fixture.counters.closed).toBe(1);
+      }),
+    );
+  }
 });
 
 describe("ProviderInstanceRegistryLive — multi-instance codex slice", () => {

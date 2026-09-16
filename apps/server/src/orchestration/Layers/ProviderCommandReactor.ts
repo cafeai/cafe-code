@@ -2,7 +2,7 @@ import {
   type ChatAttachment,
   CommandId,
   EventId,
-  type MessageId,
+  MessageId,
   type ModelSelection,
   type OrchestrationMessage,
   type OrchestrationEvent,
@@ -36,7 +36,8 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
-import { makeDrainableWorker } from "@cafecode/shared/DrainableWorker";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { makeDrainableWorker, type DrainableWorker } from "@cafecode/shared/DrainableWorker";
 
 import {
   resolveThreadWorkspaceCwd,
@@ -68,6 +69,7 @@ import {
   readSystemPromptFileForInjection,
 } from "../../systemPromptFile.ts";
 import { makeProviderTurnRecoveryEvidenceReader } from "../providerTurnRecoveryEvidence.ts";
+import { makeRuntimeRecoveryBarrierReader } from "../providerRuntimeRecovery.ts";
 import {
   buildCodexSteerAcceptedActivityCommand,
   buildCodexSteerDeliveredActivityCommand,
@@ -103,6 +105,18 @@ type ProviderIntentEvent = Extract<
       | "thread.goal-clear-requested";
   }
 >;
+
+type RuntimeLossEvent = Extract<OrchestrationEvent, { type: "thread.activity-appended" }>;
+type RuntimeRecoveryRetry = {
+  readonly _tag: "runtime-recovery-retry";
+  readonly event: Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>;
+  readonly attempt: number;
+};
+type ReactorWork = ProviderIntentEvent | RuntimeLossEvent | RuntimeRecoveryRetry;
+const isRuntimeLossEvent = (event: OrchestrationEvent): event is RuntimeLossEvent =>
+  event.type === "thread.activity-appended" &&
+  event.payload.activity.kind === "runtime.warning" &&
+  readRecord(event.payload.activity.payload)?.recovery === "provider-runtime-ownership-lost";
 
 function toNonEmptyProviderInput(value: string | undefined): string | undefined {
   const normalized = value?.trim();
@@ -543,6 +557,8 @@ const make = Effect.gen(function* () {
   const providerService = yield* ProviderService;
   const providerSessionDirectory = yield* ProviderSessionDirectory;
   const readProviderTurnRecoveryEvidence = yield* makeProviderTurnRecoveryEvidenceReader;
+  const readRuntimeRecoveryBarrier = yield* makeRuntimeRecoveryBarrierReader;
+  const sql = yield* SqlClient.SqlClient;
   const serverConfig = yield* ServerConfig;
   const gitWorkflow = yield* GitWorkflowService;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
@@ -2290,6 +2306,10 @@ const make = Effect.gen(function* () {
   const processTurnStartRequested = Effect.fn("processTurnStartRequested")(function* (
     event: Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>,
   ) {
+    if (event.payload.runtimeRecovery !== undefined) {
+      yield* processRuntimeRecoveryStart(event, 0);
+      return;
+    }
     const key = turnStartKeyForEvent(event);
     if (yield* hasHandledTurnStartRecently(key)) {
       return;
@@ -3261,9 +3281,6 @@ const make = Effect.gen(function* () {
       if (!barriers.intentVerified) {
         return yield* queue("intent-tuple-unverified");
       }
-      if (expectedTurnId === null) {
-        return yield* queue("unbound-expected-turn");
-      }
       if (barriers.sessionStopRequested) {
         return yield* queue("session-stop-requested");
       }
@@ -3280,13 +3297,23 @@ const make = Effect.gen(function* () {
       }
       const projectedNewerTurnId = [
         currentThread.session?.activeTurnId ?? null,
-        currentThread.latestTurn?.turnId ?? null,
+        // An unbound user intent may have been admitted while reconnecting
+        // had a provisional `starting` session. A historical terminal turn is
+        // not its target and must not prevent a proven-inactive next turn.
+        // Concrete running work still fences that path, even without a
+        // projected session pointer.
+        expectedTurnId === null && currentThread.latestTurn?.state !== "running"
+          ? null
+          : (currentThread.latestTurn?.turnId ?? null),
       ].find((turnId): turnId is TurnId => turnId !== null && turnId !== expectedTurnId);
       if (projectedNewerTurnId !== undefined) {
         return yield* queue("newer-turn-active");
       }
 
       if (!isCodexSteerIntent) {
+        // Other providers retain their existing unbound-intent behavior until
+        // they have an equally strong provider-specific liveness boundary.
+        if (expectedTurnId === null) return yield* queue("unbound-expected-turn");
         return { currentThread, recoveryLiveness: undefined } as const;
       }
       const recoveryLiveness = yield* resolveCodexSteerRecoveryLiveness(event.payload.threadId);
@@ -3299,11 +3326,26 @@ const make = Effect.gen(function* () {
       ) {
         return yield* queue("newer-turn-active");
       }
+      if (expectedTurnId === null && recoveryLiveness._tag === "inactive") {
+        const binding = recoveryLiveness.durableBinding;
+        const payload = readRecord(binding?.runtimePayload);
+        // A freshly read inventory and binding must both prove inactivity.
+        // Session preparation can have no active id yet, and an old running
+        // row without an explicit null is not an idle acknowledgement. Do
+        // not turn either uncertainty into permission to submit paid work.
+        if (
+          recoveryLiveness.localSession?.status === "connecting" ||
+          binding?.status === "starting" ||
+          (binding?.status === "running" && payload?.activeTurnId !== null)
+        ) {
+          return yield* queue("provider-liveness-unknown");
+        }
+      }
       return { currentThread, recoveryLiveness } as const;
     });
 
     const initialIntentValidation = yield* revalidateSteerIntentForProviderIo();
-    if (initialIntentValidation === undefined || expectedTurnId === null) {
+    if (initialIntentValidation === undefined) {
       return;
     }
 
@@ -3505,6 +3547,10 @@ const make = Effect.gen(function* () {
         const sendTurnRequest = yield* buildSendTurnRequestForThread({
           threadId: event.payload.threadId,
           messageId: event.payload.messageId,
+          // Unbound input has never named an active provider turn. If one
+          // appears after the final inventory check, fail closed rather than
+          // silently converting this next-turn send into an unrelated steer.
+          ...(expectedTurnId === null ? { allowActiveTurnSteerFallback: false } : {}),
           messageText: message.text,
           attachments: normalizedAttachments,
           ...(thread.modelSelection !== undefined ? { modelSelection: thread.modelSelection } : {}),
@@ -3536,6 +3582,23 @@ const make = Effect.gen(function* () {
           }),
         ),
       );
+
+    if (expectedTurnId === null) {
+      // The exact user message is durable, the later-control barrier is clear,
+      // and the validation above proved no live turn owns it. Reuse the normal
+      // next-turn outbox/receipt path; never borrow a historical latest turn id.
+      const currentSession = initialIntentValidation.currentThread.session;
+      return yield* retrySteerAsNextTurn({
+        summary: "Saved input submitted as next turn",
+        detail:
+          "Provider reconnection completed without an active turn. Cafe Code submitted the saved user message as the next turn.",
+        staleTurnId: null,
+        recovery: "turn-start-after-missing-active-turn-id",
+        provider: currentSession?.providerName ?? undefined,
+        providerInstanceId: currentSession?.providerInstanceId,
+        runtimeMode: currentSession?.runtimeMode,
+      });
+    }
 
     const terminalSteerRecovery = event.payload.terminalSteerRecovery;
     const terminalRecoveryValidation =
@@ -4315,20 +4378,281 @@ const make = Effect.gen(function* () {
     }
   });
 
-  const processDomainEventSafely = (event: ProviderIntentEvent) =>
-    processDomainEvent(event).pipe(
+  /**
+   * Reconnect only from a durable owner-authenticated loss. Quiet reasoning,
+   * UI watchdogs, failed inventory reads and ordinary process exits cannot
+   * mint this authority. A saved, definitely unattempted steer takes priority
+   * over the short continuation; the already-accepted original prompt is
+   * never replayed wholesale (nor are its attachment tokens paid for again).
+   */
+  const processRuntimeLoss = Effect.fn("processRuntimeLoss")(function* (event: RuntimeLossEvent) {
+    const activity = event.payload.activity;
+    const payload = readRecord(activity.payload);
+    const turnId = activity.turnId;
+    const sessionUpdatedAt = payload?.sessionUpdatedAt;
+    if (turnId === null || typeof sessionUpdatedAt !== "string") return;
+    const runtimeRecovery = { sourceEventSequence: event.sequence, turnId, sessionUpdatedAt };
+    const threadId = event.payload.threadId;
+    if (!(yield* readRuntimeRecoveryBarrier({ ...runtimeRecovery, threadId }))) return;
+    const thread = yield* resolveThread(threadId);
+    if (
+      thread === undefined ||
+      thread.archivedAt !== null ||
+      thread.deletedAt !== null ||
+      thread.session?.status !== "stopped" ||
+      thread.session.updatedAt !== sessionUpdatedAt ||
+      thread.latestTurn?.turnId !== turnId
+    )
+      return;
+
+    const savedInputs = thread.activities
+      .filter((entry) => entry.kind === "provider.turn.steer.failed" && entry.turnId === turnId)
+      .map((entry) => readRecord(entry.payload))
+      .filter(
+        (entry) =>
+          entry?.retryableFollowUp === true &&
+          entry.recoveryBarrier === "provider-liveness-unknown" &&
+          typeof entry.messageId === "string" &&
+          typeof entry.intentSequence === "number",
+      );
+    let savedInput: (typeof savedInputs)[number] | undefined;
+    for (const candidate of savedInputs.slice(-16).toReversed()) {
+      if (candidate === undefined) continue;
+      const intentSequence = candidate.intentSequence as number;
+      const messageId = MessageId.make(candidate.messageId as string);
+      const barriers = yield* projectionSnapshotQuery.getCodexSteerIntentRecoveryBarriers({
+        sequence: intentSequence,
+        threadId,
+        messageId,
+        expectedTurnId: turnId,
+      });
+      if (
+        !barriers.intentVerified ||
+        barriers.interruptRequested ||
+        barriers.sessionStopRequested ||
+        barriers.newerTurnRequested
+      )
+        continue;
+      const settlement = yield* sql<{ readonly settled: number }>`
+        WITH suffix AS MATERIALIZED (
+          SELECT event_type, actor_kind, payload_json FROM orchestration_events
+          WHERE aggregate_kind = 'thread' AND stream_id = ${threadId}
+            AND sequence > ${intentSequence}
+          ORDER BY sequence ASC LIMIT 257
+        )
+        SELECT ((SELECT COUNT(*) FROM suffix) > 256 OR EXISTS (
+          SELECT 1 FROM suffix WHERE (
+              (event_type = 'thread.message-sent' AND json_extract(payload_json, '$.messageId') = ${messageId})
+              OR (event_type = 'thread.activity-appended' AND actor_kind = 'server'
+                AND json_extract(payload_json, '$.activity.payload.messageId') = ${messageId}
+                AND json_extract(payload_json, '$.activity.kind') IN (
+                  'provider.turn.steer.accepted', 'provider.turn.steer.recovered', 'provider.turn.steer.delivered'
+                ))
+            ) LIMIT 1
+        )) AS settled
+      `;
+      if (settlement[0]?.settled === 1) continue;
+      savedInput = candidate;
+      break;
+    }
+    const savedMessage =
+      savedInput === undefined
+        ? undefined
+        : thread.messages.find(
+            (entry) => entry.role === "user" && entry.id === savedInput.messageId,
+          );
+    // This stable ID is bound to a server event sequence, not provider text.
+    // Command receipts collapse event replay and a reconnecting renderer's
+    // competing saved-message retry is fenced by ordinary message admission.
+    yield* orchestrationEngine.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make(`server:runtime-recovery:${threadId}:${event.sequence}`),
+      threadId,
+      message: {
+        messageId:
+          savedMessage?.id ?? MessageId.make(`runtime-recovery:${threadId}:${event.sequence}`),
+        role: "user",
+        text:
+          savedMessage?.text ??
+          "The provider connection was interrupted. Continue the unfinished request from the saved session state. Check existing work before repeating any actions.",
+        attachments: savedMessage?.attachments ?? [],
+      },
+      modelSelection: thread.modelSelection,
+      runtimeMode: thread.runtimeMode,
+      interactionMode: thread.interactionMode,
+      runtimeRecovery,
+      createdAt: DateTime.formatIso(yield* DateTime.now),
+    });
+  });
+
+  const processRuntimeRecoveryStart = Effect.fn("processRuntimeRecoveryStart")(function* (
+    event: Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>,
+    attempt: number,
+  ) {
+    const recovery = event.payload.runtimeRecovery;
+    if (recovery === undefined) return;
+    const threadId = event.payload.threadId;
+    const permitted = () =>
+      readRuntimeRecoveryBarrier({
+        ...recovery,
+        threadId,
+        recoveryIntentSequence: event.sequence,
+      });
+    if (!(yield* permitted())) return;
+    const thread = yield* resolveThread(threadId);
+    if (thread === undefined || thread.archivedAt !== null || thread.deletedAt !== null) return;
+    const message = thread.messages.find((entry) => entry.id === event.payload.messageId);
+    if (message?.role !== "user") return;
+
+    // This immutable pre-I/O outbox boundary survives a crash after the
+    // provider accepts but before Cafe can persist its ACK. Never retry that
+    // ambiguity as fresh work. Ordinary transport retries retain their own
+    // idempotency; this policy only retries session preparation, not paid sends.
+    const attemptCommandId = CommandId.make(`server:runtime-recovery-attempt:${event.sequence}`);
+    const attempted = yield* sql<{ readonly present: number }>`
+      SELECT 1 AS present FROM orchestration_events
+      WHERE command_id = ${attemptCommandId} LIMIT 1
+    `;
+    if (attempted.length > 0) return;
+
+    const prepared = yield* Effect.gen(function* () {
+      const before = (yield* providerService.listSessions()).find(
+        (entry) => entry.threadId === threadId,
+      );
+      if (before?.status === "running" && before.activeTurnId !== undefined) {
+        return { request: undefined, live: before };
+      }
+      const request = yield* buildSendTurnRequestForThread({
+        threadId,
+        messageId: message.id,
+        messageText: message.text,
+        attachments: message.attachments ?? [],
+        modelSelection: event.payload.modelSelection ?? thread.modelSelection,
+        interactionMode: event.payload.interactionMode,
+        allowActiveTurnSteerFallback: false,
+        createdAt: event.payload.createdAt,
+        thread,
+      });
+      // A failed second read is just as inconclusive as a failed first read.
+      // Keep both within the pre-send retry boundary.
+      const live = (yield* providerService.listSessions()).find(
+        (entry) => entry.threadId === threadId,
+      );
+      return { request, live };
+    }).pipe(Effect.matchCause({ onFailure: () => undefined, onSuccess: (result) => result }));
+    if (prepared === undefined) {
+      // Backoff is outside the global serial worker so Stop and unrelated
+      // tasks never wait for a reconnect timer. Each wakeup rechecks durable
+      // user intent and the same immutable attempt marker before doing I/O.
+      if (yield* permitted()) {
+        const delayMs = Math.min(60_000, 1_000 * 2 ** Math.min(attempt, 6));
+        yield* Effect.logWarning("provider runtime recovery awaiting reconnect", {
+          attempt,
+          delayMs,
+        });
+        yield* Effect.sleep(delayMs).pipe(
+          Effect.andThen(
+            worker.enqueue({ _tag: "runtime-recovery-retry", event, attempt: attempt + 1 }),
+          ),
+          Effect.forkScoped,
+        );
+      }
+      return;
+    }
+    if (!(yield* permitted())) return;
+    // Native resume can itself restore a live turn (notably provider goals).
+    // Its work wins; never inject a continuation into that already-live turn.
+    const live = prepared.live;
+    if (live?.status === "running" && live.activeTurnId !== undefined) {
+      yield* markThreadRunningFromSendTurnResult({ threadId, turnId: live.activeTurnId });
+      return;
+    }
+    if (prepared.request === undefined) return;
+    const now = DateTime.formatIso(yield* DateTime.now);
+    // Different backends can briefly share the same durable intent. A stable
+    // receipt alone deduplicates the marker, not the subsequent external I/O.
+    // Bind this attempt to a fresh owner nonce, then read back the winner.
+    const attemptOwnerId = crypto.randomUUID();
+    yield* orchestrationEngine.dispatch({
+      type: "thread.activity.append",
+      commandId: attemptCommandId,
+      threadId,
+      activity: {
+        id: EventId.make(`runtime-recovery-attempt:${event.sequence}`),
+        kind: "runtime.warning",
+        tone: "info",
+        summary: "Continuing interrupted provider work",
+        turnId: recovery.turnId,
+        payload: {
+          recovery: "provider-runtime-continuation-attempted",
+          sourceEventSequence: recovery.sourceEventSequence,
+          attemptOwnerId,
+        },
+        createdAt: now,
+      },
+      createdAt: now,
+    });
+    const winningAttempt = yield* sql<{ readonly ownerId: string | null }>`
+      SELECT json_extract(payload_json, '$.activity.payload.attemptOwnerId') AS ownerId
+      FROM orchestration_events WHERE command_id = ${attemptCommandId}
+        AND aggregate_kind = 'thread' AND stream_id = ${threadId}
+        AND actor_kind = 'server' AND event_type = 'thread.activity-appended'
+      LIMIT 1
+    `;
+    if (winningAttempt[0]?.ownerId !== attemptOwnerId) return;
+    if (!(yield* permitted())) return;
+    // Keep this bounded submission on the serial worker, rather than forking
+    // it behind Stop. A Stop admitted while the ACK is pending is persisted
+    // immediately, blocks the late running projection below, and its queued
+    // interrupt executes after this submission settles. The daemon's own
+    // lifecycle lock retains ordering if the network outcome is uncertain.
+    yield* providerService.sendTurn(prepared.request).pipe(
+      Effect.timeout("30 seconds"),
+      Effect.flatMap((turn) =>
+        Effect.gen(function* () {
+          if (!(yield* permitted())) return;
+          yield* reconcileAcceptedSendTurnResult({
+            threadId,
+            messageId: message.id,
+            intentSequence: event.sequence,
+            turn,
+            intentCreatedAt: event.payload.createdAt,
+          });
+        }),
+      ),
+      Effect.catchCause(() =>
+        appendProviderFailureActivity({
+          threadId,
+          kind: "provider.turn.start.failed",
+          summary: "Provider continuation needs reconciliation",
+          detail:
+            "Cafe reconnected, but could not confirm continuation acceptance. The saved input was not resent to avoid duplicate work.",
+          turnId: recovery.turnId,
+          createdAt: now,
+        }),
+      ),
+    );
+  });
+
+  const processDomainEventSafely = (event: ReactorWork) =>
+    ("_tag" in event
+      ? processRuntimeRecoveryStart(event.event, event.attempt)
+      : isRuntimeLossEvent(event)
+        ? processRuntimeLoss(event)
+        : processDomainEvent(event as ProviderIntentEvent)
+    ).pipe(
       Effect.catchCause((cause) => {
         if (Cause.hasInterruptsOnly(cause)) {
           return Effect.failCause(cause);
         }
         return Effect.logWarning("provider command reactor failed to process event", {
-          eventType: event.type,
+          eventType: "_tag" in event ? event._tag : event.type,
           cause: Cause.pretty(cause),
         });
       }),
     );
 
-  const worker = yield* makeDrainableWorker(processDomainEventSafely);
+  const worker: DrainableWorker<ReactorWork> = yield* makeDrainableWorker(processDomainEventSafely);
 
   const enqueueProviderIntentEvent = Effect.fn("enqueueProviderIntentEvent")(function* (
     event: ProviderIntentEvent,
@@ -4402,6 +4726,10 @@ const make = Effect.gen(function* () {
   });
 
   const processEvent = Effect.fn("processEvent")(function* (event: OrchestrationEvent) {
+    if (isRuntimeLossEvent(event)) {
+      yield* worker.enqueue(event);
+      return;
+    }
     if (
       event.type === "thread.runtime-mode-set" ||
       event.type === "thread.turn-start-requested" ||
@@ -4428,6 +4756,53 @@ const make = Effect.gen(function* () {
       Stream.runForEach(orchestrationEngine.streamDomainEvents, processEvent),
     );
     yield* Effect.yieldNow;
+
+    // Recover only our recent, explicitly marked losses, not every historical
+    // interrupted turn. The bounded per-thread suffix avoids scanning large
+    // transcripts and includes admitted-but-not-attempted continuations after
+    // a backend restart. Exact marker/Stop barriers are rechecked by the worker.
+    yield* Effect.gen(function* () {
+      const recoveryShell = yield* projectionSnapshotQuery.getShellSnapshot();
+      for (const thread of recoveryShell.threads) {
+        if (thread.archivedAt !== null || thread.deletedAt !== null) continue;
+        if (thread.session?.status === "running") continue;
+        const rows = yield* sql<{ readonly sequence: number }>`
+        WITH recent AS MATERIALIZED (
+          SELECT sequence, event_type, actor_kind, payload_json
+          FROM orchestration_events INDEXED BY idx_orch_events_stream_sequence
+          WHERE aggregate_kind = 'thread' AND stream_id = ${thread.id}
+          ORDER BY sequence DESC LIMIT 64
+        )
+        SELECT sequence FROM recent WHERE actor_kind = 'server' AND (
+          (event_type = 'thread.activity-appended' AND
+            json_extract(payload_json, '$.activity.payload.recovery') = 'provider-runtime-ownership-lost')
+          OR (event_type = 'thread.turn-start-requested' AND
+            json_type(payload_json, '$.runtimeRecovery') = 'object')
+        ) ORDER BY sequence DESC LIMIT 1
+      `;
+        const row = rows[0];
+        if (row === undefined) continue;
+        const persisted = yield* orchestrationEngine
+          .readEvents(row.sequence - 1, 1)
+          .pipe(Stream.runHead);
+        if (Option.isNone(persisted) || persisted.value.sequence !== row.sequence) continue;
+        if (isRuntimeLossEvent(persisted.value)) yield* worker.enqueue(persisted.value);
+        else if (
+          persisted.value.type === "thread.turn-start-requested" &&
+          persisted.value.payload.runtimeRecovery !== undefined
+        )
+          yield* worker.enqueue({
+            _tag: "runtime-recovery-retry",
+            event: persisted.value,
+            attempt: 0,
+          });
+        // SQLite is synchronous. Even a bounded per-thread query must yield the
+        // actual event loop between candidates in a mature workspace.
+        yield* Effect.sleep(1);
+      }
+    }).pipe(
+      Effect.catchCause(() => Effect.logWarning("provider runtime recovery startup read deferred")),
+    );
 
     yield* recoverInterruptedProviderWorkOnStartup().pipe(
       Effect.catchCause((cause) =>

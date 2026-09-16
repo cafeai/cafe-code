@@ -40,6 +40,7 @@ import {
   OrchestrationThreadHardDeleteError,
 } from "../Errors.ts";
 import { decideOrchestrationCommand } from "../decider.ts";
+import { makeRuntimeRecoveryBarrierReader } from "../providerRuntimeRecovery.ts";
 import {
   hydrateLegacyMessageIdentitiesForThread,
   readLatestMessageIdentity,
@@ -230,6 +231,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   const commandReceiptRepository = yield* OrchestrationCommandReceiptRepository;
   const projectionPipeline = yield* OrchestrationProjectionPipeline;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
+  const readRuntimeRecoveryBarrier = yield* makeRuntimeRecoveryBarrierReader;
 
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
   let commandReadModel = createEmptyReadModel(yield* nowIso);
@@ -447,9 +449,22 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           yield* assertUserMessageIdentityAvailable(envelope.command);
         }
 
+        // Serialized command admission linearizes this durable check before
+        // any later Stop/start/settings command. The provider reactor repeats
+        // it immediately before I/O, covering controls accepted after this
+        // intent commits while the provider side effect is still pending.
+        const runtimeRecoveryBarrierVerified =
+          envelope.command.type === "thread.turn.start" &&
+          envelope.command.runtimeRecovery !== undefined
+            ? yield* readRuntimeRecoveryBarrier({
+                ...envelope.command.runtimeRecovery,
+                threadId: envelope.command.threadId,
+              })
+            : false;
         const eventBase = yield* decideOrchestrationCommand({
           command: envelope.command,
           readModel: commandReadModel,
+          runtimeRecoveryBarrierVerified,
         });
         const eventBases = Array.isArray(eventBase) ? eventBase : [eventBase];
         const committedCommand = yield* sql
@@ -700,8 +715,8 @@ const makeOrchestrationEngine = Effect.gen(function* () {
     Effect.annotateLogs({ sequence: commandReadModel.snapshotSequence }),
   );
 
-  const readEvents: OrchestrationEngineShape["readEvents"] = (fromSequenceExclusive) =>
-    eventStore.readFromSequence(fromSequenceExclusive);
+  const readEvents: OrchestrationEngineShape["readEvents"] = (fromSequenceExclusive, limit) =>
+    eventStore.readFromSequence(fromSequenceExclusive, limit);
 
   const dispatch: OrchestrationEngineShape["dispatch"] = (command) =>
     Effect.gen(function* () {

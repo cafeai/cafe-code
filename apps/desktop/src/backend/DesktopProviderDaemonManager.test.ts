@@ -3,6 +3,7 @@ import * as crypto from "node:crypto";
 import * as http from "node:http";
 
 import {
+  PROVIDER_DAEMON_HEALTH_PATH,
   PROVIDER_DAEMON_LEASES_PATH,
   ProviderDaemonHealth,
   ProviderDaemonLeaseResponse,
@@ -10,6 +11,7 @@ import {
 } from "@cafecode/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
+import { vi } from "vitest";
 import type * as Context from "effect/Context";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
@@ -19,15 +21,18 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
+import * as TestClock from "effect/testing/TestClock";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
 import * as NetService from "@cafecode/shared/Net";
 import * as ElectronSafeStorage from "../electron/ElectronSafeStorage.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
+import * as DesktopDebugServer from "../debug/DesktopDebugServer.ts";
 import * as DesktopProviderDaemonManager from "./DesktopProviderDaemonManager.ts";
 
 const TEST_TOKEN = "provider-daemon-test-token-000000000000000000000000";
+const TEST_LEASE_TOKEN = "provider-daemon-lease-token-000000000000000000000000";
 type TestProcessSpawner = Context.Service.Shape<typeof ChildProcessSpawner.ChildProcessSpawner>;
 const encodeProviderDaemonHealthJson = Schema.encodeSync(
   Schema.fromJsonString(ProviderDaemonHealth),
@@ -72,7 +77,10 @@ const startFakeProviderDaemon = (
     try: () =>
       new Promise<FakeProviderDaemon>((resolve, reject) => {
         const server = http.createServer((request, response) => {
-          if (request.headers.authorization !== `Bearer ${TEST_TOKEN}`) {
+          if (
+            request.headers.authorization !== `Bearer ${TEST_TOKEN}` &&
+            request.headers.authorization !== `Bearer ${TEST_LEASE_TOKEN}`
+          ) {
             response.writeHead(401, {
               "content-type": "application/json",
             });
@@ -92,7 +100,7 @@ const startFakeProviderDaemon = (
             response.end(
               `${encodeProviderDaemonLeaseResponseJson({
                 leaseId: "lease-000000000000000000000000000",
-                token: "provider-daemon-lease-token-000000000000000000000000",
+                token: TEST_LEASE_TOKEN,
                 capabilities: ["health", "events", "rpc"],
                 issuedAt: "1970-01-01T00:00:00.000Z",
               })}\n`,
@@ -422,7 +430,7 @@ describe("DesktopProviderDaemonManager", () => {
       );
     }
   }
-  it.effect("adopts an existing authorized loopback provider daemon marker", () =>
+  it.effect("keeps rich-health observation time separate from liveness after adoption", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
@@ -438,8 +446,21 @@ describe("DesktopProviderDaemonManager", () => {
         backendBundle,
       });
       yield* fileSystem.writeFileString(backendEntryPath, backendBundle);
-      const fakeDaemon = yield* startFakeProviderDaemon(runtimeBuildId);
+      let failHealth = false;
+      const fakeDaemon = yield* startFakeProviderDaemon(
+        runtimeBuildId,
+        (pathname) => failHealth && pathname === PROVIDER_DAEMON_HEALTH_PATH,
+      );
       yield* Effect.addFinalizer(() => fakeDaemon.close);
+      let publishedSnapshot: Record<string, unknown> = {};
+      const debugPublication = vi
+        .spyOn(DesktopDebugServer, "publishProviderDaemonDebugSnapshot")
+        .mockImplementation((snapshot) =>
+          Effect.sync(() => {
+            publishedSnapshot = snapshot;
+          }),
+        );
+      yield* Effect.addFinalizer(() => Effect.sync(() => debugPublication.mockRestore()));
       const httpBaseUrl = `http://127.0.0.1:${fakeDaemon.port}`;
 
       yield* fileSystem.writeFileString(credentialPath, TEST_TOKEN);
@@ -475,6 +496,22 @@ describe("DesktopProviderDaemonManager", () => {
         assert.equal(Option.getOrUndefined(snapshot.pid), process.pid);
         assert.equal(Option.getOrUndefined(snapshot.lastHealth)?.activeSessionCount, 3);
         assert.equal(snapshot.runtimeBuildId, runtimeBuildId);
+        const adoptedHealthObservedAt = publishedSnapshot.lastHealthObservedAt;
+        assert.isString(adoptedHealthObservedAt);
+
+        yield* TestClock.adjust("6 seconds");
+        assert.isTrue(Option.isSome(yield* manager.probeLiveness));
+        assert.equal(publishedSnapshot.lastHealthObservedAt, adoptedHealthObservedAt);
+
+        failHealth = true;
+        assert.isTrue(Option.isNone(yield* manager.refreshHealth));
+        assert.equal(publishedSnapshot.lastHealthObservedAt, adoptedHealthObservedAt);
+
+        failHealth = false;
+        assert.isTrue(Option.isSome(yield* manager.refreshHealth));
+        assert.notEqual(publishedSnapshot.lastHealthObservedAt, adoptedHealthObservedAt);
+        assert.isFalse(JSON.stringify(publishedSnapshot).includes(TEST_TOKEN));
+        assert.isFalse(JSON.stringify(publishedSnapshot).includes(TEST_LEASE_TOKEN));
       }).pipe(Effect.provide(makeManagerLayer(baseDir, markerPath, backendEntryPath)));
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );

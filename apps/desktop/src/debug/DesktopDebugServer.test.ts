@@ -283,6 +283,7 @@ const makeLargeRendererSnapshot = (index: number) => ({
 
 const makeLargeProviderDaemonSnapshot = () => ({
   status: "running",
+  lastHealthObservedAt: new Date().toISOString(),
   pid: 123,
   endpoint: {
     httpBaseUrl: "http://127.0.0.1:3773",
@@ -782,7 +783,7 @@ describe("DesktopDebugServer compact snapshots", () => {
   it("uses cached provider daemon snapshots for ordinary debug reads", async () => {
     debugServer.reset();
     debugServer.publishProviderDaemonSnapshot(makeLargeProviderDaemonSnapshot());
-    debugServer.setProviderDaemonSnapshotUpdatedAt("9999-01-01T00:00:00.000Z");
+    debugServer.setProviderDaemonHealthObservedAt("9999-01-01T00:00:00.000Z");
     let refreshCount = 0;
     debugServer.setProviderDaemonSnapshotRefresher(async () => {
       refreshCount += 1;
@@ -806,11 +807,78 @@ describe("DesktopDebugServer compact snapshots", () => {
       debugServer.publishProviderDaemonSnapshot(makeLargeProviderDaemonSnapshot());
       resolveBackgroundRefresh();
     });
-    debugServer.setProviderDaemonSnapshotUpdatedAt("1970-01-01T00:00:00.000Z");
+    debugServer.setProviderDaemonHealthObservedAt("1970-01-01T00:00:00.000Z");
     await debugServer.prepareProviderDaemonSnapshotForDebugRequest(false);
     await backgroundRefreshCompleted;
 
     assert.equal(refreshCount, 2);
     assert.equal(debugServer.getProviderDaemonRefreshAttemptCount(), 2);
+  });
+
+  it("refreshes old rich health even when liveness keeps republishing manager state", async () => {
+    debugServer.reset();
+    const oldHealthObservedAt = "1970-01-01T00:00:00.000Z";
+    const cachedSnapshot = {
+      ...makeLargeProviderDaemonSnapshot(),
+      lastHealthObservedAt: oldHealthObservedAt,
+    };
+    // Each publication gets a fresh manager updatedAt, just like a successful
+    // watchdog liveness probe, but none observed session/RPC/event diagnostics.
+    for (let index = 0; index < 3; index += 1) {
+      debugServer.publishProviderDaemonSnapshot(cachedSnapshot);
+    }
+    const stale = debugServer.buildCompactDebugSnapshot().providerDaemon as Record<string, unknown>;
+    assert.equal(stale.lastHealthObservedAt, oldHealthObservedAt);
+    assert.isTrue(stale.stale);
+    assert.isAbove(stale.ageMs as number, 5_000);
+    assert.notEqual(stale.updatedAt, oldHealthObservedAt);
+
+    let finishRefresh!: () => void;
+    const completed = new Promise<void>((resolve) => {
+      finishRefresh = resolve;
+    });
+    debugServer.setProviderDaemonSnapshotRefresher(async () => {
+      await completed;
+      debugServer.publishProviderDaemonSnapshot(makeLargeProviderDaemonSnapshot());
+    });
+    try {
+      // Compact reads must finish before this controlled slow refresh does.
+      await debugServer.prepareProviderDaemonSnapshotForDebugRequest(false);
+      await debugServer.prepareProviderDaemonSnapshotForDebugRequest(false);
+      assert.equal(debugServer.getProviderDaemonRefreshAttemptCount(), 1);
+      assert.isTrue(
+        (debugServer.buildCompactDebugSnapshot().providerDaemon as Record<string, unknown>).stale,
+      );
+    } finally {
+      finishRefresh();
+      await completed;
+    }
+    const refreshed = debugServer.buildCompactDebugSnapshot().providerDaemon as Record<
+      string,
+      unknown
+    >;
+    assert.isFalse(refreshed.stale);
+    assert.notEqual(refreshed.lastHealthObservedAt, oldHealthObservedAt);
+  });
+
+  it("treats a missing rich-health observation time as stale despite a fresh publication", async () => {
+    debugServer.reset();
+    debugServer.publishProviderDaemonSnapshot({
+      ...makeLargeProviderDaemonSnapshot(),
+      lastHealthObservedAt: null,
+    });
+    const snapshot = debugServer.buildCompactDebugSnapshot().providerDaemon as Record<
+      string,
+      unknown
+    >;
+    assert.isNull(snapshot.lastHealthObservedAt);
+    assert.isNull(snapshot.ageMs);
+    assert.isTrue(snapshot.stale);
+    let refreshCount = 0;
+    debugServer.setProviderDaemonSnapshotRefresher(async () => {
+      refreshCount += 1;
+    });
+    await debugServer.prepareProviderDaemonSnapshotForDebugRequest(false);
+    assert.equal(refreshCount, 1);
   });
 });

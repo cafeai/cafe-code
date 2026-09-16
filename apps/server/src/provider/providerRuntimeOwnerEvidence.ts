@@ -21,6 +21,9 @@ export interface ProviderRuntimeOwnerEvidence {
 }
 
 export const PROVIDER_RUNTIME_OWNER_HEARTBEAT_INTERVAL_MS = 60_000;
+/** Canonical exit reason reserved for verified loss of this runtime's session. */
+export const PROVIDER_RUNTIME_OWNERSHIP_LOST_REASON =
+  "Provider session is no longer owned by its configured runtime.";
 export const PROVIDER_RUNTIME_OWNER_MAX_HEARTBEAT_AGE_MS = 3 * 60_000;
 export const PROVIDER_RUNTIME_OWNER_MAX_FUTURE_SKEW_MS = 60_000;
 

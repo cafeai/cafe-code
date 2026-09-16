@@ -357,6 +357,353 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
 const advanceTestClock = (ms: number) =>
   TestClock.adjust(`${ms} millis`).pipe(Effect.andThen(Effect.yieldNow));
 
+/** A settings reload drops the old scoped adapter without delivering an exit. */
+function makeReloadableProviderServiceFixture() {
+  const codex = makeFakeCodexAdapter();
+  const claude = makeFakeCodexAdapter(CLAUDE_AGENT_DRIVER);
+  const replacement = makeFakeCodexAdapter();
+  const adapters = new Map([
+    [codexInstanceId, codex.adapter],
+    [claudeAgentInstanceId, claude.adapter],
+  ]);
+  const changes = Effect.runSync(PubSub.unbounded<void>());
+  const base = makeAdapterRegistryMock({
+    [CODEX_DRIVER]: codex.adapter,
+    [CLAUDE_AGENT_DRIVER]: claude.adapter,
+  });
+  const registry: ProviderAdapterRegistryShape = {
+    ...base,
+    getByInstance: (instanceId) =>
+      Effect.suspend(() => {
+        const adapter = adapters.get(instanceId);
+        return adapter === undefined
+          ? Effect.fail(new ProviderUnsupportedError({ provider: CODEX_DRIVER }))
+          : Effect.succeed(adapter);
+      }),
+    listInstances: () => Effect.sync(() => Array.from(adapters.keys())),
+    streamChanges: Stream.fromPubSub(changes),
+    subscribeChanges: PubSub.subscribe(changes),
+  };
+  const repositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
+    Layer.provide(SqlitePersistenceMemory),
+  );
+  const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(repositoryLayer));
+  const layer = Layer.mergeAll(
+    directoryLayer,
+    makeProviderServiceLive().pipe(
+      Layer.provide(Layer.succeed(ProviderAdapterRegistry, registry)),
+      Layer.provide(directoryLayer),
+      Layer.provide(defaultServerSettingsLayer),
+      Layer.provide(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+    ),
+  );
+  const replace = (adapter: ProviderAdapterShape<ProviderAdapterError> | undefined) =>
+    Effect.sync(() => {
+      if (adapter === undefined) adapters.delete(codexInstanceId);
+      else adapters.set(codexInstanceId, adapter);
+    }).pipe(Effect.andThen(PubSub.publish(changes, undefined)));
+  const start = (threadId: ThreadId, instanceId = codexInstanceId) =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      yield* provider.startSession(threadId, {
+        provider: instanceId === codexInstanceId ? CODEX_DRIVER : CLAUDE_AGENT_DRIVER,
+        providerInstanceId: instanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      yield* provider.sendTurn({ threadId, input: "Work until stopped", attachments: [] });
+    });
+  return { layer, codex, claude, replacement, replace, start };
+}
+
+for (const change of ["replacement", "removal", "missed-exit"] as const) {
+  it.effect(`ProviderService reconciles owned orphan sessions after ${change}`, () => {
+    const fixture = makeReloadableProviderServiceFixture();
+    return Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      const threadId = asThreadId(`orphan-${change}`);
+      const siblingId = asThreadId(`live-sibling-${change}`);
+      const events: ProviderRuntimeEvent[] = [];
+      yield* Stream.runForEach(provider.streamEvents, (event) =>
+        Effect.sync(() => events.push(event)),
+      ).pipe(Effect.forkChild);
+      yield* advanceTestClock(1);
+      yield* fixture.start(threadId);
+      yield* fixture.start(siblingId, claudeAgentInstanceId);
+      const before = Option.getOrThrow(yield* directory.getBinding(threadId));
+
+      // Simulate scope finalization dropping every live session and losing
+      // its final stream notification. The service must supply that boundary.
+      yield* fixture.codex.stopAll();
+      if (change !== "missed-exit") {
+        yield* fixture.replace(change === "removal" ? undefined : fixture.replacement.adapter);
+      }
+      yield* advanceTestClock(change === "missed-exit" ? 60_000 : 1);
+
+      const after = Option.getOrThrow(yield* directory.getBinding(threadId));
+      assert.equal(after.status, "stopped");
+      assert.deepEqual(after.resumeCursor, before.resumeCursor);
+      assert.equal((after.runtimePayload as Record<string, unknown>).activeTurnId, null);
+      assert.equal(
+        (after.runtimePayload as Record<string, unknown>).lastRuntimeEvent,
+        "session.exited",
+      );
+      assert.equal(Option.getOrThrow(yield* directory.getBinding(siblingId)).status, "running");
+      const exits = events.filter((event) => event.type === "session.exited");
+      assert.equal(exits.length, 1);
+      assert.equal(exits[0]?.threadId, threadId);
+      assert.equal(exits[0]?.turnId, `turn-${threadId}`);
+      assert.equal(fixture.replacement.startSession.mock.calls.length, 0);
+      yield* advanceTestClock(60_000);
+      assert.equal(events.filter((event) => event.type === "session.exited").length, 1);
+    }).pipe(Effect.provide(fixture.layer));
+  });
+}
+
+it.effect("ProviderService orphan reconciliation preserves another runtime owner", () => {
+  const fixture = makeReloadableProviderServiceFixture();
+  return Effect.gen(function* () {
+    const directory = yield* ProviderSessionDirectory;
+    const threadId = asThreadId("orphan-different-owner");
+    yield* fixture.start(threadId);
+    yield* directory.upsert({
+      threadId,
+      provider: CODEX_DRIVER,
+      providerInstanceId: codexInstanceId,
+      runtimePayload: { runtimeOwnerId: "00000000-0000-4000-8000-000000000001" },
+    });
+    yield* fixture.codex.stopAll();
+    yield* fixture.replace(fixture.replacement.adapter);
+    yield* advanceTestClock(60_000);
+    const binding = Option.getOrThrow(yield* directory.getBinding(threadId));
+    assert.equal(binding.status, "running");
+    assert.equal(
+      (binding.runtimePayload as Record<string, unknown>).activeTurnId,
+      `turn-${threadId}`,
+    );
+  }).pipe(Effect.provide(fixture.layer));
+});
+
+it.effect("ProviderService orphan reconciliation treats failed inventory as inconclusive", () => {
+  const fixture = makeReloadableProviderServiceFixture();
+  return Effect.gen(function* () {
+    const directory = yield* ProviderSessionDirectory;
+    const threadId = asThreadId("orphan-inventory-failed");
+    yield* fixture.start(threadId);
+    yield* fixture.codex.stopAll();
+    fixture.replacement.listSessions.mockImplementation(() => Effect.die("inventory unavailable"));
+    yield* fixture.replace(fixture.replacement.adapter);
+    yield* advanceTestClock(1);
+    assert.equal(Option.getOrThrow(yield* directory.getBinding(threadId)).status, "running");
+    // A later conclusive observation repairs the binding; failed inventory
+    // never freezes the periodic reconciliation fiber permanently.
+    fixture.replacement.listSessions.mockImplementation(() => Effect.succeed([]));
+    yield* advanceTestClock(60_000);
+    assert.equal(Option.getOrThrow(yield* directory.getBinding(threadId)).status, "stopped");
+  }).pipe(Effect.provide(fixture.layer));
+});
+
+it.effect(
+  "ProviderService orphan reconciliation preserves a concurrently started replacement",
+  () => {
+    const fixture = makeReloadableProviderServiceFixture();
+    return Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      const threadId = asThreadId("orphan-new-generation");
+      yield* fixture.start(threadId);
+      yield* fixture.codex.stopAll();
+      const inventoryStarted = yield* Deferred.make<void>();
+      const releaseInventory = yield* Deferred.make<void>();
+      fixture.replacement.listSessions.mockImplementationOnce(() =>
+        Deferred.succeed(inventoryStarted, undefined).pipe(
+          Effect.andThen(Deferred.await(releaseInventory)),
+          Effect.as([]),
+        ),
+      );
+      yield* fixture.replace(fixture.replacement.adapter);
+      yield* Deferred.await(inventoryStarted);
+      // This start acquires the thread permit before reconciliation can do so.
+      // Even if the stale inventory said empty, this new session must survive.
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      yield* Deferred.succeed(releaseInventory, undefined);
+      yield* advanceTestClock(1);
+      assert.isTrue(yield* fixture.replacement.hasSession(threadId));
+      assert.equal(Option.getOrThrow(yield* directory.getBinding(threadId)).status, "running");
+    }).pipe(Effect.provide(fixture.layer));
+  },
+);
+
+it.effect("ProviderService orphan reconciliation leaves an explicit Stop terminal", () => {
+  const fixture = makeReloadableProviderServiceFixture();
+  return Effect.gen(function* () {
+    const provider = yield* ProviderService;
+    const directory = yield* ProviderSessionDirectory;
+    const threadId = asThreadId("orphan-explicit-stop");
+    const events: ProviderRuntimeEvent[] = [];
+    yield* Stream.runForEach(provider.streamEvents, (event) =>
+      Effect.sync(() => events.push(event)),
+    ).pipe(Effect.forkChild);
+    yield* advanceTestClock(1);
+    yield* fixture.start(threadId);
+    yield* provider.stopSession({ threadId });
+    yield* fixture.replace(fixture.replacement.adapter);
+    yield* advanceTestClock(60_000);
+    assert.equal(Option.getOrThrow(yield* directory.getBinding(threadId)).status, "stopped");
+    assert.equal(events.filter((event) => event.type === "session.exited").length, 0);
+    assert.equal(fixture.replacement.startSession.mock.calls.length, 0);
+  }).pipe(Effect.provide(fixture.layer));
+});
+
+it.effect(
+  "ProviderService orphan reconciliation cleans idle bindings without recovery events",
+  () => {
+    const fixture = makeReloadableProviderServiceFixture();
+    return Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      const threadId = asThreadId("orphan-idle-session");
+      const events: ProviderRuntimeEvent[] = [];
+      yield* Stream.runForEach(provider.streamEvents, (event) =>
+        Effect.sync(() => events.push(event)),
+      ).pipe(Effect.forkChild);
+      yield* advanceTestClock(1);
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      yield* fixture.codex.stopAll();
+      yield* fixture.replace(fixture.replacement.adapter);
+      yield* advanceTestClock(1);
+      assert.equal(Option.getOrThrow(yield* directory.getBinding(threadId)).status, "stopped");
+      assert.equal(events.length, 0);
+    }).pipe(Effect.provide(fixture.layer));
+  },
+);
+
+it.effect("ProviderService orphan reconciliation bounds an inconclusive inventory timeout", () => {
+  const fixture = makeReloadableProviderServiceFixture();
+  return Effect.gen(function* () {
+    const directory = yield* ProviderSessionDirectory;
+    const threadId = asThreadId("orphan-inventory-timeout");
+    yield* fixture.start(threadId);
+    yield* fixture.codex.stopAll();
+    fixture.replacement.listSessions.mockImplementationOnce(() => Effect.never);
+    yield* fixture.replace(fixture.replacement.adapter);
+    yield* advanceTestClock(5_001);
+    assert.equal(Option.getOrThrow(yield* directory.getBinding(threadId)).status, "running");
+    yield* advanceTestClock(60_000);
+    assert.equal(Option.getOrThrow(yield* directory.getBinding(threadId)).status, "stopped");
+  }).pipe(Effect.provide(fixture.layer));
+});
+
+it.effect(
+  "ProviderService orphan reconciliation rechecks durable owner after inventory I/O",
+  () => {
+    const fixture = makeReloadableProviderServiceFixture();
+    return Effect.gen(function* () {
+      const directory = yield* ProviderSessionDirectory;
+      const threadId = asThreadId("orphan-owner-generation-race");
+      yield* fixture.start(threadId);
+      yield* fixture.codex.stopAll();
+      const checkStarted = yield* Deferred.make<void>();
+      const releaseCheck = yield* Deferred.make<void>();
+      fixture.replacement.hasSession.mockImplementationOnce(() =>
+        Deferred.succeed(checkStarted, undefined).pipe(
+          Effect.andThen(Deferred.await(releaseCheck)),
+          Effect.as(false),
+        ),
+      );
+      yield* fixture.replace(fixture.replacement.adapter);
+      yield* Deferred.await(checkStarted);
+      // A second process does not take this process's lifecycle permit. The
+      // post-I/O re-read must therefore reject its distinct owner generation.
+      yield* directory.upsert({
+        threadId,
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        runtimePayload: { runtimeOwnerId: "00000000-0000-4000-8000-000000000002" },
+      });
+      yield* Deferred.succeed(releaseCheck, undefined);
+      yield* advanceTestClock(1);
+      assert.equal(Option.getOrThrow(yield* directory.getBinding(threadId)).status, "running");
+    }).pipe(Effect.provide(fixture.layer));
+  },
+);
+
+for (const terminalBoundary of ["reload", "stop"] as const) {
+  it.effect(
+    `ProviderService does not resurrect ${terminalBoundary} from a delayed heartbeat`,
+    () => {
+      const fixture = makeReloadableProviderServiceFixture();
+      return Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const directory = yield* ProviderSessionDirectory;
+        const ownerSourceId = asThreadId(`heartbeat-owner-${terminalBoundary}`);
+        yield* fixture.start(ownerSourceId);
+        const owned = Option.getOrThrow(yield* directory.getBinding(ownerSourceId));
+        const threadId = asThreadId(`heartbeat-terminal-${terminalBoundary}`);
+        const turnId = asTurnId(`heartbeat-turn-${terminalBoundary}`);
+        // A just-discovered running adapter has no heartbeat cache entry yet.
+        // Copy only this test runtime's lease to model event-persisted ownership.
+        yield* fixture.codex.startSession({
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          threadId,
+          runtimeMode: "full-access",
+        });
+        fixture.codex.updateSession(threadId, (session) => ({
+          ...session,
+          status: "running",
+          activeTurnId: turnId,
+        }));
+        yield* directory.upsert({
+          threadId,
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          status: "running",
+          runtimePayload: {
+            ...(owned.runtimePayload as Record<string, unknown>),
+            activeTurnId: turnId,
+          },
+        });
+        const staleSessions = yield* fixture.codex.listSessions();
+        const inventoryStarted = yield* Deferred.make<void>();
+        const releaseInventory = yield* Deferred.make<void>();
+        fixture.codex.listSessions.mockImplementationOnce(() =>
+          Deferred.succeed(inventoryStarted, undefined).pipe(
+            Effect.andThen(Deferred.await(releaseInventory)),
+            Effect.as(staleSessions),
+          ),
+        );
+        const inventory = yield* provider.listSessions().pipe(Effect.forkChild);
+        yield* Deferred.await(inventoryStarted);
+        if (terminalBoundary === "reload") {
+          yield* fixture.codex.stopAll();
+          yield* fixture.replace(fixture.replacement.adapter);
+          yield* advanceTestClock(1);
+        } else {
+          yield* provider.stopSession({ threadId });
+        }
+        assert.equal(Option.getOrThrow(yield* directory.getBinding(threadId)).status, "stopped");
+        yield* Deferred.succeed(releaseInventory, undefined);
+        yield* Fiber.join(inventory);
+        const final = Option.getOrThrow(yield* directory.getBinding(threadId));
+        assert.equal(final.status, "stopped");
+        assert.equal((final.runtimePayload as Record<string, unknown>).activeTurnId, null);
+      }).pipe(Effect.provide(fixture.layer));
+    },
+  );
+}
+
 const hasMetricSnapshot = (
   snapshots: ReadonlyArray<Metric.Metric.Snapshot>,
   id: string,

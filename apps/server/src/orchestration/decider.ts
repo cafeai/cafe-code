@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from "node:util";
+
 import type {
   OrchestrationCommand,
   OrchestrationEvent,
@@ -107,9 +109,12 @@ const decideCommandSequence = Effect.fn("decideCommandSequence")(function* ({
 export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand")(function* ({
   command,
   readModel,
+  runtimeRecoveryBarrierVerified = false,
 }: {
   readonly command: OrchestrationCommand;
   readonly readModel: OrchestrationReadModel;
+  /** Only the engine's durable loss-marker/control-barrier read may set this. */
+  readonly runtimeRecoveryBarrierVerified?: boolean;
 }): Effect.fn.Return<DecideOrchestrationCommandResult, OrchestrationCommandInvariantError> {
   switch (command.type) {
     case "project.create": {
@@ -607,6 +612,34 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      if (command.runtimeRecovery !== undefined) {
+        // A verified loss is permission to continue precisely one stopped
+        // session, not permission to steer newer work or reopen an archived
+        // thread. Stop has no reliable session-row representation, so this
+        // snapshot comparison supplements (never replaces) the engine's
+        // durable, sequence-ordered control barrier.
+        const recovery = command.runtimeRecovery;
+        if (
+          !runtimeRecoveryBarrierVerified ||
+          !command.commandId.startsWith("server:") ||
+          targetThread.archivedAt !== null ||
+          targetThread.deletedAt !== null ||
+          targetThread.session?.status !== "stopped" ||
+          targetThread.session.activeTurnId !== null ||
+          targetThread.session.updatedAt !== recovery.sessionUpdatedAt ||
+          targetThread.latestTurn?.turnId !== recovery.turnId ||
+          command.bootstrap !== undefined ||
+          command.runtimeMode !== targetThread.runtimeMode ||
+          command.interactionMode !== targetThread.interactionMode ||
+          (command.modelSelection !== undefined &&
+            !isDeepStrictEqual(command.modelSelection, targetThread.modelSelection))
+        ) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: "Runtime recovery no longer matches the verified stopped turn.",
+          });
+        }
+      }
       const boundProviderInstanceId =
         targetThread.session?.providerInstanceId ?? targetThread.session?.providerName;
       const requestsProviderInstanceSwitch =
@@ -738,6 +771,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           runtimeMode: targetThread.runtimeMode,
           interactionMode: targetThread.interactionMode,
           ...(sourceProposedPlan !== undefined ? { sourceProposedPlan } : {}),
+          ...(command.runtimeRecovery !== undefined
+            ? { runtimeRecovery: command.runtimeRecovery }
+            : {}),
           createdAt: command.createdAt,
         },
       };

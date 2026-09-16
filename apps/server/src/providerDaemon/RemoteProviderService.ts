@@ -141,6 +141,16 @@ export class ProviderDaemonAuthenticationError extends ProviderDaemonRpcResponse
   }
 }
 
+/** Inventory failure conveys no evidence about whether provider work is still live. */
+export class ProviderDaemonSessionInventoryUnavailableError extends Error {
+  readonly _tag = "ProviderDaemonSessionInventoryUnavailableError";
+
+  constructor() {
+    super("Provider daemon session inventory is unavailable; active-session ownership is unknown.");
+    this.name = "ProviderDaemonSessionInventoryUnavailableError";
+  }
+}
+
 function requireAuthorizedDaemonResponse(statusCode: number): void {
   // An authentication response is not an RPC envelope. In particular, never
   // decode or attach its body to a schema error that could echo response data.
@@ -347,11 +357,16 @@ async function readRemoteHealth(
 }
 
 /**
- * Keep authentication failures inconclusive at the inventory boundary. The
- * established service interface has no typed inventory-error channel; a defect
- * deliberately escapes its compatibility fallback instead of manufacturing an
- * authoritative empty list that startup reconciliation could use to orphan
- * live turns. Ordinary failures retain the existing compatibility behavior.
+ * Only a successful inventory response can prove that the remote owner has no
+ * sessions. Timeouts, failed RPCs, and malformed responses are inconclusive,
+ * just like rejected authentication; returning [] can make recovery duplicate
+ * a still-running turn. The established service signature has no typed error
+ * channel, so preserve failure as a defect for callers' cause-aware recovery.
+ *
+ * Ordinary transport/schema errors may contain socket paths, capabilities, or
+ * provider response bodies. Replace them with one fixed content-free error,
+ * without retaining their cause, before downstream diagnostics can render it.
+ * Authentication already has a sanitized typed error and retains its identity.
  */
 export const recoverRemoteSessionInventory = <A, E extends { readonly message: string }, R>(
   read: Effect.Effect<ReadonlyArray<A>, E, R>,
@@ -360,9 +375,7 @@ export const recoverRemoteSessionInventory = <A, E extends { readonly message: s
     Effect.catch((error) =>
       remoteAuthenticationStatus(error) !== undefined
         ? Effect.die(error)
-        : Effect.logWarning("provider daemon listSessions failed", {
-            detail: error.message,
-          }).pipe(Effect.as([])),
+        : Effect.die(new ProviderDaemonSessionInventoryUnavailableError()),
     ),
   );
 

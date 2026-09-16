@@ -194,6 +194,8 @@ interface ProviderDaemonState {
   readonly adoptedExistingProcess: boolean;
   readonly terminate: Option.Option<Effect.Effect<void>>;
   readonly lastHealth: Option.Option<ProviderDaemonHealthValue>;
+  /** The last successful rich-health observation, independent of liveness publications. */
+  readonly lastHealthObservedAt: Option.Option<string>;
   readonly lastError: Option.Option<string>;
   readonly lastEnsureRunningDurationMs: Option.Option<number>;
   readonly lastAdoptionDurationMs: Option.Option<number>;
@@ -213,6 +215,7 @@ const initialState: ProviderDaemonState = {
   adoptedExistingProcess: false,
   terminate: Option.none(),
   lastHealth: Option.none(),
+  lastHealthObservedAt: Option.none(),
   lastError: Option.none(),
   lastEnsureRunningDurationMs: Option.none(),
   lastAdoptionDurationMs: Option.none(),
@@ -577,6 +580,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
       }),
       adoptedExistingProcess: current.adoptedExistingProcess,
       lastHealth: Option.getOrNull(current.lastHealth),
+      lastHealthObservedAt: Option.getOrNull(current.lastHealthObservedAt),
       lastError: Option.getOrNull(current.lastError),
       markerPath: environment.providerDaemonMarkerPath,
       credentialPath: environment.providerDaemonCredentialPath,
@@ -677,6 +681,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
       }
       const rootEndpoint = markerEndpoint(marker, token.value);
       const health = yield* observeForAdoption(() => fetchProviderDaemonHealth(rootEndpoint));
+      const healthObservedAt = DateTime.formatIso(yield* DateTime.now);
       if (Option.isNone(health)) {
         return yield* preserveInconclusiveOwner("health");
       }
@@ -720,6 +725,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
         adoptedExistingProcess: true,
         terminate: Option.some(terminateExternalPid(marker.pid)),
         lastHealth: Option.some(health.value),
+        lastHealthObservedAt: Option.some(healthObservedAt),
         lastError: Option.none(),
         lastEnsureRunningDurationMs: Option.none(),
         lastAdoptionDurationMs: Option.some(
@@ -835,6 +841,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
       adoptedExistingProcess: false,
       terminate: Option.some(terminateExternalPid(handle.pid)),
       lastHealth: Option.none(),
+      lastHealthObservedAt: Option.none(),
       lastError: Option.none(),
       lastEnsureRunningDurationMs: Option.none(),
       lastAdoptionDurationMs: Option.none(),
@@ -861,6 +868,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
           ),
       ),
     );
+    const healthObservedAt = DateTime.formatIso(yield* DateTime.now);
     const lease = yield* Effect.tryPromise({
       try: () => issueProviderDaemonLease(rootEndpoint),
       catch: (cause) => new ProviderDaemonHealthError({ cause }),
@@ -888,6 +896,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
       endpoint: Option.some(endpoint),
       status: "running" as const,
       lastHealth: Option.some(health),
+      lastHealthObservedAt: Option.some(healthObservedAt),
       lastSpawnDurationMs: Option.some(
         Math.round((performance.now() - spawnStartedAtMs) * 100) / 100,
       ),
@@ -1060,10 +1069,16 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
         return Option.none<ProviderDaemonHealthValue>();
       }
 
+      // Only a completed rich-health response refreshes this timestamp. The
+      // watchdog republishes the manager snapshot every five seconds after
+      // liveness probes, which says nothing about the age of cached RPC,
+      // session, or event-journal diagnostics.
+      const healthObservedAt = DateTime.formatIso(yield* DateTime.now);
       yield* Ref.update(state, (latest) => ({
         ...latest,
         status: "running" as const,
         lastHealth: Option.some(healthResult.success),
+        lastHealthObservedAt: Option.some(healthObservedAt),
         lastError: Option.none(),
         lastHealthRefreshDurationMs: Option.some(
           Math.round((performance.now() - refreshStartedAtMs) * 100) / 100,

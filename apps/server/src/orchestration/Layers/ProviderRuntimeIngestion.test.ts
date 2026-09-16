@@ -78,6 +78,7 @@ import {
   CODEX_TERMINAL_STEER_RECOVERY,
 } from "../codexSteerRecovery.ts";
 import { buildCodexSteerClientCorrelationId } from "../../provider/codexSteerCorrelation.ts";
+import { PROVIDER_RUNTIME_OWNERSHIP_LOST_REASON } from "../../provider/providerRuntimeOwnerEvidence.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { PROVIDER_PIPELINE_POLICY } from "@cafecode/shared/providerPipelinePolicy";
 
@@ -269,6 +270,14 @@ type ProviderRuntimeTestMessage = ProviderRuntimeTestThread["messages"][number];
 type ProviderRuntimeTestProposedPlan = ProviderRuntimeTestThread["proposedPlans"][number];
 type ProviderRuntimeTestActivity = ProviderRuntimeTestThread["activities"][number];
 type ProviderRuntimeTestCheckpoint = ProviderRuntimeTestThread["checkpoints"][number];
+
+const recoveryActivities = (thread: ProviderRuntimeTestThread) =>
+  thread.activities.filter(
+    (activity) =>
+      activity.kind === "runtime.warning" &&
+      (activity.payload as Readonly<Record<string, unknown>> | undefined)?.recovery ===
+        "provider-runtime-ownership-lost",
+  );
 
 async function waitForThread(
   readModel: () => Promise<ProviderRuntimeTestReadModel>,
@@ -5882,6 +5891,299 @@ describe("ProviderRuntimeIngestion", () => {
         : undefined;
     expect(terminalInputResolvedPayload?.requestKind).toBe("terminal-input");
     expect(terminalInputResolvedPayload?.requestType).toBe("terminal_input_approval");
+  });
+
+  describe("verified runtime ownership loss", () => {
+    const threadId = asThreadId("thread-1");
+    const instanceId = ProviderInstanceId.make("codex");
+    const provider = ProviderDriverKind.make("codex");
+    const startedAt = "2026-01-01T00:00:01.000Z";
+    const lostAt = "2026-01-01T00:00:04.000Z";
+    const lossEvent = (
+      turnId: TurnId,
+      eventId = asEventId("evt-owned-runtime-lost"),
+    ): ProviderRuntimeEvent => ({
+      type: "session.exited",
+      eventId,
+      provider,
+      providerInstanceId: instanceId,
+      threadId,
+      turnId,
+      createdAt: lostAt,
+      payload: { reason: PROVIDER_RUNTIME_OWNERSHIP_LOST_REASON },
+    });
+    async function startActiveTurn(
+      harness: Awaited<ReturnType<typeof createHarness>>,
+      turnId: TurnId,
+      createdAt = startedAt,
+    ) {
+      harness.setProviderSession({
+        provider,
+        providerInstanceId: instanceId,
+        threadId,
+        status: "running",
+        activeTurnId: turnId,
+        runtimeMode: "approval-required",
+        createdAt,
+        updatedAt: createdAt,
+      });
+      harness.emit({
+        type: "turn.started",
+        eventId: asEventId(`evt-owned-start-${turnId}`),
+        provider,
+        providerInstanceId: instanceId,
+        threadId,
+        turnId,
+        createdAt,
+        payload: {},
+      });
+      await waitForThread(
+        harness.readModel,
+        (thread) => thread.session?.status === "running" && thread.session.activeTurnId === turnId,
+      );
+    }
+
+    it("flushes buffered output before the exact recovery marker and preserves Max selection", async () => {
+      const dispatched: OrchestrationCommand[] = [];
+      const harness = await createHarness({
+        serverSettings: { enableAssistantStreaming: false },
+        dispatchGate: (command, dispatch) => {
+          dispatched.push(command);
+          return dispatch(command);
+        },
+      });
+      const turnId = asTurnId("turn-owned-runtime-lost");
+      const modelSelection = {
+        instanceId,
+        model: "gpt-6-astra",
+        options: [{ id: "reasoningEffort", value: "max" }],
+      } as const;
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("cmd-ownership-max-selection"),
+          threadId,
+          modelSelection,
+        }),
+      );
+      await startActiveTurn(harness, turnId);
+      harness.clearProviderSessions();
+      const text = "A private buffered assistant tail that must survive runtime loss.\n";
+      harness.emit({
+        type: "content.delta",
+        eventId: asEventId("evt-owned-buffered-tail"),
+        provider,
+        providerInstanceId: instanceId,
+        threadId,
+        turnId,
+        itemId: asItemId("item-owned-buffered-tail"),
+        createdAt: "2026-01-01T00:00:02.000Z",
+        payload: { streamKind: "assistant_text", delta: text },
+      });
+      harness.emit(lossEvent(turnId));
+      await harness.drain();
+      const thread = await waitForThread(
+        harness.readModel,
+        (candidate) =>
+          candidate.session?.status === "stopped" && recoveryActivities(candidate).length > 0,
+      );
+      expect(thread.session).toMatchObject({
+        status: "stopped",
+        activeTurnId: null,
+        providerInstanceId: instanceId,
+        lastError: PROVIDER_RUNTIME_OWNERSHIP_LOST_REASON,
+        updatedAt: lostAt,
+      });
+      expect(thread.latestTurn).toMatchObject({ turnId, state: "interrupted" });
+      expect(thread.modelSelection).toEqual(modelSelection);
+      expect(
+        thread.messages.find((message) => message.id === "assistant:item-owned-buffered-tail"),
+      ).toMatchObject({ text, streaming: false, turnId });
+      const activities = recoveryActivities(thread);
+      expect(activities).toHaveLength(1);
+      expect(activities[0]).toMatchObject({
+        kind: "runtime.warning",
+        summary: "Reconnecting interrupted provider work",
+        turnId,
+        payload: {
+          recovery: "provider-runtime-ownership-lost",
+          sessionUpdatedAt: lostAt,
+        },
+      });
+      expect(JSON.stringify(activities[0]?.payload)).not.toContain(text);
+      const deltaIndex = dispatched.findIndex(
+        (command) => command.type === "thread.message.assistant.delta",
+      );
+      const stopIndex = dispatched.findIndex(
+        (command) => command.type === "thread.session.set" && command.session.status === "stopped",
+      );
+      expect(deltaIndex).toBeGreaterThanOrEqual(0);
+      expect(stopIndex).toBeGreaterThan(deltaIndex);
+    });
+
+    it("ignores stale loss without closing a newer turn or discarding its buffered output", async () => {
+      const harness = await createHarness({ serverSettings: { enableAssistantStreaming: false } });
+      const oldTurnId = asTurnId("turn-owned-old");
+      const newTurnId = asTurnId("turn-owned-new");
+      await startActiveTurn(harness, oldTurnId);
+      await startActiveTurn(harness, newTurnId, "2026-01-01T00:00:03.000Z");
+      harness.emit({
+        type: "content.delta",
+        eventId: asEventId("evt-owned-new-buffered-tail"),
+        provider,
+        providerInstanceId: instanceId,
+        threadId,
+        turnId: newTurnId,
+        itemId: asItemId("item-owned-new-buffered-tail"),
+        createdAt: "2026-01-01T00:00:03.500Z",
+        payload: { streamKind: "assistant_text", delta: "Newer turn output remains intact." },
+      });
+      harness.emit(lossEvent(oldTurnId));
+      await harness.drain();
+      const afterLoss = (await harness.readModel()).threads.find(
+        (thread) => thread.id === threadId,
+      )!;
+      expect(afterLoss.session).toMatchObject({ status: "running", activeTurnId: newTurnId });
+      expect(afterLoss.latestTurn).toMatchObject({ turnId: newTurnId, state: "running" });
+      expect(recoveryActivities(afterLoss)).toHaveLength(0);
+
+      // This completion has no fallback body, so only an intact ingestion
+      // buffer can supply the output following the rejected old exit.
+      harness.emit({
+        type: "item.completed",
+        eventId: asEventId("evt-owned-new-buffer-completed"),
+        provider,
+        providerInstanceId: instanceId,
+        threadId,
+        turnId: newTurnId,
+        itemId: asItemId("item-owned-new-buffered-tail"),
+        createdAt: "2026-01-01T00:00:05.000Z",
+        payload: { itemType: "assistant_message", status: "completed" },
+      });
+      const completed = await waitForThread(harness.readModel, (thread) =>
+        thread.messages.some(
+          (message) =>
+            message.id === "assistant:item-owned-new-buffered-tail" && !message.streaming,
+        ),
+      );
+      expect(
+        completed.messages.find(
+          (message) => message.id === "assistant:item-owned-new-buffered-tail",
+        )?.text,
+      ).toBe("Newer turn output remains intact.");
+    });
+
+    for (const reason of ["Session stopped by the user.", "Provider process exited with code 1."]) {
+      it(`does not request automatic recovery for an ordinary exit: ${reason}`, async () => {
+        const harness = await createHarness();
+        const turnId = asTurnId("turn-ordinary-exit");
+        await startActiveTurn(harness, turnId);
+        harness.clearProviderSessions();
+        harness.emit({
+          ...lossEvent(turnId),
+          type: "session.exited",
+          payload: { reason },
+        });
+        await harness.drain();
+        const thread = await waitForThread(
+          harness.readModel,
+          (candidate) => candidate.session?.status === "stopped",
+        );
+        expect(recoveryActivities(thread)).toHaveLength(0);
+        expect(thread.session?.lastError).not.toBe(PROVIDER_RUNTIME_OWNERSHIP_LOST_REASON);
+      });
+    }
+
+    it("deduplicates repeated ownership-loss delivery after the stopped boundary", async () => {
+      const harness = await createHarness();
+      const turnId = asTurnId("turn-owned-replay");
+      await startActiveTurn(harness, turnId);
+      harness.clearProviderSessions();
+      const event = lossEvent(turnId);
+      harness.emit(event);
+      harness.emit(event);
+      await harness.drain();
+      await waitForThread(harness.readModel, (thread) => recoveryActivities(thread).length === 1);
+      // Even a distinct repeated observer event cannot create a second
+      // recovery generation once the same turn has already been stopped.
+      harness.emit(lossEvent(turnId, asEventId("evt-owned-runtime-lost-again")));
+      await harness.drain();
+      const thread = (await harness.readModel()).threads.find(
+        (candidate) => candidate.id === threadId,
+      )!;
+      expect(recoveryActivities(thread)).toHaveLength(1);
+      expect(thread.session).toMatchObject({
+        status: "stopped",
+        activeTurnId: null,
+        updatedAt: lostAt,
+      });
+    });
+
+    it("finishes a matching recovery marker after the terminal projection already committed", async () => {
+      const harness = await createHarness();
+      const turnId = asTurnId("turn-owned-marker-crash-window");
+      await startActiveTurn(harness, turnId);
+      harness.clearProviderSessions();
+      // Model a process exit between durable session-set and activity append.
+      // Replay may complete only that exact turn/time/reason boundary.
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-owned-loss-terminal-before-crash"),
+          threadId,
+          session: {
+            threadId,
+            status: "stopped",
+            providerName: provider,
+            providerInstanceId: instanceId,
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: PROVIDER_RUNTIME_OWNERSHIP_LOST_REASON,
+            updatedAt: lostAt,
+          },
+          createdAt: lostAt,
+        }),
+      );
+      harness.emit(lossEvent(turnId));
+      await harness.drain();
+      const thread = await waitForThread(
+        harness.readModel,
+        (candidate) => recoveryActivities(candidate).length === 1,
+      );
+      expect(thread.session).toMatchObject({
+        status: "stopped",
+        activeTurnId: null,
+        updatedAt: lostAt,
+      });
+      expect(recoveryActivities(thread)[0]).toMatchObject({
+        turnId,
+        payload: { recovery: "provider-runtime-ownership-lost", sessionUpdatedAt: lostAt },
+      });
+    });
+
+    for (const mismatch of ["idle", "missing-turn", "different-instance"] as const) {
+      it(`does not create a recovery marker for ${mismatch} ownership evidence`, async () => {
+        const harness = await createHarness();
+        const turnId = asTurnId(`turn-owned-${mismatch}`);
+        if (mismatch !== "idle") await startActiveTurn(harness, turnId);
+        const original = (await harness.readModel()).threads.find(
+          (candidate) => candidate.id === threadId,
+        )!;
+        harness.emit({
+          ...lossEvent(turnId),
+          ...(mismatch === "missing-turn" ? { turnId: undefined } : {}),
+          ...(mismatch === "different-instance"
+            ? { providerInstanceId: ProviderInstanceId.make("codex-other") }
+            : {}),
+        });
+        await harness.drain();
+        const thread = (await harness.readModel()).threads.find(
+          (candidate) => candidate.id === threadId,
+        )!;
+        expect(thread.session).toEqual(original.session);
+        expect(recoveryActivities(thread)).toHaveLength(0);
+      });
+    }
   });
 
   it("maps runtime.error into errored session state", async () => {

@@ -18,6 +18,7 @@ import {
   isVoidProviderDaemonRpcMethod,
   ProviderDaemonRpcResponseError,
   ProviderDaemonAuthenticationError,
+  ProviderDaemonSessionInventoryUnavailableError,
   PROVIDER_DAEMON_AUTHENTICATION_RETRY_MS,
   providerDaemonReplayCursorForHealth,
   providerDaemonRequestThreadIds,
@@ -116,10 +117,61 @@ describe("RemoteProviderService", () => {
       }
       assert.isFalse(reconciliationRan);
       assert.deepEqual(yield* recoverRemoteSessionInventory(Effect.succeed([])), []);
-      assert.deepEqual(
-        yield* recoverRemoteSessionInventory(Effect.fail(new Error("synthetic ordinary failure"))),
-        [],
-      );
+    }),
+  );
+
+  for (const [scenario, failure] of [
+    [
+      "timeout",
+      Object.assign(new Error("timed out at /private/provider-secret.sock"), {
+        code: "ETIMEDOUT",
+      }),
+    ],
+    ["HTTP 500", new ProviderDaemonHttpStatusError(500)],
+    [
+      "malformed response",
+      new Error('Cannot decode {"token":"provider-secret-capability","body":"private-output"}'),
+    ],
+    [
+      "provider RPC failure",
+      new ProviderDaemonRpcResponseError("ProviderInternalError", "private-output"),
+    ],
+  ] as const) {
+    it.effect(`keeps ${scenario} inventory failure inconclusive and redacted`, () =>
+      Effect.gen(function* () {
+        const error = toRemoteRequestError("listSessions", failure);
+        let reconciliationRan = false;
+        const exit = yield* recoverRemoteSessionInventory(Effect.fail(error)).pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              reconciliationRan = true;
+            }),
+          ),
+          Effect.exit,
+        );
+        assert.isFalse(reconciliationRan);
+        assert.isTrue(Exit.isFailure(exit));
+        if (Exit.isFailure(exit)) {
+          const defect = exit.cause.reasons.find(Cause.isDieReason)?.defect;
+          assert.instanceOf(defect, ProviderDaemonSessionInventoryUnavailableError);
+          assert.notProperty(defect, "cause");
+          assert.notInclude(Cause.pretty(exit.cause), "provider-secret");
+          assert.notInclude(Cause.pretty(exit.cause), "private-output");
+        }
+        const observation = yield* recoverRemoteSessionInventory(Effect.fail(error)).pipe(
+          Effect.map(() => "authoritative" as const),
+          Effect.catchCause(() => Effect.succeed("unknown" as const)),
+        );
+        assert.equal(observation, "unknown");
+      }),
+    );
+  }
+
+  it.effect("preserves successful empty and nonempty session inventory", () =>
+    Effect.gen(function* () {
+      const sessions = [{ threadId: "thread-still-running", activeTurnId: "turn-active" }];
+      assert.deepEqual(yield* recoverRemoteSessionInventory(Effect.succeed([])), []);
+      assert.strictEqual(yield* recoverRemoteSessionInventory(Effect.succeed(sessions)), sessions);
     }),
   );
 

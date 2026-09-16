@@ -71,6 +71,7 @@ interface LiveEntry {
   readonly instance: ProviderInstance;
   readonly scope: Scope.Closeable;
   readonly entry: ProviderInstanceConfig;
+  readonly updatePresentation: (entry: ProviderInstanceConfig) => Effect.Effect<void>;
 }
 
 /**
@@ -84,14 +85,93 @@ interface RegistryState {
 }
 
 /**
- * Structural equality on `ProviderInstanceConfig` envelopes. Used by
- * `reconcile` to skip rebuilds when settings arrive unchanged. Config
- * payloads are opaque `unknown` at the envelope layer; `Equal.equals`
- * falls back to structural equality for plain records, which matches how
- * the schema decode output is constructed.
+ * Only settings consumed by the driver may replace its process-owning scope.
+ * Presentation and new-chat defaults can change during a multi-hour turn;
+ * closing that scope would kill the turn merely to rename its provider or
+ * change the next chat's reasoning preference. Keep opaque driver config and
+ * environment comparisons structural, including credential-bearing values,
+ * so a real runtime change still follows the existing reload boundary.
  */
-const entryEqual = (a: ProviderInstanceConfig, b: ProviderInstanceConfig): boolean =>
-  Equal.equals(a, b);
+const runtimeEntryEqual = (a: ProviderInstanceConfig, b: ProviderInstanceConfig): boolean =>
+  a.driver === b.driver &&
+  a.enabled === b.enabled &&
+  Equal.equals(a.environment, b.environment) &&
+  Equal.equals(a.config, b.config);
+
+/**
+ * Keep the instance and snapshot wrapper identities stable across cosmetic
+ * edits. ProviderService and ProviderRegistry key their subscriptions by those
+ * identities; replacing wrappers on each rename would leave duplicate stream
+ * subscribers alive until the runtime itself eventually shuts down.
+ */
+const withLivePresentation = (
+  instance: ProviderInstance,
+  entry: ProviderInstanceConfig,
+  defaultDisplayName: string,
+) =>
+  Effect.gen(function* () {
+    const presentation = yield* Ref.make({
+      displayName: entry.displayName,
+      accentColor: entry.accentColor,
+    });
+    const changes = yield* PubSub.unbounded<void>();
+    yield* Effect.addFinalizer(() => PubSub.shutdown(changes));
+    const decorate = (snapshot: ServerProvider): ServerProvider => {
+      const current = Ref.getUnsafe(presentation);
+      return {
+        ...snapshot,
+        // The source snapshot may retain the custom name captured at driver
+        // creation. Removing that override must restore the driver's label.
+        displayName: current.displayName ?? defaultDisplayName,
+        accentColor: current.accentColor,
+      };
+    };
+    const snapshot = instance.snapshot;
+    const getSnapshot = snapshot.getSnapshot.pipe(Effect.map(decorate));
+    const presented: ProviderInstance = {
+      ...instance,
+      get displayName() {
+        return Ref.getUnsafe(presentation).displayName;
+      },
+      get accentColor() {
+        return Ref.getUnsafe(presentation).accentColor;
+      },
+      snapshot: {
+        ...snapshot,
+        getSnapshot,
+        refresh: snapshot.refresh.pipe(Effect.map(decorate)),
+        ...(snapshot.refreshAccountUsage
+          ? { refreshAccountUsage: snapshot.refreshAccountUsage.pipe(Effect.map(decorate)) }
+          : {}),
+        ...(snapshot.refreshModels
+          ? { refreshModels: snapshot.refreshModels.pipe(Effect.map(decorate)) }
+          : {}),
+        get streamChanges() {
+          // A rename must become visible even while the provider is silent.
+          // Both sources read the current presentation at delivery time, so a
+          // delayed probe cannot restore a previous name or accent color.
+          return Stream.merge(
+            snapshot.streamChanges.pipe(Stream.map(decorate)),
+            Stream.fromPubSub(changes).pipe(Stream.mapEffect(() => getSnapshot)),
+            { haltStrategy: "either" },
+          );
+        },
+      },
+    };
+    const updatePresentation = (next: ProviderInstanceConfig) =>
+      Effect.gen(function* () {
+        const current = yield* Ref.get(presentation);
+        if (current.displayName === next.displayName && current.accentColor === next.accentColor) {
+          return;
+        }
+        yield* Ref.set(presentation, {
+          displayName: next.displayName,
+          accentColor: next.accentColor,
+        });
+        yield* PubSub.publish(changes, undefined);
+      });
+    return { instance: presented, updatePresentation };
+  });
 
 const decodedConfigEnabled = (config: unknown): boolean | undefined => {
   if (!config || typeof config !== "object" || globalThis.Array.isArray(config)) {
@@ -194,10 +274,15 @@ const buildEntry = <R>(input: {
       };
     }
 
+    const presented = yield* withLivePresentation(
+      createResult.success,
+      entry,
+      driver.metadata.displayName,
+    ).pipe(Effect.provideService(Scope.Scope, childScope));
     return {
       kind: "live" as const,
       live: {
-        instance: createResult.success,
+        ...presented,
         scope: childScope,
         entry,
       },
@@ -234,7 +319,7 @@ const makeReconcile = <R>(input: {
           continue;
         }
         const nextEntry = configMap[instanceId];
-        if (nextEntry !== undefined && !entryEqual(live.entry, nextEntry)) {
+        if (nextEntry !== undefined && !runtimeEntryEqual(live.entry, nextEntry)) {
           replacedIds.add(instanceId);
         }
       }
@@ -250,6 +335,7 @@ const makeReconcile = <R>(input: {
       const builtEntries = new Map<ProviderInstanceId, LiveEntry>();
       const builtUnavailable = new Map<ProviderInstanceId, ServerProvider>();
       let orderChanged = false;
+      let presentationOrDefaultsChanged = false;
       const previousOrder = [...previousEntries.keys()];
       const nextOrder: Array<ProviderInstanceId> = [];
 
@@ -259,8 +345,14 @@ const makeReconcile = <R>(input: {
 
         const existing = previousEntries.get(instanceId);
         if (existing !== undefined && !replacedIds.has(instanceId)) {
-          // No-op update: keep the existing live entry and scope.
-          builtEntries.set(instanceId, existing);
+          // Defaults are read from ServerSettings by the composer, not by the
+          // driver. Retain the newest envelope for later comparisons without
+          // changing the process, session inventory, or subscription identity.
+          if (!Equal.equals(existing.entry, entry)) {
+            presentationOrDefaultsChanged = true;
+            yield* existing.updatePresentation(entry);
+          }
+          builtEntries.set(instanceId, { ...existing, entry });
           continue;
         }
 
@@ -291,6 +383,7 @@ const makeReconcile = <R>(input: {
 
       const entriesChanged =
         orderChanged ||
+        presentationOrDefaultsChanged ||
         removedIds.length > 0 ||
         replacedIds.size > 0 ||
         builtEntries.size !== previousEntries.size;

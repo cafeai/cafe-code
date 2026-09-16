@@ -91,6 +91,7 @@ import Migration0073 from "./Migrations/073_UsageAccountingCheckpoints.ts";
 import Migration0074 from "./Migrations/074_FileAttachmentUploadLifecycle.ts";
 import Migration0075 from "./Migrations/075_VirtualDesktops.ts";
 import Migration0076 from "./Migrations/076_DesktopObservations.ts";
+import Migration0077 from "./Migrations/077_RuntimeRecoveryControls.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -183,6 +184,7 @@ export const migrationEntries = [
   [74, "FileAttachmentUploadLifecycle", Migration0074],
   [75, "VirtualDesktops", Migration0075],
   [76, "DesktopObservations", Migration0076],
+  [77, "RuntimeRecoveryControls", Migration0077],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

@@ -54,6 +54,7 @@ import {
 } from "../Services/ProjectionPipeline.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { ServerConfig } from "../../config.ts";
+import { makeRuntimeRecoveryBarrierReader } from "../providerRuntimeRecovery.ts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asMessageId = (value: string): MessageId => MessageId.make(value);
@@ -82,9 +83,11 @@ async function createOrchestrationSystem() {
   const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
   const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
   const sql = await runtime.runPromise(Effect.service(SqlClient.SqlClient));
+  const readRuntimeRecoveryBarrier = await runtime.runPromise(makeRuntimeRecoveryBarrierReader);
   return {
     engine,
     sql,
+    readRuntimeRecoveryBarrier,
     readModel: () => runtime.runPromise(snapshotQuery.getSnapshot()),
     run: <A, E>(effect: Effect.Effect<A, E>) => runtime.runPromise(effect),
     dispose: () => runtime.dispose(),
@@ -122,6 +125,424 @@ async function createPersistentOrchestrationSystem(dbPath: string, baseDir: stri
 function now() {
   return "2026-01-01T00:00:00.000Z";
 }
+
+/** A fully durable stopped turn/loss marker, without any real provider I/O. */
+async function createRuntimeRecoveryFixture() {
+  const system = await createOrchestrationSystem();
+  const threadId = ThreadId.make("runtime-recovery-thread");
+  const turnId = TurnId.make("runtime-recovery-turn");
+  const modelSelection = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-6-astra" };
+  const dispatch = (command: OrchestrationCommand) => system.run(system.engine.dispatch(command));
+  await dispatch({
+    type: "project.create",
+    commandId: CommandId.make("project-recovery-create"),
+    projectId: asProjectId("runtime-recovery-project"),
+    title: "Recovery",
+    workspaceRoot: "/tmp/recovery",
+    defaultModelSelection: modelSelection,
+    createdAt: now(),
+  });
+  await dispatch({
+    type: "thread.create",
+    commandId: CommandId.make("thread-recovery-create"),
+    threadId,
+    projectId: asProjectId("runtime-recovery-project"),
+    title: "Recovery",
+    modelSelection,
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    createdAt: now(),
+  });
+  await dispatch({
+    type: "thread.turn.start",
+    commandId: CommandId.make("original-user-start"),
+    threadId,
+    message: {
+      messageId: asMessageId("original-user-message"),
+      role: "user",
+      text: "Work on this task.",
+      attachments: [],
+    },
+    modelSelection,
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    createdAt: now(),
+  });
+  for (const status of ["running", "stopped"] as const) {
+    await dispatch({
+      type: "thread.session.set",
+      commandId: CommandId.make(`server:recovery-${status}`),
+      threadId,
+      session: {
+        threadId,
+        status,
+        providerName: "codex",
+        providerInstanceId: modelSelection.instanceId,
+        runtimeMode: "full-access",
+        activeTurnId: status === "running" ? turnId : null,
+        lastError: null,
+        updatedAt: now(),
+      },
+      createdAt: now(),
+    });
+  }
+  const marker = await dispatch({
+    type: "thread.activity.append",
+    commandId: CommandId.make("server:recovery-loss"),
+    threadId,
+    activity: {
+      id: EventId.make("runtime-recovery-loss"),
+      tone: "info",
+      kind: "runtime.warning",
+      summary: "Provider runtime ownership lost",
+      turnId,
+      createdAt: now(),
+      payload: { recovery: "provider-runtime-ownership-lost", sessionUpdatedAt: now() },
+    },
+    createdAt: now(),
+  });
+  const runtimeRecovery = { sourceEventSequence: marker.sequence, turnId, sessionUpdatedAt: now() };
+  const command: Extract<OrchestrationCommand, { type: "thread.turn.start" }> = {
+    type: "thread.turn.start",
+    commandId: CommandId.make("server:runtime-recovery-start"),
+    threadId,
+    message: {
+      messageId: asMessageId("runtime-recovery-message"),
+      role: "user",
+      text: "Continue the interrupted work.",
+      attachments: [],
+    },
+    modelSelection,
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    runtimeRecovery,
+    createdAt: now(),
+  };
+  return { ...system, dispatch, command, threadId, turnId, runtimeRecovery };
+}
+
+describe("OrchestrationEngine runtime recovery barriers", () => {
+  it("preserves continuation consent through title-only metadata before or after loss", async () => {
+    const system = await createRuntimeRecoveryFixture();
+    try {
+      await system.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("server:automatic-title"),
+        threadId: system.threadId,
+        title: "Automatic task title",
+      });
+      expect(
+        await system.run(
+          system.readRuntimeRecoveryBarrier({
+            ...system.runtimeRecovery,
+            threadId: system.threadId,
+          }),
+        ),
+      ).toBe(true);
+      const newerMarker = await system.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("server:loss-after-title"),
+        threadId: system.threadId,
+        createdAt: now(),
+        activity: {
+          id: EventId.make("loss-after-title"),
+          kind: "runtime.warning",
+          tone: "info",
+          summary: "Ownership loss",
+          turnId: system.turnId,
+          createdAt: now(),
+          payload: { recovery: "provider-runtime-ownership-lost", sessionUpdatedAt: now() },
+        },
+      });
+      expect(
+        await system.run(
+          system.readRuntimeRecoveryBarrier({
+            ...system.runtimeRecovery,
+            sourceEventSequence: newerMarker.sequence,
+            threadId: system.threadId,
+          }),
+        ),
+      ).toBe(true);
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it.each(["stop", "interrupt", "settings"] as const)(
+    "does not let a delayed loss marker erase prior %s consent barriers",
+    async (control) => {
+      const system = await createRuntimeRecoveryFixture();
+      try {
+        const base = {
+          commandId: CommandId.make("control-before-loss-marker"),
+          threadId: system.threadId,
+          createdAt: now(),
+        };
+        if (control === "stop") {
+          await system.dispatch({ ...base, type: "thread.session.stop" });
+        } else if (control === "interrupt") {
+          await system.dispatch({ ...base, type: "thread.turn.interrupt", turnId: system.turnId });
+        } else {
+          await system.dispatch({ ...base, type: "thread.meta.update", branch: "changed-branch" });
+        }
+        const appendDelayedMarker = (suffix: string) =>
+          system.dispatch({
+            type: "thread.activity.append",
+            commandId: CommandId.make(`server:delayed-loss-${suffix}`),
+            threadId: system.threadId,
+            createdAt: now(),
+            activity: {
+              id: EventId.make(`delayed-loss-${suffix}`),
+              kind: "runtime.warning",
+              tone: "info",
+              summary: "Ownership loss",
+              turnId: system.turnId,
+              createdAt: now(),
+              payload: { recovery: "provider-runtime-ownership-lost", sessionUpdatedAt: now() },
+            },
+          });
+        const delayed = await appendDelayedMarker("blocked");
+        const blockedGuard = { ...system.runtimeRecovery, sourceEventSequence: delayed.sequence };
+        expect(
+          await system.run(
+            system.readRuntimeRecoveryBarrier({ ...blockedGuard, threadId: system.threadId }),
+          ),
+        ).toBe(false);
+        expect(
+          (
+            await system.run(
+              Effect.exit(
+                system.engine.dispatch({ ...system.command, runtimeRecovery: blockedGuard }),
+              ),
+            )
+          )._tag,
+        ).toBe("Failure");
+
+        // Only fresh explicit user work releases the prior control. A new loss
+        // warning alone never resets Stop, even with identical timestamps.
+        await system.dispatch({
+          ...system.command,
+          commandId: CommandId.make("new-explicit-user-start"),
+          runtimeRecovery: undefined,
+          message: {
+            ...system.command.message,
+            messageId: asMessageId("new-explicit-user-message"),
+          },
+        });
+        const renewed = await appendDelayedMarker("renewed");
+        expect(
+          await system.run(
+            system.readRuntimeRecoveryBarrier({
+              ...system.runtimeRecovery,
+              sourceEventSequence: renewed.sequence,
+              threadId: system.threadId,
+            }),
+          ),
+        ).toBe(true);
+      } finally {
+        await system.dispose();
+      }
+    },
+  );
+
+  it("requires fresh explicit input after the control ledger completeness fence", async () => {
+    const system = await createRuntimeRecoveryFixture();
+    try {
+      // Simulate an old user turn whose loss becomes observable after upgrade.
+      // Historical controls are unknown, so its old start is not consent.
+      await system.run(system.sql`UPDATE orchestration_runtime_recovery_control_state
+        SET indexed_from_sequence = ${system.runtimeRecovery.sourceEventSequence} WHERE singleton = 1`);
+      expect(
+        await system.run(
+          system.readRuntimeRecoveryBarrier({
+            ...system.runtimeRecovery,
+            threadId: system.threadId,
+          }),
+        ),
+      ).toBe(false);
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it("authenticates one loss marker and exempts only its exact admitted recovery intent", async () => {
+    const system = await createRuntimeRecoveryFixture();
+    try {
+      const input = { ...system.runtimeRecovery, threadId: system.threadId };
+      expect(await system.run(system.readRuntimeRecoveryBarrier(input))).toBe(true);
+      const accepted = await system.dispatch(system.command);
+      const exactIntent = await system.run(
+        Stream.runCollect(system.engine.readEvents(accepted.sequence - 1, 1)),
+      );
+      expect(Array.from(exactIntent).map((event) => event.sequence)).toEqual([accepted.sequence]);
+      expect(await system.run(system.readRuntimeRecoveryBarrier(input))).toBe(false);
+      expect(
+        await system.run(
+          system.readRuntimeRecoveryBarrier({
+            ...input,
+            recoveryIntentSequence: accepted.sequence,
+          }),
+        ),
+      ).toBe(true);
+      expect(
+        await system.run(
+          system.readRuntimeRecoveryBarrier({
+            ...input,
+            recoveryIntentSequence: accepted.sequence - 1,
+          }),
+        ),
+      ).toBe(false);
+      await system.dispatch({
+        type: "thread.session.stop",
+        commandId: CommandId.make("stop-after-recovery"),
+        threadId: system.threadId,
+        createdAt: now(),
+      });
+      expect(
+        await system.run(
+          system.readRuntimeRecoveryBarrier({
+            ...input,
+            recoveryIntentSequence: accepted.sequence,
+          }),
+        ),
+      ).toBe(false);
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it.each([
+    "thread.session.stop",
+    "thread.turn.interrupt",
+    "thread.turn.start",
+    "thread.turn.steer",
+    "thread.archive",
+    "thread.delete",
+    "thread.meta.update",
+    "thread.runtime-mode.set",
+    "thread.interaction-mode.set",
+  ] as const)("rejects recovery after a durable %s, before committing any send", async (type) => {
+    const system = await createRuntimeRecoveryFixture();
+    try {
+      const base = {
+        commandId: CommandId.make("newer-control"),
+        threadId: system.threadId,
+        createdAt: now(),
+      };
+      switch (type) {
+        case "thread.turn.start":
+          await system.dispatch({
+            ...system.command,
+            ...base,
+            runtimeRecovery: undefined,
+            message: { ...system.command.message, messageId: asMessageId("newer-user-message") },
+          });
+          break;
+        case "thread.turn.steer":
+          await system.dispatch({
+            ...base,
+            type,
+            message: { ...system.command.message, messageId: asMessageId("newer-user-message") },
+          });
+          break;
+        case "thread.meta.update":
+          await system.dispatch({
+            ...base,
+            type,
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("other-codex"),
+              model: "gpt-6-astra",
+            },
+          });
+          break;
+        case "thread.runtime-mode.set":
+          await system.dispatch({ ...base, type, runtimeMode: "approval-required" });
+          break;
+        case "thread.interaction-mode.set":
+          await system.dispatch({ ...base, type, interactionMode: "plan" });
+          break;
+        default:
+          await system.dispatch({ ...base, type });
+      }
+      expect(
+        await system.run(
+          system.readRuntimeRecoveryBarrier({
+            ...system.runtimeRecovery,
+            threadId: system.threadId,
+          }),
+        ),
+      ).toBe(false);
+      const before = await system.readModel();
+      const result = await system.run(Effect.exit(system.engine.dispatch(system.command)));
+      expect(result._tag).toBe("Failure");
+      const after = await system.readModel();
+      // Identical timestamps are deliberate: only the durable event order
+      // distinguishes the user's Stop from the older lost-session snapshot.
+      expect(after.snapshotSequence).toBe(before.snapshotSequence);
+      expect(
+        after.threads[0]?.messages.some(
+          (message) => message.id === system.command.message.messageId,
+        ),
+      ).toBe(false);
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it("fails closed for forged actor/marker/turn/session/sequence authority", async () => {
+    const system = await createRuntimeRecoveryFixture();
+    try {
+      const input = { ...system.runtimeRecovery, threadId: system.threadId };
+      for (const invalid of [
+        { ...input, sourceEventSequence: 0 },
+        { ...input, sourceEventSequence: input.sourceEventSequence - 1 },
+        { ...input, threadId: ThreadId.make("wrong-thread") },
+        { ...input, turnId: TurnId.make("wrong-turn") },
+        { ...input, sessionUpdatedAt: "2026-01-01T00:00:01.000Z" },
+      ]) {
+        expect(await system.run(system.readRuntimeRecoveryBarrier(invalid))).toBe(false);
+      }
+      for (const actor of ["provider", "client"]) {
+        await system.run(system.sql`UPDATE orchestration_events SET actor_kind = ${actor}
+          WHERE sequence = ${input.sourceEventSequence}`);
+        expect(await system.run(system.readRuntimeRecoveryBarrier(input))).toBe(false);
+      }
+      const before = await system.readModel();
+      expect((await system.run(Effect.exit(system.engine.dispatch(system.command))))._tag).toBe(
+        "Failure",
+      );
+      expect((await system.readModel()).snapshotSequence).toBe(before.snapshotSequence);
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it("bounds old same-thread suffixes and ignores activity in unrelated threads", async () => {
+    const system = await createRuntimeRecoveryFixture();
+    try {
+      const input = { ...system.runtimeRecovery, threadId: system.threadId };
+      // Insert harmless event records directly to exercise the bounded ledger
+      // reader without projecting hundreds of artificial transcript entries.
+      const appendNoise = (streamId: string, count: number) =>
+        system.run(system.sql`
+        WITH RECURSIVE numbers(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM numbers WHERE n < ${count})
+        INSERT INTO orchestration_events (
+          event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+          command_id, causation_event_id, correlation_id, actor_kind, payload_json, metadata_json
+        ) SELECT ${streamId} || '-' || n, 'thread', ${streamId}, 100 + n,
+          'thread.message-sent', ${now()}, NULL, NULL, NULL, 'provider', '{}', '{}' FROM numbers
+      `);
+      await appendNoise("unrelated-thread", 300);
+      expect(await system.run(system.readRuntimeRecoveryBarrier(input))).toBe(true);
+      await appendNoise(system.threadId, 257);
+      expect(await system.run(system.readRuntimeRecoveryBarrier(input))).toBe(false);
+    } finally {
+      await system.dispose();
+    }
+  });
+});
 
 const hasMetricSnapshot = (
   snapshots: ReadonlyArray<Metric.Metric.Snapshot>,

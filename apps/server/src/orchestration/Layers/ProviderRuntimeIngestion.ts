@@ -38,6 +38,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { makeDrainableWorker } from "@cafecode/shared/DrainableWorker";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import { PROVIDER_RUNTIME_OWNERSHIP_LOST_REASON } from "../../provider/providerRuntimeOwnerEvidence.ts";
 import { UsageStatsService } from "../../usageStats/Services/UsageStatsService.ts";
 import {
   buildCodexSteerClientCorrelationId,
@@ -2549,7 +2550,30 @@ const make = Effect.gen(function* () {
         explicitTerminalTurnRecovery ??
         (restoresFalseOrphanTerminal ? ("live-provider-continuation" as const) : undefined);
 
+      // Only the runtime owner's positively reconciled loss can authorize
+      // automatic continuation. A delayed loss from an older turn must never
+      // terminate replacement work, and an ordinary exit (including Stop) is
+      // deliberately not a recovery trigger.
+      const isRuntimeOwnershipLoss =
+        event.type === "session.exited" &&
+        event.payload.reason === PROVIDER_RUNTIME_OWNERSHIP_LOST_REASON;
+      const mayRecoverRuntimeOwnershipLoss =
+        isRuntimeOwnershipLoss &&
+        eventTurnId !== undefined &&
+        thread.session?.providerInstanceId === event.providerInstanceId &&
+        ((activeTurnId !== null &&
+          sameId(activeTurnId, eventTurnId) &&
+          thread.session?.status === "running") ||
+          // Replaying after a crash between the terminal write and marker
+          // append must finish that exact write, not lose recovery authority.
+          (thread.session?.status === "stopped" &&
+            thread.session.lastError === PROVIDER_RUNTIME_OWNERSHIP_LOST_REASON &&
+            thread.session.updatedAt === now &&
+            thread.latestTurn?.turnId === eventTurnId));
       const passesStrictProviderLifecycleGuard = (() => {
+        if (isRuntimeOwnershipLoss) {
+          return mayRecoverRuntimeOwnershipLoss;
+        }
         if (!STRICT_PROVIDER_LIFECYCLE_GUARD) {
           return true;
         }
@@ -2647,7 +2671,10 @@ const make = Effect.gen(function* () {
           (thread.session?.lastError ?? null) !== null ||
           providerRuntimeOwnsConflictingTurn);
 
-      if (event.type === "turn.completed" && eventTurnId !== undefined) {
+      if (
+        (event.type === "turn.completed" || mayRecoverRuntimeOwnershipLoss) &&
+        eventTurnId !== undefined
+      ) {
         // A terminal session projection closes every streaming message for the
         // turn. Flush the ingestion coalescer first so a short final token
         // (commonly a Markdown fence or URL suffix) cannot arrive afterward as
@@ -2768,8 +2795,9 @@ const make = Effect.gen(function* () {
           }
           return thread.session?.status ?? "ready";
         })();
-        const lastError =
-          event.type === "session.state.changed" && event.payload.state === "error"
+        const lastError = mayRecoverRuntimeOwnershipLoss
+          ? PROVIDER_RUNTIME_OWNERSHIP_LOST_REASON
+          : event.type === "session.state.changed" && event.payload.state === "error"
             ? (event.payload.reason ?? thread.session?.lastError ?? "Provider session error")
             : event.type === "thread.state.changed" && sessionRelevantThreadState === "error"
               ? (thread.session?.lastError ?? "Provider thread error")
@@ -2824,6 +2852,33 @@ const make = Effect.gen(function* () {
             ...(terminalTurnRecovery ? { terminalTurnRecovery } : {}),
             createdAt: now,
           });
+
+          if (mayRecoverRuntimeOwnershipLoss) {
+            // This durable, content-free marker is the only automatic recovery
+            // authority. The reactor verifies its exact event sequence and
+            // later Stop/newer-input barriers before resuming anything. It is
+            // appended after terminal state so live and startup handling agree.
+            yield* orchestrationEngine.dispatch({
+              type: "thread.activity.append",
+              commandId: CommandId.make(
+                `server:runtime-ownership-loss:${thread.id}:${eventTurnId}:${now}`,
+              ),
+              threadId: thread.id,
+              activity: {
+                id: EventId.make(`runtime-ownership-loss:${thread.id}:${eventTurnId}:${now}`),
+                kind: "runtime.warning",
+                tone: "info",
+                summary: "Reconnecting interrupted provider work",
+                turnId: eventTurnId!,
+                payload: {
+                  recovery: "provider-runtime-ownership-lost",
+                  sessionUpdatedAt: now,
+                },
+                createdAt: now,
+              },
+              createdAt: now,
+            });
+          }
         }
       }
 
@@ -3076,7 +3131,11 @@ const make = Effect.gen(function* () {
         }
       }
 
-      if (event.type === "turn.aborted" || event.type === "session.exited") {
+      if (
+        event.type === "turn.aborted" ||
+        (event.type === "session.exited" &&
+          (!isRuntimeOwnershipLoss || mayRecoverRuntimeOwnershipLoss))
+      ) {
         yield* clearTurnStateForSession(thread.id);
       }
 

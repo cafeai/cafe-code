@@ -807,9 +807,12 @@ async function refreshProviderDaemonSnapshotForDebugRequest(): Promise<void> {
   }
 }
 
-function providerDaemonSnapshotAgeMs(nowMs: number = Date.now()): number | null {
+function providerDaemonHealthAgeMs(nowMs: number = Date.now()): number | null {
   const snapshot = readRecord(state.providerDaemonSnapshot);
-  return readTimestampAgeMs(snapshot?.updatedAt, nowMs);
+  // A liveness probe republishes manager state without reading rich health.
+  // Publication time cannot certify cached session/RPC/event diagnostics as
+  // fresh; missing observation metadata must also trigger a real refresh.
+  return readTimestampAgeMs(snapshot?.lastHealthObservedAt, nowMs);
 }
 
 async function prepareProviderDaemonSnapshotForDebugRequest(fullDetail: boolean): Promise<void> {
@@ -817,7 +820,7 @@ async function prepareProviderDaemonSnapshotForDebugRequest(fullDetail: boolean)
     return;
   }
 
-  const ageMs = providerDaemonSnapshotAgeMs();
+  const ageMs = providerDaemonHealthAgeMs();
   if (fullDetail || state.providerDaemonSnapshot === null) {
     await refreshProviderDaemonSnapshotForDebugRequest();
     return;
@@ -1164,15 +1167,17 @@ function summarizeProviderDaemonForCompactDebug(): Record<string, unknown> {
       reason: "Provider daemon manager has not published a snapshot yet.",
     };
   }
-  const ageMs = providerDaemonSnapshotAgeMs();
+  const ageMs = providerDaemonHealthAgeMs();
   return {
     available: true,
     status: readString(snapshot.status),
     pid: readNumber(snapshot.pid),
     adoptedExistingProcess: readBoolean(snapshot.adoptedExistingProcess),
     updatedAt: readString(snapshot.updatedAt),
+    lastHealthObservedAt: readCanonicalIsoTimestamp(snapshot.lastHealthObservedAt),
+    // Age/staleness qualify the cached health below, not manager publication.
     ageMs,
-    stale: ageMs === null ? null : ageMs > PROVIDER_DAEMON_DEBUG_REFRESH_TTL_MS,
+    stale: ageMs === null || ageMs > PROVIDER_DAEMON_DEBUG_REFRESH_TTL_MS,
     runtimeBuildId: readString(snapshot.runtimeBuildId),
     endpoint: {
       transport: readString(readRecord(snapshot.endpoint)?.transport),
@@ -1839,11 +1844,11 @@ export const __desktopDebugServerTestApi = {
       updatedAt: new Date().toISOString(),
     };
   },
-  setProviderDaemonSnapshotUpdatedAt(updatedAt: string): void {
+  setProviderDaemonHealthObservedAt(lastHealthObservedAt: string): void {
     if (state.providerDaemonSnapshot !== null) {
       state.providerDaemonSnapshot = {
         ...state.providerDaemonSnapshot,
-        updatedAt,
+        lastHealthObservedAt,
       };
     }
   },
