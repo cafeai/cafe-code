@@ -1744,7 +1744,18 @@ async function dispatchInputKey(
 }
 
 function createDesktopBridgeForChatViewTests(
-  sourceUpdateState: DesktopSourceUpdateState,
+  sourceUpdateState: DesktopSourceUpdateState = {
+    status: "idle",
+    branch: null,
+    trackedBranch: null,
+    runtimeHash: null,
+    localHash: null,
+    remoteHash: null,
+    mergeBaseHash: null,
+    dirty: null,
+    checkedAt: null,
+    message: null,
+  },
 ): DesktopBridge {
   return {
     openVirtualDesktop: async () => undefined,
@@ -7445,10 +7456,13 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
 
       try {
         await waitForServerConfigToApply();
+        // The full app also reads bootstrap and other desktop capabilities on
+        // rerender. Keep this fixture checked against the complete bridge
+        // contract so newly mounted desktop controls cannot call missing methods.
         window.desktopBridge = {
+          ...createDesktopBridgeForChatViewTests(),
           pickFolder,
-          setTheme: vi.fn().mockResolvedValue(undefined),
-        } as unknown as NonNullable<typeof window.desktopBridge>;
+        };
 
         await page.getByTestId("sidebar-add-project-trigger").click();
 

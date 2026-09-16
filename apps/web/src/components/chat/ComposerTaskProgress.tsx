@@ -180,7 +180,18 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
                   {hasSubagents ? `${subagents.length} active` : null}
                 </span>
                 {props.onShowOnSide ? (
-                  <SessionPlacementButton placement="side" onClick={props.onShowOnSide} />
+                  <SessionPlacementButton
+                    placement="side"
+                    onClick={() => {
+                      // Docking hides this component's output without unmounting
+                      // its state. Close before handing placement to the parent
+                      // so undocking cannot restore a press-open popup and make
+                      // the user's first click unexpectedly toggle it closed.
+                      openModeRef.current = null;
+                      setOpen(false);
+                      props.onShowOnSide?.();
+                    }}
+                  />
                 ) : null}
               </div>
             </div>
