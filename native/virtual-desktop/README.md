@@ -10,7 +10,12 @@ the worker input loop. No VNC or video codec is involved.
 
 Build through `node scripts/build-virtual-desktop.ts` using the pinned Node. Build
 dependencies: a C/C++20 compiler, CMake, pkg-config, wayland-scanner, and development
-headers for Wayland, libpng, json-c, xkbcommon, X11/XTest, GBM, EGL, GLES2, Pango/Cairo (`libpango1.0-dev`), and GIO (`libglib2.0-dev`).
+headers for Wayland, libpng, json-c, xkbcommon, X11/XTest, GBM, DRM (`libdrm-dev` on Debian/Ubuntu), EGL, GLES2, Pango/Cairo (`libpango1.0-dev`), and GIO (`libglib2.0-dev`).
+DRM headers are required directly for DMA-BUF pixel-format definitions; installing
+GBM alone does not guarantee they are present. The build checks the host
+pkg-config dependencies before downloading or compiling SDL so missing development
+packages fail early. Keep the Linux prerequisite steps in CI, release, and
+reliability workflows aligned with these requirements.
 The script downloads and verifies SDL 3.4.14, then caches a minimal static build;
 system SDL is not required. CI's apt dependency list is in `.github/workflows/ci.yml`.
 Runtime dependencies include Sway, Xwayland, dbus-daemon, the host display/GPU

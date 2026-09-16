@@ -4,9 +4,51 @@ import { mkdirSync, chmodSync, copyFileSync } from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
+// Keep the compile/link package order stable: SDL is a static archive, while
+// the host graphics and desktop libraries retain their existing linkage.
+const NATIVE_BUILD_PACKAGES = [
+  "wayland-client",
+  "sdl3",
+  "libpng",
+  "json-c",
+  "xkbcommon",
+  "xtst",
+  "x11",
+  "gbm",
+  "egl",
+  "glesv2",
+  "pangocairo",
+  "gio-2.0",
+];
+
+function verifyLinuxBuildPrerequisites(): void {
+  // SDL is built from the pinned source below. Everything else must already be
+  // installed, including libdrm's format headers: libgbm-dev does not guarantee
+  // those headers are present on Ubuntu. Check before downloading/building SDL
+  // so a missing development package fails quickly on a fresh build machine.
+  // libdrm supplies constants only and need not change the helper's link flags.
+  const hostPackages = NATIVE_BUILD_PACKAGES.filter((name) => name !== "sdl3");
+  hostPackages.push("libdrm");
+  try {
+    execFileSync("pkg-config", ["--exists", ...hostPackages], {
+      shell: false,
+      stdio: "ignore",
+      timeout: 10_000,
+      killSignal: "SIGKILL",
+    });
+  } catch {
+    // Use a fixed diagnostic rather than echoing arbitrary subprocess output
+    // or environment-dependent search paths into the build error.
+    throw new Error(
+      `Could not verify Linux virtual-desktop build prerequisites. Install pkg-config and development packages for: ${hostPackages.join(", ")}. On Ubuntu/Debian, libdrm-dev provides the required DRM format headers.`,
+    );
+  }
+}
+
 /** Linux-only native resource. JS/package execution stays on Node/Corepack. */
-export async function buildVirtualDesktopNative() {
-  if (process.platform !== "linux") return;
+export async function buildVirtualDesktopNative(platform: NodeJS.Platform = process.platform) {
+  if (platform !== "linux") return;
+  verifyLinuxBuildPrerequisites();
   const root = fileURLToPath(new URL("../", import.meta.url));
   const source = path.join(root, "native/virtual-desktop");
   const generated = path.join(root, "build/virtual-desktop");
@@ -16,23 +58,7 @@ export async function buildVirtualDesktopNative() {
   const prefix = await desktopSdlPrefix(generated);
   const flags = execFileSync(
     "pkg-config",
-    [
-      "--static",
-      "--cflags",
-      "--libs",
-      "wayland-client",
-      "sdl3",
-      "libpng",
-      "json-c",
-      "xkbcommon",
-      "xtst",
-      "x11",
-      "gbm",
-      "egl",
-      "glesv2",
-      "pangocairo",
-      "gio-2.0",
-    ],
+    ["--static", "--cflags", "--libs", ...NATIVE_BUILD_PACKAGES],
     {
       encoding: "utf8",
       env: {
