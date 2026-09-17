@@ -54,6 +54,57 @@ Current limitations:
 
 Provider settings report whether the CLI is missing, outdated, timed out, unauthenticated, protocol-incompatible, or ready. Raw provider stderr, prompts, outputs, tool payloads, credentials, MCP headers, and full Grok-home paths are not included in user-visible diagnostics.
 
+### CLI works, but Cafe reports a sandbox failure
+
+Cafe's provider check defaults to a **read-only** sandbox. An ordinary
+terminal `grok` session defaults to sandboxing off, so a working interactive CLI
+does not prove that protected ACP startup works on the same machine.
+
+Grok 1.0.34 refuses read-only startup when a container-runtime socket endpoint is
+a symbolic link. Docker Desktop's optional `/var/run/docker.sock` link on macOS
+can trigger this before ACP initialization or authentication. Cafe identifies
+this as a sandbox failure, keeps authentication unknown, and reports the safe
+reason instead of telling you to log in again. Other enforcement failures retain
+a generic sandbox-specific message. Probe logs record only the fixed startup
+phase, error tag/code, and classified reason; raw stderr and socket targets are
+discarded. A fast child exit does not discard a warning already in its stderr
+pipe, and Cafe never retries with weaker protection.
+
+This endpoint refusal is present in the upstream
+[runtime-socket resolver](https://github.com/xai-org/grok-build/blob/482711333c7195dc16a272777f86086d615e2afb/crates/codegen/xai-grok-sandbox/src/runtime_sockets.rs).
+It cannot safely be repaired by silently switching to `off`, `workspace`, or a
+custom profile that removes container-socket protection. Review your container
+socket configuration or use a provider version that supports it. On Docker
+Desktop for Mac, Settings → Advanced controls the optional default socket link;
+disabling it is a **user decision**, since other Docker clients may depend on
+that path. The Docker CLI itself can use its active context. See
+[Docker's permission requirements](https://docs.docker.com/desktop/setup/install/mac-permission-requirements/).
+Cafe does not delete or modify Docker's socket, login state, or configuration.
+
+### Explicit Full access connection checks
+
+If you want to use Grok without changing Docker, open **Settings → Providers →
+Grok Build → Use without sandbox** and read the confirmation. This saves consent
+for that specific provider instance to run its connection checks outside the OS
+sandbox. Checks still use Grok's native default/ask approval policy, do not send
+a model prompt, and do not register Cafe's per-thread MCP tools. Missing consent
+keeps protected checks; Cafe never switches automatically after a failure.
+
+After a successful check Grok becomes selectable, with a notice that sandbox
+support was **not checked**. In the chat, select the existing **Full access** mode
+to run normally without a sandbox. Full access also bypasses ordinary approval
+prompts; it is not equivalent to sandbox-off with approvals enabled. The check
+preference does **not** change a chat's selected access mode. Plan, protected
+chat modes and title/branch/commit/PR helpers still require their existing
+sandboxes and may remain unavailable on the affected host.
+
+Choose **Use protected checks** to revoke the connection-check consent. Make
+provider configuration changes between sessions because saving can reload the
+instance. Revocation does not itself change a chat's Full access selection.
+These controls apply to the selected Grok instance only, not to other providers
+or other Grok installations. See the [qualification decision](decisions/grok-explicit-full-access-qualification.md)
+for the security boundary and failure behavior.
+
 The normal test suite uses a mock ACP agent and needs no Grok credentials. Maintainers can run the explicit credentialed canary without adding it to the default test path:
 
 ```bash

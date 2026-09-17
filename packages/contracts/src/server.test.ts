@@ -1,7 +1,11 @@
 import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vitest";
 
-import { ServerProvider, ServerRuntimeLayerDiagnosticsResult } from "./server.ts";
+import {
+  ServerProvider,
+  ServerProviderSandbox,
+  ServerRuntimeLayerDiagnosticsResult,
+} from "./server.ts";
 
 const decodeServerProvider = Schema.decodeUnknownSync(ServerProvider);
 const decodeRuntimeLayerDiagnostics = Schema.decodeUnknownSync(ServerRuntimeLayerDiagnosticsResult);
@@ -87,9 +91,45 @@ describe("ServerProvider", () => {
 
     expect(parsed.slashCommands).toEqual([]);
     expect(parsed.skills).toEqual([]);
+    expect(parsed.sandbox).toBeUndefined();
     expect(parsed.probeDiagnostics).toBeUndefined();
     expect(parsed.versionAdvisory).toBeUndefined();
     expect(parsed.updateState).toBeUndefined();
+  });
+
+  it("keeps sandbox qualification separate from provider readiness and strips raw diagnostics", () => {
+    const parsed = decodeServerProvider({
+      instanceId: "grok",
+      driver: "grok",
+      enabled: true,
+      installed: true,
+      version: "1.0.34",
+      status: "error",
+      auth: { status: "unknown" },
+      checkedAt: "2026-04-10T00:00:00.000Z",
+      models: [],
+      sandbox: {
+        status: "unavailable",
+        reason: "container-socket-symlink",
+        stderr: "SECRET provider stderr",
+        socketPath: "/private/user/container.sock",
+      },
+    });
+    expect(parsed.sandbox).toEqual({
+      status: "unavailable",
+      reason: "container-socket-symlink",
+    });
+    expect(JSON.stringify(parsed)).not.toContain("SECRET");
+    expect(JSON.stringify(parsed)).not.toContain("/private/");
+
+    const decodeSandbox = Schema.decodeUnknownSync(ServerProviderSandbox);
+    for (const status of ["available", "unavailable", "not-checked"]) {
+      expect(decodeSandbox({ status })).toEqual({ status });
+    }
+    expect(() => decodeSandbox({ status: "assumed-available" })).toThrow();
+    expect(() =>
+      decodeSandbox({ status: "unavailable", reason: "SECRET provider stderr" }),
+    ).toThrow();
   });
 
   it("decodes bounded provider probe diagnostics without retaining unknown sensitive fields", () => {

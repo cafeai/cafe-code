@@ -51,6 +51,7 @@ function makeAcpGrokWrapper(dir: string, env: Record<string, string>): Promise<s
 function withFakeAcpGrok<A, E, R>(
   env: Record<string, string>,
   effectFn: (textGeneration: TextGeneration.TextGeneration["Service"]) => Effect.Effect<A, E, R>,
+  settings: Pick<Partial<GrokSettings>, "allowUnsandboxedProbe"> = {},
 ) {
   return Effect.gen(function* () {
     const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "cafecode-grok-text-acp-"));
@@ -60,7 +61,7 @@ function withFakeAcpGrok<A, E, R>(
       }),
     );
     const binaryPath = yield* Effect.promise(() => makeAcpGrokWrapper(tempDir, env));
-    const config = decodeGrokSettings({ binaryPath });
+    const config = decodeGrokSettings({ ...settings, binaryPath });
     const textGeneration = yield* provideGrokTestProcessSpawner(
       binaryPath,
       makeGrokTextGeneration(config),
@@ -80,6 +81,30 @@ function readJsonRpcRequests(
 }
 
 it.layer(GrokTextGenerationTestLayer)("GrokTextGeneration", (it) => {
+  it.effect("keeps disposable generation read-only after unsandboxed probe consent", () =>
+    withFakeAcpGrok(
+      {
+        CAFE_CODE_ACP_PROMPT_RESPONSE_TEXT: JSON.stringify({
+          title: "Protected helper",
+          branch: "protected-helper",
+        }),
+      },
+      (textGeneration) =>
+        Effect.gen(function* () {
+          // The fixture rejects any argv other than read-only/default. A
+          // successful mock response therefore also verifies the OS policy
+          // request; probe consent cannot relax an automatic helper process.
+          const generated = yield* textGeneration.generateThreadMetadata({
+            cwd: process.cwd(),
+            message: "Keep helpers protected",
+            modelSelection: createModelSelection(ProviderInstanceId.make("grok"), "grok-mock-alt"),
+          });
+          expect(generated).toEqual({ title: "Protected helper", branch: "protected-helper" });
+        }),
+      { allowUnsandboxedProbe: true },
+    ),
+  );
+
   it.effect("generates both first-turn labels from one Grok structured response", () =>
     withFakeAcpGrok(
       {

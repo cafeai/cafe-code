@@ -151,8 +151,34 @@ export function readGrokAcpSessionModelMetadata(
 const GROK_SANDBOX_APPLY_FAILURE = "warning: sandbox could not be applied:";
 
 /**
- * Grok's built-in profiles intentionally warn and continue when the host OS
- * cannot apply Landlock or Seatbelt. Cafe treats read-only/workspace as a
+ * Only Cafe's bounded local stderr classifier constructs this subtype. Do not
+ * recover it from provider JSON-RPC data: that boundary deliberately discards
+ * arbitrary provider messages/data, which may include secrets or host paths.
+ * Keeping a local type distinguishes an enforcement failure from an ACP or
+ * login failure without copying any of the original diagnostic into a log.
+ */
+export class GrokSandboxStartupError extends EffectAcpErrors.AcpRequestError {
+  readonly reason: "container-socket-symlink" | "sandbox-unavailable";
+
+  constructor(
+    profile: GrokSandboxProfile,
+    reason: "container-socket-symlink" | "sandbox-unavailable",
+  ) {
+    super({
+      code: -32603,
+      errorMessage:
+        reason === "container-socket-symlink"
+          ? `Grok cannot start its ${profile} sandbox because a container-runtime socket is a symbolic link. Review the Docker/container socket configuration or use a Grok version that supports it. Cafe has not disabled sandbox protection.`
+          : `Grok could not enforce its ${profile} sandbox. Check Grok's sandbox requirements for this machine. Cafe stopped startup instead of continuing without protection.`,
+    });
+    this.reason = reason;
+  }
+}
+
+/**
+ * Older Grok builds can warn and continue when the host OS cannot apply
+ * Landlock or Seatbelt; newer builds can refuse startup after the warning.
+ * Cafe treats read-only/workspace as a
  * security promise, so protected sessions fail closed on that upstream warning
  * while explicit full-access (`off`) remains unaffected. The returned error is
  * deliberately free of the raw stderr, which can contain host paths.
@@ -160,15 +186,25 @@ const GROK_SANDBOX_APPLY_FAILURE = "warning: sandbox could not be applied:";
 export function classifyGrokSandboxStartupStderr(
   sandboxProfile: GrokSandboxProfile,
   boundedStderr: string,
-): EffectAcpErrors.AcpError | undefined {
+): GrokSandboxStartupError | undefined {
+  const normalized = boundedStderr.toLowerCase();
   if (
     sandboxProfile === GrokSandboxProfile.Off ||
-    !boundedStderr.toLowerCase().includes(GROK_SANDBOX_APPLY_FAILURE)
+    !normalized.includes(GROK_SANDBOX_APPLY_FAILURE)
   ) {
     return undefined;
   }
-  return EffectAcpErrors.AcpRequestError.internalError(
-    `Grok Build could not enforce the requested ${sandboxProfile} sandbox. Session startup was stopped instead of continuing without protection.`,
+  // Grok 1.0.34 rejects symlink endpoints while resolving runtime-socket denies,
+  // including Docker Desktop's optional default socket link on macOS. This is
+  // an upstream security refusal, not failed authentication. Classify fixed
+  // phrases only; never return the intervening path or suggest an off fallback.
+  // Upstream: xai-org/grok-build at 482711333c7195dc16a272777f86086d615e2afb,
+  // crates/codegen/xai-grok-sandbox/src/runtime_sockets.rs (endpoint validation).
+  return new GrokSandboxStartupError(
+    sandboxProfile,
+    normalized.includes("runtime-socket deny path") && normalized.includes("endpoint is a symlink")
+      ? "container-socket-symlink"
+      : "sandbox-unavailable",
   );
 }
 

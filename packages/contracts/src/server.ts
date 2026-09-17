@@ -64,6 +64,16 @@ export const ServerProviderAuthActions = Schema.Struct({
 });
 export type ServerProviderAuthActions = typeof ServerProviderAuthActions.Type;
 
+// Qualification reports only finite, Cafe-owned outcomes. An unsandboxed
+// health check can establish authentication but cannot establish protection
+// for sessions that request a sandbox. Never transport the provider's raw
+// failure text or host paths as the diagnostic reason.
+export const ServerProviderSandbox = Schema.Struct({
+  status: Schema.Literals(["available", "unavailable", "not-checked"]),
+  reason: Schema.optionalKey(Schema.Literals(["container-socket-symlink", "sandbox-unavailable"])),
+});
+export type ServerProviderSandbox = typeof ServerProviderSandbox.Type;
+
 export const ServerProviderAccountRateLimitWindow = Schema.Struct({
   // Optional: some providers (e.g. Claude) report a window's reset time without
   // a usage figure. A window with only `resetsAt` is valid — consumers render
@@ -346,6 +356,7 @@ export const ServerProvider = Schema.Struct({
   status: ServerProviderState,
   auth: ServerProviderAuth,
   authActions: Schema.optionalKey(ServerProviderAuthActions),
+  sandbox: Schema.optionalKey(ServerProviderSandbox),
   checkedAt: IsoDateTime,
   message: Schema.optional(TrimmedNonEmptyString),
   // Optional for back-compat: every legacy producer omits this field and

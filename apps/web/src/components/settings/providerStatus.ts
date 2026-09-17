@@ -49,6 +49,15 @@ export function getProviderSummary(provider: ServerProvider | undefined) {
       detail: provider.message ?? "CLI not detected on PATH.",
     };
   }
+  // A protected startup failure says nothing about credentials or whether an
+  // explicitly unsandboxed connection could work. Keep that distinction even
+  // when a previous snapshot has already established authentication.
+  if (provider.driver === "grok" && provider.sandbox?.status === "unavailable") {
+    return {
+      headline: "Sandbox unavailable",
+      detail: provider.message ?? "Grok could not start its protected connection check.",
+    };
+  }
   if (provider.auth.status === "authenticated") {
     const authLabel = provider.auth.label ?? provider.auth.type;
     return {

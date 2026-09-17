@@ -387,6 +387,24 @@ describe("provider settings", () => {
     });
   });
 
+  it("requires explicit Boolean consent for unsandboxed Grok qualification and accepts revocation", () => {
+    expect(decodeGrokSettings({}).allowUnsandboxedProbe).toBeUndefined();
+    for (const allowUnsandboxedProbe of [true, false]) {
+      expect(decodeGrokSettings({ allowUnsandboxedProbe }).allowUnsandboxedProbe).toBe(
+        allowUnsandboxedProbe,
+      );
+      expect(decodeServerSettingsPatch({ providers: { grok: { allowUnsandboxedProbe } } })).toEqual(
+        { providers: { grok: { allowUnsandboxedProbe } } },
+      );
+    }
+    for (const allowUnsandboxedProbe of ["true", 1, null]) {
+      expect(() => Schema.decodeUnknownSync(GrokSettings)({ allowUnsandboxedProbe })).toThrow();
+      expect(() =>
+        decodeServerSettingsPatch({ providers: { grok: { allowUnsandboxedProbe } } }),
+      ).toThrow();
+    }
+  });
+
   it("defaults Codex and Claude provider runtime source to system", () => {
     expect(decodeCodexSettings({}).runtimeSource).toBe("system");
     expect(decodeClaudeSettings({}).runtimeSource).toBe("system");

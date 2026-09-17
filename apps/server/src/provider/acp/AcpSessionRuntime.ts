@@ -49,6 +49,10 @@ export type AcpSessionRuntimeEvent = AcpParsedSessionEvent | AcpSessionEventStre
 
 const defaultSessionLoadTimeout = Duration.seconds(90);
 const defaultSessionLoadReplayIdleGap = Duration.seconds(2);
+// Stdout EOF and stderr EOF are independent notifications. Give an already
+// failed startup a short window to drain its final diagnostic, but never wait
+// indefinitely for a child (or an inherited pipe) that keeps stderr open.
+const startupStderrFailureDrainTimeout = Duration.millis(250);
 
 export interface AcpSpawnInput {
   readonly command: string;
@@ -368,24 +372,55 @@ export const make = (
     // once the OS pipe fills. Keep only a small startup tail when a provider
     // needs to detect a fail-open security warning; never expose or log it.
     const startupStderrFailure = yield* Deferred.make<never, EffectAcpErrors.AcpError>();
+    const startupStderrDrained = yield* Deferred.make<void>();
     let startupStderrTail = "";
     let inspectStartupStderr = options.classifyStartupStderr !== undefined;
     const maxStartupStderrCharacters = 8 * 1024;
+    const inspectStartupStderrChunk = (chunk: string, flushPartialLine = false) =>
+      Effect.gen(function* () {
+        if (!inspectStartupStderr || !options.classifyStartupStderr) return;
+        // Classify complete lines so a warning prefix in one OS read cannot
+        // permanently hide a more specific reason arriving in the next read.
+        // Process large chunks in bounded pieces, preserving overlap in the
+        // rolling tail so a split marker remains recognizable. An oversized
+        // unterminated line is still classified at the cap: withholding a
+        // newline must not turn a fail-closed warning into a successful start.
+        for (let offset = 0; offset < chunk.length; offset += maxStartupStderrCharacters / 2) {
+          startupStderrTail =
+            `${startupStderrTail}${chunk.slice(offset, offset + maxStartupStderrCharacters / 2)}`.slice(
+              -maxStartupStderrCharacters,
+            );
+          const lastNewline = startupStderrTail.lastIndexOf("\n");
+          const completeLines =
+            startupStderrTail.length === maxStartupStderrCharacters
+              ? startupStderrTail
+              : lastNewline >= 0
+                ? startupStderrTail.slice(0, lastNewline + 1)
+                : "";
+          const failure = completeLines && options.classifyStartupStderr(completeLines);
+          if (failure) yield* Deferred.fail(startupStderrFailure, failure);
+        }
+        if (flushPartialLine && startupStderrTail.length > 0) {
+          const failure = options.classifyStartupStderr(startupStderrTail);
+          if (failure) yield* Deferred.fail(startupStderrFailure, failure);
+        }
+      });
+    const failIfStartupStderrWasClassified = Effect.gen(function* () {
+      if (yield* Deferred.isDone(startupStderrFailure)) {
+        return yield* Deferred.await(startupStderrFailure);
+      }
+    });
     yield* child.stderr.pipe(
       Stream.decodeText(),
-      Stream.runForEach((chunk) =>
-        Effect.suspend(() => {
-          if (!inspectStartupStderr || !options.classifyStartupStderr) return Effect.void;
-          startupStderrTail = `${startupStderrTail}${chunk}`.slice(-maxStartupStderrCharacters);
-          const failure = options.classifyStartupStderr(startupStderrTail);
-          return failure
-            ? Deferred.fail(startupStderrFailure, failure).pipe(Effect.asVoid)
-            : Effect.void;
-        }),
-      ),
+      Stream.runForEach((chunk) => inspectStartupStderrChunk(chunk)),
       // The ACP transport owns process-exit reporting. A stderr read failure is
       // therefore drained here without creating a second, racing error path.
       Effect.catchCause(() => Effect.void),
+      Effect.ensuring(
+        inspectStartupStderrChunk("", true).pipe(
+          Effect.andThen(Deferred.succeed(startupStderrDrained, undefined)),
+        ),
+      ),
       Effect.forkIn(runtimeScope),
     );
 
@@ -711,6 +746,28 @@ export const make = (
     const startOnce = options.classifyStartupStderr
       ? Effect.raceFirst(
           startOnceBase.pipe(
+            Effect.catchCause((cause) => {
+              // Cancellation and conclusive RPC failures remain immediate.
+              // Otherwise stdout/process exit can win the race while a security warning is still buffered
+              // on stderr; prefer its classified, provider-safe failure once
+              // the drain completes or its short deadline expires.
+              const transportFailure = cause.reasons.some(
+                (reason) =>
+                  Cause.isFailReason(reason) &&
+                  (reason.error._tag === "AcpTransportError" ||
+                    reason.error._tag === "AcpProcessExitedError" ||
+                    reason.error._tag === "AcpInputStreamEndedError"),
+              );
+              if (Cause.hasInterrupts(cause) || !transportFailure) {
+                return Effect.failCause(cause);
+              }
+              return Deferred.await(startupStderrDrained).pipe(
+                Effect.timeoutOption(startupStderrFailureDrainTimeout),
+                Effect.andThen(inspectStartupStderrChunk("", true)),
+                Effect.andThen(failIfStartupStderrWasClassified),
+                Effect.andThen(Effect.failCause(cause)),
+              );
+            }),
             // The warning is emitted before Grok starts its ACP loop. Yield a
             // few scheduler turns after session setup so the independent
             // stderr drain can observe bytes already in its OS pipe without
@@ -722,6 +779,11 @@ export const make = (
                 }
               }),
             ),
+            // A provider need not terminate its last stderr line. Flush that
+            // bounded tail before success, without waiting for stderr EOF or
+            // adding a timer to the normal successful startup path.
+            Effect.tap(() => inspectStartupStderrChunk("", true)),
+            Effect.tap(() => failIfStartupStderrWasClassified),
             Effect.tap(() =>
               Effect.sync(() => {
                 inspectStartupStderr = false;

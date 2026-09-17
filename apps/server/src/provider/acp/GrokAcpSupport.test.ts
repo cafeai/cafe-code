@@ -8,6 +8,7 @@ import {
   classifyGrokSandboxStartupStderr,
   GrokPermissionMode,
   GrokSandboxProfile,
+  GrokSandboxStartupError,
   grokPermissionModeForRuntimeMode,
   grokSandboxProfileForRuntimeMode,
   readGrokAcpModelMetadata,
@@ -160,8 +161,42 @@ describe("classifyGrokSandboxStartupStderr", () => {
   it("fails protected profiles without retaining raw stderr details", () => {
     const raw = "warning: sandbox could not be applied: kernel rejected /private/secret/path";
     const failure = classifyGrokSandboxStartupStderr(GrokSandboxProfile.ReadOnly, raw);
-    expect(failure?._tag).toBe("AcpRequestError");
+    expect(failure).toBeInstanceOf(GrokSandboxStartupError);
+    expect(failure?.reason).toBe("sandbox-unavailable");
     expect(failure?.message).not.toContain("/private/secret/path");
+    expect(JSON.stringify(failure)).not.toContain("/private/secret/path");
+  });
+
+  it.each([GrokSandboxProfile.ReadOnly, GrokSandboxProfile.Workspace])(
+    "classifies the socket-symlink refusal without retaining its path in %s mode",
+    (profile) => {
+      const failure = classifyGrokSandboxStartupStderr(
+        profile,
+        "warning: sandbox could not be applied: socket deny resolution failed: could not resolve runtime-socket deny path /private/secret-token.sock: endpoint is a symlink\n",
+      );
+      expect(failure).toBeInstanceOf(GrokSandboxStartupError);
+      expect(failure?.reason).toBe("container-socket-symlink");
+      expect(failure?.message).toContain("socket is a symbolic link");
+      expect(failure?.message).toContain("has not disabled sandbox protection");
+      expect(JSON.stringify(failure)).not.toContain("secret-token");
+      expect(failure?.cause).toBeUndefined();
+      expect(failure?.data).toBeUndefined();
+    },
+  );
+
+  it("does not misclassify unrelated symlink or provider errors as socket failures", () => {
+    expect(
+      classifyGrokSandboxStartupStderr(
+        GrokSandboxProfile.ReadOnly,
+        "runtime-socket deny path /private/token: endpoint is a symlink\n",
+      ),
+    ).toBeUndefined();
+    expect(
+      classifyGrokSandboxStartupStderr(
+        GrokSandboxProfile.ReadOnly,
+        "warning: sandbox could not be applied: hook directory is a symlink\n",
+      )?.reason,
+    ).toBe("sandbox-unavailable");
   });
 
   it("does not reinterpret warnings for explicit full access", () => {

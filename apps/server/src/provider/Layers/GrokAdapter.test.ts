@@ -199,7 +199,7 @@ const testSessionCredentials = {
 const makeTestAdapter = (
   binaryPath: string,
   options?: Parameters<typeof makeGrokAdapter>[1],
-  settings?: { readonly homePath?: string },
+  settings?: { readonly homePath?: string; readonly allowUnsandboxedProbe?: boolean },
 ) =>
   provideGrokTestProcessSpawner(
     binaryPath,
@@ -395,6 +395,36 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
       assert.equal(error._tag, "ProviderAdapterRequestError");
     }),
   );
+
+  // Connection-check consent must not become a second source of authority for
+  // the process executing a user's turn. Each protected mode still fails closed.
+  for (const policy of [
+    { runtimeMode: "approval-required", interactionMode: "default" },
+    { runtimeMode: "auto-accept-edits", interactionMode: "auto" },
+    { runtimeMode: "full-access", interactionMode: "plan" },
+  ] as const) {
+    it.effect(
+      `keeps ${policy.runtimeMode}/${policy.interactionMode} protected after unsandboxed probe consent`,
+      () =>
+        Effect.gen(function* () {
+          const wrapperPath = yield* Effect.promise(() =>
+            makeMockGrokWrapper({ CAFE_CODE_ACP_SANDBOX_FAILURE_WARNING: "1" }),
+          );
+          const adapter = yield* makeTestAdapter(wrapperPath, undefined, {
+            allowUnsandboxedProbe: true,
+          });
+          const error = yield* adapter
+            .startSession({
+              threadId: ThreadId.make(`grok-protected-consent-${policy.interactionMode}`),
+              provider: ProviderDriverKind.make("grok"),
+              cwd: process.cwd(),
+              ...policy,
+            })
+            .pipe(Effect.flip);
+          assert.equal(error._tag, "ProviderAdapterRequestError");
+        }),
+    );
+  }
 
   it.effect("starts a session and maps mock ACP prompt flow to runtime events", () =>
     Effect.gen(function* () {

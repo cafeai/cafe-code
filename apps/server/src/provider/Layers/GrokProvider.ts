@@ -31,7 +31,9 @@ import {
 } from "../providerSnapshot.ts";
 import { parseGrokAccountRateLimitsPayload } from "../grokAccountUsage.ts";
 import {
+  GrokPermissionMode,
   GrokSandboxProfile,
+  GrokSandboxStartupError,
   makeGrokAcpRuntime,
   readGrokAcpModelMetadata,
   resolveGrokAcpBaseModelId,
@@ -236,6 +238,7 @@ export const buildInitialGrokProviderSnapshot = (
             version: null,
             status: "warning",
             auth: { status: "unknown" },
+            sandbox: { status: "not-checked" },
             message: "Checking Grok CLI availability...",
           }
         : {
@@ -243,6 +246,7 @@ export const buildInitialGrokProviderSnapshot = (
             version: null,
             status: "warning",
             auth: { status: "unknown" },
+            sandbox: { status: "not-checked" },
             message: "Grok is disabled in Cafe Code settings.",
           },
     });
@@ -267,6 +271,7 @@ const discoverViaAcp = (
   cwd: string,
   environment: NodeJS.ProcessEnv,
   checkedAt: string,
+  observePhase: (phase: GrokAcpProbePhase) => void,
 ) =>
   Effect.gen(function* () {
     const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -275,8 +280,30 @@ const discoverViaAcp = (
       environment,
       childProcessSpawner,
       cwd,
-      sandboxProfile: GrokSandboxProfile.ReadOnly,
+      // Only explicit persisted consent qualifies Full access without a
+      // sandbox. This probe never submits a model prompt or changes the
+      // session adapter's access mapping, and it retains native permission
+      // callbacks even when protection is intentionally disabled. A failed
+      // protected probe must never retry through this path automatically.
+      sandboxProfile:
+        settings.allowUnsandboxedProbe === true
+          ? GrokSandboxProfile.Off
+          : GrokSandboxProfile.ReadOnly,
+      permissionMode: GrokPermissionMode.Ask,
       clientInfo: { name: "cafe-code-provider-probe", version: "0.0.0" },
+      // Track only Cafe-owned phase names. Never retain payloads, provider
+      // results, error bodies, or authentication arguments from this callback.
+      requestLogger: (event) =>
+        Effect.sync(() => {
+          if (event.status !== "started") return;
+          switch (event.method) {
+            case "initialize":
+            case "authenticate":
+            case "session/new":
+              observePhase(event.method);
+              break;
+          }
+        }),
     });
     const eventFiber = yield* runtime.getEvents().pipe(
       Stream.runForEach((event) =>
@@ -287,6 +314,7 @@ const discoverViaAcp = (
       Effect.forkScoped,
     );
     const started = yield* runtime.start();
+    observePhase("capabilities");
     const [liveSteer, accountRateLimits] = yield* Effect.all(
       [
         runtime
@@ -323,6 +351,8 @@ const discoverViaAcp = (
       ...(accountRateLimits ? { accountRateLimits } : {}),
     };
   }).pipe(Effect.scoped);
+
+type GrokAcpProbePhase = "spawn" | "initialize" | "authenticate" | "session/new" | "capabilities";
 
 function causeTag(cause: Cause.Cause<unknown>): string {
   const reason = cause.reasons[0];
@@ -361,7 +391,9 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
         liveSteer: liveSteer ? "supported" : "unsupported",
         threadGoals: "supported",
       },
-      probe,
+      // A fresh failed/pending qualification must not inherit evidence of
+      // sandbox availability from an earlier probe or a revoked opt-in.
+      probe: { sandbox: { status: "not-checked" }, ...probe },
     });
 
   if (!settings.enabled) {
@@ -432,26 +464,35 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
     });
   }
 
-  const acpExit = yield* discoverViaAcp(settings, cwd, environment, checkedAt).pipe(
-    Effect.timeoutOption(GROK_ACP_PROBE_TIMEOUT_MS),
-    Effect.exit,
-  );
+  let acpPhase: GrokAcpProbePhase = "spawn";
+  const acpExit = yield* discoverViaAcp(settings, cwd, environment, checkedAt, (phase) => {
+    acpPhase = phase;
+  }).pipe(Effect.timeoutOption(GROK_ACP_PROBE_TIMEOUT_MS), Effect.exit);
   if (Exit.isFailure(acpExit)) {
     const error = Cause.squash(acpExit.cause);
     const unauthenticated =
       error instanceof EffectAcpErrors.AcpRequestError && error.code === -32000;
+    const sandboxFailure = error instanceof GrokSandboxStartupError ? error : undefined;
     yield* Effect.logWarning("Grok ACP qualification probe failed.", {
       errorTag: causeTag(acpExit.cause),
       unauthenticated,
+      phase: sandboxFailure ? "sandbox" : acpPhase,
+      ...(sandboxFailure ? { sandboxFailureReason: sandboxFailure.reason } : {}),
+      ...(error instanceof EffectAcpErrors.AcpRequestError ? { rpcCode: error.code } : {}),
     });
     return build({
       installed: true,
       version,
       status: unauthenticated ? "warning" : "error",
       auth: { status: unauthenticated ? "unauthenticated" : "unknown" },
-      message: unauthenticated
-        ? "Grok Build is not authenticated. Run `grok login` in a terminal."
-        : "Grok CLI is installed but ACP startup failed. Check server logs for details.",
+      ...(sandboxFailure
+        ? { sandbox: { status: "unavailable" as const, reason: sandboxFailure.reason } }
+        : {}),
+      message: sandboxFailure
+        ? sandboxFailure.message
+        : unauthenticated
+          ? "Grok Build is not authenticated. Run `grok login` in a terminal."
+          : `Grok CLI is installed but ACP startup failed during ${acpPhase}. Check server logs for details.`,
     });
   }
   if (Option.isNone(acpExit.value)) {
@@ -460,7 +501,7 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
       version,
       status: "error",
       auth: { status: "unknown" },
-      message: `Grok CLI is installed but ACP startup timed out after ${GROK_ACP_PROBE_TIMEOUT_MS}ms.`,
+      message: `Grok CLI is installed but ACP startup timed out during ${acpPhase} after ${GROK_ACP_PROBE_TIMEOUT_MS}ms.`,
     });
   }
 
@@ -476,6 +517,15 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
       version,
       status: "ready",
       auth: { status: "authenticated", type: "cached-token" },
+      sandbox: {
+        status: settings.allowUnsandboxedProbe === true ? "not-checked" : "available",
+      },
+      ...(settings.allowUnsandboxedProbe === true
+        ? {
+            message:
+              "Grok is ready for Full access without a sandbox. Protected access modes and Plan still require a working sandbox.",
+          }
+        : {}),
       ...(discovered.accountRateLimits ? { accountRateLimits: discovered.accountRateLimits } : {}),
     },
     discovered.models.length > 0

@@ -56,6 +56,20 @@ export const hydrateCachedProvider = (input: {
     return input.fallbackProvider;
   }
 
+  if (input.fallbackProvider.driver === "grok" && input.fallbackProvider.sandbox !== undefined) {
+    // Cache identity binds only the instance id and driver, not configuration
+    // or unsandboxed-probe consent. Reusing old Grok status/auth/message could
+    // therefore advertise readiness obtained with protection disabled after
+    // consent was revoked, or retain an obsolete refusal after consent was
+    // granted. Keep only the model catalog while this scope's bounded initial
+    // qualification establishes fresh readiness and sandbox evidence. Other
+    // providers retain their existing cached-status and probe-history policy.
+    return {
+      ...input.fallbackProvider,
+      models: mergeProviderModels(input.fallbackProvider.models, input.cachedProvider.models),
+    };
+  }
+
   const { message: _fallbackMessage, ...fallbackWithoutMessage } = input.fallbackProvider;
   const cachedProbeDiagnostics = input.cachedProvider.probeDiagnostics;
   const fallbackProbeDiagnostics = input.fallbackProvider.probeDiagnostics;

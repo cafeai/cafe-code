@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   defaultInstanceIdForDriver,
+  GrokSettings,
   ProviderDriverKind,
   ProviderInstanceId,
   type ServerProvider,
@@ -9,7 +10,9 @@ import { createModelCapabilities } from "@cafecode/shared/model";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Schema from "effect/Schema";
 
+import { buildInitialGrokProviderSnapshot } from "./Layers/GrokProvider.ts";
 import {
   hydrateCachedProvider,
   isCachedProviderCorrelated,
@@ -21,6 +24,7 @@ import {
 const emptyCapabilities = createModelCapabilities({ optionDescriptors: [] });
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
 const CLAUDE_AGENT_DRIVER = ProviderDriverKind.make("claudeAgent");
+const GROK_DRIVER = ProviderDriverKind.make("grok");
 
 const makeProvider = (
   provider: ProviderDriverKind,
@@ -174,6 +178,72 @@ it.layer(NodeServices.layer)("providerStatusCache", (it) => {
       nextScheduledAt: null,
     });
   });
+
+  for (const allowUnsandboxedProbe of [undefined, false, true]) {
+    it.effect(
+      `requires fresh Grok qualification when current unsandboxed consent is ${String(allowUnsandboxedProbe)}`,
+      () =>
+        Effect.gen(function* () {
+          const fallback = makeProvider(
+            GROK_DRIVER,
+            yield* buildInitialGrokProviderSnapshot(
+              Schema.decodeSync(GrokSettings)(
+                allowUnsandboxedProbe === undefined ? {} : { allowUnsandboxedProbe },
+              ),
+            ),
+          );
+          const cachedModel = {
+            slug: "grok-cached-model",
+            name: "Cached Grok model",
+            isCustom: false,
+            capabilities: emptyCapabilities,
+          };
+          const oldObservations = [
+            {
+              status: "ready",
+              auth: { status: "authenticated" },
+              sandbox: { status: "available" },
+            },
+            {
+              status: "ready",
+              auth: { status: "authenticated" },
+              sandbox: { status: "not-checked" },
+            },
+            {
+              status: "error",
+              auth: { status: "unknown" },
+              sandbox: { status: "unavailable", reason: "container-socket-symlink" },
+            },
+            // Pre-sandbox-metadata caches are equally unbound to the current
+            // binary/home/configuration and cannot establish fresh readiness.
+            { status: "ready", auth: { status: "authenticated" } },
+          ] satisfies ReadonlyArray<Partial<ServerProvider>>;
+
+          for (const observation of oldObservations) {
+            const cached = makeProvider(GROK_DRIVER, {
+              ...observation,
+              checkedAt: "2026-04-10T12:00:00.000Z",
+              message: "Historical qualification message",
+              models: [cachedModel],
+              slashCommands: [{ name: "cached-command" }],
+              skills: [{ name: "cached-skill", path: "/old/home/SKILL.md", enabled: true }],
+            });
+            const hydrated = hydrateCachedProvider({
+              cachedProvider: cached,
+              fallbackProvider: fallback,
+            });
+            assert.deepStrictEqual(hydrated, {
+              ...fallback,
+              models: [...fallback.models, cachedModel],
+            });
+            assert.strictEqual(hydrated.status, "warning");
+            assert.deepStrictEqual(hydrated.auth, { status: "unknown" });
+            assert.deepStrictEqual(hydrated.sandbox, { status: "not-checked" });
+            assert.strictEqual(hydrated.message, "Checking Grok CLI availability...");
+          }
+        }),
+    );
+  }
 
   it("ignores stale cached enabled state when the provider is now disabled", () => {
     const cachedCodex = makeProvider(CODEX_DRIVER, {

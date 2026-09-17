@@ -53,6 +53,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import type { DriverOption } from "./providerDriverMeta";
 import { ProviderSettingsForm } from "./ProviderSettingsForm";
 import { ProviderModelsSection } from "./ProviderModelsSection";
+import { GrokSandboxSettings } from "./GrokSandboxSettings";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { RedactedSensitiveText } from "./RedactedSensitiveText";
 import {
@@ -741,8 +742,12 @@ export function ProviderInstanceCard({
   const statusStyle = PROVIDER_STATUS_STYLES[statusKey];
   const rawSummary = getProviderSummary(liveProvider);
   const authEmail = liveProvider?.auth.email;
+  const hasSandboxFailure =
+    instance.driver === "grok" && liveProvider?.sandbox?.status === "unavailable";
   const hasAuthenticatedEmail =
-    liveProvider?.auth.status === "authenticated" && Boolean(authEmail?.trim());
+    !hasSandboxFailure &&
+    liveProvider?.auth.status === "authenticated" &&
+    Boolean(authEmail?.trim());
   const authenticatedDetail = hasAuthenticatedEmail
     ? (liveProvider?.auth.label ?? liveProvider?.auth.type ?? null)
     : null;
@@ -1188,6 +1193,15 @@ export function ProviderInstanceCard({
           </div>
         </div>
       </div>
+
+      {driverKind === "grok" ? (
+        <GrokSandboxSettings
+          instance={instance}
+          displayName={displayName}
+          sandbox={liveProvider?.sandbox}
+          onUpdate={onUpdate}
+        />
+      ) : null}
 
       <Dialog open={isSettingsOpen} onOpenChange={onSettingsOpenChange}>
         <DialogPopup className="max-w-2xl">

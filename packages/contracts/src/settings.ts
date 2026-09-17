@@ -782,6 +782,13 @@ export const GrokSettings = makeProviderSettingsSchema(
       Schema.withDecodingDefault(Effect.succeed(true)),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
+    // This records explicit consent to qualify the provider for Full access
+    // when a protected health probe cannot start. Absence is deliberately not
+    // consent, and the thread's existing access controls remain authoritative
+    // for every actual session; this is never a runtime permission default.
+    allowUnsandboxedProbe: Schema.optionalKey(Schema.Boolean).pipe(
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
     binaryPath: makeBinaryPathSetting("grok").pipe(
       Schema.annotateKey({
         title: "Binary path",
@@ -982,6 +989,7 @@ const ClaudeSettingsPatch = Schema.Struct({
 
 const GrokSettingsPatch = Schema.Struct({
   enabled: Schema.optionalKey(Schema.Boolean),
+  allowUnsandboxedProbe: Schema.optionalKey(Schema.Boolean),
   binaryPath: Schema.optionalKey(TrimmedString),
   homePath: Schema.optionalKey(TrimmedString),
   customModels: Schema.optionalKey(Schema.Array(Schema.String)),
