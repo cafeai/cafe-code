@@ -44,6 +44,10 @@ import {
 } from "../providerSnapshot.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import { codexAppServerRateLimitsToServer } from "../codexRateLimits.ts";
+import {
+  codexAuthWithSubscriptionPlan,
+  formatCodexSubscriptionLabel,
+} from "../codexSubscription.ts";
 import packageJson from "../../../package.json" with { type: "json" };
 const isCodexAppServerSpawnError = Schema.is(CodexErrors.CodexAppServerSpawnError);
 
@@ -91,41 +95,7 @@ function codexAccountAuthLabel(account: CodexSchema.V2GetAccountResponse["accoun
   if (account.type === "amazonBedrock") return "Amazon Bedrock";
   if (account.type !== "chatgpt") return undefined;
 
-  switch (account.planType) {
-    case "free":
-      return "ChatGPT Free Subscription";
-    case "go":
-      return "ChatGPT Go Subscription";
-    case "plus":
-      return "ChatGPT Plus Subscription";
-    case "pro":
-      return "ChatGPT Pro 20x Subscription";
-    case "prolite":
-      return "ChatGPT Pro 5x Subscription";
-    case "team":
-      return "ChatGPT Team Subscription";
-    case "self_serve_business_prolite":
-      return "ChatGPT Business ProLite Subscription";
-    case "self_serve_business_usage_based":
-    case "business":
-      return "ChatGPT Business Subscription";
-    case "ent26":
-    case "enterprise_cbp_automation":
-    case "enterprise_cbp_usage_based":
-    case "enterprise":
-      return "ChatGPT Enterprise Subscription";
-    case "edu":
-      return "ChatGPT Edu Subscription";
-    case "edu_plus":
-      return "ChatGPT Edu Plus Subscription";
-    case "edu_pro":
-      return "ChatGPT Edu Pro Subscription";
-    case "unknown":
-      return "ChatGPT Subscription";
-    default:
-      account.planType satisfies never;
-      return undefined;
-  }
+  return formatCodexSubscriptionLabel(account.planType);
 }
 
 function codexAccountEmail(account: CodexSchema.V2GetAccountResponse["account"]) {
@@ -1657,7 +1627,12 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
       installed: true,
       version: parsedVersion,
       status: accountStatus.status,
-      auth: accountStatus.auth,
+      // Reuse the already-fetched, redacted usage metadata. Reading a plan must
+      // not add another process, account request, or model call to this probe.
+      auth: codexAuthWithSubscriptionPlan(
+        accountStatus.auth,
+        accountRateLimits?.rateLimits.planType,
+      ),
       phases,
       ...(accountRateLimits ? { accountRateLimits } : {}),
       ...(accountStatus.message ? { message: accountStatus.message } : {}),

@@ -20,6 +20,40 @@ function makeProvider(overrides: Partial<ServerProvider> = {}): ServerProvider {
   };
 }
 
+describe("Codex subscription provider summary", () => {
+  it.each([
+    "ChatGPT Plus Subscription",
+    "ChatGPT Pro 5x Subscription",
+    "ChatGPT Pro 20x Subscription",
+  ])("preserves the server-reported %s label", (label) => {
+    expect(
+      getProviderSummary(
+        makeProvider({
+          driver: ProviderDriverKind.make("codex"),
+          status: "ready",
+          auth: { status: "authenticated", type: "chatgpt", label },
+        }),
+      ),
+    ).toEqual({ headline: `Authenticated · ${label}`, detail: null });
+  });
+
+  it("keeps the generic subscription label when the server cannot establish a tier", () => {
+    expect(
+      getProviderSummary(
+        makeProvider({
+          driver: ProviderDriverKind.make("codex"),
+          status: "ready",
+          auth: {
+            status: "authenticated",
+            type: "chatgpt",
+            label: "ChatGPT Subscription",
+          },
+        }),
+      ).headline,
+    ).toBe("Authenticated · ChatGPT Subscription");
+  });
+});
+
 describe("Grok sandbox provider summary", () => {
   it("uses the typed sandbox failure even when authentication was previously verified", () => {
     expect(

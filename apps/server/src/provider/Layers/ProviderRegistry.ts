@@ -57,6 +57,7 @@ import {
 import type { ProviderInstance } from "../ProviderDriver.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
 import type { ProviderSnapshotSource } from "../builtInProviderCatalog.ts";
+import { codexAuthWithSubscriptionPlan } from "../codexSubscription.ts";
 import {
   DEFAULT_PROVIDER_INCONCLUSIVE_FAILURE_THRESHOLD,
   hasConclusiveProviderAuthState,
@@ -130,6 +131,16 @@ export const mergeProviderSnapshot = (
   previousProvider: ServerProvider | undefined,
   nextProvider: ServerProvider,
 ): ServerProvider => {
+  // Usage-only refreshes carry a new plan alongside the prior auth label. Use
+  // only this incoming snapshot's metadata, before any cached quota retention,
+  // so an account switch without fresh usage cannot inherit another tier.
+  if (nextProvider.driver === "codex") {
+    const auth = codexAuthWithSubscriptionPlan(
+      nextProvider.auth,
+      nextProvider.accountRateLimits?.rateLimits.planType,
+    );
+    if (auth !== nextProvider.auth) nextProvider = { ...nextProvider, auth };
+  }
   if (!previousProvider) {
     return nextProvider;
   }
@@ -562,6 +573,11 @@ export const ProviderRegistryLive = Layer.effect(
           const nextProvider: ServerProvider = {
             ...provider,
             accountRateLimits: nextRateLimits,
+            // Only a fresh canonical Codex bucket can update the subscription
+            // label. Sparse quota-only or auxiliary-model updates keep it intact.
+            ...(provider.driver === "codex" && "snapshot" in input && input.limitId === "codex"
+              ? { auth: codexAuthWithSubscriptionPlan(provider.auth, input.snapshot.planType) }
+              : {}),
           };
           if (Equal.equals(provider, nextProvider)) {
             return [{ changed: false }, previousProviders];

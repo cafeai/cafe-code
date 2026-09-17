@@ -861,14 +861,22 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           status: "ready",
           enabled: true,
           installed: true,
-          auth: { status: "authenticated", type: "chatgpt", email: "old@example.test" },
+          auth: {
+            status: "authenticated",
+            type: "chatgpt",
+            label: "ChatGPT Pro 20x Subscription",
+            email: "old@example.test",
+          },
           checkedAt: "2026-04-14T00:00:00.000Z",
           version: "2026.04.09-f2b0fcd",
           models: [],
           slashCommands: [],
           skills: [],
           accountRateLimits: {
-            rateLimits: { primary: { usedPercent: 88, windowDurationMins: 300 } },
+            rateLimits: {
+              planType: "pro",
+              primary: { usedPercent: 88, windowDurationMins: 300 },
+            },
             rateLimitResetCredits: { availableCount: 1 },
             checkedAt: "2026-04-14T00:00:00.000Z",
           },
@@ -876,13 +884,22 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         const { accountRateLimits: _omitted, ...withoutRateLimits } = previousProvider;
         const refreshedProvider = {
           ...withoutRateLimits,
-          auth: { status: "authenticated", type: "chatgpt", email: "new@example.test" },
+          auth: {
+            status: "authenticated",
+            type: "chatgpt",
+            label: "ChatGPT Subscription",
+            email: "new@example.test",
+          },
           checkedAt: "2026-04-14T00:05:00.000Z",
         } as const satisfies ServerProvider;
 
         assert.strictEqual(
           mergeProviderSnapshot(previousProvider, refreshedProvider).accountRateLimits,
           undefined,
+        );
+        assert.strictEqual(
+          mergeProviderSnapshot(previousProvider, refreshedProvider).auth.label,
+          "ChatGPT Subscription",
         );
       });
 
@@ -935,6 +952,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           accountRateLimits: {
             rateLimits: {
               limitId: "codex",
+              planType: "pro",
               primary: { usedPercent: 1, windowDurationMins: 10_080 },
             },
             checkedAt: "2026-08-12T10:00:00.000Z",
@@ -949,6 +967,12 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         assert.deepStrictEqual(
           mergeProviderSnapshot(previousProvider, refreshedProvider).accountRateLimits,
           previousProvider.accountRateLimits,
+        );
+        // Quota retention is not fresh subscription evidence. An omitted plan
+        // must not acquire a tier merely because cached same-account usage exists.
+        assert.strictEqual(
+          mergeProviderSnapshot(previousProvider, refreshedProvider).auth.label,
+          undefined,
         );
       });
 
@@ -1331,7 +1355,12 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             status: "ready",
             enabled: true,
             installed: true,
-            auth: { status: "authenticated" },
+            auth: {
+              status: "authenticated",
+              type: "chatgpt",
+              label: "ChatGPT Subscription",
+              email: "usage-refresh@example.test",
+            },
             checkedAt: "2026-04-29T10:00:00.000Z",
             version: "1.0.0",
             models: [
@@ -1349,6 +1378,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             ...cachedProvider,
             accountRateLimits: {
               rateLimits: {
+                planType: "prolite",
                 primary: {
                   usedPercent: 20,
                   windowDurationMins: 300,
@@ -1425,7 +1455,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               cachedProvider,
             ]);
             assert.deepStrictEqual(yield* registry.refreshInstanceAccountUsage(codexInstanceId), [
-              usageRefreshedProvider,
+              {
+                ...usageRefreshedProvider,
+                auth: { ...cachedProvider.auth, label: "ChatGPT Pro 5x Subscription" },
+              },
             ]);
             assert.deepStrictEqual(yield* registry.refreshInstanceModels!(codexInstanceId), [
               {
@@ -1433,6 +1466,40 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
                 accountRateLimits: usageRefreshedProvider.accountRateLimits,
               },
             ]);
+
+            // Model-only refreshes may retain quota data but do not authenticate
+            // that cached plan. Sparse and auxiliary events cannot relabel it.
+            yield* registry.updateProviderAccountRateLimits({
+              instanceId: codexInstanceId,
+              limitId: "codex",
+              snapshot: { primary: { usedPercent: 21 } },
+              checkedAt: "2026-04-29T10:02:00.000Z",
+            });
+            assert.strictEqual(
+              (yield* registry.getProviders)[0]?.auth.label,
+              "ChatGPT Subscription",
+            );
+            for (const update of [
+              { limitId: "codex", planType: "pro", expected: "ChatGPT Pro 20x Subscription" },
+              { limitId: "codex", planType: undefined, expected: "ChatGPT Pro 20x Subscription" },
+              {
+                limitId: "codex_bengalfox",
+                planType: "plus",
+                expected: "ChatGPT Pro 20x Subscription",
+              },
+              { limitId: "codex", planType: "plus", expected: "ChatGPT Plus Subscription" },
+            ]) {
+              yield* registry.updateProviderAccountRateLimits({
+                instanceId: codexInstanceId,
+                limitId: update.limitId,
+                snapshot: {
+                  ...(update.planType ? { planType: update.planType } : {}),
+                  primary: { usedPercent: 22 },
+                },
+                checkedAt: "2026-04-29T10:03:00.000Z",
+              });
+              assert.strictEqual((yield* registry.getProviders)[0]?.auth.label, update.expected);
+            }
           }).pipe(Effect.provide(runtimeServices));
         }),
       );
@@ -2119,6 +2186,111 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         }),
       );
 
+      it.effect("labels subscription plans from the existing lightweight usage request only", () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const homePath = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "cafecode-codex-subscription-",
+          });
+          const authPath = path.join(homePath, "auth.json");
+          // Synthetic credentials keep this test isolated from the developer's
+          // account. The only HTTP request is intercepted below; no provider
+          // process or model inference is permitted by the recording fake.
+          yield* fileSystem.writeFileString(
+            authPath,
+            encodeUnknownJsonString({
+              auth_mode: "chatgpt",
+              tokens: {
+                access_token: "subscription-fixture-token",
+                account_id: "subscription-fixture-account",
+              },
+            }),
+          );
+          yield* fileSystem.chmod(authPath, 0o600);
+          const originalFetch = globalThis.fetch;
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => {
+              globalThis.fetch = originalFetch;
+            }),
+          );
+
+          for (const testCase of [
+            { plan: "plus", label: "ChatGPT Plus Subscription" },
+            { plan: "prolite", label: "ChatGPT Pro 5x Subscription" },
+            { plan: "pro", label: "ChatGPT Pro 20x Subscription" },
+            { plan: undefined, label: "ChatGPT Subscription" },
+            { plan: "unrecognized-plan", label: "ChatGPT Subscription" },
+          ]) {
+            let fetchCount = 0;
+            globalThis.fetch = (async () => {
+              fetchCount += 1;
+              return Response.json({
+                ...(testCase.plan ? { plan_type: testCase.plan } : {}),
+                rate_limit: { primary_window: { used_percent: 10 } },
+              });
+            }) as typeof fetch;
+            const { layer, commands } = recordingMockSpawnerLayer((args) => {
+              const command = args.join(" ");
+              if (command === "--version") {
+                return { stdout: "codex-cli 0.153.4\n", stderr: "", code: 0 };
+              }
+              if (command === "login status") {
+                return { stdout: "Logged in using ChatGPT\n", stderr: "", code: 0 };
+              }
+              throw new Error(`Unexpected subscription probe: ${command}`);
+            });
+            const status = yield* checkCodexCliProviderStatus(
+              decodeCodexSettings({ homePath }),
+            ).pipe(Effect.provide(layer));
+            assert.strictEqual(status.auth.label, testCase.label);
+            assert.strictEqual(status.auth.status, "authenticated");
+            assert.strictEqual(fetchCount, 1);
+            assert.deepStrictEqual(
+              commands.map((command) => command.args.join(" ")),
+              ["--version", "login status"],
+            );
+          }
+
+          // Even if old ChatGPT credentials exist on disk, a current API-key or
+          // unauthenticated login result must not request or display their tier.
+          for (const testCase of [
+            {
+              login: "Logged in using an API key - synthetic-key",
+              code: 0,
+              label: "OpenAI API Key",
+              auth: "authenticated",
+            },
+            { login: "Not logged in", code: 1, label: undefined, auth: "unauthenticated" },
+          ]) {
+            let fetchCount = 0;
+            globalThis.fetch = (async () => {
+              fetchCount += 1;
+              return Response.json({ plan_type: "pro" });
+            }) as typeof fetch;
+            const status = yield* checkCodexCliProviderStatus(
+              decodeCodexSettings({ homePath }),
+            ).pipe(
+              Effect.provide(
+                mockSpawnerLayer((args) => {
+                  const command = args.join(" ");
+                  if (command === "--version") {
+                    return { stdout: "codex-cli 0.153.4\n", stderr: "", code: 0 };
+                  }
+                  if (command === "login status") {
+                    return { stdout: testCase.login, stderr: "", code: testCase.code };
+                  }
+                  throw new Error(`Unexpected subscription probe: ${command}`);
+                }),
+              ),
+            );
+            assert.strictEqual(status.auth.label, testCase.label);
+            assert.strictEqual(status.auth.status, testCase.auth);
+            assert.strictEqual(fetchCount, 0);
+          }
+        }),
+      );
+
       it.effect("adds redacted Codex account usage from the upstream ChatGPT usage endpoint", () =>
         Effect.gen(function* () {
           const fileSystem = yield* FileSystem.FileSystem;
@@ -2234,6 +2406,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           assert.strictEqual(seenHeaders[0]?.["ChatGPT-Account-ID"], "account-id");
           assert.strictEqual(seenHeaders[0]?.["X-OpenAI-Fedramp"], "true");
           assert.strictEqual(status.accountRateLimits?.rateLimits.planType, "pro");
+          assert.strictEqual(status.auth.label, "ChatGPT Pro 20x Subscription");
           assert.strictEqual(status.accountRateLimits?.rateLimits.primary?.windowDurationMins, 300);
           assert.strictEqual(status.accountRateLimits?.rateLimits.secondary?.usedPercent, 75);
           assert.strictEqual(status.accountRateLimits?.rateLimits.spendControlReached, true);
