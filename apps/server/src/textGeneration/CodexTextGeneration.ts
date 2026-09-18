@@ -196,6 +196,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       const reasoningEffort =
         getModelSelectionStringOptionValue(modelSelection, "reasoningEffort") ??
         CODEX_GIT_TEXT_GENERATION_REASONING_EFFORT;
+      const fastMode = getModelSelectionBooleanOptionValue(modelSelection, "fastMode");
       const command = ChildProcess.make(
         codexConfig.binaryPath || "codex",
         [
@@ -209,8 +210,12 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
           modelSelection.model,
           "--config",
           `model_reasoning_effort="${reasoningEffort}"`,
-          ...(getModelSelectionBooleanOptionValue(modelSelection, "fastMode") === true
-            ? ["--config", `service_tier="fast"`]
+          // Match the app-server/TUI wire ids. An explicit Off must override a
+          // user's priority config, otherwise even a short metadata helper can
+          // silently incur the premium the Cafe selection turned off. Only an
+          // absent selection delegates to upstream configuration.
+          ...(fastMode !== undefined
+            ? ["--config", `service_tier="${fastMode ? "priority" : "default"}"`]
             : []),
           "--output-schema",
           schemaPath,
@@ -241,7 +246,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
         );
 
       const usageReader = makeCodexAuxiliaryUsageReader(randomUUID());
-      const [snapshot, stderr, exitCode] = yield* Effect.all(
+      const [snapshot, , exitCode] = yield* Effect.all(
         [
           child.stdout.pipe(
             Stream.decodeText(),
@@ -261,7 +266,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
         { concurrency: "unbounded" },
       );
 
-      return { snapshot, stderr, exitCode, observedAtMs: yield* Clock.currentTimeMillis };
+      return { snapshot, exitCode, observedAtMs: yield* Clock.currentTimeMillis };
     });
 
     const cleanup = Effect.all(
@@ -272,7 +277,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
     ).pipe(Effect.asVoid);
 
     return yield* Effect.gen(function* () {
-      const { snapshot, stderr, exitCode, observedAtMs } = yield* runCodexCommand().pipe(
+      const { snapshot, exitCode, observedAtMs } = yield* runCodexCommand().pipe(
         Effect.scoped,
         Effect.timeoutOption(CODEX_TIMEOUT_MS),
         Effect.flatMap(
@@ -298,15 +303,12 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       }
 
       if (exitCode !== 0) {
-        // --json stdout includes assistant/tool content. Never copy that stream
-        // into an error merely because the CLI did not provide stderr detail.
-        const detail = stderr.trim();
+        // Both native streams can include private assistant/tool content or
+        // credentials. Preserve the bounded exit classification, not arbitrary
+        // provider text, and never retry generation to recover diagnostics.
         return yield* new TextGenerationError({
           operation,
-          detail:
-            detail.length > 0
-              ? `Codex CLI command failed: ${detail}`
-              : `Codex CLI command failed with code ${exitCode}.`,
+          detail: `Codex CLI command failed with code ${exitCode}.`,
         });
       }
 
@@ -322,12 +324,11 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
             }),
         ),
         Effect.flatMap(decodeOutput),
-        Effect.catchTag("SchemaError", (cause) =>
+        Effect.catchTag("SchemaError", () =>
           Effect.fail(
             new TextGenerationError({
               operation,
               detail: "Codex returned invalid structured output.",
-              cause,
             }),
           ),
         ),

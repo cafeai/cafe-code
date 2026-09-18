@@ -989,11 +989,11 @@ function buildThreadStartParams(input: {
   // ceiling, and defaults its accounting scope to `total`. Do not duplicate
   // those defaults here: model metadata changes independently of Cafe, and an
   // injected limit caused Cafe sessions to compact earlier than the CUI.
-  // Do not override `features.remote_compaction_v2`. Codex marks the feature
-  // stable and default-enabled, and the legacy ChatGPT compaction endpoint can
-  // return 404 for otherwise healthy authenticated sessions. Let app-server
-  // apply its current default (or an explicit user/managed configuration) so
-  // Cafe follows the same compaction path as the upstream CLI.
+  // Do not override `features.remote_compaction_v2`. Codex 0.155 removed that
+  // compatibility flag and always streams remote compaction when supported;
+  // older supported releases enabled it by default. Keep context, retention,
+  // and tool-output budgets provider-owned so resumed/forked sessions preserve
+  // upstream's recorded truncation budgets without Cafe forcing extra compacts.
   const threadConfig: Record<string, unknown> = {};
   if (input.autoCompactTokenLimit !== undefined) {
     // This is an explicit user override. App-server still applies its upstream
@@ -2313,6 +2313,14 @@ export const readCodexBoundedThreadSnapshotWithClient = Effect.fn(
   } satisfies EffectCodexSchema.V2ThreadReadResponse;
 });
 
+export function isCodexStoredAttachmentNotification(method: string): boolean {
+  // Codex 0.155's attachment APIs manage provider-native metadata, not the
+  // authenticated files attached to Cafe messages. Their arbitrary identity
+  // keys must not enter native logs, durable diagnostics, or liveness tracking
+  // merely because a provider publishes a change to its independent store.
+  return method === "thread/attachment/updated";
+}
+
 function readNotificationThreadId(notification: CodexServerNotification): string | undefined {
   switch (notification.method) {
     case "thread/started":
@@ -2713,6 +2721,7 @@ export function isCodexChildConversationWorkNotification(
 ): boolean {
   const method = notification.method;
   if (
+    isCodexStoredAttachmentNotification(method) ||
     method === "turn/started" ||
     method === "turn/completed" ||
     method === "thread/status/changed" ||
@@ -5480,6 +5489,9 @@ export const makeCodexSessionRuntime = (
 
     const handleRawNotification = (notification: CodexServerNotification) =>
       Effect.gen(function* () {
+        if (isCodexStoredAttachmentNotification(notification.method)) {
+          return;
+        }
         // Native cancellation wins even for child-owned or standalone MCP
         // requests. Compare the actual RPC id and provider thread, never an
         // item-id guess or the currently focused Cafe thread.

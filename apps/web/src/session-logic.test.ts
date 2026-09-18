@@ -66,6 +66,36 @@ describe("turn duration formatting", () => {
 });
 
 describe("derivePendingApprovals", () => {
+  it("preserves only boolean provider approval safety hints", () => {
+    const rows = derivePendingApprovals([
+      makeActivity({
+        kind: "approval.requested",
+        payload: {
+          requestId: "sensitive",
+          requestKind: "command",
+          defaultToNo: true,
+          suppressAlwaysAllowRule: true,
+        },
+      }),
+      makeActivity({
+        kind: "approval.requested",
+        payload: {
+          requestId: "ordinary",
+          requestKind: "command",
+          defaultToNo: "true",
+          suppressAlwaysAllowRule: 1,
+        },
+      }),
+    ]);
+    expect(rows.find((row) => row.requestId === "sensitive")).toMatchObject({
+      defaultToNo: true,
+      suppressAlwaysAllowRule: true,
+    });
+    expect(rows.find((row) => row.requestId === "ordinary")).not.toHaveProperty("defaultToNo");
+    expect(rows.find((row) => row.requestId === "ordinary")).not.toHaveProperty(
+      "suppressAlwaysAllowRule",
+    );
+  });
   it("preserves typed network destinations for informed approvals", () => {
     const rows = derivePendingApprovals([
       makeActivity({

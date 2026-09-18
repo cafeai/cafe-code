@@ -93,6 +93,7 @@ import { ServerConfig } from "../../config.ts";
 import {
   CodexResumeCursorSchema,
   CodexSessionRuntimeThreadIdMissingError,
+  isCodexStoredAttachmentNotification,
   makeCodexSessionRuntime,
   readCodexSubagentThreadTransient,
   type CodexSessionRuntimeError,
@@ -3621,6 +3622,12 @@ function mapToRuntimeEvents(
     return [];
   }
 
+  // Defense in depth for injected runtimes and historical daemon replay. The
+  // current runtime drops this metadata before emitting a provider event.
+  if (isCodexStoredAttachmentNotification(event.method ?? "")) {
+    return [];
+  }
+
   if (event.method === "deprecationNotice") {
     const payload = readPayload(EffectCodexSchema.V2DeprecationNoticeNotification, event.payload);
     if (!payload) {
@@ -4477,6 +4484,13 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
 
         const eventFiber = yield* Stream.runForEach(runtime.events, (rawEvent) =>
           Effect.gen(function* () {
+            // Injected runtimes and replay can bypass the current runtime's
+            // metadata filter. Drop this provider-owned store notification
+            // before the native logger as well as before canonical mapping;
+            // its identity key may contain private paths or arbitrary text.
+            if (isCodexStoredAttachmentNotification(rawEvent.method)) {
+              return;
+            }
             const event = redactDesktopToolEvent(rawEvent);
             yield* writeNativeEvent(event).pipe(
               Effect.catchCause((cause) =>

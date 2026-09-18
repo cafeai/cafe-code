@@ -5790,6 +5790,8 @@ describe("ProviderRuntimeIngestion", () => {
       payload: {
         requestType: "command_execution_approval",
         detail: "pwd",
+        defaultToNo: true,
+        suppressAlwaysAllowRule: true,
       },
     });
 
@@ -5858,6 +5860,8 @@ describe("ProviderRuntimeIngestion", () => {
         : undefined;
     expect(requestedPayload?.requestKind).toBe("command");
     expect(requestedPayload?.requestType).toBe("command_execution_approval");
+    expect(requestedPayload?.defaultToNo).toBe(true);
+    expect(requestedPayload?.suppressAlwaysAllowRule).toBe(true);
 
     const resolved = thread?.activities.find(
       (activity: ProviderRuntimeTestActivity) => activity.id === "evt-request-resolved",

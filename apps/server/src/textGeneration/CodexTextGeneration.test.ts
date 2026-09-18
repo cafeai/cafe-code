@@ -88,7 +88,7 @@ function makeFakeCodexBinary(
           "  const fail = (code, message) => process.stderr.write(`${message}\\n`, () => process.exit(code));",
           "  if (forcedCode !== undefined) return fail(forcedCode, forcedMessage);",
           '  if (config.requireImage && !args.includes("--image")) return fail(2, "missing --image input");',
-          '  if (config.requireFastServiceTier && !configValues.includes(\'service_tier="fast"\')) return fail(5, "missing fast service tier config");',
+          '  if (config.requireFastServiceTier && !configValues.includes(\'service_tier="priority"\')) return fail(5, "missing priority service tier config");',
           '  if (config.requireReasoningEffort !== undefined && reasoningEffort !== `model_reasoning_effort="${config.requireReasoningEffort}"`) return fail(6, `unexpected reasoning effort config: ${reasoningEffort ?? ""}`);',
           "  if (config.forbidReasoningEffort && reasoningEffort !== undefined) return fail(7, `reasoning effort config should be omitted: ${reasoningEffort}`);",
           '  if (config.stdinMustContain !== undefined && !stdin.includes(config.stdinMustContain)) return fail(3, "stdin missing expected content");',
@@ -135,7 +135,7 @@ function makeFakeCodexBinary(
         "  fi",
         '  if [ "$1" = "--config" ]; then',
         "    shift",
-        '    if [ "$1" = "service_tier=\\"fast\\"" ]; then',
+        '    if [ "$1" = "service_tier=\\"priority\\"" ]; then',
         '      seen_fast_service_tier="1"',
         "    fi",
         '    case "$1" in',
@@ -282,6 +282,7 @@ function withFakeCodexSpawner<A, E, R>(
     stderr?: string;
     requireImage?: boolean;
     requireFastServiceTier?: boolean;
+    expectedServiceTier?: "priority" | "default" | "omitted";
     requireReasoningEffort?: string;
     forbidReasoningEffort?: boolean;
     stdinMustContain?: string;
@@ -317,7 +318,14 @@ function withFakeCodexSpawner<A, E, R>(
         }
         const missingRequiredImage = input.requireImage && !command.args.includes("--image");
         if (input.requireFastServiceTier) {
-          expect(configValues).toContain('service_tier="fast"');
+          expect(configValues).toContain('service_tier="priority"');
+        }
+        if (input.expectedServiceTier !== undefined) {
+          expect(configValues.filter((value) => value.startsWith("service_tier="))).toEqual(
+            input.expectedServiceTier === "omitted"
+              ? []
+              : [`service_tier="${input.expectedServiceTier}"`],
+          );
         }
         if (input.requireReasoningEffort !== undefined) {
           expect(configValues).toContain(
@@ -477,6 +485,31 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
           }),
       ),
   );
+
+  for (const testCase of [
+    { fastMode: true, tier: "priority" },
+    { fastMode: false, tier: "default" },
+    { fastMode: undefined, tier: "omitted" },
+  ] as const) {
+    it.effect(`uses ${testCase.tier} routing for helper Fast ${String(testCase.fastMode)}`, () =>
+      withFakeCodexSpawner(
+        {
+          output: JSON.stringify({ title: "Helper title" }),
+          expectedServiceTier: testCase.tier,
+        },
+        (generation) =>
+          generation.generateThreadTitle({
+            cwd: process.cwd(),
+            message: "Name the supplied task",
+            modelSelection: createModelSelection(
+              ProviderInstanceId.make("codex"),
+              "gpt-6-astra",
+              testCase.fastMode === undefined ? [] : [{ id: "fastMode", value: testCase.fastMode }],
+            ),
+          }),
+      ),
+    );
+  }
 
   it.effect("defaults git text generation codex effort to low", () =>
     withFakeCodexSpawner(
@@ -798,7 +831,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
           expect(Result.isFailure(result)).toBe(true);
           if (Result.isFailure(result)) {
             expect(result.failure).toBeInstanceOf(TextGenerationError);
-            expect(result.failure.message).toContain("missing --image input");
+            expect(result.failure.message).toContain("Codex CLI command failed with code 2.");
           }
         }),
     ),
@@ -854,11 +887,37 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
           expect(Result.isFailure(result)).toBe(true);
           if (Result.isFailure(result)) {
             expect(result.failure).toBeInstanceOf(TextGenerationError);
-            expect(result.failure.message).toContain(
-              "Codex CLI command failed: codex execution failed",
-            );
+            expect(result.failure.message).toContain("Codex CLI command failed with code 1.");
           }
         }),
     ),
   );
+
+  for (const exitCode of [0, 1]) {
+    it.effect(`redacts helper streams and invalid structured output on exit ${exitCode}`, () =>
+      withFakeCodexSpawner(
+        {
+          output: JSON.stringify({ title: { privateSentinel: "private-helper-sentinel" } }),
+          stdout: "private-helper-sentinel",
+          stderr: "private-helper-sentinel",
+          exitCode,
+        },
+        (generation) =>
+          Effect.gen(function* () {
+            const result = yield* generation
+              .generateThreadTitle({
+                cwd: process.cwd(),
+                message: "Name the task",
+                modelSelection: DEFAULT_TEST_MODEL_SELECTION,
+              })
+              .pipe(Effect.result);
+            expect(Result.isFailure(result)).toBe(true);
+            if (Result.isFailure(result)) {
+              expect(result.failure.message).not.toContain("private-helper-sentinel");
+              expect(JSON.stringify(result.failure)).not.toContain("private-helper-sentinel");
+            }
+          }),
+      ),
+    );
+  }
 });

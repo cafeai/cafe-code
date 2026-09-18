@@ -554,6 +554,9 @@ export type ContentDeltaPayload = typeof ContentDeltaPayload.Type;
 const RequestOpenedPayload = Schema.Struct({
   requestType: CanonicalRequestType,
   networkApproval: Schema.optional(ProviderNetworkApproval),
+  // Provider safety hints are explicit booleans, not arbitrary tool arguments.
+  defaultToNo: Schema.optional(Schema.Boolean),
+  suppressAlwaysAllowRule: Schema.optional(Schema.Boolean),
   detail: Schema.optional(TrimmedNonEmptyStringSchema),
   args: Schema.optional(Schema.Unknown),
 });

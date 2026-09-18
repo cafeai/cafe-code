@@ -4343,6 +4343,21 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
 
       const ignoredEvents = [
         {
+          id: asEventId("evt-codex-stored-attachment"),
+          kind: "notification" as const,
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "thread/attachment/updated",
+          payload: {
+            threadId: "provider-thread-1",
+            attachmentId: "attachment-1",
+            attachmentType: "document",
+            identityKey: "/private/provider-owned-metadata",
+            operation: "created",
+          },
+        },
+        {
           id: asEventId("evt-codex-model-safety-buffering"),
           kind: "notification" as const,
           provider: ProviderDriverKind.make("codex"),
@@ -4906,6 +4921,25 @@ it.effect("flushes managed native logs when the adapter layer shuts down", () =>
       const mappedEventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 3)).pipe(
         Effect.forkChild,
       );
+      // The fake runtime deliberately bypasses the live runtime's filter.
+      // The following visible events are also an ordering barrier: after all
+      // three map, the attachment event must have been discarded before the
+      // native logger rather than merely ignored by canonical projection.
+      yield* runtime.emit({
+        id: asEventId("evt-native-log-stored-attachment"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-logger"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "thread/attachment/updated",
+        payload: {
+          threadId: "provider-thread-logger",
+          attachmentId: "attachment-native-log",
+          attachmentType: "document",
+          identityKey: "/native-log-secret-attachment-identity",
+          operation: "created",
+        },
+      } satisfies ProviderEvent);
       yield* runtime.emit({
         id: asEventId("evt-native-log"),
         kind: "notification",
@@ -4987,6 +5021,7 @@ it.effect("flushes managed native logs when the adapter layer shuts down", () =>
       assert.match(contents, /NTIVE: .*"model":"gpt-5\.4"/);
       assert.match(contents, /"reason":"subagent-provider-content"/);
       assert.match(contents, /"reason":"model-provider-auth-recovery-content"/);
+      assert.doesNotMatch(contents, /thread\/attachment\/updated/);
       assert.doesNotMatch(contents, /native-log-secret/);
     } finally {
       if (!scopeClosed) {

@@ -81,6 +81,64 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
     }),
   );
 
+  it.effect("round-trips Codex 0.155 stored-attachment RPCs without starting a turn", () =>
+    Effect.gen(function* () {
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      const client = yield* CodexClient.make(stdio);
+      const identity = {
+        threadId: "thread-1",
+        attachmentType: "document",
+        identityKey: "document-1",
+      };
+      const payload = { title: "Stored document", nested: [null, true, 1] };
+      const attachment = {
+        attachmentType: identity.attachmentType,
+        identityKey: identity.identityKey,
+        id: "attachment-1",
+        payload,
+        createdAt: 1_789_700_000,
+      };
+
+      // Use the generated method map, not raw JSON-RPC, so a missing request or
+      // response schema fails here before a provider update reaches users.
+      const add = yield* client
+        .request("thread/attachment/add", { ...identity, payload })
+        .pipe(Effect.forkScoped);
+      assert.deepEqual(decodeJson(yield* Queue.take(output)), {
+        id: 1,
+        method: "thread/attachment/add",
+        params: { ...identity, payload },
+      });
+      const addResult = { outcome: "existing" as const, attachment };
+      yield* Queue.offer(input, encodeJsonl({ id: 1, result: addResult }));
+      assert.deepEqual(yield* Fiber.join(add), addResult);
+
+      const listParams = { threadId: identity.threadId, cursor: "page-2", limit: 20 };
+      const list = yield* client
+        .request("thread/attachment/list", listParams)
+        .pipe(Effect.forkScoped);
+      assert.deepEqual(decodeJson(yield* Queue.take(output)), {
+        id: 2,
+        method: "thread/attachment/list",
+        params: listParams,
+      });
+      const listResult = { data: [attachment], nextCursor: null };
+      yield* Queue.offer(input, encodeJsonl({ id: 2, result: listResult }));
+      assert.deepEqual(yield* Fiber.join(list), listResult);
+
+      const remove = yield* client
+        .request("thread/attachment/remove", identity)
+        .pipe(Effect.forkScoped);
+      assert.deepEqual(decodeJson(yield* Queue.take(output)), {
+        id: 3,
+        method: "thread/attachment/remove",
+        params: identity,
+      });
+      yield* Queue.offer(input, encodeJsonl({ id: 3, result: {} }));
+      assert.deepEqual(yield* Fiber.join(remove), {});
+    }),
+  );
+
   it.effect("initializes, handles typed server requests, and reads account and skills data", () =>
     Effect.gen(function* () {
       const userInputRequests = yield* Ref.make<Array<unknown>>([]);

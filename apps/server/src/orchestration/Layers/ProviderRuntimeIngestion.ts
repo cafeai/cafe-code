@@ -546,6 +546,10 @@ function runtimeEventToActivities(
             requestId: toApprovalRequestId(event.requestId),
             ...(requestKind ? { requestKind } : {}),
             requestType: event.payload.requestType,
+            ...(event.payload.defaultToNo === true ? { defaultToNo: true } : {}),
+            ...(event.payload.suppressAlwaysAllowRule === true
+              ? { suppressAlwaysAllowRule: true }
+              : {}),
             ...(event.payload.networkApproval
               ? { networkApproval: event.payload.networkApproval }
               : {}),

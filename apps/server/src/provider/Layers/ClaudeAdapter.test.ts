@@ -616,6 +616,18 @@ describe("ClaudeAdapterLive", () => {
         },
       },
       {
+        name: "Opus 5 explicitly disables an inherited fast mode",
+        selection: createModelSelection(instanceId, "claude-opus-5", [
+          { id: "fastMode", value: false },
+        ]),
+        expected: {
+          model: "claude-opus-5[1m]",
+          effort: "high",
+          context: 1000000,
+          settings: { fastMode: false },
+        },
+      },
+      {
         name: "Opus 4.7 default effort",
         selection: createModelSelection(instanceId, "claude-opus-4-7"),
         expected: { model: "claude-opus-4-7", effort: "xhigh", context: 200000, settings: {} },
@@ -680,6 +692,18 @@ describe("ClaudeAdapterLive", () => {
         },
       },
       {
+        name: "Opus 4.8 explicitly disables an inherited fast mode",
+        selection: createModelSelection(instanceId, "claude-opus-4-8", [
+          { id: "fastMode", value: false },
+        ]),
+        expected: {
+          model: "claude-opus-4-8",
+          effort: "xhigh",
+          context: 200000,
+          settings: { fastMode: false },
+        },
+      },
+      {
         name: "Opus 4.6 ignores removed fast mode",
         selection: createModelSelection(instanceId, "claude-opus-4-6", [
           { id: "fastMode", value: true },
@@ -695,6 +719,13 @@ describe("ClaudeAdapterLive", () => {
         name: "Sonnet ignores fast mode",
         selection: createModelSelection(instanceId, "claude-sonnet-4-6", [
           { id: "fastMode", value: true },
+        ]),
+        expected: { model: "claude-sonnet-4-6", effort: "high", context: 200000, settings: {} },
+      },
+      {
+        name: "Sonnet ignores a stale disabled fast mode option",
+        selection: createModelSelection(instanceId, "claude-sonnet-4-6", [
+          { id: "fastMode", value: false },
         ]),
         expected: { model: "claude-sonnet-4-6", effort: "high", context: 200000, settings: {} },
       },
@@ -821,6 +852,37 @@ describe("ClaudeAdapterLive", () => {
 
       const createInput = harness.getLastCreateQueryInput();
       assert.equal(createInput?.options.agentProgressSummaries, false);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("sends and reports an explicit normal-speed Claude session", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const eventsFiber = yield* Stream.take(adapter.streamEvents, 3).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("claudeAgent"),
+          "claude-opus-5",
+          [{ id: "fastMode", value: false }],
+        ),
+        runtimeMode: "full-access",
+      });
+      assert.deepEqual(harness.getLastCreateQueryInput()?.options.settings, { fastMode: false });
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      const configured = events.find((event) => event.type === "session.configured");
+      assert.equal(configured?.type, "session.configured");
+      if (configured?.type === "session.configured") {
+        assert.equal(configured.payload.config.fastMode, false);
+      }
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -1911,6 +1973,84 @@ describe("ClaudeAdapterLive", () => {
       );
     },
   );
+
+  it.effect("keeps pending user input through Claude's batched empty background results", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const turn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "Continue the review",
+        attachments: [],
+      });
+      yield* adapter.steerTurn({
+        threadId: session.threadId,
+        expectedTurnId: turn.turnId,
+        input: "Include the latest changes",
+        attachments: [],
+      });
+      const messages = yield* Effect.promise(() =>
+        readPromptMessages(harness.getLastCreateQueryInput(), 2),
+      );
+      const [first, later] = messages.map((message) => message.uuid);
+      if (!first || !later) throw new Error("Expected UUID-stamped user inputs.");
+      const nativeSessionId = "claude-batched-background-completions";
+      const emptyBackgroundResult = {
+        ...makeSuccessfulClaudeResult(nativeSessionId),
+        duration_api_ms: 0,
+        num_turns: 0,
+        result: "",
+        origin: { kind: "task-notification" },
+      } satisfies SDKMessage;
+
+      // SDK 0.3.274 keeps one result per internally queued completion even
+      // when only the final completion causes inference. Neither intermediary
+      // has consumed a client UUID. Local sends can still be awaiting provider
+      // admission, so the UUID ledger must survive regardless of queue counts.
+      for (const uuid of [
+        "00000000-0000-4000-8000-000000000306",
+        "00000000-0000-4000-8000-000000000307",
+      ] as const) {
+        harness.query.emit({ ...emptyBackgroundResult, uuid });
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, turn.turnId);
+        assert.equal((yield* adapter.readThread(session.threadId)).turns.length, 0);
+      }
+
+      // A provider-owned turn can subsequently incorporate an actual user
+      // send. Its explicit correlation takes precedence over notification
+      // origin, including zero-inference local-command results.
+      harness.query.emit({
+        ...emptyBackgroundResult,
+        uuid: "00000000-0000-4000-8000-000000000308",
+        user_message_uuid: first,
+      });
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, turn.turnId);
+      harness.query.emit({
+        ...makeSuccessfulClaudeResult(nativeSessionId),
+        uuid: "00000000-0000-4000-8000-000000000309",
+        user_message_uuid: later,
+      });
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      assert.equal((yield* adapter.listSessions())[0]?.status, "ready");
+      const snapshot = yield* adapter.readThread(session.threadId);
+      assert.equal(snapshot.turns.length, 1);
+      assert.equal(snapshot.turns[0]?.id, turn.turnId);
+      assert.deepEqual(harness.query.interruptCalls, []);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
 
   it.effect("rejects Claude steer input for a stale active turn id", () => {
     const harness = makeHarness();
@@ -8007,6 +8147,48 @@ describe("ClaudeAdapterLive", () => {
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
     );
+  });
+
+  it.effect("enforces provider one-time-only approval hints even for older clients", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+      const canUseTool = harness.getLastCreateQueryInput()?.options.canUseTool;
+      assert.ok(canUseTool);
+      const permissionPromise = canUseTool(
+        "Bash",
+        { command: "pwd" },
+        {
+          signal: new AbortController().signal,
+          toolUseID: "sensitive-tool",
+          requestId: "sensitive-request",
+          defaultToNo: true,
+          suppressAlwaysAllowRule: true,
+          suggestions: [{ type: "setMode", mode: "bypassPermissions", destination: "session" }],
+        },
+      );
+      const requested = yield* Stream.runHead(adapter.streamEvents);
+      assert.equal(requested._tag, "Some");
+      if (requested._tag !== "Some" || requested.value.type !== "request.opened") return;
+      assert.equal(requested.value.payload.defaultToNo, true);
+      assert.equal(requested.value.payload.suppressAlwaysAllowRule, true);
+      const requestId = ApprovalRequestId.make(requested.value.requestId!);
+      const rejected = yield* adapter
+        .respondToRequest(session.threadId, requestId, "acceptForSession")
+        .pipe(Effect.flip);
+      assert.match(rejected.message, /one-time decision/);
+      // Rejection must leave the same request actionable, never silently grant
+      // broader rights or force the caller to replay the original tool call.
+      yield* adapter.respondToRequest(session.threadId, requestId, "accept");
+      const permission = yield* Effect.promise(() => permissionPromise);
+      assert.deepEqual(permission, { behavior: "allow", updatedInput: { command: "pwd" } });
+    }).pipe(Effect.provide(harness.layer));
   });
 
   it.effect("honors rule-forced Claude approvals even in full-access mode", () => {

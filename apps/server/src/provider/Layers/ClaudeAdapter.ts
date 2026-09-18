@@ -395,6 +395,7 @@ interface PendingApproval {
   readonly requestType: CanonicalRequestType;
   readonly detail?: string;
   readonly suggestions?: ReadonlyArray<PermissionUpdate>;
+  readonly suppressAlwaysAllowRule?: boolean;
   readonly decision: Deferred.Deferred<ProviderApprovalDecision>;
 }
 
@@ -1890,6 +1891,24 @@ function consumeClaudeResultPrompt(
     return correlatedUuids.length;
   }
 
+  // Claude Code 2.1.274 coalesces queued background completions into one model
+  // call, but still emits an empty successful zero-turn result for each held
+  // notification. Those provider-owned results carry task-notification origin
+  // and no client UUID: they are not acknowledgements of a queued Cafe prompt.
+  // Do not let the older uncorrelated-result fallback consume user input here.
+  // Explicit correlation above remains authoritative when a synthetic turn
+  // actually folds in a Cafe message; missing/older origin keeps compatibility.
+  // Source: 0.3.274 SDK changelog and its paired CLI queue-drain/result emitter.
+  if (
+    result.subtype === "success" &&
+    result.is_error === false &&
+    result.num_turns === 0 &&
+    result.result === "" &&
+    result.origin?.kind === "task-notification"
+  ) {
+    return 0;
+  }
+
   const started = Array.from(context.promptLifecycleByUuid).find(
     ([, state]) => state === "started",
   );
@@ -2046,7 +2065,7 @@ export function resolveClaudeModelSessionOptions(
   readonly agentProgressSummaries: boolean;
   readonly settings: {
     readonly alwaysThinkingEnabled?: boolean;
-    readonly fastMode?: true;
+    readonly fastMode?: boolean;
     readonly outputStyle?: "Concise";
   };
 } {
@@ -2073,8 +2092,9 @@ export function resolveClaudeModelSessionOptions(
       (descriptor) => descriptor.type === "boolean" && descriptor.id === "agentProgressSummaries",
     ),
   );
-  const fastMode =
-    getModelSelectionBooleanOptionValue(modelSelection, "fastMode") === true && fastModeSupported;
+  const fastMode = fastModeSupported
+    ? getModelSelectionBooleanOptionValue(modelSelection, "fastMode")
+    : undefined;
   const thinking = thinkingSupported
     ? getModelSelectionBooleanOptionValue(modelSelection, "thinking")
     : undefined;
@@ -2086,7 +2106,11 @@ export function resolveClaudeModelSessionOptions(
     agentProgressSummaries: agentProgressSummaries !== false,
     settings: {
       ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
-      ...(fastMode ? { fastMode: true as const } : {}),
+      // An explicit false must override a persisted Claude fast-mode setting.
+      // Omitting it would let the native settings layer silently re-enable the
+      // premium mode after the user selected normal mode in Cafe. Absence still
+      // delegates to upstream, and unsupported models keep ignoring stale values.
+      ...(typeof fastMode === "boolean" ? { fastMode } : {}),
       // Output-style names enter Claude's system prompt. Forward only the
       // built-in value Cafe advertises; never treat a persisted arbitrary
       // string as an inline Claude settings fragment.
@@ -7129,7 +7153,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // layered over a historical full-access runtime policy, but upstream's
         // classifier must remain authoritative. If Auto falls back to a human
         // prompt, silently allowing it here would defeat the safety model.
-        if (context.currentPermissionMode === "bypassPermissions" && !matchedAskRule) {
+        if (
+          context.currentPermissionMode === "bypassPermissions" &&
+          !matchedAskRule &&
+          callbackOptions.defaultToNo !== true &&
+          callbackOptions.suppressAlwaysAllowRule !== true
+        ) {
           return {
             behavior: "allow",
             updatedInput: toolInput,
@@ -7154,6 +7183,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           requestType,
           detail,
           decision: decisionDeferred,
+          ...(callbackOptions.suppressAlwaysAllowRule === true
+            ? { suppressAlwaysAllowRule: true }
+            : {}),
           ...(callbackOptions.suggestions ? { suggestions: callbackOptions.suggestions } : {}),
         };
 
@@ -7169,6 +7201,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           payload: {
             requestType,
             detail,
+            ...(callbackOptions.defaultToNo === true ? { defaultToNo: true } : {}),
+            ...(callbackOptions.suppressAlwaysAllowRule === true
+              ? { suppressAlwaysAllowRule: true }
+              : {}),
             args: {
               toolName,
               input: toolInput,
@@ -7445,7 +7481,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         "claude.query.resume_session_at": "",
         "claude.query.session_id": "",
         "claude.query.include_partial_messages": true,
-        "claude.query.agent_progress_summaries": true,
+        "claude.query.agent_progress_summaries": agentProgressSummaries,
         "claude.query.additional_directories": claudeAdditionalDirectories,
         "claude.query.setting_sources": [...CLAUDE_SETTING_SOURCES],
         "claude.query.settings_json": encodeJsonStringForDiagnostics(settings) ?? "",
@@ -7568,7 +7604,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             ...(initialResumeSessionId !== undefined && existingResumeSessionId === undefined
               ? { droppedResumeReason: "missing-transcript" }
               : {}),
-            ...(fastMode ? { fastMode: true } : {}),
+            ...(typeof settings.fastMode === "boolean" ? { fastMode: settings.fastMode } : {}),
           },
         },
         providerRefs: {},
@@ -8194,6 +8230,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         });
       }
 
+      // SDK 0.3.274 exposes asks whose reusable rule would grant more than
+      // the action being reviewed. Enforce that restriction here as well as
+      // in the UI: an older/reconnected client must not broaden permission.
+      // Keep the request open so the user can still explicitly approve once.
+      if (decision === "acceptForSession" && pending.suppressAlwaysAllowRule) {
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "item/requestApproval/decision",
+          detail: "This provider approval permits a one-time decision only.",
+        });
+      }
       context.pendingApprovals.delete(requestId);
       yield* Deferred.succeed(pending.decision, decision);
     },

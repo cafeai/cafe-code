@@ -59,6 +59,7 @@ import {
   isRecoverableThreadResumeError,
   isCodexContextCompactionItemType,
   isCodexChildConversationWorkNotification,
+  isCodexStoredAttachmentNotification,
   isCodexUserMessageItemType,
   isTerminalCodexChildThreadReadError,
   openCodexThread,
@@ -1542,6 +1543,22 @@ describe("Codex child conversation routing", () => {
   });
 
   it("classifies live child work and terminal thread/read errors conservatively", () => {
+    assert.equal(isCodexStoredAttachmentNotification("thread/attachment/updated"), true);
+    assert.equal(isCodexStoredAttachmentNotification("item/agentMessage/delta"), false);
+    assert.equal(
+      isCodexChildConversationWorkNotification({
+        method: "thread/attachment/updated",
+        params: {
+          threadId: "thread-child",
+          turnId: "must-not-imply-live-work",
+          attachmentId: "attachment-1",
+          attachmentType: "document",
+          identityKey: "/private/provider-metadata",
+          operation: "created",
+        },
+      }),
+      false,
+    );
     assert.equal(
       isCodexChildConversationWorkNotification({
         method: "item/agentMessage/delta",

@@ -141,6 +141,16 @@ function withFakeClaudeEnv<A, E, R>(
           : "";
 
         expect(command.command).toBe(config.binaryPath || "claude");
+        // Metadata generation has no tool work: enforce both the built-in
+        // allowlist and the separate MCP deny rule on every helper operation.
+        // Keep schema output enabled and never fall back to a privileged retry.
+        expect(command.args).toContain("--tools=");
+        expect(command.args[command.args.indexOf("--disallowedTools") + 1]).toBe("mcp__*");
+        expect(command.args[command.args.indexOf("--permission-mode") + 1]).toBe("default");
+        expect(command.args).toContain("--json-schema");
+        expect(command.args).not.toContain("--dangerously-skip-permissions");
+        expect(command.args).not.toContain("--allow-dangerously-skip-permissions");
+        expect(command.args).not.toContain("--bare");
         if (input.argsMustContain !== undefined) {
           expect(args).toContain(input.argsMustContain);
         }
@@ -165,6 +175,39 @@ function withFakeClaudeEnv<A, E, R>(
 }
 
 it.layer(ClaudeTextGenerationTestLayer)("ClaudeTextGeneration", (it) => {
+  for (const testCase of [
+    { exitCode: 1, output: "private-helper-sentinel" },
+    { exitCode: 0, output: "private-helper-sentinel" },
+    {
+      exitCode: 0,
+      output: JSON.stringify({
+        structured_output: { title: { secret: "private-helper-sentinel" } },
+      }),
+    },
+  ]) {
+    it.effect(`redacts private helper diagnostics for ${JSON.stringify(testCase)}`, () =>
+      withFakeClaudeEnv({ ...testCase, stderr: "private-helper-sentinel" }, (generation) =>
+        Effect.gen(function* () {
+          const result = yield* generation
+            .generateThreadTitle({
+              cwd: process.cwd(),
+              message: "Name the task",
+              modelSelection: createModelSelection(
+                ProviderInstanceId.make("claudeAgent"),
+                "claude-opus-5",
+              ),
+            })
+            .pipe(Effect.result);
+          expect(Result.isFailure(result)).toBe(true);
+          if (Result.isFailure(result)) {
+            expect(result.failure.message).not.toContain("private-helper-sentinel");
+            expect(JSON.stringify(result.failure)).not.toContain("private-helper-sentinel");
+          }
+        }),
+      ),
+    );
+  }
+
   for (const exitCode of [0, 1]) {
     it.effect(`records authoritative Claude helper usage when the CLI exits ${exitCode}`, () =>
       Effect.gen(function* () {
@@ -312,6 +355,38 @@ it.layer(ClaudeTextGenerationTestLayer)("ClaudeTextGeneration", (it) => {
         }),
     ),
   );
+
+  for (const testCase of [
+    { model: "claude-opus-5", fastMode: false, expected: '"fastMode":false' },
+    { model: "claude-opus-5", fastMode: undefined, expected: undefined },
+    { model: "claude-sonnet-5", fastMode: true, expected: undefined },
+    { model: "claude-sonnet-5", fastMode: false, expected: undefined },
+  ]) {
+    it.effect(
+      `preserves helper Fast ${String(testCase.fastMode)} only when ${testCase.model} supports it`,
+      () =>
+        withFakeClaudeEnv(
+          {
+            output: JSON.stringify({ structured_output: { title: "Helper title" } }),
+            ...(testCase.expected
+              ? { argsMustContain: testCase.expected }
+              : { argsMustNotContain: '"fastMode"' }),
+          },
+          (generation) =>
+            generation.generateThreadTitle({
+              cwd: process.cwd(),
+              message: "Name this task from the supplied message only",
+              modelSelection: createModelSelection(
+                ProviderInstanceId.make("claudeAgent"),
+                testCase.model,
+                testCase.fastMode === undefined
+                  ? []
+                  : [{ id: "fastMode", value: testCase.fastMode }],
+              ),
+            }),
+        ),
+    );
+  }
 
   it.effect("generates both first-turn labels from one Claude structured response", () =>
     withFakeClaudeEnv(

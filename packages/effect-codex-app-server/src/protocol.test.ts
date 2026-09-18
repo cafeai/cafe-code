@@ -157,6 +157,52 @@ it("distinguishes Codex 0.154 MCP tool-discovery failure from an empty or older 
   });
 });
 
+it("decodes Codex 0.155 stored-attachment metadata without making it conversation input", () => {
+  const notification = {
+    method: "thread/attachment/updated" as const,
+    params: {
+      threadId: "thread-1",
+      attachmentId: "attachment-1",
+      attachmentType: "document",
+      identityKey: "document-1",
+      operation: "created" as const,
+    },
+  };
+
+  // These records belong to the provider's independent attachment store. A
+  // decoded metadata update is neither a prompt nor proof of file delivery;
+  // Cafe's attachment authorization and turn input remain separate surfaces.
+  assert.deepEqual(decodeServerNotification(notification), notification);
+  assert.deepEqual(
+    decodeServerNotification({
+      ...notification,
+      params: { ...notification.params, operation: "deleted" },
+    }),
+    { ...notification, params: { ...notification.params, operation: "deleted" } },
+  );
+  assert.equal(
+    Schema.is(CodexSchema.V2ThreadAttachmentUpdatedNotification)({
+      ...notification.params,
+      operation: "updated",
+    }),
+    false,
+  );
+  assert.equal(Schema.is(CodexSchema.V2TurnStartParams__UserInput)(notification.params), false);
+  assert.equal(
+    Schema.is(CodexSchema.V2ThreadAttachmentListParams)({ threadId: "thread-1", limit: -1 }),
+    false,
+  );
+});
+
+it("preserves optional Codex 0.155 feedback prompt hashes and older responses", () => {
+  const decodeFeedback = Schema.decodeUnknownSync(CodexSchema.V2FeedbackUploadResponse);
+  const legacy = { threadId: "thread-1" };
+  assert.deepEqual(decodeFeedback(legacy), legacy);
+  for (const promptHash of [null, "a".repeat(64)]) {
+    assert.deepEqual(decodeFeedback({ ...legacy, promptHash }), { ...legacy, promptHash });
+  }
+});
+
 it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
   it.effect(
     "encodes requests without a jsonrpc field and routes inbound requests and notifications",

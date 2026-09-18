@@ -107,6 +107,8 @@ export interface PendingApproval {
   createdAt: string;
   detail?: string;
   networkApproval?: ProviderNetworkApproval;
+  defaultToNo?: boolean;
+  suppressAlwaysAllowRule?: boolean;
 }
 
 export interface PendingUserInput {
@@ -303,6 +305,8 @@ export function derivePendingApprovals(
         requestKind,
         createdAt: activity.createdAt,
         ...(detail ? { detail } : {}),
+        ...(payload?.defaultToNo === true ? { defaultToNo: true } : {}),
+        ...(payload?.suppressAlwaysAllowRule === true ? { suppressAlwaysAllowRule: true } : {}),
         ...(isNetworkApproval(payload?.networkApproval)
           ? { networkApproval: payload.networkApproval }
           : {}),

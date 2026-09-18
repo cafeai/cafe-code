@@ -149,7 +149,10 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       fastModeDescriptor?.type === "boolean" ? fastModeDescriptor.currentValue : undefined;
     const settings = {
       ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
-      ...(fastMode ? { fastMode: true } : {}),
+      // --settings overrides named keys, but omitted keys inherit settings.json.
+      // Preserve an explicit Off so background helpers cannot silently inherit
+      // premium Fast routing. Unsupported models still omit this setting.
+      ...(typeof fastMode === "boolean" ? { fastMode } : {}),
     };
     const settingsJson =
       Object.keys(settings).length > 0
@@ -173,7 +176,21 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
           resolveClaudeApiModelId(modelSelection),
           ...(cliEffort ? ["--effort", cliEffort] : []),
           ...(settingsJson ? ["--settings", settingsJson] : []),
-          "--dangerously-skip-permissions",
+          // These bounded prompts already contain all source material. They
+          // must not turn attachment names, commit patches or user prose into
+          // unattended tool work. The documented --tools flag affects only
+          // built-ins, so MCP tools must also be denied explicitly. Keep the
+          // normal auth/settings path (unlike --bare, which skips OAuth), and
+          // retain --json-schema's provider-owned structured-output machinery.
+          // Use the attached empty value so the existing Windows command shim
+          // cannot discard a standalone empty argv entry. Commander accepts
+          // --option=value; native POSIX children receive the same empty list.
+          // Reference: https://code.claude.com/docs/en/cli-reference
+          "--tools=",
+          "--disallowedTools",
+          "mcp__*",
+          "--permission-mode",
+          "default",
         ],
         {
           env: claudeEnvironment,
@@ -193,7 +210,7 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
           ),
         );
 
-      const [stdout, stderr, exitCode] = yield* Effect.all(
+      const [stdout, , exitCode] = yield* Effect.all(
         [
           readStreamAsString(operation, child.stdout),
           readStreamAsString(operation, child.stderr),
@@ -206,12 +223,11 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
         { concurrency: "unbounded" },
       );
 
-      return { stdout, stderr, exitCode, observedAtMs: yield* Clock.currentTimeMillis };
+      return { stdout, exitCode, observedAtMs: yield* Clock.currentTimeMillis };
     });
 
     const {
       stdout: rawStdout,
-      stderr,
       exitCode,
       observedAtMs,
     } = yield* runClaudeCommand().pipe(
@@ -243,25 +259,22 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
     }
 
     if (exitCode !== 0) {
-      const stderrDetail = stderr.trim();
-      const stdoutDetail = rawStdout.trim();
-      const detail = stderrDetail.length > 0 ? stderrDetail : stdoutDetail;
+      // Either stream may repeat the private prompt, model output, native
+      // session identities or credentials. The numeric process outcome is
+      // enough to diagnose this failed one-shot operation without retaining
+      // provider-authored output in an error or retrying a paid generation.
       return yield* new TextGenerationError({
         operation,
-        detail:
-          detail.length > 0
-            ? `Claude CLI command failed: ${detail}`
-            : `Claude CLI command failed with code ${exitCode}.`,
+        detail: `Claude CLI command failed with code ${exitCode}.`,
       });
     }
 
     const envelope = yield* decodeClaudeOutputEnvelope(rawStdout).pipe(
-      Effect.catchTag("SchemaError", (cause) =>
+      Effect.catchTag("SchemaError", () =>
         Effect.fail(
           new TextGenerationError({
             operation,
             detail: "Claude CLI returned unexpected output format.",
-            cause,
           }),
         ),
       ),
@@ -269,12 +282,11 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
 
     const decodeOutput = Schema.decodeEffect(outputSchemaJson);
     return yield* decodeOutput(envelope.structured_output).pipe(
-      Effect.catchTag("SchemaError", (cause) =>
+      Effect.catchTag("SchemaError", () =>
         Effect.fail(
           new TextGenerationError({
             operation,
             detail: "Claude returned invalid structured output.",
-            cause,
           }),
         ),
       ),
