@@ -98,6 +98,7 @@ import {
   ImageIcon,
   LoaderCircleIcon,
   ListTodoIcon,
+  NetworkIcon,
   FileIcon,
   PencilIcon,
   Trash2Icon,
@@ -183,12 +184,13 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
   planSidebarOpen: boolean;
   onToggleInteractionMode: () => void;
   onTogglePlanSidebar: () => void;
+  onOpenWorkflowObservatory?: (() => void) | undefined;
 }) {
   const usesNativePermissionModes = props.provider === "claudeAgent" || props.provider === "grok";
   const showStandaloneInteractionMode =
     props.showInteractionModeToggle && !usesNativePermissionModes;
 
-  if (!showStandaloneInteractionMode && !props.showPlanToggle) {
+  if (!showStandaloneInteractionMode && !props.showPlanToggle && !props.onOpenWorkflowObservatory) {
     return null;
   }
 
@@ -239,6 +241,24 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
           >
             <ListTodoIcon />
             <span className="sr-only sm:not-sr-only">{props.planSidebarLabel}</span>
+          </Button>
+        </>
+      ) : null}
+
+      {props.onOpenWorkflowObservatory ? (
+        <>
+          <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
+          <Button
+            variant="ghost"
+            className="shrink-0 whitespace-nowrap px-2 text-muted-foreground/70 hover:text-foreground/80 sm:px-3"
+            size="sm"
+            type="button"
+            data-testid="composer-open-workflow-observatory"
+            onClick={props.onOpenWorkflowObservatory}
+            title="Show the recorded workflow for this thread"
+          >
+            <NetworkIcon />
+            <span className="sr-only sm:not-sr-only">Workflow</span>
           </Button>
         </>
       ) : null}
@@ -831,6 +851,8 @@ export interface ChatComposerProps extends ComposerInteractionCallbacks {
   handleRuntimeModeChange: (mode: RuntimeMode) => void;
   handleInteractionModeChange: (mode: ProviderInteractionMode) => void;
   togglePlanSidebar: () => void;
+  /** Opens the read-only workflow panel. Absent for draft threads. */
+  onOpenWorkflowObservatory?: (() => void) | undefined;
   onOpenGoalDialog: () => void;
   onOpenSubagentDetail?: (workEntry: WorkLogEntry, trigger: HTMLButtonElement) => void;
 
@@ -922,6 +944,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     handleRuntimeModeChange,
     handleInteractionModeChange,
     togglePlanSidebar,
+    onOpenWorkflowObservatory,
     onOpenGoalDialog,
     onOpenSubagentDetail,
     focusComposer,
@@ -3454,6 +3477,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     onToggleInteractionMode={cycleComposerInteractionMode}
                     onNativePermissionModeChange={handleClaudePermissionModeChange}
                     onTogglePlanSidebar={togglePlanSidebar}
+                    onOpenWorkflowObservatory={onOpenWorkflowObservatory}
                     onRuntimeModeChange={handleRuntimeModeChange}
                     onOpenGoal={onOpenGoalDialog}
                   />
@@ -3486,6 +3510,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       planSidebarOpen={planSidebarOpen}
                       onToggleInteractionMode={cycleComposerInteractionMode}
                       onTogglePlanSidebar={togglePlanSidebar}
+                      onOpenWorkflowObservatory={onOpenWorkflowObservatory}
                     />
                     {goalControlsSupported && interactionMode !== "plan" ? (
                       <>
