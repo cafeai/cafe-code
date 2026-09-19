@@ -1,11 +1,36 @@
+import * as ElectronShell from "../electron/ElectronShell.ts";
+import { COPY_TEXT_CHANNEL } from "./channels.ts";
+import { copyText } from "./methods/window.ts";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import * as Layer from "effect/Layer";
 import { describe, expect, it, vi } from "vitest";
 
-import * as ElectronShell from "../electron/ElectronShell.ts";
-import { COPY_TEXT_CHANNEL } from "./channels.ts";
 import * as DesktopIpc from "./DesktopIpc.ts";
-import { copyText } from "./methods/window.ts";
+
+describe("strict sender-aware IPC methods", () => {
+  it("rejects excess payload fields before calling the handler", async () => {
+    let calls = 0;
+    const sender = { id: 42 };
+    const method = DesktopIpc.makeIpcMethod({
+      channel: "test.strict",
+      payload: Schema.Struct({ tabId: Schema.String }),
+      result: Schema.Number,
+      strict: true,
+      handler: (_input, event) =>
+        Effect.sync(() => {
+          calls++;
+          expect(event.sender).toBe(sender);
+          return calls;
+        }),
+    });
+    await expect(
+      Effect.runPromise(method.handler({ tabId: "tab", extra: "denied" }, { sender })),
+    ).rejects.toThrow();
+    expect(calls).toBe(0);
+    expect(await Effect.runPromise(method.handler({ tabId: "tab" }, { sender }))).toBe(1);
+  });
+});
 
 function makeTopFrame(url: string): DesktopIpc.DesktopIpcWebFrame {
   const frame = {
@@ -59,20 +84,26 @@ describe("DesktopIpc sender validation", () => {
     expect(DesktopIpc.isTrustedDesktopIpcFrameUrl("http://127.0.0.1:5733/")).toBe(true);
     expect(DesktopIpc.isTrustedDesktopIpcFrameUrl("http://localhost:5733/")).toBe(true);
     expect(DesktopIpc.isTrustedDesktopIpcFrameUrl("http://[::1]:5733/")).toBe(true);
+    expect(DesktopIpc.isTrustedDesktopIpcFrameUrl("http://127.attacker.example:5733/")).toBe(false);
+    expect(DesktopIpc.isTrustedDesktopIpcFrameUrl("http://localhost.attacker.example:5733/")).toBe(
+      false,
+    );
     expect(DesktopIpc.isTrustedDesktopIpcFrameUrl("https://example.com/")).toBe(false);
     expect(DesktopIpc.isTrustedDesktopIpcFrameUrl("app://cafe-code/index.html")).toBe(false);
   });
 
-  it("allows invoke handlers from registered top-level production and dev frames", async () => {
+  it("pins registered webContents to their exact production file or development origin", async () => {
     const ipcMain = makeIpcMainStub();
     const ipc = DesktopIpc.make(ipcMain.ipcMain);
-    const sender = { id: 7, isDestroyed: () => false };
+    const productionSender = { id: 7, isDestroyed: () => false };
+    const developmentSender = { id: 8, isDestroyed: () => false };
     let calls = 0;
 
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          yield* ipc.trustWebContents(sender);
+          yield* ipc.trustWebContents(productionSender, "file:///Applications/CafeCode/index.html");
+          yield* ipc.trustWebContents(developmentSender, "http://127.0.0.1:5733/");
           yield* ipc.handle({
             channel: "secure.invoke",
             handler: (raw) =>
@@ -85,7 +116,10 @@ describe("DesktopIpc sender validation", () => {
           yield* Effect.promise(() =>
             Promise.resolve(
               ipcMain.getInvokeListener()(
-                { sender, senderFrame: makeTopFrame("file:///Applications/CafeCode/index.html") },
+                {
+                  sender: productionSender,
+                  senderFrame: makeTopFrame("file:///Applications/CafeCode/index.html#/chat"),
+                },
                 "production",
               ),
             ),
@@ -93,7 +127,10 @@ describe("DesktopIpc sender validation", () => {
           yield* Effect.promise(() =>
             Promise.resolve(
               ipcMain.getInvokeListener()(
-                { sender, senderFrame: makeTopFrame("http://127.0.0.1:5733/") },
+                {
+                  sender: developmentSender,
+                  senderFrame: makeTopFrame("http://127.0.0.1:5733/chat"),
+                },
                 "development",
               ),
             ),
@@ -105,6 +142,39 @@ describe("DesktopIpc sender validation", () => {
     expect(calls).toBe(2);
   });
 
+  it("passes the validated sender to sender-aware handlers", async () => {
+    const ipcMain = makeIpcMainStub();
+    const ipc = DesktopIpc.make(ipcMain.ipcMain);
+    const sender = { id: 42, isDestroyed: () => false };
+    let handledSenderId: number | undefined;
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* ipc.trustWebContents(sender, "http://127.0.0.1:5733/");
+          yield* ipc.handleFromSender({
+            channel: "secure.sender-aware",
+            handler: (_raw, event) =>
+              Effect.sync(() => {
+                handledSenderId = event.sender?.id;
+                return "handled";
+              }),
+          });
+          yield* Effect.promise(() =>
+            Promise.resolve(
+              ipcMain.getInvokeListener()(
+                { sender, senderFrame: makeTopFrame("http://127.0.0.1:5733/") },
+                undefined,
+              ),
+            ),
+          );
+        }),
+      ),
+    );
+
+    expect(handledSenderId).toBe(42);
+  });
+
   it("rejects invoke handlers from untrusted origins and unexpected frames", async () => {
     const ipcMain = makeIpcMainStub();
     const ipc = DesktopIpc.make(ipcMain.ipcMain);
@@ -114,7 +184,7 @@ describe("DesktopIpc sender validation", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          yield* ipc.trustWebContents(sender);
+          yield* ipc.trustWebContents(sender, "http://127.0.0.1:5733/");
           yield* ipc.handle({
             channel: "secure.invoke",
             handler: () =>
@@ -133,6 +203,15 @@ describe("DesktopIpc sender validation", () => {
 
     await expect(
       listener({ sender, senderFrame: makeTopFrame("https://evil.example/") }, "payload"),
+    ).rejects.toThrow(DesktopIpc.DesktopIpcSenderValidationError);
+    await expect(
+      listener({ sender, senderFrame: makeTopFrame("http://127.0.0.1:5734/") }, "payload"),
+    ).rejects.toThrow(DesktopIpc.DesktopIpcSenderValidationError);
+    await expect(
+      listener(
+        { sender, senderFrame: makeTopFrame("http://127.attacker.example:5733/") },
+        "payload",
+      ),
     ).rejects.toThrow(DesktopIpc.DesktopIpcSenderValidationError);
     await expect(listener({ sender, senderFrame: childFrame }, "payload")).rejects.toThrow(
       DesktopIpc.DesktopIpcSenderValidationError,
@@ -175,7 +254,6 @@ describe("DesktopIpc sender validation", () => {
     expect(event.returnValue).toBeNull();
     expect(calls).toBe(0);
   });
-
   it("decodes trusted clipboard writes and rejects invalid payloads", async () => {
     const ipcMain = makeIpcMainStub();
     const ipc = DesktopIpc.make(ipcMain.ipcMain);
@@ -186,7 +264,7 @@ describe("DesktopIpc sender validation", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          yield* ipc.trustWebContents(sender);
+          yield* ipc.trustWebContents(sender, "file:///Applications/CafeCode/index.html");
           yield* ipc.handle(copyText);
 
           const listener = ipcMain.getInvokeListener();
@@ -215,7 +293,7 @@ describe("DesktopIpc sender validation", () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          yield* ipc.trustWebContents(sender);
+          yield* ipc.trustWebContents(sender, "file:///Applications/CafeCode/index.html");
           yield* ipc.handle(copyText);
         }),
       ).pipe(Effect.provide(makeElectronShellLayer((text) => copiedTexts.push(text)))),
