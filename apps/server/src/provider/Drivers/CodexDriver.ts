@@ -24,6 +24,7 @@
  */
 import {
   CodexSettings,
+  ProviderUsageResetError,
   ProviderDriverKind,
   type ServerProvider,
   type ServerProviderProbePhaseDiagnostics,
@@ -43,6 +44,8 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 import { makeCodexTextGeneration } from "../../textGeneration/CodexTextGeneration.ts";
 import { ServerConfig } from "../../config.ts";
 import { ProviderDriverError } from "../Errors.ts";
+import { runCodexUsageReset } from "../CodexAccountUsageReset.ts";
+import type { ProviderUsageResetOperation } from "../ProviderUsageReset.ts";
 import { makeCodexAdapter } from "../Layers/CodexAdapter.ts";
 import {
   checkCodexCliProviderStatus,
@@ -411,6 +414,38 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         snapshot,
         adapter,
         textGeneration,
+        usageReset: {
+          run: (operation: ProviderUsageResetOperation) =>
+            refreshCodexShadowHome.pipe(
+              Effect.andThen(
+                runCodexUsageReset({
+                  settings: effectiveConfig,
+                  environment: effectiveEnvironment,
+                  cwd: serverConfig.stateDir,
+                  operation,
+                }),
+              ),
+              Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+              Effect.provideService(FileSystem.FileSystem, fileSystem),
+              Effect.provideService(Path.Path, path),
+              Effect.scoped,
+              Effect.timeout(Duration.seconds(20)),
+              Effect.mapError(
+                () =>
+                  new ProviderUsageResetError({
+                    message:
+                      operation.action === "preview"
+                        ? "Could not check Codex resets. Check authentication and update Codex, then try again."
+                        : "Could not confirm the reset result. Retry this same reset to check it safely.",
+                  }),
+              ),
+              Effect.tap((result) =>
+                result.rateLimits && snapshot.setAccountUsage
+                  ? snapshot.setAccountUsage(result.rateLimits)
+                  : Effect.void,
+              ),
+            ),
+        },
       } satisfies ProviderInstance;
     }),
 };

@@ -447,21 +447,35 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     return yield* fullRefreshSingleFlight.run(externallyAdmittedOperation);
   });
 
-  const applyAccountUsageBase = Effect.fn("applyAccountUsage")(function* () {
-    if (!input.refreshAccountUsage) {
+  const applyAccountUsageBase = Effect.fn("applyAccountUsage")(function* (
+    provided?: ServerProviderAccountRateLimits,
+  ) {
+    if (!input.refreshAccountUsage && provided === undefined) {
       return yield* Ref.get(snapshotStateRef).pipe(Effect.map((state) => state.snapshot));
     }
 
     const settings = yield* input.getSettings;
     const currentState = yield* Ref.get(snapshotStateRef);
-    const accountRateLimits = yield* input.refreshAccountUsage({
-      settings,
-      snapshot: currentState.snapshot,
-    });
+    const accountRateLimits =
+      provided ??
+      (yield* input.refreshAccountUsage!({
+        settings,
+        snapshot: currentState.snapshot,
+      }));
     // A transient usage endpoint failure must not erase a known-good usage
     // snapshot. Full provider health refreshes remain authoritative for
     // clearing account-bound data after logout or account replacement.
     if (accountRateLimits === undefined) {
+      return currentState.snapshot;
+    }
+
+    // Explicit reset reads run outside this mutation lock. A newer completed
+    // usage read must win if it lands before this supplied snapshot is applied.
+    if (
+      provided &&
+      currentState.snapshot.accountRateLimits &&
+      currentState.snapshot.accountRateLimits.checkedAt > provided.checkedAt
+    ) {
       return currentState.snapshot;
     }
 
@@ -613,6 +627,10 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
 
   return {
     maintenanceCapabilities: input.maintenanceCapabilities,
+    setAccountUsage: (rateLimits: ServerProviderAccountRateLimits) =>
+      snapshotMutationSemaphore
+        .withPermits(1)(applyAccountUsageBase(rateLimits))
+        .pipe(Effect.orDie),
     getSnapshot: input.getSettings.pipe(
       Effect.flatMap(applySnapshot),
       Effect.tapError(Effect.logError),

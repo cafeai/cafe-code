@@ -43,6 +43,7 @@ import { isElectron } from "../env";
 import { readLocalApi } from "../localApi";
 import {
   collapseExpandedComposerCursor,
+  parseComposerCompactionCommand,
   parseStandaloneComposerGoalCommand,
   parseStandaloneComposerSlashCommand,
 } from "../composer-logic";
@@ -223,6 +224,8 @@ import {
   sanitizeThreadErrorMessage,
 } from "~/rpc/transportError";
 import { retainThreadDetailSubscription } from "../environments/runtime/service";
+import { requireEnvironmentConnection } from "../environments/runtime";
+import { ProviderUsageResetButton } from "./ProviderUsageResetButton";
 import { RightPanelSheet } from "./RightPanelSheet";
 import { deriveDebugWaitReasons } from "./chat/debugWaitReasons";
 import { summarizeProviderDebugFleet } from "./chat/providerDebugSummary";
@@ -1882,14 +1885,8 @@ export default function ChatView(props: ChatViewProps) {
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
   const workLogEntries = useMemo(() => {
     const turnId = activeLatestTurn?.turnId;
-    return deriveWorkLogEntries(
-      threadActivities,
-      turnId,
-      turnId && activeLatestTurn?.state !== "running"
-        ? { terminalTurnIds: new Set([turnId]) }
-        : undefined,
-    );
-  }, [activeLatestTurn?.state, activeLatestTurn?.turnId, threadActivities]);
+    return deriveWorkLogEntries(threadActivities, turnId, { includeUnscopedCompaction: true });
+  }, [activeLatestTurn?.turnId, threadActivities]);
   const subagentEntries = useMemo(() => {
     const turnId = activeLatestTurn?.turnId;
     return deriveSubagentWorkEntries(
@@ -4064,6 +4061,13 @@ export default function ChatView(props: ChatViewProps) {
     options: { readonly preserveComposer?: boolean; readonly id?: string } = {},
   ): Promise<boolean> => {
     if (!activeThread || sendInFlightRef.current || queueDispatchInFlightRef.current) return false;
+    if (parseComposerCompactionCommand(snapshot.provider, snapshot.promptText) !== null) {
+      setThreadError(
+        activeThread.id,
+        "Run /compact directly after the current turn finishes; compaction commands cannot be queued.",
+      );
+      return false;
+    }
     // Async answers use a stable, scoped question identity as the durable queue
     // and eventual command/message id. A lost local ACK therefore cannot turn
     // an explicit answer into two provider submissions after reload.
@@ -4737,6 +4741,58 @@ export default function ChatView(props: ChatViewProps) {
       imageCount: composerImages.length,
       fileCount: snapshot.files.length,
     });
+    const compactionCommand = parseComposerCompactionCommand(ctxSelectedProvider, trimmed);
+    if (compactionCommand !== null) {
+      const issue =
+        compactionCommand === "invalid-arguments"
+          ? "Use /compact on its own, without additional instructions."
+          : composerImages.length || snapshot.files.length
+            ? "Remove attachments before running /compact."
+            : followUpQueuePhase === "running" || followUpQueuePhase === "connecting"
+              ? "Wait for the current turn to finish before compacting."
+              : followUpQueuePhase === "disconnected"
+                ? "Resume this conversation before running /compact."
+                : !activeThread.session ||
+                    activeThread.session.providerInstanceId !== ctxSelectedModelSelection.instanceId
+                  ? "Start a conversation with the selected provider before compacting."
+                  : null;
+      if (issue) {
+        setThreadError(activeThread.id, issue);
+        return;
+      }
+      sendInFlightRef.current = true;
+      const commandId = newCommandId();
+      const createdAt = new Date().toISOString();
+      try {
+        await api.orchestration.dispatchCommand({
+          type: "thread.compact",
+          commandId,
+          threadId: activeThread.id,
+          providerInstanceId: ctxSelectedModelSelection.instanceId,
+          createdAt,
+        });
+        // Do not erase text or attachments added while the request was pending.
+        const current = readComposerSnapshotForDispatch();
+        if (
+          current?.promptText === promptForSend &&
+          current.images.length === 0 &&
+          current.files.length === 0
+        ) {
+          promptRef.current = "";
+          clearComposerDraftContent(composerDraftTarget);
+          composerRef.current?.resetCursorState();
+        }
+        scheduleComposerFocus();
+      } catch (cause) {
+        setThreadError(
+          activeThread.id,
+          cause instanceof Error ? cause.message : "Compaction could not be requested.",
+        );
+      } finally {
+        sendInFlightRef.current = false;
+      }
+      return;
+    }
     const standaloneGoalCommand =
       composerImages.length === 0 && snapshot.files.length === 0 && goalControlsSupported
         ? parseStandaloneComposerGoalCommand(trimmed)
@@ -5151,6 +5207,10 @@ export default function ChatView(props: ChatViewProps) {
     }
     const snapshot = readComposerSnapshotForDispatch();
     if (!snapshot) return;
+    if (parseComposerCompactionCommand(snapshot.provider, snapshot.promptText) !== null) {
+      await onSend(e);
+      return;
+    }
     const { hasSendableContent } = deriveComposerSendState({
       prompt: snapshot.promptText,
       imageCount: snapshot.images.length,
@@ -5530,6 +5590,13 @@ export default function ChatView(props: ChatViewProps) {
       (!snapshot.promptText.trim() && snapshot.images.length === 0 && snapshot.files.length === 0)
     )
       return;
+    if (parseComposerCompactionCommand(snapshot.provider, snapshot.promptText) !== null) {
+      setThreadError(
+        activeThread.id,
+        "Run /compact directly after the current turn finishes; compaction commands cannot be queued.",
+      );
+      return;
+    }
     const current = followUpQueueByThreadIdRef.current[activeThread.id] ?? [];
     if (
       !current.some(
@@ -6647,6 +6714,15 @@ export default function ChatView(props: ChatViewProps) {
                 onOpenSubagentDetail={openSubagentDetail}
                 usage={sessionRailUsage}
                 rateLimits={sessionRailRateLimits}
+                usageResetAction={
+                  <ProviderUsageResetButton
+                    key={`${environmentId}:${activeProviderStatus?.instanceId ?? ""}`}
+                    provider={activeProviderStatus}
+                    request={(input) =>
+                      requireEnvironmentConnection(environmentId).client.server.usageReset(input)
+                    }
+                  />
+                }
                 onShowInComposer={hideSessionRail}
                 className="min-h-0 flex-1"
               />

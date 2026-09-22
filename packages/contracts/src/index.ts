@@ -10,6 +10,7 @@ export * from "./providerGoal.ts";
 export * from "./providerInstance.ts";
 export * from "./providerRuntime.ts";
 export * from "./providerInteraction.ts";
+export * from "./providerUsageReset.ts";
 export * from "./providerPipelineDiagnostics.ts";
 export * from "./providerDaemon.ts";
 export * from "./providerSupervisor.ts";
@@ -28,3 +29,5 @@ export * from "./usageStats.ts";
 export * from "./rpc.ts";
 export * from "./mcp.ts";
 export * from "./virtualDesktop.ts";
+
+export * from "./providerCompaction.ts";

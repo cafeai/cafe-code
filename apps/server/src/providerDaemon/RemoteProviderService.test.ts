@@ -1,4 +1,10 @@
-import { ProviderInstanceId, ThreadId, TurnId } from "@cafecode/contracts";
+import {
+  CommandId,
+  ProviderDaemonRpcRequest,
+  ProviderInstanceId,
+  ThreadId,
+  TurnId,
+} from "@cafecode/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import { ProviderDaemonHttpStatusError } from "@cafecode/shared/providerDaemonHttp";
 import {
@@ -6,6 +12,7 @@ import {
   snapshotProviderPipelineDiagnostics,
 } from "@cafecode/shared/providerPipelineDiagnostics";
 import * as Cause from "effect/Cause";
+import * as Schema from "effect/Schema";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -13,6 +20,7 @@ import * as TestClock from "effect/testing/TestClock";
 
 import {
   attachCommandIdToMutatingProviderDaemonRequest,
+  providerDaemonCompactionRequest,
   guardRemoteProviderThreadOperation,
   isRetryableProviderDaemonControlError,
   isVoidProviderDaemonRpcMethod,
@@ -318,6 +326,26 @@ describe("RemoteProviderService", () => {
       throw new Error("restartProviderRuntime request did not receive commandId");
     }
     assert.isAtLeast(commandId.length, 16);
+  });
+
+  it("keeps short compaction command ids valid, idempotent, and scoped to their thread", () => {
+    const input = {
+      threadId: ThreadId.make("thread-1"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      operationId: CommandId.make("a"),
+    };
+    const request = providerDaemonCompactionRequest(input);
+    assert.doesNotThrow(() => Schema.encodeSync(ProviderDaemonRpcRequest)(request));
+    assert.deepEqual(
+      attachCommandIdToMutatingProviderDaemonRequest(request),
+      providerDaemonCompactionRequest(input),
+    );
+    assert.deepEqual(providerDaemonRequestThreadIds(request), [input.threadId]);
+    assert.isTrue(isVoidProviderDaemonRpcMethod(request.method));
+    assert.notEqual(
+      providerDaemonCompactionRequest({ ...input, operationId: CommandId.make("b") }).commandId,
+      request.commandId,
+    );
   });
 
   it("adds commandId to goal mutation daemon RPC requests", () => {

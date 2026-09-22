@@ -13,6 +13,7 @@ import {
   type ThreadId,
   type ProviderRuntimeEvent,
   type ProviderDaemonClientConfig,
+  type ProviderCompactThreadInput,
 } from "@cafecode/contracts";
 import {
   ProviderDaemonHttpStatusError,
@@ -78,6 +79,7 @@ const VOID_RPC_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
   "stopSession",
   "quiesceThreadForHardDelete",
   "rollbackConversation",
+  "compactThread",
 ]);
 const MUTATING_RPC_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
   "startSession",
@@ -95,6 +97,7 @@ const MUTATING_RPC_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
   "setGoal",
   "clearGoal",
   "rollbackConversation",
+  "compactThread",
 ]);
 const PROVIDER_DAEMON_REPLAY_OVERLAP_EVENTS = 1_000;
 const PROVIDER_DAEMON_REPLAY_HEALTH_TIMEOUT_MS = 5_000;
@@ -198,6 +201,18 @@ function toProviderRuntimeEndpointUnavailable(): ProviderValidationError {
     operation: "ProviderDaemonRemoteProviderService",
     issue: "Provider daemon or supervisor endpoint is not configured for this server process.",
   });
+}
+
+export function providerDaemonCompactionRequest(
+  input: ProviderCompactThreadInput,
+): Extract<ProviderDaemonRpcRequest, { method: "compactThread" }> {
+  return {
+    method: "compactThread",
+    payload: input,
+    // Public command ids may be shorter than the daemon's 16-character
+    // minimum. Namespacing preserves stable retry identity for every valid id.
+    commandId: "thread.compaction:" + input.operationId,
+  };
 }
 
 export const attachCommandIdToMutatingProviderDaemonRequest = <
@@ -699,6 +714,7 @@ const makeRemoteProviderService = Effect.gen(function* () {
       guardedRpc({ method: "getInstanceInfo", payload: { instanceId } }).pipe(
         Effect.map((info) => decodeInstanceRoutingInfo(info) as ProviderInstanceRoutingInfo),
       ),
+    compactThread: (input) => guardedRpc(providerDaemonCompactionRequest(input)),
     getGoal: (input) => guardedRpc({ method: "getGoal", payload: input }),
     setGoal: (input) => guardedRpc({ method: "setGoal", payload: input }),
     clearGoal: (input) => guardedRpc({ method: "clearGoal", payload: input }),

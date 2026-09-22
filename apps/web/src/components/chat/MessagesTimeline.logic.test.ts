@@ -661,6 +661,67 @@ describe("deriveMessagesTimelineRows", () => {
   });
 });
 
+describe("manual compaction history", () => {
+  it.each(["between messages", "after messages", "without messages"])(
+    "retains a compaction turn %s without inventing a chat message",
+    (position) => {
+      const turnId = "manual-compaction" as never;
+      const messages = [0, 20].map((second) => ({
+        id: `message-${second}`,
+        kind: "message" as const,
+        createdAt: `2026-01-01T00:00:${String(second).padStart(2, "0")}Z`,
+        message: {
+          id: `message-${second}` as never,
+          role: "user" as const,
+          text: "A normal message",
+          turnId: `turn-${second}` as never,
+          createdAt: `2026-01-01T00:00:${String(second).padStart(2, "0")}Z`,
+          streaming: false,
+        },
+      }));
+      const rows = deriveMessagesTimelineRows({
+        timelineEntries:
+          position === "without messages"
+            ? []
+            : position === "after messages"
+              ? messages.slice(0, 1)
+              : messages,
+        historicalWorkLogSummariesByTurnId: new Map([
+          [
+            turnId,
+            {
+              turnId,
+              snapshotEntryCount: 1,
+              previewEntries: [
+                {
+                  id: "compaction-result",
+                  turnId,
+                  createdAt: "2026-01-01T00:00:10Z",
+                  label: "Context compacted",
+                  itemType: "context_compaction",
+                  tone: "tool",
+                },
+              ],
+            },
+          ],
+        ]),
+        completionDividerAfterEntryId: null,
+        isWorking: false,
+        activeTurnStartedAt: null,
+        revertTurnCountByUserMessageId: new Map(),
+      });
+      expect(rows.map((row) => row.kind)).toEqual(
+        position === "without messages"
+          ? ["historical-work"]
+          : position === "after messages"
+            ? ["message", "historical-work"]
+            : ["message", "historical-work", "message"],
+      );
+      expect(rows.filter((row) => row.kind === "historical-work")).toMatchObject([{ turnId }]);
+    },
+  );
+});
+
 describe("computeStableMessagesTimelineRows", () => {
   it("returns the previous result when row order and content are unchanged", () => {
     const firstUserMessage = {

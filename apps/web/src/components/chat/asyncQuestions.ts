@@ -197,11 +197,24 @@ export function rememberHandledAsyncQuestion(
   storage: Pick<Storage, "getItem" | "setItem">,
   id: string,
 ): boolean {
-  if (!HANDLED_ID.test(id)) return false;
+  return rememberHandledAsyncQuestions(storage, [id]);
+}
+
+/** Commit a captured skip-all selection once under the same cross-tab lock as
+ * individual answers/skips. Merge existing receipts so other threads and newly
+ * arriving questions keep their own handling state. Only opaque IDs are saved. */
+export function rememberHandledAsyncQuestions(
+  storage: Pick<Storage, "getItem" | "setItem">,
+  ids: readonly string[],
+): boolean {
+  if (ids.length > MAX_HANDLED_ASYNC_QUESTIONS || ids.some((id) => !HANDLED_ID.test(id)))
+    return false;
   try {
     const handled = readHandledAsyncQuestions(storage);
-    handled.delete(id);
-    handled.add(id);
+    for (const id of ids) {
+      handled.delete(id);
+      handled.add(id);
+    }
     storage.setItem(
       ASYNC_QUESTION_HANDLED_STORAGE_KEY,
       JSON.stringify([...handled].slice(-MAX_HANDLED_ASYNC_QUESTIONS)),

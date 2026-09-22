@@ -59,6 +59,11 @@ const runtimeMock = {
     closeCalls: [] as string[],
     revertCalls: [] as Array<{ sessionID: string; messageID?: string }>,
     promptCalls: [] as Array<unknown>,
+    summarizeCalls: [] as Array<unknown>,
+    summarize: ((_input: unknown, _signal?: AbortSignal) => Promise.resolve({ data: true })) as (
+      input: unknown,
+      signal?: AbortSignal,
+    ) => Promise<{ data: boolean }>,
     promptAsyncError: null as Error | null,
     closeError: null as Error | null,
     messages: [] as MessageEntry[],
@@ -72,6 +77,8 @@ const runtimeMock = {
     this.state.closeCalls.length = 0;
     this.state.revertCalls.length = 0;
     this.state.promptCalls.length = 0;
+    this.state.summarizeCalls.length = 0;
+    this.state.summarize = () => Promise.resolve({ data: true });
     this.state.promptAsyncError = null;
     this.state.closeError = null;
     this.state.messages = [];
@@ -131,6 +138,10 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
         },
         abort: async ({ sessionID }: { sessionID: string }) => {
           runtimeMock.state.abortCalls.push(sessionID);
+        },
+        summarize: (input: unknown, options?: { signal?: AbortSignal }) => {
+          runtimeMock.state.summarizeCalls.push(input);
+          return runtimeMock.state.summarize(input, options?.signal);
         },
         promptAsync: async (input: unknown) => {
           runtimeMock.state.promptCalls.push(input);
@@ -246,6 +257,110 @@ const advanceTestClock = (ms: number) =>
   TestClock.adjust(`${ms} millis`).pipe(Effect.andThen(Effect.yieldNow));
 
 it.layer(IsolatedOpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
+  it.effect(
+    "uses native compaction without sending a prompt and releases admission on completion",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* OpenCodeAdapter;
+        const threadId = asThreadId("compact-success");
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          runtimeMode: "full-access",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("opencode"),
+            model: "openai/gpt-5",
+          },
+        });
+        let finish!: (value: { data: boolean }) => void;
+        runtimeMock.state.summarize = () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          });
+        yield* adapter.compactThread!(threadId);
+        yield* Effect.yieldNow;
+        assert.equal((yield* adapter.listSessions())[0]?.status, "running");
+        assert.equal(runtimeMock.state.summarizeCalls.length, 1);
+        assert.deepEqual(runtimeMock.state.summarizeCalls[0], {
+          sessionID: "http://127.0.0.1:9999/session",
+          directory: process.cwd(),
+          providerID: "openai",
+          modelID: "gpt-5",
+          auto: false,
+        });
+        const duplicate = yield* Effect.exit(adapter.compactThread!(threadId));
+        assert.equal(Exit.isFailure(duplicate), true);
+        const send = yield* Effect.exit(adapter.sendTurn({ threadId, input: "overlap" }));
+        assert.equal(Exit.isFailure(send), true);
+        assert.equal(runtimeMock.state.promptCalls.length, 0);
+        finish({ data: true });
+        yield* Effect.promise(() => Promise.resolve());
+        yield* Effect.yieldNow;
+        assert.equal((yield* adapter.listSessions())[0]?.status, "ready");
+        assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, undefined);
+      }),
+  );
+
+  it.effect("interrupts manual compaction and ignores a late HTTP completion", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("compact-interrupt");
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: ProviderInstanceId.make("opencode"), model: "openai/gpt-5" },
+      });
+      let finish!: (value: { data: boolean }) => void;
+      let signal: AbortSignal | undefined;
+      runtimeMock.state.summarize = (_input, value) => {
+        signal = value;
+        return new Promise((resolve) => {
+          finish = resolve;
+        });
+      };
+      yield* adapter.compactThread!(threadId);
+      yield* Effect.yieldNow;
+      yield* adapter.interruptTurn(threadId);
+      assert.equal(signal?.aborted, true);
+      assert.equal((yield* adapter.listSessions())[0]?.status, "ready");
+      const sent = yield* adapter.sendTurn({ threadId, input: "continue" });
+      finish({ data: true });
+      yield* Effect.promise(() => Promise.resolve());
+      yield* Effect.yieldNow;
+      assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, sent.turnId);
+      assert.equal((yield* adapter.listSessions())[0]?.status, "running");
+    }),
+  );
+
+  it.effect("reports compaction failures without exposing raw provider errors", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("compact-failure");
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: ProviderInstanceId.make("opencode"), model: "openai/gpt-5" },
+      });
+      const terminal = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId && event.type === "turn.completed"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      runtimeMock.state.summarize = () => Promise.reject(new Error("private upstream detail"));
+      yield* adapter.compactThread!(threadId);
+      yield* Fiber.join(terminal).pipe(Effect.timeout("1 second"));
+      const session = (yield* adapter.listSessions())[0];
+      assert.equal(session?.status, "ready");
+      assert.equal(
+        session?.lastError,
+        "OpenCode compaction failed. Try again when the provider is available.",
+      );
+    }),
+  );
+
   it.effect("reuses a configured OpenCode server URL instead of spawning a local server", () =>
     Effect.gen(function* () {
       const adapter = yield* OpenCodeAdapter;

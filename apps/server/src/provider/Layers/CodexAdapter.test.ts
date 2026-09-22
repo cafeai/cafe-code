@@ -449,6 +449,8 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
     return Effect.promise(() => this.snoozeUserInputImpl(_requestId));
   }
 
+  compactThread = Effect.void;
+
   getGoal = Effect.succeed<ProviderThreadGoal | null>(null);
 
   setGoal(input: Omit<ProviderThreadGoalSetInput, "threadId">) {

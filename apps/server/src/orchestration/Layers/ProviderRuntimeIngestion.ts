@@ -387,7 +387,11 @@ function itemLifecycleActivitySummary(
     "itemType" in payload &&
     payload.itemType === "context_compaction"
   ) {
-    return lifecycle === "started" ? "Context compaction started" : "Context compacted";
+    if (lifecycle === "started") return "Context compaction started";
+    if ("status" in payload && payload.status === "failed") return "Context compaction failed";
+    if ("status" in payload && payload.status === "declined")
+      return "Context compaction interrupted";
+    return "Context compacted";
   }
 
   if (
@@ -929,6 +933,7 @@ function runtimeEventToActivities(
           summary: itemLifecycleActivitySummary(event.payload, "completed"),
           payload: {
             itemType: event.payload.itemType,
+            ...(event.payload.status ? { status: event.payload.status } : {}),
             ...(event.itemId !== undefined ? { itemId: event.itemId } : {}),
             ...(event.payload.title !== undefined ? { title: event.payload.title } : {}),
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),

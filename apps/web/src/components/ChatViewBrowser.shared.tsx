@@ -2008,6 +2008,223 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
   });
 
   if (chatViewBrowserPart === "composer") {
+    it("shows manual compaction in the used-tools list without a user turn or composer notice", async () => {
+      const base = createSnapshotForTargetUser({
+        targetMessageId: "compact-history" as MessageId,
+        targetText: "Existing conversation",
+      });
+      const snapshot = {
+        ...base,
+        threads: base.threads.map((thread) => ({
+          ...thread,
+          latestTurn: {
+            turnId: "previous-turn" as TurnId,
+            state: "completed" as const,
+            requestedAt: isoAt(100),
+            startedAt: isoAt(101),
+            completedAt: isoAt(130),
+            assistantMessageId: null,
+          },
+          session: thread.session
+            ? { ...thread.session, providerInstanceId: ProviderInstanceId.make("codex") }
+            : null,
+        })),
+      };
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot,
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
+      });
+      try {
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, "/compact");
+        await waitForLayout();
+        (await waitForSendButton()).click();
+        await vi.waitFor(() =>
+          expect(
+            wsRequests.some(
+              (request) =>
+                request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+                request.type === "thread.compact",
+            ),
+          ).toBe(true),
+        );
+        const request = wsRequests.find(
+          (request) =>
+            request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+            request.type === "thread.compact",
+        );
+        expect(request).toMatchObject({ threadId: THREAD_ID, providerInstanceId: "codex" });
+        expect(document.querySelector("[data-compaction-status]")).toBeNull();
+        const requested = {
+          id: EventId.make("compact-requested"),
+          kind: "provider.compaction.requested",
+          tone: "info" as const,
+          summary: "Compaction requested",
+          createdAt: isoAt(180),
+          turnId: null,
+          payload: { operationId: request?.commandId },
+        };
+        const started = {
+          id: EventId.make("compact-started"),
+          kind: "tool.started",
+          tone: "tool" as const,
+          summary: "Context compaction started",
+          createdAt: isoAt(181),
+          turnId: "compact-turn" as TurnId,
+          payload: {
+            itemType: "context_compaction",
+            itemId: "compact-item",
+            title: "Context compaction",
+            status: "inProgress",
+          },
+        };
+        const completed = {
+          ...started,
+          id: EventId.make("compact-completed"),
+          kind: "tool.completed",
+          summary: "Context compacted",
+          createdAt: isoAt(182),
+          payload: { ...started.payload, status: "completed" },
+        };
+        for (const [sequence, activities, state, label] of [
+          [3, [requested], "requested", "Compaction requested"],
+          [4, [requested, started], "running", "Compacting context"],
+          [5, [requested, started, completed], "completed", "Context compacted"],
+        ] as const) {
+          const thread = {
+            ...snapshot.threads[0]!,
+            activities,
+            latestTurn:
+              state === "requested"
+                ? snapshot.threads[0]!.latestTurn
+                : {
+                    turnId: started.turnId,
+                    state,
+                    requestedAt: requested.createdAt,
+                    startedAt: started.createdAt,
+                    completedAt: state === "completed" ? completed.createdAt : null,
+                    assistantMessageId: null,
+                  },
+          };
+          fixture.snapshot = { ...snapshot, snapshotSequence: sequence, threads: [thread] };
+          rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+            kind: "snapshot",
+            snapshot: { snapshotSequence: sequence, thread },
+          });
+          await vi.waitFor(() =>
+            expect(
+              [...document.querySelectorAll("[data-work-log]")]
+                .map((node) => node.textContent)
+                .join(" "),
+            ).toContain(label),
+          );
+        }
+        expect(document.querySelector("[data-compaction-status]")).toBeNull();
+        expect(document.body.textContent).not.toContain("Compacting context");
+        expect(wsRequests.some((request) => request.type === "thread.turn.start")).toBe(false);
+        await vi.waitFor(() =>
+          expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt ?? "").toBe(
+            "",
+          ),
+        );
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it.each([
+      ["completed", "Context compacted"],
+      ["failed", "Context compaction failed"],
+      ["declined", "Context compaction interrupted"],
+    ] as const)(
+      "restores %s manual compaction in the used-tools list without an assistant message",
+      async (status, title) => {
+        const base = createSnapshotForTargetUser({
+          targetMessageId: "compact-restored" as MessageId,
+          targetText: "Existing conversation",
+        });
+        const snapshot = {
+          ...base,
+          threads: base.threads.map((thread) =>
+            Object.assign({}, thread, {
+              latestTurn: {
+                turnId: "compact-turn" as TurnId,
+                state:
+                  status === "failed"
+                    ? ("error" as const)
+                    : status === "declined"
+                      ? ("interrupted" as const)
+                      : ("completed" as const),
+                requestedAt: isoAt(178),
+                startedAt: isoAt(179),
+                completedAt: isoAt(180),
+                assistantMessageId: null,
+              },
+              activities: [
+                {
+                  id: EventId.make("restored-compaction"),
+                  kind: "tool.completed",
+                  tone: "tool" as const,
+                  summary: title,
+                  createdAt: isoAt(180),
+                  turnId: "compact-turn" as TurnId,
+                  payload: {
+                    itemType: "context_compaction",
+                    itemId: "item",
+                    title: "Context compaction",
+                    status,
+                  },
+                },
+              ],
+            }),
+          ),
+        };
+        const mounted = await mountChatView({ viewport: DEFAULT_VIEWPORT, snapshot });
+        try {
+          await vi.waitFor(() =>
+            expect(
+              [...document.querySelectorAll("[data-work-log]")]
+                .map((node) => node.textContent)
+                .join(" "),
+            ).toContain(title),
+          );
+          expect(document.querySelector("[data-compaction-status]")).toBeNull();
+          expect(wsRequests.some((request) => request.type === "thread.compact")).toBe(false);
+        } finally {
+          await mounted.cleanup();
+        }
+      },
+    );
+
+    it("preserves invalid compaction arguments instead of sending them to the model", async () => {
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotForTargetUser({
+          targetMessageId: "compact-args" as MessageId,
+          targetText: "Existing conversation",
+        }),
+      });
+      try {
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, "/compact focus on tests");
+        await waitForLayout();
+        (await waitForSendButton()).click();
+        await vi.waitFor(() =>
+          expect(document.body.textContent).toContain("Use /compact on its own"),
+        );
+        expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+          "/compact focus on tests",
+        );
+        expect(
+          wsRequests.some(
+            (request) => request.type === "thread.turn.start" || request.type === "thread.compact",
+          ),
+        ).toBe(false);
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
     it("places configured dictation immediately before the send action", async () => {
       const mounted = await mountChatView({
         viewport: DEFAULT_VIEWPORT,

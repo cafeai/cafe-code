@@ -1,7 +1,13 @@
 # Desktop tool efficiency
 
-Observe an unfamiliar desktop, group predictable input, and capture at the next
-decision point. The same tools support single actions for exploratory work.
+Observe an unfamiliar desktop, group predictable input, and capture when the
+next decision needs pixels or a completed operation needs visual verification.
+Use `observeAfter: "none"` (the default) for intermediate typing, shortcuts and
+script chunks. Stop batching when the next step depends on UI state you have
+not seen. The same tools support single actions for exploratory work.
+
+At a visual checkpoint, combine the last known input steps and the observation
+in one call:
 
 ```js
 await act({
@@ -19,15 +25,27 @@ A sequence permits 24 steps, 4096 UTF-8 text bytes total, and 45 seconds.
 `waitFor` supports a screen change or a visible window selected by `windowId`
 and/or `appId`, for at most five seconds. Local polls are 350 ms apart and stop
 on cancellation. A changed screen is not proof an application finished loading.
-`observeAfter: "always"` forces pixels; `"none"` (the compatibility default)
-returns only the action result. A timeout never repeats an action.
+`observeAfter: "always"` forces pixels; `"none"` returns only the action result.
+A timeout never repeats an action. `"if_changed"` is exact pixel deduplication,
+not a judgment that a change is useful: console text and cursor changes can
+still cause a full screenshot after every batch. Choose `"none"` when those
+pixels will not inform the next decision.
 
-`observe({ since: observationId })` omits identical image content. Hashing happens
-before PNG compression in the disposable encoder. Geometry or control changes
-always require fresh pixels. `observe({ force: true })` recovers a full screenshot.
-There is no continuous capture loop.
+Inspect an image returned by `act` before requesting another screenshot. An
+additional observation is useful when you need to check a later state, recover
+from an unexpected result, or inspect a different area; it should not be a
+routine second call after every action.
 
-For small dialogs, `observe({ windowId })` or
+For repeat visual checks, `observe({ since: latestObservationId })` omits identical
+image content. Use the latest returned reference, including one returned by
+`act`. Hashing happens before PNG compression in the disposable encoder. New
+turns, expired references, and geometry or control changes require fresh
+observations. `observe({})` recovers a full screenshot;
+`observe({ force: true })` explicitly requests fresh pixels. There is no
+continuous capture loop.
+
+Prefer a crop when only a small dialog or part of the application matters.
+`observe({ windowId })` or
 `observe({ region: { x, y, width, height } })` returns a native-resolution crop.
 Pass its `observationId` to `act` and use coordinates within that image. Cafe
 translates them to desktop coordinates and rejects stale geometry, hidden/moved
@@ -54,8 +72,12 @@ existing profile; its exit alone does not prove failure. There is no automatic
 relaunch or GPU/profile workaround.
 
 For repetitive application work, use its supported scripting interface when
-appropriate, such as Blender's Python console for arranging many objects, then
-visually verify the result.
+appropriate, such as Blender's Python console for arranging many objects. Use
+`observeAfter: "none"` for intermediate script chunks, check errors/results
+through text output where available, and visually verify the completed result.
+If an output render has already been viewed, capture the desktop only when its
+UI state is relevant to the next action. Obtain an observation before proceeding
+whenever the next step depends on a visual result or execution is uncertain.
 
 ## Measuring
 

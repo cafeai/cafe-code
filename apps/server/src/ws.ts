@@ -16,6 +16,7 @@ import { type AuthAccessStreamEvent, AuthSessionId } from "@cafecode/contracts/a
 import {
   DEFAULT_AUTOMATIC_GIT_FETCH_INTERVAL,
   CommandId,
+  type ClientOrchestrationCommand,
   EventId,
   type OrchestrationCommand,
   OrchestrationDispatchCommandError,
@@ -64,6 +65,7 @@ import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner
 import * as ProviderLoginLauncher from "./provider/providerLoginLauncher.ts";
 import { ServerLifecycleEvents } from "./serverLifecycleEvents.ts";
 import { UsageStatsService } from "./usageStats/Services/UsageStatsService.ts";
+import { ProviderUsageResetError } from "@cafecode/contracts";
 import { ServerRuntimeStartup } from "./serverRuntimeStartup.ts";
 import { redactServerSettingsForClient, ServerSettingsService } from "./serverSettings.ts";
 import { ServerClientSettingsService } from "./serverClientSettings.ts";
@@ -207,6 +209,10 @@ const makeWsRpcLayer = (
       const providerRegistry = yield* ProviderRegistry;
       const providerService = yield* ProviderService;
       const config = yield* ServerConfig;
+      const normalizationContext =
+        yield* Effect.context<Effect.Services<ReturnType<typeof normalizeDispatchCommand>>>();
+      const normalizeCommand = (command: ClientOrchestrationCommand) =>
+        normalizeDispatchCommand(command).pipe(Effect.provide(normalizationContext));
       const mcpAccess = {
         canManage: currentSession.role === "owner" && secureSecretTransport,
         canInstall:
@@ -450,7 +456,7 @@ const makeWsRpcLayer = (
       };
 
       const dispatchBootstrapTurnStart = (
-        command: Extract<OrchestrationCommand, { type: "thread.turn.start" }>,
+        command: Extract<ClientOrchestrationCommand, { type: "thread.turn.start" }>,
       ): Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError> =>
         Effect.gen(function* () {
           const bootstrap = command.bootstrap;
@@ -545,6 +551,13 @@ const makeWsRpcLayer = (
               createdThread = true;
             }
 
+            // Attachment commitments are owned by the durable thread through
+            // a foreign key. A renderer-local draft has no projection row yet:
+            // normalizing it before thread.create rejects every first-send
+            // attachment. Keep verification inside bootstrap cleanup, before
+            // worktree/setup side effects and before the provider can see input.
+            const normalizedCommand = yield* normalizeCommand(finalTurnStartCommand);
+
             if (bootstrap?.prepareWorktree) {
               const worktree = yield* gitWorkflow.createWorktree({
                 cwd: bootstrap.prepareWorktree.projectCwd,
@@ -565,7 +578,7 @@ const makeWsRpcLayer = (
 
             yield* runSetupProgram();
 
-            return yield* orchestrationEngine.dispatch(finalTurnStartCommand);
+            return yield* orchestrationEngine.dispatch(normalizedCommand);
           });
 
           return yield* bootstrapProgram.pipe(
@@ -590,15 +603,13 @@ const makeWsRpcLayer = (
                 projectionSnapshotQuery,
                 providerService,
               })
-            : normalizedCommand.type === "thread.turn.start" && normalizedCommand.bootstrap
-              ? dispatchBootstrapTurnStart(normalizedCommand)
-              : orchestrationEngine
-                  .dispatch(normalizedCommand)
-                  .pipe(
-                    Effect.mapError((cause) =>
-                      toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
-                    ),
-                  );
+            : orchestrationEngine
+                .dispatch(normalizedCommand)
+                .pipe(
+                  Effect.mapError((cause) =>
+                    toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
+                  ),
+                );
 
         return startup
           .enqueueCommand(dispatchEffect)
@@ -653,7 +664,10 @@ const makeWsRpcLayer = (
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.dispatchCommand,
             Effect.gen(function* () {
-              const normalizedCommand = yield* normalizeDispatchCommand(command);
+              if (command.type === "thread.turn.start" && command.bootstrap) {
+                return yield* startup.enqueueCommand(dispatchBootstrapTurnStart(command));
+              }
+              const normalizedCommand = yield* normalizeCommand(command);
               const shouldStopSessionAfterArchive =
                 normalizedCommand.type === "thread.archive"
                   ? yield* projectionSnapshotQuery
@@ -1037,6 +1051,25 @@ const makeWsRpcLayer = (
             ).pipe(Effect.map((providers) => ({ providers }))),
             { "rpc.aggregate": "server" },
           ),
+        [WS_METHODS.serverUsageReset]: (input) => {
+          // This spends an account entitlement. Use the private owner transport
+          // boundary, and never include confirmation ids or provider data in logs.
+          if (currentSession.role !== "owner" || !secureSecretTransport) {
+            return Effect.fail(
+              new ProviderUsageResetError({
+                message: "Usage resets require an owner connection over HTTPS or the same machine.",
+              }),
+            );
+          }
+          return (
+            providerRegistry.usageReset?.(input) ??
+            Effect.fail(
+              new ProviderUsageResetError({
+                message: "Usage resets are unavailable on this server.",
+              }),
+            )
+          );
+        },
         [WS_METHODS.serverUpdateProvider]: (input) =>
           observeRpcEffect(
             WS_METHODS.serverUpdateProvider,

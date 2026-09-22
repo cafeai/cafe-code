@@ -642,6 +642,7 @@ __metadata:
     katex: "npm:^0.17.0"
     lexical: "npm:^0.41.0"
     lucide-react: "npm:^0.564.0"
+    micromark-util-types: "npm:^2.0.2"
     msw: "npm:2.12.11"
     playwright: "npm:^1.58.2"
     react: "npm:19.2.6"
@@ -650,11 +651,13 @@ __metadata:
     rehype-katex: "npm:^7.0.1"
     remark-gfm: "npm:^4.0.1"
     remark-math: "npm:^6.0.0"
+    remark-parse: "npm:^11.0.0"
     rolldown: "npm:1.0.2"
     scheduler: "npm:^0.27.0"
     tailwind-merge: "npm:^3.4.0"
     tailwindcss: "npm:^4.0.0"
     typescript: "catalog:"
+    unified: "npm:^11.0.5"
     vite: "npm:^8.0.16"
     vitest: "catalog:"
     vitest-browser-react: "npm:^2.0.5"
@@ -6522,7 +6525,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"micromark-util-types@npm:^2.0.0":
+"micromark-util-types@npm:^2.0.0, micromark-util-types@npm:^2.0.2":
   version: 2.0.2
   resolution: "micromark-util-types@npm:2.0.2"
   checksum: 10c0/c8c15b96c858db781c4393f55feec10004bf7df95487636c9a9f7209e51002a5cca6a047c5d2a5dc669ff92da20e57aaa881e81a268d9ccadb647f9dce305298
@@ -8771,7 +8774,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"unified@npm:^11.0.0":
+"unified@npm:^11.0.0, unified@npm:^11.0.5":
   version: 11.0.5
   resolution: "unified@npm:11.0.5"
   dependencies:

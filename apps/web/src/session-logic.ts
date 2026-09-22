@@ -565,11 +565,21 @@ export function hasActionableProposedPlan(
 export function deriveWorkLogEntries(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
   latestTurnId: TurnId | undefined,
-  _subagentOptions: DeriveSubagentActivityOptions = {},
+  options: DeriveSubagentActivityOptions & { includeUnscopedCompaction?: boolean } = {},
 ): WorkLogEntry[] {
-  const ordered = [...activities]
-    .toSorted(compareActivitiesByOrder)
-    .filter((activity) => (latestTurnId ? activity.turnId === latestTurnId : true));
+  const ordered = [...activities].toSorted(compareActivitiesByOrder).filter(
+    (activity) =>
+      !latestTurnId ||
+      activity.turnId === latestTurnId ||
+      // Manual requests/failures and some provider compaction notifications
+      // have no user turn. Keep them in the main tool list, but never copy
+      // them into every historical turn's separately paged work log.
+      (options.includeUnscopedCompaction &&
+        activity.turnId === null &&
+        (isContextCompactionActivity(activity) ||
+          activity.kind === "provider.compaction.requested" ||
+          activity.kind === "provider.compaction.failed")),
+  );
   const latestTaskVisibility = new Map<string, "visible" | "ambient">();
   for (const activity of ordered) {
     const identity = taskActivityIdentityKey(activity);
@@ -861,7 +871,14 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
       : null;
   const commandPreview = extractToolCommand(payload);
   const changedFiles = extractChangedFiles(payload);
-  const title = extractToolTitle(payload);
+  const compaction = isContextCompactionActivity(activity);
+  // Native titles are often identical at start and completion. The tool row
+  // must communicate the lifecycle outcome, including a failed compaction.
+  const title = compaction
+    ? activity.kind === "tool.started"
+      ? "Compacting context"
+      : activity.summary
+    : extractToolTitle(payload);
   const isTaskActivity = activity.kind === "task.progress" || activity.kind === "task.completed";
   const taskSummary =
     isTaskActivity && typeof payload?.summary === "string" && payload.summary.length > 0
@@ -883,7 +900,9 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
       ? stripTrailingExitCode(payload.detail).output
       : null
     : extractActivityDetail(activity.kind, payload, title ?? activity.summary);
-  const toolCallId = isTaskActivity ? null : extractToolCallId(payload);
+  const toolCallId = isTaskActivity
+    ? null
+    : (extractToolCallId(payload) ?? (compaction ? asTrimmedString(payload?.itemId) : null));
   const entry: DerivedWorkLogEntry = {
     id: activity.id,
     turnId: activity.turnId,
@@ -1029,6 +1048,9 @@ function deriveToolLifecycleCollapseKey(entry: DerivedWorkLogEntry): string | un
   if (entry.toolCallId) {
     return `tool:${entry.toolCallId}`;
   }
+  // Older saved compaction items may lack an item id. Their changing status
+  // label must not prevent adjacent start/completion edges from collapsing.
+  if (entry.itemType === "context_compaction") return "context_compaction";
   const normalizedLabel = normalizeCompactToolLabel(entry.toolTitle ?? entry.label);
   const detail = entry.detail?.trim() ?? "";
   const itemType = entry.itemType ?? "";

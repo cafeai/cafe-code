@@ -47,6 +47,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import {
   FetchHttpClient,
@@ -68,6 +69,8 @@ import { makeRoutesLayer } from "./server.ts";
 import { WebPushNotificationsTest } from "./notifications/WebPushNotifications.ts";
 import * as NodeHttpServerCompression from "./nodeHttpServerCompression.ts";
 import { resolveAttachmentRelativePath } from "./attachmentPaths.ts";
+import { computeAttachmentContentSha256 } from "./attachmentContentCommitment.ts";
+import { storeFileAttachment } from "./fileAttachmentStore.ts";
 import { GitManager, type GitManagerShape } from "./git/GitManager.ts";
 import { Keybindings, type KeybindingsShape } from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
@@ -447,6 +450,7 @@ const makeBrowserOtlpPayload = (spanName: string) =>
 const buildAppUnderTest = (options?: {
   config?: Partial<ServerConfigShape>;
   layers?: {
+    sqlClient?: SqlClient.SqlClient;
     keybindings?: Partial<KeybindingsShape>;
     providerRegistry?: Partial<ProviderRegistryShape>;
     providerService?: Partial<ProviderServiceShape>;
@@ -1008,7 +1012,11 @@ const buildAppUnderTest = (options?: {
       Layer.provideMerge(makeAuthTestLayer()),
       Layer.provideMerge(WebPushNotificationsTest),
       Layer.provideMerge(ThreadDetailSubscriptionRegistryLive),
-      Layer.provideMerge(SqlitePersistenceMemory),
+      Layer.provideMerge(
+        options?.layers?.sqlClient
+          ? Layer.succeed(SqlClient.SqlClient, options.layers.sqlClient)
+          : SqlitePersistenceMemory,
+      ),
       Layer.provide(workspaceAndProjectServicesLayer),
       Layer.provideMerge(FetchHttpClient.layer),
       Layer.provideMerge(BrandingImageStoreLive),
@@ -2741,6 +2749,96 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         ),
       );
     }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
+  );
+
+  it.effect("routes owner usage-reset confirmations only to the mocked provider action", () =>
+    Effect.gen(function* () {
+      const calls: unknown[] = [];
+      const confirmationId = "00000000-0000-4000-8000-000000000001";
+      yield* buildAppUnderTest({
+        layers: {
+          providerRegistry: {
+            usageReset: (input) =>
+              Effect.sync(() => {
+                calls.push(input);
+                return {
+                  rateLimits: null,
+                  confirmationId,
+                  outcome: input.action === "redeem" ? ("nothingToReset" as const) : null,
+                  retrying: false,
+                };
+              }),
+          },
+        },
+      });
+      const wsUrl = yield* getWsServerUrl("/ws");
+      yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.gen(function* () {
+            yield* client[WS_METHODS.serverUsageReset]({
+              action: "preview",
+              instanceId: ProviderInstanceId.make("codex-personal"),
+            });
+            assert.lengthOf(calls, 1);
+            const result = yield* client[WS_METHODS.serverUsageReset]({
+              action: "redeem",
+              instanceId: ProviderInstanceId.make("codex-personal"),
+              confirmationId,
+            });
+            assert.equal(result.outcome, "nothingToReset");
+          }),
+        ),
+      );
+      assert.deepEqual(calls, [
+        { action: "preview", instanceId: "codex-personal" },
+        { action: "redeem", instanceId: "codex-personal", confirmationId },
+      ]);
+    }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
+  );
+
+  it.effect(
+    "rejects usage reset reads and redemption from a paired non-owner before provider access",
+    () =>
+      Effect.gen(function* () {
+        let calls = 0;
+        yield* buildAppUnderTest({
+          layers: {
+            providerRegistry: {
+              usageReset: () =>
+                Effect.sync(() => {
+                  calls += 1;
+                  return { rateLimits: null, confirmationId: null, outcome: null, retrying: false };
+                }),
+            },
+          },
+        });
+        const pairing = yield* HttpClient.post("/api/auth/pairing-token", {
+          headers: { cookie: yield* getAuthenticatedSessionCookieHeader() },
+        });
+        const { credential } = (yield* pairing.json) as { credential: string };
+        const cookie = yield* getAuthenticatedSessionCookieHeader(credential);
+        const wsUrl = appendSessionCookieToWsUrl(
+          yield* getWsServerUrl("/ws", { authenticated: false }),
+          cookie,
+        );
+        yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            Effect.gen(function* () {
+              const error = yield* client[WS_METHODS.serverUsageReset]({
+                action: "preview",
+                instanceId: ProviderInstanceId.make("codex"),
+              }).pipe(Effect.flip);
+              assert.include(error.message, "owner connection");
+              yield* client[WS_METHODS.serverUsageReset]({
+                action: "redeem",
+                instanceId: ProviderInstanceId.make("codex"),
+                confirmationId: "00000000-0000-4000-8000-000000000001",
+              }).pipe(Effect.flip);
+            }),
+          ),
+        );
+        assert.equal(calls, 0);
+      }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
   );
 
   it.effect("orders the hard-delete RPC across provider, ingestion, and engine barriers", () =>
@@ -5528,6 +5626,115 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         }
       }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
+
+  for (const attachmentType of ["image", "file"] as const) {
+    it.effect(`secures a first-send ${attachmentType} only after creating its owning thread`, () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const threadId = ThreadId.make(`thread-bootstrap-${attachmentType}`);
+        const createdAt = "2026-09-09T00:00:00.000Z";
+        const bytes = Buffer.from("private first-send attachment bytes");
+        const commands: Array<OrchestrationCommand> = [];
+        yield* sql`
+          INSERT INTO projection_projects (
+            project_id, title, workspace_root, scripts_json, created_at, updated_at
+          ) VALUES (${defaultProjectId}, 'Attachments', '/tmp/project', '[]', ${createdAt}, ${createdAt})
+        `;
+        const config = yield* buildAppUnderTest({
+          layers: {
+            sqlClient: sql,
+            orchestrationEngine: {
+              dispatch: (command) =>
+                Effect.gen(function* () {
+                  commands.push(command);
+                  if (command.type === "thread.create") {
+                    // Exercise the real FK boundary: normalizing an attachment
+                    // before this durable projection exists must fail.
+                    yield* sql`
+                      INSERT INTO projection_threads (
+                        thread_id, project_id, title, created_at, updated_at
+                      ) VALUES (${threadId}, ${defaultProjectId}, 'Attachments', ${createdAt}, ${createdAt})
+                    `;
+                  } else if (command.type === "thread.turn.start") {
+                    const attachment = command.message.attachments[0];
+                    assert.isDefined(attachment);
+                    assert.notProperty(attachment, "dataUrl");
+                    assert.notProperty(attachment, "contentSha256");
+                    assert.deepEqual(
+                      yield* sql`SELECT thread_id, content_sha256, size_bytes
+                        FROM attachment_content_commitments WHERE attachment_id = ${attachment!.id}`,
+                      [
+                        {
+                          thread_id: threadId,
+                          content_sha256: computeAttachmentContentSha256(bytes),
+                          size_bytes: bytes.byteLength,
+                        },
+                      ],
+                    );
+                  }
+                  return { sequence: commands.length };
+                }).pipe(Effect.orDie),
+            },
+          },
+        });
+        const attachment =
+          attachmentType === "image"
+            ? {
+                type: "image" as const,
+                name: "screenshot.png",
+                mimeType: "image/png",
+                sizeBytes: bytes.byteLength,
+                dataUrl: `data:image/png;base64,${bytes.toString("base64")}`,
+              }
+            : yield* Effect.promise(() =>
+                storeFileAttachment({
+                  attachmentsDir: config.attachmentsDir,
+                  threadId,
+                  name: "notes.txt",
+                  mimeType: "text/plain",
+                  bytes,
+                }),
+              );
+        const wsUrl = yield* getWsServerUrl("/ws");
+        const result = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+              type: "thread.turn.start",
+              commandId: CommandId.make(`cmd-bootstrap-${attachmentType}`),
+              threadId,
+              message: {
+                messageId: MessageId.make(`message-bootstrap-${attachmentType}`),
+                role: "user",
+                text: "Read this attachment",
+                attachments: [attachment],
+              },
+              modelSelection: defaultModelSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              bootstrap: {
+                createThread: {
+                  projectId: defaultProjectId,
+                  title: "Attachments",
+                  modelSelection: defaultModelSelection,
+                  runtimeMode: "full-access",
+                  interactionMode: "default",
+                  branch: null,
+                  worktreePath: null,
+                  createdAt,
+                },
+              },
+              createdAt,
+            }),
+          ),
+        );
+        assert.equal(result.sequence, 2);
+        assert.deepEqual(
+          commands.map((command) => command.type),
+          ["thread.create", "thread.turn.start"],
+        );
+      }).pipe(Effect.provide(SqlitePersistenceMemory), Effect.provide(NodeHttpServer.layerTest)),
+    );
+  }
 
   it.effect("records setup-script failures without aborting bootstrap turn start", () =>
     Effect.gen(function* () {

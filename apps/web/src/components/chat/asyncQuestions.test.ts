@@ -7,6 +7,7 @@ import {
   deriveAsyncQuestions,
   readHandledAsyncQuestions,
   rememberHandledAsyncQuestion,
+  rememberHandledAsyncQuestions,
   persistExactAsyncQuestionAnswer,
   retainAsyncQuestionDrafts,
   updateAsyncQuestionDraft,
@@ -108,6 +109,31 @@ describe("inline async question identity", () => {
     expect(readHandledAsyncQuestions(storage).size).toBe(0);
     expect(rememberHandledAsyncQuestion(storage, `async-question:${"0".repeat(64)}:0`)).toBe(false);
     expect(deriveWorkLogEntries([activity("item")], undefined)).toEqual([]);
+  });
+
+  it("persists a skip-all batch in one write while preserving other scopes' receipts", async () => {
+    const questions = await deriveAsyncQuestions("local", "thread", [activity("item")]);
+    const [other] = await deriveAsyncQuestions("remote", "thread", [activity("item")]);
+    let stored = JSON.stringify([other!.id]);
+    const storage = {
+      getItem: () => stored,
+      setItem: vi.fn((_key: string, value: string) => {
+        stored = value;
+      }),
+    };
+    expect(
+      rememberHandledAsyncQuestions(
+        storage,
+        questions.map((question) => question.id),
+      ),
+    ).toBe(true);
+    expect(storage.setItem).toHaveBeenCalledTimes(1);
+    expect(readHandledAsyncQuestions(storage)).toEqual(
+      new Set([other!.id, ...questions.map((question) => question.id)]),
+    );
+    expect(stored).not.toMatch(/Which|Additional|route/u);
+    expect(rememberHandledAsyncQuestions(storage, [questions[0]!.id, "invalid"])).toBe(false);
+    expect(storage.setItem).toHaveBeenCalledTimes(1);
   });
 
   it("rejects a different answer claimed during the asynchronous save instead of consuming the draft", async () => {

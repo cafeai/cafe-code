@@ -1,6 +1,8 @@
 import { CodexSettings } from "@cafecode/contracts";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { ChildProcess } from "effect/unstable/process";
 import type * as CodexClient from "effect-codex-app-server/client";
@@ -15,10 +17,43 @@ import {
   makeCodexHealthProbeCommand,
   makeCodexModelListCommand,
   requestAllCodexModelsWithClient,
+  readCodexUsageIdentity,
 } from "./CodexProvider.ts";
 import { terminateProbeChild } from "../providerSnapshot.ts";
 
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
+
+describe("private reset account identity", () => {
+  const identity = (accountId: string | undefined, tokenRevision: number) => {
+    const token = `header.${Buffer.from(JSON.stringify({ sub: "same-user", revision: tokenRevision })).toString("base64url")}.signature`;
+    return Effect.runPromise(
+      readCodexUsageIdentity(decodeCodexSettings({ homePath: "/mock-codex-home" }), {}).pipe(
+        Effect.provideService(
+          FileSystem.FileSystem,
+          FileSystem.makeNoop({
+            readFileString: () =>
+              Effect.succeed(
+                JSON.stringify({
+                  auth_mode: "chatgpt",
+                  tokens: { access_token: token, account_id: accountId },
+                }),
+              ),
+          }),
+        ),
+        Effect.provide(Path.layer),
+      ),
+    );
+  };
+
+  it("keeps a known user/workspace stable across token refresh but distinguishes workspaces", async () => {
+    expect(await identity("personal", 1)).toEqual(await identity("personal", 2));
+    expect(await identity("personal", 1)).not.toEqual(await identity("work", 1));
+  });
+
+  it("invalidates a rotated credential when the workspace identity is unavailable", async () => {
+    expect(await identity(undefined, 1)).not.toEqual(await identity(undefined, 2));
+  });
+});
 
 const makeModel = (slug: string): CodexSchema.V2ModelListResponse__Model => ({
   defaultReasoningEffort: "medium",

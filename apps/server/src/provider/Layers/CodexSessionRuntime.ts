@@ -163,6 +163,7 @@ export const CodexResumeCursorSchema = Schema.Struct({
 const CodexUserInputAnswerObject = Schema.Struct({
   answers: Schema.Array(Schema.String),
 });
+const isCodexCompactionRequestRejection = Schema.is(CodexErrors.CodexAppServerRequestError);
 const isCodexResumeCursorSchema = Schema.is(CodexResumeCursorSchema);
 const isCodexUserInputAnswerObject = Schema.is(CodexUserInputAnswerObject);
 
@@ -484,9 +485,52 @@ export function validateCodexSubagentThreadReadMetadata(input: {
   return input.child.sessionId === input.root.sessionId ? undefined : "session-tree-mismatch";
 }
 
+/** Reserve the ACK-to-notification gap without inventing a native turn id.
+ * Completion can race the ACK, so only an unchanged lifecycle may be restored
+ * after a rejected request. Transport ambiguity fails closed until Stop/resume.
+ * https://learn.chatgpt.com/docs/app-server#trigger-thread-compaction */
+export const requestCodexManualCompaction = Effect.fn("requestCodexManualCompaction")(
+  function* (input: {
+    readonly sessionRef: Ref.Ref<ProviderSession>;
+    readonly pendingRef: Ref.Ref<boolean>;
+    readonly lifecycleEpochRef: Ref.Ref<symbol>;
+    readonly request: () => Effect.Effect<unknown, CodexSessionRuntimeError>;
+  }) {
+    const session = yield* Ref.get(input.sessionRef);
+    if (session.status !== "ready" || session.activeTurnId || (yield* Ref.get(input.pendingRef))) {
+      return yield* CodexErrors.CodexAppServerRequestError.invalidRequest(
+        "Wait for the current turn to finish before compacting.",
+      );
+    }
+    const epoch = yield* Ref.get(input.lifecycleEpochRef);
+    yield* Ref.set(input.pendingRef, true);
+    yield* Ref.update(input.sessionRef, (current) => ({ ...current, status: "running" as const }));
+    yield* input.request().pipe(
+      Effect.tapError((error) =>
+        Effect.gen(function* () {
+          if ((yield* Ref.get(input.lifecycleEpochRef)) !== epoch) return;
+          if (!isCodexCompactionRequestRejection(error)) {
+            yield* Ref.update(input.sessionRef, (current) => ({
+              ...current,
+              status: "error" as const,
+            }));
+            return;
+          }
+          yield* Ref.set(input.pendingRef, false);
+          yield* Ref.update(input.sessionRef, (current) => ({
+            ...current,
+            status: "ready" as const,
+          }));
+        }),
+      ),
+    );
+  },
+);
+
 export interface CodexSessionRuntimeShape {
   readonly start: () => Effect.Effect<ProviderSession, CodexSessionRuntimeError>;
   readonly getSession: Effect.Effect<ProviderSession>;
+  readonly compactThread: Effect.Effect<void, CodexSessionRuntimeError>;
   readonly sendTurn: (
     input: CodexSessionRuntimeSendTurnInput,
   ) => Effect.Effect<ProviderTurnStartResult, CodexSessionRuntimeError>;
@@ -3902,6 +3946,7 @@ export const makeCodexSessionRuntime = (
     // lifecycle. A long-delayed request can compare its captured token without
     // retaining notification history or relying on wall-clock ordering.
     const rootTurnLifecycleEpochRef = yield* Ref.make(Symbol());
+    const manualCompactionPendingRef = yield* Ref.make(false);
     // Request responses and raw notifications are independent Effect fibers.
     // Serialize the two writes that decide steer-vs-terminal ownership so a
     // late ACK can never overwrite an already-authoritative terminal state.
@@ -5236,7 +5281,10 @@ export const makeCodexSessionRuntime = (
               // shift the final duration or race a recovered child channel.
               return true;
             }
-            if (result.rootLifecycleChanged) yield* Ref.set(rootTurnLifecycleEpochRef, Symbol());
+            if (result.rootLifecycleChanged) {
+              yield* Ref.set(manualCompactionPendingRef, false);
+              yield* Ref.set(rootTurnLifecycleEpochRef, Symbol());
+            }
             if (result.action === "terminal") {
               return false;
             }
@@ -5366,6 +5414,7 @@ export const makeCodexSessionRuntime = (
             (turnId && (yield* Ref.get(aggregateRootCompletionsRef)).has(String(turnId)))
           )
             return;
+          yield* Ref.set(manualCompactionPendingRef, false);
           yield* Ref.set(rootTurnLifecycleEpochRef, Symbol());
           yield* updateSession(sessionRef, {
             status: "running",
@@ -6218,9 +6267,46 @@ export const makeCodexSessionRuntime = (
     return {
       start,
       getSession: Ref.get(sessionRef),
+      compactThread: Effect.gen(function* () {
+        const providerThreadId = yield* readProviderThreadId;
+        const reservationEpoch = yield* Ref.get(rootTurnLifecycleEpochRef);
+        yield* requestCodexManualCompaction({
+          sessionRef,
+          pendingRef: manualCompactionPendingRef,
+          lifecycleEpochRef: rootTurnLifecycleEpochRef,
+          request: () => client.request("thread/compact/start", { threadId: providerThreadId }),
+        });
+        // A missing native start must not leave an apparently running turn
+        // forever. Fail closed instead of replaying a possibly accepted RPC.
+        // Stop/resume reconstructs authoritative native state in this case.
+        yield* Effect.gen(function* () {
+          yield* Effect.sleep("30 seconds");
+          if (
+            !(yield* Ref.get(manualCompactionPendingRef)) ||
+            (yield* Ref.get(closedRef)) ||
+            (yield* Ref.get(rootTurnLifecycleEpochRef)) !== reservationEpoch
+          )
+            return;
+          const message =
+            "Compaction start could not be confirmed. Stop and resume this conversation before trying again.";
+          yield* updateSession(sessionRef, { status: "error", lastError: message });
+          yield* emitEvent({
+            kind: "notification",
+            threadId: options.threadId,
+            method: "error",
+            message,
+            payload: { threadId: providerThreadId, error: { message }, willRetry: false },
+          });
+        }).pipe(Effect.forkIn(runtimeScope));
+      }),
       sendTurn: (input) =>
         Effect.gen(function* () {
           const providerThreadId = yield* readProviderThreadId;
+          if (yield* Ref.get(manualCompactionPendingRef)) {
+            return yield* CodexErrors.CodexAppServerRequestError.invalidRequest(
+              "Cannot send a message while manual compaction is starting.",
+            );
+          }
           const normalizedModel = normalizeCodexModelSlug(
             input.model ?? (yield* Ref.get(sessionRef)).model,
           );
@@ -6335,6 +6421,11 @@ export const makeCodexSessionRuntime = (
       steerTurn: (input) =>
         Effect.gen(function* () {
           const providerThreadId = yield* readProviderThreadId;
+          if (yield* Ref.get(manualCompactionPendingRef)) {
+            return yield* CodexErrors.CodexAppServerRequestError.invalidRequest(
+              "cannot steer a compact turn",
+            );
+          }
           const rejectIfContextCompactionActive = (expectedTurnId: TurnId) =>
             Effect.gen(function* () {
               const activeContextCompaction = findCodexActiveContextCompactionForTurn(
@@ -6630,6 +6721,11 @@ export const makeCodexSessionRuntime = (
           const session = yield* Ref.get(sessionRef);
           const effectiveTurnId = turnId ?? session.activeTurnId;
           if (!effectiveTurnId) {
+            // Compaction can be accepted before its native turn id arrives.
+            // Codex cannot interrupt without that id. An explicit Stop closes
+            // this runtime so a delayed start cannot silently keep working;
+            // the next session resumes the durable native conversation.
+            if (yield* Ref.get(manualCompactionPendingRef)) yield* close;
             return;
           }
           const requestInterrupt = (targetTurnId: TurnId) =>

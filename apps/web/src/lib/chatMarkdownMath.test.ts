@@ -3,6 +3,14 @@ import katex from "katex";
 import { normalizeChatMarkdownMath } from "./chatMarkdownMath";
 
 describe("normalizeChatMarkdownMath", () => {
+  it("does not apply TeX repairs to prose between currency amounts", () => {
+    const text =
+      "Cost $5; literal \\texttt{prose_identifier}; then $10. Math: $\\texttt{math_identifier}$.";
+    expect(normalizeChatMarkdownMath(text)).toBe(
+      "Cost $5; literal \\texttt{prose_identifier}; then $10. Math: $\\texttt{math\\_identifier}$.",
+    );
+  });
+
   it("converts Codex-style fenced math blocks to display math", () => {
     expect(
       normalizeChatMarkdownMath(

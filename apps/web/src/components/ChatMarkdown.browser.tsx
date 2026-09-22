@@ -240,6 +240,64 @@ describe("ChatMarkdown", () => {
     }
   });
 
+  it("keeps currency, spacing, and bold emphasis in billing prose", async () => {
+    const screen = await render(
+      <ChatMarkdown
+        text={[
+          "Routine CI is separate. Our desktop workflow launches **8 jobs on every push**, including two macOS jobs. If each took 20 minutes, that would cost **$3.36 per push**—an illustration, since we don’t yet have a fully passing baseline. A 10-minute website check costs **$0.06**.",
+          "",
+          "I also checked September’s billing report: **$12.13 of recorded usage, fully covered by discounts, with $0 net charges reported**. That’s consistent with hitting the included allowance and paid usage being blocked.",
+        ].join("\n")}
+        cwd="/repo/project"
+      />,
+    );
+
+    try {
+      expect(document.querySelector(".katex")).toBeNull();
+      expect(document.querySelector(".katex-error")).toBeNull();
+      const strongText = Array.from(
+        document.querySelectorAll(".chat-markdown strong"),
+        (element) => element.textContent,
+      );
+      expect(strongText).toEqual([
+        "8 jobs on every push",
+        "$3.36 per push",
+        "$0.06",
+        "$12.13 of recorded usage, fully covered by discounts, with $0 net charges reported",
+      ]);
+      expect(document.querySelector(".chat-markdown")?.textContent).toContain(
+        "—an illustration, since we don’t yet have a fully passing baseline.",
+      );
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("renders genuine formulas alongside bold and plain currency", async () => {
+    const screen = await render(
+      <ChatMarkdown
+        text="The price is **$5**; the variable is **$x$**. Another option costs $10. Compute $2 + 2 = 4$."
+        cwd="/repo/project"
+      />,
+    );
+
+    try {
+      expect(document.querySelector(".chat-markdown strong")?.textContent).toBe("$5");
+      expect(document.querySelector(".chat-markdown")?.textContent).toContain(
+        "Another option costs $10.",
+      );
+      expect(
+        Array.from(
+          document.querySelectorAll(".katex-mathml annotation"),
+          (element) => element.textContent,
+        ),
+      ).toEqual(["x", "2 + 2 = 4"]);
+      expect(document.querySelector(".katex-error")).toBeNull();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("renders Codex math fences with KaTeX instead of code highlighting", async () => {
     const screen = await render(
       <ChatMarkdown text={["```math", "E = mc^2", "```"].join("\n")} cwd="/repo/project" />,

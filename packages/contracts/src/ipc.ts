@@ -35,6 +35,7 @@ import type {
   ProjectWriteFileResult,
 } from "./project.ts";
 import type { ProviderInstanceId } from "./providerInstance.ts";
+import type { ProviderUsageResetInput, ProviderUsageResetResult } from "./providerUsageReset.ts";
 import type {
   ServerConfig,
   ServerOpenSystemPromptFileResult,
@@ -439,6 +440,7 @@ export interface LocalApi {
     removeSavedEnvironmentSecret: (environmentId: EnvironmentId) => Promise<void>;
   };
   server: {
+    usageReset: (input: ProviderUsageResetInput) => Promise<ProviderUsageResetResult>;
     virtualDesktop: (input: VirtualDesktopRequest) => Promise<VirtualDesktopState>;
     getMcpStatus: () => Promise<CafeMcpStatus>;
     updateMcpClient: (input: CafeMcpClientUpdate) => Promise<CafeMcpStatus>;

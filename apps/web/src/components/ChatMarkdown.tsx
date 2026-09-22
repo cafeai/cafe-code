@@ -20,7 +20,6 @@ import ReactMarkdown from "react-markdown";
 import { defaultUrlTransform } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
 import { VscodeEntryIcon } from "./chat/VscodeEntryIcon";
 import { renderSkillInlineMarkdownChildren } from "./chat/SkillInlineText";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
@@ -40,6 +39,7 @@ import { readLocalApi } from "../localApi";
 import { getLocalShellCapabilities } from "../localCapabilities";
 import { cn, isMacPlatform, isWindowsPlatform } from "../lib/utils";
 import { normalizeChatMarkdownMath } from "../lib/chatMarkdownMath";
+import { remarkChatMath } from "../lib/remarkChatMath";
 import { normalizeCodexCitationMarkers } from "../lib/codexCitations";
 
 class CodeHighlightErrorBoundary extends React.Component<
@@ -776,7 +776,7 @@ function ChatMarkdown({
   return (
     <div className="chat-markdown w-full min-w-0 text-sm leading-relaxed text-foreground/80">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, [remarkMath, { singleDollarTextMath: true }]]}
+        remarkPlugins={[remarkGfm, remarkChatMath]}
         rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false, trust: false }]]}
         components={markdownComponents}
         urlTransform={markdownUrlTransform}

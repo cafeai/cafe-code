@@ -2362,6 +2362,71 @@ describe("deriveWorkLogEntries context window handling", () => {
     expect(entries[0]?.label).toBe("Context compacted");
   });
 
+  it("includes unscoped manual compaction only in the main work log", () => {
+    const activities = [
+      makeActivity({
+        id: "request",
+        kind: "provider.compaction.requested",
+        summary: "Compaction requested",
+      }),
+      makeActivity({
+        id: "failed",
+        kind: "provider.compaction.failed",
+        summary: "Compaction could not start",
+      }),
+      makeActivity({
+        id: "native",
+        kind: "tool.started",
+        summary: "Context compaction started",
+        payload: { itemType: "context_compaction", itemId: "compact" },
+      }),
+      makeActivity({ id: "unrelated", kind: "runtime.warning" }),
+      makeActivity({ id: "old", turnId: "old-turn", kind: "tool.completed" }),
+    ];
+    const turnId = TurnId.make("current-turn");
+    expect(deriveWorkLogEntries(activities, turnId)).toEqual([]);
+    expect(
+      deriveWorkLogEntries(activities, turnId, { includeUnscopedCompaction: true })
+        .map((entry) => entry.id)
+        .toSorted(),
+    ).toEqual(["failed", "native", "request"]);
+  });
+
+  it.each([
+    ["Context compacted", "completed"],
+    ["Context compaction failed", "failed"],
+    ["Context compaction interrupted", "declined"],
+  ])("replaces the native compaction start with %s in the same tool row", (summary, status) => {
+    const started = makeActivity({
+      id: "started",
+      turnId: "manual-turn",
+      kind: "tool.started",
+      summary: "Context compaction started",
+      payload: { itemType: "context_compaction", itemId: "compact", title: "Context compaction" },
+    });
+    expect(deriveWorkLogEntries([started], TurnId.make("manual-turn"))[0]?.toolTitle).toBe(
+      "Compacting context",
+    );
+    const completed = makeActivity({
+      id: "completed",
+      turnId: "manual-turn",
+      kind: "tool.completed",
+      summary,
+      payload: {
+        itemType: "context_compaction",
+        itemId: "compact",
+        title: "Context compaction",
+        status,
+      },
+    });
+    const entries = deriveWorkLogEntries([started, completed], TurnId.make("manual-turn"));
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ id: "completed", toolTitle: summary });
+    // An unrelated native item must never finish a newer compaction.
+    const other = { ...completed, payload: { ...(completed.payload as object), itemId: "other" } };
+    expect(deriveWorkLogEntries([started, other], TurnId.make("manual-turn"))).toHaveLength(2);
+  });
+
   it("keeps provider switch notices as normal work log entries", () => {
     const entries = deriveWorkLogEntries(
       [

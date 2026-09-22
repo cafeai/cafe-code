@@ -155,6 +155,10 @@ function createBrowserLocalApi(rpcClient?: WsRpcClient): LocalApi {
       },
     },
     server: {
+      usageReset: (input) =>
+        rpcClient
+          ? rpcClient.server.usageReset(input)
+          : Promise.reject(unavailableLocalBackendError()),
       virtualDesktop: (input) =>
         rpcClient
           ? rpcClient.server.virtualDesktop(input)

@@ -5,6 +5,30 @@ const TEX_COMMAND_PATTERN =
 const TEX_OPERATOR_PATTERN = /(?:[_^{}=<>]|[∈∉≤≥≠≈≡→←↔∞]|\bmod\b)/;
 const MARKDOWN_STRUCTURAL_LINE_PATTERN = /^(?:#{1,6}\s|[-*+]\s|\d+[.)]\s|>\s|\|)/;
 const LONG_PROSE_WORD_PATTERN = /[A-Za-z]{3,}/g;
+const AMOUNT_START = /^[+-]?(?:\d|\.\d)/u;
+const EMPHASIS_END = /(?:\*\*|__|~~)(?=\s|[.,;:!?—–)]|$)/u;
+const EMPHASIS_AT_END = /(?:\*\*|__|~~)$/u;
+
+/** Shared by math-only text repairs and the Markdown tokenizer. */
+export function hasChatInlineMathBoundaries(source: string, nextCode: number | null): boolean {
+  // `$5 and $10` is currency, not a formula ending immediately before `10`.
+  // Matching optional padding keeps `$ x $` valid while rejecting `$5 and $x$`
+  // at the price, allowing a subsequent parse attempt to recognize `$x$`.
+  const closesBeforeNumber = nextCode !== null && nextCode >= 48 && nextCode <= 57;
+  const hasOpeningPadding = /\s/u.test(source[1] ?? "");
+  const hasClosingPadding = /\s/u.test(source.at(-2) ?? "");
+  const content = source.slice(1, -1);
+
+  // A price can close emphasis before a later formula opens it again, as in
+  // `**$5 per item** and **$x$**`. Reject this crossing even if the second
+  // dollar is currently the end of a partial stream. Checking both boundaries
+  // keeps isolated math operators and literal stars inside TeX text intact.
+  const crossesAmountEmphasis =
+    AMOUNT_START.test(content) &&
+    EMPHASIS_AT_END.test(content) &&
+    EMPHASIS_END.test(content.slice(0, -2));
+  return !closesBeforeNumber && hasOpeningPadding === hasClosingPadding && !crossesAmountEmphasis;
+}
 
 function isFenceClose(line: string, fenceIndent: string, fenceMarker: string): boolean {
   const markerChar = fenceMarker[0];
@@ -525,6 +549,20 @@ function normalizeLiteralTextCommandsInMathChunk(markdown: string): string {
     const closingIndex = findClosingDelimiter(markdown, contentStart, "$", delimiterLength);
     if (closingIndex === null) {
       output.push(markdown.slice(cursor, contentStart));
+      cursor = contentStart;
+      continue;
+    }
+
+    if (
+      delimiterLength === 1 &&
+      !hasChatInlineMathBoundaries(
+        markdown.slice(cursor, closingIndex + 1),
+        markdown.charCodeAt(closingIndex + 1),
+      )
+    ) {
+      // Currency cannot authorize a TeX repair in the prose between prices.
+      // Advance only past this dollar so a later real formula is still found.
+      output.push("$");
       cursor = contentStart;
       continue;
     }

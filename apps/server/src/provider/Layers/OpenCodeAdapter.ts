@@ -68,6 +68,11 @@ type OpenCodeSubscribedEvent =
     ? TEvent
     : never;
 
+interface OpenCodeManualCompaction {
+  readonly turnId: TurnId;
+  readonly controller: AbortController;
+}
+
 interface OpenCodeSessionContext {
   session: ProviderSession;
   readonly client: OpencodeClient;
@@ -81,6 +86,7 @@ interface OpenCodeSessionContext {
   readonly emittedTextByPartId: Map<string, string>;
   readonly completedAssistantPartIds: Set<string>;
   readonly turns: Array<OpenCodeTurnSnapshot>;
+  manualCompaction?: OpenCodeManualCompaction;
   activeTurnId: TurnId | undefined;
   activeAgent: string | undefined;
   activeVariant: string | undefined;
@@ -439,6 +445,8 @@ const stopOpenCodeContext = Effect.fn("stopOpenCodeContext")(function* (
     return false;
   }
 
+  context.manualCompaction?.controller.abort();
+
   // Best-effort remote abort. The scope close below tears down the local
   // handles (event-pump fiber, server-exit fiber, event-subscribe fetch),
   // but we still want to tell OpenCode that this session is done.
@@ -505,6 +513,54 @@ export function makeOpenCodeAdapter(
 
     const emit = (event: ProviderRuntimeEvent) =>
       Queue.offer(runtimeEvents, event).pipe(Effect.asVoid);
+    const finishManualCompaction = Effect.fn("finishManualCompaction")(function* (
+      context: OpenCodeSessionContext,
+      operation: OpenCodeManualCompaction,
+      state: "completed" | "failed" | "interrupted",
+    ) {
+      // HTTP, SSE errors, and Stop can race. Only the owning operation may
+      // settle this turn; an old response cannot finish a newer user turn.
+      if (context.manualCompaction !== operation || (yield* Ref.get(context.stopped))) return;
+      delete context.manualCompaction;
+      context.activeTurnId = undefined;
+      const message =
+        state === "failed"
+          ? "OpenCode compaction failed. Try again when the provider is available."
+          : undefined;
+      yield* updateProviderSession(
+        context,
+        { status: "ready", ...(message ? { lastError: message } : {}) },
+        { clearActiveTurnId: true },
+      );
+      yield* emit({
+        ...(yield* buildEventBase({
+          threadId: context.session.threadId,
+          turnId: operation.turnId,
+          itemId: operation.turnId,
+        })),
+        type: "item.completed",
+        payload: {
+          itemType: "context_compaction",
+          status:
+            state === "completed" ? "completed" : state === "interrupted" ? "declined" : "failed",
+          title:
+            state === "completed"
+              ? "Context compacted"
+              : state === "interrupted"
+                ? "Compaction interrupted"
+                : "Compaction failed",
+        },
+      });
+      yield* emit({
+        ...(yield* buildEventBase({
+          threadId: context.session.threadId,
+          turnId: operation.turnId,
+        })),
+        type: "turn.completed",
+        payload: { state, ...(message ? { errorMessage: message } : {}) },
+      });
+    });
+
     const writeNativeEvent = (
       threadId: ThreadId,
       event: {
@@ -891,7 +947,7 @@ export function makeOpenCodeAdapter(
             break;
           }
 
-          if (event.properties.status.type === "idle" && turnId) {
+          if (event.properties.status.type === "idle" && turnId && !context.manualCompaction) {
             context.activeTurnId = undefined;
             yield* updateProviderSession(context, { status: "ready" }, { clearActiveTurnId: true });
             yield* emit({
@@ -910,6 +966,12 @@ export function makeOpenCodeAdapter(
         }
 
         case "session.error": {
+          if (context.manualCompaction) {
+            const operation = context.manualCompaction;
+            operation.controller.abort();
+            yield* finishManualCompaction(context, operation, "failed");
+            break;
+          }
           const message = sessionErrorMessage(event.properties.error);
           const activeTurnId = context.activeTurnId;
           context.activeTurnId = undefined;
@@ -1146,6 +1208,13 @@ export function makeOpenCodeAdapter(
 
     const sendTurn: OpenCodeAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
       const context = ensureSessionContext(sessions, input.threadId);
+      if (context.manualCompaction) {
+        return yield* new ProviderAdapterValidationError({
+          provider: PROVIDER,
+          operation: "sendTurn",
+          issue: "Wait for compaction to finish before sending a message.",
+        });
+      }
       const turnId = TurnId.make(`opencode-turn-${yield* Random.nextUUIDv4}`);
       const modelSelection =
         input.modelSelection ??
@@ -1295,12 +1364,92 @@ export function makeOpenCodeAdapter(
         }),
       );
 
+    const compactThread: NonNullable<OpenCodeAdapterShape["compactThread"]> = Effect.fn(
+      "compactThread",
+    )(function* (threadId) {
+      const context = ensureSessionContext(sessions, threadId);
+      const model = parseOpenCodeModelSlug(context.session.model);
+      if (
+        context.session.status !== "ready" ||
+        context.activeTurnId ||
+        context.manualCompaction ||
+        context.pendingPermissions.size ||
+        context.pendingQuestions.size ||
+        !model
+      ) {
+        return yield* new ProviderAdapterValidationError({
+          provider: PROVIDER,
+          operation: "compactThread",
+          issue:
+            "Manual compaction requires an idle conversation with an existing provider/model selection.",
+        });
+      }
+      const operation: OpenCodeManualCompaction = {
+        turnId: TurnId.make("opencode-compact-" + (yield* Random.nextUUIDv4)),
+        controller: new AbortController(),
+      };
+      context.manualCompaction = operation;
+      context.activeTurnId = operation.turnId;
+      yield* updateProviderSession(
+        context,
+        { status: "running", activeTurnId: operation.turnId },
+        { clearLastError: true },
+      );
+      yield* emit({
+        ...(yield* buildEventBase({ threadId, turnId: operation.turnId })),
+        type: "turn.started",
+        payload: { model: context.session.model },
+      });
+      yield* emit({
+        ...(yield* buildEventBase({
+          threadId,
+          turnId: operation.turnId,
+          itemId: operation.turnId,
+        })),
+        type: "item.started",
+        payload: {
+          itemType: "context_compaction",
+          status: "inProgress",
+          title: "Compacting context",
+        },
+      });
+      // The installed v2 SDK's compatibility endpoint awaits SessionPrompt.loop.
+      // Scope ownership keeps this long request cancellable without holding the
+      // provider command lock. Native idle may precede the HTTP result; only
+      // this operation's result (or an explicit error/Stop) settles it.
+      // https://opencode.ai/docs/sdk/#sessions
+      yield* runOpenCodeSdk("session.summarize", () =>
+        context.client.session.summarize(
+          {
+            sessionID: context.openCodeSessionId,
+            directory: context.directory,
+            ...model,
+            auto: false,
+          },
+          { signal: operation.controller.signal },
+        ),
+      ).pipe(
+        Effect.flatMap((result) =>
+          finishManualCompaction(context, operation, result.data === true ? "completed" : "failed"),
+        ),
+        Effect.catchCause(() => finishManualCompaction(context, operation, "failed")),
+        Effect.ensuring(Effect.sync(() => operation.controller.abort())),
+        Effect.forkIn(context.sessionScope),
+      );
+    });
+
     const interruptTurn: OpenCodeAdapterShape["interruptTurn"] = Effect.fn("interruptTurn")(
       function* (threadId, turnId) {
         const context = ensureSessionContext(sessions, threadId);
+        const compaction = context.manualCompaction;
         yield* runOpenCodeSdk("session.abort", () =>
           context.client.session.abort({ sessionID: context.openCodeSessionId }),
         ).pipe(Effect.mapError(toRequestError));
+        if (compaction) {
+          yield* finishManualCompaction(context, compaction, "interrupted");
+          compaction.controller.abort();
+          return;
+        }
         if (turnId ?? context.activeTurnId) {
           yield* emit({
             ...(yield* buildEventBase({
@@ -1457,8 +1606,10 @@ export function makeOpenCodeAdapter(
       capabilities: {
         sessionModelSwitch: "in-session",
         liveSteer: "unsupported",
+        manualCompaction: "supported",
       },
       startSession,
+      compactThread,
       sendTurn,
       steerTurn,
       interruptTurn,

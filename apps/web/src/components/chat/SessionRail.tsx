@@ -1,6 +1,6 @@
 import type { ServerProviderAccountRateLimits } from "@cafecode/contracts";
 import { PanelBottomIcon, PanelRightIcon } from "lucide-react";
-import { forwardRef, memo } from "react";
+import { forwardRef, memo, type ReactNode } from "react";
 
 import type { ContextWindowSnapshot } from "~/lib/contextWindow";
 import { cn } from "~/lib/utils";
@@ -51,6 +51,7 @@ interface SessionRailProps {
     | undefined;
   readonly usage: ContextWindowSnapshot | null;
   readonly rateLimits?: ServerProviderAccountRateLimits | null | undefined;
+  readonly usageResetAction?: ReactNode;
   readonly onShowInComposer: () => void;
   readonly className?: string;
 }
@@ -110,7 +111,12 @@ export const SessionRail = memo(
           className="shrink-0 border-t border-border/60 px-3 py-3"
           data-session-rail-usage="true"
         >
-          <ContextWindowDetails usage={props.usage} rateLimits={props.rateLimits} layout="panel" />
+          <ContextWindowDetails
+            usage={props.usage}
+            rateLimits={props.rateLimits}
+            usageResetAction={props.usageResetAction}
+            layout="panel"
+          />
         </div>
       </div>
     );

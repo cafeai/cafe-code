@@ -52,6 +52,7 @@ export interface ProviderAdapterCapabilities {
    * This remains optional while decoding adapters built before the goal
    * capability existed; absence is always interpreted as unsupported.
    */
+  readonly manualCompaction?: "supported" | "unsupported";
   readonly threadGoals?: ProviderThreadGoalSupport;
   /**
    * Declares whether the adapter can branch provider-owned conversation state.
@@ -201,6 +202,9 @@ export interface ProviderAdapterShape<TError> {
    * Goal methods are present only when `threadGoals` is supported. The
    * provider-native thread id must remain encapsulated by the adapter.
    */
+  /** Admit native compaction; lifecycle events report completion asynchronously. */
+  readonly compactThread?: (threadId: ThreadId) => Effect.Effect<void, TError>;
+
   readonly getGoal?: (threadId: ThreadId) => Effect.Effect<ProviderThreadGoal | null, TError>;
 
   /**

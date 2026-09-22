@@ -1,3 +1,4 @@
+import { ProviderCompactThreadInput } from "./providerCompaction.ts";
 import * as Schema from "effect/Schema";
 import {
   ProviderRespondToInteractionInput,
@@ -403,6 +404,7 @@ export const ProviderDaemonAdapterCapabilities = Schema.Struct({
   // Optional on the wire so a newly built desktop can still interrogate an
   // adopted daemon from before goal capability negotiation existed. Missing
   // always means unsupported.
+  manualCompaction: Schema.optional(Schema.Literals(["supported", "unsupported"])),
   threadGoals: Schema.optional(Schema.Literals(["supported", "unsupported"])),
   // Optional for compatibility with daemons built before provider-native
   // thread/session branching was exposed through Cafe.
@@ -575,6 +577,11 @@ export const ProviderDaemonRpcRequest = Schema.Union([
     payload: GetInstanceInfoPayload,
   }),
   Schema.Struct({
+    method: Schema.Literal("compactThread"),
+    commandId: Schema.optional(ProviderDaemonCommandId),
+    payload: ProviderCompactThreadInput,
+  }),
+  Schema.Struct({
     method: Schema.Literal("getGoal"),
     payload: ProviderThreadGoalGetInput,
   }),
@@ -618,6 +625,7 @@ export const ProviderDaemonRpcResultByMethod = {
   listSessions: Schema.Array(ProviderSession),
   getCapabilities: ProviderDaemonAdapterCapabilities,
   getInstanceInfo: ProviderDaemonInstanceRoutingInfo,
+  compactThread: Schema.Void,
   getGoal: Schema.NullOr(ProviderThreadGoal),
   setGoal: ProviderThreadGoal,
   clearGoal: ProviderThreadGoalClearResult,

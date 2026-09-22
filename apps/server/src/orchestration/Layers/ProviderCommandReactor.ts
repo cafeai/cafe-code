@@ -102,6 +102,7 @@ type ProviderIntentEvent = Extract<
       | "thread.user-input-snooze-requested"
       | "thread.session-stop-requested"
       | "thread.goal-set-requested"
+      | "thread.compaction-requested"
       | "thread.goal-clear-requested";
   }
 >;
@@ -760,6 +761,7 @@ const make = Effect.gen(function* () {
       | "provider.session.stop.failed"
       | "provider.goal.set.failed"
       | "provider.goal.clear.failed"
+      | "provider.compaction.failed"
       | "provider.goal.replace.failed";
     readonly summary: string;
     readonly detail: string;
@@ -4225,6 +4227,64 @@ const make = Effect.gen(function* () {
     };
   });
 
+  const processCompactionRequested = Effect.fn("processCompactionRequested")(function* (
+    event: Extract<ProviderIntentEvent, { type: "thread.compaction-requested" }>,
+  ) {
+    const thread = yield* resolveThread(event.payload.threadId);
+    if (!thread) return;
+    // Record submission before native I/O so an immediate completion cannot
+    // race a later "requested" activity and leave the UI looking pending.
+    const requestedAt = DateTime.formatIso(yield* DateTime.now);
+    yield* orchestrationEngine.dispatch({
+      type: "thread.activity.append",
+      commandId: CommandId.make(`compaction-requested:${event.eventId}`),
+      threadId: thread.id,
+      activity: {
+        id: EventId.make(`compaction-requested:${event.eventId}`),
+        tone: "info",
+        kind: "provider.compaction.requested",
+        summary: "Compaction requested",
+        payload: { operationId: event.commandId ?? event.eventId },
+        turnId: null,
+        createdAt: requestedAt,
+      },
+      createdAt: requestedAt,
+    });
+    // Recheck after the durable intent is consumed: provider selection or live
+    // turn admission may have changed since the renderer dispatched it.
+    yield* Effect.gen(function* () {
+      const capabilities = yield* providerService.getCapabilities(event.payload.providerInstanceId);
+      if (
+        capabilities.manualCompaction !== "supported" ||
+        !providerService.compactThread ||
+        thread.session?.providerInstanceId !== event.payload.providerInstanceId
+      ) {
+        return yield* Effect.fail(
+          new Error("Manual compaction is unavailable for this conversation."),
+        );
+      }
+      yield* providerService.compactThread({
+        threadId: thread.id,
+        providerInstanceId: event.payload.providerInstanceId,
+        operationId: event.commandId ?? CommandId.make(event.eventId),
+      });
+    }).pipe(
+      Effect.catchCause(() =>
+        Effect.gen(function* () {
+          yield* appendProviderFailureActivity({
+            threadId: thread.id,
+            kind: "provider.compaction.failed",
+            summary: "Compaction could not start",
+            detail:
+              "Manual compaction requires an idle Codex or OpenCode conversation and a provider version that supports it. Wait for any active turn to finish, then try again.",
+            turnId: null,
+            createdAt: DateTime.formatIso(yield* DateTime.now),
+          });
+        }),
+      ),
+    );
+  });
+
   const processGoalSetRequested = Effect.fn("processGoalSetRequested")(function* (
     event: Extract<ProviderIntentEvent, { type: "thread.goal-set-requested" }>,
   ) {
@@ -4368,6 +4428,9 @@ const make = Effect.gen(function* () {
         return;
       case "thread.session-stop-requested":
         yield* processSessionStopRequested(event);
+        return;
+      case "thread.compaction-requested":
+        yield* processCompactionRequested(event);
         return;
       case "thread.goal-set-requested":
         yield* processGoalSetRequested(event);
@@ -4740,6 +4803,7 @@ const make = Effect.gen(function* () {
       event.type === "thread.user-input-snooze-requested" ||
       event.type === "thread.session-stop-requested" ||
       event.type === "thread.goal-set-requested" ||
+      event.type === "thread.compaction-requested" ||
       event.type === "thread.goal-clear-requested"
     ) {
       return yield* enqueueProviderIntentEvent(event);

@@ -197,6 +197,7 @@ describe("ProviderCommandReactor", () => {
     readonly sessionModelSwitch?: "unsupported" | "restart-resume" | "in-session";
     readonly liveSteer?: "supported" | "unsupported";
     readonly threadGoals?: "supported" | "unsupported";
+    readonly manualCompaction?: "supported" | "unsupported";
     readonly startReactor?: boolean;
     readonly getCodexSteerAcceptanceEvidence?: ProjectionSnapshotQueryShape["getCodexSteerAcceptanceEvidence"];
     readonly beforeCodexSteerDeliveryAttemptDispatch?: Effect.Effect<void>;
@@ -215,6 +216,7 @@ describe("ProviderCommandReactor", () => {
     const durableProviderBindings: Array<ProviderRuntimeBindingWithMetadata> = [];
     let providerGoal: ProviderThreadGoal | null = null;
     const goalOperations: string[] = [];
+    const compactThread = vi.fn(() => Effect.void);
     const modelSelection = input?.threadModelSelection ?? {
       instanceId: ProviderInstanceId.make("codex"),
       model: "gpt-5-codex",
@@ -421,6 +423,7 @@ describe("ProviderCommandReactor", () => {
     const service: ProviderServiceShape = {
       startSession: startSession as ProviderServiceShape["startSession"],
       forkSession: () => unsupported(),
+      compactThread,
       discardSessionFork: () => unsupported(),
       sendTurn: sendTurn as ProviderServiceShape["sendTurn"],
       steerTurn: steerTurn as ProviderServiceShape["steerTurn"],
@@ -437,6 +440,7 @@ describe("ProviderCommandReactor", () => {
           sessionModelSwitch: input?.sessionModelSwitch ?? "in-session",
           liveSteer: input?.liveSteer ?? "unsupported",
           threadGoals: input?.threadGoals ?? "unsupported",
+          manualCompaction: input?.manualCompaction ?? "unsupported",
         }),
       getInstanceInfo: (instanceId) => {
         const raw = String(instanceId);
@@ -685,6 +689,7 @@ describe("ProviderCommandReactor", () => {
       setGoal,
       clearGoal,
       goalOperations,
+      compactThread,
       respondToRequest,
       respondToUserInput,
       snoozeUserInput,
@@ -1339,6 +1344,92 @@ describe("ProviderCommandReactor", () => {
       title: title.slice(0, PROVIDER_SESSION_TITLE_MAX_CHARS),
     });
     expect(harness.generateThreadTitle).not.toHaveBeenCalled();
+  });
+
+  it("deduplicates manual compaction without sending a user prompt", async () => {
+    const harness = await createHarness({ manualCompaction: "supported" });
+    const threadId = ThreadId.make("thread-1");
+    await harness.setRunningCodexTurn(TurnId.make("previous-turn"), "2026-01-01T00:00:01.000Z");
+    await harness.markThreadReady();
+    const command = {
+      type: "thread.compact" as const,
+      commandId: CommandId.make("cmd-compact-1"),
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+    };
+    harness.compactThread.mockImplementation(() =>
+      Effect.promise(async () => {
+        const thread = await harness.readThreadDetail(threadId);
+        expect(
+          thread?.activities.some((activity) => activity.kind === "provider.compaction.requested"),
+        ).toBe(true);
+      }),
+    );
+    await Effect.runPromise(harness.engine.dispatch(command));
+    await Effect.runPromise(harness.engine.dispatch(command));
+    await harness.drain();
+    expect(harness.compactThread).toHaveBeenCalledTimes(1);
+    const feedback = (await harness.readThreadDetail(threadId))?.activities.filter(
+      (activity) => activity.kind === "provider.compaction.requested",
+    );
+    expect(feedback).toHaveLength(1);
+    expect(feedback?.[0]?.payload).toMatchObject({ operationId: command.commandId });
+    expect(harness.compactThread).toHaveBeenCalledWith({
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      operationId: command.commandId,
+    });
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+    expect(harness.generateThreadMetadata).not.toHaveBeenCalled();
+  });
+
+  it("rejects compaction during active turns and for a different provider instance", async () => {
+    const harness = await createHarness({ manualCompaction: "supported" });
+    const threadId = ThreadId.make("thread-1");
+    await harness.setRunningCodexTurn(TurnId.make("active-turn"), "2026-01-01T00:00:01.000Z");
+    const command = {
+      type: "thread.compact" as const,
+      commandId: CommandId.make("cmd-compact-busy"),
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+    };
+    await expect(Effect.runPromise(harness.engine.dispatch(command))).rejects.toThrow(
+      "Wait for the current turn",
+    );
+    await harness.markThreadReady();
+    await expect(
+      Effect.runPromise(
+        harness.engine.dispatch({
+          ...command,
+          commandId: CommandId.make("cmd-compact-wrong-instance"),
+          providerInstanceId: ProviderInstanceId.make("opencode"),
+        }),
+      ),
+    ).rejects.toThrow("existing Codex or OpenCode");
+    expect(harness.compactThread).not.toHaveBeenCalled();
+  });
+
+  it("records a visible failure when an adopted daemon lacks compaction support", async () => {
+    const harness = await createHarness();
+    await harness.setRunningCodexTurn(TurnId.make("previous-turn"), "2026-01-01T00:00:01.000Z");
+    await harness.markThreadReady();
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.compact",
+        commandId: CommandId.make("cmd-compact-unsupported"),
+        threadId: ThreadId.make("thread-1"),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        createdAt: "2026-01-01T00:00:02.000Z",
+      }),
+    );
+    await harness.drain();
+    const detail = await harness.readThreadDetail(ThreadId.make("thread-1"));
+    expect(
+      detail?.activities.some((activity) => activity.kind === "provider.compaction.failed"),
+    ).toBe(true);
+    expect(harness.compactThread).not.toHaveBeenCalled();
   });
 
   it("replaces a Codex goal with an ordered clear then active unbudgeted set", async () => {
@@ -3793,7 +3884,13 @@ describe("ProviderCommandReactor", () => {
 
     await waitFor(async () => {
       const readModel = await harness.readModel();
-      return readModel.threads.find((entry) => entry.id === threadId)?.goal?.status === "paused";
+      const thread = readModel.threads.find((entry) => entry.id === threadId);
+      // Goal synchronization and the interrupt-completed activity are separate
+      // durable writes. Observing the first does not prove the second exists.
+      return (
+        thread?.goal?.status === "paused" &&
+        thread.activities.some((activity) => activity.kind === "provider.turn.interrupt.completed")
+      );
     });
     const readModel = await harness.readModel();
     const thread = readModel.threads.find((entry) => entry.id === threadId);

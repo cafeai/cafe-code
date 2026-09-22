@@ -769,4 +769,39 @@ describe("makeManagedServerProvider", () => {
       }),
     ),
   );
+
+  it.effect(
+    "publishes confirmed reset usage without a health probe and ignores an older delayed read",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const checkCalls = yield* Ref.make(0);
+          const provider = yield* makeManagedServerProvider<TestSettings>({
+            maintenanceCapabilities,
+            getSettings: Effect.succeed({ enabled: true }),
+            streamSettings: Stream.empty,
+            haveSettingsChanged: () => false,
+            initialSnapshot: () => Effect.succeed(refreshedSnapshot),
+            checkProvider: Ref.update(checkCalls, (count) => count + 1).pipe(
+              Effect.as(refreshedSnapshot),
+            ),
+            probePolicy: { initialRefresh: "external" },
+          });
+          const fresh = {
+            ...refreshedAccountRateLimits,
+            checkedAt: "2026-09-09T00:00:01.000Z",
+            rateLimitResetCredits: { availableCount: 1 },
+          };
+          const stale = {
+            ...fresh,
+            checkedAt: "2026-09-09T00:00:00.000Z",
+            rateLimitResetCredits: { availableCount: 2 },
+          };
+          yield* provider.setAccountUsage!(fresh);
+          yield* provider.setAccountUsage!(stale);
+          assert.deepStrictEqual((yield* provider.getSnapshot).accountRateLimits, fresh);
+          assert.strictEqual(yield* Ref.get(checkCalls), 0);
+        }),
+      ),
+  );
 });

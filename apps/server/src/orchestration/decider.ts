@@ -1004,6 +1004,44 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "thread.compact": {
+      const thread = yield* requireThreadNotArchived({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      if (
+        !thread.session ||
+        thread.session.providerInstanceId !== command.providerInstanceId ||
+        (thread.session.providerName !== "codex" && thread.session.providerName !== "opencode")
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Select the existing Codex or OpenCode conversation before compacting.",
+        });
+      }
+      if (threadHasUnsettledTurnStart(thread)) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Wait for the current turn to finish before compacting.",
+        });
+      }
+      return {
+        ...withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        }),
+        type: "thread.compaction-requested",
+        payload: {
+          threadId: command.threadId,
+          providerInstanceId: command.providerInstanceId,
+          createdAt: command.createdAt,
+        },
+      };
+    }
+
     case "thread.goal.set": {
       const thread = yield* requireThreadNotArchived({
         readModel,

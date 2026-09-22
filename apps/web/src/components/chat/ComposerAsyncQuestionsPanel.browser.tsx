@@ -8,6 +8,7 @@ import {
   ASYNC_QUESTION_HANDLED_STORAGE_KEY,
   deriveAsyncQuestions,
   rememberHandledAsyncQuestion,
+  withAsyncQuestionLock,
 } from "./asyncQuestions";
 
 const activities: OrchestrationThreadActivity[] = [
@@ -22,6 +23,18 @@ const activities: OrchestrationThreadActivity[] = [
       questions: [{ title: "Which route?", options: ["Suggested route", "Another route"] }],
     },
     turnId: null,
+  },
+];
+const multipleActivities: OrchestrationThreadActivity[] = [
+  {
+    ...activities[0]!,
+    payload: {
+      itemId: "item-1",
+      questions: [
+        { title: "Which route?", options: ["Suggested route", "Another route"] },
+        { title: "What should happen next?", options: [] },
+      ],
+    },
   },
 ];
 
@@ -71,35 +84,153 @@ describe("inline async questions", () => {
     }
   });
 
-  it("serializes double clicks and skip against an in-flight durable acceptance", async () => {
-    let accept!: (result: boolean) => void;
-    const onAnswer = vi.fn(
-      () =>
-        new Promise<boolean>((resolve) => {
-          accept = resolve;
-        }),
+  it.each([1, 2])(
+    "serializes double clicks and skips against an in-flight answer with %i questions",
+    async (count) => {
+      let accept!: (result: boolean) => void;
+      const onAnswer = vi.fn(
+        () =>
+          new Promise<boolean>((resolve) => {
+            accept = resolve;
+          }),
+      );
+      const screen = await render(
+        <ComposerAsyncQuestionsPanel
+          environmentId="local"
+          threadId="thread"
+          activities={count === 1 ? activities : multipleActivities}
+          deliveryDisabled={false}
+          onAnswer={onAnswer}
+        />,
+      );
+      try {
+        await page
+          .getByText(`${count} ${count === 1 ? "question" : "questions"} from Codex`)
+          .click();
+        await page.getByLabelText("Your answer").fill("Explicit answer");
+        const submit = page.getByRole("button", { name: "Queue answer" }).element();
+        submit.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        submit.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        await expect.poll(() => onAnswer.mock.calls.length).toBe(1);
+        await expect
+          .element(page.getByRole("button", { name: "Skip", exact: true }))
+          .toBeDisabled();
+        if (count > 1)
+          await expect
+            .element(page.getByRole("button", { name: "Skip all", exact: true }))
+            .toBeDisabled();
+        accept(true);
+        if (count === 1)
+          await expect.element(page.getByText("1 question from Codex")).not.toBeInTheDocument();
+        else {
+          await expect.element(page.getByText("1 question from Codex")).toBeInTheDocument();
+          await expect
+            .element(page.getByRole("button", { name: "Skip all", exact: true }))
+            .not.toBeInTheDocument();
+        }
+        expect(onAnswer).toHaveBeenCalledTimes(1);
+      } finally {
+        await screen.unmount();
+      }
+    },
+  );
+
+  it("skips all pending questions without sending or clearing the main draft and keeps new questions", async () => {
+    const onAnswer = vi.fn(async () => true);
+    const component = (rows = multipleActivities, environmentId = "local", key = "initial") => (
+      <>
+        <ComposerAsyncQuestionsPanel
+          key={key}
+          environmentId={environmentId}
+          threadId="thread"
+          activities={rows}
+          deliveryDisabled={false}
+          onAnswer={onAnswer}
+        />
+        <textarea aria-label="Main draft" defaultValue="Keep this main draft" />
+      </>
     );
-    const screen = await render(
+    const screen = await render(component());
+    try {
+      await page.getByText("2 questions from Codex").click();
+      await page.getByLabelText("Your answer").fill("Discard this skipped answer");
+      await page.getByRole("button", { name: "Skip all", exact: true }).click();
+      await expect.element(page.getByText("2 questions from Codex")).not.toBeInTheDocument();
+      await expect.element(page.getByLabelText("Main draft")).toHaveValue("Keep this main draft");
+      expect(onAnswer).not.toHaveBeenCalled();
+
+      // Reopening/replaying the same activities must keep both questions skipped.
+      await screen.rerender(component([...multipleActivities], "local", "reload"));
+      await expect.element(page.getByText("2 questions from Codex")).not.toBeInTheDocument();
+      const newQuestion = {
+        ...activities[0]!,
+        id: EventId.make(`codex-async-questions:${"b".repeat(64)}`),
+      };
+      await screen.rerender(component([...multipleActivities, newQuestion], "local", "reload"));
+      await page.getByText("1 question from Codex").click();
+      await expect.element(page.getByLabelText("Your answer")).toHaveValue("");
+      await expect
+        .element(page.getByRole("button", { name: "Skip all", exact: true }))
+        .not.toBeInTheDocument();
+
+      // The same provider activity in a different environment is independent.
+      await screen.rerender(component(multipleActivities, "remote"));
+      await page.getByText("2 questions from Codex").click();
+      await expect.element(page.getByLabelText("Your answer")).toHaveValue("");
+      expect(onAnswer).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("keeps questions that arrive while Skip all waits for another view's handling lock", async () => {
+    const onAnswer = vi.fn(async () => true);
+    const component = (rows: OrchestrationThreadActivity[]) => (
       <ComposerAsyncQuestionsPanel
         environmentId="local"
         threadId="thread"
-        activities={activities}
+        activities={rows}
         deliveryDisabled={false}
         onAnswer={onAnswer}
-      />,
+      />
     );
+    const screen = await render(component(multipleActivities));
+    let markAcquired!: () => void;
+    let release!: () => void;
+    const acquired = new Promise<void>((resolve) => {
+      markAcquired = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const lock = withAsyncQuestionLock(async () => {
+      markAcquired();
+      await released;
+    });
     try {
-      await page.getByText("1 question from Codex").click();
-      await page.getByLabelText("Your answer").fill("Explicit answer");
-      const submit = page.getByRole("button", { name: "Queue answer" }).element();
-      submit.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      submit.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      await expect.poll(() => onAnswer.mock.calls.length).toBe(1);
-      await expect.element(page.getByRole("button", { name: "Skip" })).toBeDisabled();
-      accept(true);
-      await expect.element(page.getByText("1 question from Codex")).not.toBeInTheDocument();
-      expect(onAnswer).toHaveBeenCalledTimes(1);
+      await acquired;
+      await page.getByText("2 questions from Codex").click();
+      await page.getByRole("button", { name: "Skip all", exact: true }).click();
+      await expect
+        .element(page.getByRole("button", { name: "Skip all", exact: true }))
+        .toBeDisabled();
+      const newQuestion = {
+        ...activities[0]!,
+        id: EventId.make(`codex-async-questions:${"b".repeat(64)}`),
+      };
+      await screen.rerender(component([...multipleActivities, newQuestion]));
+      await expect.element(page.getByText("3 questions from Codex")).toBeInTheDocument();
+      release();
+      await lock;
+      await expect.element(page.getByText("1 question from Codex")).toBeInTheDocument();
+      await expect.element(page.getByRole("button", { name: "Skip", exact: true })).toBeEnabled();
+      await expect
+        .element(page.getByRole("button", { name: "Skip all", exact: true }))
+        .not.toBeInTheDocument();
+      expect(onAnswer).not.toHaveBeenCalled();
     } finally {
+      release();
+      await lock;
       await screen.unmount();
     }
   });

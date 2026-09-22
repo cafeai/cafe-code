@@ -6,6 +6,7 @@ import {
   detectComposerTrigger,
   expandCollapsedComposerCursor,
   isCollapsedCursorAdjacentToInlineToken,
+  parseComposerCompactionCommand,
   parseStandaloneComposerGoalCommand,
   parseStandaloneComposerSlashCommand,
   replaceTextRange,
@@ -320,4 +321,24 @@ describe("parseStandaloneComposerGoalCommand", () => {
     expect(parseStandaloneComposerGoalCommand("/goals")).toBeNull();
     expect(parseStandaloneComposerGoalCommand("Please run /goal later")).toBeNull();
   });
+});
+
+describe("manual compaction commands", () => {
+  it.each(["codex", "opencode"])("recognizes standalone commands for %s", (provider) => {
+    expect(parseComposerCompactionCommand(provider, "  /COMPACT \n")).toBe("compact");
+    expect(parseComposerCompactionCommand(provider, "/compact focus on tests")).toBe(
+      "invalid-arguments",
+    );
+    expect(parseComposerCompactionCommand(provider, "/compact\nmore text")).toBe(
+      "invalid-arguments",
+    );
+    expect(parseComposerCompactionCommand(provider, "Explain /compact")).toBeNull();
+    expect(parseComposerCompactionCommand(provider, "/compact-other")).toBeNull();
+  });
+  it.each(["claudeAgent", "grok", "unknown"])(
+    "preserves native prompt handling for %s",
+    (provider) => {
+      expect(parseComposerCompactionCommand(provider, "/compact")).toBeNull();
+    },
+  );
 });

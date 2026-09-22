@@ -131,6 +131,7 @@ import { useSettings } from "../../hooks/useSettings";
 import { useComposerDictation } from "../../hooks/useComposerDictation";
 import { readDictationBrowserCapability } from "../../dictation/realtimeTranscription";
 import { requireEnvironmentConnection } from "../../environments/runtime";
+import { ProviderUsageResetButton } from "../ProviderUsageResetButton";
 import { dictationStatusQueryOptions } from "../../lib/dictationReactQuery";
 import { domSnapshot, mobileDebugLog } from "../../lib/mobileDebugLog";
 import {
@@ -250,6 +251,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   compact: boolean;
   activeContextWindow: ReturnType<typeof deriveLatestContextWindowSnapshot>;
   codexRateLimits: ServerProvider["accountRateLimits"] | null;
+  usageResetAction: ReactNode;
   sessionRailVisible: boolean;
   onShowSessionRail?: () => void;
   isPreparingWorktree: boolean;
@@ -289,6 +291,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
       {props.pendingStatusLabel ? (
         <span className="text-muted-foreground/70 text-xs">{props.pendingStatusLabel}</span>
       ) : null}
+      {!props.sessionRailVisible ? props.usageResetAction : null}
       {props.dictationAction}
       <ComposerPrimaryActions
         compact={props.compact}
@@ -1434,6 +1437,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           label: "/default",
           description: "Switch this thread back to normal build mode",
         },
+        ...(selectedProvider === "codex" || selectedProvider === "opencode"
+          ? [
+              {
+                id: "slash:compact",
+                type: "slash-command" as const,
+                command: "compact" as const,
+                label: "/compact",
+                description: "Compact conversation context (between turns)",
+              },
+            ]
+          : []),
         ...(goalControlsSupported
           ? [
               {
@@ -1446,16 +1460,22 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             ]
           : []),
       ] satisfies ReadonlyArray<Extract<ComposerCommandItem, { type: "slash-command" }>>;
-      const providerSlashCommandItems = (selectedProviderStatus?.slashCommands ?? []).map(
-        (command) => ({
+      const providerSlashCommandItems = (selectedProviderStatus?.slashCommands ?? [])
+        .filter(
+          (command) =>
+            !(
+              (selectedProvider === "codex" || selectedProvider === "opencode") &&
+              command.name.toLowerCase() === "compact"
+            ),
+        )
+        .map((command) => ({
           id: `provider-slash-command:${selectedProvider}:${command.name}`,
           type: "provider-slash-command" as const,
           provider: selectedProvider,
           command,
           label: `/${command.name}`,
           description: command.description ?? command.input?.hint ?? "Run provider command",
-        }),
-      );
+        }));
       const query = composerTrigger.query.trim().toLowerCase();
       const slashCommandItems = [...builtInSlashCommandItems, ...providerSlashCommandItems];
       if (!query) {
@@ -2086,6 +2106,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             setComposerHighlightedItemId(null);
             setIsComposerModelPickerOpen(true);
           }
+          return;
+        }
+        if (item.command === "compact") {
+          const applied = applyPromptReplacement(
+            trigger.rangeStart,
+            trigger.rangeEnd,
+            "/compact ",
+            {
+              expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd),
+            },
+          );
+          if (applied) setComposerHighlightedItemId(null);
           return;
         }
         if (item.command === "goal") {
@@ -3531,6 +3563,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   compact={isComposerPrimaryActionsCompact}
                   activeContextWindow={activeContextWindow}
                   codexRateLimits={selectedCodexRateLimits}
+                  usageResetAction={
+                    <ProviderUsageResetButton
+                      key={`${environmentId}:${selectedProviderStatus?.instanceId ?? ""}`}
+                      provider={selectedProviderStatus}
+                      request={(input) =>
+                        requireEnvironmentConnection(environmentId).client.server.usageReset(input)
+                      }
+                    />
+                  }
                   sessionRailVisible={sessionRailVisible}
                   {...(onShowSessionRail ? { onShowSessionRail } : {})}
                   pendingAction={pendingPrimaryAction}

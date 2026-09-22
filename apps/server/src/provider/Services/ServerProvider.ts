@@ -1,4 +1,4 @@
-import type { ServerProvider } from "@cafecode/contracts";
+import type { ServerProvider, ServerProviderAccountRateLimits } from "@cafecode/contracts";
 import type * as Effect from "effect/Effect";
 import type * as Stream from "effect/Stream";
 import type { ProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
@@ -13,6 +13,9 @@ export interface ServerProviderShape {
    * bounded usage-only path omit this capability.
    */
   readonly refreshAccountUsage?: Effect.Effect<ServerProvider>;
+  readonly setAccountUsage?: (
+    rateLimits: ServerProviderAccountRateLimits,
+  ) => Effect.Effect<ServerProvider>;
   /**
    * Refresh only the provider-owned model catalogue. This deliberately omits
    * installation, authentication, account-usage, and skills probes so a

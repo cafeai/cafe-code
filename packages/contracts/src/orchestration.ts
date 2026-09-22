@@ -1112,6 +1112,14 @@ const ThreadGoalSetCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+const ThreadCompactCommand = Schema.Struct({
+  type: Schema.Literal("thread.compact"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  providerInstanceId: ProviderInstanceId,
+  createdAt: IsoDateTime,
+});
+
 const ThreadGoalClearCommand = Schema.Struct({
   type: Schema.Literal("thread.goal.clear"),
   commandId: CommandId,
@@ -1144,6 +1152,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadSessionStopCommand,
   ThreadGoalSetCommand,
   ThreadGoalClearCommand,
+  ThreadCompactCommand,
 ]);
 export type DispatchableClientOrchestrationCommand =
   typeof DispatchableClientOrchestrationCommand.Type;
@@ -1172,6 +1181,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadSessionStopCommand,
   ThreadGoalSetCommand,
   ThreadGoalClearCommand,
+  ThreadCompactCommand,
 ]).pipe(
   Schema.check(
     Schema.makeFilter((command) =>
@@ -1341,6 +1351,7 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.session-set",
   "thread.goal-set-requested",
   "thread.goal-clear-requested",
+  "thread.compaction-requested",
   "thread.goal-synced",
   "thread.proposed-plan-upserted",
   "thread.turn-diff-completed",
@@ -1574,6 +1585,12 @@ export const ThreadGoalSetRequestedPayload = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+export const ThreadCompactionRequestedPayload = Schema.Struct({
+  threadId: ThreadId,
+  providerInstanceId: ProviderInstanceId,
+  createdAt: IsoDateTime,
+});
+
 export const ThreadGoalClearRequestedPayload = Schema.Struct({
   ...ProviderThreadGoalClearInput.fields,
   expectedUpdatedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
@@ -1757,6 +1774,11 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.goal-set-requested"),
     payload: ThreadGoalSetRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.compaction-requested"),
+    payload: ThreadCompactionRequestedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

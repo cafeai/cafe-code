@@ -882,6 +882,10 @@ const executeRpcRequest = (
       return providerService.getCapabilities(request.payload.instanceId);
     case "getInstanceInfo":
       return providerService.getInstanceInfo(request.payload.instanceId);
+    case "compactThread":
+      return providerService.compactThread
+        ? providerService.compactThread(request.payload)
+        : Effect.die("Provider service does not expose manual compaction.");
     case "getGoal":
       return providerService.getGoal
         ? providerService.getGoal(request.payload)

@@ -4,6 +4,11 @@ import {
   VirtualDesktopError,
 } from "./virtualDesktop.ts";
 import * as Schema from "effect/Schema";
+import {
+  ProviderUsageResetError,
+  ProviderUsageResetInput,
+  ProviderUsageResetResult,
+} from "./providerUsageReset.ts";
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
 import { CafeMcpClientUpdate, CafeMcpError, CafeMcpStatus } from "./mcp.ts";
@@ -153,6 +158,7 @@ export const WS_METHODS = {
   serverGetMcpStatus: "server.getMcpStatus",
   serverUpdateMcpClient: "server.updateMcpClient",
   serverRefreshProviders: "server.refreshProviders",
+  serverUsageReset: "server.usageReset",
   serverLoginProvider: "server.loginProvider",
   serverUpdateProvider: "server.updateProvider",
   serverRestartProviderRuntime: "server.restartProviderRuntime",
@@ -245,6 +251,12 @@ export const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProv
     scope: Schema.optional(Schema.Literals(["full", "models"])),
   }),
   success: ServerProviderUpdatedPayload,
+});
+
+export const WsServerUsageResetRpc = Rpc.make(WS_METHODS.serverUsageReset, {
+  payload: ProviderUsageResetInput,
+  success: ProviderUsageResetResult,
+  error: ProviderUsageResetError,
 });
 
 export const WsServerUpdateProviderRpc = Rpc.make(WS_METHODS.serverUpdateProvider, {
@@ -617,6 +629,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerVirtualDesktopRpc,
   WsServerUpdateMcpClientRpc,
   WsServerRefreshProvidersRpc,
+  WsServerUsageResetRpc,
   WsServerLoginProviderRpc,
   WsServerUpdateProviderRpc,
   WsServerRestartProviderRuntimeRpc,

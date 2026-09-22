@@ -17,6 +17,7 @@ import type {
 } from "@cafecode/contracts";
 import {
   ApprovalRequestId,
+  CommandId,
   EventId,
   MessageId,
   ProviderDriverKind,
@@ -224,6 +225,8 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
       }),
   );
 
+  const compactThread = vi.fn((_threadId: ThreadId) => Effect.void);
+
   const listSessions = vi.fn(
     (): Effect.Effect<ReadonlyArray<ProviderSession>> =>
       Effect.sync(() => Array.from(sessions.values())),
@@ -283,6 +286,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     provider,
     capabilities: {
       sessionModelSwitch: "in-session",
+      manualCompaction: provider === CODEX_DRIVER ? "supported" : "unsupported",
       liveSteer:
         provider === CODEX_DRIVER || provider === CLAUDE_AGENT_DRIVER ? "supported" : "unsupported",
       sessionFork:
@@ -291,6 +295,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     startSession,
     forkSession,
     discardSessionFork,
+    compactThread,
     sendTurn,
     steerTurn,
     interruptTurn,
@@ -338,6 +343,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     startSession,
     forkSession,
     discardSessionFork,
+    compactThread,
     sendTurn,
     steerTurn,
     interruptTurn,
@@ -806,6 +812,41 @@ imageValidation.layer("ProviderService image modality validation", (it) => {
     mimeType: "image/png",
     sizeBytes: 10,
   };
+  it.effect("rechecks provider binding and live idle state for manual compaction", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const threadId = asThreadId("compact-service");
+      yield* provider.startSession(threadId, {
+        threadId,
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        runtimeMode: "full-access",
+      });
+      const input = {
+        threadId,
+        providerInstanceId: codexInstanceId,
+        operationId: CommandId.make("cmd-service-compact"),
+      };
+      yield* provider.compactThread!(input);
+      assert.equal(imageValidation.codex.compactThread.mock.calls.length, 1);
+      const wrong = yield* Effect.exit(
+        provider.compactThread!({
+          ...input,
+          providerInstanceId: ProviderInstanceId.make("other-codex"),
+        }),
+      );
+      assert.equal(Exit.isFailure(wrong), true);
+      imageValidation.codex.updateSession(threadId, (session) => ({
+        ...session,
+        status: "running",
+        activeTurnId: TurnId.make("live-turn"),
+      }));
+      const busy = yield* Effect.exit(provider.compactThread!(input));
+      assert.equal(Exit.isFailure(busy), true);
+      assert.equal(imageValidation.codex.compactThread.mock.calls.length, 1);
+    }),
+  );
+
   it.effect("rejects a known text-only selected model before provider submission", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;

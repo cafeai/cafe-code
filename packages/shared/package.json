@@ -4,6 +4,10 @@
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "exports": {
+    "./providerUsageReset": {
+      "types": "./src/providerUsageReset.ts",
+      "import": "./src/providerUsageReset.ts"
+    },
     "./desktopObservation": {
       "types": "./src/desktopObservation.ts",
       "import": "./src/desktopObservation.ts"

@@ -23,6 +23,7 @@ export function providerDaemonRequestThreadIds(
     case "snoozeUserInput":
     case "stopSession":
     case "quiesceThreadForHardDelete":
+    case "compactThread":
     case "getGoal":
     case "setGoal":
     case "clearGoal":

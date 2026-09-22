@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import * as DateTime from "effect/DateTime";
 import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
@@ -319,6 +320,29 @@ const readCodexUsageCredentials = Effect.fn("readCodexUsageCredentials")(functio
   const authJson = yield* fileSystem.readFileString(authPath).pipe(Effect.option);
   return Option.isSome(authJson) ? extractCodexUsageCredentials(authJson.value) : undefined;
 });
+
+/** Private, volatile comparison key only; never publish or persist this digest. */
+export const readCodexUsageIdentity = (settings: CodexSettings, environment: NodeJS.ProcessEnv) =>
+  readCodexUsageCredentials(settings, environment).pipe(
+    Effect.map((credentials) =>
+      credentials
+        ? createHash("sha256")
+            .update(
+              JSON.stringify([
+                credentials.accountId,
+                credentials.isFedrampAccount,
+                // A subject alone cannot distinguish this user's workspaces.
+                // Preserve normal refresh only when both account and subject
+                // are known; incomplete/opaque credentials fail closed on rotation.
+                credentials.accountId
+                  ? (decodeJwtPayload(credentials.accessToken)?.sub ?? credentials.accessToken)
+                  : credentials.accessToken,
+              ]),
+            )
+            .digest("hex")
+        : undefined,
+    ),
+  );
 
 function mapRawRateLimitWindow(value: unknown): ServerProviderAccountRateLimitWindow | null {
   const record = readRecord(value);
@@ -984,53 +1008,62 @@ export function finalizeCodexModelListRefresh(
 }
 
 /**
- * Read only Codex's live model catalogue.
- *
- * Codex 0.152 refreshes `model/list` when its native picker opens. Cafe uses
- * the same provider boundary, but intentionally does not couple that user
- * gesture to `account/read`, rate-limit reads, skills, or the CLI health/auth
- * probes. The caller owns the scope and timeout so an unresponsive disposable
- * app-server is interrupted and reaped without clearing the cached models.
+ * Run one explicitly requested metadata/account operation in a disposable
+ * app-server. Model discovery and earned-reset dialogs share the same startup,
+ * initialization and tree-aware cleanup; the callback selects the narrow RPCs
+ * appropriate to that gesture. No thread is started here. The caller owns the
+ * scope and timeout so an unresponsive child is interrupted and reaped.
  */
-export const readCodexAppServerModels = Effect.fn("readCodexAppServerModels")(function* (input: {
-  readonly binaryPath: string;
-  readonly homePath?: string;
-  readonly cwd: string;
-  readonly customModels?: ReadonlyArray<string>;
-  readonly environment?: NodeJS.ProcessEnv;
-}) {
-  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  return yield* Effect.acquireUseRelease(
-    spawner.spawn(makeCodexModelListCommand(input)).pipe(
-      Effect.mapError(
-        (cause) =>
-          // Deliberately omit the configured binary/home paths. Picker refresh
-          // failures are logged only as a fixed phase marker by the driver.
-          new CodexErrors.CodexAppServerSpawnError({ cause }),
+export const withCodexMetadataClient = <A, E, R>(
+  input: {
+    readonly binaryPath: string;
+    readonly homePath?: string;
+    readonly cwd: string;
+    readonly customModels?: ReadonlyArray<string>;
+    readonly environment?: NodeJS.ProcessEnv;
+  },
+  use: (client: CodexClient.CodexAppServerClientShape) => Effect.Effect<A, E, R>,
+) =>
+  Effect.gen(function* () {
+    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    return yield* Effect.acquireUseRelease(
+      spawner.spawn(makeCodexModelListCommand(input)).pipe(
+        Effect.mapError(
+          (cause) =>
+            // Deliberately omit the configured binary/home paths. Picker refresh
+            // failures are logged only as a fixed phase marker by the driver.
+            new CodexErrors.CodexAppServerSpawnError({ cause }),
+        ),
       ),
-    ),
-    (child) =>
-      Effect.gen(function* () {
-        const clientContext = yield* Layer.build(CodexClient.layerChildProcess(child));
-        const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
-          Effect.provide(clientContext),
-        );
+      (child) =>
+        Effect.gen(function* () {
+          const clientContext = yield* Layer.build(CodexClient.layerChildProcess(child));
+          const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
+            Effect.provide(clientContext),
+          );
 
-        yield* client.request("initialize", buildCodexInitializeParams());
-        yield* client.notify("initialized", undefined);
-        const models = yield* requestAllCodexModelsWithClient(client);
-        // A custom-model setting must not turn an empty provider response into
-        // an apparently authoritative success. Keep the stale catalogue intact
-        // until Codex itself returns at least one model.
-        return finalizeCodexModelListRefresh(models, input.customModels ?? []);
-      }),
-    // Effect's process scope sends the configured SIGKILL as a final backstop,
-    // but its force-kill timeout does not bound the later exit wait. The
-    // acquire/use/release bracket closes the post-spawn interruption gap and
-    // explicitly waits for TERM, then KILL, before scope release.
-    (child) => terminateProbeChild(child, CODEX_MODEL_LIST_CHILD_TERMINATION_GRACE),
+          yield* client.request("initialize", buildCodexInitializeParams());
+          yield* client.notify("initialized", undefined);
+          return yield* use(client);
+        }),
+      // Effect's process scope sends the configured SIGKILL as a final backstop,
+      // but its force-kill timeout does not bound the later exit wait. The
+      // acquire/use/release bracket closes the post-spawn interruption gap and
+      // explicitly waits for TERM, then KILL, before scope release.
+      (child) => terminateProbeChild(child, CODEX_MODEL_LIST_CHILD_TERMINATION_GRACE),
+    );
+  });
+
+export const readCodexAppServerModels = (
+  input: Parameters<typeof makeCodexModelListCommand>[0] & {
+    readonly customModels?: ReadonlyArray<string>;
+  },
+) =>
+  withCodexMetadataClient(input, (client) =>
+    requestAllCodexModelsWithClient(client).pipe(
+      Effect.map((models) => finalizeCodexModelListRefresh(models, input.customModels ?? [])),
+    ),
   );
-});
 
 export function buildCodexInitializeParams(): CodexSchema.V1InitializeParams {
   return {

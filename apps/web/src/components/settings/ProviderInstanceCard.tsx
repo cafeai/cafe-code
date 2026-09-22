@@ -26,6 +26,8 @@ import {
 } from "@cafecode/contracts";
 
 import { cn } from "../../lib/utils";
+import { ProviderUsageResetButton } from "../ProviderUsageResetButton";
+import { ensureLocalApi } from "../../localApi";
 import {
   formatCodexRateLimitResetAvailability,
   formatCodexRateLimitSummary,
@@ -1080,7 +1082,15 @@ export function ProviderInstanceCard({
             {authRowNode}
             {codexRateLimitSummary || codexRateLimitResetAvailabilityText ? (
               <div className="grid gap-0.5 text-xs leading-snug text-muted-foreground/80">
-                {codexRateLimitWindowText ? <p>Usage: {codexRateLimitWindowText}</p> : null}
+                {codexRateLimitWindowText ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p>Usage: {codexRateLimitWindowText}</p>
+                    <ProviderUsageResetButton
+                      provider={liveProvider}
+                      request={(input) => ensureLocalApi().server.usageReset(input)}
+                    />
+                  </div>
+                ) : null}
                 {codexRateLimitResetAvailabilityText ? (
                   <p>{codexRateLimitResetAvailabilityText}</p>
                 ) : null}

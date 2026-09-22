@@ -3884,6 +3884,34 @@ describe("ProviderRuntimeIngestion", () => {
     expect(started?.summary).toBe("Context compaction started");
     expect(completed?.kind).toBe("tool.completed");
     expect(completed?.summary).toBe("Context compacted");
+    expect(completed?.payload).toMatchObject({ status: "completed" });
+  });
+
+  it.each([
+    ["failed", "Context compaction failed"],
+    ["declined", "Context compaction interrupted"],
+  ] as const)("does not label %s compaction as success", async (status, summary) => {
+    const harness = await createHarness();
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-compact-unsuccessful"),
+      provider: ProviderDriverKind.make("opencode"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-compacting"),
+      itemId: asItemId("item-compaction"),
+      payload: { itemType: "context_compaction", status },
+    });
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity: ProviderRuntimeTestActivity) => activity.id === "evt-compact-unsuccessful",
+      ),
+    );
+    expect(
+      thread.activities.find(
+        (activity: ProviderRuntimeTestActivity) => activity.id === "evt-compact-unsuccessful",
+      )?.summary,
+    ).toBe(summary);
   });
 
   it("normalizes command execution activities to ran-command summaries", async () => {

@@ -9,7 +9,7 @@ import {
   asyncQuestionStorage,
   deriveAsyncQuestions,
   readHandledAsyncQuestions,
-  rememberHandledAsyncQuestion,
+  rememberHandledAsyncQuestions,
   withAsyncQuestionLock,
   MAX_HANDLED_ASYNC_QUESTIONS,
   retainAsyncQuestionDrafts,
@@ -115,16 +115,27 @@ function ScopedAsyncQuestionsPanel({
     setError(null);
   };
 
-  const complete = (id: string) => {
-    const persisted = rememberHandledAsyncQuestion(asyncQuestionStorage, id);
+  const complete = (ids: readonly string[]) => {
+    const persisted = rememberHandledAsyncQuestions(asyncQuestionStorage, ids);
     if (!mounted.current) return;
-    setHandled((current) => new Set([...current, id].slice(-MAX_HANDLED_ASYNC_QUESTIONS)));
+    setHandled((current) => {
+      const next = new Set(current);
+      for (const id of ids) {
+        next.delete(id);
+        next.add(id);
+      }
+      return new Set([...next].slice(-MAX_HANDLED_ASYNC_QUESTIONS));
+    });
     const next = { ...draftsRef.current };
-    delete next[id];
+    for (const id of ids) delete next[id];
     draftsRef.current = next;
     setDrafts(next);
     if (!persisted)
-      setError("This question is handled, but browser storage could not remember it after reload.");
+      setError(
+        ids.length === 1
+          ? "This question is handled, but browser storage could not remember it after reload."
+          : "These questions are handled, but browser storage could not remember them after reload.",
+      );
   };
 
   const submit = async () => {
@@ -144,7 +155,7 @@ function ScopedAsyncQuestionsPanel({
           if (mounted.current)
             setHandled((current) => new Set([...current, id].slice(-MAX_HANDLED_ASYNC_QUESTIONS)));
         } else if (await onAnswer(text, id)) {
-          complete(id);
+          complete([id]);
         } else if (mounted.current) {
           setError("The answer was not queued. Your draft is still here; try again.");
         }
@@ -158,17 +169,25 @@ function ScopedAsyncQuestionsPanel({
     }
   };
 
-  const skip = async () => {
+  const skip = async (all = false) => {
     if (!question || deliveryDisabled || inFlight.current) return;
-    const id = question.id;
+    // Capture the visible pending set at the click. Questions arriving while
+    // another tab owns the handling lock must not be silently dismissed.
+    const ids = all ? pending.map((entry) => entry.id) : [question.id];
     inFlight.current = true;
     setSubmitting(true);
+    setError(null);
     try {
       await withAsyncQuestionLock(async () => {
-        complete(id);
+        complete(ids);
       });
     } catch {
-      if (mounted.current) setError("Could not skip this question. Try again.");
+      if (mounted.current)
+        setError(
+          all
+            ? "Could not skip these questions. Try again."
+            : "Could not skip this question. Try again.",
+        );
     } finally {
       inFlight.current = false;
       if (mounted.current) setSubmitting(false);
@@ -177,13 +196,16 @@ function ScopedAsyncQuestionsPanel({
 
   if (!question)
     return error ? (
-      <p role="status" className="mb-2 text-xs text-muted-foreground">
+      <p
+        role="status"
+        className="mx-auto mb-2 w-full min-w-0 max-w-208 text-xs text-muted-foreground"
+      >
         {error}
       </p>
     ) : null;
 
   return (
-    <details className="mb-2 rounded-lg border border-border/60 bg-card text-sm">
+    <details className="mx-auto mb-2 w-full min-w-0 max-w-208 rounded-lg border border-border/60 bg-card text-sm">
       <summary className="cursor-pointer px-3 py-2 text-muted-foreground">
         {pending.length} {pending.length === 1 ? "question" : "questions"} from Codex
       </summary>
@@ -251,7 +273,7 @@ function ScopedAsyncQuestionsPanel({
             {error}
           </p>
         )}
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
             disabled={
@@ -277,6 +299,18 @@ function ScopedAsyncQuestionsPanel({
           >
             Skip
           </button>
+          {pending.length > 1 && (
+            <button
+              type="button"
+              disabled={deliveryDisabled || submitting}
+              onClick={() => {
+                void skip(true);
+              }}
+              className="rounded-md px-3 py-1.5 text-xs text-muted-foreground hover:bg-accent disabled:opacity-50"
+            >
+              Skip all
+            </button>
+          )}
         </div>
       </div>
     </details>

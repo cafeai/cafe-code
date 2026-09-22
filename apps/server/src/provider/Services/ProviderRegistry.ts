@@ -13,6 +13,9 @@ import type {
   ServerProviderAccountRateLimitSnapshot,
   ServerProviderAccountRateLimitWindow,
   ServerProviderUpdateState,
+  ProviderUsageResetInput,
+  ProviderUsageResetResult,
+  ProviderUsageResetError,
 } from "@cafecode/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
@@ -22,6 +25,9 @@ import type { ProviderMaintenanceCapabilities } from "../providerMaintenance.ts"
 export type ProviderMaintenanceActionKind = "update";
 
 export interface ProviderRegistryShape {
+  readonly usageReset?: (
+    input: ProviderUsageResetInput,
+  ) => Effect.Effect<ProviderUsageResetResult, ProviderUsageResetError>;
   /**
    * Read the latest provider snapshots for every configured instance.
    * Multiple snapshots may share the same `provider` kind (multiple

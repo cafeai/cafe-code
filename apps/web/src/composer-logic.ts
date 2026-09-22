@@ -1,7 +1,7 @@
 import { splitPromptIntoComposerSegments } from "./composer-editor-mentions";
 
 export type ComposerTriggerKind = "path" | "slash-command" | "skill";
-export type ComposerSlashCommand = "model" | "plan" | "default" | "goal";
+export type ComposerSlashCommand = "model" | "plan" | "default" | "goal" | "compact";
 
 export type ComposerGoalCommand =
   | { readonly action: "show" | "edit" | "pause" | "resume" | "clear" }
@@ -221,9 +221,21 @@ export function detectComposerTrigger(text: string, cursorInput: number): Compos
   };
 }
 
+/** Other providers retain their own command semantics. Arguments are rejected,
+ * rather than accidentally sent as a model prompt, because Codex accepts none. */
+export function parseComposerCompactionCommand(
+  provider: string,
+  text: string,
+): "compact" | "invalid-arguments" | null {
+  if (provider !== "codex" && provider !== "opencode") return null;
+  const match = /^\/compact(?:\s+([\s\S]*))?$/i.exec(text.trim());
+  if (!match) return null;
+  return match[1]?.trim() ? "invalid-arguments" : "compact";
+}
+
 export function parseStandaloneComposerSlashCommand(
   text: string,
-): Exclude<ComposerSlashCommand, "model" | "goal"> | null {
+): Exclude<ComposerSlashCommand, "model" | "goal" | "compact"> | null {
   const match = /^\/(plan|default)\s*$/i.exec(text.trim());
   if (!match) {
     return null;

@@ -46,10 +46,21 @@ export const desktopRegion = z
   .strict();
 export type DesktopRegion = z.infer<typeof desktopRegion>;
 export const observeInput = {
-  since: z.string().uuid().optional(),
+  since: z
+    .string()
+    .uuid()
+    .optional()
+    .describe("For repeat checks, pass the latest observationId to omit unchanged pixels."),
   force: z.boolean().optional(),
-  region: desktopRegion.optional(),
-  windowId: z.number().int().positive().optional(),
+  region: desktopRegion
+    .optional()
+    .describe("Crop a relevant area in desktop pixels instead of capturing the whole desktop."),
+  windowId: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Crop a visible window from windows; use region or windowId, not both."),
 };
 export const observeSchema = z
   .object(observeInput)
@@ -86,7 +97,12 @@ export const actInput = {
   actions: z.array(desktopAction).min(1).max(24).optional(),
   observationId: z.string().uuid().optional(),
   waitFor: waitFor.optional(),
-  observeAfter: z.enum(["none", "if_changed", "always"]).optional(),
+  observeAfter: z
+    .enum(["none", "if_changed", "always"])
+    .optional()
+    .describe(
+      "Defaults to none for intermediate steps. Use if_changed only when the next decision needs an image or to verify a result; even console typing changes pixels. always forces an image.",
+    ),
 };
 export function decodeDesktopInput<T>(schema: z.ZodType<T>, value: unknown): T {
   const result = schema.safeParse(value);

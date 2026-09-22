@@ -1,3 +1,4 @@
+import { ProviderCompactThreadInput } from "@cafecode/contracts";
 /**
  * ProviderServiceLive - Cross-provider orchestration layer.
  *
@@ -2699,6 +2700,43 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const getInstanceInfo: ProviderServiceShape["getInstanceInfo"] = (instanceId) =>
     registry.getInstanceInfo(instanceId);
 
+  const compactThread: NonNullable<ProviderServiceShape["compactThread"]> = Effect.fn(
+    "compactThread",
+  )(function* (rawInput) {
+    const operation = "ProviderService.compactThread";
+    const input = yield* decodeInputOrValidationError({
+      operation,
+      schema: ProviderCompactThreadInput,
+      payload: rawInput,
+    });
+    const routed = yield* resolveRoutableSession({
+      threadId: input.threadId,
+      operation,
+      // Compaction must operate on the materialized conversation, never
+      // create an empty replacement (OpenCode has no native resume path yet).
+      allowRecovery: false,
+    });
+    if (
+      routed.instanceId !== input.providerInstanceId ||
+      routed.adapter.capabilities.manualCompaction !== "supported" ||
+      !routed.adapter.compactThread
+    ) {
+      return yield* toValidationError(
+        operation,
+        "This conversation's provider does not support manual compaction.",
+      );
+    }
+    const sessions = yield* routed.adapter.listSessions();
+    const session = sessions.find((candidate) => candidate.threadId === input.threadId);
+    if (!session || session.status !== "ready" || session.activeTurnId) {
+      return yield* toValidationError(
+        operation,
+        "Wait for the current turn to finish before compacting.",
+      );
+    }
+    yield* routed.adapter.compactThread(input.threadId);
+  });
+
   const requireGoalAdapter = Effect.fn("requireGoalAdapter")(function* (input: {
     readonly threadId: ThreadId;
     readonly operation: string;
@@ -3041,6 +3079,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         operation: "ProviderService.discardSessionFork",
         threadId: input.fork.targetThreadId,
         effect: discardSessionFork(input),
+      }),
+    compactThread: (input) =>
+      whileThreadAcceptsProviderWork({
+        operation: "ProviderService.compactThread",
+        threadId: input.threadId,
+        effect: compactThread(input),
       }),
     sendTurn: (input) =>
       whileThreadAcceptsProviderWork({

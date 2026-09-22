@@ -1,5 +1,7 @@
 import {
   ProviderDaemonRpcRequest,
+  CommandId,
+  ProviderInstanceId,
   ThreadId,
   ApprovalRequestId,
   type ProviderDaemonRpcRequest as ProviderDaemonRpcRequestValue,
@@ -84,6 +86,32 @@ describe("ProviderDaemonCommandLedger", () => {
         expect(first).toEqual({ ok: true, value: null });
         expect(second).toEqual(first);
         expect(yield* Ref.get(callCount)).toBe(1);
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+    );
+  });
+
+  it("deduplicates native compaction under the original orchestration command identity", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const ledger = yield* makeProviderDaemonCommandLedger();
+        const count = yield* Ref.make(0);
+        const commandId = CommandId.make("command-compact-0000000000000000000");
+        const request = {
+          method: "compactThread" as const,
+          commandId,
+          payload: {
+            threadId: ThreadId.make("thread-1"),
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            operationId: commandId,
+          },
+        };
+        const execute = Ref.update(count, (n) => n + 1).pipe(
+          Effect.as({ ok: true as const, value: null }),
+        );
+        yield* ledger.runOnce(request, execute);
+        yield* ledger.runOnce(request, execute);
+        expect(yield* Ref.get(count)).toBe(1);
+        expect((yield* ledger.snapshot).recentCompletedCommands[0]?.method).toBe("compactThread");
       }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
     );
   });

@@ -12,6 +12,7 @@
  * @module ProviderService
  */
 import type {
+  ProviderCompactThreadInput,
   ProviderDriverKind,
   ProviderInterruptTurnInput,
   ProviderInstanceId,
@@ -192,6 +193,10 @@ export interface ProviderServiceShape {
   /**
    * Read a provider-owned durable goal for a Cafe thread.
    */
+  readonly compactThread?: (
+    input: ProviderCompactThreadInput,
+  ) => Effect.Effect<void, ProviderServiceError>;
+
   readonly getGoal?: (
     input: ProviderThreadGoalGetInput,
   ) => Effect.Effect<ProviderThreadGoal | null, ProviderServiceError>;

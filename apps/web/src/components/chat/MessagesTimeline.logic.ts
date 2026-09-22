@@ -303,11 +303,44 @@ export function deriveMessagesTimelineRows(input: {
     });
   };
 
+  // Manual compaction creates a provider turn without a chat message. Once a
+  // later turn is current, its work log still needs an anchor of its own. Use
+  // bounded snapshot previews; do not load old activity pages just to place it.
+  const anchoredTurnIds = new Set(
+    input.timelineEntries.flatMap((entry) => {
+      const turnId =
+        entry.kind === "message"
+          ? entry.message.turnId
+          : entry.kind === "work"
+            ? entry.entry.turnId
+            : null;
+      return turnId ? [turnId] : [];
+    }),
+  );
+  const unanchoredWork = [...(input.historicalWorkLogSummariesByTurnId?.values() ?? [])]
+    .flatMap((summary) => {
+      if (anchoredTurnIds.has(summary.turnId)) return [];
+      const createdAt =
+        summary.previewEntries.at(-1)?.createdAt ?? summary.subagentEntries?.at(-1)?.createdAt;
+      return createdAt ? [{ turnId: summary.turnId, createdAt }] : [];
+    })
+    .toSorted((left, right) => left.createdAt.localeCompare(right.createdAt));
+  let unanchoredIndex = 0;
+  const pushUnanchoredWorkBefore = (createdAt?: string) => {
+    while (unanchoredIndex < unanchoredWork.length) {
+      const anchor = unanchoredWork[unanchoredIndex]!;
+      if (createdAt !== undefined && anchor.createdAt > createdAt) break;
+      pushHistoricalWorkRow(anchor.turnId, anchor.createdAt);
+      unanchoredIndex++;
+    }
+  };
+
   for (let index = 0; index < input.timelineEntries.length; index += 1) {
     const timelineEntry = input.timelineEntries[index];
     if (!timelineEntry) {
       continue;
     }
+    pushUnanchoredWorkBefore(timelineEntry.createdAt);
 
     if (timelineEntry.kind === "work") {
       const groupedEntries = [timelineEntry.entry];
@@ -315,6 +348,8 @@ export function deriveMessagesTimelineRows(input: {
       while (cursor < input.timelineEntries.length) {
         const nextEntry = input.timelineEntries[cursor];
         if (!nextEntry || nextEntry.kind !== "work") break;
+        const nextAnchor = unanchoredWork[unanchoredIndex];
+        if (nextAnchor && nextAnchor.createdAt <= nextEntry.createdAt) break;
         groupedEntries.push(nextEntry.entry);
         cursor += 1;
       }
@@ -393,6 +428,8 @@ export function deriveMessagesTimelineRows(input: {
       });
     }
   }
+
+  pushUnanchoredWorkBefore();
 
   if (input.isWorking) {
     nextRows.push({

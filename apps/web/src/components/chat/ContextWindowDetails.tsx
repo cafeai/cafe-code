@@ -43,6 +43,7 @@ export function ContextWindowDetails(props: {
   readonly rateLimits?: ServerProviderAccountRateLimits | null | undefined;
   readonly layout?: "popover" | "panel";
   readonly headerAction?: ReactNode;
+  readonly usageResetAction?: ReactNode;
 }) {
   const usage = props.usage ?? null;
   const layout = props.layout ?? "popover";
@@ -130,6 +131,12 @@ export function ContextWindowDetails(props: {
             layout === "panel" && hasUsage && "mt-1",
           )}
         >
+          {props.usageResetAction ? (
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-muted-foreground">Usage</span>
+              {props.usageResetAction}
+            </div>
+          ) : null}
           {rateLimitSummary.primary ? (
             layout === "panel" && primaryRemaining !== null ? (
               <div className="space-y-1.5" data-session-rail-rate-limit="primary">

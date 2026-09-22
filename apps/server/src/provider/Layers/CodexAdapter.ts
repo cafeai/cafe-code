@@ -4196,6 +4196,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
   const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
   const sessions = new Map<ThreadId, CodexAdapterSessionContext>();
+  const manualCompactions = new Set<ThreadId>();
   // A detail click is read-only but still spawns a short-lived app-server when
   // the root is not already live. Bound that resource amplification per
   // configured adapter; retries remain safe and deterministic.
@@ -4335,6 +4336,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
 
     session.stopped = true;
     sessions.delete(threadId);
+    manualCompactions.delete(threadId);
     yield* Effect.logWarning(diagnosticName, {
       threadId,
       reason,
@@ -4531,6 +4533,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
 
             if (
               desktopBinding &&
+              !manualCompactions.has(input.threadId) &&
               runtimeEvents.some((v) => v.threadId === input.threadId && v.type === "turn.started")
             )
               yield* Effect.tryPromise({
@@ -4551,6 +4554,15 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               )
             )
               yield* Effect.promise(() => desktopBinding.endTurn());
+            if (
+              runtimeEvents.some(
+                (v) =>
+                  v.threadId === input.threadId &&
+                  (v.type === "turn.completed" || v.type === "session.exited"),
+              )
+            ) {
+              manualCompactions.delete(input.threadId);
+            }
             if (runtimeEvents.length === 0) {
               const context = bridgeEventLogContext(event, {
                 stage: "map",
@@ -4993,6 +5005,28 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       ),
     );
 
+  const compactThread: NonNullable<CodexAdapterShape["compactThread"]> = (threadId) =>
+    requireSession(threadId).pipe(
+      Effect.flatMap((session) =>
+        Effect.gen(function* () {
+          // Compaction only summarizes native context; it does not own a desktop.
+          manualCompactions.add(threadId);
+          yield* session.runtime.compactThread.pipe(
+            Effect.tapError(() =>
+              Effect.sync(() => {
+                manualCompactions.delete(threadId);
+              }),
+            ),
+          );
+        }),
+      ),
+      Effect.mapError((cause) =>
+        cause._tag === "ProviderAdapterSessionNotFoundError"
+          ? cause
+          : mapCodexRuntimeError(threadId, "thread/compact/start", cause),
+      ),
+    );
+
   const getGoal: NonNullable<CodexAdapterShape["getGoal"]> = (threadId) =>
     requireSession(threadId).pipe(
       Effect.flatMap((session) => session.runtime.getGoal),
@@ -5290,6 +5324,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     session.stopped = true;
     if (session.desktopBinding) yield* Effect.promise(() => session.desktopBinding!.dispose());
     sessions.delete(session.threadId);
+    manualCompactions.delete(session.threadId);
     yield* session.runtime.close.pipe(Effect.ignore);
     yield* Fiber.interrupt(session.eventFiber).pipe(Effect.ignore);
     yield* terminalizeAuthRecoveryForAdapterStop(session);
@@ -5334,6 +5369,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     capabilities: {
       sessionModelSwitch: "in-session",
       liveSteer: "supported",
+      manualCompaction: "supported",
       threadGoals: "supported",
       sessionFork: "supported",
     },
@@ -5343,6 +5379,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     sendTurn,
     steerTurn,
     interruptTurn,
+    compactThread,
     getGoal,
     setGoal,
     clearGoal,
