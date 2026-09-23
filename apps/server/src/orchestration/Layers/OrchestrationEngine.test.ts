@@ -126,6 +126,135 @@ function now() {
   return "2026-01-01T00:00:00.000Z";
 }
 
+describe("OrchestrationEngine completed-root replacement admission", () => {
+  it.each(["accepted", "interrupt", "session-stop", "newer-projection", "invalid-intent"] as const)(
+    "atomically fences %s without timestamp ordering",
+    async (variant) => {
+      const system = await createOrchestrationSystem();
+      const threadId = ThreadId.make("root-replacement-thread");
+      const projectId = asProjectId("root-replacement-project");
+      const expectedTurnId = asTurnId("completed-aggregate-root");
+      const nextTurnId = asTurnId("new-native-root");
+      const messageId = asMessageId("root-replacement-message");
+      const providerInstanceId = ProviderInstanceId.make("codex");
+      const modelSelection = { instanceId: providerInstanceId, model: "gpt-6-astra" };
+      const dispatch = (command: OrchestrationCommand) =>
+        system.run(system.engine.dispatch(command));
+      try {
+        await dispatch({
+          type: "project.create",
+          commandId: CommandId.make("replacement-project"),
+          projectId,
+          title: "Replacement",
+          workspaceRoot: "/tmp/replacement",
+          defaultModelSelection: modelSelection,
+          createdAt: now(),
+        });
+        await dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("replacement-thread"),
+          threadId,
+          projectId,
+          title: "Replacement",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt: now(),
+        });
+        const session = {
+          threadId,
+          status: "running" as const,
+          providerName: "codex" as const,
+          providerInstanceId,
+          runtimeMode: "full-access" as const,
+          activeTurnId: expectedTurnId,
+          lastError: null,
+          updatedAt: now(),
+        };
+        await dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("server:replacement-old-root"),
+          threadId,
+          session,
+          createdAt: now(),
+        });
+        const intent = await dispatch({
+          type: "thread.turn.steer",
+          commandId: CommandId.make("replacement-steer"),
+          threadId,
+          message: {
+            messageId,
+            role: "user",
+            text: "Continue with this saved input.",
+            attachments: [],
+          },
+          createdAt: now(),
+        });
+        // All commands deliberately share one timestamp. Admission must use
+        // the serial command state and durable event sequence, not wall time.
+        if (variant === "interrupt") {
+          await dispatch({
+            type: "thread.turn.interrupt",
+            commandId: CommandId.make("replacement-stop"),
+            threadId,
+            turnId: expectedTurnId,
+            createdAt: now(),
+          });
+        } else if (variant === "session-stop") {
+          await dispatch({
+            type: "thread.session.stop",
+            commandId: CommandId.make("replacement-session-stop"),
+            threadId,
+            createdAt: now(),
+          });
+        } else if (variant === "newer-projection") {
+          await dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("server:replacement-newer-root"),
+            threadId,
+            session: { ...session, activeTurnId: asTurnId("newer-root") },
+            createdAt: now(),
+          });
+        }
+        const before = await system.readModel();
+        const command: Extract<OrchestrationCommand, { type: "thread.session.set" }> = {
+          type: "thread.session.set",
+          commandId: CommandId.make("server:replacement-ack"),
+          threadId,
+          session: { ...session, activeTurnId: nextTurnId },
+          createdAt: now(),
+          codexRootReplacement: {
+            expectedTurnId,
+            providerInstanceId,
+            messageId,
+            intentSequence: variant === "invalid-intent" ? intent.sequence - 1 : intent.sequence,
+          },
+        };
+        const result = await system.run(Effect.exit(system.engine.dispatch(command)));
+        const after = await system.readModel();
+        if (variant === "accepted") {
+          expect(result._tag).toBe("Success");
+          expect(after.threads[0]?.session?.activeTurnId).toBe(nextTurnId);
+          const events = await system.run(
+            system.engine.readEvents(intent.sequence).pipe(Stream.runCollect),
+          );
+          const committed = events.find((event) => event.commandId === command.commandId);
+          expect(committed?.type).toBe("thread.session-set");
+          expect(committed?.payload).not.toHaveProperty("codexRootReplacement");
+        } else {
+          expect(result._tag).toBe("Failure");
+          expect(after.threads[0]?.session).toEqual(before.threads[0]?.session);
+          expect(after.snapshotSequence).toBe(before.snapshotSequence);
+        }
+      } finally {
+        await system.dispose();
+      }
+    },
+  );
+});
+
 /** A fully durable stopped turn/loss marker, without any real provider I/O. */
 async function createRuntimeRecoveryFixture() {
   const system = await createOrchestrationSystem();

@@ -461,10 +461,33 @@ const makeOrchestrationEngine = Effect.gen(function* () {
                 threadId: envelope.command.threadId,
               })
             : false;
+        let codexRootReplacementVerified = false;
+        if (
+          envelope.command.type === "thread.session.set" &&
+          envelope.command.codexRootReplacement !== undefined
+        ) {
+          const replacement = envelope.command.codexRootReplacement;
+          // This read and the following decider/projector commit share the
+          // engine's serial command worker. A control accepted while the
+          // provider ACK/inventory was pending therefore wins atomically, not
+          // through unreliable comparisons of provider wall-clock timestamps.
+          const barriers = yield* projectionSnapshotQuery.getCodexSteerIntentRecoveryBarriers({
+            threadId: envelope.command.threadId,
+            sequence: replacement.intentSequence,
+            messageId: replacement.messageId,
+            expectedTurnId: replacement.expectedTurnId,
+          });
+          codexRootReplacementVerified =
+            barriers.intentVerified &&
+            !barriers.sessionStopRequested &&
+            !barriers.interruptRequested &&
+            !barriers.newerTurnRequested;
+        }
         const eventBase = yield* decideOrchestrationCommand({
           command: envelope.command,
           readModel: commandReadModel,
           runtimeRecoveryBarrierVerified,
+          codexRootReplacementVerified,
         });
         const eventBases = Array.isArray(eventBase) ? eventBase : [eventBase];
         const committedCommand = yield* sql

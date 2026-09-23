@@ -201,6 +201,7 @@ describe("ProviderCommandReactor", () => {
     readonly startReactor?: boolean;
     readonly getCodexSteerAcceptanceEvidence?: ProjectionSnapshotQueryShape["getCodexSteerAcceptanceEvidence"];
     readonly beforeCodexSteerDeliveryAttemptDispatch?: Effect.Effect<void>;
+    readonly beforeCodexRootReplacementDispatch?: Effect.Effect<void>;
     readonly beforeRuntimeRecoveryAttemptDispatch?: Effect.Effect<void>;
     readonly testClock?: TestClock.TestClock;
   }) {
@@ -490,6 +491,7 @@ describe("ProviderCommandReactor", () => {
     );
     const providerCommandEngineLayer =
       input?.beforeCodexSteerDeliveryAttemptDispatch === undefined &&
+      input?.beforeCodexRootReplacementDispatch === undefined &&
       input?.beforeRuntimeRecoveryAttemptDispatch === undefined
         ? orchestrationLayer
         : Layer.effect(
@@ -511,7 +513,13 @@ describe("ProviderCommandReactor", () => {
                     ? input.beforeRuntimeRecoveryAttemptDispatch.pipe(
                         Effect.andThen(engine.dispatch(command)),
                       )
-                    : engine.dispatch(command),
+                    : command.type === "thread.session.set" &&
+                        command.codexRootReplacement !== undefined &&
+                        input.beforeCodexRootReplacementDispatch !== undefined
+                      ? input.beforeCodexRootReplacementDispatch.pipe(
+                          Effect.andThen(engine.dispatch(command)),
+                        )
+                      : engine.dispatch(command),
             })),
           ).pipe(Layer.provide(orchestrationLayer));
     const baseProjectionSnapshotLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
@@ -5195,6 +5203,508 @@ describe("ProviderCommandReactor", () => {
       },
     });
     expect(await harness.getUnsettledCodexSteerIntentEvents()).toEqual([]);
+  });
+
+  describe("completed Codex root with running subagents", () => {
+    const threadId = ThreadId.make("thread-1");
+    const rootTurnId = asTurnId("turn-completed-root-subagents-running");
+    const providerThreadId = "native-thread-completed-root-subagents-running";
+    const messageId = asMessageId("message-after-root-completion");
+    const text = "preserve this exact saved input after the root finishes";
+
+    async function createRootCompletionRace(input?: {
+      readonly beforeCodexSteerDeliveryAttemptDispatch?: Effect.Effect<void>;
+      readonly beforeCodexRootReplacementDispatch?: Effect.Effect<void>;
+      readonly changeRecoveryState?: (harness: Awaited<ReturnType<typeof createHarness>>) => void;
+    }) {
+      const harness = await createHarness({
+        liveSteer: "supported",
+        ...(input?.beforeCodexSteerDeliveryAttemptDispatch !== undefined
+          ? {
+              beforeCodexSteerDeliveryAttemptDispatch:
+                input.beforeCodexSteerDeliveryAttemptDispatch,
+            }
+          : {}),
+        ...(input?.beforeCodexRootReplacementDispatch !== undefined
+          ? { beforeCodexRootReplacementDispatch: input.beforeCodexRootReplacementDispatch }
+          : {}),
+      });
+      await harness.setRunningCodexTurn(rootTurnId, "2026-01-01T00:00:01.000Z");
+      harness.runtimeSessions[0] = {
+        ...harness.runtimeSessions[0]!,
+        cwd: "/tmp/provider-project",
+        model: "gpt-5-codex",
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+      };
+      harness.durableProviderBindings.push({
+        threadId,
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        status: "running",
+        runtimeMode: "approval-required",
+        runtimePayload: { activeTurnId: rootTurnId, ...liveDurableRuntimeOwnerPayload() },
+        resumeCursor: { threadId: providerThreadId },
+        lastSeenAt: "2026-01-01T00:00:03.000Z",
+      });
+      harness.steerTurn.mockImplementationOnce(() =>
+        Effect.gen(function* () {
+          const current = harness.runtimeSessions[0]!;
+          // The root completes between admission and turn/steer. The adapter
+          // keeps the aggregate running id for its live children, but exposes
+          // exact root-completion evidence in the next fresh inventory read.
+          harness.runtimeSessions[0] = {
+            ...current,
+            resumeCursor: { threadId: providerThreadId },
+            codexRootTurnCompletion: {
+              turnId: rootTurnId,
+              providerThreadId,
+              observedAt: "2026-01-01T00:00:03.000Z",
+            },
+          };
+          input?.changeRecoveryState?.(harness);
+          return yield* Effect.fail(
+            new ProviderAdapterRequestError({
+              provider: "provider-daemon",
+              method: "steerTurn",
+              detail:
+                "Provider adapter request failed (codex) for turn/steer: no active turn to steer",
+            }),
+          );
+        }),
+      );
+      const dispatchSteer = (commandId = "cmd-steer-after-root-completion") =>
+        Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.turn.steer",
+            commandId: CommandId.make(commandId),
+            threadId,
+            message: { messageId, role: "user", text, attachments: [] },
+            createdAt: "2026-01-01T00:00:02.000Z",
+          }),
+        );
+      const waitForRecoveryOutcome = () =>
+        waitFor(async () => {
+          const thread = await harness.readThreadDetail(threadId);
+          return (
+            thread?.activities.some(
+              (activity) =>
+                activity.kind === "provider.turn.steer.delivered" ||
+                activity.kind === "provider.turn.steer.failed",
+            ) === true
+          );
+        });
+      return { ...harness, dispatchSteer, waitForRecoveryOutcome };
+    }
+
+    it("delivers the original steer once as a new root despite aggregate durable running state", async () => {
+      const harness = await createRootCompletionRace();
+      const nextTurnId = asTurnId("turn-next-root");
+      harness.sendTurn.mockImplementationOnce(() =>
+        Effect.sync(() => {
+          expect(harness.runtimeSessions[0]).toMatchObject({
+            status: "running",
+            activeTurnId: rootTurnId,
+          });
+          const { codexRootTurnCompletion: _completion, ...session } = harness.runtimeSessions[0]!;
+          harness.runtimeSessions[0] = { ...session, activeTurnId: nextTurnId };
+          return { threadId, turnId: nextTurnId };
+        }),
+      );
+      await harness.dispatchSteer();
+      await harness.waitForRecoveryOutcome();
+      await harness.drain();
+
+      expect(harness.steerTurn).toHaveBeenCalledTimes(1);
+      expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+      expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
+        threadId,
+        messageId,
+        input: text,
+        allowActiveTurnSteerFallback: false,
+        expectedCompletedRootTurnId: rootTurnId,
+      });
+      const thread = await harness.readThreadDetail(threadId);
+      expect(thread?.session).toMatchObject({ status: "running", activeTurnId: nextTurnId });
+      expect(
+        thread?.activities.filter((activity) => activity.kind === "provider.turn.steer.delivered"),
+      ).toHaveLength(1);
+      expect(
+        thread?.activities.some((activity) => activity.kind === "provider.turn.steer.failed"),
+      ).toBe(false);
+      expect(await harness.getUnsettledCodexSteerIntentEvents()).toEqual([]);
+    });
+
+    it("preserves aggregate running projection before the replacement root is submitted", async () => {
+      const releaseMarker = Effect.runSync(Deferred.make<void>());
+      let attemptedMarkers = 0;
+      const harness = await createRootCompletionRace({
+        beforeCodexSteerDeliveryAttemptDispatch: Effect.gen(function* () {
+          attemptedMarkers += 1;
+          if (attemptedMarkers === 2) yield* Deferred.await(releaseMarker);
+        }),
+      });
+      await harness.dispatchSteer();
+      await waitFor(() => attemptedMarkers === 2);
+
+      // Subagents still own aggregate work throughout recovery. A synthetic
+      // ready/null-active projection would temporarily hide Stop and expose
+      // idle-only controls before the provider accepts a replacement root.
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      const thread = await harness.readThreadDetail(threadId);
+      expect(thread?.session).toMatchObject({ status: "running", activeTurnId: rootTurnId });
+      const events = await Effect.runPromise(harness.engine.readEvents(0).pipe(Stream.runCollect));
+      expect(
+        events.some(
+          (event) =>
+            event.type === "thread.session-set" &&
+            event.payload.threadId === threadId &&
+            event.payload.session?.status === "ready",
+        ),
+      ).toBe(false);
+
+      await Effect.runPromise(Deferred.succeed(releaseMarker, undefined));
+      await harness.waitForRecoveryOutcome();
+      await harness.drain();
+    });
+
+    it("admits a new user-authorized retry of the same message after a rejected next-root send", async () => {
+      const harness = await createRootCompletionRace();
+      harness.sendTurn.mockImplementationOnce(() =>
+        Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: "codex",
+            method: "turn/start",
+            detail: "simulated explicit provider rejection before accepting input",
+          }),
+        ),
+      );
+      const firstIntent = await harness.dispatchSteer();
+      await harness.waitForRecoveryOutcome();
+      await harness.drain();
+      expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+
+      // A new command id creates new durable user authorization while keeping
+      // the immutable message id and content. The prior in-memory recovery
+      // cache entry must not consume this distinct intent generation.
+      const nextTurnId = asTurnId("turn-retried-next-root");
+      harness.sendTurn.mockImplementationOnce(() =>
+        Effect.sync(() => {
+          const { codexRootTurnCompletion: _completion, ...session } = harness.runtimeSessions[0]!;
+          harness.runtimeSessions[0] = { ...session, activeTurnId: nextTurnId };
+          return { threadId, turnId: nextTurnId };
+        }),
+      );
+      const retryIntent = await harness.dispatchSteer("cmd-user-authorized-root-retry");
+      expect(retryIntent.sequence).toBeGreaterThan(firstIntent.sequence);
+      await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+      await waitFor(async () => {
+        const thread = await harness.readThreadDetail(threadId);
+        return (
+          thread?.activities.some(
+            (activity) =>
+              activity.kind === "provider.turn.steer.delivered" &&
+              (activity.payload as Readonly<Record<string, unknown>> | undefined)
+                ?.intentSequence === retryIntent.sequence,
+          ) === true
+        );
+      });
+      await harness.drain();
+
+      expect(harness.steerTurn).toHaveBeenCalledTimes(1);
+      expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({
+        threadId,
+        messageId,
+        input: text,
+        expectedCompletedRootTurnId: rootTurnId,
+      });
+      const thread = await harness.readThreadDetail(threadId);
+      expect(thread?.messages.filter((message) => message.id === messageId)).toHaveLength(1);
+      expect(thread?.session).toMatchObject({ status: "running", activeTurnId: nextTurnId });
+      expect(await harness.getUnsettledCodexSteerIntentEvents()).toEqual([]);
+    });
+
+    it.each([
+      "newer-projection",
+      "newer-provider-turn",
+      "missing-inventory",
+      "failed-inventory",
+      "mismatched-instance",
+      "missing-instance",
+    ] as const)(
+      "preserves newer or unverified projection state after a recovery ACK with %s",
+      async (variant) => {
+        const harness = await createRootCompletionRace();
+        const acknowledgedTurnId = asTurnId("turn-recovery-ack");
+        const newerTurnId = asTurnId("turn-newer-than-recovery-ack");
+        const ack = Effect.runSync(
+          Deferred.make<{ readonly threadId: ThreadId; readonly turnId: TurnId }>(),
+        );
+        harness.sendTurn.mockImplementationOnce(() => Deferred.await(ack));
+        await harness.dispatchSteer();
+        await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+
+        const { codexRootTurnCompletion: _completion, ...activeSession } =
+          harness.runtimeSessions[0]!;
+        if (variant === "newer-projection") {
+          await harness.setRunningCodexTurn(newerTurnId, "2026-01-01T00:00:04.000Z");
+        }
+        // The provider ACK arrives after its final admission check. Only a
+        // fresh matching native turn and instance can replace the exact old
+        // aggregate root; neither a later root nor unavailable inventory can.
+        harness.runtimeSessions[0] = {
+          ...activeSession,
+          activeTurnId: variant === "newer-provider-turn" ? newerTurnId : acknowledgedTurnId,
+        };
+        if (variant === "missing-inventory") {
+          harness.runtimeSessions.length = 0;
+        } else if (variant === "failed-inventory") {
+          harness.listSessions.mockImplementation(() =>
+            Effect.die(new Error("inventory unavailable after ACK")),
+          );
+        } else if (variant === "mismatched-instance") {
+          harness.runtimeSessions[0] = {
+            ...harness.runtimeSessions[0]!,
+            providerInstanceId: ProviderInstanceId.make("codex_other"),
+          };
+        } else if (variant === "missing-instance") {
+          const { providerInstanceId: _instance, ...withoutInstance } = harness.runtimeSessions[0]!;
+          harness.runtimeSessions[0] = withoutInstance;
+        }
+        await Effect.runPromise(Deferred.succeed(ack, { threadId, turnId: acknowledgedTurnId }));
+        await harness.waitForRecoveryOutcome();
+        await harness.drain();
+
+        const thread = await harness.readThreadDetail(threadId);
+        expect(thread?.session).toMatchObject({
+          status: "running",
+          activeTurnId: variant === "newer-projection" ? newerTurnId : rootTurnId,
+          providerInstanceId: ProviderInstanceId.make("codex"),
+        });
+        expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+        expect(harness.steerTurn).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.each([
+      { phase: "inventory read", barrier: "Stop" },
+      { phase: "inventory read", barrier: "newer root" },
+      { phase: "guarded session write", barrier: "Stop" },
+      { phase: "guarded session write", barrier: "newer root" },
+    ] as const)(
+      "honors $barrier committed during the post-ACK $phase",
+      async ({ phase, barrier }) => {
+        const releasePause = Effect.runSync(Deferred.make<void>());
+        let pauseReached = false;
+        const pause = Effect.gen(function* () {
+          pauseReached = true;
+          yield* Deferred.await(releasePause);
+        });
+        const harness = await createRootCompletionRace(
+          phase === "guarded session write" ? { beforeCodexRootReplacementDispatch: pause } : {},
+        );
+        const acknowledgedTurnId = asTurnId("turn-accepted-before-post-ack-race");
+        const newerTurnId = asTurnId("turn-started-during-post-ack-race");
+        harness.sendTurn.mockImplementationOnce(() =>
+          Effect.sync(() => {
+            const { codexRootTurnCompletion: _completion, ...session } =
+              harness.runtimeSessions[0]!;
+            const acceptedSession = { ...session, activeTurnId: acknowledgedTurnId };
+            harness.runtimeSessions[0] = acceptedSession;
+            if (phase === "inventory read") {
+              harness.listSessions.mockImplementationOnce(() =>
+                pause.pipe(Effect.as([acceptedSession])),
+              );
+            }
+            return { threadId, turnId: acknowledgedTurnId };
+          }),
+        );
+        await harness.dispatchSteer();
+        await waitFor(() => pauseReached);
+
+        // Stop/newer state commits while the recovery worker is suspended after
+        // its provider ACK. The inventory response can still describe the ACK
+        // turn, and the session write can already have been constructed; neither
+        // may overwrite a later durable user-control or projected-turn barrier.
+        if (barrier === "Stop") {
+          await Effect.runPromise(
+            harness.engine.dispatch({
+              type: "thread.session.stop",
+              commandId: CommandId.make(`cmd-stop-during-post-ack-${phase.replaceAll(" ", "-")}`),
+              threadId,
+              createdAt: "2026-01-01T00:00:04.000Z",
+            }),
+          );
+          await waitFor(
+            async () => (await harness.readThreadDetail(threadId))?.session?.status === "stopped",
+          );
+        } else {
+          await harness.setRunningCodexTurn(newerTurnId, "2026-01-01T00:00:04.000Z");
+        }
+        await Effect.runPromise(Deferred.succeed(releasePause, undefined));
+        await harness.waitForRecoveryOutcome();
+        await harness.drain();
+
+        const thread = await harness.readThreadDetail(threadId);
+        expect(thread?.session).toMatchObject(
+          barrier === "Stop"
+            ? { status: "stopped", activeTurnId: null }
+            : { status: "running", activeTurnId: newerTurnId },
+        );
+        expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+        expect(harness.steerTurn).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.each([
+      "missing-proof",
+      "stale-turn-proof",
+      "mismatched-native-thread",
+      "newer-durable-turn",
+      "different-instance",
+      "unverified-owner",
+      "failed-ownership-read",
+    ] as const)("keeps the saved steer queued for %s", async (variant) => {
+      const harness = await createRootCompletionRace({
+        changeRecoveryState: (currentHarness) => {
+          const session = currentHarness.runtimeSessions[0]!;
+          const binding = currentHarness.durableProviderBindings[0]!;
+          if (variant === "missing-proof") {
+            const { codexRootTurnCompletion: _completion, ...withoutCompletion } = session;
+            currentHarness.runtimeSessions[0] = withoutCompletion;
+          } else if (variant === "stale-turn-proof" || variant === "mismatched-native-thread") {
+            currentHarness.runtimeSessions[0] = {
+              ...session,
+              codexRootTurnCompletion: {
+                ...session.codexRootTurnCompletion!,
+                ...(variant === "stale-turn-proof"
+                  ? { turnId: asTurnId("turn-older-root") }
+                  : { providerThreadId: "native-thread-older-root" }),
+              },
+            };
+          } else if (variant === "newer-durable-turn") {
+            currentHarness.durableProviderBindings[0] = {
+              ...binding,
+              runtimePayload: {
+                activeTurnId: asTurnId("turn-newer-root"),
+                ...liveDurableRuntimeOwnerPayload(),
+              },
+            };
+          } else if (variant === "different-instance") {
+            currentHarness.durableProviderBindings[0] = {
+              ...binding,
+              providerInstanceId: ProviderInstanceId.make("codex_other"),
+            };
+          } else if (variant === "unverified-owner") {
+            currentHarness.durableProviderBindings[0] = {
+              ...binding,
+              runtimePayload: { activeTurnId: rootTurnId },
+            };
+          } else {
+            currentHarness.getBinding.mockImplementation(() =>
+              Effect.die(new Error("ownership unavailable")),
+            );
+          }
+        },
+      });
+      await harness.dispatchSteer();
+      await harness.waitForRecoveryOutcome();
+      await harness.drain();
+
+      expect(harness.steerTurn).toHaveBeenCalledTimes(1);
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      const thread = await harness.readThreadDetail(threadId);
+      expect(
+        thread?.messages.some((message) => message.id === messageId && message.text === text),
+      ).toBe(true);
+      expect(
+        thread?.activities.some((activity) => activity.kind === "provider.turn.steer.failed"),
+      ).toBe(true);
+      expect(
+        thread?.activities.some((activity) => activity.kind === "provider.turn.steer.delivered"),
+      ).toBe(false);
+    });
+
+    it.each(["Stop", "newer turn", "withdrawn root proof"] as const)(
+      "honors %s after root proof but before recovery I/O",
+      async (barrier) => {
+        const releaseMarker = Effect.runSync(Deferred.make<void>());
+        let attemptedMarkers = 0;
+        const harness = await createRootCompletionRace({
+          beforeCodexSteerDeliveryAttemptDispatch: Effect.gen(function* () {
+            attemptedMarkers += 1;
+            // The first marker authorizes the rejected steer; the second marks
+            // its replacement turn/start. Pause only that recovery boundary.
+            if (attemptedMarkers === 2) yield* Deferred.await(releaseMarker);
+          }),
+        });
+        await harness.dispatchSteer();
+        await waitFor(() => attemptedMarkers === 2);
+        if (barrier === "Stop") {
+          await Effect.runPromise(
+            harness.engine.dispatch({
+              type: "thread.turn.interrupt",
+              commandId: CommandId.make("cmd-stop-after-root-completion"),
+              threadId,
+              turnId: rootTurnId,
+              createdAt: "2026-01-01T00:00:04.000Z",
+            }),
+          );
+        } else if (barrier === "newer turn") {
+          await harness.setRunningCodexTurn(
+            asTurnId("turn-newer-root"),
+            "2026-01-01T00:00:04.000Z",
+          );
+        } else {
+          const { codexRootTurnCompletion: _completion, ...withoutCompletion } =
+            harness.runtimeSessions[0]!;
+          harness.runtimeSessions[0] = withoutCompletion;
+        }
+        await Effect.runPromise(Deferred.succeed(releaseMarker, undefined));
+        await harness.waitForRecoveryOutcome();
+        await harness.drain();
+
+        expect(harness.steerTurn).toHaveBeenCalledTimes(1);
+        expect(harness.sendTurn).not.toHaveBeenCalled();
+        const thread = await harness.readThreadDetail(threadId);
+        expect(
+          thread?.activities.some((activity) => activity.kind === "provider.turn.steer.failed"),
+        ).toBe(true);
+        expect(
+          thread?.activities.some((activity) => activity.kind === "provider.turn.steer.delivered"),
+        ).toBe(false);
+      },
+    );
+
+    it("does not resend after an ambiguous next-root submission outcome", async () => {
+      const harness = await createRootCompletionRace();
+      harness.sendTurn.mockImplementationOnce(() =>
+        Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: "provider-daemon",
+            method: "sendTurn",
+            detail: "simulated lost turn/start acknowledgement",
+          }),
+        ),
+      );
+      await harness.dispatchSteer();
+      await harness.waitForRecoveryOutcome();
+      await harness.drain();
+      // Repeating the original durable command is idempotent even when the
+      // provider may have accepted it before the acknowledgement was lost.
+      await harness.dispatchSteer();
+      await harness.drain();
+
+      expect(harness.steerTurn).toHaveBeenCalledTimes(1);
+      expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+      const thread = await harness.readThreadDetail(threadId);
+      expect(
+        thread?.activities.some((activity) => activity.kind === "provider.turn.steer.failed"),
+      ).toBe(true);
+      expect(
+        thread?.activities.some((activity) => activity.kind === "provider.turn.steer.delivered"),
+      ).toBe(false);
+      expect(await harness.getUnsettledCodexSteerIntentEvents()).toEqual([]);
+    });
   });
 
   it("treats stale steer commands on inactive sessions as the next turn", async () => {

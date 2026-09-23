@@ -4831,6 +4831,12 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         : undefined;
     return yield* session.runtime
       .sendTurn({
+        ...(input.allowActiveTurnSteerFallback !== undefined
+          ? { allowActiveTurnSteerFallback: input.allowActiveTurnSteerFallback }
+          : {}),
+        ...(input.expectedCompletedRootTurnId !== undefined
+          ? { expectedCompletedRootTurnId: input.expectedCompletedRootTurnId }
+          : {}),
         ...(prompt !== undefined ? { input: prompt } : {}),
         ...(input.modelSelection?.instanceId === boundInstanceId
           ? { model: input.modelSelection.model }

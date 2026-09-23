@@ -988,6 +988,48 @@ imageValidation.layer("ProviderService image modality validation", (it) => {
       assert.equal(imageValidation.codex.sendTurn.mock.calls.length, 2);
     }),
   );
+
+  it.effect("does not infer a completed-root pin for an explicit no-fallback image send", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const threadId = asThreadId("image-no-fallback-newer-root-proof");
+      const newerRootTurnId = asTurnId("turn-newer-root-image-check");
+      yield* provider.startSession(threadId, {
+        threadId,
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        runtimeMode: "full-access",
+      });
+      imageValidation.codex.updateSession(threadId, (session) => ({
+        ...session,
+        status: "running",
+        activeTurnId: newerRootTurnId,
+        resumeCursor: { threadId: "native-newer-root-image-check" },
+        codexRootTurnCompletion: {
+          turnId: newerRootTurnId,
+          providerThreadId: "native-newer-root-image-check",
+          observedAt: "2026-01-01T00:00:03.000Z",
+        },
+      }));
+
+      // Image validation forces a live inventory read even with fallback off.
+      // Discovering a newer completed root during that read must not expand
+      // the original caller's authority to start after that root.
+      yield* provider.sendTurn({
+        threadId,
+        allowActiveTurnSteerFallback: false,
+        modelSelection: createModelSelection(codexInstanceId, "unknown-model"),
+        attachments: [imageAttachment],
+      });
+
+      assert.equal(imageValidation.codex.steerTurn.mock.calls.length, 0);
+      assert.equal(imageValidation.codex.sendTurn.mock.calls.length, 1);
+      assert.equal(
+        imageValidation.codex.sendTurn.mock.calls[0]?.[0].expectedCompletedRootTurnId,
+        undefined,
+      );
+    }),
+  );
 });
 
 it.effect("ProviderServiceLive catches stopAll failures during shutdown", () =>
@@ -2157,6 +2199,12 @@ routing.layer("ProviderServiceLive routing", (it) => {
         ...current,
         status: "running",
         activeTurnId: asTurnId("turn-newer"),
+        resumeCursor: { threadId: "native-thread-newer" },
+        codexRootTurnCompletion: {
+          turnId: asTurnId("turn-newer"),
+          providerThreadId: "native-thread-newer",
+          observedAt: "2026-01-01T00:00:03.000Z",
+        },
       }));
       routing.codex.sendTurn.mockClear();
       routing.codex.steerTurn.mockClear();
@@ -2166,6 +2214,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
         threadId: session.threadId,
         messageId,
         allowActiveTurnSteerFallback: false,
+        expectedCompletedRootTurnId: asTurnId("turn-original"),
         input: "deliver only as the next turn",
         attachments: [],
       });
@@ -2173,13 +2222,109 @@ routing.layer("ProviderServiceLive routing", (it) => {
       assert.equal(turn.turnId, asTurnId(`turn-${String(threadId)}`));
       assert.equal(routing.codex.steerTurn.mock.calls.length, 0);
       assert.equal(routing.codex.sendTurn.mock.calls.length, 1);
+      // The fake adapter accepts so this boundary can inspect the request.
+      // Production admission must reject this original pin atomically; the
+      // service may never replace it with a later root's completion proof.
       assert.deepEqual(routing.codex.sendTurn.mock.calls[0]?.[0], {
         threadId,
         messageId,
         allowActiveTurnSteerFallback: false,
+        expectedCompletedRootTurnId: asTurnId("turn-original"),
         input: "deliver only as the next turn",
         attachments: [],
       });
+    }),
+  );
+
+  it.effect("starts a new root turn while completed-root subagents remain running", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const threadId = asThreadId("thread-completed-root-subagents-running");
+      const rootTurnId = asTurnId("turn-completed-root");
+      const providerThreadId = "native-thread-completed-root";
+      const session = yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+      routing.codex.updateSession(session.threadId, (current) => ({
+        ...current,
+        status: "running",
+        activeTurnId: rootTurnId,
+        resumeCursor: { threadId: providerThreadId },
+        codexRootTurnCompletion: {
+          turnId: rootTurnId,
+          providerThreadId,
+          observedAt: "2026-01-01T00:00:02.000Z",
+        },
+      }));
+      routing.codex.sendTurn.mockClear();
+      routing.codex.steerTurn.mockClear();
+      const messageId = MessageId.make("message-after-completed-root");
+
+      const turn = yield* provider.sendTurn({
+        threadId,
+        messageId,
+        input: "continue with the next root turn",
+        attachments: [],
+      });
+
+      // Aggregate running state is still needed to show subagent progress.
+      // The native root-completion proof changes only submission admission.
+      assert.equal(turn.turnId, asTurnId(`turn-${String(threadId)}`));
+      assert.equal(routing.codex.steerTurn.mock.calls.length, 0);
+      assert.equal(routing.codex.sendTurn.mock.calls.length, 1);
+      assert.deepEqual(routing.codex.sendTurn.mock.calls[0]?.[0], {
+        threadId,
+        messageId,
+        expectedCompletedRootTurnId: rootTurnId,
+        input: "continue with the next root turn",
+        attachments: [],
+      });
+    }),
+  );
+
+  it.effect("does not use completion evidence from another root turn or native thread", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      for (const mismatch of ["turn", "thread"] as const) {
+        const threadId = asThreadId(`thread-mismatched-root-completion-${mismatch}`);
+        const rootTurnId = asTurnId(`turn-active-root-${mismatch}`);
+        const providerThreadId = `native-thread-active-root-${mismatch}`;
+        const session = yield* provider.startSession(threadId, {
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          threadId,
+          cwd: "/tmp/project",
+          runtimeMode: "full-access",
+        });
+        routing.codex.updateSession(session.threadId, (current) => ({
+          ...current,
+          status: "running",
+          activeTurnId: rootTurnId,
+          resumeCursor: { threadId: providerThreadId },
+          codexRootTurnCompletion: {
+            turnId: mismatch === "turn" ? asTurnId("turn-older-root") : rootTurnId,
+            providerThreadId: mismatch === "thread" ? "native-thread-older" : providerThreadId,
+            observedAt: "2026-01-01T00:00:02.000Z",
+          },
+        }));
+        routing.codex.sendTurn.mockClear();
+        routing.codex.steerTurn.mockClear();
+
+        const turn = yield* provider.sendTurn({
+          threadId,
+          input: "follow the currently active root",
+          attachments: [],
+        });
+
+        assert.equal(turn.turnId, rootTurnId);
+        assert.equal(routing.codex.sendTurn.mock.calls.length, 0);
+        assert.equal(routing.codex.steerTurn.mock.calls.length, 1);
+        assert.equal(routing.codex.steerTurn.mock.calls[0]?.[0].expectedTurnId, rootTurnId);
+      }
     }),
   );
 

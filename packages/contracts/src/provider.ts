@@ -54,6 +54,16 @@ export const ProviderSession = Schema.Struct({
   threadId: ThreadId,
   resumeCursor: Schema.optional(Schema.Unknown),
   activeTurnId: Schema.optional(TurnId),
+  // Fresh Codex runtime evidence, not a durable or renderer-authored override.
+  // Aggregate child work can keep activeTurnId running after its native root
+  // has completed. Older daemons omit this proof and retain conservative routing.
+  codexRootTurnCompletion: Schema.optional(
+    Schema.Struct({
+      turnId: TurnId,
+      providerThreadId: TrimmedNonEmptyString,
+      observedAt: IsoDateTime,
+    }),
+  ),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
   lastError: Schema.optional(TrimmedNonEmptyString),
@@ -136,6 +146,10 @@ export const ProviderSendTurnInput = Schema.Struct({
   // authenticated internal transport policy; omission preserves the normal
   // live-steer fallback.
   allowActiveTurnSteerFallback: Schema.optional(Schema.Boolean),
+  // Internal final-admission fence for replacing a completed native Codex
+  // root while its children are still visible. A newer root must reject this
+  // request, never silently receive the saved input as a steer.
+  expectedCompletedRootTurnId: Schema.optional(TurnId),
   input: Schema.optional(
     TrimmedNonEmptyString.check(Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_INPUT_CHARS)),
   ),

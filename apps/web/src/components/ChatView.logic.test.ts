@@ -14,6 +14,7 @@ import { type EnvironmentState, useStore } from "../store";
 import { type Thread } from "../types";
 
 import {
+  canRetryLegacyCodexRootCompletion,
   createLocalDispatchSnapshot,
   deriveRetryableSteerReplayCandidates,
   deriveComposerSendState,
@@ -24,6 +25,7 @@ import {
   isSteerProcessingActivityTimely,
   mergePendingSteerSnapshotsForInterruptedTurn,
   readDeliveredSteerMessageId,
+  readRetryableSteerFailure,
   readRecoveredSteerMessageId,
   readSteerProcessingMessageId,
   restoreCanonicalRetryImages,
@@ -545,6 +547,125 @@ describe("deriveRetryableSteerReplayCandidates", () => {
         },
       })[0]?.failure,
     ).toEqual({ messageId: sourceMessageId, intentSequence: 77, turnKind: "review" });
+  });
+});
+
+describe("legacy aggregate-root steer retry eligibility", () => {
+  const turnId = TurnId.make("root-completed-children-running");
+  const failedAt = "2026-09-23T10:43:41.000Z";
+  const completion = {
+    id: EventId.make("root-completion-deferred"),
+    tone: "info" as const,
+    kind: "runtime.warning",
+    summary: "Runtime warning",
+    payload: {
+      message: "Codex root turn completed; waiting for 3 routed subagent threads.",
+      detail: { rootCompletedAt: "2026-09-23T10:36:52.000Z", childThreadCount: 3 },
+    },
+    turnId,
+    sequence: 1,
+    createdAt: "2026-09-23T10:36:52.000Z",
+  };
+  const failure = {
+    id: EventId.make("legacy-root-steer-failure"),
+    tone: "error" as const,
+    kind: "provider.turn.steer.failed",
+    summary: "Provider steer queued",
+    payload: {
+      messageId: MessageId.make("legacy-root-steer-message"),
+      intentSequence: 12,
+      retryableFollowUp: true,
+      recoveryBarrier: "newer-turn-active",
+    },
+    turnId,
+    sequence: 13,
+    createdAt: failedAt,
+  };
+  const makeRunningThread = (): Thread => ({
+    ...makeThread(),
+    latestTurn: {
+      turnId,
+      state: "running",
+      requestedAt: "2026-09-23T09:19:00.000Z",
+      startedAt: "2026-09-23T09:19:01.000Z",
+      completedAt: null,
+      assistantMessageId: null,
+    },
+    session: {
+      status: "running",
+      orchestrationStatus: "running",
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      activeTurnId: turnId,
+      createdAt: "2026-09-23T09:19:00.000Z",
+      updatedAt: failedAt,
+    },
+    activities: [completion, failure],
+  });
+
+  it("retains exact legacy failure identity and permits a server recheck after root completion", () => {
+    const retry = readRetryableSteerFailure(failure)?.legacyRootCompletionRetry;
+    expect(retry).toEqual({ turnId, failedAt });
+    expect(canRetryLegacyCodexRootCompletion({ thread: makeRunningThread(), retry })).toBe(true);
+  });
+
+  it("does not turn the corrected server rejection into another automatic retry", () => {
+    const nextFailure = {
+      ...failure,
+      payload: { ...failure.payload, recoveryBarrier: "active-turn-not-idle", intentSequence: 20 },
+    };
+    const retry = readRetryableSteerFailure(nextFailure)?.legacyRootCompletionRetry;
+    expect(retry).toBeUndefined();
+    expect(canRetryLegacyCodexRootCompletion({ thread: makeRunningThread(), retry })).toBe(false);
+  });
+
+  it("keeps newer turns, Stop, another provider and unrelated warnings blocked", () => {
+    const retry = readRetryableSteerFailure(failure)?.legacyRootCompletionRetry;
+    const thread = makeRunningThread();
+    const newerTurn = TurnId.make("newer-root");
+    const variants: Thread[] = [
+      { ...thread, session: { ...thread.session!, activeTurnId: newerTurn } },
+      { ...thread, latestTurn: { ...thread.latestTurn!, turnId: newerTurn } },
+      {
+        ...thread,
+        session: { ...thread.session!, status: "closed", orchestrationStatus: "stopped" },
+      },
+      {
+        ...thread,
+        session: { ...thread.session!, provider: ProviderDriverKind.make("claudeAgent") },
+      },
+      {
+        ...thread,
+        activities: [
+          { ...completion, payload: { ...completion.payload, message: "Root completed" } },
+        ],
+      },
+      { ...thread, activities: [{ ...completion, turnId: newerTurn }] },
+      { ...thread, activities: [{ ...completion, createdAt: "2026-09-23T10:44:00.000Z" }] },
+      {
+        ...thread,
+        activities: [completion, { ...failure, kind: "provider.turn.interrupt.completed" }],
+      },
+    ];
+    for (const candidate of variants) {
+      expect(canRetryLegacyCodexRootCompletion({ thread: candidate, retry })).toBe(false);
+    }
+  });
+
+  it("rejects malformed and missing completion metadata", () => {
+    const retry = readRetryableSteerFailure(failure)?.legacyRootCompletionRetry;
+    for (const detail of [
+      undefined,
+      {},
+      { rootCompletedAt: "invalid", childThreadCount: 3 },
+      { rootCompletedAt: completion.createdAt, childThreadCount: 0 },
+    ]) {
+      const thread = {
+        ...makeRunningThread(),
+        activities: [{ ...completion, payload: { ...completion.payload, detail } }],
+      };
+      expect(canRetryLegacyCodexRootCompletion({ thread, retry })).toBe(false);
+    }
   });
 });
 

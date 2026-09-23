@@ -183,6 +183,7 @@ import { ThreadErrorBanner } from "./chat/ThreadErrorBanner";
 import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
 import {
   buildLocalDraftThread,
+  canRetryLegacyCodexRootCompletion,
   collectUserMessageBlobPreviewUrls,
   createLocalDispatchSnapshot,
   deriveRetryableSteerReplayCandidates,
@@ -192,6 +193,7 @@ import {
   hasServerAcknowledgedLocalDispatch,
   isSteerProcessingActivityTimely,
   type LocalDispatchSnapshot,
+  type LegacyRootCompletionRetry,
   PullRequestDialogState,
   cloneComposerImageForRetry,
   deriveLockedProvider,
@@ -472,6 +474,7 @@ interface FollowUpQueueItem extends ComposerSendSnapshot {
   automaticSteerRetry?: {
     readonly nonSteerableTurnKind: CodexNonSteerableTurnKind | null;
     readonly sourceMessageId: MessageId;
+    readonly legacyRootCompletionRetry?: LegacyRootCompletionRetry;
     /** Only an explicit retry may clear a settled dispatch failure. */
     readonly dispatchFailed?: true;
   } | null;
@@ -567,6 +570,16 @@ function resolveAutomaticSteerRetryBlocker(input: {
   // it while the same turn is still active would immediately call the same
   // rejected extension again and could spin an unbounded steer/requeue loop.
   if (retry.nonSteerableTurnKind === null) {
+    if (
+      input.phase === "running" &&
+      !threadHasActiveContextCompaction(input.thread, input.thread.session?.activeTurnId ?? null) &&
+      canRetryLegacyCodexRootCompletion({
+        thread: input.thread,
+        retry: retry.legacyRootCompletionRetry,
+      })
+    ) {
+      return null;
+    }
     return input.phase === "running" ? "provider-steer-rejected" : null;
   }
 
@@ -954,6 +967,7 @@ export default function ChatView(props: ChatViewProps) {
   // dismissed so snapshot refreshes remain idempotent, while a real reload can
   // rebuild unresolved entries from canonical thread state again.
   const handledRetryableSteerSourceMessageIdsRef = useRef<Set<string>>(new Set());
+  const legacyRootRecheckSourceMessageIdsRef = useRef<Set<string>>(new Set());
   const retryableSteerReconstructionInFlightRef = useRef<Set<string>>(new Set());
   const pendingSteerInterruptRecoveryByThreadIdRef = useRef<
     Record<string, PendingSteerInterruptRecovery>
@@ -1355,9 +1369,6 @@ export default function ChatView(props: ChatViewProps) {
             : [String(item.automaticSteerRetry.sourceMessageId)],
         ),
     );
-    for (const messageId of handledRetryableSteerSourceMessageIdsRef.current) {
-      queuedSourceMessageIds.add(messageId);
-    }
     const candidates = deriveRetryableSteerReplayCandidates({
       thread: activeThread,
       existingSourceMessageIds: queuedSourceMessageIds,
@@ -1365,6 +1376,18 @@ export default function ChatView(props: ChatViewProps) {
 
     for (const candidate of candidates) {
       const sourceMessageKey = String(candidate.failure.messageId);
+      // A legacy root-idle recheck can be declined by the corrected server.
+      // Restore that distinct, non-retrying result once so the saved message
+      // remains visible. Keep the ordinary per-message deduplication: changing
+      // it for every failure generation could reopen rejected compact loops.
+      const restoreBlockedRootRecheck =
+        legacyRootRecheckSourceMessageIdsRef.current.has(sourceMessageKey) &&
+        candidate.failure.rootIdleRecheckBlocked === true;
+      if (
+        handledRetryableSteerSourceMessageIdsRef.current.has(sourceMessageKey) &&
+        !restoreBlockedRootRecheck
+      )
+        continue;
       if (retryableSteerReconstructionInFlightRef.current.has(sourceMessageKey)) {
         continue;
       }
@@ -1432,10 +1455,18 @@ export default function ChatView(props: ChatViewProps) {
             automaticSteerRetry: {
               nonSteerableTurnKind: candidate.failure.turnKind,
               sourceMessageId: candidate.failure.messageId,
+              ...(candidate.failure.legacyRootCompletionRetry
+                ? { legacyRootCompletionRetry: candidate.failure.legacyRootCompletionRetry }
+                : {}),
             },
           };
 
           handledRetryableSteerSourceMessageIdsRef.current.add(sourceMessageKey);
+          if (candidate.failure.legacyRootCompletionRetry) {
+            legacyRootRecheckSourceMessageIdsRef.current.add(sourceMessageKey);
+          } else {
+            legacyRootRecheckSourceMessageIdsRef.current.delete(sourceMessageKey);
+          }
           setFollowUpQueueByThreadId((existing) => {
             const current = existing[queuedItem.threadId] ?? EMPTY_FOLLOW_UP_QUEUE;
             if (
@@ -4665,6 +4696,9 @@ export default function ChatView(props: ChatViewProps) {
     if (!canSteerFollowUpQueue || !activeThread) {
       return;
     }
+    // A queued retry is automatic, so it cannot clear or race the user's Stop
+    // barrier. Explicit send actions remain the only renderer path that clears it.
+    if (manualStopBarrierByThreadIdRef.current[activeThread.id] !== undefined) return;
 
     const firstItem = followUpQueueByThreadIdRef.current[activeThread.id]?.[0] ?? null;
     if (firstItem === null || !isAutomaticSteerRetryItem(firstItem)) {
@@ -5385,6 +5419,9 @@ export default function ChatView(props: ChatViewProps) {
         automaticSteerRetry: {
           sourceMessageId: item.automaticSteerRetry.sourceMessageId,
           nonSteerableTurnKind: item.automaticSteerRetry.nonSteerableTurnKind,
+          ...(item.automaticSteerRetry.legacyRootCompletionRetry
+            ? { legacyRootCompletionRetry: item.automaticSteerRetry.legacyRootCompletionRetry }
+            : {}),
         },
       };
       recordFollowUpQueueDebugAttempt("manual-steer-retry", "dispatch-requested", {

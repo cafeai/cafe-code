@@ -85,6 +85,7 @@ import {
   PROVIDER_RUNTIME_OWNERSHIP_LOST_REASON,
   type ProviderRuntimeOwnerEvidence,
 } from "../providerRuntimeOwnerEvidence.ts";
+import { getCodexRootTurnCompletion } from "../codexRootTurnCompletion.ts";
 import {
   ProviderSessionDirectory,
   type ProviderRuntimeBinding,
@@ -2015,6 +2016,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       const hasImages = input.attachments.some((attachment) => attachment.type === "image");
       const inspectLiveSession =
         hasImages ||
+        routed.adapter.provider === "codex" ||
         (routed.adapter.capabilities.liveSteer === "supported" &&
           input.allowActiveTurnSteerFallback !== false);
       const activeSession = inspectLiveSession
@@ -2022,9 +2024,15 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             (session) => session.threadId === input.threadId,
           )
         : undefined;
+      // Visible subagent work is not a steerable native root. This proof comes
+      // from the live adapter inventory, never the durable binding. Pin it
+      // through native admission so a later root cannot become the recipient.
+      const completedRoot = getCodexRootTurnCompletion(activeSession);
       if (
         routed.adapter.capabilities.liveSteer === "supported" &&
-        input.allowActiveTurnSteerFallback !== false
+        input.allowActiveTurnSteerFallback !== false &&
+        input.expectedCompletedRootTurnId === undefined &&
+        completedRoot === undefined
       ) {
         // Projection state can lag the provider runtime during long streams or
         // reconnects. Ask the adapter for its live session before starting a
@@ -2080,7 +2088,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             readPersistedModelSelection(routed.binding.runtimePayload)?.model,
           "ProviderService.sendTurn",
         );
-      const turn = yield* routed.adapter.sendTurn(input);
+      const turn = yield* routed.adapter.sendTurn({
+        ...input,
+        ...(input.expectedCompletedRootTurnId === undefined &&
+        input.allowActiveTurnSteerFallback !== false &&
+        completedRoot !== undefined
+          ? { expectedCompletedRootTurnId: completedRoot.turnId }
+          : {}),
+      });
       yield* persistTurnSubagentHistoryRoot({
         binding: routed.binding,
         provider: routed.adapter.provider,

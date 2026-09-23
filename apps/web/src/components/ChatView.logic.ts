@@ -275,6 +275,73 @@ export interface RetryableSteerFailure {
   readonly messageId: MessageId;
   readonly intentSequence: number | null;
   readonly turnKind: RetryableCodexSteerTurnKind | null;
+  readonly legacyRootCompletionRetry?: LegacyRootCompletionRetry;
+  readonly rootIdleRecheckBlocked?: true;
+}
+
+/** Eligibility to recheck an old queue entry, never authority to submit provider work. */
+export interface LegacyRootCompletionRetry {
+  readonly turnId: TurnId;
+  readonly failedAt: string;
+}
+
+/**
+ * Older Cafe builds mistook a completed root's live descendants for another
+ * active root and persisted `newer-turn-active`. Give only that exact saved
+ * input one opportunity to reach the corrected server guard. This historical
+ * activity is a UI eligibility hint: the server must independently read fresh
+ * native-root ownership before starting anything, and its distinct rejection
+ * marker prevents a failed recheck from becoming another automatic loop.
+ */
+export function canRetryLegacyCodexRootCompletion(input: {
+  readonly thread: Pick<Thread, "session" | "latestTurn" | "activities">;
+  readonly retry: LegacyRootCompletionRetry | undefined;
+}): boolean {
+  const { thread, retry } = input;
+  if (
+    retry === undefined ||
+    thread.session?.provider !== "codex" ||
+    thread.session.status !== "running" ||
+    thread.session.activeTurnId !== retry.turnId ||
+    thread.latestTurn?.turnId !== retry.turnId ||
+    thread.latestTurn.state !== "running"
+  ) {
+    return false;
+  }
+
+  let rootCompleted = false;
+  for (const activity of thread.activities) {
+    // A persisted Stop wins even if a lagging descendant snapshot still shows
+    // this aggregate as running. The backend also checks durable user controls.
+    if (
+      activity.kind === "provider.turn.interrupt.completed" &&
+      activity.createdAt >= retry.failedAt
+    ) {
+      return false;
+    }
+    if (activity.kind !== "runtime.warning" || activity.turnId !== retry.turnId) continue;
+    const payload = readUnknownRecord(activity.payload);
+    const detail = readUnknownRecord(payload?.detail);
+    const rootCompletedAt = readNonEmptyString(detail?.rootCompletedAt);
+    const childThreadCount = detail?.childThreadCount;
+    if (
+      rootCompletedAt === null ||
+      !Number.isFinite(Date.parse(rootCompletedAt)) ||
+      rootCompletedAt > retry.failedAt ||
+      activity.createdAt > retry.failedAt ||
+      typeof childThreadCount !== "number" ||
+      !Number.isSafeInteger(childThreadCount) ||
+      childThreadCount <= 0
+    ) {
+      continue;
+    }
+    // Legacy warning projections did not retain raw.method. Their fixed Cafe
+    // message and structured completion metadata identify the narrow case;
+    // unrelated provider warnings cannot enable a generic retry.
+    const expectedMessage = `Codex root turn completed; waiting for ${childThreadCount} routed subagent thread${childThreadCount === 1 ? "" : "s"}.`;
+    if (payload?.message === expectedMessage) rootCompleted = true;
+  }
+  return rootCompleted;
 }
 
 function readIntentSequence(payload: Readonly<Record<string, unknown>> | null): number | null {
@@ -324,6 +391,19 @@ export function readRetryableSteerFailure(
     messageId: messageId as MessageId,
     intentSequence: readIntentSequence(payload),
     turnKind: turnKind === "review" || turnKind === "compact" ? turnKind : null,
+    ...(payload.recoveryBarrier === "active-turn-not-idle"
+      ? { rootIdleRecheckBlocked: true as const }
+      : {}),
+    ...(turnKind === null &&
+    payload.recoveryBarrier === "newer-turn-active" &&
+    activity.turnId !== null
+      ? {
+          legacyRootCompletionRetry: {
+            turnId: activity.turnId,
+            failedAt: activity.createdAt,
+          },
+        }
+      : {}),
   };
 }
 

@@ -36,6 +36,7 @@ import {
   acknowledgeCodexPendingSteerProcessing,
   acknowledgeCodexSteerLifecycleBoundary,
   acknowledgeCodexTurnStartLifecycleBoundary,
+  admitCodexTurnStartLifecycleBoundary,
   admitCodexPendingSteerProcessing,
   buildCodexAppServerArgs,
   buildCodexActiveContextCompactionSteerError,
@@ -48,9 +49,15 @@ import {
   claimCodexRestartedSteerProcessingObservation,
   codexAggregateNotificationMethod,
   codexAggregateTurnHasUnfinishedChildren,
+  commitCodexAggregateRootCompletion,
   canReopenCodexAggregateRootCompletion,
   reconcileCodexAggregateRootCompletion,
   readCodexAggregateRootCompletion,
+  readCodexRootTurnCompletion,
+  observeCodexRootTurnStartedLifecycleBoundary,
+  reconcileCodexNoActiveSteerLifecycleBoundary,
+  rejectCodexTurnStartLifecycleBoundary,
+  requestCodexManualCompaction,
   codexChildConversationThreadIdsForTurn,
   codexElapsedDelayMilliseconds,
   codexElapsedDelayRemainingMilliseconds,
@@ -2109,6 +2116,505 @@ describe("Codex context compaction steer guard", () => {
       },
     });
   });
+});
+
+describe("Codex native root completion and aggregate input admission", () => {
+  const rootTurnId = TurnId.make("completed-root-with-live-children");
+  const nextTurnId = TurnId.make("next-native-root");
+  const completion: CodexAggregateRootCompletion = {
+    turnId: rootTurnId,
+    providerThreadId: "native-root-thread",
+    state: "completed",
+    observedAt: "2026-09-23T10:40:00.000Z",
+  };
+  const session: ProviderSession = {
+    provider: ProviderDriverKind.make("codex"),
+    status: "running",
+    runtimeMode: "full-access",
+    threadId: ThreadId.make("cafe-thread"),
+    resumeCursor: { threadId: completion.providerThreadId },
+    activeTurnId: rootTurnId,
+    createdAt: "2026-09-23T09:00:00.000Z",
+    updatedAt: "2026-09-23T10:42:00.000Z",
+  };
+  const makeBoundary = () =>
+    Effect.gen(function* () {
+      return {
+        semaphore: yield* Semaphore.make(1),
+        completionsRef: yield* Ref.make(new Map([[String(rootTurnId), completion]])),
+        rootLifecycleEpochRef: yield* Ref.make(Symbol()),
+        nativeTurnStartPendingRef: yield* Ref.make(false),
+        nativeTurnStartRequestRef: yield* Ref.make<symbol | undefined>(undefined),
+        manualCompactionPendingRef: yield* Ref.make(false),
+        closedRef: yield* Ref.make(false),
+        sessionRef: yield* Ref.make(session),
+      };
+    });
+
+  it("exports exact successful root proof without mistaking child liveness for root activity", () => {
+    const input = {
+      session,
+      completions: new Map([[String(rootTurnId), completion]]),
+      nativeTurnStartPending: false,
+      manualCompactionPending: false,
+      closed: false,
+    };
+    assert.deepEqual(readCodexRootTurnCompletion(input), {
+      turnId: rootTurnId,
+      providerThreadId: "native-root-thread",
+      observedAt: completion.observedAt,
+    });
+    for (const overrides of [
+      { completions: new Map() },
+      { nativeTurnStartPending: true },
+      { manualCompactionPending: true },
+      { closed: true },
+      { session: { ...session, status: "error" as const } },
+      { session: { ...session, status: "closed" as const } },
+      { session: { ...session, activeTurnId: nextTurnId } },
+      { session: { ...session, resumeCursor: { threadId: "different-native-thread" } } },
+      { session: { ...session, provider: ProviderDriverKind.make("claude") } },
+      { completions: new Map([[String(rootTurnId), { ...completion, state: "failed" as const }]]) },
+      {
+        completions: new Map([
+          [String(rootTurnId), { ...completion, state: "interrupted" as const }],
+        ]),
+      },
+      {
+        completions: new Map([[String(rootTurnId), { ...completion, turnId: nextTurnId }]]),
+      },
+      {
+        // An older daemon's aggregate-only session carries no native proof.
+        session: { ...session, resumeCursor: undefined },
+      },
+    ]) {
+      assert.equal(readCodexRootTurnCompletion({ ...input, ...overrides }), undefined);
+    }
+  });
+
+  effectIt.effect(
+    "starts a new root after child reopening without retiring the prior aggregate",
+    () =>
+      Effect.gen(function* () {
+        const boundary = yield* makeBoundary();
+        const admission = yield* admitCodexTurnStartLifecycleBoundary({
+          ...boundary,
+          expectedCompletedRootTurnId: rootTurnId,
+        });
+        assert.equal(admission.supersededAggregateTurnId, rootTurnId);
+        assert.deepEqual(yield* Ref.get(boundary.sessionRef), session);
+        assert.equal(yield* Ref.get(boundary.nativeTurnStartPendingRef), true);
+        assert.equal(
+          readCodexRootTurnCompletion({
+            session,
+            completions: yield* Ref.get(boundary.completionsRef),
+            nativeTurnStartPending: true,
+            manualCompactionPending: false,
+            closed: false,
+          }),
+          undefined,
+        );
+        // Child-only activity can keep the old aggregate running while the
+        // root start is in flight. It must not advance the native root epoch.
+        yield* Ref.update(boundary.sessionRef, (current) => ({
+          ...current,
+          updatedAt: "2026-09-23T10:43:01.000Z",
+        }));
+        assert.equal(
+          yield* acknowledgeCodexTurnStartLifecycleBoundary({
+            ...boundary,
+            ...admission,
+            turnId: nextTurnId,
+            acknowledgedAt: "2026-09-23T10:43:02.000Z",
+          }),
+          true,
+        );
+        assert.equal((yield* Ref.get(boundary.sessionRef)).activeTurnId, nextTurnId);
+        assert.equal(yield* Ref.get(boundary.nativeTurnStartPendingRef), false);
+        // The previous aggregate's terminal record remains available to its
+        // independent child-completion watcher; starting T2 does not delete T1.
+        assert.deepEqual(
+          (yield* Ref.get(boundary.completionsRef)).get(String(rootTurnId)),
+          completion,
+        );
+      }),
+  );
+
+  effectIt.effect(
+    "acknowledges its reserved replacement root after an unrelated delayed completion",
+    () =>
+      Effect.gen(function* () {
+        const boundary = yield* makeBoundary();
+        const admission = yield* admitCodexTurnStartLifecycleBoundary({
+          ...boundary,
+          expectedCompletedRootTurnId: rootTurnId,
+        });
+        const managedRef = yield* Ref.make<ReadonlySet<string>>(new Set());
+        const pendingRef = yield* Ref.make<ReadonlySet<string>>(new Set());
+        yield* boundary.semaphore.withPermits(1)(
+          commitCodexAggregateRootCompletion({
+            ...boundary,
+            managedRef,
+            pendingRef,
+            completion: { ...completion, turnId: TurnId.make("delayed-older-root") },
+            hasUnfinishedChildren: false,
+          }),
+        );
+        assert.notEqual(
+          yield* Ref.get(boundary.rootLifecycleEpochRef),
+          admission.requestedRootLifecycleEpoch,
+        );
+        assert.equal(
+          yield* acknowledgeCodexTurnStartLifecycleBoundary({
+            ...boundary,
+            ...admission,
+            turnId: nextTurnId,
+            acknowledgedAt: "2026-09-23T10:43:02.000Z",
+          }),
+          true,
+        );
+        assert.equal((yield* Ref.get(boundary.sessionRef)).activeTurnId, nextTurnId);
+        assert.equal(yield* Ref.get(boundary.nativeTurnStartPendingRef), false);
+        assert.equal(
+          readCodexRootTurnCompletion({
+            session: yield* Ref.get(boundary.sessionRef),
+            completions: yield* Ref.get(boundary.completionsRef),
+            nativeTurnStartPending: yield* Ref.get(boundary.nativeTurnStartPendingRef),
+            manualCompactionPending: yield* Ref.get(boundary.manualCompactionPendingRef),
+            closed: false,
+          }),
+          undefined,
+        );
+        assert.equal(
+          (yield* admitCodexTurnStartLifecycleBoundary(boundary).pipe(Effect.exit))._tag,
+          "Failure",
+        );
+      }),
+  );
+
+  effectIt.effect(
+    "rejects active, unknown, compacting, closed, and mismatched root admission",
+    () =>
+      Effect.gen(function* () {
+        for (const scenario of ["active", "unknown", "compacting", "closed", "mismatch"] as const) {
+          const boundary = yield* makeBoundary();
+          if (scenario === "active") yield* Ref.set(boundary.completionsRef, new Map());
+          if (scenario === "unknown")
+            yield* Ref.update(boundary.sessionRef, (current) => ({
+              ...current,
+              activeTurnId: undefined,
+            }));
+          if (scenario === "compacting") yield* Ref.set(boundary.manualCompactionPendingRef, true);
+          if (scenario === "closed") yield* Ref.set(boundary.closedRef, true);
+          const exit = yield* admitCodexTurnStartLifecycleBoundary({
+            ...boundary,
+            expectedCompletedRootTurnId: scenario === "mismatch" ? nextTurnId : rootTurnId,
+          }).pipe(Effect.exit);
+          assert.equal(exit._tag, "Failure", scenario);
+          assert.equal(yield* Ref.get(boundary.nativeTurnStartPendingRef), false, scenario);
+        }
+      }),
+  );
+
+  effectIt.effect(
+    "allows strict recovery only for idle roots or the explicitly pinned completed root",
+    () =>
+      Effect.gen(function* () {
+        for (const scenario of [
+          "unpinned-aggregate",
+          "pinned-aggregate",
+          "idle",
+          "error",
+        ] as const) {
+          const boundary = yield* makeBoundary();
+          if (scenario === "idle" || scenario === "error") {
+            yield* Ref.update(boundary.sessionRef, (current) => ({
+              ...current,
+              status: scenario === "idle" ? ("ready" as const) : ("error" as const),
+              activeTurnId: undefined,
+            }));
+          }
+          const result = yield* admitCodexTurnStartLifecycleBoundary({
+            ...boundary,
+            allowActiveTurnSteerFallback: false,
+            ...(scenario === "pinned-aggregate" ? { expectedCompletedRootTurnId: rootTurnId } : {}),
+          }).pipe(Effect.exit);
+          assert.equal(
+            result._tag,
+            scenario === "pinned-aggregate" || scenario === "idle" ? "Success" : "Failure",
+            scenario,
+          );
+        }
+      }),
+  );
+
+  effectIt.effect(
+    "keeps pending native admission across missing-id starts and unrelated old completions",
+    () =>
+      Effect.gen(function* () {
+        const boundary = yield* makeBoundary();
+        yield* admitCodexTurnStartLifecycleBoundary(boundary);
+        const before = yield* Ref.get(boundary.sessionRef);
+        const epoch = yield* Ref.get(boundary.rootLifecycleEpochRef);
+        yield* observeCodexRootTurnStartedLifecycleBoundary({ ...boundary, turnId: undefined });
+        assert.equal(yield* Ref.get(boundary.nativeTurnStartPendingRef), true);
+        assert.equal(yield* Ref.get(boundary.rootLifecycleEpochRef), epoch);
+        assert.deepEqual(yield* Ref.get(boundary.sessionRef), before);
+
+        const olderTurnId = TurnId.make("unrelated-older-completed-root");
+        const managedRef = yield* Ref.make<ReadonlySet<string>>(new Set());
+        const pendingRef = yield* Ref.make<ReadonlySet<string>>(new Set());
+        yield* boundary.semaphore.withPermits(1)(
+          commitCodexAggregateRootCompletion({
+            ...boundary,
+            managedRef,
+            pendingRef,
+            completion: { ...completion, turnId: olderTurnId },
+            hasUnfinishedChildren: false,
+          }),
+        );
+        assert.equal(yield* Ref.get(boundary.nativeTurnStartPendingRef), true);
+        assert.notEqual(yield* Ref.get(boundary.rootLifecycleEpochRef), epoch);
+        yield* observeCodexRootTurnStartedLifecycleBoundary({ ...boundary, turnId: olderTurnId });
+        assert.equal(yield* Ref.get(boundary.nativeTurnStartPendingRef), true);
+        assert.deepEqual(yield* Ref.get(boundary.sessionRef), before);
+        assert.equal(
+          (yield* admitCodexTurnStartLifecycleBoundary(boundary).pipe(Effect.exit))._tag,
+          "Failure",
+        );
+
+        yield* observeCodexRootTurnStartedLifecycleBoundary({ ...boundary, turnId: nextTurnId });
+        assert.equal(yield* Ref.get(boundary.nativeTurnStartPendingRef), false);
+        assert.equal((yield* Ref.get(boundary.sessionRef)).activeTurnId, nextTurnId);
+      }),
+  );
+
+  effectIt.effect(
+    "releases the matching start reservation when terminal precedes ACK without turn/started",
+    () =>
+      Effect.gen(function* () {
+        const boundary = yield* makeBoundary();
+        yield* Ref.update(boundary.sessionRef, (current) => ({
+          ...current,
+          status: "ready" as const,
+          activeTurnId: undefined,
+        }));
+        const admission = yield* admitCodexTurnStartLifecycleBoundary(boundary);
+        const managedRef = yield* Ref.make<ReadonlySet<string>>(new Set());
+        const pendingRef = yield* Ref.make<ReadonlySet<string>>(new Set());
+        yield* boundary.semaphore.withPermits(1)(
+          commitCodexAggregateRootCompletion({
+            ...boundary,
+            managedRef,
+            pendingRef,
+            completion: { ...completion, turnId: nextTurnId },
+            hasUnfinishedChildren: false,
+          }),
+        );
+        assert.equal(yield* Ref.get(boundary.nativeTurnStartPendingRef), true);
+        const terminalSession = yield* Ref.get(boundary.sessionRef);
+        assert.equal(
+          yield* acknowledgeCodexTurnStartLifecycleBoundary({
+            ...boundary,
+            ...admission,
+            turnId: nextTurnId,
+            acknowledgedAt: "2026-09-23T10:43:02.000Z",
+          }),
+          false,
+        );
+        assert.deepEqual(yield* Ref.get(boundary.sessionRef), terminalSession);
+        assert.equal(yield* Ref.get(boundary.nativeTurnStartPendingRef), false);
+        assert.equal(yield* Ref.get(boundary.nativeTurnStartRequestRef), undefined);
+        assert.equal(
+          (yield* admitCodexTurnStartLifecycleBoundary(boundary).pipe(Effect.exit))._tag,
+          "Success",
+        );
+      }),
+  );
+
+  effectIt.effect("never lets an older ACK or rejection release a newer start reservation", () =>
+    Effect.gen(function* () {
+      const boundary = yield* makeBoundary();
+      const olderAdmission = yield* admitCodexTurnStartLifecycleBoundary(boundary);
+      yield* observeCodexRootTurnStartedLifecycleBoundary({ ...boundary, turnId: nextTurnId });
+      assert.equal(yield* Ref.get(boundary.nativeTurnStartRequestRef), undefined);
+      const managedRef = yield* Ref.make<ReadonlySet<string>>(new Set());
+      const pendingRef = yield* Ref.make<ReadonlySet<string>>(new Set());
+      yield* boundary.semaphore.withPermits(1)(
+        commitCodexAggregateRootCompletion({
+          ...boundary,
+          managedRef,
+          pendingRef,
+          completion: { ...completion, turnId: nextTurnId },
+          hasUnfinishedChildren: true,
+        }),
+      );
+      const newerAdmission = yield* admitCodexTurnStartLifecycleBoundary({
+        ...boundary,
+        expectedCompletedRootTurnId: nextTurnId,
+      });
+      const newerSession = yield* Ref.get(boundary.sessionRef);
+      assert.notEqual(olderAdmission.requestToken, newerAdmission.requestToken);
+      assert.equal(
+        yield* acknowledgeCodexTurnStartLifecycleBoundary({
+          ...boundary,
+          ...olderAdmission,
+          turnId: nextTurnId,
+          acknowledgedAt: "2026-09-23T10:43:02.000Z",
+        }),
+        false,
+      );
+      yield* rejectCodexTurnStartLifecycleBoundary({
+        ...boundary,
+        ...olderAdmission,
+        error: CodexErrors.CodexAppServerRequestError.invalidRequest("rejected"),
+      });
+      assert.equal(yield* Ref.get(boundary.nativeTurnStartPendingRef), true);
+      assert.equal(yield* Ref.get(boundary.nativeTurnStartRequestRef), newerAdmission.requestToken);
+      assert.deepEqual(yield* Ref.get(boundary.sessionRef), newerSession);
+      const newestTurnId = TurnId.make("newest-native-root");
+      assert.equal(
+        yield* acknowledgeCodexTurnStartLifecycleBoundary({
+          ...boundary,
+          ...newerAdmission,
+          turnId: newestTurnId,
+          acknowledgedAt: "2026-09-23T10:43:03.000Z",
+        }),
+        true,
+      );
+      assert.equal(yield* Ref.get(boundary.nativeTurnStartPendingRef), false);
+      assert.equal((yield* Ref.get(boundary.sessionRef)).activeTurnId, newestTurnId);
+    }),
+  );
+
+  effectIt.effect(
+    "retains exact aggregate proof after no-active rejection and protects newer/failed state",
+    () =>
+      Effect.gen(function* () {
+        for (const scenario of ["aggregate", "stale", "newer", "failed", "compacting"] as const) {
+          const boundary = yield* makeBoundary();
+          if (scenario === "stale") yield* Ref.set(boundary.completionsRef, new Map());
+          if (scenario === "newer")
+            yield* Ref.update(boundary.sessionRef, (current) => ({
+              ...current,
+              activeTurnId: nextTurnId,
+            }));
+          if (scenario === "failed")
+            yield* Ref.update(boundary.sessionRef, (current) => ({
+              ...current,
+              status: "error" as const,
+            }));
+          if (scenario === "compacting") yield* Ref.set(boundary.manualCompactionPendingRef, true);
+          const before = yield* Ref.get(boundary.sessionRef);
+          const result = yield* reconcileCodexNoActiveSteerLifecycleBoundary({
+            ...boundary,
+            expectedTurnId: rootTurnId,
+            observedAt: "2026-09-23T10:43:00.000Z",
+          });
+          assert.equal(
+            result,
+            scenario === "aggregate"
+              ? "aggregate-retained"
+              : scenario === "stale"
+                ? "stale-root-cleared"
+                : "superseded",
+          );
+          const after = yield* Ref.get(boundary.sessionRef);
+          if (scenario === "stale") {
+            assert.equal(after.status, "ready");
+            assert.equal(after.activeTurnId, undefined);
+          } else assert.deepEqual(after, before);
+        }
+      }),
+  );
+
+  effectIt.effect(
+    "keeps transport-ambiguous starts reserved but releases explicit rejections",
+    () =>
+      Effect.gen(function* () {
+        for (const ambiguous of [true, false]) {
+          const boundary = yield* makeBoundary();
+          const admission = yield* admitCodexTurnStartLifecycleBoundary(boundary);
+          yield* rejectCodexTurnStartLifecycleBoundary({
+            ...boundary,
+            ...admission,
+            error: ambiguous
+              ? new CodexErrors.CodexAppServerTransportError({ detail: "closed", cause: null })
+              : CodexErrors.CodexAppServerRequestError.invalidRequest("rejected"),
+          });
+          assert.equal(yield* Ref.get(boundary.nativeTurnStartPendingRef), ambiguous);
+          const retry = yield* admitCodexTurnStartLifecycleBoundary(boundary).pipe(Effect.exit);
+          assert.equal(retry._tag, ambiguous ? "Failure" : "Success");
+        }
+      }),
+  );
+
+  effectIt.effect("serializes native start and manual compaction admission before either RPC", () =>
+    Effect.gen(function* () {
+      const boundary = yield* makeBoundary();
+      yield* Ref.update(boundary.sessionRef, (current) => ({
+        ...current,
+        status: "ready" as const,
+        activeTurnId: undefined,
+      }));
+      const results = yield* Effect.all(
+        [
+          admitCodexTurnStartLifecycleBoundary(boundary).pipe(Effect.exit),
+          requestCodexManualCompaction({
+            sessionRef: boundary.sessionRef,
+            pendingRef: boundary.manualCompactionPendingRef,
+            lifecycleEpochRef: boundary.rootLifecycleEpochRef,
+            semaphore: boundary.semaphore,
+            nativeTurnStartPendingRef: boundary.nativeTurnStartPendingRef,
+            request: () => Effect.void,
+          }).pipe(Effect.exit),
+        ],
+        { concurrency: "unbounded" },
+      );
+      assert.equal(results.filter((result) => result._tag === "Success").length, 1);
+      assert.notEqual(
+        yield* Ref.get(boundary.nativeTurnStartPendingRef),
+        yield* Ref.get(boundary.manualCompactionPendingRef),
+      );
+    }),
+  );
+
+  effectIt.effect("never lets a replacement-root ACK cross a newer native lifecycle or Stop", () =>
+    Effect.gen(function* () {
+      for (const scenario of ["newer", "closed", "failed-root", "compacting"] as const) {
+        const boundary = yield* makeBoundary();
+        const admission = yield* admitCodexTurnStartLifecycleBoundary(boundary);
+        if (scenario === "newer") {
+          yield* Ref.set(boundary.rootLifecycleEpochRef, Symbol());
+          yield* Ref.update(boundary.sessionRef, (current) => ({
+            ...current,
+            activeTurnId: TurnId.make("newer-native-root"),
+          }));
+        } else if (scenario === "closed") yield* Ref.set(boundary.closedRef, true);
+        else if (scenario === "compacting")
+          yield* Ref.set(boundary.manualCompactionPendingRef, true);
+        else {
+          yield* Ref.set(boundary.rootLifecycleEpochRef, Symbol());
+          yield* Ref.update(boundary.sessionRef, (current) => ({
+            ...current,
+            status: "error" as const,
+            activeTurnId: undefined,
+          }));
+        }
+        const before = yield* Ref.get(boundary.sessionRef);
+        assert.equal(
+          yield* acknowledgeCodexTurnStartLifecycleBoundary({
+            ...boundary,
+            ...admission,
+            turnId: nextTurnId,
+            acknowledgedAt: "2026-09-23T10:43:02.000Z",
+          }),
+          false,
+        );
+        assert.deepEqual(yield* Ref.get(boundary.sessionRef), before);
+      }
+    }),
+  );
 });
 
 describe("Codex steer processing diagnostics", () => {

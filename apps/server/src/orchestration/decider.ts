@@ -110,11 +110,14 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
   command,
   readModel,
   runtimeRecoveryBarrierVerified = false,
+  codexRootReplacementVerified = false,
 }: {
   readonly command: OrchestrationCommand;
   readonly readModel: OrchestrationReadModel;
   /** Only the engine's durable loss-marker/control-barrier read may set this. */
   readonly runtimeRecoveryBarrierVerified?: boolean;
+  /** Only the engine's serialized durable steer/control-barrier read may set this. */
+  readonly codexRootReplacementVerified?: boolean;
 }): Effect.fn.Return<DecideOrchestrationCommandResult, OrchestrationCommandInvariantError> {
   switch (command.type) {
     case "project.create": {
@@ -1136,11 +1139,39 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.session.set": {
-      yield* requireThread({
+      const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
+      const replacement = command.codexRootReplacement;
+      if (
+        replacement !== undefined &&
+        (!codexRootReplacementVerified ||
+          !String(command.commandId).startsWith("server:") ||
+          thread.archivedAt !== null ||
+          thread.deletedAt !== null ||
+          thread.session?.status !== "running" ||
+          thread.session.providerName !== "codex" ||
+          thread.session.activeTurnId !== replacement.expectedTurnId ||
+          thread.session.providerInstanceId !== replacement.providerInstanceId ||
+          (thread.latestTurn !== null && thread.latestTurn.turnId !== replacement.expectedTurnId) ||
+          command.session.threadId !== command.threadId ||
+          command.session.status !== "running" ||
+          command.session.providerName !== "codex" ||
+          command.session.providerInstanceId !== replacement.providerInstanceId ||
+          command.session.activeTurnId === null ||
+          command.session.activeTurnId === replacement.expectedTurnId)
+      ) {
+        // Inventory RPCs happen outside this serialized boundary. Neither a
+        // previously valid snapshot nor a late successful native ACK may
+        // override Stop, a newer turn, or a changed provider route admitted in
+        // the meantime. Keep the failure fixed and free of private identifiers.
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Codex completed-root replacement is no longer authorized.",
+        });
+      }
       return {
         ...withEventBase({
           aggregateKind: "thread",

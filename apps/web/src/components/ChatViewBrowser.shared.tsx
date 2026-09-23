@@ -5922,6 +5922,154 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       }
     });
 
+    it("rechecks a legacy completed-root queue once and preserves a fresh rejection without looping", async () => {
+      const activeTurnId = "turn-legacy-root-children-active" as TurnId;
+      const messageId = MessageId.make("message-legacy-root-retry");
+      const text = "Preserve this exact queued follow-up";
+      const baseSnapshot = createSnapshotForTargetUser({
+        targetMessageId: MessageId.make("original-root-user"),
+        targetText: "Original root work",
+        sessionStatus: "running",
+      });
+      const oldFailure = {
+        id: EventId.make("legacy-root-failure"),
+        tone: "error" as const,
+        kind: "provider.turn.steer.failed",
+        summary: "Provider steer queued",
+        payload: {
+          messageId,
+          intentSequence: 41,
+          retryableFollowUp: true,
+          recoveryBarrier: "newer-turn-active",
+        },
+        turnId: activeTurnId,
+        sequence: 42,
+        createdAt: isoAt(2_002),
+      };
+      const snapshot: OrchestrationReadModel = {
+        ...baseSnapshot,
+        threads: baseSnapshot.threads.map((thread) => ({
+          ...thread,
+          messages: [
+            ...thread.messages,
+            {
+              ...createUserMessage({ id: messageId, text, offsetSeconds: 2_000 }),
+              turnId: activeTurnId,
+            },
+          ],
+          activities: [
+            {
+              id: EventId.make("legacy-root-completion-deferred"),
+              tone: "info",
+              kind: "runtime.warning",
+              summary: "Runtime warning",
+              payload: {
+                message: "Codex root turn completed; waiting for 3 routed subagent threads.",
+                detail: { rootCompletedAt: isoAt(1_950), childThreadCount: 3 },
+              },
+              turnId: activeTurnId,
+              sequence: 40,
+              createdAt: isoAt(1_950),
+            },
+            oldFailure,
+          ],
+          latestTurn: {
+            turnId: activeTurnId,
+            state: "running",
+            requestedAt: isoAt(1_900),
+            startedAt: isoAt(1_901),
+            completedAt: null,
+            assistantMessageId: null,
+          },
+          session: { ...thread.session!, status: "running", activeTurnId, updatedAt: isoAt(2_003) },
+          updatedAt: isoAt(2_003),
+        })),
+      };
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot,
+        configureFixture: (testFixture) => {
+          testFixture.serverConfig = {
+            ...testFixture.serverConfig,
+            providers: testFixture.serverConfig.providers.map((provider) => ({
+              ...provider,
+              runtimeCapabilities: { liveSteer: "supported", threadGoals: "unsupported" },
+            })),
+          };
+        },
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 77 } : undefined,
+      });
+      const steerRequests = () =>
+        wsRequests.filter(
+          (request) =>
+            request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+            request.type === "thread.turn.steer",
+        );
+      try {
+        await vi.waitFor(() => expect(steerRequests()).toHaveLength(1));
+        expect(steerRequests()[0]?.message).toEqual({
+          messageId,
+          role: "user",
+          text,
+          attachments: [],
+        });
+        await vi.waitFor(() =>
+          expect(
+            document.querySelector('[aria-label="Follow-up steering into active turn"]'),
+          ).not.toBeNull(),
+        );
+
+        // Native state can change before the server reads it. A fresh guard
+        // rejection must restore the shelf once and never repeat the old
+        // generation's eligibility merely because child output keeps arriving.
+        const rejectedAt = new Date().toISOString();
+        for (let revision = 0; revision < 4; revision += 1) {
+          const thread = fixture.snapshot.threads[0]!;
+          const snapshotSequence = fixture.snapshot.snapshotSequence + 1;
+          const nextThread: OrchestrationReadModel["threads"][number] = {
+            ...thread,
+            messages: thread.messages.map((message) =>
+              message.id === messageId ? { ...message, completedAt: rejectedAt } : message,
+            ),
+            activities:
+              revision === 0
+                ? [
+                    ...thread.activities,
+                    {
+                      ...oldFailure,
+                      id: EventId.make("current-root-idle-recheck-rejected"),
+                      payload: {
+                        ...oldFailure.payload,
+                        intentSequence: 77,
+                        recoveryBarrier: "active-turn-not-idle",
+                      },
+                      sequence: 78,
+                      createdAt: rejectedAt,
+                    },
+                  ]
+                : thread.activities,
+            updatedAt: rejectedAt,
+          };
+          fixture.snapshot = { ...fixture.snapshot, snapshotSequence, threads: [nextThread] };
+          rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+            kind: "snapshot",
+            snapshot: { snapshotSequence, thread: nextThread },
+          });
+          await waitForLayout();
+        }
+        await vi.waitFor(() => {
+          expect(document.body.textContent).toContain("1 follow-up requeued");
+          expect(
+            document.querySelector('[aria-label="Follow-up steering into active turn"]'),
+          ).toBeNull();
+        });
+        expect(steerRequests()).toHaveLength(1);
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
     it("reconstructs more than 64 durable steer retries once after a reload", async () => {
       const activeTurnId = "turn-reload-retry-review" as TurnId;
       const baseSnapshot = createSnapshotForTargetUser({

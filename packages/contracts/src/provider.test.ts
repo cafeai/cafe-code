@@ -160,11 +160,13 @@ describe("ProviderSendTurnInput", () => {
       threadId: "thread-1",
       messageId: "message-steer-1",
       allowActiveTurnSteerFallback: false,
+      expectedCompletedRootTurnId: "completed-root",
       input: "recover this as a new turn only",
     });
 
     expect(parsed.messageId).toBe("message-steer-1");
     expect(parsed.allowActiveTurnSteerFallback).toBe(false);
+    expect(parsed.expectedCompletedRootTurnId).toBe("completed-root");
   });
 
   it("accepts claude modelSelection including ultrathink", () => {
@@ -187,6 +189,40 @@ describe("ProviderSendTurnInput", () => {
 });
 
 describe("providerInstanceId routing key (slice-2 invariant)", () => {
+  it("decodes optional native-root completion proof without requiring it from older daemons", () => {
+    const session = {
+      provider: "codex",
+      providerInstanceId: "codex",
+      status: "running",
+      runtimeMode: "full-access",
+      threadId: "thread-1",
+      activeTurnId: "completed-root",
+      createdAt: "2026-09-23T01:00:00Z",
+      updatedAt: "2026-09-23T02:00:00Z",
+    };
+    const proof = {
+      turnId: "completed-root",
+      providerThreadId: "native-thread",
+      observedAt: "2026-09-23T02:00:00Z",
+    };
+    expect(decodeProviderSession(session).codexRootTurnCompletion).toBeUndefined();
+    expect(
+      decodeProviderSession({ ...session, codexRootTurnCompletion: proof }).codexRootTurnCompletion,
+    ).toEqual(proof);
+    expect(() =>
+      decodeProviderSession({
+        ...session,
+        codexRootTurnCompletion: { ...proof, observedAt: 123 },
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeProviderSession({
+        ...session,
+        codexRootTurnCompletion: { ...proof, providerThreadId: "" },
+      }),
+    ).toThrow();
+  });
+
   it("decodes a ProviderSessionStartInput without providerInstanceId (legacy producer)", () => {
     const parsed = decodeProviderSessionStartInput({
       threadId: "thread-1",

@@ -1205,6 +1205,17 @@ const ThreadSessionSetCommand = Schema.Struct({
   threadId: ThreadId,
   session: OrchestrationSession,
   terminalTurnRecovery: Schema.optional(TerminalTurnRecoveryReason),
+  // Server-only admission proof for a replacement ACK. This is deliberately
+  // absent from the persisted event: the engine verifies the durable intent
+  // and current projection while serializing this command with user controls.
+  codexRootReplacement: Schema.optional(
+    Schema.Struct({
+      expectedTurnId: TurnId,
+      providerInstanceId: ProviderInstanceId,
+      messageId: MessageId,
+      intentSequence: NonNegativeInt,
+    }),
+  ),
   createdAt: IsoDateTime,
 });
 

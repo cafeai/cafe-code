@@ -5,6 +5,7 @@ import {
   MessageId,
   type ModelSelection,
   type OrchestrationMessage,
+  type OrchestrationCommand,
   type OrchestrationEvent,
   type OrchestrationProjectShell,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
@@ -47,6 +48,7 @@ import { increment, orchestrationEventsProcessedTotal } from "../../observabilit
 import { ProviderAdapterProcessError, ProviderAdapterRequestError } from "../../provider/Errors.ts";
 import type { ProviderServiceError } from "../../provider/Errors.ts";
 import { hasLiveProviderRuntimeOwner } from "../../provider/providerRuntimeOwnerEvidence.ts";
+import { getCodexRootTurnCompletion } from "../../provider/codexRootTurnCompletion.ts";
 import { makeProviderSessionTitle } from "../../provider/providerSessionTitle.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
@@ -867,6 +869,7 @@ const make = Effect.gen(function* () {
       | "turn-interrupt-requested"
       | "session-stop-requested"
       | "provider-liveness-unknown"
+      | "active-turn-not-idle"
       | "newer-turn-active";
   }) =>
     appendProviderFailureActivity({
@@ -903,6 +906,10 @@ const make = Effect.gen(function* () {
     readonly threadId: ThreadId;
     readonly session: OrchestrationSession;
     readonly terminalTurnRecovery?: "live-provider-continuation";
+    readonly codexRootReplacement?: Extract<
+      OrchestrationCommand,
+      { type: "thread.session.set" }
+    >["codexRootReplacement"];
     readonly createdAt: string;
   }) =>
     orchestrationEngine.dispatch({
@@ -912,6 +919,9 @@ const make = Effect.gen(function* () {
       session: input.session,
       ...(input.terminalTurnRecovery !== undefined
         ? { terminalTurnRecovery: input.terminalTurnRecovery }
+        : {}),
+      ...(input.codexRootReplacement !== undefined
+        ? { codexRootReplacement: input.codexRootReplacement }
         : {}),
       createdAt: input.createdAt,
     });
@@ -1834,14 +1844,19 @@ const make = Effect.gen(function* () {
       readonly threadId: ThreadId;
       readonly turnId: TurnId;
       readonly createdAt?: string;
+      readonly supersededCompletedRootTurnId?: TurnId;
+      readonly steerIntent?: { readonly messageId: MessageId; readonly intentSequence: number };
     }) {
-      const thread = yield* resolveThread(input.threadId);
       const providerSessions = yield* providerService
         .listSessions()
         .pipe(Effect.catchCause(() => Effect.succeed<ReadonlyArray<ProviderSession>>([])));
       const activeProviderSession = providerSessions.find(
         (session) => session.threadId === input.threadId,
       );
+      // Inventory can involve daemon I/O. Do not compare its result against a
+      // projection captured before that await: Stop/newer work may have landed.
+      // The command below repeats the exact comparison atomically at admission.
+      const thread = yield* resolveThread(input.threadId);
       const currentSession = thread?.session ?? null;
 
       if (
@@ -1864,10 +1879,37 @@ const make = Effect.gen(function* () {
         return;
       }
 
+      // Keep the aggregate root projected as running until native admission
+      // succeeds: publishing ready while children still run would let another
+      // queued message overtake this one. Only this exact recovery ACK, backed
+      // by a fresh same-instance native inventory, may replace that old root.
+      // A missing inventory or any different projected/provider turn retains
+      // the ordinary late-ACK fence below.
+      const replacesCompletedAggregateRoot =
+        input.supersededCompletedRootTurnId !== undefined &&
+        input.steerIntent !== undefined &&
+        currentSession?.providerName === "codex" &&
+        currentSession.status === "running" &&
+        currentSession.activeTurnId === input.supersededCompletedRootTurnId &&
+        activeProviderSession?.provider === "codex" &&
+        activeProviderSession.status === "running" &&
+        activeProviderSession.activeTurnId === input.turnId &&
+        activeProviderSession.providerInstanceId !== undefined &&
+        activeProviderSession.providerInstanceId === currentSession.providerInstanceId;
+
+      if (input.supersededCompletedRootTurnId !== undefined && !replacesCompletedAggregateRoot) {
+        // This guarded ACK is not a generic permission to restore running
+        // state. If native events already installed its root, no marker is
+        // needed; if Stop/newer work won, preserve that state and still record
+        // the external delivery receipt so recovery cannot resend the input.
+        return;
+      }
+
       if (
         currentSession?.status === "running" &&
         currentSession.activeTurnId !== null &&
-        currentSession.activeTurnId !== input.turnId
+        currentSession.activeTurnId !== input.turnId &&
+        !replacesCompletedAggregateRoot
       ) {
         yield* Effect.logWarning("provider command reactor skipped stale sendTurn running marker", {
           threadId: input.threadId,
@@ -1899,12 +1941,25 @@ const make = Effect.gen(function* () {
         DEFAULT_RUNTIME_MODE;
       // `sendTurn` returns an ACK from the provider boundary. For Codex this
       // can be a provisional turn id, while the later runtime notification is
-      // the authoritative provider-owned turn. Stamp this local marker at the
-      // original request/recovery time so projection monotonicity prefers the
-      // concrete runtime event when it arrives with its provider timestamp.
+      // the authoritative provider-owned turn. Retain the original intent time
+      // as metadata, not a universal provider ordering clock. Exact turn guards
+      // and serialized replacement admission, rather than timestamp ordering,
+      // prevent this recovery ACK from overwriting Stop or newer work.
       const updatedAt = input.createdAt ?? DateTime.formatIso(yield* DateTime.now);
 
-      yield* setThreadSession({
+      const codexRootReplacement =
+        replacesCompletedAggregateRoot &&
+        input.supersededCompletedRootTurnId !== undefined &&
+        input.steerIntent !== undefined &&
+        providerInstanceId !== undefined
+          ? {
+              expectedTurnId: input.supersededCompletedRootTurnId,
+              providerInstanceId,
+              messageId: input.steerIntent.messageId,
+              intentSequence: input.steerIntent.intentSequence,
+            }
+          : undefined;
+      const commitSession = setThreadSession({
         threadId: input.threadId,
         session: {
           threadId: input.threadId,
@@ -1917,7 +1972,21 @@ const make = Effect.gen(function* () {
           updatedAt,
         },
         createdAt: updatedAt,
+        ...(codexRootReplacement !== undefined ? { codexRootReplacement } : {}),
       });
+      yield* codexRootReplacement === undefined
+        ? commitSession
+        : commitSession.pipe(
+            Effect.catchTag("OrchestrationCommandInvariantError", () =>
+              // Admission rechecks the original durable steer intent and the
+              // exact projected root after all earlier commands. A rejected
+              // marker is safe; a native ACK must still settle its receipt.
+              Effect.logInfo("provider command reactor preserved newer state after root ACK", {
+                threadId: input.threadId,
+                outcome: "superseded-root-marker",
+              }),
+            ),
+          );
     },
   );
 
@@ -1934,6 +2003,7 @@ const make = Effect.gen(function* () {
       readonly intentSequence: number;
       readonly turn: ProviderTurnStartResult;
       readonly intentCreatedAt: string;
+      readonly supersededCompletedRootTurnId?: TurnId;
     }) {
       if (input.turn.clientCorrelationId !== undefined) {
         const acceptedAt = DateTime.formatIso(yield* DateTime.now);
@@ -1954,6 +2024,12 @@ const make = Effect.gen(function* () {
         threadId: input.threadId,
         turnId: input.turn.turnId,
         createdAt: input.intentCreatedAt,
+        ...(input.supersededCompletedRootTurnId !== undefined
+          ? {
+              supersededCompletedRootTurnId: input.supersededCompletedRootTurnId,
+              steerIntent: { messageId: input.messageId, intentSequence: input.intentSequence },
+            }
+          : {}),
       });
       return true;
     },
@@ -3322,11 +3398,34 @@ const make = Effect.gen(function* () {
       if (recoveryLiveness._tag === "unknown") {
         return yield* queue("provider-liveness-unknown");
       }
-      if (
-        recoveryLiveness._tag === "active" &&
-        (recoveryLiveness.activeTurnId !== expectedTurnId || input?.requireInactiveTurn === true)
-      ) {
-        return yield* queue("newer-turn-active");
+      if (recoveryLiveness._tag === "active") {
+        if (recoveryLiveness.activeTurnId !== expectedTurnId) {
+          return yield* queue("newer-turn-active");
+        }
+        if (input?.requireInactiveTurn === true) {
+          const rootCompletion = getCodexRootTurnCompletion(recoveryLiveness.localSession);
+          const binding = recoveryLiveness.durableBinding;
+          const payload = readRecord(binding?.runtimePayload);
+          const durableCursor = readRecord(binding?.resumeCursor);
+          // Completion is positive evidence from the currently queried native
+          // owner, not an inference from a quiet aggregate or persisted UI row.
+          // A live same-turn durable aggregate may lag its root completion;
+          // only a matching native thread and live owner can be superseded. General
+          // lifecycle/reaper callers still see the aggregate as active.
+          const matchingDurableOwner =
+            binding === undefined ||
+            (binding.status === "running" &&
+              binding.providerInstanceId === recoveryLiveness.localSession?.providerInstanceId &&
+              durableCursor?.threadId === rootCompletion?.providerThreadId &&
+              payload?.activeTurnId === expectedTurnId &&
+              hasLiveProviderRuntimeOwner(payload, Date.now()));
+          if (rootCompletion?.turnId !== expectedTurnId || !matchingDurableOwner) {
+            // Do not call the SAME active root a newer turn. This distinct
+            // barrier also prevents a legacy false-conflict queue retry from
+            // repeatedly using its historical completion hint after rejection.
+            return yield* queue("active-turn-not-idle");
+          }
+        }
       }
       if (expectedTurnId === null && recoveryLiveness._tag === "inactive") {
         const binding = recoveryLiveness.durableBinding;
@@ -3356,9 +3455,8 @@ const make = Effect.gen(function* () {
      * leaving startup recovery ambiguous. A successful Codex turn/start gets
      * a post-I/O, server-authored delivery receipt after the accepted turn is
      * materialized; the pre-I/O attempt marker protects that narrow ordering
-     * gap. If ProviderService discovers a newly active Codex turn and routes
-     * through steer instead, its opaque correlation produces the existing
-     * accepted-steer receipt instead of a false next-turn receipt.
+     * gap. Recovery is bound to the original target, so a newly active root
+     * must fail/queue rather than silently becoming a different steer target.
      */
     const deliverPersistedSteerAsNextTurn = Effect.fn("deliverPersistedSteerAsNextTurn")(
       function* (input: {
@@ -3368,7 +3466,7 @@ const make = Effect.gen(function* () {
         readonly providerHint?: string;
         readonly createdAt: string;
       }) {
-        const validation = yield* revalidateSteerIntentForProviderIo({
+        let validation = yield* revalidateSteerIntentForProviderIo({
           requireInactiveTurn: true,
         });
         if (validation === undefined) {
@@ -3404,74 +3502,90 @@ const make = Effect.gen(function* () {
 
           // The marker write is intentionally not treated as a lock. Re-read
           // Stop/newer-turn barriers after it commits and before provider I/O.
-          if (
-            (yield* revalidateSteerIntentForProviderIo({ requireInactiveTurn: true })) === undefined
-          ) {
+          validation = yield* revalidateSteerIntentForProviderIo({ requireInactiveTurn: true });
+          if (validation === undefined) {
             return;
           }
         }
 
-        yield* providerService.sendTurn(input.request).pipe(
-          Effect.matchCauseEffect({
-            onFailure: (cause) =>
-              isCodex
-                ? orchestrationEngine
-                    .dispatch(
-                      buildCodexSteerNextTurnQueuedCommand({
-                        threadId: event.payload.threadId,
-                        messageId: event.payload.messageId,
-                        intentSequence: event.sequence,
-                        staleTurnId: input.staleTurnId,
-                        reason: input.reason,
-                        createdAt: input.createdAt,
-                      }),
-                    )
-                    .pipe(Effect.retry({ times: 2 }))
-                : appendProviderFailureActivity({
+        const completedRoot =
+          validation.recoveryLiveness?._tag === "active"
+            ? getCodexRootTurnCompletion(validation.recoveryLiveness.localSession)
+            : undefined;
+        yield* providerService
+          .sendTurn({
+            ...input.request,
+            ...(isCodex ? { allowActiveTurnSteerFallback: false } : {}),
+            ...(completedRoot !== undefined && expectedTurnId !== null
+              ? {
+                  expectedCompletedRootTurnId: expectedTurnId,
+                }
+              : {}),
+          })
+          .pipe(
+            Effect.matchCauseEffect({
+              onFailure: (cause) =>
+                isCodex
+                  ? orchestrationEngine
+                      .dispatch(
+                        buildCodexSteerNextTurnQueuedCommand({
+                          threadId: event.payload.threadId,
+                          messageId: event.payload.messageId,
+                          intentSequence: event.sequence,
+                          staleTurnId: input.staleTurnId,
+                          reason: input.reason,
+                          createdAt: input.createdAt,
+                        }),
+                      )
+                      .pipe(Effect.retry({ times: 2 }))
+                  : appendProviderFailureActivity({
+                      threadId: event.payload.threadId,
+                      kind: "provider.turn.steer.failed",
+                      summary: "Provider steer queued",
+                      detail: `Automatic steer delivery failed: ${formatFailureDetail(cause)}`,
+                      turnId: input.staleTurnId,
+                      createdAt: input.createdAt,
+                      messageId: event.payload.messageId,
+                      intentSequence: event.sequence,
+                      retryableFollowUp: true,
+                    }),
+              onSuccess: (turn) =>
+                Effect.gen(function* () {
+                  // Materialize the provider-accepted turn before attaching the
+                  // receipt to it. The pre-I/O attempt marker already closes the
+                  // crash window, so this ordering avoids an invalid activity
+                  // reference without permitting startup redelivery.
+                  yield* reconcileAcceptedSendTurnResult({
                     threadId: event.payload.threadId,
-                    kind: "provider.turn.steer.failed",
-                    summary: "Provider steer queued",
-                    detail: `Automatic steer delivery failed: ${formatFailureDetail(cause)}`,
-                    turnId: input.staleTurnId,
-                    createdAt: input.createdAt,
                     messageId: event.payload.messageId,
                     intentSequence: event.sequence,
-                    retryableFollowUp: true,
-                  }),
-            onSuccess: (turn) =>
-              Effect.gen(function* () {
-                // Materialize the provider-accepted turn before attaching the
-                // receipt to it. The pre-I/O attempt marker already closes the
-                // crash window, so this ordering avoids an invalid activity
-                // reference without permitting startup redelivery.
-                yield* reconcileAcceptedSendTurnResult({
-                  threadId: event.payload.threadId,
-                  messageId: event.payload.messageId,
-                  intentSequence: event.sequence,
-                  turn,
-                  intentCreatedAt: event.payload.createdAt,
-                });
-                if (isCodex && turn.clientCorrelationId === undefined) {
-                  // This activity is the durable commit point for the external
-                  // provider side effect. Retry the stable command locally so a
-                  // transient SQLite contention does not reopen the intent on
-                  // the next backend start.
-                  yield* orchestrationEngine
-                    .dispatch(
-                      buildCodexSteerDeliveredActivityCommand({
-                        threadId: event.payload.threadId,
-                        messageId: event.payload.messageId,
-                        intentSequence: event.sequence,
-                        deliveredTurnId: turn.turnId,
-                        reason: input.reason,
-                        createdAt: input.createdAt,
-                      }),
-                    )
-                    .pipe(Effect.retry({ times: 2 }));
-                }
-              }),
-          }),
-        );
+                    turn,
+                    intentCreatedAt: event.payload.createdAt,
+                    ...(completedRoot !== undefined && expectedTurnId !== null
+                      ? { supersededCompletedRootTurnId: expectedTurnId }
+                      : {}),
+                  });
+                  if (isCodex && turn.clientCorrelationId === undefined) {
+                    // This activity is the durable commit point for the external
+                    // provider side effect. Retry the stable command locally so a
+                    // transient SQLite contention does not reopen the intent on
+                    // the next backend start.
+                    yield* orchestrationEngine
+                      .dispatch(
+                        buildCodexSteerDeliveredActivityCommand({
+                          threadId: event.payload.threadId,
+                          messageId: event.payload.messageId,
+                          intentSequence: event.sequence,
+                          deliveredTurnId: turn.turnId,
+                          reason: input.reason,
+                          createdAt: input.createdAt,
+                        }),
+                      )
+                      .pipe(Effect.retry({ times: 2 }));
+                  }
+                }),
+            }),
+          );
       },
     );
 
@@ -3495,6 +3609,7 @@ const make = Effect.gen(function* () {
           "stale-steer",
           event.payload.threadId,
           event.payload.messageId,
+          event.sequence,
           input.recovery,
         ].join(":");
         if (yield* hasHandledStaleSteerRecoveryRecently(recoveryKey)) {
@@ -3833,11 +3948,10 @@ const make = Effect.gen(function* () {
       });
     }
 
-    const recoverStaleCodexSteerAsTurnStart = (_cause: Cause.Cause<ProviderServiceError>) =>
+    const recoverStaleCodexSteerAsTurnStart = () =>
       Effect.gen(function* () {
-        if (
-          (yield* revalidateSteerIntentForProviderIo({ requireInactiveTurn: true })) === undefined
-        ) {
+        const validation = yield* revalidateSteerIntentForProviderIo({ requireInactiveTurn: true });
+        if (validation === undefined) {
           return;
         }
         const observedAt = DateTime.formatIso(yield* DateTime.now);
@@ -3847,6 +3961,7 @@ const make = Effect.gen(function* () {
           event.payload.threadId,
           event.payload.messageId,
           staleTurnId,
+          event.sequence,
         ].join(":");
         if (yield* hasHandledStaleSteerRecoveryRecently(recoveryKey)) {
           return;
@@ -3863,7 +3978,7 @@ const make = Effect.gen(function* () {
           kind: "runtime.warning",
           summary: "Steer retried as next turn",
           detail:
-            "Codex reported that the cached active turn had already ended. Cafe Code cleared the stale active-turn pointer and submitted this message as the next turn, matching upstream Codex CLI/TUI active-turn race handling.",
+            "Codex's native root turn has ended. Cafe Code is delivering this saved message as the next native turn while preserving any remaining subagent work.",
           turnId: staleTurnId,
           createdAt: observedAt,
           payload: {
@@ -3875,17 +3990,22 @@ const make = Effect.gen(function* () {
           },
         });
 
-        yield* setThreadSession({
-          threadId: event.payload.threadId,
-          session: {
-            ...activeSession,
-            status: "ready",
-            activeTurnId: null,
-            lastError: null,
-            updatedAt: observedAt,
-          },
-          createdAt: observedAt,
-        });
+        if (validation.recoveryLiveness?._tag !== "active") {
+          // Only repair a genuinely stale aggregate pointer. Publishing idle
+          // while children remain active would release the renderer queue and
+          // let its next input overtake this already-admitted saved message.
+          yield* setThreadSession({
+            threadId: event.payload.threadId,
+            session: {
+              ...activeSession,
+              status: "ready",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: observedAt,
+            },
+            createdAt: observedAt,
+          });
+        }
 
         const sendTurnRequest = yield* buildSendTurnRequestForThread({
           threadId: event.payload.threadId,
@@ -3928,6 +4048,19 @@ const make = Effect.gen(function* () {
           ),
         ),
       );
+
+    // Avoid a knowingly doomed RPC when the fresh runtime has already observed
+    // the native root completion. The helper rechecks owner/Stop/newer-intent
+    // fences and pins this exact root through the final provider admission.
+    // Aggregate children continue streaming; they are not the input target.
+    if (
+      isCodexSteerIntent &&
+      initialIntentValidation.recoveryLiveness?._tag === "active" &&
+      getCodexRootTurnCompletion(initialIntentValidation.recoveryLiveness.localSession)?.turnId ===
+        expectedTurnId
+    ) {
+      return yield* recoverStaleCodexSteerAsTurnStart();
+    }
 
     // Codex app-server's `turn/steer` is intentionally not a second
     // `turn/start`: upstream requires the expected active turn id, rejects
@@ -3972,7 +4105,7 @@ const make = Effect.gen(function* () {
         Effect.matchCauseEffect({
           onFailure: (cause) => {
             if (isCodexNoActiveTurnToSteerFailure(cause)) {
-              return recoverStaleCodexSteerAsTurnStart(cause);
+              return recoverStaleCodexSteerAsTurnStart();
             }
             const codexNonSteerableTurnKind = detectCodexNonSteerableTurnKind(cause);
             const unsupportedLiveSteer = isUnsupportedLiveSteerFailure(cause);
