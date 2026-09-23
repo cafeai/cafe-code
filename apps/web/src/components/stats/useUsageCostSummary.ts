@@ -34,7 +34,7 @@ export interface UsageCostSummary {
   readonly outputTokens: number;
   /** Share of input served from cache, 0..1, or null when there is no input. */
   readonly cachedShare: number | null;
-  /** USD not spent because the cache served input at its lower rate. */
+  /** Net USD saved by cache reads after write premiums; can be negative. */
   readonly cacheSavings: number;
   /** The raw response, for surfaces rendering the full cost panels. */
   readonly raw: UsageStatsGetResult | null;

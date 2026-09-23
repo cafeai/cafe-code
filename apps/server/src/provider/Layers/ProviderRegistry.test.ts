@@ -2031,6 +2031,111 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
     });
 
     describe("checkCodexCliProviderStatus", () => {
+      it.effect("explains missing native Codex dependencies without exposing launcher output", () =>
+        Effect.gen(function* () {
+          // The same launcher failure can occur on any official platform and
+          // some command wrappers forward stderr to stdout. All variants must
+          // remain a version-phase failure, never an account/login failure.
+          for (const target of [
+            "darwin-arm64",
+            "darwin-x64",
+            "linux-arm64",
+            "linux-x64",
+            "win32-arm64",
+            "win32-x64",
+          ]) {
+            for (const outputChannel of ["stderr", "stdout"] as const) {
+              const output =
+                "file:///private/user/provider-install/bin/codex.js:107\n" +
+                `Error: Missing optional dependency @openai/codex-${target}. ` +
+                "Reinstall Codex: untrusted-provider-command\n" +
+                "    at findCodexExecutable (file:///private/user/provider-install/bin/codex.js:107:9)\n" +
+                "private-secret-sentinel\nNode.js v25.9.0\n";
+              const { layer, commands } = recordingMockSpawnerLayer(() => ({
+                stdout: outputChannel === "stdout" ? output : "",
+                stderr: outputChannel === "stderr" ? output : "",
+                code: 1,
+              }));
+              const status = yield* checkCodexCliProviderStatus(defaultCodexSettings).pipe(
+                Effect.provide(layer),
+              );
+
+              assert.strictEqual(status.installed, true);
+              assert.strictEqual(status.status, "error");
+              assert.strictEqual(status.version, null);
+              assert.deepStrictEqual(status.auth, { status: "unknown" });
+              assert.strictEqual(
+                status.message,
+                "Codex's installation is incomplete: its native executable is missing. Reinstall Codex with optional dependencies enabled, or choose a working Codex binary in provider settings. Account authentication could not be checked.",
+              );
+              assert.deepStrictEqual(
+                commands.map((command) => command.args),
+                [["--version"]],
+              );
+              const serialized = JSON.stringify(status);
+              for (const privateDetail of [
+                "/private/user",
+                "untrusted-provider-command",
+                "private-secret-sentinel",
+                "25.9.0",
+              ]) {
+                assert.notInclude(serialized, privateDetail);
+              }
+            }
+          }
+        }),
+      );
+
+      it.effect("does not classify unrelated missing packages as a native Codex dependency", () =>
+        Effect.gen(function* () {
+          for (const detail of [
+            "Missing optional dependency @openai/codex-darwin-arm64-unrelated.",
+            "Unknown launcher failure with private-secret-sentinel at /private/user/provider-install; Node.js v25.9.0",
+          ]) {
+            const status = yield* checkCodexCliProviderStatus(defaultCodexSettings).pipe(
+              Effect.provide(mockSpawnerLayer(() => ({ stdout: detail, stderr: detail, code: 1 }))),
+            );
+            assert.strictEqual(status.status, "error");
+            assert.strictEqual(status.version, null);
+            assert.strictEqual(
+              status.message,
+              "Codex CLI is installed but failed to run. Check its installation and the binary selected in provider settings.",
+            );
+            assert.notInclude(JSON.stringify(status), detail);
+          }
+        }),
+      );
+
+      it.effect("does not expose a failed version probe's spawn exception", () =>
+        Effect.gen(function* () {
+          const status = yield* checkCodexCliProviderStatus(defaultCodexSettings).pipe(
+            Effect.provide(
+              Layer.succeed(
+                ChildProcessSpawner.ChildProcessSpawner,
+                ChildProcessSpawner.make(() =>
+                  Effect.fail(
+                    PlatformError.systemError({
+                      _tag: "PermissionDenied",
+                      module: "ChildProcess",
+                      method: "spawn",
+                      description: "private-secret-sentinel at /private/user/provider-install",
+                    }),
+                  ),
+                ),
+              ),
+            ),
+          );
+          assert.strictEqual(status.status, "error");
+          assert.strictEqual(status.version, null);
+          assert.strictEqual(
+            status.message,
+            "Failed to execute the Codex CLI health check. Check the binary selected in provider settings.",
+          );
+          assert.notInclude(JSON.stringify(status), "private-secret-sentinel");
+          assert.notInclude(JSON.stringify(status), "/private/user");
+        }),
+      );
+
       it("classifies only the bounded login-status timeout as inconclusive", () => {
         const timeoutSnapshot = {
           instanceId: ProviderInstanceId.make("codex"),
@@ -2085,6 +2190,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             status.models.map((model) => model.slug),
             [
               "gpt-6-astra",
+              "gpt-6-sol",
+              "gpt-6-luna",
               "gpt-5.6-sol",
               "gpt-5.6-terra",
               "gpt-5.6-luna",
@@ -2605,7 +2712,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             version: "2.1.110",
             slugs: [] as Array<string>,
             upgrade:
-              "Claude Code v2.1.110 is too old for Claude Opus 5. Upgrade to v2.1.219 or newer to access it.",
+              "Claude Code v2.1.110 is too old for Claude Opus 5.5. Upgrade to v2.1.280 or newer to access it.",
           },
           { version: "2.1.111", slugs: ["claude-opus-4-7"] },
           { version: "2.1.154", slugs: ["claude-opus-4-7", "claude-opus-4-8"] },
@@ -2638,7 +2745,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               "claude-sonnet-5",
             ],
             upgrade:
-              "Claude Code v2.1.256 is too old for Claude Fable 5.1. Upgrade to v2.1.257 or newer to access it.",
+              "Claude Code v2.1.256 is too old for Claude Opus 5.5. Upgrade to v2.1.280 or newer to access it.",
           },
           {
             version: "2.1.257",
@@ -2651,8 +2758,34 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               "claude-sonnet-5",
             ],
           },
+          {
+            version: "2.1.279",
+            slugs: [
+              "claude-opus-5",
+              "claude-fable-5-1",
+              "claude-opus-4-7",
+              "claude-opus-4-8",
+              "claude-fable-5",
+              "claude-sonnet-5",
+            ],
+            upgrade:
+              "Claude Code v2.1.279 is too old for Claude Opus 5.5. Upgrade to v2.1.280 or newer to access it.",
+          },
+          {
+            version: "2.1.280",
+            slugs: [
+              "claude-opus-5-5",
+              "claude-opus-5",
+              "claude-fable-5-1",
+              "claude-opus-4-7",
+              "claude-opus-4-8",
+              "claude-fable-5",
+              "claude-sonnet-5",
+            ],
+          },
         ];
         const gatedSlugs = [
+          "claude-opus-5-5",
           "claude-opus-5",
           "claude-fable-5-1",
           "claude-opus-4-7",
@@ -2788,6 +2921,40 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           )
           .map((model) => model.slug);
         assert.deepStrictEqual(fastModeSlugs, ["claude-opus-5", "claude-opus-4-8"]);
+
+        const opus55 = getBuiltInClaudeModelsForVersion("2.1.280").find(
+          (model) => model.slug === "claude-opus-5-5",
+        );
+        const opus55Descriptors = opus55?.capabilities?.optionDescriptors ?? [];
+        const opus55Effort = opus55Descriptors.find((descriptor) => descriptor.id === "effort");
+        assert.deepStrictEqual(
+          opus55Effort?.type === "select"
+            ? {
+                efforts: opus55Effort.options.map((option) => option.id),
+                currentValue: opus55Effort.currentValue,
+                default: opus55Effort.options.find((option) => option.isDefault)?.id,
+              }
+            : undefined,
+          {
+            efforts: ["low", "medium", "high", "xhigh", "max"],
+            currentValue: "medium",
+            default: "medium",
+          },
+        );
+        assert.includeDeepMembers(
+          [...opus55Descriptors],
+          [
+            { id: "fastMode", label: "Fast Mode", type: "boolean" },
+            {
+              id: "contextWindow",
+              label: "Context Window",
+              type: "select",
+              options: [{ id: "1m", label: "1M", isDefault: true }],
+              currentValue: "1m",
+            },
+          ],
+        );
+        assert.isUndefined(formatClaudeModelUpgradeMessage("2.1.280"));
 
         for (const model of getBuiltInClaudeModelsForVersion("2.1.219")) {
           const descriptors = model.capabilities?.optionDescriptors ?? [];

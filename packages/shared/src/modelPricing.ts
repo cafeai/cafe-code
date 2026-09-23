@@ -48,10 +48,22 @@ export interface TokenCountsForCost {
  * expensive model's traffic.
  */
 const BUNDLED_RATES: ReadonlyArray<readonly [prefix: string, rate: ModelRate]> = [
-  // Anthropic
+  // Anthropic standard global rates, verified 2026-09-23:
+  // https://platform.claude.com/docs/en/about-claude/pricing
+  // The ledger does not preserve cache TTL. These are 5-minute cache-write
+  // rates; one-hour writes, Fast mode and regional processing remain outside
+  // this standard-rate estimate, just like per-request context adjustments.
+  ["claude-opus-5-5", { input: 4, cachedInput: 0.2, cacheWrite: 5, output: 20 }],
+  ["claude-opus-5", { input: 5, cachedInput: 0.5, cacheWrite: 6.25, output: 25 }],
+  ["claude-opus-4-8", { input: 5, cachedInput: 0.5, cacheWrite: 6.25, output: 25 }],
+  ["claude-opus-4-7", { input: 5, cachedInput: 0.5, cacheWrite: 6.25, output: 25 }],
+  ["claude-opus-4-6", { input: 5, cachedInput: 0.5, cacheWrite: 6.25, output: 25 }],
+  ["claude-opus-4-5", { input: 5, cachedInput: 0.5, cacheWrite: 6.25, output: 25 }],
   ["claude-opus-4", { input: 15, cachedInput: 1.5, cacheWrite: 18.75, output: 75 }],
   ["claude-opus", { input: 15, cachedInput: 1.5, cacheWrite: 18.75, output: 75 }],
+  ["claude-sonnet-5", { input: 2, cachedInput: 0.2, cacheWrite: 2.5, output: 10 }],
   ["claude-sonnet", { input: 3, cachedInput: 0.3, cacheWrite: 3.75, output: 15 }],
+  ["claude-haiku-4-5", { input: 1, cachedInput: 0.1, cacheWrite: 1.25, output: 5 }],
   ["claude-haiku", { input: 0.8, cachedInput: 0.08, cacheWrite: 1, output: 4 }],
   // Fable 5.1 cuts cache reads from 0.1x to 0.025x of base input, so keep its
   // longer prefix separate from the Fable 5 family fallback.
@@ -65,6 +77,16 @@ const BUNDLED_RATES: ReadonlyArray<readonly [prefix: string, rate: ModelRate]> =
   // Fast uses 2x applicable rates. Those request-level dimensions are absent
   // from the usage ledger, so this entry is explicitly the standard baseline.
   ["gpt-6-astra", { input: 10, cachedInput: 1, cacheWrite: 12.5, output: 50 }],
+  // Released 2026-09-22; https://developers.openai.com/api/docs/pricing.
+  // Keep distinct prefixes so new Sol/Luna usage cannot inherit GPT-5 rates.
+  ["gpt-6-sol", { input: 2, cachedInput: 0.2, cacheWrite: 2.5, output: 10 }],
+  ["gpt-6-luna", { input: 0.1, cachedInput: 0.01, cacheWrite: 0.125, output: 0.5 }],
+  // Verified 2026-09-23 against each model's official API page. GPT-5.6
+  // remains selectable during rollout and Luna is the metadata-helper default.
+  // Sol's promotional pricing is promised through at least 2026-11-21.
+  ["gpt-5.6-sol", { input: 4, cachedInput: 0.4, cacheWrite: 5, output: 20 }],
+  ["gpt-5.6-terra", { input: 2, cachedInput: 0.2, cacheWrite: 2.5, output: 12 }],
+  ["gpt-5.6-luna", { input: 0.2, cachedInput: 0.02, cacheWrite: 0.25, output: 1.2 }],
   ["gpt-5", { input: 1.25, cachedInput: 0.125, cacheWrite: 1.25, output: 10 }],
   ["gpt-4.1", { input: 2, cachedInput: 0.5, cacheWrite: 2, output: 8 }],
   ["gpt-4o", { input: 2.5, cachedInput: 1.25, cacheWrite: 2.5, output: 10 }],
@@ -147,8 +169,9 @@ export interface CostRollup {
   readonly unpricedTokens: number;
   /**
    * What a run would have cost with no cache at all, minus what it did cost.
-   * This is the headline saving figure and is only meaningful for rows that
-   * actually carry cache counters.
+   * Cache-write premiums are deducted from read discounts. This can be
+   * negative while a cache is being populated, before later reads pay back
+   * the write premium. Meaningful only for rows carrying cache counters.
    */
   readonly cacheSavings: number;
 }
@@ -191,11 +214,15 @@ export function rollUpCost(
     const actual = computeModelCost(entry, rate);
     cost += actual;
 
-    // Everything the cache served, charged as if it had been fresh input.
+    // Compare the same processed input with caching disabled: cache reads
+    // save the difference from fresh input, while writes pay a premium over
+    // fresh input. Preserve negative values so a write-heavy session cannot
+    // look like it has already realized the later cache-read saving.
     const cached = Math.max(0, entry.cachedInputTokens);
-    if (cached > 0) {
-      cacheSavings += (cached * (rate.input - rate.cachedInput)) / PER_MILLION;
-    }
+    const written = Math.max(0, entry.cacheWriteInputTokens);
+    cacheSavings +=
+      (cached * (rate.input - rate.cachedInput) + written * (rate.input - rate.cacheWrite)) /
+      PER_MILLION;
   }
 
   return { cost, pricedTokens, unpricedTokens, cacheSavings };

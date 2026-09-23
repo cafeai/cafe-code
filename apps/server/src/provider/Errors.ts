@@ -77,6 +77,33 @@ export class ProviderAdapterRequestError extends Schema.TaggedErrorClass<Provide
 }
 
 /**
+ * A rewind crossed its native mutation boundary, but its durable outcome could
+ * not be established. This tag must survive the daemon RPC boundary: treating
+ * it as an ordinary refusal would restore files ahead of possibly truncated
+ * provider history. Carry no raw provider error or native session identity.
+ */
+export class ProviderAdapterRewindOutcomeUnknownError extends Schema.TaggedErrorClass<ProviderAdapterRewindOutcomeUnknownError>()(
+  "ProviderAdapterRewindOutcomeUnknownError",
+  {},
+) {
+  override get message(): string {
+    return "The provider rewind outcome could not be verified. The target workspace and recovery checkpoint were retained; stop this thread and inspect its history before continuing or retrying.";
+  }
+}
+
+/** Recognize the same finite outcome locally and after daemon error wrapping. */
+export function isProviderRewindOutcomeUnknown(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  if ("_tag" in error && error._tag === "ProviderAdapterRewindOutcomeUnknownError") return true;
+  return (
+    "_tag" in error &&
+    error._tag === "ProviderAdapterRequestError" &&
+    "remoteErrorTag" in error &&
+    error.remoteErrorTag === "ProviderAdapterRewindOutcomeUnknownError"
+  );
+}
+
+/**
  * ProviderAdapterProcessError - Provider process lifecycle failure.
  */
 export class ProviderAdapterProcessError extends Schema.TaggedErrorClass<ProviderAdapterProcessError>()(
@@ -263,6 +290,7 @@ export type ProviderAdapterError =
   | ProviderAdapterSessionNotFoundError
   | ProviderAdapterSessionClosedError
   | ProviderAdapterRequestError
+  | ProviderAdapterRewindOutcomeUnknownError
   | ProviderAdapterProcessError
   | ProviderSubagentDetailReadError;
 

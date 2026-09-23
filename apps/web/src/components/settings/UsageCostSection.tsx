@@ -500,12 +500,12 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
         />
         <StatTile
           id="cache-savings"
-          label="Cache savings (USD)"
+          label="Net cache savings (USD)"
           value={formatUsd(view.rollup.cacheSavings)}
           detail={
-            view.rollup.cost > 0
-              ? `${(view.rollup.cacheSavings / view.rollup.cost).toFixed(1)}x the raw cost`
-              : undefined
+            view.rollup.cacheSavings < 0
+              ? "Cache writes cost more than reads have saved"
+              : "Read discounts minus cache-write premiums"
           }
         />
       </div>
@@ -590,7 +590,7 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
               </dd>
             </div>
             <div className="flex items-baseline gap-2">
-              <dt className="text-muted-foreground">Cache savings (USD)</dt>
+              <dt className="text-muted-foreground">Net cache savings (USD)</dt>
               <dd
                 className="ml-auto break-words text-right tabular-nums [overflow-wrap:anywhere]"
                 data-usage-cost-quality-cache-savings="true"

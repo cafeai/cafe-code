@@ -164,6 +164,42 @@ describe("Codex picker model/list refresh", () => {
     expect(models.filter((model) => model.slug === "gpt-6-astra")).toHaveLength(1);
   });
 
+  it.each([
+    ["gpt-6-sol", "GPT-6-Sol", ["low", "medium", "high", "xhigh", "max", "ultra"]],
+    ["gpt-6-luna", "GPT-6-Luna", ["low", "medium", "high", "xhigh", "max"]],
+  ] as const)(
+    "provides %s fallback controls without replacing a live catalogue",
+    (slug, name, efforts) => {
+      const fallback = fallbackCodexModelsFromSettings(
+        decodeCodexSettings({ customModels: [slug] }),
+      );
+      expect(fallback.filter((model) => model.slug === slug)).toHaveLength(1);
+      const row = fallback.find((model) => model.slug === slug);
+      expect(row).toMatchObject({ slug, name, isCustom: false });
+      const reasoning = row?.capabilities?.optionDescriptors?.find(
+        (option) => option.id === "reasoningEffort",
+      );
+      expect(
+        reasoning?.type === "select" ? reasoning.options.map((option) => option.id) : undefined,
+      ).toEqual(efforts);
+      expect(reasoning?.currentValue).toBe("medium");
+      expect(row?.capabilities?.optionDescriptors).toContainEqual({
+        id: "fastMode",
+        label: "Fast Mode",
+        type: "boolean",
+      });
+
+      const live = { slug, name: "Account model", isCustom: false, capabilities: null };
+      expect(finalizeCodexModelListRefresh([live], [slug])).toEqual([live]);
+      const other = { ...live, slug: "other" };
+      expect(finalizeCodexModelListRefresh([other], [])).toEqual([other]);
+      expect(finalizeCodexModelListRefresh([other], [slug])?.[1]).toEqual({
+        ...row,
+        isCustom: true,
+      });
+    },
+  );
+
   it("reads bounded cursor pages in provider order", async () => {
     const payloads: CodexSchema.V2ModelListParams[] = [];
     const client = makeModelListClient((payload) =>

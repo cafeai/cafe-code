@@ -137,7 +137,12 @@ const OPENCODE_DRIVER_KIND = ProviderDriverKind.make("opencode");
 // Codex rust-v0.153.4's bundled catalog defaults to Astra. This is only the
 // missing-selection fallback; explicit project/thread model slugs are retained.
 export const DEFAULT_MODEL = "gpt-6-astra";
-export const DEFAULT_GIT_TEXT_GENERATION_MODEL = "gpt-5.4-mini";
+// GPT-5.4 Mini retired from Codex ChatGPT sign-in on 2026-08-31. The existing
+// GPT-5.6 Luna catalogue remains available during the GPT-6 rollout, so helpers
+// can use a supported small model without requiring a newly entitled account.
+// https://learn.chatgpt.com/docs/models
+// This applies only to absent selections; explicitly saved models are retained.
+export const DEFAULT_GIT_TEXT_GENERATION_MODEL = "gpt-5.6-luna";
 
 export const DEFAULT_MODEL_BY_PROVIDER: Partial<Record<ProviderDriverKind, string>> = {
   [CODEX_DRIVER_KIND]: DEFAULT_MODEL,
@@ -173,13 +178,24 @@ export const MODEL_SLUG_ALIASES_BY_PROVIDER: Partial<
     "gpt-5.3-spark": "gpt-5.3-codex-spark",
   },
   [CLAUDE_DRIVER_KIND]: {
-    default: "claude-opus-5",
-    opus: "claude-opus-5",
+    // Claude Code 2.1.280 promotes its moving Opus alias to 5.5. Explicit
+    // Opus 5 selections remain pinned; this is not a stored-thread migration.
+    // https://code.claude.com/docs/en/model-config
+    default: "claude-opus-5-5",
+    opus: "claude-opus-5-5",
+    "opus[1m]": "claude-opus-5-5",
+    "opus-5.5": "claude-opus-5-5",
+    "claude-opus-5.5": "claude-opus-5-5",
+    "opus-5-5": "claude-opus-5-5",
+    "opus5.5": "claude-opus-5-5",
+    opus55: "claude-opus-5-5",
+    opus_5_5: "claude-opus-5-5",
+    "claude-opus-5-5[1m]": "claude-opus-5-5",
+    "opus-5-5[1m]": "claude-opus-5-5",
     opus5: "claude-opus-5",
     "opus-5": "claude-opus-5",
     opus_5: "claude-opus-5",
     "claude-opus-5[1m]": "claude-opus-5",
-    "opus[1m]": "claude-opus-5",
     "fable-5.1": "claude-fable-5-1",
     "claude-fable-5.1": "claude-fable-5-1",
     "fable-5-1": "claude-fable-5-1",

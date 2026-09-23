@@ -2,8 +2,9 @@ import type { UsageAccountingModel, UsageAccountingSnapshot } from "@cafecode/co
 
 /**
  * Official contract: https://code.claude.com/docs/en/agent-sdk/cost-tracking
- * `modelUsage` is cumulative for one query(), including children/sidechains;
- * a new query or conversation reset begins another epoch. Assistant message
+ * `modelUsage` includes children/sidechains. Claude Code 2.1.277+ also restores
+ * saved totals on resume/fork, so each Cafe query epoch subtracts its exact
+ * pre-launch baseline. A conversation reset starts from zero. Assistant message
  * IDs identify API responses, even when parallel tools produce several SDK
  * messages. Their input/cache counts are usable; their output is a placeholder.
  * Keep this billing state separate from the live primary context-window meter.
@@ -17,7 +18,13 @@ const FIELDS = [
   "outputTokens",
   "reasoningOutputTokens",
 ] as const;
-type Counts = { -readonly [K in Exclude<keyof UsageAccountingModel, "model">]: number };
+export type ClaudeUsageCounts = {
+  -readonly [K in Exclude<keyof UsageAccountingModel, "model">]: number;
+};
+type Counts = ClaudeUsageCounts;
+export type ClaudeUsageBaseline =
+  | { readonly status: "known"; readonly models: ReadonlyMap<string, Counts> }
+  | { readonly status: "unavailable" };
 const zero = (): Counts => ({
   inputTokens: 0,
   cachedInputTokens: 0,
@@ -38,6 +45,14 @@ const modelName = (value: unknown): string | undefined =>
   typeof value === "string" && /^[a-zA-Z0-9][a-zA-Z0-9._[\]-]{0,255}$/.test(value.trim())
     ? value.trim()
     : undefined;
+const attributedModelName = (
+  rawModel: string,
+  usage: Record<string, unknown>,
+  published: ReadonlyMap<string, Counts>,
+): string | undefined => {
+  const rawName = modelName(rawModel);
+  return rawName && published.has(rawName) ? rawName : (modelName(usage.canonicalModel) ?? rawName);
+};
 const add = (left: number, right: number) => Math.min(Number.MAX_SAFE_INTEGER, left + right);
 
 export interface ClaudeUsageAccounting {
@@ -49,9 +64,18 @@ export interface ClaudeUsageAccounting {
   readonly published: Map<string, Counts>;
   incomplete: boolean;
   completeness: UsageAccountingSnapshot["completeness"] | undefined;
+  /** Undefined means restored history has not yet been safely separated. */
+  baseline: ReadonlyMap<string, Counts> | undefined;
+  readonly resumeBaseline: ClaudeUsageBaseline | undefined;
+  awaitingVersion: boolean;
+  baselineIncomplete: boolean;
+  readonly carried: Map<string, Counts>;
 }
 
-export const makeClaudeUsageAccounting = (scopeId: string): ClaudeUsageAccounting => ({
+export const makeClaudeUsageAccounting = (
+  scopeId: string,
+  resumeBaseline?: ClaudeUsageBaseline,
+): ClaudeUsageAccounting => ({
   scopeId,
   revision: 0,
   seenRequestIds: new Set(),
@@ -60,13 +84,36 @@ export const makeClaudeUsageAccounting = (scopeId: string): ClaudeUsageAccountin
   published: new Map(),
   incomplete: false,
   completeness: undefined,
+  baseline: resumeBaseline ? undefined : new Map(),
+  resumeBaseline,
+  awaitingVersion: resumeBaseline !== undefined,
+  baselineIncomplete: false,
+  carried: new Map(),
 });
+
+/** Use the configured CLI's own init version, never the imported SDK's pin. */
+export function configureClaudeUsageVersion(state: ClaudeUsageAccounting, version: unknown): void {
+  if (!state.awaitingVersion || typeof version !== "string") return;
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
+  if (!match) return;
+  const [major, minor, patch] = match.slice(1).map(Number);
+  if (![major, minor, patch].every(Number.isSafeInteger)) return;
+  const restoresHistory =
+    major! > 2 || (major === 2 && (minor! > 1 || (minor === 1 && patch! >= 277)));
+  state.baseline = restoresHistory
+    ? state.resumeBaseline?.status === "known"
+      ? state.resumeBaseline.models
+      : undefined
+    : new Map();
+  state.awaitingVersion = false;
+}
 
 function publish(
   state: ClaudeUsageAccounting,
   completeness: UsageAccountingSnapshot["completeness"],
 ): UsageAccountingSnapshot | undefined {
-  const effectiveCompleteness = state.incomplete ? "input-only" : completeness;
+  const effectiveCompleteness =
+    state.incomplete || state.baselineIncomplete ? "input-only" : completeness;
   let changed = false;
   for (const model of new Set([...state.settled.keys(), ...state.pending.keys()])) {
     const prior = state.published.get(model) ?? zero();
@@ -161,27 +208,24 @@ export function observeClaudeAssistantUsage(
   return publish(state, "input-only");
 }
 
-/** Every result settles the query so far, including intermediate steer results. */
-export function observeClaudeResultUsage(
-  state: ClaudeUsageAccounting,
+/** Decode only bounded numeric/model metadata; transcript content never escapes. */
+export function decodeClaudeCumulativeUsage(
   value: unknown,
-): UsageAccountingSnapshot | undefined {
-  const result = record(value);
-  const modelUsage = record(result?.modelUsage);
+  published: ReadonlyMap<string, Counts> = new Map(),
+): Map<string, Counts> | undefined {
+  const modelUsage = record(value);
   if (!modelUsage) return undefined;
   const entries = Object.entries(modelUsage);
-  if (entries.length === 0 || entries.length > MAX_MODELS) return undefined;
+  if (entries.length > MAX_MODELS) return undefined;
   const settled = new Map<string, Counts>();
   for (const [rawModel, rawUsage] of entries) {
     const usage = record(rawUsage);
     if (!usage) return undefined;
-    const rawName = modelName(rawModel);
-    const canonical = modelName(usage.canonicalModel);
     // SDK ModelUsage.canonicalModel is the pricing lookup slug and may differ
     // from its raw provider/alias map key. Match a prior assistant observation
     // via that explicit alias, while retaining any already-published raw key:
     // historical attribution cannot be silently moved between model buckets.
-    const model = rawName && state.published.has(rawName) ? rawName : (canonical ?? rawName);
+    const model = attributedModelName(rawModel, usage, published);
     if (!model) return undefined;
     const fresh = count(usage.inputTokens);
     const cached = count(usage.cacheReadInputTokens);
@@ -220,6 +264,121 @@ export function observeClaudeResultUsage(
       )
     )
       return undefined;
+  }
+  return settled;
+}
+
+/**
+ * The native cost-state writer keeps raw model map keys but omits each row's
+ * canonicalModel. Restore that attribution only from this result's exact raw
+ * key and explicit canonical metadata, using the same published-key preference
+ * as live totals. Several gateway aliases can name one model and must be added
+ * before subtraction. Never guess an alias from its spelling, move already
+ * published usage, or rewrite the saved map: a later result must still prove
+ * its own raw-to-canonical mapping.
+ */
+function attributeRestoredBaseline(
+  baseline: ReadonlyMap<string, Counts>,
+  rawUsage: unknown,
+  published: ReadonlyMap<string, Counts>,
+): ReadonlyMap<string, Counts> | undefined {
+  const rows = record(rawUsage);
+  if (!rows) return undefined;
+  const aliases = new Map<string, { model: string; counts: Counts }>();
+  for (const [rawModel, value] of Object.entries(rows)) {
+    const rawName = modelName(rawModel);
+    const usage = record(value);
+    if (!rawName || !usage) continue;
+    const model = attributedModelName(rawModel, usage, published);
+    const counts = model
+      ? decodeClaudeCumulativeUsage({ [rawModel]: value }, published)?.get(model)
+      : undefined;
+    // A normalized-key collision cannot identify which saved row a live row
+    // extends. Refuse settlement rather than hiding a reset inside an alias sum.
+    if (aliases.has(rawName)) return undefined;
+    if (model && counts) aliases.set(rawName, { model, counts });
+  }
+  const normalized = new Map<string, Counts>();
+  for (const [rawModel, counts] of baseline) {
+    const current = aliases.get(rawModel);
+    if (
+      !current ||
+      FIELDS.some((field) => current.counts[field] < counts[field]) ||
+      current.counts.inputTokens -
+        current.counts.cachedInputTokens -
+        current.counts.cacheWriteInputTokens <
+        counts.inputTokens - counts.cachedInputTokens - counts.cacheWriteInputTokens ||
+      current.counts.outputTokens - current.counts.reasoningOutputTokens <
+        counts.outputTokens - counts.reasoningOutputTokens
+    )
+      return undefined;
+    const model = current.model;
+    const combined = normalized.get(model) ?? zero();
+    for (const field of FIELDS) {
+      combined[field] += counts[field];
+      if (!Number.isSafeInteger(combined[field])) return undefined;
+    }
+    normalized.set(model, combined);
+  }
+  return normalized;
+}
+
+/** Every result settles the query so far, including intermediate steer results. */
+export function observeClaudeResultUsage(
+  state: ClaudeUsageAccounting,
+  value: unknown,
+): UsageAccountingSnapshot | undefined {
+  const result = record(value);
+  const cumulative = decodeClaudeCumulativeUsage(result?.modelUsage, state.published);
+  if (!cumulative || cumulative.size === 0) return undefined;
+  if (!state.baseline) {
+    // A missing/unsafe baseline or unknown CLI version is not permission to
+    // charge a resumed transcript again. Preserve the new primary input we
+    // actually observed, anchor future deltas here, and keep the epoch marked
+    // incomplete because this first segment's child/output totals are unknown.
+    // Zeroed crash results cannot establish an offset over pending input.
+    for (const [model, observed] of state.published) {
+      const total = cumulative.get(model);
+      if (!total || FIELDS.some((field) => total[field] < observed[field])) return undefined;
+    }
+    if ([...cumulative.values()].every((counts) => FIELDS.every((field) => counts[field] === 0)))
+      return undefined;
+    state.awaitingVersion = false;
+    state.baseline = cumulative;
+    state.baselineIncomplete = true;
+    for (const [model, counts] of state.published) {
+      state.carried.set(model, { ...counts });
+      state.settled.set(model, { ...counts });
+    }
+    state.pending.clear();
+    return publish(state, "input-only");
+  }
+  const settled = new Map<string, Counts>();
+  const baseline =
+    state.resumeBaseline?.status === "known" && state.baseline === state.resumeBaseline.models
+      ? attributeRestoredBaseline(state.baseline, result?.modelUsage, state.published)
+      : state.baseline;
+  if (!baseline) return undefined;
+  // Saved and live alias maps must agree. Missing/regressing rows cannot prove
+  // that the CLI restored the snapshot we inspected; retain the lower bound.
+  for (const [model, previous] of baseline) {
+    const total = cumulative.get(model);
+    if (!total || FIELDS.some((field) => total[field] < previous[field])) return undefined;
+  }
+  for (const [model, total] of cumulative) {
+    const offset = baseline.get(model) ?? zero();
+    const carried = state.carried.get(model) ?? zero();
+    const current = zero();
+    for (const field of FIELDS) {
+      current[field] = total[field] - offset[field] + carried[field];
+      if (!Number.isSafeInteger(current[field])) return undefined;
+    }
+    if (
+      current.cachedInputTokens + current.cacheWriteInputTokens > current.inputTokens ||
+      current.reasoningOutputTokens > current.outputTokens
+    )
+      return undefined;
+    settled.set(model, current);
   }
   // Missing/regressing model rows cannot prove settlement. In particular a
   // zeroed error result after a crash must retain the last successful result

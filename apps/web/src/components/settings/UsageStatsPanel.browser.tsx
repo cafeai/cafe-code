@@ -3,7 +3,7 @@ import "../../index.css";
 import { page } from "vitest/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
-import type { UsageStatsGetResult } from "@cafecode/contracts";
+import { ProviderDriverKind, type UsageStatsGetResult } from "@cafecode/contracts";
 
 import { UsageCostContent } from "./UsageCostSection";
 import { UsageStatsPanel } from "./UsageStatsPanel";
@@ -299,6 +299,38 @@ describe("UsageStatsPanel", () => {
       true,
     );
     expect(document.body.textContent).not.toMatch(/\btokens? exact\b/i);
+  });
+
+  it("shows a negative net cache saving while writes exceed read discounts", async () => {
+    const usage = createUsageDetail();
+    mounted = await render(
+      <UsageCostContent
+        usage={{
+          ...usage,
+          tokenBreakdown: [
+            {
+              provider: ProviderDriverKind.make("claudeAgent"),
+              model: "claude-opus-5-5",
+              inputTokens: 1_000_000,
+              cachedInputTokens: 0,
+              cacheWriteInputTokens: 1_000_000,
+              outputTokens: 0,
+              reasoningOutputTokens: 0,
+            },
+          ],
+        }}
+      />,
+    );
+    expect(requiredElement('[data-usage-composition-value="cache-savings"]').textContent).toBe(
+      "-$1.00 USD",
+    );
+    expect(requiredElement('[data-usage-cost-quality-cache-savings="true"]').textContent).toBe(
+      "-$1.00 USD",
+    );
+    await expect
+      .element(page.getByText("Cache writes cost more than reads have saved"))
+      .toBeVisible();
+    await expect.element(page.getByText("Net cache savings (USD)").first()).toBeVisible();
   });
 
   it("renders the billion-scale shorthand beneath the full counter", async () => {

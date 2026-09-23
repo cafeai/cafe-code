@@ -32,6 +32,27 @@ const makeServerSettingsLayer = () =>
   );
 
 it.layer(NodeServices.layer)("server settings", (it) => {
+  it.effect(
+    "defaults metadata helpers to supported Luna while preserving explicit selections",
+    () =>
+      Effect.sync(() => {
+        const decode = Schema.decodeUnknownSync(ServerSettings);
+        assert.deepEqual(decode({}).textGenerationModelSelection, {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5.6-luna",
+        });
+        const explicit = {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5.4-mini",
+          options: [{ id: "fastMode", value: false }],
+        };
+        assert.deepEqual(
+          decode({ textGenerationModelSelection: explicit }).textGenerationModelSelection,
+          explicit,
+        );
+      }),
+  );
+
   it.effect("decodes nested settings patches", () =>
     Effect.sync(() => {
       const decodePatch = Schema.decodeUnknownSync(ServerSettingsPatch);

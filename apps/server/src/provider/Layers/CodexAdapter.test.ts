@@ -50,7 +50,10 @@ import { ServerConfig } from "../../config.ts";
 import { storeFileAttachment } from "../../fileAttachmentStore.ts";
 import { AssistantStreamTextCommitment } from "../../orchestration/providerAssistantStreamCommitment.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
-import { ProviderAdapterValidationError } from "../Errors.ts";
+import {
+  ProviderAdapterRewindOutcomeUnknownError,
+  ProviderAdapterValidationError,
+} from "../Errors.ts";
 import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import { buildCodexSteerClientCorrelationId } from "../codexSteerCorrelation.ts";
@@ -478,7 +481,10 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   }
 
   rollbackThread(numTurns: number) {
-    return Effect.promise(() => this.rollbackThreadImpl(numTurns));
+    return Effect.tryPromise({
+      try: () => this.rollbackThreadImpl(numTurns),
+      catch: (error) => error as CodexSessionRuntimeError,
+    });
   }
 
   respondToRequest(requestId: ApprovalRequestId, decision: ProviderApprovalDecision) {
@@ -899,6 +905,26 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       assert.equal(result.failure._tag, "ProviderAdapterSessionNotFoundError");
       assert.equal(result.failure.provider, "codex");
       assert.equal(result.failure.threadId, "sess-never-started");
+    }),
+  );
+
+  it.effect("preserves uncertain rewind outcome tags for checkpoint compensation", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("sess-rewind-outcome-unknown");
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = sessionRuntimeFactory.lastRuntime;
+      assert.ok(runtime);
+      const failure = new ProviderAdapterRewindOutcomeUnknownError({});
+      runtime.rollbackThreadImpl.mockRejectedValueOnce(failure);
+      const result = yield* adapter.rollbackThread(threadId, 1).pipe(Effect.result);
+      assert.equal(result._tag, "Failure");
+      assert.equal(result.failure, failure);
+      assert.equal(runtime.rollbackThreadImpl.mock.calls.length, 1);
     }),
   );
 

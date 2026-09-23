@@ -64,6 +64,16 @@ const CODEX_ORIGINATOR = "cafecode_desktop";
 export const CODEX_CLI_LOGIN_STATUS_TIMEOUT_MESSAGE =
   "Codex CLI login status check timed out. Provider sessions may still work.";
 
+// The official @openai/codex 0.156.0 bin/codex.js launcher reports this exact
+// failure when neither its optional platform package nor its legacy vendored
+// executable exists. Match only the six official package names, never a
+// provider-supplied reinstall command. The wrapper's stack trace contains local
+// paths and a Node version, neither of which belongs in Codex's status card.
+const CODEX_MISSING_NATIVE_DEPENDENCY =
+  /\bMissing optional dependency @openai\/codex-(?:darwin|linux|win32)-(?:arm64|x64)\.(?=\s|$)/u;
+const CODEX_MISSING_NATIVE_DEPENDENCY_MESSAGE =
+  "Codex's installation is incomplete: its native executable is missing. Reinstall Codex with optional dependencies enabled, or choose a working Codex binary in provider settings. Account authentication could not be checked.";
+
 export interface CodexAppServerProviderSnapshot {
   readonly account: CodexSchema.V2GetAccountResponse;
   readonly accountRateLimits?: ServerProviderAccountRateLimits;
@@ -740,8 +750,36 @@ const ASTRA_CODEX_MODEL: ServerProviderModel = {
     supportsFastMode: true,
   }),
 };
+// Codex's published model guide (verified 2026-09-23) lists Sol's CLI efforts
+// through Ultra with Medium as default, and Luna through Max only:
+// https://learn.chatgpt.com/docs/models
+// These fallbacks cover cold starts/custom entries while rollout catalogues
+// catch up. Live model/list still owns availability, effort and speed controls.
+// Do not infer a Codex context budget from the separate API context maximum.
+const SOL_CODEX_MODEL: ServerProviderModel = {
+  slug: "gpt-6-sol",
+  name: "GPT-6-Sol",
+  isCustom: false,
+  capabilities: makeStaticCodexReasoningCapabilities({
+    defaultEffort: "medium",
+    supportedEfforts: CODEX_ULTRA_REASONING_EFFORTS,
+    supportsFastMode: true,
+  }),
+};
+const LUNA_CODEX_MODEL: ServerProviderModel = {
+  slug: "gpt-6-luna",
+  name: "GPT-6-Luna",
+  isCustom: false,
+  capabilities: makeStaticCodexReasoningCapabilities({
+    defaultEffort: "medium",
+    supportedEfforts: CODEX_MAX_REASONING_EFFORTS,
+    supportsFastMode: true,
+  }),
+};
 const KNOWN_CUSTOM_CODEX_MODELS: ReadonlyMap<string, ServerProviderModel> = new Map([
   [ASTRA_CODEX_MODEL.slug, { ...ASTRA_CODEX_MODEL, isCustom: true }],
+  [SOL_CODEX_MODEL.slug, { ...SOL_CODEX_MODEL, isCustom: true }],
+  [LUNA_CODEX_MODEL.slug, { ...LUNA_CODEX_MODEL, isCustom: true }],
 ]);
 
 // Lightweight provider status deliberately avoids `codex app-server`; keep a
@@ -749,6 +787,8 @@ const KNOWN_CUSTOM_CODEX_MODELS: ReadonlyMap<string, ServerProviderModel> = new 
 // models before the full app-server diagnostic path has ever populated cache.
 const STATIC_CODEX_MODELS: ReadonlyArray<ServerProviderModel> = [
   ASTRA_CODEX_MODEL,
+  SOL_CODEX_MODEL,
+  LUNA_CODEX_MODEL,
   {
     slug: "gpt-5.6-sol",
     name: "GPT-5.6-Sol",
@@ -1523,7 +1563,7 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
         phases,
         message: isCommandMissingCause(error)
           ? "Codex CLI (`codex`) is not installed or not on PATH."
-          : `Failed to execute Codex CLI health check: ${error instanceof Error ? error.message : String(error)}.`,
+          : "Failed to execute the Codex CLI health check. Check the binary selected in provider settings.",
       },
     });
   }
@@ -1550,12 +1590,13 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
   }
 
   const versionResult = versionProbe.success.value;
-  const parsedVersion = parseGenericCliVersion(`${versionResult.stdout}\n${versionResult.stderr}`);
   if (versionResult.code !== 0) {
     phases.push({ phase: "version", outcome: "error", durationMs: versionDurationMs });
     phases.push({ phase: "login-status", outcome: "skipped", durationMs: 0 });
     phases.push({ phase: "account-usage", outcome: "skipped", durationMs: 0 });
-    const detail = detailFromResult(versionResult);
+    const missingNativeDependency =
+      CODEX_MISSING_NATIVE_DEPENDENCY.test(versionResult.stderr) ||
+      CODEX_MISSING_NATIVE_DEPENDENCY.test(versionResult.stdout);
     return buildServerProvider({
       presentation: CODEX_PRESENTATION,
       enabled: codexSettings.enabled,
@@ -1564,16 +1605,20 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
       skills: [],
       probe: {
         installed: true,
-        version: parsedVersion,
+        // Failed launchers can print Node's version, dependency versions, or
+        // private output. Only a successful version probe establishes Codex's
+        // version; never turn arbitrary failure text into status metadata.
+        version: null,
         status: "error",
         auth: { status: "unknown" },
         phases,
-        message: detail
-          ? `Codex CLI is installed but failed to run. ${detail}`
-          : "Codex CLI is installed but failed to run.",
+        message: missingNativeDependency
+          ? CODEX_MISSING_NATIVE_DEPENDENCY_MESSAGE
+          : "Codex CLI is installed but failed to run. Check its installation and the binary selected in provider settings.",
       },
     });
   }
+  const parsedVersion = parseGenericCliVersion(`${versionResult.stdout}\n${versionResult.stderr}`);
   phases.push({ phase: "version", outcome: "success", durationMs: versionDurationMs });
 
   const loginStartedAtMs = yield* Clock.currentTimeMillis;

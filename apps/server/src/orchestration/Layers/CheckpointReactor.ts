@@ -27,6 +27,10 @@ import {
 } from "../../checkpointing/Utils.ts";
 import { CheckpointStore } from "../../checkpointing/Services/CheckpointStore.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import {
+  isProviderRewindOutcomeUnknown,
+  ProviderAdapterRewindOutcomeUnknownError,
+} from "../../provider/Errors.ts";
 import { CheckpointReactor, type CheckpointReactorShape } from "../Services/CheckpointReactor.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -42,6 +46,8 @@ const CHECKPOINT_REFS_RETAINED_PER_THREAD = 3;
 const CHECKPOINT_REF_PRUNE_WARNING_SAMPLE_SIZE = 20;
 const PROVIDER_TURN_INGESTION_QUIESCENCE_TIMEOUT = "30 seconds";
 const CHECKPOINT_REVERT_RECOVERY_TURN = Number.MAX_SAFE_INTEGER;
+const CHECKPOINT_REVERT_RECOVERY_REQUIRED_MESSAGE =
+  "A previous checkpoint recovery snapshot is still present. Stop this thread and inspect its provider history and saved workspace before retrying; the existing recovery snapshot was not changed.";
 
 export function computeCheckpointRefPrunePlan(input: {
   readonly threadId: ThreadId;
@@ -879,12 +885,33 @@ const make = Effect.gen(function* () {
 
     // Capture the exact pre-revert workspace/index state before touching the
     // filesystem. Provider rewind is a second independent transaction; if it
-    // fails, restoring this private recovery ref prevents Cafe's workspace
-    // from moving behind a provider conversation that stayed ahead.
+    // definitely fails, restoring this private recovery ref prevents Cafe's
+    // workspace from moving behind a provider conversation that stayed ahead.
+    // An uncertain mutation must preserve both the target files and recovery
+    // ref instead: the provider may already have discarded the later history.
     const recoveryCheckpointRef = checkpointRefForThreadTurn(
       event.payload.threadId,
       CHECKPOINT_REVERT_RECOVERY_TURN,
     );
+    // This exact ref can survive an inconclusive native mutation or a process
+    // crash. It may contain edits absent from every ordinary turn checkpoint.
+    // Never overwrite that evidence on retry, or infer that either side of the
+    // two independent transactions committed. Explicit inspection/recovery is
+    // required before another rewind can safely claim this reserved ref.
+    if (
+      yield* checkpointStore.hasCheckpointRef({
+        cwd: sessionRuntime.value.cwd,
+        checkpointRef: recoveryCheckpointRef,
+      })
+    ) {
+      yield* appendRevertFailureActivity({
+        threadId: event.payload.threadId,
+        turnCount: event.payload.turnCount,
+        detail: CHECKPOINT_REVERT_RECOVERY_REQUIRED_MESSAGE,
+        createdAt: now,
+      });
+      return;
+    }
     yield* checkpointStore.captureCheckpoint({
       cwd: sessionRuntime.value.cwd,
       checkpointRef: recoveryCheckpointRef,
@@ -923,30 +950,40 @@ const make = Effect.gen(function* () {
           numTurns: rolledBackTurns,
         })
         .pipe(
-          Effect.tapError(() =>
-            checkpointStore
-              .restoreCheckpoint({
-                cwd: sessionRuntime.value.cwd,
-                checkpointRef: recoveryCheckpointRef,
-                fallbackToHead: false,
-              })
-              .pipe(
-                Effect.flatMap(() => workspaceEntries.invalidate(sessionRuntime.value.cwd)),
-                Effect.catchCause((cause) =>
-                  Effect.logError("failed to restore workspace after provider rewind failure", {
-                    threadId: event.payload.threadId,
-                    cause: Cause.pretty(cause),
-                  }),
-                ),
-                Effect.ensuring(
-                  checkpointStore
-                    .deleteCheckpointRefs({
-                      cwd: sessionRuntime.value.cwd,
-                      checkpointRefs: [recoveryCheckpointRef],
-                    })
-                    .pipe(Effect.ignore),
-                ),
-              ),
+          Effect.tapError((error) =>
+            isProviderRewindOutcomeUnknown(error)
+              ? Effect.void
+              : checkpointStore
+                  .restoreCheckpoint({
+                    cwd: sessionRuntime.value.cwd,
+                    checkpointRef: recoveryCheckpointRef,
+                    fallbackToHead: false,
+                  })
+                  .pipe(
+                    Effect.flatMap(() => workspaceEntries.invalidate(sessionRuntime.value.cwd)),
+                    Effect.catchCause((cause) =>
+                      Effect.logError("failed to restore workspace after provider rewind failure", {
+                        threadId: event.payload.threadId,
+                        cause: Cause.pretty(cause),
+                      }),
+                    ),
+                    Effect.ensuring(
+                      checkpointStore
+                        .deleteCheckpointRefs({
+                          cwd: sessionRuntime.value.cwd,
+                          checkpointRefs: [recoveryCheckpointRef],
+                        })
+                        .pipe(Effect.ignore),
+                    ),
+                  ),
+          ),
+          // Daemon wrappers may carry provider detail alongside the finite
+          // outcome tag. Only the fixed actionable message crosses into the
+          // work log; no raw provider error, path or native identity is needed.
+          Effect.mapError((error) =>
+            isProviderRewindOutcomeUnknown(error)
+              ? new ProviderAdapterRewindOutcomeUnknownError({})
+              : error,
           ),
         );
     }

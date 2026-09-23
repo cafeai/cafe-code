@@ -113,10 +113,15 @@ describe("normalizeModelSlug", () => {
     // persisted value names 5.1 explicitly.
     expect(normalizeModelSlug("fable", claude)).toBe("claude-fable-5");
     expect(normalizeModelSlug("fable[1m]", claude)).toBe("claude-fable-5");
-    expect(normalizeModelSlug("default", claude)).toBe("claude-opus-5");
-    expect(normalizeModelSlug("opus", claude)).toBe("claude-opus-5");
+    expect(normalizeModelSlug("default", claude)).toBe("claude-opus-5-5");
+    expect(normalizeModelSlug("opus", claude)).toBe("claude-opus-5-5");
+    expect(normalizeModelSlug("opus-5.5", claude)).toBe("claude-opus-5-5");
+    expect(normalizeModelSlug("opus55", claude)).toBe("claude-opus-5-5");
+    expect(normalizeModelSlug("claude-opus-5-5[1m]", claude)).toBe("claude-opus-5-5");
     expect(normalizeModelSlug("opus-5", claude)).toBe("claude-opus-5");
-    expect(normalizeModelSlug("opus[1m]", claude)).toBe("claude-opus-5");
+    expect(normalizeModelSlug("opus5", claude)).toBe("claude-opus-5");
+    expect(normalizeModelSlug("claude-opus-5", claude)).toBe("claude-opus-5");
+    expect(normalizeModelSlug("opus[1m]", claude)).toBe("claude-opus-5-5");
     expect(normalizeModelSlug("opus-4.7", claude)).toBe("claude-opus-4-7");
     expect(normalizeModelSlug("sonnet", claude)).toBe("claude-sonnet-5");
     expect(normalizeModelSlug("sonnet[1m]", claude)).toBe("claude-sonnet-5");

@@ -57,6 +57,8 @@ import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { buildCodexInitializeParams } from "./CodexProvider.ts";
 import { isCodexRootAgentPath } from "./CodexSubagentPath.ts";
+import { rewindCodexThreadWithClient } from "./CodexThreadRewind.ts";
+import type { ProviderAdapterRewindOutcomeUnknownError } from "../Errors.ts";
 import {
   buildCodexSteerClientCorrelationId,
   parseCodexSteerClientCorrelationId,
@@ -248,7 +250,7 @@ export type CodexResumeCursor = typeof CodexResumeCursorSchema.Type;
 type CodexServiceTier = NonNullable<EffectCodexSchema.V2ThreadStartParams["serviceTier"]>;
 export type CodexThreadItem =
   | EffectCodexSchema.V2ThreadReadResponse["thread"]["turns"][number]["items"][number]
-  | EffectCodexSchema.V2ThreadRollbackResponse["thread"]["turns"][number]["items"][number];
+  | EffectCodexSchema.V2ThreadRevertResponse["thread"]["turns"][number]["items"][number];
 type CodexSnapshotThreadItem = CodexThreadItem;
 type CodexSnapshotTurn = {
   readonly completedAt?: number | null;
@@ -264,7 +266,7 @@ type CodexSnapshotThreadStatus =
   | EffectCodexSchema.V2ThreadReadResponse["thread"]["status"]
   | EffectCodexSchema.V2ThreadResumeResponse["thread"]["status"]
   | EffectCodexSchema.V2ThreadStartResponse["thread"]["status"]
-  | EffectCodexSchema.V2ThreadRollbackResponse["thread"]["status"];
+  | EffectCodexSchema.V2ThreadRevertResponse["thread"]["status"];
 type CodexSnapshotThread = {
   readonly id: string;
   readonly status?: CodexSnapshotThreadStatus | undefined;
@@ -574,6 +576,7 @@ export interface CodexSessionRuntimeShape {
 
 export type CodexSessionRuntimeError =
   | CodexErrors.CodexAppServerError
+  | ProviderAdapterRewindOutcomeUnknownError
   | CodexSessionRuntimePendingApprovalNotFoundError
   | CodexSessionRuntimePendingUserInputNotFoundError
   | CodexSessionRuntimeInvalidUserInputAnswersError
@@ -3445,7 +3448,7 @@ export function publishCodexTurnCompletionAfterLifecycleBoundary<E, R>(input: {
 }
 
 function parseThreadSnapshot(
-  response: EffectCodexSchema.V2ThreadReadResponse | EffectCodexSchema.V2ThreadRollbackResponse,
+  response: EffectCodexSchema.V2ThreadReadResponse | EffectCodexSchema.V2ThreadRevertResponse,
 ): CodexThreadSnapshot {
   return {
     threadId: response.thread.id,
@@ -6924,9 +6927,16 @@ export const makeCodexSessionRuntime = (
         }),
       rollbackThread: (numTurns) =>
         Effect.gen(function* () {
+          const current = yield* Ref.get(sessionRef);
+          if (current.activeTurnId || current.status === "running") {
+            return yield* CodexErrors.CodexAppServerRequestError.invalidRequest(
+              "Stop the active Codex turn before rewinding",
+            );
+          }
           const providerThreadId = yield* readProviderThreadId;
-          const response = yield* client.request("thread/rollback", {
-            threadId: providerThreadId,
+          const response = yield* rewindCodexThreadWithClient({
+            client,
+            providerThreadId,
             numTurns,
           });
           yield* updateSession(sessionRef, {

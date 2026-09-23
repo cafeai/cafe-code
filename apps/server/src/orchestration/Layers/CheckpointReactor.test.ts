@@ -57,6 +57,10 @@ import {
   ProviderService,
   type ProviderServiceShape,
 } from "../../provider/Services/ProviderService.ts";
+import {
+  ProviderAdapterRequestError,
+  ProviderAdapterRewindOutcomeUnknownError,
+} from "../../provider/Errors.ts";
 import { checkpointRefForThreadTurn } from "../../checkpointing/Utils.ts";
 import { ServerConfig } from "../../config.ts";
 import { WorkspaceEntriesLive } from "../../workspace/Layers/WorkspaceEntries.ts";
@@ -123,7 +127,10 @@ function createProviderServiceHarness(
   const now = "2026-01-01T00:00:00.000Z";
   const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
   const rollbackConversation = vi.fn(
-    (_input: { readonly threadId: ThreadId; readonly numTurns: number }) => Effect.void,
+    (_input: {
+      readonly threadId: ThreadId;
+      readonly numTurns: number;
+    }): ReturnType<ProviderServiceShape["rollbackConversation"]> => Effect.void,
   );
 
   const unsupported = <A>() =>
@@ -1284,6 +1291,171 @@ describe("CheckpointReactor", () => {
       gitRefExists(harness.cwd, checkpointRefForThreadTurn(ThreadId.make("thread-1"), 2)),
     ).toBe(false);
   });
+
+  it.each([
+    {
+      label: "local uncertain outcome",
+      error: new ProviderAdapterRewindOutcomeUnknownError({}),
+      uncertain: true,
+      preexistingRecovery: false,
+    },
+    {
+      label: "remote uncertain outcome",
+      error: new ProviderAdapterRequestError({
+        provider: "codex",
+        method: "thread/revert",
+        remoteErrorTag: "ProviderAdapterRewindOutcomeUnknownError",
+        detail: "Private provider transcript and native path must not enter the work log.",
+      }),
+      uncertain: true,
+      preexistingRecovery: false,
+    },
+    {
+      label: "definite provider refusal",
+      error: new ProviderAdapterRequestError({
+        provider: "codex",
+        method: "thread/revert",
+        detail: "Provider refused the rewind before mutation.",
+      }),
+      uncertain: false,
+      preexistingRecovery: false,
+    },
+    {
+      label: "recovery snapshot retained by an earlier process",
+      error: new ProviderAdapterRewindOutcomeUnknownError({}),
+      uncertain: true,
+      preexistingRecovery: true,
+    },
+  ])(
+    "preserves safe filesystem recovery for $label",
+    async ({ error, uncertain, preexistingRecovery }) => {
+      const harness = await createHarness();
+      const threadId = ThreadId.make("thread-1");
+      const createdAt = "2026-01-01T00:00:00.000Z";
+      const recoveryRef = checkpointRefForThreadTurn(threadId, Number.MAX_SAFE_INTEGER);
+      const recoveryRequiredMessage =
+        "A previous checkpoint recovery snapshot is still present. Stop this thread and inspect its provider history and saved workspace before retrying; the existing recovery snapshot was not changed.";
+      harness.provider.rollbackConversation.mockReturnValue(Effect.fail(error));
+      if (preexistingRecovery) {
+        // Model a crash after the private recovery capture, with subsequent user
+        // edits that must not be overwritten by another attempted checkpoint.
+        await runtime!.runPromise(
+          harness.checkpointStore.captureCheckpoint({
+            cwd: harness.cwd,
+            checkpointRef: recoveryRef,
+          }),
+        );
+        fs.writeFileSync(path.join(harness.cwd, "README.md"), "edited after crash\n", "utf8");
+      }
+
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-session-set-rewind-failure"),
+          threadId,
+          session: {
+            threadId,
+            status: "ready",
+            providerName: "codex",
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: createdAt,
+          },
+          createdAt,
+        }),
+      );
+      for (const turnCount of [1, 2]) {
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.turn.diff.complete",
+            commandId: CommandId.make(`cmd-rewind-failure-diff-${turnCount}`),
+            threadId,
+            turnId: asTurnId(`turn-${turnCount}`),
+            completedAt: createdAt,
+            checkpointRef: checkpointRefForThreadTurn(threadId, turnCount),
+            status: "ready",
+            files: [],
+            checkpointTurnCount: turnCount,
+            createdAt,
+          }),
+        );
+      }
+
+      const dispatch = vi.spyOn(harness.engine, "dispatch");
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.checkpoint.revert",
+          commandId: CommandId.make("cmd-rewind-failure-request"),
+          threadId,
+          turnCount: 1,
+          createdAt,
+        }),
+      );
+      await harness.drain();
+
+      const snapshot = await harness.readModel();
+      const thread = snapshot.threads.find((entry) => entry.id === threadId);
+      const failure = thread?.activities.find(
+        (activity) => activity.kind === "checkpoint.revert.failed",
+      );
+      expect(failure?.payload).toEqual({
+        turnCount: 1,
+        detail: preexistingRecovery
+          ? recoveryRequiredMessage
+          : uncertain
+            ? new ProviderAdapterRewindOutcomeUnknownError({}).message
+            : error.message,
+      });
+      expect(
+        dispatch.mock.calls.some(([command]) => command.type === "thread.revert.complete"),
+      ).toBe(false);
+      expect(thread?.checkpoints).toHaveLength(2);
+      if (preexistingRecovery) expect(harness.provider.rollbackConversation).not.toHaveBeenCalled();
+      else
+        expect(harness.provider.rollbackConversation).toHaveBeenCalledExactlyOnceWith({
+          threadId,
+          numTurns: 1,
+        });
+      // An uncertain native commit keeps the target workspace in place and the
+      // original v3 content reachable for explicit recovery. A definite refusal
+      // still compensates back to v3 and removes the no-longer-needed recovery ref.
+      expect(fs.readFileSync(path.join(harness.cwd, "README.md"), "utf8")).toBe(
+        preexistingRecovery ? "edited after crash\n" : uncertain ? "v2\n" : "v3\n",
+      );
+      expect(gitRefExists(harness.cwd, recoveryRef)).toBe(uncertain);
+      if (uncertain) expect(gitShowFileAtRef(harness.cwd, recoveryRef, "README.md")).toBe("v3\n");
+      expect(gitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 2))).toBe(true);
+
+      if (uncertain && !preexistingRecovery) {
+        fs.writeFileSync(path.join(harness.cwd, "README.md"), "edited after uncertainty\n", "utf8");
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.checkpoint.revert",
+            commandId: CommandId.make("cmd-rewind-failure-retry"),
+            threadId,
+            turnCount: 1,
+            createdAt,
+          }),
+        );
+        await harness.drain();
+        expect(harness.provider.rollbackConversation).toHaveBeenCalledTimes(1);
+        expect(fs.readFileSync(path.join(harness.cwd, "README.md"), "utf8")).toBe(
+          "edited after uncertainty\n",
+        );
+        expect(gitShowFileAtRef(harness.cwd, recoveryRef, "README.md")).toBe("v3\n");
+        const retried = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+        expect(
+          retried?.activities
+            .filter((activity) => activity.kind === "checkpoint.revert.failed")
+            .map((activity) => activity.payload),
+        ).toContainEqual({ turnCount: 1, detail: recoveryRequiredMessage });
+        expect(
+          dispatch.mock.calls.some(([command]) => command.type === "thread.revert.complete"),
+        ).toBe(false);
+      }
+    },
+  );
 
   it("executes provider revert and emits thread.reverted for claude sessions", async () => {
     const harness = await createHarness({ providerName: ProviderDriverKind.make("claudeAgent") });

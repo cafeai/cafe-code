@@ -204,6 +204,9 @@ function mapCodexRuntimeError(
   method: string,
   error: CodexSessionRuntimeError,
 ): ProviderAdapterError {
+  // Keep the finite mutation-outcome tag intact through ProviderService and
+  // the daemon envelope so checkpoint compensation can fail closed.
+  if (error._tag === "ProviderAdapterRewindOutcomeUnknownError") return error;
   if (isCodexAppServerProcessExitedError(error) || isCodexAppServerTransportError(error)) {
     return new ProviderAdapterSessionClosedError({
       provider: PROVIDER,
@@ -5186,12 +5189,12 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   };
 
   const rollbackThread: CodexAdapterShape["rollbackThread"] = (threadId, numTurns) => {
-    if (!Number.isInteger(numTurns) || numTurns < 1) {
+    if (!Number.isSafeInteger(numTurns) || numTurns < 1) {
       return Effect.fail(
         new ProviderAdapterValidationError({
           provider: PROVIDER,
           operation: "rollbackThread",
-          issue: "numTurns must be an integer >= 1.",
+          issue: "numTurns must be a safe integer >= 1.",
         }),
       );
     }
@@ -5201,7 +5204,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       Effect.mapError((cause) =>
         cause._tag === "ProviderAdapterSessionNotFoundError"
           ? cause
-          : mapCodexRuntimeError(threadId, "thread/rollback", cause),
+          : mapCodexRuntimeError(threadId, "thread/revert", cause),
       ),
       Effect.map((snapshot) => ({
         threadId,

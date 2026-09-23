@@ -593,6 +593,29 @@ describe("ClaudeAdapterLive", () => {
     const instanceId = ProviderInstanceId.make("claudeAgent");
     const cases = [
       {
+        name: "Opus 5.5 defaults to medium effort and its fixed 1M context",
+        selection: createModelSelection(instanceId, "claude-opus-5-5"),
+        expected: {
+          model: "claude-opus-5-5[1m]",
+          effort: "medium",
+          context: 1000000,
+          settings: {},
+        },
+      },
+      {
+        name: "Opus 5.5 preserves explicit max effort and Fast off",
+        selection: createModelSelection(instanceId, "claude-opus-5-5", [
+          { id: "effort", value: "max" },
+          { id: "fastMode", value: false },
+        ]),
+        expected: {
+          model: "claude-opus-5-5[1m]",
+          effort: "max",
+          context: 1000000,
+          settings: { fastMode: false },
+        },
+      },
+      {
         name: "Opus 5 defaults to high effort and its fixed 1M context",
         selection: createModelSelection(instanceId, "claude-opus-5"),
         expected: {
@@ -6803,6 +6826,128 @@ describe("ClaudeAdapterLive", () => {
       }).pipe(Effect.provide(harness.layer));
     },
   );
+
+  for (const cliVersion of ["2.1.278", "2.1.274"]) {
+    it.effect(`separates resumed Claude usage from saved history on CLI ${cliVersion}`, () => {
+      const homePath = mkdtempSync(path.join(os.tmpdir(), "claude-accounting-resume-"));
+      const cwd = path.join(homePath, "workspace");
+      const sessionId = "550e8400-e29b-41d4-a716-446655440000";
+      const project = claudeProjectDirectoryForTest(homePath, cwd);
+      mkdirSync(project, { recursive: true });
+      const model = "claude-sonnet-5";
+      const totals = (inputTokens: number, outputTokens: number) => ({
+        [model]: {
+          inputTokens,
+          outputTokens,
+          cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0,
+        },
+      });
+      writeFileSync(
+        path.join(project, `${sessionId}.jsonl`),
+        JSON.stringify({
+          type: "cost-state",
+          sessionId,
+          modelUsage: totals(1000, 100),
+        }) + "\n",
+        { mode: 0o600 },
+      );
+      const harness = makeHarness({
+        cwd,
+        claudeConfig: { homePath },
+        environment: { ...process.env, CLAUDE_CONFIG_DIR: undefined },
+      });
+      return Effect.gen(function* () {
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => rmSync(homePath, { recursive: true, force: true })),
+        );
+        const adapter = yield* ClaudeAdapter;
+        const observed = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "thread.usage-accounting.updated"),
+          Stream.take(3),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+          cwd,
+          resumeCursor: { resume: sessionId, turnCount: 1 },
+        });
+        assert.equal(harness.getLastCreateQueryInput()?.options.resume, sessionId);
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "new input", attachments: [] });
+        harness.query.emit({
+          type: "system",
+          subtype: "init",
+          claude_code_version: cliVersion,
+          session_id: sessionId,
+          uuid: "init-usage",
+          capabilities: [],
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "assistant",
+          uuid: "new-assistant",
+          session_id: sessionId,
+          parent_tool_use_id: null,
+          message: {
+            id: "new-api-request",
+            model: "claude-sonnet-5",
+            content: [],
+            usage: {
+              input_tokens: 100,
+              output_tokens: 999,
+              cache_read_input_tokens: 0,
+              cache_creation_input_tokens: 0,
+            },
+          },
+        } as unknown as SDKMessage);
+        const emitResult = (modelUsage: ReturnType<typeof totals>) =>
+          harness.query.emit({
+            type: "result",
+            subtype: "success",
+            is_error: false,
+            uuid: "new-result",
+            session_id: sessionId,
+            result: "done",
+            stop_reason: "end_turn",
+            num_turns: 1,
+            duration_ms: 1,
+            duration_api_ms: 1,
+            usage: {
+              input_tokens: 200,
+              output_tokens: 20,
+              cache_read_input_tokens: 0,
+              cache_creation_input_tokens: 0,
+            },
+            modelUsage,
+          } as unknown as SDKMessage);
+        emitResult(cliVersion === "2.1.278" ? totals(1200, 120) : totals(200, 20));
+        harness.query.emit({
+          type: "conversation_reset",
+          new_conversation_id: "30000000-0000-4000-8000-000000000000",
+          session_id: sessionId,
+          uuid: "40000000-0000-4000-8000-000000000000",
+        } as SDKMessage);
+        emitResult(totals(300, 30));
+        const snapshots = (yield* Fiber.join(observed)).map((event) => event.payload);
+        assert.deepEqual(
+          snapshots.map((snapshot) => snapshot.models[0]?.inputTokens),
+          [100, 200, 300],
+        );
+        assert.deepEqual(
+          snapshots.map((snapshot) => snapshot.models[0]?.outputTokens),
+          [0, 20, 30],
+        );
+        assert.deepEqual(
+          snapshots.map((snapshot) => snapshot.completeness),
+          ["input-only", "complete", "complete"],
+        );
+        assert.equal(snapshots[0]?.scopeId, snapshots[1]?.scopeId);
+        assert.notEqual(snapshots[1]?.scopeId, snapshots[2]?.scopeId);
+      }).pipe(Effect.provide(harness.layer));
+    });
+  }
 
   it.effect("emits Claude context window on result completion usage snapshots", () => {
     const harness = makeHarness();

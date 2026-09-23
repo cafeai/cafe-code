@@ -119,6 +119,11 @@ function decodeClaudeModelCatalog(raw: unknown) {
   };
 }
 
+// Catalog provenance for Opus 5.5: Claude Code's official model-config and
+// fast-mode guides, verified 2026-09-23, require CLI 2.1.280, list low through
+// max effort with Medium default, and specify native 1M context plus Fast.
+// https://code.claude.com/docs/en/model-config
+// Live initialization metadata still takes precedence over these fallbacks.
 const DECODED_CLAUDE_MODEL_CATALOG = decodeClaudeModelCatalog(claudeModelCatalog);
 const VERSIONED_BUILT_IN_MODELS = DECODED_CLAUDE_MODEL_CATALOG.models;
 const BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = VERSIONED_BUILT_IN_MODELS.map(

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   makeClaudeUsageAccounting,
+  configureClaudeUsageVersion,
+  decodeClaudeCumulativeUsage,
   observeClaudeAssistantUsage,
   observeClaudeResultUsage,
 } from "./claudeUsageAccounting.ts";
@@ -45,6 +47,229 @@ const result = (models: Record<string, ReturnType<typeof modelUsage>>) => ({
 });
 
 describe("Claude billing accounting", () => {
+  it("attributes a saved gateway alias from the live result's explicit canonical model", () => {
+    const state = makeClaudeUsageAccounting(SCOPE, {
+      status: "known",
+      models: decodeClaudeCumulativeUsage({ "gateway-alias": modelUsage(1000, 100) })!,
+    });
+    configureClaudeUsageVersion(state, "2.1.278");
+    observeClaudeAssistantUsage(state, assistant("new", 100));
+    const first = observeClaudeResultUsage(state, {
+      modelUsage: { "gateway-alias": { ...modelUsage(1100, 150), canonicalModel: MODEL } },
+    });
+    expect(first?.models).toEqual([
+      {
+        model: MODEL,
+        inputTokens: 100,
+        cachedInputTokens: 0,
+        cacheWriteInputTokens: 0,
+        outputTokens: 50,
+        reasoningOutputTokens: 0,
+      },
+    ]);
+    expect(first?.completeness).toBe("complete");
+    observeClaudeAssistantUsage(state, assistant("next", 30));
+    expect(
+      observeClaudeResultUsage(state, {
+        modelUsage: { "gateway-alias": { ...modelUsage(1130, 170), canonicalModel: MODEL } },
+      })?.models[0],
+    ).toMatchObject({ inputTokens: 130, outputTokens: 70 });
+  });
+
+  it("combines saved aliases of one canonical model before subtracting historical usage", () => {
+    const state = makeClaudeUsageAccounting(SCOPE, {
+      status: "known",
+      models: decodeClaudeCumulativeUsage({
+        "gateway-one": modelUsage(1000, 100, 200, 50),
+        "gateway-two": modelUsage(2000, 200, 400, 100),
+      })!,
+    });
+    configureClaudeUsageVersion(state, "2.1.280");
+    observeClaudeAssistantUsage(state, assistant("new", 100, { cached: 60, written: 10 }));
+    const snapshot = observeClaudeResultUsage(state, {
+      modelUsage: {
+        "gateway-one": { ...modelUsage(1040, 120, 220, 55), canonicalModel: MODEL },
+        "gateway-two": { ...modelUsage(2060, 230, 440, 105), canonicalModel: MODEL },
+      },
+    });
+    expect(snapshot?.models).toEqual([
+      {
+        model: MODEL,
+        inputTokens: 170,
+        cachedInputTokens: 60,
+        cacheWriteInputTokens: 10,
+        outputTokens: 50,
+        reasoningOutputTokens: 0,
+      },
+    ]);
+  });
+
+  it("preserves previously published raw alias attribution and refuses later canonical rewrites", () => {
+    const state = makeClaudeUsageAccounting(SCOPE, {
+      status: "known",
+      models: decodeClaudeCumulativeUsage({ "gateway-alias": modelUsage(1000, 100) })!,
+    });
+    configureClaudeUsageVersion(state, "2.1.278");
+    observeClaudeAssistantUsage(state, assistant("new", 100, { model: "gateway-alias" }));
+    const snapshot = observeClaudeResultUsage(state, {
+      modelUsage: { "gateway-alias": { ...modelUsage(1100, 150), canonicalModel: MODEL } },
+    });
+    expect(snapshot?.models[0]).toMatchObject({
+      model: "gateway-alias",
+      inputTokens: 100,
+      outputTokens: 50,
+    });
+    expect(snapshot?.models).toHaveLength(1);
+    expect(
+      observeClaudeResultUsage(state, { modelUsage: { [MODEL]: modelUsage(1200, 170) } }),
+    ).toBeUndefined();
+  });
+
+  it("cannot hide missing, regressing or ambiguously normalized raw aliases behind canonical sums", () => {
+    const state = makeClaudeUsageAccounting(SCOPE, {
+      status: "known",
+      models: decodeClaudeCumulativeUsage({
+        "gateway-one": modelUsage(1000, 100),
+        "gateway-two": modelUsage(2000, 200),
+      })!,
+    });
+    configureClaudeUsageVersion(state, "2.1.278");
+    observeClaudeAssistantUsage(state, assistant("new", 100));
+    for (const rows of [
+      {
+        "gateway-one": { ...modelUsage(900, 150), canonicalModel: MODEL },
+        "gateway-two": { ...modelUsage(2200, 250), canonicalModel: MODEL },
+      },
+      { "gateway-one": { ...modelUsage(3100, 400), canonicalModel: MODEL } },
+      {
+        "gateway-one": { ...modelUsage(1100, 150), canonicalModel: MODEL },
+        " gateway-one ": { ...modelUsage(1100, 150), canonicalModel: MODEL },
+        "gateway-two": { ...modelUsage(2100, 250), canonicalModel: MODEL },
+      },
+    ])
+      expect(observeClaudeResultUsage(state, { modelUsage: rows })).toBeUndefined();
+  });
+
+  it("subtracts restored resume/fork history while settling new primary, cache and child usage", () => {
+    const baseline = {
+      status: "known" as const,
+      models: decodeClaudeCumulativeUsage({
+        [MODEL]: modelUsage(1000, 300, 5000, 200, 100),
+        "claude-haiku-4-5": modelUsage(400, 20),
+      })!,
+    };
+    const state = makeClaudeUsageAccounting(SCOPE, baseline);
+    configureClaudeUsageVersion(state, "2.1.278");
+    observeClaudeAssistantUsage(state, assistant("new", 100, { cached: 600, written: 20 }));
+    const snapshot = observeClaudeResultUsage(
+      state,
+      result({
+        [MODEL]: modelUsage(1100, 350, 5600, 220, 120),
+        "claude-haiku-4-5": modelUsage(430, 25),
+      }),
+    );
+    expect(snapshot?.models).toEqual([
+      {
+        model: "claude-haiku-4-5",
+        inputTokens: 30,
+        cachedInputTokens: 0,
+        cacheWriteInputTokens: 0,
+        outputTokens: 5,
+        reasoningOutputTokens: 0,
+      },
+      {
+        model: MODEL,
+        inputTokens: 720,
+        cachedInputTokens: 600,
+        cacheWriteInputTokens: 20,
+        outputTokens: 50,
+        reasoningOutputTokens: 20,
+      },
+    ]);
+    expect(snapshot?.completeness).toBe("complete");
+    expect(
+      observeClaudeResultUsage(
+        state,
+        result({
+          [MODEL]: modelUsage(1100, 350, 5600, 220, 120),
+          "claude-haiku-4-5": modelUsage(430, 25),
+        }),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("uses query-only totals on an older configured CLI despite a newer SDK and saved cost state", () => {
+    const state = makeClaudeUsageAccounting(SCOPE, {
+      status: "known",
+      models: decodeClaudeCumulativeUsage({ [MODEL]: modelUsage(10000, 300) })!,
+    });
+    configureClaudeUsageVersion(state, "2.1.274");
+    expect(
+      observeClaudeResultUsage(state, result({ [MODEL]: modelUsage(100, 20) }))?.models[0],
+    ).toMatchObject({ inputTokens: 100, outputTokens: 20 });
+  });
+
+  it.each([undefined, "unknown", "2.1.278"])(
+    "retains input and later deltas when a resume baseline is unavailable (%s)",
+    (version) => {
+      const state = makeClaudeUsageAccounting(SCOPE, { status: "unavailable" });
+      configureClaudeUsageVersion(state, version);
+      observeClaudeAssistantUsage(state, assistant("first", 100, { cached: 200 }));
+      expect(
+        observeClaudeResultUsage(state, result({ [MODEL]: modelUsage(0, 0) })),
+      ).toBeUndefined();
+      observeClaudeResultUsage(state, result({ [MODEL]: modelUsage(10100, 300, 5200) }));
+      const input = observeClaudeAssistantUsage(state, assistant("second", 50, { cached: 150 }));
+      expect(input?.models[0]).toMatchObject({
+        inputTokens: 500,
+        cachedInputTokens: 350,
+        outputTokens: 0,
+      });
+      const next = observeClaudeResultUsage(
+        state,
+        result({ [MODEL]: modelUsage(10150, 330, 5350) }),
+      );
+      expect(next?.models[0]).toMatchObject({
+        inputTokens: 500,
+        cachedInputTokens: 350,
+        outputTokens: 30,
+      });
+      expect(next?.completeness).toBe("input-only");
+      // A late/repeated init must not replace the already-established offset.
+      configureClaudeUsageVersion(state, "2.1.274");
+      expect(
+        observeClaudeResultUsage(state, result({ [MODEL]: modelUsage(10150, 330, 5350) })),
+      ).toBeUndefined();
+    },
+  );
+
+  it("does not settle a restored offset that regresses or reclassifies saved token categories", () => {
+    const state = makeClaudeUsageAccounting(SCOPE, {
+      status: "known",
+      models: decodeClaudeCumulativeUsage({ [MODEL]: modelUsage(1000, 50, 500) })!,
+    });
+    configureClaudeUsageVersion(state, "2.1.280");
+    observeClaudeAssistantUsage(state, assistant("new", 100));
+    expect(
+      observeClaudeResultUsage(state, result({ [MODEL]: modelUsage(900, 60, 700) })),
+    ).toBeUndefined();
+    expect(
+      observeClaudeResultUsage(state, result({ [MODEL]: modelUsage(1000, 0, 500) })),
+    ).toBeUndefined();
+    expect(
+      observeClaudeResultUsage(state, result({ [MODEL]: modelUsage(1100, 60, 500) }))?.models[0],
+    ).toMatchObject({ inputTokens: 100, outputTokens: 10 });
+  });
+
+  it("keeps a zeroed pre-init result from freezing unknown version semantics", () => {
+    const state = makeClaudeUsageAccounting(SCOPE, { status: "unavailable" });
+    expect(observeClaudeResultUsage(state, result({ [MODEL]: modelUsage(0, 0) }))).toBeUndefined();
+    configureClaudeUsageVersion(state, "2.1.274");
+    const snapshot = observeClaudeResultUsage(state, result({ [MODEL]: modelUsage(100, 20) }));
+    expect(snapshot?.models[0]).toMatchObject({ inputTokens: 100, outputTokens: 20 });
+    expect(snapshot?.completeness).toBe("complete");
+  });
+
   it("counts equal/growing independent requests fully and deduplicates parallel assistant copies by API ID", () => {
     const state = makeClaudeUsageAccounting(SCOPE);
     observeClaudeAssistantUsage(state, assistant("a", 100000));

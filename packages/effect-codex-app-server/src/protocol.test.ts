@@ -30,6 +30,56 @@ const decodeServerNotification = Schema.decodeUnknownSync(CodexSchema.ServerNoti
 const decodeThreadShellCommandParams = Schema.decodeUnknownSync(
   CodexSchema.V2ThreadShellCommandParams,
 );
+const decodeTurnUserInput = Schema.decodeUnknownSync(CodexSchema.V2TurnStartParams__UserInput);
+const isTurnUserInput = Schema.is(CodexSchema.V2TurnStartParams__UserInput);
+const decodeResumeContent = Schema.decodeUnknownSync(CodexSchema.V2ThreadResumeParams__ContentItem);
+const isResumeContent = Schema.is(CodexSchema.V2ThreadResumeParams__ContentItem);
+const decodeCatalogModel = Schema.decodeUnknownSync(CodexSchema.V2ModelListResponse__Model);
+
+it("preserves Codex 0.156 image alternatives and their shared discriminant", () => {
+  // Upstream's anyOf image locator is intersected with sibling type/detail
+  // properties. Generation must not lose those siblings or require both the
+  // legacy URL and new file-id locator when reading resumed native history.
+  for (const locator of [{ url: "https://example.invalid/image.png" }, { fileId: "file-1" }]) {
+    const input = { type: "image", detail: "high", ...locator } as const;
+    assert.deepEqual(decodeTurnUserInput(input), input);
+    assert.equal(isTurnUserInput(locator), false);
+    assert.equal(isTurnUserInput({ ...input, type: "unknown" }), false);
+  }
+  for (const locator of [
+    { image_url: "https://example.invalid/image.png" },
+    { file_id: "file-1" },
+  ]) {
+    const content = { type: "input_image", detail: "high", ...locator } as const;
+    assert.deepEqual(decodeResumeContent(content), content);
+    assert.equal(isResumeContent(locator), false);
+  }
+  assert.equal(isTurnUserInput({ type: "image", detail: "high" }), false);
+  assert.equal(isTurnUserInput({ type: "image", fileId: 42 }), false);
+  assert.equal(isResumeContent({ type: "input_image" }), false);
+});
+
+it("accepts Codex 0.156 nullable model access metadata and older catalogs", () => {
+  const legacy = {
+    id: "gpt-6-astra",
+    model: "gpt-6-astra",
+    displayName: "GPT-6 Astra",
+    description: "A coding model",
+    hidden: false,
+    isDefault: true,
+    defaultReasoningEffort: "low",
+    supportedReasoningEfforts: [],
+  } as const;
+  assert.deepEqual(decodeCatalogModel(legacy), legacy);
+  assert.deepEqual(decodeCatalogModel({ ...legacy, availableAccessPrograms: null }), {
+    ...legacy,
+    availableAccessPrograms: null,
+  });
+  // Removed upstream operations must not remain advertised by generated RPC
+  // metadata. The runtime's explicit legacy rewind adapter is separate.
+  assert.equal("thread/rollback" in CodexSchema.CLIENT_REQUEST_METHODS, false);
+  assert.equal(CodexSchema.CLIENT_REQUEST_METHODS["thread/revert"], "thread/revert");
+});
 
 it("tracks Codex 0.146 app-server compatibility additions", () => {
   assert.equal(

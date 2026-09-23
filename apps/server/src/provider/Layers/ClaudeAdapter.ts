@@ -105,12 +105,15 @@ import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
 import { makeProviderSessionTitle } from "../providerSessionTitle.ts";
 import { awaitClaudeDecision } from "../claudeDecision.ts";
 import { recoverClaudeResume } from "../claudeResumeRecovery.ts";
+import { readClaudeUsageBaseline } from "../claudeUsageBaseline.ts";
 import { prepareFileAttachmentPrompt } from "../fileAttachmentPrompt.ts";
 import {
   makeClaudeUsageAccounting,
+  configureClaudeUsageVersion,
   observeClaudeAssistantUsage,
   observeClaudeResultUsage,
   type ClaudeUsageAccounting,
+  type ClaudeUsageBaseline,
 } from "../claudeUsageAccounting.ts";
 import {
   getClaudeModelCapabilities,
@@ -5514,6 +5517,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         return;
       }
       case "init":
+        configureClaudeUsageVersion(context.usageAccounting, message.claude_code_version);
         context.capabilities.clear();
         for (const capability of message.capabilities ?? []) {
           if (typeof capability === "string" && capability.length > 0) {
@@ -7365,6 +7369,29 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
       const existingResumeSessionId = durableResumeState?.resume;
       const resumeBaseTurnCount = durableResumeState?.turnCount ?? 0;
+      // Capture a numeric offset before query() can restore and automatically
+      // continue work. Since Claude Code 2.1.277, result.modelUsage includes
+      // saved history, including on a fork. Missing/unsafe metadata is nonfatal:
+      // the accounting layer retains only provably new usage in that case.
+      const resumeUsageBaseline: ClaudeUsageBaseline | undefined = existingResumeSessionId
+        ? input.cwd
+          ? yield* Effect.promise((signal) =>
+              readClaudeUsageBaseline({
+                configDirectory: resolveClaudeConfigDirectory(path, claudeEnvironment),
+                projectKey:
+                  claudeEnvironment.CLAUDE_CODE_PROJECT_DIR_NAME?.trim() ||
+                  claudeProjectDirectoryName(path, input.cwd!),
+                sessionId: existingResumeSessionId,
+                signal,
+              }),
+            ).pipe(
+              Effect.timeoutOrElse({
+                duration: 1_000,
+                orElse: () => Effect.succeed<ClaudeUsageBaseline>({ status: "unavailable" }),
+              }),
+            )
+          : { status: "unavailable" }
+        : undefined;
 
       const queryOptions: ClaudeQueryOptions = {
         ...(input.cwd ? { cwd: input.cwd } : {}),
@@ -7563,7 +7590,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         lastFastModeNoticeKey: undefined,
         lastKnownContextWindow: selectedContextWindowTokens,
         lastKnownTokenUsage: undefined,
-        usageAccounting: makeClaudeUsageAccounting(randomUUID()),
+        usageAccounting: makeClaudeUsageAccounting(randomUUID(), resumeUsageBaseline),
         usageAccountingResetIds: new Set(),
         usageAccountingResetOverflow: false,
         lastAssistantUuid: undefined,
