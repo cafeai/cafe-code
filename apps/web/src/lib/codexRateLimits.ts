@@ -130,6 +130,13 @@ export function selectCodexRateLimitSnapshot(
 export function formatCodexRateLimitResetAvailability(
   rateLimits: ServerProviderAccountRateLimits | null | undefined,
 ): string | null {
+  const availableCount = selectCodexAvailableResetCount(rateLimits);
+  return availableCount === null ? null : `Usage limit resets available: ${availableCount}`;
+}
+
+export function selectCodexAvailableResetCount(
+  rateLimits: ServerProviderAccountRateLimits | null | undefined,
+): number | null {
   const availableCount = rateLimits?.rateLimitResetCredits?.availableCount;
   if (
     typeof availableCount !== "number" ||
@@ -141,7 +148,7 @@ export function formatCodexRateLimitResetAvailability(
 
   // Upstream reports an authoritative aggregate because the optional credit list can be
   // absent or redacted. Never infer availability by counting those detail rows.
-  return `Usage limit resets available: ${availableCount}`;
+  return availableCount;
 }
 
 export function formatCodexRateLimitSummary(

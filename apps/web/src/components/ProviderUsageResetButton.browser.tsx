@@ -106,8 +106,8 @@ describe("ProviderUsageResetButton (mocked account only)", () => {
     expect(request).not.toHaveBeenCalled();
   });
 
-  it("only reads on opening and cancellation, including cached zero availability", async () => {
-    const request = vi.fn<RequestProviderUsageReset>().mockResolvedValue(preview());
+  it("hides when reset availability is zero or unknown without probing", async () => {
+    const request = vi.fn<RequestProviderUsageReset>();
     const cached = provider();
     mounted = await render(
       <ProviderUsageResetButton
@@ -121,6 +121,35 @@ describe("ProviderUsageResetButton (mocked account only)", () => {
         request={request}
       />,
     );
+    await expect
+      .element(page.getByRole("button", { name: "Redeem reset", exact: true }))
+      .not.toBeInTheDocument();
+    await mounted.rerender(
+      <ProviderUsageResetButton
+        provider={{
+          ...cached,
+          accountRateLimits: { ...cached.accountRateLimits!, rateLimitResetCredits: null },
+        }}
+        request={request}
+      />,
+    );
+    await expect
+      .element(page.getByRole("button", { name: "Redeem reset", exact: true }))
+      .not.toBeInTheDocument();
+    const withoutRateLimits = { ...cached };
+    delete withoutRateLimits.accountRateLimits;
+    await mounted.rerender(
+      <ProviderUsageResetButton provider={withoutRateLimits} request={request} />,
+    );
+    await expect
+      .element(page.getByRole("button", { name: "Redeem reset", exact: true }))
+      .not.toBeInTheDocument();
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("only reads on opening and cancellation when availability is positive", async () => {
+    const request = vi.fn<RequestProviderUsageReset>().mockResolvedValue(preview());
+    mounted = await render(<ProviderUsageResetButton provider={provider()} request={request} />);
     await page.getByRole("button", { name: "Redeem reset", exact: true }).click();
     await expect.element(page.getByText("2 usage limit resets available")).toBeVisible();
     await expect

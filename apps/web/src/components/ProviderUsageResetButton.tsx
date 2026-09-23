@@ -6,7 +6,10 @@ import type {
   ServerProvider,
 } from "@cafecode/contracts";
 import { hasLowCodexUsage } from "@cafecode/shared/providerUsageReset";
-import { formatCodexRateLimitSummary } from "../lib/codexRateLimits";
+import {
+  formatCodexRateLimitSummary,
+  selectCodexAvailableResetCount,
+} from "../lib/codexRateLimits";
 import { Button } from "./ui/button";
 import {
   Dialog,
@@ -66,6 +69,7 @@ export function ProviderUsageResetButton(props: {
     provider.driver === "codex" &&
     provider.auth.status === "authenticated" &&
     provider.auth.type === "chatgpt" &&
+    (selectCodexAvailableResetCount(provider.accountRateLimits) ?? 0) > 0 &&
     hasLowCodexUsage(provider.accountRateLimits);
 
   const preview = async () => {

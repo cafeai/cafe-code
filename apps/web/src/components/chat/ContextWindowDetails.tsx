@@ -3,7 +3,11 @@ import type { ServerProviderAccountRateLimits } from "@cafecode/contracts";
 
 import { cn } from "~/lib/utils";
 import { type ContextWindowSnapshot, formatContextWindowTokens } from "~/lib/contextWindow";
-import { formatCodexRateLimitSummary, selectCodexRateLimitSnapshot } from "~/lib/codexRateLimits";
+import {
+  formatCodexRateLimitResetAvailability,
+  formatCodexRateLimitSummary,
+  selectCodexRateLimitSnapshot,
+} from "~/lib/codexRateLimits";
 
 function formatPercentage(value: number | null): string | null {
   if (value === null || !Number.isFinite(value)) {
@@ -48,13 +52,14 @@ export function ContextWindowDetails(props: {
   const usage = props.usage ?? null;
   const layout = props.layout ?? "popover";
   const rateLimitSummary = formatCodexRateLimitSummary(props.rateLimits);
+  const resetAvailability = formatCodexRateLimitResetAvailability(props.rateLimits);
   const rateLimitSnapshot = selectCodexRateLimitSnapshot(props.rateLimits);
   const usedPercentage = usage ? formatPercentage(usage.usedPercentage) : null;
   const normalizedPercentage = Math.max(0, Math.min(100, usage?.usedPercentage ?? 0));
   const primaryRemaining = remainingPercentage(rateLimitSnapshot?.primary?.usedPercent);
   const secondaryRemaining = remainingPercentage(rateLimitSnapshot?.secondary?.usedPercent);
   const hasUsage = usage !== null;
-  const hasRateLimits = rateLimitSummary !== null;
+  const hasRateLimits = rateLimitSummary !== null || resetAvailability !== null;
 
   if (!hasUsage && !hasRateLimits) {
     return (
@@ -122,7 +127,7 @@ export function ContextWindowDetails(props: {
         </div>
       ) : null}
 
-      {rateLimitSummary ? (
+      {hasRateLimits ? (
         <div
           className={cn(
             "text-xs",
@@ -137,7 +142,7 @@ export function ContextWindowDetails(props: {
               {props.usageResetAction}
             </div>
           ) : null}
-          {rateLimitSummary.primary ? (
+          {rateLimitSummary?.primary ? (
             layout === "panel" && primaryRemaining !== null ? (
               <div className="space-y-1.5" data-session-rail-rate-limit="primary">
                 <div className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground/40">
@@ -162,7 +167,7 @@ export function ContextWindowDetails(props: {
               </div>
             )
           ) : null}
-          {rateLimitSummary.secondary ? (
+          {rateLimitSummary?.secondary ? (
             layout === "panel" && secondaryRemaining !== null ? (
               <div className="space-y-1.5" data-session-rail-rate-limit="secondary">
                 <div className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground/40">
@@ -187,25 +192,28 @@ export function ContextWindowDetails(props: {
               </div>
             )
           ) : null}
-          {layout === "popover" && rateLimitSummary.primaryReset ? (
+          {layout === "popover" && rateLimitSummary?.primaryReset ? (
             <div className="whitespace-nowrap text-muted-foreground">
               {rateLimitSummary.primaryReset}
             </div>
           ) : null}
-          {layout === "popover" && rateLimitSummary.weeklyReset ? (
+          {layout === "popover" && rateLimitSummary?.weeklyReset ? (
             <div className="whitespace-nowrap text-muted-foreground">
               {rateLimitSummary.weeklyReset}
             </div>
           ) : null}
-          {layout === "panel" && !rateLimitSummary.primary && rateLimitSummary.primaryReset ? (
+          {layout === "panel" && !rateLimitSummary?.primary && rateLimitSummary?.primaryReset ? (
             <div className="whitespace-normal text-muted-foreground [overflow-wrap:anywhere]">
               {rateLimitSummary.primaryReset}
             </div>
           ) : null}
-          {layout === "panel" && !rateLimitSummary.secondary && rateLimitSummary.weeklyReset ? (
+          {layout === "panel" && !rateLimitSummary?.secondary && rateLimitSummary?.weeklyReset ? (
             <div className="whitespace-normal text-muted-foreground [overflow-wrap:anywhere]">
               {rateLimitSummary.weeklyReset}
             </div>
+          ) : null}
+          {resetAvailability ? (
+            <div className="whitespace-nowrap text-muted-foreground">{resetAvailability}</div>
           ) : null}
         </div>
       ) : null}
