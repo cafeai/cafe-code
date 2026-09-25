@@ -23,10 +23,10 @@ import {
   parseRequestEntries,
 } from "./protocolMethodEntries.ts";
 
-// Codex 0.156.0 release commit. Keep generation attached to an immutable
+// Codex 0.157.0 release commit. Keep generation attached to an immutable
 // upstream commit rather than a moving tag so a reinstall cannot silently
 // change Cafe's protocol boundary.
-const UPSTREAM_REF = "fe74a774532af67b5a4a3dec03ce9469e17f89af";
+const UPSTREAM_REF = "00c972ed5d6ff6499317fd41b7f23605b8e6850d";
 const USER_AGENT = "effect-codex-app-server-generator";
 const GITHUB_API_BASE =
   "https://api.github.com/repos/openai/codex/contents/codex-rs/app-server-protocol";
@@ -333,6 +333,12 @@ function resolveResponseTypeName(
   generatedSchemaNames: ReadonlySet<string>,
 ): string {
   const overrides: Record<string, string> = {
+    // These parameterless account methods use response names without the
+    // account namespace. Resolve their exact upstream types instead of
+    // inventing an AccountGatewayOAuth* schema from the wire method name.
+    "account/gatewayOAuth/read": "GatewayOAuthReadResponse",
+    "account/gatewayOAuth/login": "GatewayOAuthLoginResponse",
+    "account/gatewayOAuth/cancel": "GatewayOAuthCancelResponse",
     "account/logout": "LogoutAccountResponse",
     "account/rateLimits/read": "GetAccountRateLimitsResponse",
     "account/usage/read": "GetAccountTokenUsageResponse",

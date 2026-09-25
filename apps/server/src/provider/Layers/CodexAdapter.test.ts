@@ -4371,6 +4371,20 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
 
       const ignoredEvents = [
         {
+          id: asEventId("evt-codex-gateway-login"),
+          kind: "notification" as const,
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "account/gatewayOAuth/changed",
+          payload: {
+            providerId: "private-gateway-account",
+            status: "inProgress",
+            authUrl: "https://example.invalid/login?secret=private-token",
+            error: "private-gateway-error",
+          },
+        },
+        {
           id: asEventId("evt-codex-stored-attachment"),
           kind: "notification" as const,
           provider: ProviderDriverKind.make("codex"),
@@ -4969,6 +4983,20 @@ it.effect("flushes managed native logs when the adapter layer shuts down", () =>
         },
       } satisfies ProviderEvent);
       yield* runtime.emit({
+        id: asEventId("evt-native-log-gateway-login"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-logger"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "account/gatewayOAuth/changed",
+        payload: {
+          providerId: "native-log-secret-gateway-account",
+          status: "inProgress",
+          authUrl: "https://example.invalid/login?secret=native-log-secret-token",
+          error: "native-log-secret-gateway-error",
+        },
+      } satisfies ProviderEvent);
+      yield* runtime.emit({
         id: asEventId("evt-native-log"),
         kind: "notification",
         provider: ProviderDriverKind.make("codex"),
@@ -5050,6 +5078,7 @@ it.effect("flushes managed native logs when the adapter layer shuts down", () =>
       assert.match(contents, /"reason":"subagent-provider-content"/);
       assert.match(contents, /"reason":"model-provider-auth-recovery-content"/);
       assert.doesNotMatch(contents, /thread\/attachment\/updated/);
+      assert.doesNotMatch(contents, /account\/gatewayOAuth\/changed/);
       assert.doesNotMatch(contents, /native-log-secret/);
     } finally {
       if (!scopeClosed) {

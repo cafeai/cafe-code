@@ -404,22 +404,24 @@ const fetchNpmLatestVersion = Effect.fn("fetchNpmLatestVersion")(function* (pack
   const request = HttpClientRequest.get(
     `https://registry.npmjs.org/${encodeURIComponent(packageName)}/latest`,
   ).pipe(HttpClientRequest.setHeader("accept", "application/json"));
-  const response = yield* client.execute(request).pipe(
+  return yield* client.execute(request).pipe(
+    Effect.flatMap((response) => {
+      if (response.status < 200 || response.status >= 300) {
+        return Effect.succeed(null);
+      }
+      return response.json.pipe(
+        Effect.flatMap(Schema.decodeUnknownEffect(NpmLatestVersionResponse)),
+        Effect.map((payload) => nonEmptyString(payload.version)),
+      );
+    }),
+    // The same deadline must include headers and the complete response body.
+    // A registry can send headers promptly and then stall JSON indefinitely;
+    // post-update verification would otherwise retain the maintenance lock.
+    // Preserve the existing null result and cache policy for every failure.
     Effect.timeoutOption(LATEST_VERSION_TIMEOUT_MS),
-    Effect.catch(() => Effect.succeed(Option.none())),
-  );
-  if (Option.isNone(response)) {
-    return null;
-  }
-  const httpResponse = response.value;
-  if (httpResponse.status < 200 || httpResponse.status >= 300) {
-    return null;
-  }
-  const payload = yield* httpResponse.json.pipe(
-    Effect.flatMap(Schema.decodeUnknownEffect(NpmLatestVersionResponse)),
+    Effect.map(Option.getOrNull),
     Effect.catch(() => Effect.succeed(null)),
   );
-  return payload ? nonEmptyString(payload.version) : null;
 });
 
 export const resolveLatestProviderVersion = Effect.fn("resolveLatestProviderVersion")(function* (

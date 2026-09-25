@@ -23,6 +23,7 @@ import * as ProviderMaintenanceRunner from "./providerMaintenanceRunner.ts";
 import {
   clearLatestProviderVersionCacheForTests,
   makeProviderMaintenanceCapabilities,
+  resolveLatestProviderVersion,
   type ProviderMaintenanceCapabilities,
 } from "./providerMaintenance.ts";
 const isServerProviderUpdateError = Schema.is(ServerProviderUpdateError);
@@ -55,7 +56,7 @@ const baseProvider: ServerProvider = {
   driver: CODEX_DRIVER,
   enabled: true,
   installed: true,
-  version: null,
+  version: "0.0.0",
   status: "ready",
   auth: { status: "authenticated" },
   checkedAt: "2026-04-10T00:00:00.000Z",
@@ -70,18 +71,50 @@ const baseClaudeProvider: ServerProvider = {
   driver: CLAUDE_DRIVER,
 };
 
-const latestVersionHttpClient = (version: string) =>
-  Layer.succeed(
+const latestVersionHttpClient = (
+  version: string,
+  options?: {
+    readonly nativePackageAvailable?: boolean;
+    readonly failVersionAdvisory?: boolean;
+  },
+) => {
+  let nativeManifestRead = false;
+  const integrity = `sha512-${Buffer.alloc(64).toString("base64")}`;
+  const platformSuffix = `${process.platform}-${process.arch}`;
+  return Layer.succeed(
     HttpClient.HttpClient,
-    HttpClient.make((request) =>
-      Effect.succeed(
+    HttpClient.make((request) => {
+      const isLatestRequest = request.url.endsWith("/latest");
+      const selectedVersion = isLatestRequest ? version : `${version}-${platformSuffix}`;
+      const status = !isLatestRequest && options?.nativePackageAvailable === false ? 404 : 200;
+      const payload =
+        isLatestRequest && nativeManifestRead && options?.failVersionAdvisory
+          ? {}
+          : {
+              name: "@openai/codex",
+              version: selectedVersion,
+              optionalDependencies: {
+                [`@openai/codex-${platformSuffix}`]: `npm:@openai/codex@${version}-${platformSuffix}`,
+              },
+              os: [process.platform],
+              cpu: [process.arch],
+              dist: {
+                tarball: `https://registry.npmjs.org/@openai/codex/-/codex-${selectedVersion}.tgz`,
+                integrity,
+              },
+            };
+      // The preflight reads both manifests before post-update advisory lookup.
+      // This lets tests model a failed later lookup without failing preflight.
+      nativeManifestRead ||= !isLatestRequest;
+      return Effect.succeed(
         HttpClientResponse.fromWeb(
           request,
-          Response.json({ version }, { headers: { "content-type": "application/json" } }),
+          Response.json(payload, { status, headers: { "content-type": "application/json" } }),
         ),
-      ),
-    ),
+      );
+    }),
   );
+};
 
 function mockHandle(result: {
   readonly stdout?: string;
@@ -200,7 +233,7 @@ describe("providerMaintenanceRunner", () => {
       assert.deepStrictEqual(calls, [
         {
           command: "npm",
-          args: ["install", "-g", "@openai/codex@latest"],
+          args: ["install", "-g", "@openai/codex@0.0.0"],
         },
       ]);
       assert.strictEqual(result.providers[0]?.updateState?.status, "succeeded");
@@ -214,6 +247,74 @@ describe("providerMaintenanceRunner", () => {
           latestVersionHttpClient("0.0.0"),
           mockSpawnerLayer((command, args) => {
             calls.push({ command, args });
+            return { stdout: "updated" };
+          }),
+        ),
+      ),
+    );
+  });
+
+  it.effect("preserves the installation when the selected native package is not published", () => {
+    let commandCalls = 0;
+    let refreshCalls = 0;
+    return Effect.gen(function* () {
+      const { registry, updateStatesRef } = yield* makeRegistry();
+      const updater = yield* makeTestRunner({
+        ...registry,
+        refreshInstance: (instanceId) => {
+          refreshCalls += 1;
+          return registry.refreshInstance(instanceId);
+        },
+      });
+
+      const result = yield* updater.updateProvider(CODEX_DRIVER);
+
+      assert.strictEqual(commandCalls, 0);
+      assert.strictEqual(refreshCalls, 0);
+      assert.strictEqual(result.providers[0]?.updateState?.status, "failed");
+      assert.strictEqual(result.providers[0]?.updateState?.output, null);
+      assert.deepStrictEqual(
+        (yield* Ref.get(updateStatesRef)).map((state) => state.status),
+        ["queued", "running", "failed"],
+      );
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          latestVersionHttpClient("0.0.0", { nativePackageAvailable: false }),
+          mockSpawnerLayer(() => {
+            commandCalls += 1;
+            return { stdout: "updated" };
+          }),
+        ),
+      ),
+    );
+  });
+
+  it.effect("verifies the pinned target even when the latest-version advisory is cached", () => {
+    const calls: Array<ReadonlyArray<string>> = [];
+    return Effect.gen(function* () {
+      // The old version may still be classified as current by the hour-long
+      // advisory cache; preflight independently selected a newer exact target.
+      yield* resolveLatestProviderVersion(lifecycleFor(CODEX_DRIVER)).pipe(
+        Effect.provide(latestVersionHttpClient("0.0.0")),
+      );
+      const { registry } = yield* makeRegistry();
+      const updater = yield* makeTestRunner(registry);
+
+      const result = yield* updater.updateProvider(CODEX_DRIVER);
+
+      assert.deepStrictEqual(calls, [["install", "-g", "@openai/codex@0.157.0"]]);
+      assert.strictEqual(result.providers[0]?.updateState?.status, "unchanged");
+      assert.strictEqual(
+        result.providers[0]?.updateState?.message,
+        "Update command completed, but Cafe Code did not detect the selected provider version.",
+      );
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          latestVersionHttpClient("0.157.0"),
+          mockSpawnerLayer((_command, args) => {
+            calls.push(args);
             return { stdout: "updated" };
           }),
         ),
@@ -254,7 +355,7 @@ describe("providerMaintenanceRunner", () => {
       assert.deepStrictEqual(calls, [
         {
           command: "pnpm",
-          args: ["add", "-g", "@openai/codex@latest"],
+          args: ["add", "-g", "@openai/codex@0.0.0"],
         },
       ]);
     }).pipe(
@@ -283,7 +384,7 @@ describe("providerMaintenanceRunner", () => {
         assert.deepStrictEqual(calls, [
           {
             command: "npm",
-            args: ["install", "-g", "@openai/codex@latest"],
+            args: ["install", "-g", "@openai/codex@0.0.0"],
           },
         ]);
         assert.strictEqual(result.providers[0]?.updateState?.status, "succeeded");
@@ -311,12 +412,12 @@ describe("providerMaintenanceRunner", () => {
         {
           ...baseProvider,
           instanceId: personalInstanceId,
-          version: "0.124.0-alpha.3",
+          version: "0.124.0",
         },
         {
           ...baseProvider,
           instanceId: workInstanceId,
-          version: "0.124.0-alpha.3",
+          version: "0.124.0",
         },
       ]);
       const updater = yield* makeTestRunner({
@@ -351,7 +452,7 @@ describe("providerMaintenanceRunner", () => {
       assert.deepStrictEqual(calls, [
         {
           command: "vp",
-          args: ["i", "-g", "@openai/codex"],
+          args: ["i", "-g", "@openai/codex@0.124.0"],
         },
       ]);
       assert.deepStrictEqual(refreshedInstanceIds, [personalInstanceId]);
@@ -362,7 +463,7 @@ describe("providerMaintenanceRunner", () => {
     }).pipe(
       Effect.provide(
         Layer.mergeAll(
-          latestVersionHttpClient("0.124.0-alpha.3"),
+          latestVersionHttpClient("0.124.0"),
           mockSpawnerLayer((command, args) => {
             calls.push({ command, args });
             return { stdout: "updated" };
@@ -439,7 +540,7 @@ describe("providerMaintenanceRunner", () => {
         const result = yield* updater.updateProvider(CODEX_DRIVER);
 
         assert.strictEqual(result.providers[0]?.updateState?.status, "unchanged");
-        assert.include(result.providers[0]?.updateState?.message ?? "", "still detects");
+        assert.include(result.providers[0]?.updateState?.message ?? "", "did not detect");
       }).pipe(
         Effect.provide(
           Layer.mergeAll(
@@ -448,6 +549,136 @@ describe("providerMaintenanceRunner", () => {
           ),
         ),
       ),
+  );
+
+  for (const scenario of [
+    {
+      name: "an incomplete native installation",
+      provider: {
+        version: null,
+        status: "error",
+        auth: { status: "unknown" },
+        probePhases: [{ phase: "version", outcome: "error", durationMs: 1 }],
+      },
+      expectedStatus: "failed",
+    },
+    {
+      name: "a missing executable despite a retained version",
+      provider: { installed: false },
+      expectedStatus: "failed",
+    },
+    {
+      name: "an explicit runtime error despite a retained version",
+      provider: { status: "error" },
+      expectedStatus: "failed",
+    },
+    {
+      name: "a failed version probe despite retained healthy presentation",
+      provider: { probePhases: [{ phase: "version", outcome: "error", durationMs: 1 }] },
+      expectedStatus: "failed",
+    },
+    {
+      name: "an inconclusive version probe despite a retained version",
+      provider: { probePhases: [{ phase: "version", outcome: "timeout", durationMs: 1 }] },
+      expectedStatus: "unchanged",
+    },
+    {
+      name: "a null version",
+      provider: { version: null },
+      expectedStatus: "unchanged",
+    },
+    {
+      name: "an unrecognized version",
+      provider: { version: "unknown" },
+      expectedStatus: "unchanged",
+    },
+    {
+      name: "a disabled instance with a cached version",
+      provider: { enabled: false },
+      expectedStatus: "unchanged",
+    },
+    {
+      name: "an unavailable instance with a cached version",
+      provider: { availability: "unavailable" },
+      expectedStatus: "unchanged",
+    },
+  ] as const) {
+    it.effect(`does not report update success for ${scenario.name}`, () =>
+      Effect.gen(function* () {
+        const { registry, updateStatesRef } = yield* makeRegistry({
+          ...baseProvider,
+          ...scenario.provider,
+          message: "private-provider-diagnostic /private/provider/home",
+        });
+        const updater = yield* makeTestRunner(registry);
+
+        const result = yield* updater.updateProvider(CODEX_DRIVER);
+        const updateState = result.providers[0]?.updateState;
+
+        assert.strictEqual(updateState?.status, scenario.expectedStatus);
+        assert.deepStrictEqual(
+          (yield* Ref.get(updateStatesRef)).map((state) => state.status),
+          ["queued", "running", scenario.expectedStatus],
+        );
+        assert.notInclude(JSON.stringify(updateState), "private-provider-diagnostic");
+        assert.notInclude(JSON.stringify(updateState), "/private/provider/home");
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            latestVersionHttpClient("0.0.0"),
+            mockSpawnerLayer(() => ({ stdout: "updated" })),
+          ),
+        ),
+      ),
+    );
+  }
+
+  it.effect("does not claim latest-version verification when the registry version is unknown", () =>
+    Effect.gen(function* () {
+      const { registry } = yield* makeRegistry();
+      const updater = yield* makeTestRunner(registry);
+
+      const result = yield* updater.updateProvider(CODEX_DRIVER);
+
+      assert.strictEqual(result.providers[0]?.updateState?.status, "unchanged");
+      assert.strictEqual(
+        result.providers[0]?.updateState?.message,
+        "Update command completed, but Cafe Code could not verify the latest provider version.",
+      );
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          latestVersionHttpClient("0.0.0", { failVersionAdvisory: true }),
+          mockSpawnerLayer(() => ({ stdout: "updated" })),
+        ),
+      ),
+    ),
+  );
+
+  it.effect("verifies an updated executable independently of account authentication", () =>
+    Effect.gen(function* () {
+      const { registry } = yield* makeRegistry({
+        ...baseProvider,
+        status: "warning",
+        auth: { status: "unauthenticated" },
+        probePhases: [
+          { phase: "version", outcome: "success", durationMs: 1 },
+          { phase: "login-status", outcome: "error", durationMs: 1 },
+        ],
+      });
+      const updater = yield* makeTestRunner(registry);
+
+      const result = yield* updater.updateProvider(CODEX_DRIVER);
+
+      assert.strictEqual(result.providers[0]?.updateState?.status, "succeeded");
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          latestVersionHttpClient("0.0.0"),
+          mockSpawnerLayer(() => ({ stdout: "updated" })),
+        ),
+      ),
+    ),
   );
 
   it.effect("prevents concurrent updates for the same provider", () => {
@@ -546,7 +777,7 @@ describe("providerMaintenanceRunner", () => {
       const second = yield* updater.updateProvider(CLAUDE_DRIVER).pipe(Effect.forkScoped);
       yield* Effect.promise(() => secondQueued);
       const providersWhileQueued = yield* registry.getProviders;
-      assert.deepStrictEqual(calls, ["install -g @openai/codex@latest"]);
+      assert.deepStrictEqual(calls, ["install -g @openai/codex@0.0.0"]);
       assert.strictEqual(
         providersWhileQueued.find((provider) => provider.instanceId === CLAUDE_INSTANCE_ID)
           ?.updateState?.status,
@@ -557,7 +788,7 @@ describe("providerMaintenanceRunner", () => {
       yield* Fiber.join(first);
       yield* Fiber.join(second);
       assert.deepStrictEqual(calls, [
-        "install -g @openai/codex@latest",
+        "install -g @openai/codex@0.0.0",
         "install -g @anthropic-ai/claude-code@latest",
       ]);
     }).pipe(
@@ -602,7 +833,7 @@ describe("providerMaintenanceRunner", () => {
 
       const result = yield* updater.updateProvider(CODEX_DRIVER);
       assert.strictEqual(result.providers[0]?.updateState?.status, "succeeded");
-      assert.deepStrictEqual(calls, ["install -g @openai/codex@latest"]);
+      assert.deepStrictEqual(calls, ["install -g @openai/codex@0.0.0"]);
     }).pipe(
       Effect.provide(
         Layer.mergeAll(

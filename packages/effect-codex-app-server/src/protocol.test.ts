@@ -36,6 +36,178 @@ const decodeResumeContent = Schema.decodeUnknownSync(CodexSchema.V2ThreadResumeP
 const isResumeContent = Schema.is(CodexSchema.V2ThreadResumeParams__ContentItem);
 const decodeCatalogModel = Schema.decodeUnknownSync(CodexSchema.V2ModelListResponse__Model);
 
+it("keeps Codex 0.157 gateway login capability opt-in and its responses typed", () => {
+  const decodeCapabilities = Schema.decodeUnknownSync(
+    CodexSchema.V1InitializeParams__InitializeCapabilities,
+  );
+  const legacy = { experimentalApi: true };
+  assert.deepEqual(decodeCapabilities(legacy), legacy);
+  for (const explicitGatewayOauth of [false, true]) {
+    assert.deepEqual(decodeCapabilities({ ...legacy, explicitGatewayOauth }), {
+      ...legacy,
+      explicitGatewayOauth,
+    });
+  }
+  assert.equal(
+    Schema.is(CodexSchema.V1InitializeParams__InitializeCapabilities)({
+      explicitGatewayOauth: null,
+    }),
+    false,
+  );
+
+  // The new methods deliberately omit the account namespace in their response
+  // type names. Exercise the generated RPC map, not just standalone schemas,
+  // so a future regeneration cannot silently bind an unrelated response type.
+  const read = {
+    providerId: "gateway-example",
+    providerName: "Example gateway",
+    required: true,
+    status: "notReady",
+    error: null,
+  } as const;
+  assert.deepEqual(
+    Schema.decodeUnknownSync(CodexSchema.CLIENT_REQUEST_RESPONSES["account/gatewayOAuth/read"])(
+      read,
+    ),
+    read,
+  );
+  for (const method of ["account/gatewayOAuth/login", "account/gatewayOAuth/cancel"] as const) {
+    assert.equal(CodexSchema.CLIENT_REQUEST_METHODS[method], method);
+    assert.equal(CodexSchema.CLIENT_REQUEST_PARAMS[method], undefined);
+    assert.deepEqual(
+      Schema.decodeUnknownSync(CodexSchema.CLIENT_REQUEST_RESPONSES[method])({}),
+      {},
+    );
+  }
+  const changed = {
+    method: "account/gatewayOAuth/changed",
+    params: {
+      providerId: "gateway-example",
+      status: "succeeded",
+      authUrl: null,
+      error: null,
+    },
+  } as const;
+  assert.deepEqual(decodeServerNotification(changed), changed);
+  assert.equal(
+    Schema.is(CodexSchema.V2GatewayOAuthReadResponse)({ ...read, status: "unknown" }),
+    false,
+  );
+});
+
+it("preserves Codex 0.157 item lifecycle timestamps and older history entries", () => {
+  const decodeEntry = Schema.decodeUnknownSync(
+    CodexSchema.V2ThreadItemsListResponse__ThreadItemEntry,
+  );
+  const legacy = {
+    turnId: "turn-1",
+    item: { type: "agentMessage", id: "item-1", text: "Done." },
+  } as const;
+  assert.deepEqual(decodeEntry(legacy), legacy);
+  for (const times of [
+    { startedAtMs: null, completedAtMs: null },
+    { startedAtMs: 1_721_234_567_000, completedAtMs: 1_721_234_567_890 },
+  ]) {
+    assert.deepEqual(decodeEntry({ ...legacy, ...times }), { ...legacy, ...times });
+  }
+  // Provider timestamps are optional display metadata, not a new lifecycle
+  // boundary. Keep wire type validation while retaining old timestamp-free
+  // entries; do not invent local timestamps during history decoding.
+  assert.equal(
+    Schema.is(CodexSchema.V2ThreadItemsListResponse__ThreadItemEntry)({
+      ...legacy,
+      completedAtMs: "1721234567890",
+    }),
+    false,
+  );
+});
+
+it("preserves Codex 0.157 MCP origins and explicit resource targets without requiring them", () => {
+  const decodeStatus = Schema.decodeUnknownSync(
+    CodexSchema.V2ListMcpServerStatusResponse__McpServerStatus,
+  );
+  const legacyStatus = {
+    name: "test-server",
+    tools: {},
+    resources: [],
+    resourceTemplates: [],
+    authStatus: "unknown",
+  } as const;
+  assert.deepEqual(decodeStatus(legacyStatus), legacyStatus);
+  for (const httpOrigin of [null, "https://example.invalid"]) {
+    assert.deepEqual(decodeStatus({ ...legacyStatus, httpOrigin }), {
+      ...legacyStatus,
+      httpOrigin,
+    });
+  }
+
+  const decodeRead = Schema.decodeUnknownSync(CodexSchema.V2McpResourceReadParams);
+  const legacyRead = { server: "test-server", uri: "ui://example/resource" };
+  assert.deepEqual(decodeRead(legacyRead), legacyRead);
+  // Null explicitly selects no-auth resource access under upstream policy;
+  // it must remain distinguishable from a selected account's opaque link id.
+  for (const linkId of [null, "account-link-1"]) {
+    const targeted = { ...legacyRead, target: { connectorId: "app-example", linkId } };
+    assert.deepEqual(decodeRead(targeted), targeted);
+  }
+  assert.equal(
+    Schema.is(CodexSchema.V2McpResourceReadParams)({
+      ...legacyRead,
+      target: { linkId: "account-link-1" },
+    }),
+    false,
+  );
+  assert.equal(
+    Schema.is(CodexSchema.V2McpResourceReadParams)({
+      ...legacyRead,
+      target: { connectorId: "app-example" },
+    }),
+    false,
+  );
+});
+
+it("decodes Codex 0.157 hosted plugin extensions while retaining older summaries", () => {
+  const decodePlugin = Schema.decodeUnknownSync(CodexSchema.V2PluginListResponse__PluginSummary);
+  const legacy = {
+    id: "plugin-example",
+    name: "Example plugin",
+    source: { type: "remote" },
+    installed: true,
+    enabled: true,
+    installPolicy: "AVAILABLE",
+    authPolicy: "ON_USE",
+  } as const;
+  assert.deepEqual(decodePlugin(legacy), legacy);
+  assert.deepEqual(decodePlugin({ ...legacy, extensions: null }), { ...legacy, extensions: null });
+  const entrypoint = {
+    type: "file",
+    appId: "app-example",
+    toolName: "read_preview",
+    title: "Preview",
+    resourceUri: "ui://example/preview",
+    icons: [],
+    extensions: [".txt"],
+  } as const;
+  const extensions = {
+    entrypoints: null,
+    settingsEntrypoints: [],
+    settings: [],
+    threadEntrypoints: [],
+    fileHandlers: [entrypoint],
+    searchMentionProviders: [],
+  };
+  assert.deepEqual(decodePlugin({ ...legacy, extensions }), { ...legacy, extensions });
+  // These are descriptive provider records. Recognizing them does not grant
+  // Cafe a resource host or authorize the tool calls named by an extension.
+  assert.equal(
+    Schema.is(CodexSchema.V2PluginListResponse__PluginSummary)({
+      ...legacy,
+      extensions: { ...extensions, fileHandlers: [{ ...entrypoint, type: "unknown" }] },
+    }),
+    false,
+  );
+});
+
 it("preserves Codex 0.156 image alternatives and their shared discriminant", () => {
   // Upstream's anyOf image locator is intersected with sibling type/detail
   // properties. Generation must not lose those siblings or require both the

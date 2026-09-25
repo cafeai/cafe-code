@@ -2384,12 +2384,19 @@ export const readCodexBoundedThreadSnapshotWithClient = Effect.fn(
   } satisfies EffectCodexSchema.V2ThreadReadResponse;
 });
 
-export function isCodexStoredAttachmentNotification(method: string): boolean {
+export function isCodexPrivateMetadataNotification(method: string): boolean {
   // Codex 0.155's attachment APIs manage provider-native metadata, not the
   // authenticated files attached to Cafe messages. Their arbitrary identity
   // keys must not enter native logs, durable diagnostics, or liveness tracking
   // merely because a provider publishes a change to its independent store.
-  return method === "thread/attachment/updated";
+  // Codex 0.157 adds account/gatewayOAuth/changed with a full authorization
+  // URL and provider-authored error. Cafe does not opt into gateway OAuth UI
+  // ownership; decoding this notification must not implicitly publish those
+  // private values or count account-level login activity as child work.
+  // Source: rust-v0.157.0 app-server-protocol/src/protocol/v2/account.rs,
+  // GatewayOAuthChangedNotification. A future login UI must consume it via a
+  // private, live-only channel, not the durable conversation event stream.
+  return method === "thread/attachment/updated" || method === "account/gatewayOAuth/changed";
 }
 
 function readNotificationThreadId(notification: CodexServerNotification): string | undefined {
@@ -2792,7 +2799,7 @@ export function isCodexChildConversationWorkNotification(
 ): boolean {
   const method = notification.method;
   if (
-    isCodexStoredAttachmentNotification(method) ||
+    isCodexPrivateMetadataNotification(method) ||
     method === "turn/started" ||
     method === "turn/completed" ||
     method === "thread/status/changed" ||
@@ -3546,7 +3553,27 @@ export function sanitizeCodexProtocolDiagnosticPayload(input: {
 
   const payload = readRecord(input.payload);
   const method = payload ? readString(payload.method) : undefined;
-  if (method === "mcpServer/elicitation/request" || method === "item/permissions/requestApproval") {
+  if (input.direction === "incoming" && input.stage === "decode_failed" && !method) {
+    // A malformed JSON frame has no trustworthy method to route through the
+    // private-notification filters. Schema causes can embed the entire actual
+    // input, including gateway authorization URLs; preserve framing metadata
+    // only, never the rejected line or its diagnostic rendering.
+    const lineByteLength = payload?.lineByteLength;
+    return {
+      diagnosticClass: "unclassified-protocol-decode-failure",
+      lineByteLength:
+        typeof lineByteLength === "number" &&
+        Number.isSafeInteger(lineByteLength) &&
+        lineByteLength >= 0
+          ? lineByteLength
+          : null,
+    };
+  }
+  if (
+    method === "account/gatewayOAuth/changed" ||
+    method === "mcpServer/elicitation/request" ||
+    method === "item/permissions/requestApproval"
+  ) {
     return { method, diagnosticClass: "private-interaction-redacted", stage: input.stage };
   }
   if (
@@ -5894,7 +5921,7 @@ export const makeCodexSessionRuntime = (
 
     const handleRawNotification = (notification: CodexServerNotification) =>
       Effect.gen(function* () {
-        if (isCodexStoredAttachmentNotification(notification.method)) {
+        if (isCodexPrivateMetadataNotification(notification.method)) {
           return;
         }
         // Native cancellation wins even for child-owned or standalone MCP

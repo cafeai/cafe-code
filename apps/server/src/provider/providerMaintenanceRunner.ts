@@ -18,11 +18,14 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import { HttpClient } from "effect/unstable/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { compareSemverVersions, parseSemver } from "@cafecode/shared/semver";
 
 import { ProviderRegistry } from "./Services/ProviderRegistry.ts";
+import { prepareCodexProviderUpdate } from "./codexUpdatePreflight.ts";
 import { makeProviderMaintenanceCommandCoordinator } from "./providerMaintenanceCommandCoordinator.ts";
 import { enrichProviderSnapshotWithVersionAdvisory } from "./providerMaintenance.ts";
 import type { ProviderMaintenanceCapabilities } from "./providerMaintenance.ts";
@@ -172,8 +175,100 @@ function failureMessage(result: ProviderMaintenanceCommandResult): string {
   return "Update command failed.";
 }
 
-function isOutdatedProvider(provider: ServerProvider | undefined): boolean {
-  return provider?.versionAdvisory?.status === "behind_latest";
+function classifyProviderUpdateVerification(
+  providers: ReadonlyArray<ServerProvider>,
+  verifiedTargetVersion?: string,
+): Pick<ServerProviderUpdateState, "status" | "message"> {
+  const unverified = {
+    status: "unchanged",
+    message: "Update command completed, but Cafe Code could not verify the provider version.",
+  } as const;
+  const runtimeFailed = {
+    status: "failed",
+    message:
+      "Update command completed, but the provider failed its runtime check. Check its installation in provider settings.",
+  } as const;
+
+  // Disabled or unavailable instances cannot establish the result of the
+  // update. In particular, their cached version is not a fresh runtime probe.
+  if (
+    providers.length === 0 ||
+    providers.some((provider) => !provider.enabled || provider.availability === "unavailable")
+  ) {
+    return unverified;
+  }
+
+  // Package managers can exit successfully while omitting a native optional
+  // dependency. The refreshed runtime must therefore be checked independently
+  // of the command exit code and the latest-version advisory. Never copy a
+  // provider's message into update diagnostics: it can contain private output.
+  if (
+    providers.some(
+      (provider) =>
+        !provider.installed ||
+        provider.probePhases?.some(
+          (phase) =>
+            (phase.phase === "prepare-runtime-home" || phase.phase === "version") &&
+            phase.outcome === "error",
+        ),
+    )
+  ) {
+    return runtimeFailed;
+  }
+
+  // A timed-out/skipped version probe is inconclusive even if the registry
+  // retained an earlier healthy version. Legacy providers without phase
+  // diagnostics still qualify through their current snapshot and version.
+  if (
+    providers.some((provider) =>
+      provider.probePhases?.some(
+        (phase) =>
+          (phase.phase === "prepare-runtime-home" || phase.phase === "version") &&
+          phase.outcome !== "success",
+      ),
+    )
+  ) {
+    return unverified;
+  }
+
+  if (providers.some((provider) => provider.status === "error")) {
+    return runtimeFailed;
+  }
+  if (providers.some((provider) => !provider.version || !parseSemver(provider.version))) {
+    return unverified;
+  }
+  // A cached latest-version advisory may predate this update. For commands
+  // pinned by preflight, only the exact selected version proves that the
+  // intended executable was installed; an older healthy CLI is insufficient.
+  if (
+    verifiedTargetVersion &&
+    providers.some(
+      (provider) =>
+        provider.version === null ||
+        compareSemverVersions(provider.version, verifiedTargetVersion) !== 0,
+    )
+  ) {
+    return {
+      status: "unchanged",
+      message:
+        "Update command completed, but Cafe Code did not detect the selected provider version.",
+    };
+  }
+  if (providers.some((provider) => provider.versionAdvisory?.status === "behind_latest")) {
+    return {
+      status: "unchanged",
+      message:
+        "Update command completed, but Cafe Code still detects an outdated provider version.",
+    };
+  }
+  if (providers.some((provider) => provider.versionAdvisory?.status !== "current")) {
+    return {
+      status: "unchanged",
+      message:
+        "Update command completed, but Cafe Code could not verify the latest provider version.",
+    };
+  }
+  return { status: "succeeded", message: "Provider updated." };
 }
 
 function makeUpdateState(input: {
@@ -263,10 +358,10 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
               verifiedProviders,
             }),
           ),
-          Effect.catchCause((cause) =>
+          Effect.catchCause(() =>
             Effect.logWarning("Provider post-update version verification failed", {
               provider,
-              cause: Cause.pretty(cause),
+              failureKind: "version_advisory_unavailable",
             }).pipe(
               Effect.as<VerifiedProviderRefresh>({
                 providers,
@@ -332,7 +427,29 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
               }),
             );
 
-            const result = yield* runMaintenanceCommand(update.executable, update.args);
+            // Resolve the selected Codex package and its host-native dependency
+            // before an update can remove the currently working installation.
+            // Preflight returns only fixed public failure text and pins the
+            // package argument so a changing latest tag cannot race this check.
+            const prepared = yield* prepareCodexProviderUpdate(provider, update).pipe(
+              Effect.provideService(HttpClient.HttpClient, httpClient),
+              Effect.result,
+            );
+            if (Result.isFailure(prepared)) {
+              return yield* finish(
+                makeUpdateState({
+                  status: "failed",
+                  startedAt,
+                  finishedAt: yield* nowIso,
+                  message: prepared.failure.message,
+                }),
+              );
+            }
+            const preparedUpdate = prepared.success;
+            const result = yield* runMaintenanceCommand(
+              preparedUpdate.executable,
+              preparedUpdate.args,
+            );
             const finishedAt = yield* nowIso;
             if (result.timedOut || result.exitCode !== 0) {
               return yield* finish(
@@ -351,20 +468,14 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
               capabilities,
               instanceId,
             );
-            const couldNotVerify = verifiedProviders.length === 0;
-            const stillOutdated =
-              couldNotVerify ||
-              verifiedProviders.some((verifiedProvider) => isOutdatedProvider(verifiedProvider));
             return yield* finish(
               makeUpdateState({
-                status: stillOutdated ? "unchanged" : "succeeded",
+                ...classifyProviderUpdateVerification(
+                  verifiedProviders,
+                  preparedUpdate.verifiedTargetVersion,
+                ),
                 startedAt,
                 finishedAt,
-                message: couldNotVerify
-                  ? "Update command completed, but Cafe Code could not verify the provider version."
-                  : stillOutdated
-                    ? "Update command completed, but Cafe Code still detects an outdated provider version."
-                    : "Provider updated.",
                 output: commandOutput(result),
               }),
             );

@@ -6,7 +6,10 @@ import os from "node:os";
 import path from "node:path";
 import { ProviderDriverKind } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Random from "effect/Random";
+import * as TestClock from "effect/testing/TestClock";
+import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import {
   clearLatestProviderVersionCacheForTests,
   createProviderVersionAdvisory,
@@ -14,6 +17,7 @@ import {
   makeProviderMaintenanceCapabilities,
   makeStaticProviderMaintenanceResolver,
   normalizeCommandPath,
+  resolveLatestProviderVersion,
   resolveProviderMaintenanceCapabilitiesEffect,
 } from "./providerMaintenance.ts";
 
@@ -86,6 +90,62 @@ afterEach(() => {
 });
 
 describe("providerMaintenance", () => {
+  it.effect(
+    "bounds version lookup across headers and a stalled body without changing cache expiry",
+    () => {
+      let requestCount = 0;
+      let finishBody: (() => void) | undefined;
+      const client = HttpClient.make((request) =>
+        Effect.gen(function* () {
+          requestCount += 1;
+          if (requestCount === 1) {
+            // Consume half the total deadline before headers arrive, then emit
+            // valid but incomplete JSON. A headers-only or per-phase deadline
+            // would leave the lookup running beyond the four-second budget.
+            yield* Effect.sleep("2 seconds");
+            return HttpClientResponse.fromWeb(
+              request,
+              new Response(
+                new ReadableStream<Uint8Array>({
+                  start(controller) {
+                    controller.enqueue(new TextEncoder().encode('{"version":'));
+                    finishBody = () => controller.close();
+                  },
+                }),
+              ),
+            );
+          }
+          return HttpClientResponse.fromWeb(request, Response.json({ version: "1.2.3" }));
+        }),
+      );
+      return Effect.gen(function* () {
+        yield* Effect.addFinalizer(() => Effect.sync(() => finishBody?.()));
+        const capabilities = makeProviderMaintenanceCapabilities({
+          provider: driver("packageTool"),
+          packageName: "@example/package-tool",
+          updateExecutable: null,
+          updateArgs: [],
+          updateLockKey: null,
+        });
+        const lookup = yield* resolveLatestProviderVersion(capabilities).pipe(Effect.forkChild);
+
+        yield* TestClock.adjust("3999 millis");
+        expect(lookup.pollUnsafe()).toBeUndefined();
+        yield* TestClock.adjust("1 millis");
+        expect(yield* Fiber.join(lookup)).toBeNull();
+
+        // Timeout remains a cached unknown result, so a UI refresh does not
+        // immediately repeat the stalled request. The normal TTL still expires.
+        expect(yield* resolveLatestProviderVersion(capabilities)).toBeNull();
+        expect(requestCount).toBe(1);
+        yield* TestClock.adjust("1 hour");
+        expect(yield* resolveLatestProviderVersion(capabilities)).toBe("1.2.3");
+        expect(yield* resolveLatestProviderVersion(capabilities)).toBe("1.2.3");
+        expect(requestCount).toBe(2);
+      }).pipe(Effect.provideService(HttpClient.HttpClient, client));
+    },
+  );
+
   it("marks providers with unknown current versions as unknown", () => {
     expect(
       createProviderVersionAdvisory({

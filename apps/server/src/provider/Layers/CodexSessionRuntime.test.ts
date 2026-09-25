@@ -66,7 +66,7 @@ import {
   isRecoverableThreadResumeError,
   isCodexContextCompactionItemType,
   isCodexChildConversationWorkNotification,
-  isCodexStoredAttachmentNotification,
+  isCodexPrivateMetadataNotification,
   isCodexUserMessageItemType,
   isTerminalCodexChildThreadReadError,
   openCodexThread,
@@ -767,8 +767,38 @@ describe("buildCodexAppServerArgs", () => {
 });
 
 describe("Codex protocol diagnostic redaction", () => {
+  it("does not retain private wire content in methodless framing failures", () => {
+    const redacted = sanitizeCodexProtocolDiagnosticPayload({
+      direction: "incoming",
+      stage: "decode_failed",
+      payload: {
+        detail: "Malformed JSON containing private-gateway-token",
+        cause: { actual: '"authUrl":"https://example.invalid/?private-gateway-token"' },
+        lineByteLength: 87,
+      },
+    });
+    assert.deepEqual(redacted, {
+      diagnosticClass: "unclassified-protocol-decode-failure",
+      lineByteLength: 87,
+    });
+    assert.doesNotMatch(JSON.stringify(redacted), /private-gateway-token/);
+    for (const lineByteLength of ["private-gateway-token", -1, Number.NaN]) {
+      assert.deepEqual(
+        sanitizeCodexProtocolDiagnosticPayload({
+          direction: "incoming",
+          stage: "decode_failed",
+          payload: { lineByteLength, cause: "private-gateway-token" },
+        }),
+        { diagnosticClass: "unclassified-protocol-decode-failure", lineByteLength: null },
+      );
+    }
+  });
   it("never logs authorization links, schema defaults or answers from private interaction diagnostics", () => {
-    for (const method of ["mcpServer/elicitation/request", "item/permissions/requestApproval"]) {
+    for (const method of [
+      "mcpServer/elicitation/request",
+      "item/permissions/requestApproval",
+      "account/gatewayOAuth/changed",
+    ]) {
       for (const stage of ["decoded", "decode_failed"] as const) {
         const redacted = sanitizeCodexProtocolDiagnosticPayload({
           direction: "incoming",
@@ -777,6 +807,8 @@ describe("Codex protocol diagnostic redaction", () => {
             method,
             params: {
               url: "https://example.com/?token=private",
+              authUrl: "https://example.com/?token=private",
+              error: "private-gateway-error",
               requestedSchema: { default: "private-default" },
             },
             cause: "private-answer",
@@ -784,7 +816,7 @@ describe("Codex protocol diagnostic redaction", () => {
         });
         assert.doesNotMatch(
           JSON.stringify(redacted),
-          /token=private|private-default|private-answer/u,
+          /token=private|private-default|private-answer|private-gateway-error/u,
         );
         assert.equal((redacted as { method: string }).method, method);
       }
@@ -1550,8 +1582,21 @@ describe("Codex child conversation routing", () => {
   });
 
   it("classifies live child work and terminal thread/read errors conservatively", () => {
-    assert.equal(isCodexStoredAttachmentNotification("thread/attachment/updated"), true);
-    assert.equal(isCodexStoredAttachmentNotification("item/agentMessage/delta"), false);
+    assert.equal(isCodexPrivateMetadataNotification("thread/attachment/updated"), true);
+    assert.equal(isCodexPrivateMetadataNotification("account/gatewayOAuth/changed"), true);
+    assert.equal(isCodexPrivateMetadataNotification("item/agentMessage/delta"), false);
+    assert.equal(
+      isCodexChildConversationWorkNotification({
+        method: "account/gatewayOAuth/changed",
+        params: {
+          providerId: "gateway-private-account",
+          status: "inProgress",
+          authUrl: "https://example.invalid/login?secret=private-token",
+          error: null,
+        },
+      }),
+      false,
+    );
     assert.equal(
       isCodexChildConversationWorkNotification({
         method: "thread/attachment/updated",
