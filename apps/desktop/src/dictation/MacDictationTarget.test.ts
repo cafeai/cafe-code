@@ -1,10 +1,34 @@
 import { EventEmitter } from "node:events";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import type { ChildProcess } from "node:child_process";
 
 import { assert, describe, it } from "@effect/vitest";
+import { vi } from "vitest";
 
 import { createMacDictationTargetClient } from "./MacDictationTarget.ts";
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  if (process.platform !== "win32") return actual;
+  return {
+    ...actual,
+    lstatSync: vi.fn((...args: Parameters<typeof actual.lstatSync>) => {
+      const metadata = actual.lstatSync(...args);
+      // Protocol tests replace the child with in-memory streams, but still
+      // pass admission through the real Node executable's metadata. Windows
+      // lacks POSIX execute bits: model them only for that exact fixture.
+      // Preserve file type, symlink status, other paths/options and errors so
+      // this test accommodation cannot turn a rejected helper into a valid one.
+      if (args[0] === process.execPath && typeof metadata?.mode === "number") {
+        metadata.mode |= 0o111;
+      }
+      return metadata;
+    }),
+  };
+});
 
 const validToken = "a".repeat(64);
 const successfulCapture = { ok: true, token: validToken, insertionMethod: "accessibility" };
@@ -53,6 +77,34 @@ function fakeHelper(onRequest: (request: Request, reply: (value: object) => void
 }
 
 describe("MacDictationTarget", () => {
+  it.each(["missing", "directory", "non-executable"] as const)(
+    "rejects a %s path outside the protocol executable fixture before spawning",
+    async (kind) => {
+      const directory = mkdtempSync(join(tmpdir(), "cafe-dictation-admission-"));
+      const executablePath = kind === "directory" ? directory : join(directory, "helper");
+      const helper = fakeHelper((request, reply) => {
+        reply({ id: request.id, ...successfulCapture });
+      });
+      const spawnChild = vi.fn(() => helper.child);
+      const client = createMacDictationTargetClient({ executablePath, spawnChild });
+      try {
+        if (kind === "non-executable") {
+          writeFileSync(executablePath, "synthetic non-executable fixture", { mode: 0o600 });
+        }
+        assert.deepEqual(await client.capture(), {
+          ok: false,
+          reason: "helper_unavailable",
+          uncertain: false,
+        });
+        assert.equal(spawnChild.mock.calls.length, 0);
+        assert.equal(helper.requests.length, 0);
+      } finally {
+        client.dispose();
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("keeps the opaque target token inside desktop main and sends draft only over stdin", async () => {
     const helper = fakeHelper((request, reply) => {
       if (request.command === "capture") {
