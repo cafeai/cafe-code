@@ -3,9 +3,11 @@ import { assert, it } from "@effect/vitest";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import { afterEach, beforeEach, vi } from "vitest";
 
 import {
   MANAGED_WINDOWS_NODE_VERSION,
+  createBuildConfig,
   desktopArtifactListSatisfiesTarget,
   resolveBuildOptions,
   resolveDesktopBuildIconAssets,
@@ -23,7 +25,14 @@ import {
 import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
 
 it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
-  it("always emits deterministic official updater metadata", () => {
+  beforeEach(() => {
+    // Each case chooses its update source independently of the CI repository.
+    vi.stubEnv("CAFE_CODE_DESKTOP_UPDATE_REPOSITORY", undefined);
+    vi.stubEnv("GITHUB_REPOSITORY", undefined);
+  });
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("emits official updater metadata when repository settings are absent", () => {
     assert.deepStrictEqual(resolveGitHubPublishConfig("latest"), {
       provider: "github",
       owner: "cafeai",
@@ -38,6 +47,40 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       channel: "nightly",
     });
   });
+
+  it.effect("binds the manifest to the resolved publish identity on each platform", () =>
+    Effect.gen(function* () {
+      for (const [workflowRepository, explicitRepository, owner, repo] of [
+        [undefined, undefined, "cafeai", "cafe-code"],
+        ["fork-owner/cafe-fork", undefined, "fork-owner", "cafe-fork"],
+        [
+          "fork-owner/cafe-fork",
+          "release-owner/desktop-releases",
+          "release-owner",
+          "desktop-releases",
+        ],
+      ]) {
+        vi.stubEnv("GITHUB_REPOSITORY", workflowRepository);
+        vi.stubEnv("CAFE_CODE_DESKTOP_UPDATE_REPOSITORY", explicitRepository);
+        for (const platform of ["mac", "linux", "win"] as const) {
+          const config = yield* createBuildConfig(
+            platform,
+            platform === "mac" ? "dmg" : platform === "linux" ? "AppImage" : "nsis",
+            "0.0.17-nightly.20260413.42",
+            false,
+            false,
+            undefined,
+          );
+          assert.deepStrictEqual(config.extraMetadata, {
+            cafeCodeUpdateTarget: { provider: "github", owner, repo },
+          });
+          assert.deepStrictEqual(config.publish, [
+            { provider: "github", owner, repo, releaseType: "prerelease", channel: "nightly" },
+          ]);
+        }
+      }
+    }),
+  );
 
   it("resolves the dedicated nightly updater channel from nightly versions", () => {
     assert.equal(resolveDesktopUpdateChannel("0.0.17-nightly.20260413.42"), "nightly");
