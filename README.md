@@ -69,6 +69,10 @@ This is the practical working list. It will probably get cleaned up later.
 
 ## Run From Source
 
+The repository includes a conservative Renovate policy with manual
+review and cross-platform checks. See [dependency maintenance](docs/dependency-updates.md)
+for setup, exclusions, security alerts, and the `main`/`dev` workflow.
+
 For now there are no desktop packages. No DMG, no updater, no notarized bundle,
 no "drag this into Applications" ceremony.
 
