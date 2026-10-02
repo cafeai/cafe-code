@@ -621,6 +621,7 @@ __metadata:
     "@formkit/auto-animate": "npm:^0.9.0"
     "@legendapp/list": "npm:3.0.0-beta.44"
     "@lexical/react": "npm:^0.41.0"
+    "@mermaid-js/tiny": "npm:12.0.0"
     "@noble/hashes": "npm:2.2.0"
     "@pierre/diffs": "catalog:"
     "@rolldown/plugin-babel": "npm:^0.2.3"
@@ -638,6 +639,7 @@ __metadata:
     "@xterm/xterm": "npm:^6.0.0"
     babel-plugin-react-compiler: "npm:1.0.0"
     class-variance-authority: "npm:^0.7.1"
+    dompurify: "npm:3.4.16"
     effect: "catalog:"
     katex: "npm:^0.17.0"
     lexical: "npm:^0.41.0"
@@ -1490,6 +1492,13 @@ __metadata:
     lodash: "npm:^4.17.15"
     tmp-promise: "npm:^3.0.2"
   checksum: 10c0/b3c87f6482b1956411af1118c771afb39cd9a0568fbb5e86015547ff6d68d2e73a7f0d74b75a57f0a156391c347c8d0adc1037e75172b92da72b96e0a05a2f4f
+  languageName: node
+  linkType: hard
+
+"@mermaid-js/tiny@npm:12.0.0":
+  version: 12.0.0
+  resolution: "@mermaid-js/tiny@npm:12.0.0"
+  checksum: 10c0/3ead28c500361f433f82057e8907cc34ad926deb4b59086e159fad0ea89139a5e48d44fd547ded45fac36ae202c3010f823b9a8a4532cb3cba31c8712bce77a5
   languageName: node
   linkType: hard
 
@@ -3127,6 +3136,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@types/trusted-types@npm:^2.0.7":
+  version: 2.0.7
+  resolution: "@types/trusted-types@npm:2.0.7"
+  checksum: 10c0/4c4855f10de7c6c135e0d32ce462419d8abbbc33713b31d294596c0cc34ae1fa6112a2f9da729c8f7a20707782b0d69da3b1f8df6645b0366d08825ca1522e0c
+  languageName: node
+  linkType: hard
+
 "@types/unist@npm:*, @types/unist@npm:^3.0.0":
   version: 3.0.3
   resolution: "@types/unist@npm:3.0.3"
@@ -4262,6 +4278,18 @@ __metadata:
     fs-extra: "npm:^10.1.0"
     js-yaml: "npm:^4.1.0"
   checksum: 10c0/6219e169d1a980c0f7301b2b76d204e2500ad87ad4acf7489f38b136932da042fd12c4f64d54ef1e00a751cb15766a25ee0a1f90f69b7ea60baf718e631c7133
+  languageName: node
+  linkType: hard
+
+"dompurify@npm:3.4.16":
+  version: 3.4.16
+  resolution: "dompurify@npm:3.4.16"
+  dependencies:
+    "@types/trusted-types": "npm:^2.0.7"
+  dependenciesMeta:
+    "@types/trusted-types":
+      optional: true
+  checksum: 10c0/65a901c6b6d489d3e898f67223d81dac66d613cda48f5785f0ed52a4ae320c4b2745490a58c14161e29f0273080fea0a0cb234a9ef892650e1a9b2a7befa07a5
   languageName: node
   linkType: hard
 

@@ -1,16 +1,24 @@
 import type { ProviderDriverKind } from "@cafecode/contracts";
 import type { ChatCopyFormat } from "@cafecode/contracts/settings";
 import { normalizeChatMarkdownMath } from "./chatMarkdownMath";
+import { normalizeAroundMermaidFences } from "./chatMarkdownMermaid";
 import { normalizeCodexCitationMarkers } from "./codexCitations";
 
 export function prepareChatMessageMarkdownCopyText(
   text: string,
   options: { provider: ProviderDriverKind | null },
 ): string {
-  const providerNormalized =
-    options.provider === "codex" ? normalizeCodexCitationMarkers(text, { mode: "strip" }) : text;
+  // Whole-message copy shares the diagram source boundary with rendering and
+  // the diagram's own Copy action. Literal TeX/citation-shaped Mermaid labels
+  // must survive copying, including inside list and blockquote containers.
+  return normalizeAroundMermaidFences(text, (source) => {
+    const providerNormalized =
+      options.provider === "codex"
+        ? normalizeCodexCitationMarkers(source, { mode: "strip" })
+        : source;
 
-  return normalizeChatMarkdownMath(providerNormalized);
+    return normalizeChatMarkdownMath(providerNormalized);
+  });
 }
 
 export function normalizeClipboardComparisonText(value: string): string {

@@ -142,9 +142,14 @@ function makeTestLayer(input: {
   readonly window: Electron.BrowserWindow;
   readonly createCount: Ref.Ref<number>;
   readonly mainWindow: Ref.Ref<Option.Option<Electron.BrowserWindow>>;
+  readonly onCreate?: (options: Electron.BrowserWindowConstructorOptions) => void;
 }) {
   const electronWindowLayer = Layer.succeed(ElectronWindow.ElectronWindow, {
-    create: () => Ref.update(input.createCount, (count) => count + 1).pipe(Effect.as(input.window)),
+    create: (options) =>
+      Effect.sync(() => input.onCreate?.(options)).pipe(
+        Effect.andThen(Ref.update(input.createCount, (count) => count + 1)),
+        Effect.as(input.window),
+      ),
     main: Ref.get(input.mainWindow),
     currentMainOrFirst: Ref.get(input.mainWindow),
     focusedMainOrFirst: Ref.get(input.mainWindow),
@@ -174,6 +179,33 @@ function makeTestLayer(input: {
 }
 
 describe("DesktopWindow", () => {
+  it.effect("keeps embedded rendering frames outside the native capability boundary", () =>
+    Effect.gen(function* () {
+      const fakeWindow = makeFakeBrowserWindow();
+      const createCount = yield* Ref.make(0);
+      const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+      const onCreate = vi.fn();
+      const layer = makeTestLayer({
+        window: fakeWindow.window,
+        createCount,
+        mainWindow,
+        onCreate,
+      });
+
+      yield* Effect.gen(function* () {
+        const desktopWindow = yield* DesktopWindow.DesktopWindow;
+        yield* desktopWindow.handleBackendReady;
+        assert.equal(onCreate.mock.calls.length, 1);
+        assert.include(onCreate.mock.calls[0]?.[0].webPreferences, {
+          contextIsolation: true,
+          nodeIntegration: false,
+          nodeIntegrationInSubFrames: false,
+          sandbox: true,
+        });
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
   it.effect("does not open a development window until the backend is ready", () =>
     Effect.gen(function* () {
       const fakeWindow = makeFakeBrowserWindow();

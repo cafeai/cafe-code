@@ -1,0 +1,142 @@
+.mermaid-block {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  background: var(--background);
+  color: var(--foreground);
+}
+
+.mermaid-toolbar,
+.mermaid-view-toggle,
+.mermaid-actions,
+.mermaid-expanded-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.mermaid-toolbar {
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.25rem 0.5rem;
+  padding: 0.375rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--muted);
+}
+
+.mermaid-actions {
+  margin-left: auto;
+}
+
+.mermaid-notice {
+  margin: 0;
+  padding: 0.75rem;
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.mermaid-block .mermaid-source {
+  max-width: 100%;
+  max-height: 24rem;
+  margin: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 0;
+  border-radius: 0;
+  padding: 0.75rem;
+  background: var(--muted);
+  white-space: pre;
+}
+
+.mermaid-source code {
+  font-size: 0.75rem;
+}
+
+.mermaid-preview {
+  min-width: 0;
+  max-width: 100%;
+  max-height: 24rem;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 0.75rem;
+}
+
+.mermaid-preview img {
+  display: block;
+  width: auto;
+  height: auto;
+  /* Keep graph labels at their authored size. The message-local preview owns
+     overflow on both axes, including in narrow split panes. */
+  max-width: none;
+  max-height: none;
+  margin: auto;
+  object-fit: contain;
+}
+
+.mermaid-expanded-dialog {
+  width: min(76rem, 100%);
+  max-width: 76rem;
+  max-height: calc(100dvh - 2rem);
+  overflow: hidden;
+  -webkit-app-region: no-drag;
+}
+
+.mermaid-expanded-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 1rem 3.25rem 0.75rem 1rem;
+}
+
+.mermaid-expanded-toolbar {
+  flex-wrap: wrap;
+  padding: 0 1rem 0.75rem;
+}
+
+.mermaid-zoom-value {
+  min-width: 3.25rem;
+  text-align: center;
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.mermaid-expanded-viewport {
+  min-width: 0;
+  min-height: 0;
+  height: min(65dvh, 44rem);
+  padding: 1rem;
+  overflow: auto;
+  overscroll-behavior: contain;
+  background: var(--background);
+  border-top: 1px solid var(--border);
+  cursor: grab;
+}
+
+.mermaid-expanded-viewport:focus-visible,
+.mermaid-preview:focus-visible,
+.mermaid-source:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.mermaid-expanded-viewport[data-dragging] {
+  cursor: grabbing;
+  user-select: none;
+}
+
+.mermaid-expanded-canvas {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 100%;
+  min-height: 100%;
+}
+
+.mermaid-expanded-canvas img {
+  flex: none;
+  max-width: none;
+  user-select: none;
+}

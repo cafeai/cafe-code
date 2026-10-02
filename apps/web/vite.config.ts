@@ -62,6 +62,8 @@ export default defineConfig({
       "@noble/hashes/sha2.js",
       "effect/Array",
       "effect/Order",
+      "unified",
+      "remark-parse",
       // This parser-owned decoder is imported by math/link normalization.
       // Prebundle it so cold browser tests do not reload during assertions.
       "micromark-util-decode-string",

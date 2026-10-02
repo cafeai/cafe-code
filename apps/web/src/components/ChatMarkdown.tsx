@@ -1,13 +1,15 @@
-import { DiffsHighlighter, getSharedHighlighter, SupportedLanguages } from "@pierre/diffs";
 import { CheckIcon, CopyIcon } from "lucide-react";
 import type { ServerProviderSkill } from "@cafecode/contracts";
 import React, {
   Children,
   Suspense,
+  createContext,
+  type ComponentProps,
   type MouseEvent as ReactMouseEvent,
   isValidElement,
   use,
   useCallback,
+  useContext,
   memo,
   useEffect,
   useMemo,
@@ -15,7 +17,7 @@ import React, {
   useState,
   type ReactNode,
 } from "react";
-import type { Components } from "react-markdown";
+import type { Components, ExtraProps } from "react-markdown";
 import ReactMarkdown from "react-markdown";
 import { defaultUrlTransform } from "react-markdown";
 import rehypeKatex from "rehype-katex";
@@ -42,8 +44,12 @@ import { readLocalApi } from "../localApi";
 import { getLocalShellCapabilities } from "../localCapabilities";
 import { cn, isMacPlatform, isWindowsPlatform } from "../lib/utils";
 import { normalizeChatMarkdownMath } from "../lib/chatMarkdownMath";
+import { getChatCodeHighlighter } from "../lib/chatCodeHighlighter";
+import { normalizeAroundMermaidFences } from "../lib/chatMarkdownMermaid";
 import { remarkChatMath } from "../lib/remarkChatMath";
+import { remarkMermaid } from "../lib/remarkMermaid";
 import { normalizeCodexCitationMarkers } from "../lib/codexCitations";
+import { MermaidBlock } from "./MermaidBlock";
 
 class CodeHighlightErrorBoundary extends React.Component<
   { fallback: ReactNode; children: ReactNode },
@@ -84,7 +90,6 @@ const highlightedCodeCache = new LRUCache<string>(
   MAX_HIGHLIGHT_CACHE_ENTRIES,
   MAX_HIGHLIGHT_CACHE_MEMORY_BYTES,
 );
-const highlighterPromiseCache = new Map<string, Promise<DiffsHighlighter>>();
 const SHIKI_ALLOWED_TAGS = new Set(["pre", "code", "span"]);
 const SHIKI_ALLOWED_ATTRIBUTES = new Set(["class", "style", "tabindex"]);
 const UNSAFE_STYLE_VALUE_PATTERN = /(?:url\s*\(|expression\s*\(|@import)/i;
@@ -110,9 +115,11 @@ function nodeToPlainText(node: ReactNode): string {
   return "";
 }
 
-function extractCodeBlock(
-  children: ReactNode,
-): { className: string | undefined; code: string } | null {
+function extractCodeBlock(children: ReactNode): {
+  className: string | undefined;
+  code: string;
+  mermaid: { source: string; complete: boolean } | undefined;
+} | null {
   const childNodes = Children.toArray(children);
   if (childNodes.length !== 1) {
     return null;
@@ -120,7 +127,12 @@ function extractCodeBlock(
 
   const onlyChild = childNodes[0];
   if (
-    !isValidElement<{ className?: string; children?: ReactNode }>(onlyChild) ||
+    !isValidElement<{
+      className?: string;
+      children?: ReactNode;
+      "data-mermaid-source"?: string;
+      "data-mermaid-complete"?: string;
+    }>(onlyChild) ||
     onlyChild.type !== "code"
   ) {
     return null;
@@ -129,6 +141,13 @@ function extractCodeBlock(
   return {
     className: onlyChild.props.className,
     code: nodeToPlainText(onlyChild.props.children),
+    mermaid:
+      typeof onlyChild.props["data-mermaid-source"] === "string"
+        ? {
+            source: onlyChild.props["data-mermaid-source"],
+            complete: onlyChild.props["data-mermaid-complete"] === "true",
+          }
+        : undefined,
   };
 }
 
@@ -190,27 +209,6 @@ export function sanitizeHighlightedCodeHtml(html: string): string {
   }
 
   return template.innerHTML;
-}
-
-function getHighlighterPromise(language: string): Promise<DiffsHighlighter> {
-  const cached = highlighterPromiseCache.get(language);
-  if (cached) return cached;
-
-  const promise = getSharedHighlighter({
-    themes: [resolveDiffThemeName("dark"), resolveDiffThemeName("light")],
-    langs: [language as SupportedLanguages],
-    preferredHighlighter: "shiki-js",
-  }).catch((err) => {
-    highlighterPromiseCache.delete(language);
-    if (language === "text") {
-      // "text" itself failed — Shiki cannot initialize at all, surface the error
-      throw err;
-    }
-    // Language not supported by Shiki — fall back to "text"
-    return getHighlighterPromise("text");
-  });
-  highlighterPromiseCache.set(language, promise);
-  return promise;
 }
 
 function MarkdownCodeBlock({ code, children }: { code: string; children: ReactNode }) {
@@ -302,6 +300,64 @@ interface UncachedShikiCodeBlockProps {
   isStreaming: boolean;
 }
 
+interface MarkdownRenderingContextValue {
+  diffThemeName: DiffThemeName;
+  resolvedTheme: "dark" | "light";
+  isStreaming: boolean;
+  skills: NonNullable<ChatMarkdownProps["skills"]>;
+}
+
+const MarkdownRenderingContext = createContext<MarkdownRenderingContextValue | null>(null);
+
+function MarkdownPre({ node: _node, children, ...props }: ComponentProps<"pre"> & ExtraProps) {
+  const rendering = useContext(MarkdownRenderingContext);
+  const codeBlock = extractCodeBlock(children);
+  if (!rendering || !codeBlock) {
+    return <pre {...props}>{children}</pre>;
+  }
+
+  if (codeBlock.mermaid) {
+    // Completion belongs to this fence, independent of whether later prose
+    // streams or a truncated transcript is terminal. Keep this renderer's
+    // component type stable so appended prose cannot reset diagram controls,
+    // close an expanded view, or churn a cached diagram's object URL.
+    return (
+      <MermaidBlock
+        code={codeBlock.mermaid.source}
+        complete={codeBlock.mermaid.complete}
+        theme={rendering.resolvedTheme}
+      />
+    );
+  }
+
+  return (
+    <MarkdownCodeBlock code={codeBlock.code}>
+      <CodeHighlightErrorBoundary fallback={<pre {...props}>{children}</pre>}>
+        <Suspense fallback={<pre {...props}>{children}</pre>}>
+          <SuspenseShikiCodeBlock
+            className={codeBlock.className}
+            code={codeBlock.code}
+            themeName={rendering.diffThemeName}
+            isStreaming={rendering.isStreaming}
+          />
+        </Suspense>
+      </CodeHighlightErrorBoundary>
+    </MarkdownCodeBlock>
+  );
+}
+
+function MarkdownListItem({ node: _node, children, ...props }: ComponentProps<"li"> & ExtraProps) {
+  const rendering = useContext(MarkdownRenderingContext);
+  // A stable pre component is insufficient when a surrounding list item is
+  // recreated. Preserve the ancestor identity for diagrams nested in lists,
+  // while retaining the same inline-skill handling as ordinary list prose.
+  return (
+    <li {...props}>
+      {renderSkillInlineMarkdownChildren(children, rendering?.skills ?? EMPTY_MARKDOWN_SKILLS)}
+    </li>
+  );
+}
+
 function UncachedShikiCodeBlock({
   code,
   language,
@@ -309,7 +365,7 @@ function UncachedShikiCodeBlock({
   cacheKey,
   isStreaming,
 }: UncachedShikiCodeBlockProps) {
-  const highlighter = use(getHighlighterPromise(language));
+  const highlighter = use(getChatCodeHighlighter(language));
   const highlightedHtml = useMemo(() => {
     try {
       return highlighter.codeToHtml(code, { lang: language, theme: themeName });
@@ -654,11 +710,17 @@ function ChatMarkdown({
 }: ChatMarkdownProps) {
   const { resolvedTheme } = useTheme();
   const diffThemeName = resolveDiffThemeName(resolvedTheme);
+  const renderingContext = useMemo(
+    () => ({ diffThemeName, resolvedTheme, isStreaming, skills }),
+    [diffThemeName, resolvedTheme, isStreaming, skills],
+  );
   const normalizedText = useMemo(() => {
-    const citationNormalizedText = normalizeCodexCitations
-      ? normalizeCodexCitationMarkers(text, { mode: "display" })
-      : text;
-    return normalizeChatMarkdownMath(citationNormalizedText);
+    return normalizeAroundMermaidFences(text, (source) => {
+      const citationNormalizedText = normalizeCodexCitations
+        ? normalizeCodexCitationMarkers(source, { mode: "display" })
+        : source;
+      return normalizeChatMarkdownMath(citationNormalizedText);
+    });
   }, [normalizeCodexCitations, text]);
   const markdownFileLinkMetaByHref = useMemo(() => {
     const metaByHref = new Map<
@@ -696,9 +758,7 @@ function ChatMarkdown({
       p({ node: _node, children, ...props }) {
         return <p {...props}>{renderSkillInlineMarkdownChildren(children, skills)}</p>;
       },
-      li({ node: _node, children, ...props }) {
-        return <li {...props}>{renderSkillInlineMarkdownChildren(children, skills)}</li>;
-      },
+      li: MarkdownListItem,
       a({ node: _node, href, ...props }) {
         const fileLinkMeta = href
           ? resolveMarkdownFileLinkMeta(href, cwd, additionalWorkspaceRoots)
@@ -737,27 +797,7 @@ function ChatMarkdown({
           />
         );
       },
-      pre({ node: _node, children, ...props }) {
-        const codeBlock = extractCodeBlock(children);
-        if (!codeBlock) {
-          return <pre {...props}>{children}</pre>;
-        }
-
-        return (
-          <MarkdownCodeBlock code={codeBlock.code}>
-            <CodeHighlightErrorBoundary fallback={<pre {...props}>{children}</pre>}>
-              <Suspense fallback={<pre {...props}>{children}</pre>}>
-                <SuspenseShikiCodeBlock
-                  className={codeBlock.className}
-                  code={codeBlock.code}
-                  themeName={diffThemeName}
-                  isStreaming={isStreaming}
-                />
-              </Suspense>
-            </CodeHighlightErrorBoundary>
-          </MarkdownCodeBlock>
-        );
-      },
+      pre: MarkdownPre,
       table({ node: _node, children, ...props }) {
         return (
           <div className="chat-markdown-table-scroll">
@@ -766,27 +806,26 @@ function ChatMarkdown({
         );
       },
     }),
-    [
-      additionalWorkspaceRoots,
-      cwd,
-      diffThemeName,
-      fileLinkParentSuffixByPath,
-      isStreaming,
-      resolvedTheme,
-      skills,
-    ],
+    [additionalWorkspaceRoots, cwd, fileLinkParentSuffixByPath, resolvedTheme, skills],
   );
 
   return (
     <div className="chat-markdown w-full min-w-0 text-sm leading-relaxed text-foreground/80">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkChatMath, [remarkNativeFileDestinations, { cwd }]]}
-        rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false, trust: false }]]}
-        components={markdownComponents}
-        urlTransform={markdownUrlTransform}
-      >
-        {normalizedText}
-      </ReactMarkdown>
+      <MarkdownRenderingContext.Provider value={renderingContext}>
+        <ReactMarkdown
+          remarkPlugins={[
+            remarkGfm,
+            remarkChatMath,
+            remarkMermaid,
+            [remarkNativeFileDestinations, { cwd }],
+          ]}
+          rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false, trust: false }]]}
+          components={markdownComponents}
+          urlTransform={markdownUrlTransform}
+        >
+          {normalizedText}
+        </ReactMarkdown>
+      </MarkdownRenderingContext.Provider>
     </div>
   );
 }

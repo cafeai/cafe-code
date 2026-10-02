@@ -1,5 +1,6 @@
 import "../index.css";
 
+import { useState } from "react";
 import { page } from "vitest/browser";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
@@ -41,6 +42,40 @@ vi.mock("../localApi", () => ({
     throw new Error("ensureLocalApi not implemented in browser test");
   }),
   readLocalApi: readLocalApiMock,
+}));
+
+// Renderer/UI behavior has dedicated MermaidBlock browser coverage. Keep these
+// integration fixtures focused on the Markdown boundary: exact source and a
+// parser-proven per-fence completion flag must reach that component unchanged.
+vi.mock("./MermaidBlock", () => ({
+  MermaidBlock({
+    code,
+    complete,
+    theme,
+  }: {
+    code: string;
+    complete: boolean;
+    theme: "dark" | "light";
+  }) {
+    const [expanded, setExpanded] = useState(false);
+    return (
+      <div
+        data-testid="mermaid-block"
+        data-complete={String(complete)}
+        data-theme={theme}
+        data-expanded={String(expanded)}
+      >
+        <button
+          type="button"
+          aria-label="Expand diagram fixture"
+          aria-expanded={expanded}
+          style={{ width: 24, height: 24 }}
+          onClick={() => setExpanded((previous) => !previous)}
+        />
+        <pre>{code}</pre>
+      </div>
+    );
+  },
 }));
 
 import ChatMarkdown, { sanitizeHighlightedCodeHtml } from "./ChatMarkdown";
@@ -924,5 +959,163 @@ describe("ChatMarkdown", () => {
     expect(container.innerHTML).not.toContain("javascript:");
     expect(container.textContent).toContain("safe text");
     expect(container.textContent).toContain("token");
+  });
+
+  it("renders a closed Mermaid fence while the remainder of the message is streaming", async () => {
+    const diagram = "```mermaid\ngraph TD\n  A --> B\n```";
+    const screen = await render(
+      <ChatMarkdown text={`${diagram}\n\nStill writing`} cwd="/repo/project" isStreaming />,
+    );
+
+    try {
+      const block = page.getByTestId("mermaid-block");
+      await expect.element(block).toHaveAttribute("data-complete", "true");
+      expect(block.element().textContent).toBe("graph TD\n  A --> B");
+      expect(document.querySelector(".chat-markdown-shiki")).toBeNull();
+
+      await screen.rerender(
+        <ChatMarkdown
+          text={`${diagram}\n\nStill writing more prose\n\n~~~mermaid\nsequenceDiagram`}
+          cwd="/repo/project"
+          isStreaming
+        />,
+      );
+      const blocks = document.querySelectorAll('[data-testid="mermaid-block"]');
+      expect(Array.from(blocks, (node) => node.getAttribute("data-complete"))).toEqual([
+        "true",
+        "false",
+      ]);
+      expect(blocks[0]?.textContent).toBe("graph TD\n  A --> B");
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("settles unsupported code-language fallback across repeated streamed prose updates", async () => {
+    const diagram = '```cafe-unknown-fixture-language\nconst literal = "<tag>";\n```';
+    const consoleError = vi.spyOn(console, "error");
+    const screen = await render(<ChatMarkdown text={diagram} cwd="/repo/project" isStreaming />);
+
+    try {
+      await vi.waitFor(() => {
+        expect(document.querySelector(".chat-markdown-shiki code")?.textContent).toContain(
+          'const literal = "<tag>";',
+        );
+      });
+      for (let update = 0; update < 3; update += 1) {
+        await screen.rerender(
+          <ChatMarkdown
+            text={`${diagram}\n\nAdditional streamed prose ${update}.`}
+            cwd="/repo/project"
+            isStreaming
+          />,
+        );
+        expect(document.querySelector(".chat-markdown-shiki code")?.textContent).toContain(
+          'const literal = "<tag>";',
+        );
+      }
+      expect(
+        consoleError.mock.calls.some((args) =>
+          args.some((value) => typeof value === "string" && value.includes("uncached promise")),
+        ),
+      ).toBe(false);
+    } finally {
+      await screen.unmount();
+      consoleError.mockRestore();
+    }
+  });
+
+  it("keeps an incomplete Mermaid fence as source even when a truncated message is terminal", async () => {
+    const text = "````mermaid\ngraph TD\n  A --> B\n```";
+    const screen = await render(
+      <ChatMarkdown text={text} cwd="/repo/project" isStreaming={false} />,
+    );
+
+    try {
+      const block = page.getByTestId("mermaid-block");
+      await expect.element(block).toHaveAttribute("data-complete", "false");
+      expect(block.element().textContent).toBe("graph TD\n  A --> B\n```");
+
+      await screen.rerender(<ChatMarkdown text={`${text}\``} cwd="/repo/project" isStreaming />);
+      await expect.element(block).toHaveAttribute("data-complete", "true");
+      expect(block.element().textContent).toBe("graph TD\n  A --> B");
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it.each([
+    ["top-level", "```mermaid\ngraph TD\n  A --> B\n```"],
+    ["nested", "> 1. ```mermaid\n>    graph TD\n>      A --> B\n>    ```"],
+  ])("retains a %s diagram's view state when later prose streams", async (_location, diagram) => {
+    const screen = await render(
+      <ChatMarkdown
+        text={`${diagram}\n\nSee [first](src/example.ts).`}
+        cwd="/repo/project"
+        isStreaming
+      />,
+    );
+
+    try {
+      const block = page.getByTestId("mermaid-block");
+      const initialElement = block.element();
+      await page.getByRole("button", { name: "Expand diagram fixture" }).click();
+      await expect.element(block).toHaveAttribute("data-expanded", "true");
+
+      // This also changes file-link basename disambiguation, the text-derived
+      // map that previously recreated the complete renderer component map.
+      const completedText = `${diagram}\n\nSee [first](src/example.ts). More prose and [second](tests/example.ts).`;
+      await screen.rerender(<ChatMarkdown text={completedText} cwd="/repo/project" isStreaming />);
+      expect(block.element()).toBe(initialElement);
+      await expect.element(block).toHaveAttribute("data-expanded", "true");
+      await expect.element(block).toHaveAttribute("data-complete", "true");
+
+      await screen.rerender(
+        <ChatMarkdown text={completedText} cwd="/repo/project" isStreaming={false} />,
+      );
+      expect(block.element()).toBe(initialElement);
+      await expect.element(block).toHaveAttribute("data-expanded", "true");
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("preserves nested Mermaid source and nearby math, native file links and ordinary code", async () => {
+    const source =
+      'graph TD\n  A["literal & <tag> \\(x\\) \\[y\\] $\\texttt{a_b}$"] --> B\n  B["\uE200cite\uE202turn3view0\uE201"]\n';
+    const screen = await render(
+      <ChatMarkdown
+        text={[
+          "> 1. Diagram",
+          ">",
+          ">    ~~~mermaid",
+          ...source.split("\n").map((line) => `>    ${line}`),
+          ">    ~~~",
+          "",
+          "$x^2$ and [source](src/example.ts)",
+          "",
+          "```text",
+          "graph LR",
+          "  X --> Y",
+          "```",
+        ].join("\n")}
+        cwd="/repo/project"
+        normalizeCodexCitations
+      />,
+    );
+
+    try {
+      const block = page.getByTestId("mermaid-block");
+      await expect.element(block).toHaveAttribute("data-complete", "true");
+      expect(block.element().textContent).toBe(source);
+      expect(document.querySelectorAll('[data-testid="mermaid-block"]')).toHaveLength(1);
+      expect(document.querySelector(".katex")).not.toBeNull();
+      expect(document.querySelector(".chat-markdown-file-link")?.getAttribute("href")).toBe(
+        "/repo/project/src/example.ts",
+      );
+      expect(document.querySelector(".chat-markdown-codeblock")?.textContent).toContain("graph LR");
+    } finally {
+      await screen.unmount();
+    }
   });
 });

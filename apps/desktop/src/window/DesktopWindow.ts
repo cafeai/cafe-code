@@ -182,6 +182,9 @@ const make = Effect.gen(function* () {
         preload: environment.preloadPath,
         contextIsolation: true,
         nodeIntegration: false,
+        // Embedded renderers process untrusted diagram text. Do not rely only
+        // on Electron's default when keeping their Node/preload surface absent.
+        nodeIntegrationInSubFrames: false,
         sandbox: true,
       },
     });
