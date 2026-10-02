@@ -14,6 +14,7 @@ import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsL
 import { UsageCostSection } from "./UsageCostSection";
 import {
   buildUsageTokenBreakdownView,
+  formatGeneratingTime,
   formatUsageModelLabel,
   getUsageModelExplanation,
   formatUsagePercentage,
@@ -21,27 +22,6 @@ import {
 } from "./usageStatsPresentation";
 
 const integerFormat = new Intl.NumberFormat("en-US");
-
-const pad = (value: number) => String(value).padStart(2, "0");
-
-/** `Xd Xh Xm Xs`, always down to the second, no unit above days. */
-function formatGeneratingTime(generatingMs: number): string {
-  const totalSeconds = Math.max(0, Math.floor(generatingMs / 1000));
-  const days = Math.floor(totalSeconds / 86_400);
-  const hours = Math.floor((totalSeconds % 86_400) / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  if (days > 0) {
-    return `${integerFormat.format(days)}d ${pad(hours)}h ${pad(minutes)}m ${pad(seconds)}s`;
-  }
-  if (hours > 0) {
-    return `${hours}h ${pad(minutes)}m ${pad(seconds)}s`;
-  }
-  if (minutes > 0) {
-    return `${minutes}m ${pad(seconds)}s`;
-  }
-  return `${seconds}s`;
-}
 
 /**
  * Between detailed server snapshots, project the generating-time counter forward

@@ -15,6 +15,7 @@ import {
   ProviderDriverKind,
   UsageStatsDayKey,
   UsageStatsModel,
+  UsageStatsModelGeneratingTimeDayEntry,
   type UsageAccountingSnapshot,
 } from "@cafecode/contracts";
 import * as Schema from "effect/Schema";
@@ -47,9 +48,15 @@ export const UsageStatsTokenBreakdownDayRow = Schema.Struct({
 });
 export type UsageStatsTokenBreakdownDayRow = typeof UsageStatsTokenBreakdownDayRow.Type;
 
+export const UsageStatsModelGeneratingTimeDayRow = Schema.Struct({
+  ...UsageStatsModelGeneratingTimeDayEntry.fields,
+});
+export type UsageStatsModelGeneratingTimeDayRow = typeof UsageStatsModelGeneratingTimeDayRow.Type;
+
 export interface UsageStatsFlushDeltas {
   readonly days: ReadonlyArray<UsageStatsDayRow>;
   readonly tokenBreakdowns: ReadonlyArray<UsageStatsTokenBreakdownDayRow>;
+  readonly modelGeneratingTimes?: ReadonlyArray<UsageStatsModelGeneratingTimeDayRow>;
 }
 
 export interface UsageStatsRepositoryShape {
@@ -80,10 +87,19 @@ export interface UsageStatsRepositoryShape {
     ProjectionRepositoryError
   >;
 
+  /** Hydrate the prospective boundary and separate numeric ledger once. */
+  readonly readModelGeneratingTime: Effect.Effect<
+    {
+      readonly startedAt: string;
+      readonly days: ReadonlyArray<UsageStatsModelGeneratingTimeDayRow>;
+    },
+    ProjectionRepositoryError
+  >;
+
   /**
-   * Add aggregate and provider/model deltas, creating rows as needed. Both
-   * tables commit in one transaction so a retry can never double-count only
-   * one side of the same output-token observation.
+   * Add aggregate, token attribution and model-time deltas together. All three
+   * ledgers commit in one transaction so a failed batch cannot charge one side
+   * while its retry duplicates the others.
    */
   readonly flushDeltas: (
     deltas: UsageStatsFlushDeltas,

@@ -70,6 +70,46 @@ export const UsageStatsTokenBreakdownDayEntry = Schema.Struct({
 });
 export type UsageStatsTokenBreakdownDayEntry = typeof UsageStatsTokenBreakdownDayEntry.Type;
 
+/** Prospective active-turn wall time, aggregated across configured accounts. */
+export const UsageStatsModelGeneratingTimeStartedAt = Schema.String.check(
+  Schema.makeFilter((value) => {
+    // The existing general-purpose IsoDateTime is deliberately permissive.
+    // This measurement boundary is durable metadata, so require one canonical
+    // UTC spelling and a real calendar instant rather than accepting Date's
+    // rollover of impossible dates (e.g. February 30).
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) return false;
+    const millis = Date.parse(value);
+    return Number.isFinite(millis) && new Date(millis).toISOString() === value;
+  }),
+);
+
+export const UsageStatsModelGeneratingTimeEntry = Schema.Struct({
+  provider: ProviderDriverKind,
+  model: UsageStatsModel,
+  generatingMs: NonNegativeInt.check(Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER)),
+});
+export type UsageStatsModelGeneratingTimeEntry = typeof UsageStatsModelGeneratingTimeEntry.Type;
+
+export const UsageStatsModelGeneratingTimeDayEntry = Schema.Struct({
+  day: UsageStatsDayKey,
+  ...UsageStatsModelGeneratingTimeEntry.fields,
+});
+export type UsageStatsModelGeneratingTimeDayEntry =
+  typeof UsageStatsModelGeneratingTimeDayEntry.Type;
+
+/**
+ * Measurement starts when the server installs its separate model-time ledger.
+ * Historical aggregate time has no recoverable model attribution; startedAt
+ * makes that boundary explicit instead of presenting missing history as zero.
+ * Tools/waits count as active-turn time and concurrent turns add independently.
+ */
+export const UsageStatsModelGeneratingTime = Schema.Struct({
+  startedAt: UsageStatsModelGeneratingTimeStartedAt,
+  totals: Schema.Array(UsageStatsModelGeneratingTimeEntry),
+  days: Schema.Array(UsageStatsModelGeneratingTimeDayEntry),
+});
+export type UsageStatsModelGeneratingTime = typeof UsageStatsModelGeneratingTime.Type;
+
 /**
  * Live totals pushed to subscribers at a high cadence. `totals`
  * includes time accrued by in-flight turns up to `asOfMs`; clients
@@ -103,5 +143,8 @@ export const UsageStatsGetResult = Schema.Struct({
   // Optional for older saved environments. Absence means unavailable daily
   // attribution, not permission to invent a daily rate from lifetime totals.
   tokenBreakdownDays: Schema.optional(Schema.Array(UsageStatsTokenBreakdownDayEntry)),
+  // Older saved environments cannot supply model-time history. Keep absence
+  // distinct from a measured empty ledger and never infer it from token share.
+  modelGeneratingTime: Schema.optional(UsageStatsModelGeneratingTime),
 });
 export type UsageStatsGetResult = typeof UsageStatsGetResult.Type;

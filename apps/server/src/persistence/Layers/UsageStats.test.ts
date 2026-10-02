@@ -49,11 +49,125 @@ const CLAUDE = ProviderDriverKind.make("claudeAgent");
 const clearUsageStats = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   yield* sql`DELETE FROM usage_stats_token_breakdown_days`;
+  yield* sql`DELETE FROM usage_stats_model_generating_time_days`;
   yield* sql`DELETE FROM usage_stats_days`;
   yield* sql`DELETE FROM usage_accounting_checkpoints`;
 });
 
 layer("UsageStatsRepository", (it) => {
+  it.effect(
+    "hydrates the stable prospective boundary and adds separate model-time rows in key order",
+    () =>
+      Effect.gen(function* () {
+        const repository = yield* UsageStatsRepository;
+        yield* clearUsageStats;
+        const empty = yield* repository.readModelGeneratingTime;
+        assert.match(empty.startedAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+        assert.deepEqual(empty.days, []);
+        yield* repository.flushDeltas({
+          days: [],
+          tokenBreakdowns: [],
+          modelGeneratingTimes: [
+            { day: "2026-10-02", provider: CODEX, model: "b", generatingMs: 20 },
+            { day: "2026-10-01", provider: CODEX, model: "a", generatingMs: 10 },
+            { day: "2026-10-02", provider: CLAUDE, model: "c", generatingMs: 30 },
+            { day: "2026-10-02", provider: CODEX, model: "b", generatingMs: 5 },
+          ],
+        });
+        assert.deepEqual(yield* repository.readModelGeneratingTime, {
+          startedAt: empty.startedAt,
+          days: [
+            { day: "2026-10-01", provider: CODEX, model: "a", generatingMs: 10 },
+            { day: "2026-10-02", provider: CLAUDE, model: "c", generatingMs: 30 },
+            { day: "2026-10-02", provider: CODEX, model: "b", generatingMs: 25 },
+          ],
+        });
+        assert.deepEqual(yield* repository.listDays, []);
+        assert.deepEqual(yield* repository.listTokenBreakdownDays, []);
+      }),
+  );
+
+  it.effect("rejects invalid model-time rows atomically with aggregate and token deltas", () =>
+    Effect.gen(function* () {
+      const repository = yield* UsageStatsRepository;
+      yield* clearUsageStats;
+      for (const invalid of [
+        { model: "x".repeat(257), generatingMs: 1 },
+        { model: "a", generatingMs: -1 },
+        { model: "a", generatingMs: Number.MAX_SAFE_INTEGER + 1 },
+      ]) {
+        const result = yield* Effect.exit(
+          repository.flushDeltas({
+            days: [day({ day: "2026-10-02", generatingMs: 1, outputTokens: 7, userMessages: 1 })],
+            tokenBreakdowns: [
+              breakdown({ day: "2026-10-02", provider: CODEX, model: "a", outputTokens: 7 }),
+            ],
+            modelGeneratingTimes: [
+              { day: "2026-10-02", provider: CODEX, model: "valid", generatingMs: 1 },
+              { day: "2026-10-02", provider: CODEX, ...invalid },
+            ],
+          }),
+        );
+        assert.isTrue(Exit.isFailure(result));
+        assert.deepEqual(yield* repository.listDays, []);
+        assert.deepEqual(yield* repository.listTokenBreakdownDays, []);
+        assert.deepEqual((yield* repository.readModelGeneratingTime).days, []);
+      }
+    }),
+  );
+
+  it.effect(
+    "rolls back a model-time SQL failure and safe-integer overflow without partial charges",
+    () =>
+      Effect.gen(function* () {
+        const repository = yield* UsageStatsRepository;
+        const sql = yield* SqlClient.SqlClient;
+        yield* clearUsageStats;
+        const batch = {
+          days: [day({ day: "2026-10-02", generatingMs: 1, outputTokens: 7, userMessages: 1 })],
+          tokenBreakdowns: [
+            breakdown({ day: "2026-10-02", provider: CODEX, model: "a", outputTokens: 7 }),
+          ],
+          modelGeneratingTimes: [
+            { day: "2026-10-02", provider: CODEX, model: "a", generatingMs: 1 },
+          ],
+        };
+        yield* sql`CREATE TRIGGER reject_model_time BEFORE INSERT ON usage_stats_model_generating_time_days BEGIN SELECT RAISE(ABORT, 'test model-time failure'); END`;
+        assert.isTrue(Exit.isFailure(yield* Effect.exit(repository.flushDeltas(batch))));
+        assert.deepEqual(yield* repository.listDays, []);
+        assert.deepEqual(yield* repository.listTokenBreakdownDays, []);
+        yield* sql`DROP TRIGGER reject_model_time`;
+        yield* repository.flushDeltas(batch);
+        assert.equal((yield* repository.readModelGeneratingTime).days[0]?.generatingMs, 1);
+        yield* sql`UPDATE usage_stats_model_generating_time_days SET generating_ms = ${Number.MAX_SAFE_INTEGER}`;
+        assert.isTrue(Exit.isFailure(yield* Effect.exit(repository.flushDeltas(batch))));
+        assert.equal((yield* repository.listDays)[0]?.generatingMs, 1);
+        assert.equal((yield* repository.listTokenBreakdownDays)[0]?.outputTokens, 7);
+        assert.equal(
+          (yield* repository.readModelGeneratingTime).days[0]?.generatingMs,
+          Number.MAX_SAFE_INTEGER,
+        );
+      }),
+  );
+
+  it.effect(
+    "rejects missing or malformed start metadata instead of manufacturing a fresh boundary",
+    () =>
+      Effect.gen(function* () {
+        const repository = yield* UsageStatsRepository;
+        const sql = yield* SqlClient.SqlClient;
+        yield* clearUsageStats;
+        const original = (yield* repository.readModelGeneratingTime).startedAt;
+        yield* sql`UPDATE usage_stats_model_generating_time_metadata SET started_at = '2026-02-30T00:00:00.000Z'`;
+        assert.isTrue(Exit.isFailure(yield* Effect.exit(repository.readModelGeneratingTime)));
+        yield* sql`DELETE FROM usage_stats_model_generating_time_metadata`;
+        assert.isTrue(Exit.isFailure(yield* Effect.exit(repository.readModelGeneratingTime)));
+        // The layer is shared by this test group; restore only the synthetic
+        // metadata so unrelated cases retain their independently cleared rows.
+        yield* sql`INSERT INTO usage_stats_model_generating_time_metadata (singleton, started_at) VALUES (1, ${original})`;
+      }),
+  );
+
   const accounting = (
     revision: number,
     inputTokens: number,

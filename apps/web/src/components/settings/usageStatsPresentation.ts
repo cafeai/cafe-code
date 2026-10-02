@@ -1,6 +1,39 @@
 import type { ProviderDriverKind, UsageStatsTokenBreakdownEntry } from "@cafecode/contracts";
 
 const tokenIntegerFormat = new Intl.NumberFormat("en-US");
+const padDurationUnit = (value: number) => String(value).padStart(2, "0");
+
+/**
+ * Recorded generating time, always down to seconds and with no unit above days.
+ * Shared with the global Usage duration so per-model rows remain familiar.
+ * Values hold at the last detailed response; this formatter never extrapolates
+ * an account-wide clock into a model's prospective recorded time.
+ */
+export function formatGeneratingTime(generatingMs: number): string {
+  const totalSeconds = Number.isFinite(generatingMs)
+    ? Math.max(0, Math.floor(generatingMs / 1_000))
+    : 0;
+  const days = Math.floor(totalSeconds / 86_400);
+  const hours = Math.floor((totalSeconds % 86_400) / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const seconds = totalSeconds % 60;
+  if (days > 0) {
+    return `${tokenIntegerFormat.format(days)}d ${padDurationUnit(hours)}h ${padDurationUnit(minutes)}m ${padDurationUnit(seconds)}s`;
+  }
+  if (hours > 0) return `${hours}h ${padDurationUnit(minutes)}m ${padDurationUnit(seconds)}s`;
+  if (minutes > 0) return `${minutes}m ${padDurationUnit(seconds)}s`;
+  return `${seconds}s`;
+}
+
+/** Local display date for the explicitly recorded coverage boundary. */
+export function formatUsageRecordingDate(startedAt: string): string | undefined {
+  // IsoDateTime remains a string on mixed-version boundaries. Keep parsing
+  // bounded and never echo an oversized/corrupt coverage value into the UI.
+  if (startedAt.length > 64) return undefined;
+  const date = new Date(startedAt);
+  if (!Number.isFinite(date.getTime())) return undefined;
+  return date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
 
 /**
  * Usage counters are decoded as non-negative finite numbers, but presentation

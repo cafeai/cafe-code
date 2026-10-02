@@ -2,6 +2,7 @@ import {
   ProviderDriverKind,
   type UsageStatsDay,
   type UsageStatsGetResult,
+  type UsageStatsModelGeneratingTimeDayEntry,
   type UsageStatsTokenBreakdownDayEntry,
   type UsageStatsTotals,
 } from "@cafecode/contracts";
@@ -60,6 +61,13 @@ const usage = (overrides: Partial<UsageStatsGetResult> = {}): UsageStatsGetResul
   asOfMs: 1,
   ...overrides,
 });
+
+const timeRow = (
+  key: string,
+  model: string,
+  generatingMs: number,
+  provider = ProviderDriverKind.make("codex"),
+): UsageStatsModelGeneratingTimeDayEntry => ({ day: key, provider, model, generatingMs });
 
 describe("usage range calendar bounds", () => {
   it("offers the approved finite inclusive day counts and full history", () => {
@@ -155,6 +163,109 @@ describe("usage range calendar bounds", () => {
 });
 
 describe("selectUsageRange", () => {
+  it("omits the entire selected time container when exact aggregation would overflow", () => {
+    const source = usage({
+      modelGeneratingTime: {
+        startedAt: "2026-09-25T00:00:00.000Z",
+        totals: [],
+        days: [
+          timeRow("2026-09-25", "overflow", Number.MAX_SAFE_INTEGER),
+          timeRow("2026-10-01", "overflow", 1),
+          timeRow("2026-10-01", "otherwise-valid", 100),
+        ],
+      },
+    });
+    expect(selectUsageRange(source, "7")).not.toHaveProperty("modelGeneratingTime");
+    expect(selectUsageRange(source, "7").totals).toEqual(zero);
+  });
+
+  it.each(["7", "30", "90"] as const)(
+    "selects model time independently of token days in the %s-day range",
+    (range) => {
+      const source = usage({
+        tokenBreakdownDays: undefined,
+        modelGeneratingTime: {
+          startedAt: "2026-01-01T00:00:00.000Z",
+          totals: [
+            {
+              provider: ProviderDriverKind.make("codex"),
+              model: "time-only",
+              generatingMs: 999_999,
+            },
+          ],
+          days: [
+            timeRow("2026-07-03", "outside", 999_999),
+            timeRow("2026-07-04", "ninety-day", 10),
+            timeRow("2026-09-01", "outside-thirty", 20),
+            timeRow("2026-09-02", "thirty-day", 30),
+            timeRow("2026-09-24", "outside-seven", 40),
+            timeRow("2026-09-25", "time-only", 50),
+            timeRow("2026-09-28", "time-only", 60),
+            timeRow("2026-10-01", "time-only", 70),
+            timeRow("2026-10-02", "future", 999_999),
+            timeRow("2026-09-31", "invalid", 999_999),
+          ],
+        },
+      });
+      const selected = selectUsageRange(source, range);
+      expect(selected.modelGeneratingTime?.startedAt).toBe(source.modelGeneratingTime?.startedAt);
+      expect(selected.tokenBreakdown).toEqual([]);
+      expect(selected.totals).toEqual(zero);
+      expect(
+        selected.modelGeneratingTime?.totals.find(({ model }) => model === "time-only")
+          ?.generatingMs,
+      ).toBe(180);
+      expect(
+        selected.modelGeneratingTime?.totals.reduce((sum, entry) => sum + entry.generatingMs, 0),
+      ).toBe(range === "7" ? 180 : range === "30" ? 250 : 280);
+      expect(
+        selected.modelGeneratingTime?.days.some(({ model }) =>
+          ["future", "invalid", "outside"].includes(model),
+        ),
+      ).toBe(false);
+      expect(source.modelGeneratingTime?.totals[0]?.generatingMs).toBe(999_999);
+    },
+  );
+
+  it("preserves authoritative All model time and includes time-only history in its calendar", () => {
+    const source = usage({
+      modelGeneratingTime: {
+        startedAt: "2026-01-01T00:00:00.000Z",
+        totals: [
+          {
+            provider: ProviderDriverKind.make("codex"),
+            model: "long-running",
+            generatingMs: 50_000,
+          },
+        ],
+        days: [timeRow("2026-01-01", "long-running", 100), timeRow("2025-01-01", "empty", 0)],
+      },
+    });
+    expect(getUsageRangeBounds(source, "all").startDay).toBe("2026-01-01");
+    expect(selectUsageRange(source, "all").modelGeneratingTime).toBe(source.modelGeneratingTime);
+  });
+
+  it("keeps missing model time unavailable and joins duplicate time rows by exact identities", () => {
+    expect(selectUsageRange(usage(), "7")).not.toHaveProperty("modelGeneratingTime");
+    const source = usage({
+      modelGeneratingTime: {
+        startedAt: "2026-09-25T00:00:00.000Z",
+        totals: [],
+        days: [
+          timeRow("2026-09-25", "__proto__", 10),
+          timeRow("2026-10-01", "__proto__", 20),
+          timeRow("2026-10-01", "__proto__", 40, ProviderDriverKind.make("claudeAgent")),
+          timeRow("2026-10-01", "explicit-zero", 0),
+        ],
+      },
+    });
+    expect(selectUsageRange(source, "7").modelGeneratingTime?.totals).toEqual([
+      { provider: ProviderDriverKind.make("claudeAgent"), model: "__proto__", generatingMs: 40 },
+      { provider: ProviderDriverKind.make("codex"), model: "__proto__", generatingMs: 30 },
+      { provider: ProviderDriverKind.make("codex"), model: "explicit-zero", generatingMs: 0 },
+    ]);
+  });
+
   it("selects calendar days from sparse history, including both bounds and zero gaps", () => {
     const selected = selectUsageRange(
       usage({

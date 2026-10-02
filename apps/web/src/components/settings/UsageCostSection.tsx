@@ -10,13 +10,16 @@ import { useCountUp } from "../stats/useCountUp";
 import { dailyUsageCost } from "../stats/dailyUsageCost";
 import { selectUsageRange, type UsageRangeKey } from "../stats/usageRange";
 import { UsageRangeSelector } from "../stats/UsageRangeSelector";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { SettingsSection } from "./settingsLayout";
 import {
   formatCompactTokenCount,
   formatFullTokenCount,
+  formatGeneratingTime,
   formatUsageModelLabel,
   getUsageModelExplanation,
   formatUsageProviderLabel,
+  formatUsageRecordingDate,
 } from "./usageStatsPresentation";
 
 /**
@@ -57,6 +60,17 @@ function formatShare(percent: number, tokens: number): string {
 }
 
 type Mode = "cost" | "tokens";
+const INITIAL_VISIBLE_MODEL_ROWS = 12;
+
+interface ModelCostRow {
+  readonly provider: ProviderDriverKind;
+  readonly model: string;
+  readonly cost: number;
+  readonly priced: boolean;
+  readonly tokens: number;
+  readonly hasTokenUsage: boolean;
+  generatingMs: number | undefined;
+}
 
 const TOKEN_BAND_COLORS = {
   cached: "#48cfff",
@@ -220,6 +234,7 @@ function UsageCostMetrics({
   setRange: (range: UsageRangeKey) => void;
   showRangeSelector: boolean;
 }) {
+  const [showAllModels, setShowAllModels] = useState(false);
   const overrides = useSettings((settings) => settings.modelPricingOverrides) as
     | Record<string, ModelRate>
     | undefined;
@@ -254,15 +269,72 @@ function UsageCostMetrics({
       .toSorted((left, right) => right.cost - left.cost || right.tokens - left.tokens);
 
     // Per model, for the breakdown table.
-    const models = breakdown
-      .map((entry) => ({
-        provider: entry.provider,
-        model: entry.model,
-        cost: rollUpCost([entry], overrides).cost,
-        priced: resolveModelRate(entry.model, overrides) !== undefined,
-        tokens: entry.inputTokens + entry.outputTokens,
-      }))
-      .toSorted((left, right) => right.cost - left.cost || right.tokens - left.tokens);
+    const models: ModelCostRow[] = breakdown.map((entry) => ({
+      provider: entry.provider,
+      model: entry.model,
+      cost: rollUpCost([entry], overrides).cost,
+      priced: resolveModelRate(entry.model, overrides) !== undefined,
+      tokens: entry.inputTokens + entry.outputTokens,
+      hasTokenUsage: true,
+      generatingMs: undefined,
+    }));
+    const modelRows = new Map<ProviderDriverKind, Map<string, ModelCostRow>>();
+    for (const entry of models) {
+      let providerRows = modelRows.get(entry.provider);
+      if (providerRows === undefined) {
+        providerRows = new Map();
+        modelRows.set(entry.provider, providerRows);
+      }
+      providerRows.set(entry.model, entry);
+    }
+    let modelTimeAvailable = usage?.modelGeneratingTime !== undefined;
+    for (const time of usage?.modelGeneratingTime?.totals ?? []) {
+      let providerRows = modelRows.get(time.provider);
+      if (providerRows === undefined) {
+        providerRows = new Map();
+        modelRows.set(time.provider, providerRows);
+      }
+      let entry = providerRows.get(time.model);
+      if (entry === undefined) {
+        // Time can be observed before the first token report. Add a visible
+        // row without feeding it into token/cost rollups or inventing a cost.
+        entry = {
+          provider: time.provider,
+          model: time.model,
+          cost: 0,
+          priced: false,
+          tokens: 0,
+          hasTokenUsage: false,
+          generatingMs: undefined,
+        };
+        providerRows.set(time.model, entry);
+        models.push(entry);
+      }
+      const previousMs = entry.generatingMs ?? 0;
+      if (
+        !Number.isSafeInteger(time.generatingMs) ||
+        time.generatingMs < 0 ||
+        time.generatingMs > Number.MAX_SAFE_INTEGER - previousMs
+      ) {
+        // Do not display rounded/partial durations from a corrupt or
+        // mixed-version response. This matches backend/finite-range omission.
+        modelTimeAvailable = false;
+        break;
+      }
+      entry.generatingMs = previousMs + time.generatingMs;
+    }
+    const visibleModels = modelTimeAvailable
+      ? models
+      : models.filter((entry) => entry.hasTokenUsage);
+    if (!modelTimeAvailable) {
+      for (const entry of visibleModels) entry.generatingMs = undefined;
+    }
+    visibleModels.sort(
+      (left, right) =>
+        right.cost - left.cost ||
+        right.tokens - left.tokens ||
+        (right.generatingMs ?? 0) - (left.generatingMs ?? 0),
+    );
 
     const totals = usage?.totals;
     const cached = totals?.cachedInputTokens ?? 0;
@@ -273,7 +345,8 @@ function UsageCostMetrics({
     return {
       rollup,
       providers,
-      models,
+      models: visibleModels,
+      modelTimeAvailable,
       processed: input + output,
       input,
       cached,
@@ -371,6 +444,19 @@ function UsageCostMetrics({
   const unpricedTokens = Math.max(0, share - view.rollup.pricedTokens);
   const pricedPercent = share === 0 ? null : (view.rollup.pricedTokens / share) * 100;
   const maxProviderCost = Math.max(0, ...view.providers.map((entry) => entry.cost));
+  const recordingStartedAt = view.modelTimeAvailable
+    ? usage?.modelGeneratingTime?.startedAt
+    : undefined;
+  const recordedSince =
+    recordingStartedAt === undefined ? undefined : formatUsageRecordingDate(recordingStartedAt);
+  const recordingUtc =
+    recordedSince && recordingStartedAt ? new Date(recordingStartedAt).toISOString() : undefined;
+  const modelTimeExplanation =
+    "Time spent generating covers full active-turn time, including tools and waits. Concurrent chats count separately. " +
+    (recordingUtc
+      ? `Recording began ${recordingUtc} (UTC); earlier history is not included. `
+      : "Earlier history is not included. ") +
+    "Models without a recorded time row show Not recorded.";
 
   return (
     // This content also appears in Atrium. Container queries must live here,
@@ -421,7 +507,7 @@ function UsageCostMetrics({
           <div className="mt-5 flex flex-col gap-3">
             {view.providers.length === 0 ? (
               <p className="text-xs text-muted-foreground">
-                No model-attributed usage recorded yet.
+                No model-attributed token usage recorded yet.
               </p>
             ) : (
               view.providers.map((entry) => {
@@ -562,62 +648,122 @@ function UsageCostMetrics({
         className="grid gap-5 border-t border-border/60 px-4 py-4 sm:px-5 @min-[52rem]/usage-cost:grid-cols-[minmax(0,1fr)_minmax(0,18rem)]"
         data-usage-cost-breakdown
       >
-        <div className="min-w-0 overflow-x-auto">
-          <table className="w-full min-w-[420px] border-collapse text-sm">
-            <thead>
-              <tr className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                <th className="py-1.5 text-left font-medium">Model</th>
-                <th className="py-1.5 text-right font-medium">Cost (USD)</th>
-                <th className="py-1.5 text-right font-medium">Tokens</th>
-              </tr>
-            </thead>
-            <tbody>
-              {view.models.length === 0 ? (
-                <tr>
-                  <td colSpan={3} className="py-3 text-xs text-muted-foreground">
-                    Nothing recorded yet.
-                  </td>
-                </tr>
-              ) : (
-                view.models.slice(0, 12).map((entry) => {
-                  const Icon = PROVIDER_ICON_BY_PROVIDER[entry.provider as never];
-                  return (
-                    <tr
-                      key={`${entry.provider}:${entry.model}`}
-                      className="border-t border-border/50"
-                    >
-                      <td className="py-1.5 pr-3">
-                        <span className="flex min-w-0 items-center gap-1.5">
-                          {Icon ? <Icon className="size-3.5 shrink-0 opacity-70" /> : null}
-                          <span className="truncate" title={getUsageModelExplanation(entry.model)}>
-                            {formatUsageModelLabel(entry.model)}
-                          </span>
-                        </span>
-                      </td>
-                      <td
-                        className="py-1.5 text-right tabular-nums"
-                        data-usage-model-cost-value="true"
+        <div className="min-w-0">
+          <div className="min-w-0 max-w-full overflow-x-auto" data-usage-model-table-scroll>
+            <table className="w-full min-w-[36rem] border-collapse text-sm" data-usage-model-table>
+              <thead>
+                <tr className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                  <th scope="col" className="min-w-[8rem] py-1.5 text-left font-medium">
+                    Model
+                  </th>
+                  <th scope="col" className="py-1.5 pl-3 text-right font-medium">
+                    Cost (USD)
+                  </th>
+                  <th scope="col" className="py-1.5 pl-3 text-right font-medium">
+                    Tokens
+                  </th>
+                  <th scope="col" className="min-w-[8rem] py-1.5 pl-4 text-right font-medium">
+                    <Tooltip>
+                      <TooltipTrigger
+                        className="cursor-help text-right uppercase underline decoration-dotted underline-offset-2"
+                        aria-label="About time spent generating"
                       >
-                        {entry.priced ? (
-                          formatUsd(entry.cost)
-                        ) : (
-                          <span className="text-muted-foreground">unpriced</span>
-                        )}
-                      </td>
-                      <td className="py-1.5 text-right tabular-nums text-muted-foreground">
-                        <TokenCountFigure
-                          value={entry.tokens}
-                          context="model"
-                          primarySuffix=""
-                          align="right"
-                        />
-                      </td>
-                    </tr>
-                  );
-                })
+                        Time spent generating
+                      </TooltipTrigger>
+                      <TooltipPopup role="tooltip" className="max-w-[20rem]">
+                        {modelTimeExplanation}
+                      </TooltipPopup>
+                    </Tooltip>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {view.models.length === 0 ? (
+                  <tr>
+                    <td colSpan={4} className="py-3 text-xs text-muted-foreground">
+                      Nothing recorded yet.
+                    </td>
+                  </tr>
+                ) : (
+                  (showAllModels
+                    ? view.models
+                    : view.models.slice(0, INITIAL_VISIBLE_MODEL_ROWS)
+                  ).map((entry) => {
+                    const Icon = PROVIDER_ICON_BY_PROVIDER[entry.provider as never];
+                    return (
+                      <tr
+                        key={JSON.stringify([entry.provider, entry.model])}
+                        className="border-t border-border/50"
+                        data-usage-model={entry.model}
+                        data-usage-provider={entry.provider}
+                      >
+                        <td className="max-w-[20rem] py-1.5 pr-3">
+                          <span className="flex min-w-0 items-center gap-1.5">
+                            {Icon ? <Icon className="size-3.5 shrink-0 opacity-70" /> : null}
+                            <span
+                              className="truncate"
+                              title={getUsageModelExplanation(entry.model)}
+                            >
+                              {formatUsageModelLabel(entry.model)}
+                            </span>
+                          </span>
+                        </td>
+                        <td
+                          className="py-1.5 pl-3 text-right tabular-nums"
+                          data-usage-model-cost-value="true"
+                        >
+                          {!entry.hasTokenUsage ? (
+                            <span className="text-muted-foreground">—</span>
+                          ) : entry.priced ? (
+                            formatUsd(entry.cost)
+                          ) : (
+                            <span className="text-muted-foreground">unpriced</span>
+                          )}
+                        </td>
+                        <td className="py-1.5 pl-3 text-right tabular-nums text-muted-foreground">
+                          <TokenCountFigure
+                            value={entry.tokens}
+                            context="model"
+                            primarySuffix=""
+                            align="right"
+                          />
+                        </td>
+                        <td
+                          className="whitespace-nowrap py-1.5 pl-4 text-right text-[11px] tabular-nums text-muted-foreground"
+                          data-usage-model-generating-time
+                        >
+                          {entry.generatingMs === undefined
+                            ? "Not recorded"
+                            : formatGeneratingTime(entry.generatingMs)}
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[11px] leading-relaxed text-muted-foreground/70">
+            <p data-usage-model-time-coverage>
+              {recordedSince && recordingUtc ? (
+                <>
+                  Recorded since <time dateTime={recordingUtc}>{recordedSince}</time>
+                </>
+              ) : (
+                "Per-model time is unavailable on this server."
               )}
-            </tbody>
-          </table>
+            </p>
+            {view.models.length > INITIAL_VISIBLE_MODEL_ROWS ? (
+              <button
+                type="button"
+                className="shrink-0 text-foreground underline underline-offset-2 hover:text-primary"
+                aria-expanded={showAllModels}
+                onClick={() => setShowAllModels((value) => !value)}
+              >
+                {showAllModels ? "Show fewer models" : `Show all ${view.models.length} models`}
+              </button>
+            ) : null}
+          </div>
         </div>
 
         <div className="min-w-0">

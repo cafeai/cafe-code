@@ -16,6 +16,36 @@ import { resetUsageStatsDetailResourceForTests } from "../stats/usageStatsDetail
 import { UsageCostContent } from "./UsageCostSection";
 import { UsageStatsPanel } from "./UsageStatsPanel";
 
+/** Independent time observations deliberately do not follow token-row values. */
+function createModelTimeUsageDetail(): UsageStatsGetResult {
+  const codex = ProviderDriverKind.make("codex");
+  const claude = ProviderDriverKind.make("claudeAgent");
+  return {
+    ...createRangeUsageDetail(),
+    modelGeneratingTime: {
+      startedAt: "2026-04-23T00:00:00.000Z",
+      totals: [
+        { provider: codex, model: "gpt-5.6-codex", generatingMs: 40 * 3_600_000 },
+        { provider: claude, model: "claude-opus-5", generatingMs: 180_000 },
+        { provider: codex, model: "gpt-4.1", generatingMs: 60_000 },
+        { provider: codex, model: "waiting-only", generatingMs: 20 * 3_600_000 },
+      ],
+      days: [
+        { day: "2026-04-23", provider: codex, model: "gpt-4.1", generatingMs: 60_000 },
+        { day: "2026-06-22", provider: claude, model: "claude-opus-5", generatingMs: 0 },
+        { day: "2026-07-15", provider: codex, model: "gpt-5.6-codex", generatingMs: 3_601_000 },
+        { day: "2026-07-21", provider: codex, model: "gpt-5.6-codex", generatingMs: 5_400_000 },
+        {
+          day: "2026-07-20",
+          provider: codex,
+          model: "waiting-only",
+          generatingMs: 16 * 3_600_000 + 123_000,
+        },
+      ],
+    },
+  };
+}
+
 const usageHarness = vi.hoisted(() => {
   let detail: unknown;
   let snapshot: unknown;
@@ -399,7 +429,11 @@ function displayedRawCount(id: string): number {
 }
 
 function overviewValue(label: string): string | null {
-  return page.getByText(label, { exact: true }).element().nextElementSibling?.textContent ?? null;
+  // The model table shares the global duration heading. The overview precedes
+  // that table and owns the first label/value pair in the dashboard.
+  return (
+    page.getByText(label, { exact: true }).first().element().nextElementSibling?.textContent ?? null
+  );
 }
 
 function costQualityValue(label: string): string | null {
@@ -437,6 +471,18 @@ function modelCostRows() {
       };
     },
   ).toSorted((left, right) => (left.model ?? "").localeCompare(right.model ?? ""));
+}
+
+function requiredModelTime(model: string, provider?: string): HTMLElement {
+  const row = Array.from(document.querySelectorAll<HTMLElement>("[data-usage-model]")).find(
+    (element) =>
+      element.dataset.usageModel === model &&
+      (provider === undefined || element.dataset.usageProvider === provider),
+  );
+  expect(row).toBeDefined();
+  const time = row!.querySelector<HTMLElement>("[data-usage-model-generating-time]");
+  expect(time).not.toBeNull();
+  return time!;
 }
 
 function activeActivityCellCount(): number {
@@ -691,6 +737,241 @@ describe("UsageStatsPanel", () => {
       await page.viewport(originalViewport.width, originalViewport.height);
     }
   });
+
+  it("selects per-model generating time for 7/30/90/All independently of token attribution", async () => {
+    settleLayoutCountersImmediately();
+    const usage = createModelTimeUsageDetail();
+    usageHarness.reset(usage, usage);
+    mounted = await render(<UsageStatsPanel />);
+    await vi.waitFor(() =>
+      expect(requiredModelTime("gpt-5.6-codex").textContent).toBe("2h 30m 01s"),
+    );
+    expect(requiredModelTime("claude-opus-5").textContent).toBe("0s");
+    expect(requiredModelTime("waiting-only").textContent).toBe("16h 02m 03s");
+    const timeOnlyRow = requiredModelTime("waiting-only").closest("tr")!;
+    expect(timeOnlyRow.querySelector("[data-usage-model-cost-value]")?.textContent).toBe("—");
+    expect(timeOnlyRow.querySelector("[data-usage-token-full='model']")?.textContent).toBe("0");
+    expect(displayedRawCount("processed")).toBe(rangeExpectations["30 days"].processed);
+    expect(requiredElement("[data-usage-model-time-coverage]").textContent).toContain(
+      "Recorded since ",
+    );
+    expect(requiredElement("[data-usage-model-time-coverage] time").getAttribute("datetime")).toBe(
+      usage.modelGeneratingTime!.startedAt,
+    );
+
+    await page.getByRole("button", { name: "7 days", exact: true }).click();
+    expect(requiredModelTime("gpt-5.6-codex").textContent).toBe("2h 30m 01s");
+    expect(document.querySelector('[data-usage-model="claude-opus-5"]')).toBeNull();
+    expect(displayedRawCount("processed")).toBe(rangeExpectations["7 days"].processed);
+    await page.getByRole("button", { name: "90 days", exact: true }).click();
+    expect(requiredModelTime("gpt-4.1").textContent).toBe("1m 00s");
+    expect(requiredModelTime("unknown-local-model").textContent).toBe("Not recorded");
+    await page.getByRole("button", { name: "All", exact: true }).click();
+    expect(requiredModelTime("gpt-5.6-codex").textContent).toBe("1d 16h 00m 00s");
+    expect(requiredModelTime("waiting-only").textContent).toBe("20h 00m 00s");
+    expect(requiredModelTime("gpt-4o").textContent).toBe("Not recorded");
+    expect(requiredModelTime("grok-legacy-model").textContent).toBe("Not recorded");
+    expect(displayedRawCount("processed")).toBe(rangeExpectations.All.processed);
+    expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(1);
+
+    await page.getByRole("button", { name: "About time spent generating" }).hover();
+    await expect.element(page.getByRole("tooltip")).toBeVisible();
+    const explanation = page.getByRole("tooltip").element().textContent;
+    expect(explanation).toContain("full active-turn time, including tools and waits");
+    expect(explanation).toContain("Concurrent chats count separately");
+    expect(explanation).toContain(`${usage.modelGeneratingTime!.startedAt} (UTC)`);
+    expect(explanation).toContain("earlier history is not included");
+  });
+
+  it("keeps older responses and post-start helper rows Not recorded instead of inventing zeroes", async () => {
+    mounted = await render(<UsageCostContent usage={createUsageDetail()} />);
+    const olderTimes = Array.from(document.querySelectorAll("[data-usage-model-generating-time]"));
+    expect(olderTimes).toHaveLength(3);
+    expect(olderTimes.every((time) => time.textContent === "Not recorded")).toBe(true);
+    expect(requiredElement("[data-usage-model-time-coverage]").textContent).toBe(
+      "Per-model time is unavailable on this server.",
+    );
+
+    const usage = createUsageDetail();
+    await mounted.rerender(
+      <UsageCostContent
+        usage={{
+          ...usage,
+          modelGeneratingTime: {
+            startedAt: "2026-07-19T00:00:00.000Z",
+            totals: [
+              {
+                provider: ProviderDriverKind.make("codex"),
+                model: "gpt-5.6-codex",
+                generatingMs: 61_000,
+              },
+            ],
+            days: [
+              {
+                day: usage.today.day,
+                provider: ProviderDriverKind.make("codex"),
+                model: "gpt-5.6-codex",
+                generatingMs: 61_000,
+              },
+            ],
+          },
+        }}
+      />,
+    );
+    expect(requiredModelTime("gpt-5.6-codex").textContent).toBe("1m 01s");
+    // These token/helper rows occurred after recording began. Their lack of a
+    // time observation still means unavailable, never a guessed zero duration.
+    expect(requiredModelTime("gpt-5.6-codex-mini").textContent).toBe("Not recorded");
+    expect(requiredModelTime("claude-opus-5").textContent).toBe("Not recorded");
+  });
+
+  it("does not display partial or rounded model time from an overflowing mixed-version response", async () => {
+    const usage = createUsageDetail();
+    const provider = ProviderDriverKind.make("codex");
+    const timeEntries = [
+      { provider, model: "gpt-5.6-codex", generatingMs: Number.MAX_SAFE_INTEGER },
+      { provider, model: "gpt-5.6-codex", generatingMs: 1 },
+      { provider, model: "time-only", generatingMs: 100 },
+    ];
+    mounted = await render(
+      <UsageCostContent
+        usage={{
+          ...usage,
+          modelGeneratingTime: {
+            startedAt: "2026-07-19T00:00:00.000Z",
+            totals: timeEntries,
+            days: timeEntries.map((entry) => Object.assign({ day: usage.today.day }, entry)),
+          },
+        }}
+      />,
+    );
+    expect(requiredModelTime("gpt-5.6-codex").textContent).toBe("Not recorded");
+    expect(document.querySelector('[data-usage-model="time-only"]')).toBeNull();
+    await page.getByRole("button", { name: "All", exact: true }).click();
+    expect(requiredModelTime("gpt-5.6-codex").textContent).toBe("Not recorded");
+    expect(document.querySelector('[data-usage-model="time-only"]')).toBeNull();
+    expect(requiredElement("[data-usage-model-time-coverage]").textContent).toBe(
+      "Per-model time is unavailable on this server.",
+    );
+  });
+
+  it("holds model time through active snapshots and updates only from new detailed observations", async () => {
+    const usage = createModelTimeUsageDetail();
+    usageHarness.reset(usage, usage);
+    mounted = await render(<UsageStatsPanel />);
+    await vi.waitFor(() =>
+      expect(requiredModelTime("gpt-5.6-codex").textContent).toBe("2h 30m 01s"),
+    );
+    usageHarness.emitSnapshot({
+      ...usage,
+      activeSessionCount: 3,
+      asOfMs: Date.now(),
+      totals: { ...usage.totals, generatingMs: 999_999_999 },
+      today: { ...usage.today, generatingMs: 999_999_999 },
+    });
+    await expect.element(page.getByText("3 sessions generating", { exact: true })).toBeVisible();
+    expect(requiredModelTime("gpt-5.6-codex").textContent).toBe("2h 30m 01s");
+    expect(requiredModelTime("waiting-only").textContent).toBe("16h 02m 03s");
+    const time = usage.modelGeneratingTime!;
+    usageHarness.refreshDetail({
+      ...usage,
+      asOfMs: Date.now() + 1,
+      modelGeneratingTime: {
+        ...time,
+        days: time.days.map((entry) =>
+          entry.day === usage.today.day
+            ? Object.assign({}, entry, { generatingMs: entry.generatingMs + 60_000 })
+            : entry,
+        ),
+        totals: time.totals.map((entry) =>
+          entry.model === "gpt-5.6-codex"
+            ? Object.assign({}, entry, { generatingMs: entry.generatingMs + 60_000 })
+            : entry,
+        ),
+      },
+    });
+    await vi.waitFor(() =>
+      expect(requiredModelTime("gpt-5.6-codex").textContent).toBe("2h 31m 01s"),
+    );
+    await page.getByRole("button", { name: "All", exact: true }).click();
+    expect(requiredModelTime("gpt-5.6-codex").textContent).toBe("1d 16h 01m 00s");
+  });
+
+  it("makes every time-only model discoverable in the shared standalone Atrium table", async () => {
+    settleLayoutCountersImmediately();
+    const usage = createUsageDetail();
+    const timeEntries = Array.from({ length: 13 }, (_, index) => ({
+      provider: ProviderDriverKind.make("codex"),
+      model: `time-only-${String(index).padStart(2, "0")}`,
+      generatingMs: (index + 1) * 1_000,
+    }));
+    mounted = await render(
+      <UsageCostContent
+        usage={{
+          ...usage,
+          modelGeneratingTime: {
+            startedAt: "2026-07-19T00:00:00.000Z",
+            totals: timeEntries,
+            days: timeEntries.map((entry) => Object.assign({ day: usage.today.day }, entry)),
+          },
+        }}
+      />,
+    );
+    expect(document.querySelectorAll("[data-usage-model]")).toHaveLength(12);
+    expect(document.querySelector('[data-usage-model="time-only-00"]')).toBeNull();
+    expect(displayedRawCount("processed")).toBe(3_000_000);
+    await page.getByRole("button", { name: "Show all 16 models", exact: true }).click();
+    expect(document.querySelectorAll("[data-usage-model]")).toHaveLength(16);
+    expect(requiredModelTime("time-only-00").textContent).toBe("1s");
+    expect(requiredModelTime("gpt-5.6-codex").textContent).toBe("Not recorded");
+    expect(displayedRawCount("processed")).toBe(3_000_000);
+    await page.getByRole("button", { name: "Show fewer models", exact: true }).click();
+    expect(document.querySelectorAll("[data-usage-model]")).toHaveLength(12);
+  });
+
+  it.each([80, 130])(
+    "keeps large model durations on one line without page overflow at %i%% scale",
+    async (scale) => {
+      applyInterfaceScalePercent(scale);
+      settleLayoutCountersImmediately();
+      const usage = createBillionScaleUsageDetail();
+      const entry = {
+        provider: ProviderDriverKind.make("codex"),
+        model: "gpt-5.6-codex",
+        generatingMs: 1_234 * 86_400_000 + 3_661_000,
+      };
+      const timedUsage = {
+        ...usage,
+        modelGeneratingTime: {
+          startedAt: "2026-07-19T00:00:00.000Z",
+          totals: [entry],
+          days: [{ ...entry, day: usage.today.day }],
+        },
+      };
+      for (const width of [1_800, 320]) {
+        await page.viewport(width, 1_000);
+        if (mounted) await mounted.rerender(<UsageCostContent usage={timedUsage} />);
+        else mounted = await render(<UsageCostContent usage={timedUsage} />);
+        const duration = requiredModelTime(entry.model);
+        expect(duration.textContent).toBe("1,234d 01h 01m 01s");
+        expect(getComputedStyle(duration).whiteSpace).toBe("nowrap");
+        const textRange = document.createRange();
+        textRange.selectNodeContents(duration);
+        expect(
+          Array.from(textRange.getClientRects()).filter((rect) => rect.width > 0),
+        ).toHaveLength(1);
+        expectNoHorizontalOverflow(requiredElement("[data-usage-cost-layout]"));
+        expectNoHorizontalOverflow(document.documentElement);
+        const scroller = requiredElement("[data-usage-model-table-scroll]");
+        const table = requiredElement("[data-usage-model-table]");
+        expect(scroller.getBoundingClientRect().right).toBeLessThanOrEqual(window.innerWidth);
+        if (width === 320) {
+          expect(table.scrollWidth).toBeGreaterThan(scroller.clientWidth);
+          expect(getComputedStyle(scroller).overflowX).toBe("auto");
+        }
+      }
+    },
+  );
 
   it("filters usage and cost figures immediately while retaining the full Activity calendar", async () => {
     const usage = createRangeUsageDetail();

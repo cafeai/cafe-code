@@ -13,6 +13,7 @@ import {
 } from "@cafecode/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -23,6 +24,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import * as SqlError from "effect/unstable/sql/SqlError";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { PersistenceSqlError } from "../../persistence/Errors.ts";
 
 import {
@@ -68,6 +70,17 @@ interface Harness {
   readonly setEnabled: (usageStatsEnabled: boolean) => Effect.Effect<void>;
   readonly failNextAccountingWrites: (count: number) => Effect.Effect<void>;
   readonly failAccountingPermanently: Effect.Effect<void>;
+  readonly delayNextSessionRead: (millis: number) => Effect.Effect<void>;
+  readonly modelTimeReadCount: Effect.Effect<number>;
+  readonly setModelTimeBoundary: (startedAt: string) => Effect.Effect<void>;
+  readonly holdNextFlush: Effect.Effect<{
+    readonly entered: Effect.Effect<void>;
+    readonly releaseFailure: Effect.Effect<void>;
+  }>;
+  readonly holdCommittedFlush: Effect.Effect<{
+    readonly entered: Effect.Effect<void>;
+    readonly releaseAcknowledgement: Effect.Effect<void>;
+  }>;
   readonly closeService: Effect.Effect<void>;
   readonly recordAuxiliary: (
     provider: ProviderDriverKind,
@@ -78,21 +91,39 @@ interface Harness {
   readonly rebuildService: Effect.Effect<UsageStatsServiceShape, never, Scope.Scope>;
 }
 
-const withHarness = <A, E>(body: (harness: Harness) => Effect.Effect<A, E, Scope.Scope>) =>
+const unsupported = <T>() =>
+  Effect.die(new Error("Unsupported call in test")) as Effect.Effect<T, never>;
+
+const withHarness = <A, E>(
+  body: (harness: Harness) => Effect.Effect<A, E, Scope.Scope>,
+  initialTimeMs = 0,
+) =>
   Effect.scoped(
     Effect.gen(function* () {
+      yield* TestClock.setTime(initialTimeMs);
       const providerPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
       const domainPubSub = yield* PubSub.unbounded<ServerSettings | OrchestrationEvent>();
       const settingsPubSub = yield* PubSub.unbounded<ServerSettings>();
       const sessionsRef = yield* Ref.make<ReadonlyArray<ProviderSession>>([]);
       const enabledRef = yield* Ref.make(true);
       const accountingFailuresRef = yield* Ref.make(0);
-
-      const unsupported = <T>() =>
-        Effect.die(new Error("Unsupported call in test")) as Effect.Effect<T, never>;
+      const sessionReadDelayRef = yield* Ref.make(0);
+      const modelTimeReadsRef = yield* Ref.make(0);
+      type HeldFlush = {
+        readonly commitFirst: boolean;
+        readonly entered: Deferred.Deferred<void>;
+        readonly release: Deferred.Deferred<void>;
+      };
+      const heldFlushRef = yield* Ref.make<HeldFlush | undefined>(undefined);
 
       const providerService = {
-        listSessions: () => Ref.get(sessionsRef),
+        listSessions: () =>
+          Effect.gen(function* () {
+            const sessions = yield* Ref.get(sessionsRef);
+            const delay = yield* Ref.getAndSet(sessionReadDelayRef, 0);
+            if (delay > 0) yield* Effect.sleep(delay);
+            return sessions;
+          }),
         get streamEvents() {
           return Stream.fromPubSub(providerPubSub);
         },
@@ -128,8 +159,27 @@ const withHarness = <A, E>(body: (harness: Harness) => Effect.Effect<A, E, Scope
       );
       const repository = Context.get(infraContext, UsageStatsRepository);
       const auxiliaryUsage = Context.get(infraContext, AuxiliaryUsage);
+      const sql = Context.get(infraContext, SqlClient.SqlClient);
       const observedRepository: UsageStatsRepositoryShape = {
         ...repository,
+        readModelGeneratingTime: Ref.update(modelTimeReadsRef, (count) => count + 1).pipe(
+          Effect.flatMap(() => repository.readModelGeneratingTime),
+        ),
+        flushDeltas: (input) =>
+          Effect.gen(function* () {
+            const held = yield* Ref.getAndSet(heldFlushRef, undefined);
+            if (held !== undefined) {
+              if (held.commitFirst) yield* repository.flushDeltas(input);
+              yield* Deferred.succeed(held.entered, undefined);
+              yield* Deferred.await(held.release);
+              if (held.commitFirst) return;
+              return yield* new PersistenceSqlError({
+                operation: "flush-test",
+                detail: "synthetic failure",
+              });
+            }
+            yield* repository.flushDeltas(input);
+          }),
         recordAccountingSnapshot: (input) =>
           Effect.gen(function* () {
             const failures = yield* Ref.get(accountingFailuresRef);
@@ -208,6 +258,31 @@ const withHarness = <A, E>(body: (harness: Harness) => Effect.Effect<A, E, Scope
         setSessions: (sessions) => Ref.set(sessionsRef, sessions),
         failNextAccountingWrites: (count) => Ref.set(accountingFailuresRef, count),
         failAccountingPermanently: Ref.set(accountingFailuresRef, -1),
+        delayNextSessionRead: (millis) => Ref.set(sessionReadDelayRef, millis),
+        modelTimeReadCount: Ref.get(modelTimeReadsRef),
+        setModelTimeBoundary: (startedAt) =>
+          sql`UPDATE usage_stats_model_generating_time_metadata SET started_at = ${startedAt}`.pipe(
+            Effect.asVoid,
+            Effect.orDie,
+          ),
+        holdNextFlush: Effect.gen(function* () {
+          const entered = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          yield* Ref.set(heldFlushRef, { entered, release, commitFirst: false });
+          return {
+            entered: Deferred.await(entered),
+            releaseFailure: Deferred.succeed(release, undefined).pipe(Effect.asVoid),
+          };
+        }),
+        holdCommittedFlush: Effect.gen(function* () {
+          const entered = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          yield* Ref.set(heldFlushRef, { entered, release, commitFirst: true });
+          return {
+            entered: Deferred.await(entered),
+            releaseAcknowledgement: Deferred.succeed(release, undefined).pipe(Effect.asVoid),
+          };
+        }),
         closeService: Scope.close(serviceScope, Exit.void),
         recordAuxiliary: auxiliaryUsage.record,
         setEnabled: (usageStatsEnabled) =>
@@ -314,6 +389,488 @@ const accountingModel = (
 });
 
 describe("UsageStatsService", () => {
+  it.effect("does not replay settled time when the wall clock moves backwards and catches up", () =>
+    withHarness((harness) =>
+      Effect.gen(function* () {
+        yield* harness.emitProvider({
+          ...providerEventBase(THREAD_1, "clock-start"),
+          type: "turn.started",
+          payload: { model: "a" },
+        });
+        yield* TestClock.adjust(1000);
+        yield* harness.emitProvider({
+          ...providerEventBase(THREAD_1, "clock-settle"),
+          type: "model.rerouted",
+          payload: { fromModel: "a", toModel: "b" },
+        });
+        yield* TestClock.setTime(500);
+        yield* harness.setEnabled(false);
+        yield* harness.setEnabled(true);
+        assert.equal((yield* harness.service.get).totals.generatingMs, 1000);
+        yield* TestClock.setTime(1500);
+        yield* harness.emitProvider({
+          ...providerEventBase(THREAD_1, "clock-stop"),
+          type: "turn.completed",
+          payload: { state: "completed" },
+        });
+        const detail = yield* harness.service.get;
+        assert.equal(detail.totals.generatingMs, 1500);
+        assert.deepEqual(detail.modelGeneratingTime?.totals, [
+          { provider: CODEX, model: "a", generatingMs: 1000 },
+          { provider: CODEX, model: "b", generatingMs: 500 },
+        ]);
+        yield* harness.service.flush;
+        assert.equal((yield* harness.repository.listDays)[0]?.generatingMs, 1500);
+        assert.equal(
+          (yield* harness.repository.readModelGeneratingTime).days.reduce(
+            (total, row) => total + row.generatingMs,
+            0,
+          ),
+          1500,
+        );
+      }),
+    ),
+  );
+
+  it.effect(
+    "uses unknown for unbounded provider model labels without persisting account or prompt material",
+    () =>
+      withHarness((harness) =>
+        Effect.gen(function* () {
+          const oversizedModel = "untrusted".repeat(40);
+          yield* harness.setSessions([runningSession(THREAD_1, CODEX, oversizedModel)]);
+          yield* harness.emitProvider({
+            ...providerEventBase(THREAD_1, "bounded-start"),
+            providerInstanceId: CODEX_PERSONAL,
+            raw: { source: "test", payload: "synthetic-private-prompt" },
+            type: "turn.started",
+            payload: { model: oversizedModel },
+          });
+          yield* TestClock.adjust(1000);
+          yield* harness.emitProvider({
+            ...providerEventBase(THREAD_1, "bounded-end"),
+            type: "turn.completed",
+            payload: { state: "completed" },
+          });
+          yield* harness.service.flush;
+          const ledger = yield* harness.repository.readModelGeneratingTime;
+          assert.deepEqual(ledger.days, [
+            { day: localDayKey(0), provider: CODEX, model: "unknown", generatingMs: 1000 },
+          ]);
+          for (const privateValue of [CODEX_PERSONAL, "synthetic-private-prompt", oversizedModel])
+            assert.notInclude(JSON.stringify(ledger), privateValue);
+        }),
+      ),
+  );
+
+  it.effect(
+    "settles repeated starts, reroutes, driver resets and aborts without recoloring elapsed time",
+    () =>
+      withHarness((harness) =>
+        Effect.gen(function* () {
+          yield* harness.emitProvider({
+            ...providerEventBase(THREAD_1, "time-a"),
+            type: "turn.started",
+            payload: { model: "a" },
+          });
+          yield* TestClock.adjust(250);
+          yield* harness.emitProvider({
+            ...providerEventBase(THREAD_1, "time-b"),
+            type: "turn.started",
+            payload: { model: "b" },
+          });
+          yield* TestClock.adjust(250);
+          yield* harness.emitProvider({
+            ...providerEventBase(THREAD_1, "time-c"),
+            type: "model.rerouted",
+            payload: { fromModel: "b", toModel: "c" },
+          });
+          yield* TestClock.adjust(250);
+          yield* harness.emitProvider({
+            ...providerEventBase(THREAD_1, "time-driver", CLAUDE),
+            type: "session.started",
+            payload: {},
+          });
+          yield* TestClock.adjust(250);
+          yield* harness.emitProvider({
+            ...providerEventBase(THREAD_1, "time-thread", CLAUDE),
+            type: "thread.started",
+            payload: {},
+          });
+          yield* TestClock.adjust(250);
+          yield* harness.emitProvider({
+            ...providerEventBase(THREAD_1, "time-d", CLAUDE),
+            type: "model.rerouted",
+            payload: { fromModel: "unknown", toModel: "d" },
+          });
+          yield* TestClock.adjust(250);
+          yield* harness.emitProvider({
+            ...providerEventBase(THREAD_1, "time-stop", CLAUDE),
+            type: "turn.aborted",
+            payload: { reason: "interrupted" },
+          });
+          const result = yield* harness.service.get;
+          assert.equal(result.totals.generatingMs, 1500);
+          assert.deepEqual(result.modelGeneratingTime?.totals, [
+            { provider: CLAUDE, model: "unknown", generatingMs: 500 },
+            { provider: CLAUDE, model: "d", generatingMs: 250 },
+            { provider: CODEX, model: "a", generatingMs: 250 },
+            { provider: CODEX, model: "b", generatingMs: 250 },
+            { provider: CODEX, model: "c", generatingMs: 250 },
+          ]);
+          yield* harness.service.flush;
+          assert.equal(
+            (yield* harness.repository.readModelGeneratingTime).days.reduce(
+              (total, row) => total + row.generatingMs,
+              0,
+            ),
+            1500,
+          );
+        }),
+      ),
+  );
+
+  it.effect(
+    "keeps an active effective model through redundant same-driver session and thread notifications",
+    () =>
+      withHarness((harness) =>
+        Effect.gen(function* () {
+          yield* harness.emitProvider({
+            ...providerEventBase(THREAD_1, "known-start"),
+            type: "turn.started",
+            payload: { model: "known" },
+          });
+          for (const [index, type] of ["session.started", "thread.started"].entries()) {
+            yield* TestClock.adjust(250);
+            yield* harness.emitProvider({
+              ...providerEventBase(THREAD_1, `duplicate-${index}`),
+              type,
+              payload: {},
+            });
+          }
+          yield* TestClock.adjust(250);
+          yield* harness.emitProvider({
+            ...providerEventBase(THREAD_1, "known-end"),
+            type: "turn.completed",
+            payload: { state: "completed" },
+          });
+          assert.deepEqual((yield* harness.service.get).modelGeneratingTime?.totals, [
+            { provider: CODEX, model: "known", generatingMs: 750 },
+          ]);
+        }),
+      ),
+  );
+
+  it.effect(
+    "assigns unresolved elapsed time to unknown before an asynchronous session-model read completes",
+    () =>
+      withHarness((harness) =>
+        Effect.gen(function* () {
+          yield* harness.setSessions([runningSession(THREAD_1, CODEX, "resolved")]);
+          yield* harness.delayNextSessionRead(500);
+          yield* harness.emitProvider({
+            ...providerEventBase(THREAD_1, "lookup-start"),
+            type: "turn.started",
+            payload: {},
+          });
+          yield* TestClock.adjust(250);
+          assert.deepEqual((yield* harness.service.get).modelGeneratingTime?.totals, [
+            { provider: CODEX, model: "unknown", generatingMs: 250 },
+          ]);
+          yield* TestClock.adjust(250);
+          yield* settle;
+          yield* TestClock.adjust(500);
+          yield* harness.emitProvider({
+            ...providerEventBase(THREAD_1, "lookup-end"),
+            type: "turn.completed",
+            payload: { state: "completed" },
+          });
+          assert.deepEqual((yield* harness.service.get).modelGeneratingTime?.totals, [
+            { provider: CODEX, model: "resolved", generatingMs: 500 },
+            { provider: CODEX, model: "unknown", generatingMs: 500 },
+          ]);
+        }),
+      ),
+  );
+
+  it.effect(
+    "partitions collection toggles under the old setting and does not charge disabled reroutes",
+    () =>
+      withHarness((harness) =>
+        Effect.gen(function* () {
+          yield* harness.emitProvider({
+            ...providerEventBase(THREAD_1, "toggle-start"),
+            type: "turn.started",
+            payload: { model: "a" },
+          });
+          yield* TestClock.adjust(250);
+          yield* harness.setEnabled(false);
+          yield* TestClock.adjust(250);
+          yield* harness.emitProvider({
+            ...providerEventBase(THREAD_1, "toggle-reroute"),
+            type: "model.rerouted",
+            payload: { fromModel: "a", toModel: "b" },
+          });
+          yield* TestClock.adjust(250);
+          yield* harness.setEnabled(true);
+          yield* TestClock.adjust(250);
+          yield* harness.emitProvider({
+            ...providerEventBase(THREAD_1, "toggle-end"),
+            type: "session.exited",
+            payload: {},
+          });
+          const result = yield* harness.service.get;
+          assert.equal(result.totals.generatingMs, 500);
+          assert.deepEqual(result.modelGeneratingTime?.totals, [
+            { provider: CODEX, model: "a", generatingMs: 250 },
+            { provider: CODEX, model: "b", generatingMs: 250 },
+          ]);
+          assert.equal(result.activeSessionCount, 0);
+        }),
+      ),
+  );
+
+  it.effect(
+    "overlays all live local-day spans before a tick without counting reads as new work",
+    () => {
+      const beforeMidnight = new Date(2026, 9, 2, 23, 59, 59, 0).getTime();
+      return withHarness(
+        (harness) =>
+          Effect.gen(function* () {
+            yield* harness.setSessions([runningSession(THREAD_1, CODEX, "night")]);
+            yield* harness.emitProvider({
+              ...providerEventBase(THREAD_1, "midnight-start"),
+              type: "turn.started",
+              payload: { model: "night" },
+            });
+            yield* TestClock.adjust(2000);
+            const first = yield* harness.service.get;
+            const second = yield* harness.service.get;
+            assert.deepEqual(first, second);
+            assert.equal(first.totals.generatingMs, 2000);
+            assert.deepEqual(
+              first.days.map(({ day, generatingMs }) => ({ day, generatingMs })),
+              [
+                { day: localDayKey(beforeMidnight), generatingMs: 1000 },
+                { day: localDayKey(beforeMidnight + 2000), generatingMs: 1000 },
+              ],
+            );
+            assert.deepEqual(
+              first.modelGeneratingTime?.days.map(({ day, generatingMs }) => ({
+                day,
+                generatingMs,
+              })),
+              first.days.map(({ day, generatingMs }) => ({ day, generatingMs })),
+            );
+            assert.deepEqual((yield* harness.repository.readModelGeneratingTime).days, []);
+            assert.equal(yield* harness.modelTimeReadCount, 1);
+            assert.notProperty(yield* harness.service.snapshot, "modelGeneratingTime");
+            yield* harness.emitProvider({
+              ...providerEventBase(THREAD_1, "midnight-end"),
+              type: "turn.completed",
+              payload: { state: "completed" },
+            });
+            yield* harness.service.flush;
+            assert.deepEqual(
+              (yield* harness.service.get).modelGeneratingTime,
+              first.modelGeneratingTime,
+            );
+            yield* harness.closeService;
+            const rebuilt = yield* harness.rebuildService;
+            assert.deepEqual((yield* rebuilt.get).modelGeneratingTime, first.modelGeneratingTime);
+            assert.equal(yield* harness.modelTimeReadCount, 2);
+          }),
+        beforeMidnight,
+      );
+    },
+  );
+
+  it.effect(
+    "requeues the exact failed three-ledger batch alongside concurrently admitted work and survives restart",
+    () =>
+      withHarness((harness) =>
+        Effect.gen(function* () {
+          yield* harness.emitProvider({
+            ...providerEventBase(THREAD_1, "retry-start"),
+            type: "turn.started",
+            payload: { model: "a" },
+          });
+          yield* TestClock.adjust(1000);
+          yield* harness.emitProvider({
+            ...providerEventBase(THREAD_1, "retry-reroute-1"),
+            type: "model.rerouted",
+            payload: { fromModel: "a", toModel: "b" },
+          });
+          yield* harness.emitDomain(userMessageEvent(THREAD_1, "retry-message-1", "user"));
+          yield* harness.emitProvider(
+            tokenUsageEvent(THREAD_1, "retry-token-1", { outputTokens: 10 }),
+          );
+          const held = yield* harness.holdNextFlush;
+          const flushing = yield* harness.service.flush.pipe(Effect.forkScoped);
+          yield* held.entered;
+          yield* TestClock.adjust(1000);
+          yield* harness.emitProvider({
+            ...providerEventBase(THREAD_1, "retry-reroute-2"),
+            type: "model.rerouted",
+            payload: { fromModel: "b", toModel: "c" },
+          });
+          yield* harness.emitDomain(userMessageEvent(THREAD_1, "retry-message-2", "user"));
+          yield* harness.emitProvider(
+            tokenUsageEvent(THREAD_1, "retry-token-2", { outputTokens: 15 }),
+          );
+          yield* held.releaseFailure;
+          yield* Fiber.join(flushing);
+          assert.deepEqual(yield* harness.repository.listDays, []);
+          assert.deepEqual(yield* harness.repository.listTokenBreakdownDays, []);
+          assert.deepEqual((yield* harness.repository.readModelGeneratingTime).days, []);
+          yield* harness.emitProvider({
+            ...providerEventBase(THREAD_1, "retry-end"),
+            type: "turn.aborted",
+            payload: { reason: "interrupted" },
+          });
+          const before = yield* harness.service.get;
+          yield* harness.service.flush;
+          yield* harness.service.flush;
+          const stored = (yield* harness.repository.listDays)[0]!;
+          assert.equal(stored.generatingMs, 2000);
+          assert.equal(stored.userMessages, 2);
+          assert.equal(stored.outputTokens, 15);
+          assert.deepEqual(
+            (yield* harness.repository.readModelGeneratingTime).days,
+            before.modelGeneratingTime?.days,
+          );
+          yield* harness.closeService;
+          const rebuilt = yield* harness.rebuildService;
+          assert.deepEqual((yield* rebuilt.get).modelGeneratingTime, before.modelGeneratingTime);
+          assert.equal((yield* rebuilt.snapshot).totals.generatingMs, 2000);
+        }),
+      ),
+  );
+
+  it.effect(
+    "settles an admitted committed batch before honoring cancellation and never replays its charge",
+    () =>
+      withHarness((harness) =>
+        Effect.gen(function* () {
+          yield* harness.emitProvider({
+            ...providerEventBase(THREAD_1, "interrupt-start"),
+            type: "turn.started",
+            payload: { model: "a" },
+          });
+          yield* TestClock.adjust(1000);
+          yield* harness.emitProvider({
+            ...providerEventBase(THREAD_1, "interrupt-end"),
+            type: "turn.aborted",
+            payload: { reason: "interrupted" },
+          });
+          yield* harness.emitDomain(userMessageEvent(THREAD_1, "interrupt-message", "user"));
+          yield* harness.emitProvider(
+            tokenUsageEvent(THREAD_1, "interrupt-token", { outputTokens: 7 }),
+          );
+          const held = yield* harness.holdCommittedFlush;
+          const flushing = yield* harness.service.flush.pipe(Effect.forkScoped);
+          yield* held.entered;
+          assert.equal((yield* harness.repository.listDays)[0]?.generatingMs, 1000);
+          const cancelling = yield* Fiber.interrupt(flushing).pipe(Effect.forkScoped);
+          yield* settle;
+          yield* held.releaseAcknowledgement;
+          yield* Fiber.join(cancelling);
+          yield* harness.service.flush;
+          assert.equal((yield* harness.repository.listDays)[0]?.generatingMs, 1000);
+          assert.equal((yield* harness.repository.listTokenBreakdownDays)[0]?.outputTokens, 7);
+          assert.equal(
+            (yield* harness.repository.readModelGeneratingTime).days[0]?.generatingMs,
+            1000,
+          );
+        }),
+      ),
+  );
+
+  it.effect(
+    "waits for an admitted periodic flush before shutdown retries the whole failed batch",
+    () =>
+      withHarness((harness) =>
+        Effect.gen(function* () {
+          yield* harness.setSessions([runningSession(THREAD_1, CODEX, "a")]);
+          yield* harness.emitProvider({
+            ...providerEventBase(THREAD_1, "shutdown-start"),
+            type: "turn.started",
+            payload: { model: "a" },
+          });
+          yield* harness.emitDomain(userMessageEvent(THREAD_1, "shutdown-message", "user"));
+          yield* harness.emitProvider(
+            tokenUsageEvent(THREAD_1, "shutdown-token", { outputTokens: 7 }),
+          );
+          const held = yield* harness.holdNextFlush;
+          yield* TestClock.adjust(5000);
+          yield* held.entered;
+          const closing = yield* harness.closeService.pipe(Effect.forkScoped);
+          yield* settle;
+          assert.deepEqual(yield* harness.repository.listDays, []);
+          yield* held.releaseFailure;
+          yield* Fiber.join(closing);
+          assert.equal((yield* harness.repository.listDays)[0]?.generatingMs, 5000);
+          assert.equal((yield* harness.repository.listTokenBreakdownDays)[0]?.outputTokens, 7);
+          assert.equal(
+            (yield* harness.repository.readModelGeneratingTime).days[0]?.generatingMs,
+            5000,
+          );
+        }),
+      ),
+  );
+
+  it.effect(
+    "keeps model-time unavailable for corrupt metadata and for unsafe combined history or live time",
+    () =>
+      withHarness((harness) =>
+        Effect.gen(function* () {
+          yield* harness.closeService;
+          yield* harness.setModelTimeBoundary("2026-02-30T00:00:00.000Z");
+          const invalidScope = yield* Scope.make();
+          const invalid = yield* harness.rebuildService.pipe(Scope.provide(invalidScope));
+          assert.notProperty(yield* invalid.get, "modelGeneratingTime");
+          assert.equal((yield* invalid.snapshot).totals.generatingMs, 0);
+          yield* Scope.close(invalidScope, Exit.void);
+          yield* harness.setModelTimeBoundary("2026-10-02T00:00:00.000Z");
+          yield* harness.repository.flushDeltas({
+            days: [],
+            tokenBreakdowns: [],
+            modelGeneratingTimes: [
+              {
+                day: "2020-01-01",
+                provider: CODEX,
+                model: "a",
+                generatingMs: Number.MAX_SAFE_INTEGER,
+              },
+            ],
+          });
+          const largeScope = yield* Scope.make();
+          const large = yield* harness.rebuildService.pipe(Scope.provide(largeScope));
+          assert.equal(
+            (yield* large.get).modelGeneratingTime?.totals[0]?.generatingMs,
+            Number.MAX_SAFE_INTEGER,
+          );
+          yield* harness.emitProvider({
+            ...providerEventBase(THREAD_1, "overflow-start"),
+            type: "turn.started",
+            payload: { model: "b" },
+          });
+          yield* TestClock.adjust(1);
+          assert.notProperty(yield* large.get, "modelGeneratingTime");
+          yield* harness.emitProvider({
+            ...providerEventBase(THREAD_1, "overflow-end"),
+            type: "turn.aborted",
+            payload: { reason: "interrupted" },
+          });
+          yield* large.flush;
+          yield* Scope.close(largeScope, Exit.void);
+          const overflowed = yield* harness.rebuildService;
+          assert.notProperty(yield* overflowed.get, "modelGeneratingTime");
+          assert.equal((yield* harness.repository.readModelGeneratingTime).days.length, 2);
+        }),
+      ),
+  );
+
   it.effect("never acknowledges permanent accounting storage failure and bounds shutdown", () =>
     withHarness((harness) =>
       Effect.gen(function* () {
@@ -788,11 +1345,13 @@ describe("UsageStatsService", () => {
         yield* harness.setSessions([runningSession(THREAD_1), runningSession(THREAD_2)]);
         yield* harness.emitProvider({
           ...providerEventBase(THREAD_1, "a0"),
+          providerInstanceId: CODEX_PERSONAL,
           type: "turn.started",
           payload: {},
         });
         yield* harness.emitProvider({
           ...providerEventBase(THREAD_2, "a1"),
+          providerInstanceId: CODEX_WORK,
           type: "turn.started",
           payload: {},
         });
@@ -819,6 +1378,12 @@ describe("UsageStatsService", () => {
         assert.equal(stopped.activeSessionCount, 0);
         assert.equal(stopped.totals.generatingMs, 20_000);
         assert.equal(stopped.today.generatingMs, 20_000);
+        const detail = yield* harness.service.get;
+        assert.deepEqual(detail.modelGeneratingTime?.totals, [
+          { provider: CODEX, model: "unknown", generatingMs: 20_000 },
+        ]);
+        assert.notInclude(JSON.stringify(detail.modelGeneratingTime), CODEX_PERSONAL);
+        assert.notInclude(JSON.stringify(detail.modelGeneratingTime), CODEX_WORK);
       }),
     ),
   );
@@ -849,6 +1414,9 @@ describe("UsageStatsService", () => {
         yield* settle;
         const later = yield* harness.service.snapshot;
         assert.equal(later.totals.generatingMs, 10_000);
+        assert.deepEqual((yield* harness.service.get).modelGeneratingTime?.totals, [
+          { provider: CODEX, model: "unknown", generatingMs: 10_000 },
+        ]);
       }),
     ),
   );
@@ -924,6 +1492,8 @@ describe("UsageStatsService", () => {
         assert.equal(snapshot.totals.outputTokens, 5000);
         assert.equal(snapshot.totals.userMessages, 7);
         assert.equal(snapshot.totals.generatingMs, 60_000);
+        assert.deepEqual((yield* rebuilt.get).modelGeneratingTime?.totals, []);
+        assert.deepEqual((yield* rebuilt.get).modelGeneratingTime?.days, []);
       }),
     ),
   );

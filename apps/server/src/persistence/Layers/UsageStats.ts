@@ -3,7 +3,10 @@ import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
-import { UsageAccountingSnapshot } from "@cafecode/contracts";
+import {
+  UsageStatsModelGeneratingTimeStartedAt,
+  UsageAccountingSnapshot,
+} from "@cafecode/contracts";
 import { USAGE_TOKEN_FIELDS } from "../../usageStats/tokenDelta.ts";
 
 import {
@@ -17,6 +20,7 @@ import {
   UsageStatsDayRow,
   UsageStatsRepository,
   UsageStatsTokenBreakdownDayRow,
+  UsageStatsModelGeneratingTimeDayRow,
   type UsageStatsRepositoryShape,
 } from "../Services/UsageStats.ts";
 
@@ -149,6 +153,54 @@ const makeUsageStatsRepository = Effect.gen(function* () {
       `,
   });
 
+  const listModelGeneratingTimeRows = SqlSchema.findAll({
+    Request: Schema.Struct({}),
+    Result: UsageStatsModelGeneratingTimeDayRow,
+    execute: () => sql`
+      SELECT day, provider_driver AS provider, model, generating_ms AS "generatingMs"
+      FROM usage_stats_model_generating_time_days
+      ORDER BY day ASC, provider_driver ASC, model ASC
+    `,
+  });
+  const readModelGeneratingTimeMetadata = SqlSchema.findAll({
+    Request: Schema.Struct({}),
+    Result: Schema.Struct({ startedAt: UsageStatsModelGeneratingTimeStartedAt }),
+    execute: () => sql`
+      SELECT started_at AS "startedAt" FROM usage_stats_model_generating_time_metadata
+      WHERE singleton = 1
+    `,
+  });
+  const readModelGeneratingTime: UsageStatsRepositoryShape["readModelGeneratingTime"] = sql
+    .withTransaction(
+      Effect.gen(function* () {
+        const metadata = yield* readModelGeneratingTimeMetadata({});
+        const startedAt = metadata[0]?.startedAt;
+        if (startedAt === undefined) {
+          return yield* toPersistenceDecodeCauseError(
+            "UsageStatsRepository.readModelGeneratingTime:metadata",
+          )(new Error("Model generating-time measurement boundary is missing."));
+        }
+        return { startedAt, days: yield* listModelGeneratingTimeRows({}) };
+      }),
+    )
+    .pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "UsageStatsRepository.readModelGeneratingTime:query",
+          "UsageStatsRepository.readModelGeneratingTime:decodeRows",
+        ),
+      ),
+    );
+  const upsertModelGeneratingTimeDelta = SqlSchema.void({
+    Request: UsageStatsModelGeneratingTimeDayRow,
+    execute: (row) => sql`
+      INSERT INTO usage_stats_model_generating_time_days (day, provider_driver, model, generating_ms)
+      VALUES (${row.day}, ${row.provider}, ${row.model}, ${row.generatingMs})
+      ON CONFLICT (day, provider_driver, model)
+      DO UPDATE SET generating_ms = generating_ms + excluded.generating_ms
+    `,
+  });
+
   const listDays: UsageStatsRepositoryShape["listDays"] = listUsageStatsDayRows({}).pipe(
     Effect.mapError(
       toPersistenceSqlOrDecodeError(
@@ -169,18 +221,25 @@ const makeUsageStatsRepository = Effect.gen(function* () {
     );
 
   const flushDeltas: UsageStatsRepositoryShape["flushDeltas"] = (deltas) => {
-    if (deltas.days.length === 0 && deltas.tokenBreakdowns.length === 0) {
+    if (
+      deltas.days.length === 0 &&
+      deltas.tokenBreakdowns.length === 0 &&
+      (deltas.modelGeneratingTimes?.length ?? 0) === 0
+    ) {
       return Effect.void;
     }
 
-    // Always use one transaction even for one-row batches. Aggregate totals
-    // and provider/model attribution describe the same token observations; a
-    // partial commit followed by retry would permanently skew one side.
+    // Always use one transaction even for one-row batches. Aggregate, token
+    // and model-time observations share this commit boundary; a partial commit
+    // followed by retry would permanently skew one side of the same work.
     return sql
       .withTransaction(
         Effect.gen(function* () {
           yield* Effect.forEach(deltas.days, upsertUsageStatsDayDelta, { discard: true });
           yield* Effect.forEach(deltas.tokenBreakdowns, upsertUsageStatsTokenBreakdownDelta, {
+            discard: true,
+          });
+          yield* Effect.forEach(deltas.modelGeneratingTimes ?? [], upsertModelGeneratingTimeDelta, {
             discard: true,
           });
         }),
@@ -281,6 +340,7 @@ const makeUsageStatsRepository = Effect.gen(function* () {
   return {
     listDays,
     listTokenBreakdownDays,
+    readModelGeneratingTime,
     flushDeltas,
     recordAccountingSnapshot,
   } satisfies UsageStatsRepositoryShape;

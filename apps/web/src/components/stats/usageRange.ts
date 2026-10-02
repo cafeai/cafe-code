@@ -2,6 +2,7 @@ import type {
   ProviderDriverKind,
   UsageStatsDay,
   UsageStatsGetResult,
+  UsageStatsModelGeneratingTimeEntry,
   UsageStatsTokenBreakdownEntry,
   UsageStatsTotals,
 } from "@cafecode/contracts";
@@ -59,7 +60,7 @@ function currentDayIndex(usage: Pick<UsageStatsGetResult, "today">): number {
 
 /** Inclusive calendar bounds, anchored to the server's current local day. */
 export function getUsageRangeBounds(
-  usage: Pick<UsageStatsGetResult, "today" | "days" | "tokenBreakdownDays">,
+  usage: Pick<UsageStatsGetResult, "today" | "days" | "tokenBreakdownDays" | "modelGeneratingTime">,
   range: UsageRangeKey,
 ): UsageRangeBounds {
   const endIndex = currentDayIndex(usage);
@@ -87,6 +88,14 @@ export function getUsageRangeBounds(
       dayIndex < startIndex &&
       (row.inputTokens > 0 || row.outputTokens > 0)
     ) {
+      startIndex = dayIndex;
+    }
+  }
+  for (const row of usage.modelGeneratingTime?.days ?? []) {
+    const dayIndex = usageDayToUtcDayIndex(row.day);
+    // A turn can accrue time before it reports any tokens. Keep that history
+    // reachable even when neither of the older ledgers has a row for its day.
+    if (dayIndex !== undefined && dayIndex < startIndex && row.generatingMs > 0) {
       startIndex = dayIndex;
     }
   }
@@ -218,13 +227,72 @@ export function selectUsageRange(
       compareText(left.model, right.model),
   );
 
+  const modelTime = usage.modelGeneratingTime;
+  let modelGeneratingTime = modelTime;
+  if (modelTime !== undefined) {
+    let timeAvailable = true;
+    const timeDays = modelTime.days.filter((row) => {
+      const dayIndex = usageDayToUtcDayIndex(row.day);
+      return dayIndex !== undefined && dayIndex >= startIndex && dayIndex <= endIndex;
+    });
+    // Time is its own prospective ledger. Token-day availability, aggregate
+    // generating time and current activity counts cannot supply model time.
+    // Nested maps preserve exact identities without delimiter collisions or
+    // interpreting provider-controlled model strings as object properties.
+    const byTimeProvider = new Map<
+      ProviderDriverKind,
+      Map<string, UsageStatsModelGeneratingTimeEntry>
+    >();
+    for (const row of timeDays) {
+      let models = byTimeProvider.get(row.provider);
+      if (models === undefined) {
+        models = new Map();
+        byTimeProvider.set(row.provider, models);
+      }
+      const previous = models.get(row.model);
+      const previousMs = previous?.generatingMs ?? 0;
+      if (
+        !Number.isSafeInteger(row.generatingMs) ||
+        row.generatingMs < 0 ||
+        row.generatingMs > Number.MAX_SAFE_INTEGER - previousMs
+      ) {
+        // Match the server's all-or-unavailable policy. A rounded or partial
+        // duration is not an honest recorded total, even if each row decoded.
+        timeAvailable = false;
+        break;
+      }
+      models.set(row.model, {
+        provider: row.provider,
+        model: row.model,
+        generatingMs: previousMs + row.generatingMs,
+      });
+    }
+    const timeTotals = Array.from(byTimeProvider.values()).flatMap((models) =>
+      Array.from(models.values()),
+    );
+    timeTotals.sort(
+      (left, right) =>
+        compareText(left.provider, right.provider) ||
+        right.generatingMs - left.generatingMs ||
+        compareText(left.model, right.model),
+    );
+    modelGeneratingTime = timeAvailable
+      ? { ...modelTime, days: timeDays, totals: timeTotals }
+      : undefined;
+  }
+
+  const { modelGeneratingTime: _originalModelTime, ...usageWithoutModelTime } = usage;
+
   return {
-    ...usage,
+    ...usageWithoutModelTime,
     totals,
     days,
     tokenBreakdown,
     // Preserve unavailable attribution as absent so callers can distinguish an
     // older server from an available daily ledger with no observations here.
     ...(tokenBreakdownDays === undefined ? {} : { tokenBreakdownDays }),
+    // An older response has no container at all; do not turn unavailable
+    // recording into an available but zero-valued time ledger.
+    ...(modelGeneratingTime === undefined ? {} : { modelGeneratingTime }),
   };
 }
