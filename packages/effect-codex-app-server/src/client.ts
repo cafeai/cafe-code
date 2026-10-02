@@ -12,6 +12,7 @@ import * as CodexRpc from "./_generated/meta.gen.ts";
 import * as CodexError from "./errors.ts";
 import * as CodexProtocol from "./protocol.ts";
 import { normalizeCodexAccountPlanPayload } from "./compatibility.ts";
+import { codexCommandUsesShell } from "./command.ts";
 import {
   decodeNotificationPayload,
   decodeOptionalPayload,
@@ -389,7 +390,7 @@ export const layerCommand = (
         ...(options.cwd ? { cwd: options.cwd } : {}),
         ...(options.env ? { env: { ...process.env, ...options.env } } : {}),
         forceKillAfter: DEFAULT_APP_SERVER_FORCE_KILL_AFTER,
-        shell: process.platform === "win32",
+        shell: codexCommandUsesShell(options.command, process.platform),
       });
       return yield* spawner.spawn(command).pipe(
         Effect.mapError(

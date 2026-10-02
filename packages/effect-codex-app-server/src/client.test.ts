@@ -1,8 +1,11 @@
+import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import * as Scope from "effect/Scope";
@@ -16,6 +19,7 @@ import { assert, it } from "@effect/vitest";
 
 import * as CodexClient from "./client.ts";
 import * as CodexError from "./errors.ts";
+import { codexCommandUsesShell } from "./command.ts";
 import * as Ref from "effect/Ref";
 import * as CodexProtocol from "./protocol.ts";
 import { makeInMemoryStdio } from "./_internal/stdio.ts";
@@ -28,13 +32,98 @@ const encoder = new TextEncoder();
 const encodeJsonl = (value: unknown) => encoder.encode(`${encodeUnknownJsonString(value)}\n`);
 const decodeJson = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
 
+const literalCommandArgs = [
+  "space in argument",
+  'literal"quote',
+  "literal&pipe|",
+  "%CAFE_ARG%",
+  "!CAFE_ARG!",
+  "$(literal);`literal`",
+  "trailing\\",
+  'backslash-before-quote\\"',
+  "",
+];
+const commandPolicies = [
+  { command: "C:\\Program Files\\Codex\\codex.exe", windowsShell: false },
+  { command: "C:\\tools & fixtures\\CODEX.EXE", windowsShell: false },
+  { command: "codex.com", windowsShell: false },
+  { command: "CODEX.COM", windowsShell: false },
+  { command: "C:\\tools & fixtures\\codex.cmd", windowsShell: true },
+  { command: "codex.BAT", windowsShell: true },
+  { command: "codex.exe.cmd", windowsShell: true },
+  { command: "C:\\codex.exe\\codex", windowsShell: true },
+  { command: "codex", windowsShell: true },
+  { command: "/usr/local/bin/codex", windowsShell: true },
+  { command: "/tmp/native executable & fixture.exe", windowsShell: false },
+] as const;
+
+const makeNativePeerFixture = () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const temporaryRoot = yield* fs.makeTempDirectoryScoped({ prefix: "cafe-codex-launch-" });
+    // macOS resolves /var temporary paths through /private/var in cwd;
+    // use one canonical usable spelling for all fixture paths and homes.
+    const fixtureRoot = yield* fs.realPath(temporaryRoot);
+    const binaryDir = path.join(fixtureRoot, "native executable & fixtures");
+    yield* fs.makeDirectory(binaryDir);
+    const executable = path.join(binaryDir, "mock codex.EXE");
+    const peer = path.join(fixtureRoot, "mock peer.ts");
+    // A copy guarantees a spaced native executable path on every runner,
+    // without Windows symlink privileges or any installed-provider lookup.
+    yield* fs.copyFile(process.execPath, executable);
+    if (process.platform !== "win32") {
+      yield* fs.chmod(executable, 0o700);
+    }
+    yield* fs.copyFile(yield* mockPeerPath, peer);
+    const homeDrive = process.platform === "win32" ? path.parse(fixtureRoot).root.slice(0, 2) : "";
+    const fixtureEnv: Record<string, string> = {
+      HOME: fixtureRoot,
+      USERPROFILE: fixtureRoot,
+      HOMEDRIVE: homeDrive,
+      HOMEPATH: fixtureRoot.slice(homeDrive.length),
+      APPDATA: fixtureRoot,
+      LOCALAPPDATA: fixtureRoot,
+      CODEX_HOME: fixtureRoot,
+      CODEX_SQLITE_HOME: fixtureRoot,
+      PATH: binaryDir,
+      TEMP: fixtureRoot,
+      TMP: fixtureRoot,
+      TMPDIR: fixtureRoot,
+      NODE_OPTIONS: "",
+      NODE_PATH: "",
+      NODE_EXTRA_CA_CERTS: "",
+      // Node restores parent coverage settings when this key is absent;
+      // an explicit empty value prevents files outside the fixture root.
+      NODE_V8_COVERAGE: "",
+      USERNAME: "cafe-fixture",
+      USERDOMAIN: "cafe-fixture",
+      LOGONSERVER: "cafe-fixture",
+      CAFE_ARG: "must-never-expand",
+      CAFE_CODE_MOCK_PEER_ROOT: fixtureRoot,
+      CAFE_CODE_MOCK_PEER_PATH: binaryDir,
+    };
+    // libuv restores certain absent Windows variables from the parent.
+    // Override every home/profile/PATH/temp value above, retaining only
+    // the real system directories required for native Windows startup.
+    // Required-variable list: Node v24.13.1 deps/uv/src/win/process.c.
+    for (const [key, value] of Object.entries(process.env)) {
+      if (value && ["SYSTEMROOT", "WINDIR", "SYSTEMDRIVE"].includes(key.toUpperCase())) {
+        fixtureEnv[key.toUpperCase()] = value;
+      }
+    }
+    return { fixtureRoot, executable, peer, fixtureEnv };
+  });
+
 it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
   const makeHandle = () =>
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-      const path = yield* Path.Path;
-      const command = ChildProcess.make(process.execPath, [yield* mockPeerPath], {
-        cwd: path.join(import.meta.dirname, ".."),
+      const { fixtureRoot, executable, peer, fixtureEnv } = yield* makeNativePeerFixture();
+      const command = ChildProcess.make(executable, [peer], {
+        cwd: fixtureRoot,
+        env: fixtureEnv,
+        extendEnv: false,
         shell: false,
       });
       return yield* spawner.spawn(command);
@@ -210,6 +299,10 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
       const messageDeltas = yield* Ref.make<Array<unknown>>([]);
       const handle = yield* makeHandle();
       const scope = yield* Scope.make();
+      // Layer construction can fail before the normal request-region ensuring
+      // is installed. Attach this manual scope to the test immediately; its
+      // later normal close is idempotent, and test teardown remains a backstop.
+      yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
       const clientLayer = CodexClient.layerChildProcess(handle);
       const context = yield* Layer.buildWithScope(clientLayer, scope);
 
@@ -307,34 +400,186 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
     }),
   );
 
-  it.effect("initializes a command-backed app-server client", () =>
-    Effect.gen(function* () {
-      const path = yield* Path.Path;
-      const scope = yield* Scope.make();
-      const clientLayer = CodexClient.layerCommand({
-        command: process.execPath,
-        args: [yield* mockPeerPath],
-        cwd: path.join(import.meta.dirname, ".."),
-      });
-      const context = yield* Layer.buildWithScope(clientLayer, scope);
-
-      const initialized = yield* Effect.gen(function* () {
-        const client = yield* CodexClient.CodexAppServerClient;
-        return yield* client.request("initialize", {
-          clientInfo: {
-            name: "effect-codex-app-server-test",
-            title: "Effect Codex App Server Test",
-            version: "0.0.0",
-          },
-          capabilities: {
-            experimentalApi: true,
-            optOutNotificationMethods: null,
-          },
-        });
-      }).pipe(Effect.provide(context), Effect.ensuring(Scope.close(scope, Exit.void)));
-
-      assert.equal(initialized.userAgent, "mock-codex-app-server");
+  it.effect.each(
+    (["win32", "darwin", "linux"] as const).flatMap((platform) =>
+      commandPolicies.map((policy) => ({ ...policy, platform })),
+    ),
+  )("selects $platform shell policy for $command", ({ command, platform, windowsShell }) =>
+    Effect.sync(() => {
+      assert.equal(codexCommandUsesShell(command, platform), platform === "win32" && windowsShell);
     }),
+  );
+
+  it.effect.each(commandPolicies)(
+    "applies the host command policy at the client spawn boundary for $command",
+    ({ command, windowsShell }) =>
+      Effect.gen(function* () {
+        const commands: Array<ChildProcess.Command> = [];
+        // These paths are policy examples, never installed providers. Stop at
+        // the exact spawn boundary before anything could resolve or execute.
+        const spawner = ChildProcessSpawner.make((observed) => {
+          commands.push(observed);
+          return Effect.fail(
+            PlatformError.systemError({
+              _tag: "NotFound",
+              module: "ChildProcess",
+              method: "spawn",
+              description: "Intentional command-policy fixture stop",
+            }),
+          );
+        });
+        const cwd = (yield* Path.Path).join(import.meta.dirname, "..");
+        const result = yield* CodexClient.layerCommand({
+          command,
+          args: literalCommandArgs,
+          cwd,
+        }).pipe(
+          Layer.provide(Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner)),
+          Layer.build,
+          Effect.exit,
+        );
+        assert.equal(Exit.isFailure(result), true);
+        assert.equal(commands.length, 1);
+        const observed = commands[0];
+        if (observed?._tag !== "StandardCommand") {
+          return assert.fail("Expected one standard command");
+        }
+        assert.equal(observed.command, command);
+        assert.deepEqual(observed.args, literalCommandArgs);
+        assert.equal(observed.options.cwd, cwd);
+        assert.equal(observed.options.shell, process.platform === "win32" && windowsShell);
+      }),
+  );
+
+  it.effect.each([
+    { name: "initializes a command-backed app-server client", echo: false, failDuringBuild: false },
+    { name: "preserves native executable arguments literally", echo: true, failDuringBuild: false },
+    {
+      name: "closes the native fixture when client layer construction fails",
+      echo: true,
+      failDuringBuild: true,
+    },
+  ])(
+    "$name",
+    ({ echo, failDuringBuild }) =>
+      Effect.gen(function* () {
+        const realSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const { fixtureRoot, executable, peer, fixtureEnv } = yield* makeNativePeerFixture();
+        const args = [peer, ...(echo ? ["--echo-argv", ...literalCommandArgs] : [])];
+        const handles: Array<ChildProcessSpawner.ChildProcessHandle> = [];
+        const isolatedSpawner = ChildProcessSpawner.make((observed) => {
+          // Only this copied executable and this peer may run. Preserve the
+          // production command/argv/cwd/shell while removing ambient secrets
+          // and Node hooks from the synthetic subprocess's environment.
+          assert.equal(observed._tag, "StandardCommand");
+          if (observed._tag !== "StandardCommand") {
+            return Effect.die("Unexpected command fixture pipeline");
+          }
+          assert.equal(observed.command, executable);
+          assert.deepEqual(observed.args, args);
+          assert.equal(observed.options.cwd, fixtureRoot);
+          assert.equal(observed.options.shell, false);
+          return realSpawner
+            .spawn(
+              ChildProcess.make(observed.command, observed.args, {
+                ...observed.options,
+                env: fixtureEnv,
+                extendEnv: false,
+              }),
+            )
+            .pipe(
+              Effect.tap((handle) => Effect.sync(() => handles.push(handle))),
+              Effect.map((handle) =>
+                failDuringBuild
+                  ? new Proxy(handle, {
+                      get(target, property, receiver) {
+                        // Fail after the real child is acquired but while
+                        // layerCommand is still constructing its stdio. This
+                        // catches setup leaks that a later assertion failure
+                        // inside an already-built client would not exercise.
+                        if (property === "stdout") {
+                          throw new Error("Intentional fixture stdio construction failure");
+                        }
+                        return Reflect.get(target, property, receiver);
+                      },
+                    })
+                  : handle,
+              ),
+            );
+        });
+        // Register the child in an inner scope before building the client, so
+        // failed layer initialization also retires it. The outer scope keeps
+        // its copied executable and peer until child cleanup has completed.
+        const result = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const context = yield* CodexClient.layerCommand({
+              command: executable,
+              args,
+              cwd: fixtureRoot,
+            }).pipe(
+              Layer.provide(
+                Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, isolatedSpawner),
+              ),
+              Layer.build,
+            );
+            const initialized = yield* Effect.gen(function* () {
+              const client = yield* CodexClient.CodexAppServerClient;
+              return yield* client.request("initialize", {
+                clientInfo: {
+                  name: "effect-codex-app-server-test",
+                  title: "Effect Codex App Server Test",
+                  version: "0.0.0",
+                },
+                capabilities: { experimentalApi: true, optOutNotificationMethods: null },
+              });
+            }).pipe(Effect.provide(context));
+            return initialized;
+          }),
+        ).pipe(Effect.exit);
+        assert.equal(handles.length, 1);
+        for (const handle of handles) {
+          assert.equal(yield* handle.isRunning, false);
+        }
+        if (failDuringBuild) {
+          if (Exit.isSuccess(result)) {
+            return assert.fail("Expected fixture stdio construction to fail");
+          }
+          assert.match(
+            Cause.pretty(result.cause),
+            /Intentional fixture stdio construction failure/,
+          );
+          return;
+        }
+        if (Exit.isFailure(result)) {
+          return assert.fail("Native mock app-server initialization failed");
+        }
+        assert.equal(result.value.codexHome, fixtureRoot);
+        assert.equal(
+          result.value.userAgent,
+          echo
+            ? JSON.stringify({
+                argv: literalCommandArgs,
+                environment: {
+                  home: true,
+                  userProfile: true,
+                  homeDriveAndPath: true,
+                  appData: true,
+                  localAppData: true,
+                  codexHome: true,
+                  codexSqliteHome: true,
+                  temp: true,
+                  path: true,
+                  nodeHooksAbsent: true,
+                  syntheticUser: true,
+                  providerCredentialsAbsent: true,
+                },
+              })
+            : "mock-codex-app-server",
+        );
+      }),
+    // Copy/spawn on a loaded Windows runner can exceed the ordinary budget;
+    // in-memory policy cases keep their default, as do macOS/Linux fixtures.
+    process.platform === "win32" ? 20_000 : undefined,
   );
 
   it.effect("keeps dispatching notifications after a handler defect", () =>

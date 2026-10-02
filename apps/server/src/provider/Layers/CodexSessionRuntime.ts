@@ -51,6 +51,7 @@ import * as Stream from "effect/Stream";
 import * as SchemaIssue from "effect/SchemaIssue";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import * as CodexClient from "effect-codex-app-server/client";
+import { codexCommandUsesShell } from "effect-codex-app-server/command";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexRpc from "effect-codex-app-server/rpc";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
@@ -4522,7 +4523,10 @@ export const makeCodexSessionRuntime = (
           cwd: appServerCwd,
           env,
           forceKillAfter: CODEX_APP_SERVER_FORCE_KILL_AFTER,
-          shell: process.platform === "win32",
+          // Use the same command policy as disposable Codex probes.
+          // Native executables must receive structured argv, not a shell's
+          // interpretation of generated configuration or configured paths.
+          shell: codexCommandUsesShell(options.binaryPath, process.platform),
         }),
       )
       .pipe(

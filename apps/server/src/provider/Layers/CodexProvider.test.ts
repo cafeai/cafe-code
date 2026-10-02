@@ -84,6 +84,44 @@ const makeModelListClient = (
   }) as CodexClient.CodexAppServerClientShape;
 
 describe("Codex CLI health probe command", () => {
+  // These inert command spellings exercise the real factory on each CI host.
+  // The package's separate injected-platform matrix covers all three policies
+  // locally; neither test resolves a provider or inherits a real auth home.
+  it.each([
+    { binaryPath: "C:\\Program Files\\Cafe & Codex\\codex.exe", windowsShell: false },
+    { binaryPath: "C:\\Program Files\\Cafe & Codex\\CODEX.COM", windowsShell: false },
+    { binaryPath: "C:\\Program Files\\Cafe & Codex\\codex.cmd", windowsShell: true },
+    { binaryPath: "C:\\Program Files\\Cafe & Codex\\codex.bat", windowsShell: true },
+    { binaryPath: "codex", windowsShell: true },
+    { binaryPath: "/test-only/codex", windowsShell: true },
+  ])("preserves probe ownership and argv for $binaryPath", ({ binaryPath, windowsShell }) => {
+    const environment = { CAFE_TEST_ONLY: "literal & | %fixture%", CODEX_HOME: "overridden" };
+    const homePath = "isolated-codex-home";
+    const args = ["", "two words", 'embedded"quote', "a&b|c", "%CAFE_TEST_ONLY%"];
+    const health = makeCodexHealthProbeCommand(
+      decodeCodexSettings({ binaryPath, homePath }),
+      args,
+      environment,
+    );
+    const models = makeCodexModelListCommand({
+      binaryPath,
+      homePath,
+      cwd: "backend-owned-cwd",
+      environment,
+    });
+
+    for (const command of [health, models]) {
+      expect(command.command).toBe(binaryPath);
+      expect(command.options.shell).toBe(process.platform === "win32" && windowsShell);
+      expect(command.options.env).toEqual({ ...environment, CODEX_HOME: homePath });
+      expect(command.options.detached).toBe(process.platform !== "win32");
+      expect(command.options.killSignal).toBe("SIGKILL");
+    }
+    expect(health.args).toEqual(args);
+    expect(models.args).toEqual(["app-server"]);
+    expect(models.options.cwd).toBe("backend-owned-cwd");
+  });
+
   it("isolates POSIX descendants and gives scope cleanup a SIGKILL backstop", () => {
     const command = makeCodexHealthProbeCommand(
       decodeCodexSettings({

@@ -10,7 +10,7 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { createModelSelection } from "@cafecode/shared/model";
 import { expect } from "vitest";
 
@@ -25,6 +25,7 @@ import { AuxiliaryUsage, AuxiliaryUsageLive } from "../usageStats/Services/Auxil
 import { ServerConfig } from "../config.ts";
 import { type TextGenerationShape } from "./TextGeneration.ts";
 import { makeCodexTextGeneration } from "./CodexTextGeneration.ts";
+import { buildThreadTitlePrompt } from "./TextGenerationPrompts.ts";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 
 const DEFAULT_TEST_MODEL_SELECTION = createModelSelection(
@@ -87,6 +88,7 @@ function makeFakeCodexBinary(
           "  process.stdin.pause();",
           "  const fail = (code, message) => process.stderr.write(`${message}\\n`, () => process.exit(code));",
           "  if (forcedCode !== undefined) return fail(forcedCode, forcedMessage);",
+          '  if (process.env.CODEX_HOME !== process.env.CAFE_CODE_EXEC_FIXTURE_HOME || process.env.HOME !== process.env.CAFE_CODE_EXEC_FIXTURE_PROFILE || process.env.NODE_OPTIONS !== "" || process.env.NODE_V8_COVERAGE !== "") return fail(9, "fixture environment mismatch");',
           '  if (config.requireImage && !args.includes("--image")) return fail(2, "missing --image input");',
           '  if (config.requireFastServiceTier && !configValues.includes(\'service_tier="priority"\')) return fail(5, "missing priority service tier config");',
           '  if (config.requireReasoningEffort !== undefined && reasoningEffort !== `model_reasoning_effort="${config.requireReasoningEffort}"`) return fail(6, `unexpected reasoning effort config: ${reasoningEffort ?? ""}`);',
@@ -120,6 +122,12 @@ function makeFakeCodexBinary(
       codexPath,
       [
         "#!/bin/sh",
+        // Validate the environment observed by the actual synthetic child,
+        // rather than relying only on its pre-spawn command object.
+        'if [ "$CODEX_HOME" != "$CAFE_CODE_EXEC_FIXTURE_HOME" ] || [ "$HOME" != "$CAFE_CODE_EXEC_FIXTURE_PROFILE" ] || [ -n "$NODE_OPTIONS" ] || [ -n "$NODE_V8_COVERAGE" ]; then',
+        '  printf "%s\\n" "fixture environment mismatch" >&2',
+        "  exit 9",
+        "fi",
         'output_path=""',
         'seen_image="0"',
         'seen_fast_service_tier="0"',
@@ -241,11 +249,108 @@ function withFakeCodexCli<A, E, R>(
 ) {
   return Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const nativeSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-codex-text-" });
+    const homePath = path.join(tempDir, "codex-home");
+    const profilePath = path.join(tempDir, "profile");
+    const fixtureTemp = path.join(tempDir, "tmp");
+    yield* fs.makeDirectory(homePath);
+    yield* fs.makeDirectory(profilePath);
+    yield* fs.makeDirectory(fixtureTemp);
+    const environment: NodeJS.ProcessEnv = {
+      HOME: profilePath,
+      HOMEDRIVE:
+        process.platform === "win32" ? path.parse(profilePath).root.slice(0, -1) : profilePath,
+      HOMEPATH:
+        process.platform === "win32"
+          ? profilePath.slice(path.parse(profilePath).root.length - 1)
+          : profilePath,
+      USERPROFILE: profilePath,
+      APPDATA: path.join(profilePath, "AppData", "Roaming"),
+      LOCALAPPDATA: path.join(profilePath, "AppData", "Local"),
+      TEMP: fixtureTemp,
+      TMP: fixtureTemp,
+      TMPDIR: fixtureTemp,
+      // The POSIX fixture intentionally uses only the host's standard cat and
+      // grep utilities. Its executable and Windows' Node helper are absolute
+      // fixture paths, so no provider or developer-tool PATH is required.
+      PATH: "/usr/bin:/bin",
+      CODEX_HOME: homePath,
+      CODEX_SQLITE_HOME: homePath,
+      NODE_OPTIONS: "",
+      NODE_V8_COVERAGE: "",
+      CAFE_CODE_EXEC_FIXTURE_HOME: homePath,
+      CAFE_CODE_EXEC_FIXTURE_PROFILE: profilePath,
+    };
+    if (process.platform === "win32") {
+      const windowsSystemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT;
+      if (!windowsSystemRoot) {
+        return yield* Effect.die(
+          new Error("Windows system directory is unavailable for the fixture."),
+        );
+      }
+      const systemShell = path.join(windowsSystemRoot, "System32", "cmd.exe");
+      // Node chooses the parent ComSpec before applying child env. Refuse a
+      // custom interpreter rather than silently evaluating the fixture with
+      // an ambient wrapper; keep the caller's shell option unchanged.
+      const parentShell = process.env.ComSpec;
+      if (
+        !parentShell ||
+        path.resolve(parentShell).toLowerCase() !== path.resolve(systemShell).toLowerCase()
+      ) {
+        return yield* Effect.die(
+          new Error("Windows fixture requires the system command interpreter."),
+        );
+      }
+      environment.SystemRoot = windowsSystemRoot;
+      environment.WINDIR = windowsSystemRoot;
+      environment.SYSTEMDRIVE = path.parse(windowsSystemRoot).root.slice(0, -1);
+      environment.ComSpec = systemShell;
+      environment.PATH = [path.join(windowsSystemRoot, "System32"), windowsSystemRoot].join(";");
+      // libuv's required_vars / make_program_env restores absent profile and
+      // identity entries. Explicit scoped paths and fixed identity values keep
+      // the helper independent of real Windows profiles and logon servers.
+      // https://github.com/nodejs/node/blob/v24.13.1/deps/uv/src/win/process.c
+      environment.LOGONSERVER = "cafe-fixture";
+      environment.USERDOMAIN = "cafe-fixture";
+      environment.USERNAME = "cafe-fixture";
+    }
     const codexPath = yield* makeFakeCodexBinary(tempDir, input);
-    const config = decodeCodexSettings({ binaryPath: codexPath });
-    const textGeneration = yield* makeCodexTextGeneration(config);
-    return yield* effectFn(textGeneration);
+    let admittedCommands = 0;
+    const fixtureSpawner = ChildProcessSpawner.make((command) => {
+      // This is the sole process-backed text-generation fixture. Admit only
+      // its exact freshly generated executable; no ambient provider command
+      // can reach the real spawner if a future test accidentally changes the
+      // settings. Keep argv, stdin, cwd and native/batch shell policy intact.
+      if (command._tag !== "StandardCommand" || command.command !== codexPath) {
+        return Effect.die(new Error("Unexpected synthetic Codex fixture command."));
+      }
+      const commandEnvironment = command.options.env ?? {};
+      const environmentEntries = Object.entries(environment);
+      if (
+        Object.keys(commandEnvironment).length !== environmentEntries.length ||
+        !environmentEntries.every(([key, value]) => commandEnvironment[key] === value)
+      ) {
+        // A failure must not print a newly inherited credential value.
+        return Effect.die(new Error("Synthetic Codex fixture environment changed."));
+      }
+      admittedCommands += 1;
+      return nativeSpawner.spawn(
+        ChildProcess.make(command.command, command.args, {
+          ...command.options,
+          env: environment,
+          extendEnv: false,
+        }),
+      );
+    });
+    const config = decodeCodexSettings({ binaryPath: codexPath, homePath });
+    const textGeneration = yield* makeCodexTextGeneration(config, environment).pipe(
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, fixtureSpawner),
+    );
+    const result = yield* effectFn(textGeneration);
+    expect(admittedCommands).toBe(1);
+    return result;
   }).pipe(Effect.scoped);
 }
 
@@ -253,6 +358,9 @@ type CapturedCodexCommand = {
   readonly command: string;
   readonly args: ReadonlyArray<string>;
   readonly options: {
+    readonly cwd?: string;
+    readonly env?: NodeJS.ProcessEnv;
+    readonly shell?: boolean | string;
     readonly stdin?: { readonly stream: Stream.Stream<Uint8Array> };
   };
 };
@@ -277,6 +385,10 @@ function makeCodexHandle(input: { stdout?: string; stderr?: string; exitCode?: n
 function withFakeCodexSpawner<A, E, R>(
   input: {
     output: string;
+    binaryPath?: string;
+    homePath?: string;
+    environment?: NodeJS.ProcessEnv;
+    inspectCommand?: (command: CapturedCodexCommand, prompt: string) => void;
     stdout?: string;
     exitCode?: number;
     stderr?: string;
@@ -291,7 +403,8 @@ function withFakeCodexSpawner<A, E, R>(
   effectFn: (textGeneration: TextGenerationShape) => Effect.Effect<A, E, R>,
 ) {
   return Effect.gen(function* () {
-    const config = decodeCodexSettings({ binaryPath: "fake-codex" });
+    const binaryPath = input.binaryPath ?? "fake-codex";
+    const config = decodeCodexSettings({ binaryPath, homePath: input.homePath ?? "" });
     const spawner = ChildProcessSpawner.make((unknownCommand) =>
       Effect.gen(function* () {
         const command = unknownCommand as unknown as CapturedCodexCommand;
@@ -310,9 +423,10 @@ function withFakeCodexSpawner<A, E, R>(
           command.args[index - 1] === "--config" ? [arg] : [],
         );
 
-        expect(command.command).toBe("fake-codex");
+        expect(command.command).toBe(binaryPath);
         expect(command.args).toContain("--json");
         expect(outputPath).toBeTypeOf("string");
+        input.inspectCommand?.(command, prompt);
         if (outputPath !== undefined) {
           writeFileSync(outputPath, input.output);
         }
@@ -348,7 +462,7 @@ function withFakeCodexSpawner<A, E, R>(
         );
       }),
     );
-    const textGeneration = yield* makeCodexTextGeneration(config).pipe(
+    const textGeneration = yield* makeCodexTextGeneration(config, input.environment).pipe(
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
     );
     return yield* effectFn(textGeneration);
@@ -356,6 +470,101 @@ function withFakeCodexSpawner<A, E, R>(
 }
 
 it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
+  for (const fixture of [
+    { name: "native .exe", filename: "codex fixture.exe", windowsUsesShell: false },
+    { name: "native upper-case .COM", filename: "codex fixture.COM", windowsUsesShell: false },
+    { name: "legacy .cmd", filename: "codex fixture.cmd", windowsUsesShell: true },
+    { name: "legacy .bat", filename: "codex fixture.bat", windowsUsesShell: true },
+    { name: "bare command", filename: undefined, windowsUsesShell: true },
+  ]) {
+    it.effect(`preserves structured text-generation input for a ${fixture.name}`, () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const fixtureRoot = yield* fs.makeTempDirectoryScoped({
+          prefix: "cafe-codex-exec-policy-",
+        });
+        const cwd = path.join(fixtureRoot, "workspace & notes");
+        const homePath = path.join(fixtureRoot, "home & notes");
+        yield* fs.makeDirectory(cwd);
+        yield* fs.makeDirectory(homePath);
+        const binaryPath = fixture.filename
+          ? path.join(fixtureRoot, "program files & tools", fixture.filename)
+          : "codex";
+        const environment = {
+          CAFE_CODE_EXEC_FIXTURE: "synthetic",
+          CODEX_HOME: path.join(fixtureRoot, "unused-environment-home"),
+        };
+        const message = 'Preserve "quotes", & | < > %PATH% !VALUE! ^ and 日本語.';
+        const modelSelection = createModelSelection(
+          ProviderInstanceId.make("codex"),
+          "gpt-5.4-mini",
+          [
+            { id: "reasoningEffort", value: "high" },
+            { id: "fastMode", value: false },
+          ],
+        );
+        let commandCount = 0;
+        const generated = yield* withFakeCodexSpawner(
+          {
+            binaryPath,
+            homePath,
+            environment,
+            output: JSON.stringify({ title: "Preserve structured metadata input" }),
+            inspectCommand: (command, prompt) => {
+              commandCount += 1;
+              // Exercise the real text-generation builder with an in-memory
+              // process. Native executable paths must retain structured argv,
+              // including metacharacters in paths and literal stdin, while
+              // batch/bare commands keep the host's established shell policy.
+              expect(command.options.shell).toBe(
+                process.platform === "win32" && fixture.windowsUsesShell,
+              );
+              expect(command.options.cwd).toBe(cwd);
+              const expectedEnvironment = { ...environment, CODEX_HOME: homePath };
+              const commandEnvironment = command.options.env ?? {};
+              expect(
+                Object.keys(commandEnvironment).length ===
+                  Object.keys(expectedEnvironment).length &&
+                  Object.entries(expectedEnvironment).every(
+                    ([key, value]) => commandEnvironment[key] === value,
+                  ),
+              ).toBe(true);
+              expect(prompt).toBe(buildThreadTitlePrompt({ message }).prompt);
+              const schemaPath = command.args[command.args.indexOf("--output-schema") + 1];
+              const outputPath = command.args[command.args.indexOf("--output-last-message") + 1];
+              expect(schemaPath).toBeTypeOf("string");
+              expect(outputPath).toBeTypeOf("string");
+              expect(command.args).toEqual([
+                "exec",
+                "--json",
+                "--ephemeral",
+                "--skip-git-repo-check",
+                "-s",
+                "read-only",
+                "--model",
+                modelSelection.model,
+                "--config",
+                'model_reasoning_effort="high"',
+                "--config",
+                'service_tier="default"',
+                "--output-schema",
+                schemaPath,
+                "--output-last-message",
+                outputPath,
+                "-",
+              ]);
+            },
+          },
+          (generation) => generation.generateThreadTitle({ cwd, message, modelSelection }),
+        );
+        expect(generated.title).toBe("Preserve structured metadata input");
+        expect(commandCount).toBe(1);
+        expect(environment.CODEX_HOME).toBe(path.join(fixtureRoot, "unused-environment-home"));
+      }),
+    );
+  }
+
   for (const exitCode of [0, 1]) {
     it.effect(`records one Codex terminal usage snapshot when the helper exits ${exitCode}`, () =>
       Effect.gen(function* () {

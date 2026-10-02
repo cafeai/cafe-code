@@ -8,6 +8,10 @@
       "types": "./src/client.ts",
       "import": "./src/client.ts"
     },
+    "./command": {
+      "types": "./src/command.ts",
+      "import": "./src/command.ts"
+    },
     "./compatibility": {
       "types": "./src/compatibility.ts",
       "import": "./src/compatibility.ts"

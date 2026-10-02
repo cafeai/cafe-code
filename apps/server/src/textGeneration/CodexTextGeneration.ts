@@ -9,6 +9,7 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { codexCommandUsesShell } from "effect-codex-app-server/command";
 
 import { ProviderDriverKind, type CodexSettings, type ModelSelection } from "@cafecode/contracts";
 import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@cafecode/shared/git";
@@ -230,7 +231,10 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
             ...(codexConfig.homePath ? { CODEX_HOME: expandHomePath(codexConfig.homePath) } : {}),
           },
           cwd,
-          shell: process.platform === "win32",
+          // Metadata helpers must preserve the same literal file/config argv
+          // as sessions and probes; the shared policy changes no paid-tier,
+          // authentication, sandbox or stdin behavior.
+          shell: codexCommandUsesShell(codexConfig.binaryPath || "codex", process.platform),
           stdin: {
             stream: Stream.encodeText(Stream.make(prompt)),
           },
