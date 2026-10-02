@@ -1,7 +1,7 @@
 # Dependency maintenance with Renovate
 
 Created: 2026-10-03 01:30:40 JST (UTC+0900)
-Last updated: 2026-10-03 02:00:17 JST (UTC+0900)
+Last updated: 2026-10-03 07:33:39 JST (UTC+0900)
 
 Cafe is configured to use the Mend-hosted [Renovate GitHub App](https://github.com/apps/renovate)
 to propose dependency updates once activated. The checked-in repository policy is
@@ -159,6 +159,32 @@ Protect `dev` with required review and current CI checks before considering futu
 automatic merging. This setup deliberately leaves automerge off and does not
 silently change branch protections or rulesets. A bot configuration cannot prevent
 a repository administrator from manually bypassing failed checks.
+
+## Manually reviewed batches and dashboard refresh
+
+A dashboard entry is a proposal, not evidence that an upgrade is compatible. A
+maintainer can update an audited subset directly on `dev`, preserving the same
+age, integrity, test and review requirements. Check actual locked versions as
+well as manifest ranges: some proposals only bring an old minimum up to a version
+already installed. Record concrete reasons for deferred proposals rather than
+checking every approval or schedule-override box. See the
+[October 3 reviewed batch](dependency-updates-2026-10-03.md) for an example.
+
+After the reviewed commit is pushed, use the dashboard's **run Renovate again**
+checkbox at the bottom (the `manual job` control). This requests another hosted
+scan; it does not approve all upgrades or bypass their schedule. When updating it
+through the API, first fetch the current issue body, change only that checkbox,
+and preserve the bot's remaining content. Do not manually remove completed rows
+or select the approve-all, unpend-all or unschedule-all controls. A short comment
+can explain the commit, checks and deferrals, but a comment alone is not a rerun.
+
+Distinguish a submitted rerun request from a completed scan. Confirm the bot's
+subsequent dashboard update or the Mend job result; proposals still waiting for
+their schedule or release-age hold are expected. The bot remains responsible for
+reconciling the dashboard against the new `dev` lockfile.
+
+Official references: [Dependency Dashboard](https://docs.renovatebot.com/key-concepts/dashboard/)
+and [Mend job processing](https://docs.mend.io/wsk/renovate-ee-job-processing-in-renovate).
 
 ## Rollback
 

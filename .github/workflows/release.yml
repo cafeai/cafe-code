@@ -58,10 +58,10 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24.13.1
 
@@ -71,7 +71,7 @@ jobs:
           corepack prepare yarn@4.17.1 --activate
 
       - name: Cache Yarn and Turbo
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.yarn/berry
@@ -131,10 +131,10 @@ jobs:
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24.13.1
 
@@ -144,7 +144,7 @@ jobs:
           corepack prepare yarn@4.17.1 --activate
 
       - name: Cache Yarn and Turbo
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.yarn/berry
@@ -171,7 +171,7 @@ jobs:
         run: corepack yarn dist:desktop:linux
 
       - name: Upload release artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: cafe-code-release-${{ matrix.name }}
           path: release/
@@ -180,7 +180,7 @@ jobs:
 
       - name: Upload packaged detection probe
         if: matrix.name == 'linux-x64'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: cafe-code-update-probe-linux-x64
           path: release-probe/*.AppImage
@@ -200,10 +200,10 @@ jobs:
       RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24.13.1
 
@@ -222,7 +222,7 @@ jobs:
         run: corepack yarn install --immutable
 
       - name: Download native artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           pattern: cafe-code-release-*
           path: release-assets
@@ -288,7 +288,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Download lower-version packaged probe
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: cafe-code-update-probe-linux-x64
           path: update-probe

@@ -3672,32 +3672,26 @@ describe("Codex steer processing diagnostics", () => {
           assert.equal(replay.rootLifecycleChanged, false);
         } else if (scenario === "native-started") {
           yield* Ref.set(rootLifecycleEpochRef, Symbol());
-          yield* Ref.update(
-            sessionRef,
-            (session): ProviderSession => ({
-              ...session,
-              status: "running",
-              activeTurnId: firstTurnId,
-              updatedAt: "2026-09-05T00:00:00.050Z",
-            }),
-          );
+          yield* Ref.update(sessionRef, (session): ProviderSession => ({
+            ...session,
+            status: "running",
+            activeTurnId: firstTurnId,
+            updatedAt: "2026-09-05T00:00:00.050Z",
+          }));
         } else if (scenario === "newer-active") {
           // The final exact-active compare is still required if the typed
           // observer made concrete ownership visible before an epoch update.
-          yield* Ref.update(
-            sessionRef,
-            (session): ProviderSession => ({
-              ...session,
-              status: "running",
-              activeTurnId: TurnId.make("newer-concrete-turn"),
-            }),
-          );
+          yield* Ref.update(sessionRef, (session): ProviderSession => ({
+            ...session,
+            status: "running",
+            activeTurnId: TurnId.make("newer-concrete-turn"),
+          }));
         } else if (scenario === "closed") {
           yield* Ref.set(closedRef, true);
-          yield* Ref.update(
-            sessionRef,
-            (session): ProviderSession => ({ ...session, status: "closed" }),
-          );
+          yield* Ref.update(sessionRef, (session): ProviderSession => ({
+            ...session,
+            status: "closed",
+          }));
         } else if (scenario !== "ordinary") {
           const state =
             scenario === "failed" ||
@@ -3726,24 +3720,21 @@ describe("Codex steer processing diagnostics", () => {
           );
           if (scenario === "provisional-terminal" || scenario === "deferred-success")
             yield* Ref.set(rootLifecycleEpochRef, Symbol());
-          yield* Ref.update(
-            sessionRef,
-            (session): ProviderSession => ({
-              ...session,
-              status:
-                scenario === "deferred-success" || scenario === "terminal-recorded"
-                  ? "running"
-                  : state === "failed"
-                    ? "error"
-                    : "ready",
-              activeTurnId:
-                scenario === "deferred-success" || scenario === "terminal-recorded"
-                  ? firstTurnId
-                  : undefined,
-              lastError: state === "failed" ? "Selected model is at capacity" : undefined,
-              updatedAt: "2026-09-05T00:00:00.050Z",
-            }),
-          );
+          yield* Ref.update(sessionRef, (session): ProviderSession => ({
+            ...session,
+            status:
+              scenario === "deferred-success" || scenario === "terminal-recorded"
+                ? "running"
+                : state === "failed"
+                  ? "error"
+                  : "ready",
+            activeTurnId:
+              scenario === "deferred-success" || scenario === "terminal-recorded"
+                ? firstTurnId
+                : undefined,
+            lastError: state === "failed" ? "Selected model is at capacity" : undefined,
+            updatedAt: "2026-09-05T00:00:00.050Z",
+          }));
         }
         const beforeAck = yield* Ref.get(sessionRef);
         yield* Deferred.succeed(releaseAck, undefined);

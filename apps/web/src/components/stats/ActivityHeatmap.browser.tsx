@@ -242,14 +242,14 @@ describe("ActivityHeatmap selected calendars", () => {
     const mapDays = vi.spyOn(days, "map");
     const originalIterator = Map.prototype[Symbol.iterator];
     let historyScans = 0;
-    vi.spyOn(Map.prototype, Symbol.iterator).mockImplementation(
-      function (this: Map<unknown, unknown>) {
-        // Identify this exact synthetic history map. Other React/browser maps
-        // must retain their normal iterator and do not contribute to the count.
-        if (this.has("0100-01-01") && this.has("2026-07-21")) historyScans += 1;
-        return originalIterator.call(this);
-      },
-    );
+    vi.spyOn(Map.prototype, Symbol.iterator).mockImplementation(function (
+      this: Map<unknown, unknown>,
+    ) {
+      // Identify this exact synthetic history map. Other React/browser maps
+      // must retain their normal iterator and do not contribute to the count.
+      if (this.has("0100-01-01") && this.has("2026-07-21")) historyScans += 1;
+      return originalIterator.call(this);
+    });
     const bounds = { startDay: "0100-01-01", endDay: "2026-07-21" };
     mounted = await render(
       <ActivityHeatmap days={days} bounds={bounds} today={activity("2026-07-21", 1_000)} />,

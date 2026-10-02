@@ -616,28 +616,26 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
   });
 
   const snapshot = Ref.get(state).pipe(
-    Effect.map(
-      (current): DesktopProviderDaemonSnapshot => ({
-        status: current.status,
-        pid: current.pid,
-        endpoint: current.endpoint,
-        adoptedExistingProcess: current.adoptedExistingProcess,
-        lastHealth: current.lastHealth,
-        lastError: current.lastError,
-        markerPath: environment.providerDaemonMarkerPath,
-        credentialPath: environment.providerDaemonCredentialPath,
-        runtimeBuildId,
-        lastEnsureRunningDurationMs: current.lastEnsureRunningDurationMs,
-        lastAdoptionDurationMs: current.lastAdoptionDurationMs,
-        lastSpawnDurationMs: current.lastSpawnDurationMs,
-        lastHealthRefreshDurationMs: current.lastHealthRefreshDurationMs,
-        healthRefreshCount: current.healthRefreshCount,
-        healthRefreshFailureCount: current.healthRefreshFailureCount,
-        recoveryCount: current.recoveryCount,
-        lastRecoveryAt: current.lastRecoveryAt,
-        lastRecoveryReason: current.lastRecoveryReason,
-      }),
-    ),
+    Effect.map((current): DesktopProviderDaemonSnapshot => ({
+      status: current.status,
+      pid: current.pid,
+      endpoint: current.endpoint,
+      adoptedExistingProcess: current.adoptedExistingProcess,
+      lastHealth: current.lastHealth,
+      lastError: current.lastError,
+      markerPath: environment.providerDaemonMarkerPath,
+      credentialPath: environment.providerDaemonCredentialPath,
+      runtimeBuildId,
+      lastEnsureRunningDurationMs: current.lastEnsureRunningDurationMs,
+      lastAdoptionDurationMs: current.lastAdoptionDurationMs,
+      lastSpawnDurationMs: current.lastSpawnDurationMs,
+      lastHealthRefreshDurationMs: current.lastHealthRefreshDurationMs,
+      healthRefreshCount: current.healthRefreshCount,
+      healthRefreshFailureCount: current.healthRefreshFailureCount,
+      recoveryCount: current.recoveryCount,
+      lastRecoveryAt: current.lastRecoveryAt,
+      lastRecoveryReason: current.lastRecoveryReason,
+    })),
   );
 
   const adoptMarker = (

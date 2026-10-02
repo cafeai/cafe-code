@@ -135,20 +135,18 @@ function cloneThreadContextForDuplicate(input: {
     messages: copiedMessages.slice(-MAX_THREAD_MESSAGES),
     proposedPlans: copiedPlans,
     activities: copiedActivities,
-    checkpoints: sourceThread.checkpoints.map(
-      (checkpoint): OrchestrationCheckpointSummary => ({
-        turnId: copiedRequiredTurnId(targetThread.id, checkpoint.turnId),
-        checkpointTurnCount: checkpoint.checkpointTurnCount,
-        checkpointRef: checkpoint.checkpointRef,
-        status: checkpoint.status,
-        files: checkpoint.files,
-        assistantMessageId:
-          checkpoint.assistantMessageId === null
-            ? null
-            : copiedMessageId(targetThread.id, checkpoint.assistantMessageId),
-        completedAt: checkpoint.completedAt,
-      }),
-    ),
+    checkpoints: sourceThread.checkpoints.map((checkpoint): OrchestrationCheckpointSummary => ({
+      turnId: copiedRequiredTurnId(targetThread.id, checkpoint.turnId),
+      checkpointTurnCount: checkpoint.checkpointTurnCount,
+      checkpointRef: checkpoint.checkpointRef,
+      status: checkpoint.status,
+      files: checkpoint.files,
+      assistantMessageId:
+        checkpoint.assistantMessageId === null
+          ? null
+          : copiedMessageId(targetThread.id, checkpoint.assistantMessageId),
+      completedAt: checkpoint.completedAt,
+    })),
     // Context-copy events never clone a live session object. Projection-only
     // duplicates stay unbound, while provider-native forks immediately apply a
     // separate thread.session-set event carrying the target's dormant resume

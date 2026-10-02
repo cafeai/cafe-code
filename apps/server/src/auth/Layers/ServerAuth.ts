@@ -474,12 +474,10 @@ export const makeServerAuth = Effect.gen(function* () {
           }),
       ),
       Effect.map((clientSessions) =>
-        clientSessions.map(
-          (clientSession): AuthClientSession => ({
-            ...clientSession,
-            current: clientSession.sessionId === currentSessionId,
-          }),
-        ),
+        clientSessions.map((clientSession): AuthClientSession => ({
+          ...clientSession,
+          current: clientSession.sessionId === currentSessionId,
+        })),
       ),
     );
 

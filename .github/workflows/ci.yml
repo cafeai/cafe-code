@@ -39,10 +39,10 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24.13.1
 
@@ -53,7 +53,7 @@ jobs:
           corepack yarn --version
 
       - name: Cache Yarn and Turbo
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.yarn/berry
@@ -125,12 +125,12 @@ jobs:
         if: runner.os != 'Linux'
         run: corepack yarn workspace @cafecode/web exec playwright install chromium
 
-      - name: Cross-platform Markdown and file action browser tests
+      - name: Cross-platform Markdown, timeline and file action browser tests
         # These shared parser/preference changes need real browser coverage on
         # the other hosts too. Linux retains its full browser suite above; this
         # focused subset does not claim native file-manager/editor UI success.
         if: runner.os != 'Linux'
-        run: corepack yarn workspace @cafecode/web test:browser src/components/ChatMarkdown.browser.tsx src/components/MermaidBlock.browser.tsx src/components/MermaidPreview.browser.tsx src/components/MermaidRendering.browser.tsx src/components/MermaidSecurity.browser.tsx src/components/settings/SettingsPanels.browser.tsx --maxWorkers=2
+        run: corepack yarn workspace @cafecode/web test:browser src/components/ChatMarkdown.browser.tsx src/components/MermaidBlock.browser.tsx src/components/MermaidPreview.browser.tsx src/components/MermaidRendering.browser.tsx src/components/MermaidSecurity.browser.tsx src/components/chat/MessagesTimelineRealList.browser.tsx src/components/settings/SettingsPanels.browser.tsx --maxWorkers=2
 
       - name: Isolated MCP bridge artifacts
         if: runner.os == 'Linux'
@@ -163,10 +163,10 @@ jobs:
     timeout-minutes: 120
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24.13.1
 
@@ -176,7 +176,7 @@ jobs:
           corepack prepare yarn@4.17.1 --activate
 
       - name: Cache Yarn and Turbo
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.yarn/berry
@@ -196,7 +196,7 @@ jobs:
         run: corepack yarn ${{ matrix.command }}
 
       - name: Upload native artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: cafe-code-${{ matrix.name }}
           path: release/
@@ -209,10 +209,10 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24.13.1
 
@@ -222,7 +222,7 @@ jobs:
           corepack prepare yarn@4.17.1 --activate
 
       - name: Cache Yarn and Turbo
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.yarn/berry
@@ -242,7 +242,7 @@ jobs:
         run: corepack yarn dist:desktop:linux
 
       - name: Upload AppImage
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: cafe-code-linux-x64
           path: release/

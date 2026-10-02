@@ -1828,12 +1828,10 @@ function handleRequest(request: NodeHttp.IncomingMessage, response: NodeHttp.Ser
   });
 }
 
-export const getDebugEndpointState = Effect.sync(
-  (): DesktopDebugEndpointState => ({
-    enabled: state.enabled,
-    url: state.url,
-  }),
-);
+export const getDebugEndpointState = Effect.sync((): DesktopDebugEndpointState => ({
+  enabled: state.enabled,
+  url: state.url,
+}));
 
 export const publishRendererDebugSnapshot = (
   snapshot: DesktopRendererDebugSnapshot,

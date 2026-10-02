@@ -740,14 +740,13 @@ export function awaitCodexUserInputResolution(input: {
 
   const resolutionAfterDecision: Effect.Effect<CodexUserInputResolution> =
     automaticResolutionDecision.pipe(
-      Effect.flatMap(
-        (decision): Effect.Effect<CodexUserInputResolution> =>
-          decision === "snoozed"
-            ? explicitResolution
-            : Effect.succeed({
-                answers: {} satisfies ProviderUserInputAnswers,
-                source: "automatic",
-              }),
+      Effect.flatMap((decision): Effect.Effect<CodexUserInputResolution> =>
+        decision === "snoozed"
+          ? explicitResolution
+          : Effect.succeed({
+              answers: {} satisfies ProviderUserInputAnswers,
+              source: "automatic",
+            }),
       ),
     );
 

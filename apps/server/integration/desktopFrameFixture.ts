@@ -20,7 +20,7 @@ export function fixtureRegion(
     compressed: Buffer[] = [];
   let width = 0,
     height = 0;
-  for (let at = 8; at + 12 <= bytes.length; ) {
+  for (let at = 8; at + 12 <= bytes.length;) {
     const size = bytes.readUInt32BE(at),
       type = bytes.toString("ascii", at + 4, at + 8);
     if (type === "IHDR") {

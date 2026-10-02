@@ -58,12 +58,12 @@
   },
   "devDependencies": {
     "@effect/language-service": "catalog:",
-    "@oxlint/plugins": "^1.63.0",
+    "@oxlint/plugins": "^1.85.0",
     "@types/node": "catalog:",
     "electron-builder": "26.15.3",
-    "oxfmt": "^0.40.0",
-    "oxlint": "^1.63.0",
-    "turbo": "^2.9.14",
+    "oxfmt": "^0.70.0",
+    "oxlint": "^1.85.0",
+    "turbo": "^2.11.4",
     "typescript": "catalog:",
     "vitest": "catalog:"
   },
@@ -95,13 +95,13 @@
     "picomatch": "^4.0.4",
     "postcss": "^8.5.28",
     "qs": "^6.16.0",
-    "rolldown@npm:^1.0.0": "npm:1.0.2",
+    "rolldown@npm:^1.0.0": "npm:1.2.11",
     "undici": "^8.10.2",
     "uuid": "^13.0.1",
-    "vite": "8.1.4",
+    "vite": "8.3.1",
     "ws": "^8.21.0",
-    "yaml": "2.8.3",
-    "yauzl": "3.3.1"
+    "yaml": "2.9.1",
+    "yauzl": "3.4.0"
   },
   "engines": {
     "node": "^24.13.1"

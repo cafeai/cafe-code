@@ -218,22 +218,20 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     ): Effect.Effect<void, ProviderAdapterError> => Effect.void,
   );
 
-  const stopSession = vi.fn(
-    (threadId: ThreadId): Effect.Effect<void, ProviderAdapterError> =>
-      Effect.sync(() => {
-        sessions.delete(threadId);
-      }),
+  const stopSession = vi.fn((threadId: ThreadId): Effect.Effect<void, ProviderAdapterError> =>
+    Effect.sync(() => {
+      sessions.delete(threadId);
+    }),
   );
 
   const compactThread = vi.fn((_threadId: ThreadId) => Effect.void);
 
-  const listSessions = vi.fn(
-    (): Effect.Effect<ReadonlyArray<ProviderSession>> =>
-      Effect.sync(() => Array.from(sessions.values())),
+  const listSessions = vi.fn((): Effect.Effect<ReadonlyArray<ProviderSession>> =>
+    Effect.sync(() => Array.from(sessions.values())),
   );
 
-  const hasSession = vi.fn(
-    (threadId: ThreadId): Effect.Effect<boolean> => Effect.succeed(sessions.has(threadId)),
+  const hasSession = vi.fn((threadId: ThreadId): Effect.Effect<boolean> =>
+    Effect.succeed(sessions.has(threadId)),
   );
 
   const readThread = vi.fn(
@@ -275,11 +273,10 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
       Effect.succeed({ threadId, turns: [] }),
   );
 
-  const stopAll = vi.fn(
-    (): Effect.Effect<void, ProviderAdapterError> =>
-      Effect.sync(() => {
-        sessions.clear();
-      }),
+  const stopAll = vi.fn((): Effect.Effect<void, ProviderAdapterError> =>
+    Effect.sync(() => {
+      sessions.clear();
+    }),
   );
 
   const adapter: ProviderAdapterShape<ProviderAdapterError> = {

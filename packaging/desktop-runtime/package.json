@@ -22,7 +22,7 @@
     "saxes": "6.0.0",
     "toml": "4.3.0",
     "web-push": "^3.6.7",
-    "yauzl": "3.3.1",
+    "yauzl": "3.4.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {

@@ -26,9 +26,17 @@ const PIPELINE_SOURCE = `flowchart TD
 const CLOSED_MARKDOWN = `\`\`\`mermaid\n${PIPELINE_SOURCE}\n\`\`\``;
 
 async function renderedPipeline(host: HTMLElement): Promise<HTMLImageElement> {
-  await vi.waitFor(() => {
-    expect(host.querySelector(".mermaid-preview img")).not.toBeNull();
-  });
+  // The first real render lazily loads the bundled engine before starting its
+  // sandbox, whose production deadline is 15 seconds. A one-second polling
+  // default races that cold startup under parallel browser CI. Bound readiness
+  // separately, leaving time for the unchanged layout/security assertions
+  // inside the suite's 30-second test budget; production limits stay unchanged.
+  await vi.waitFor(
+    () => {
+      expect(host.querySelector(".mermaid-preview img")).not.toBeNull();
+    },
+    { timeout: 20_000 },
+  );
   const image = host.querySelector<HTMLImageElement>(".mermaid-preview img")!;
   await image.decode();
   expect(image.naturalWidth).toBeGreaterThan(0);

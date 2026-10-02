@@ -430,7 +430,7 @@ function findClosingDelimiter(
   character: string,
   delimiterLength: number,
 ): number | null {
-  for (let cursor = start; cursor < text.length; ) {
+  for (let cursor = start; cursor < text.length;) {
     const delimiterIndex = text.indexOf(character, cursor);
     if (delimiterIndex < 0) return null;
 

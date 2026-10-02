@@ -1757,12 +1757,10 @@ export const runProviderDaemonServer = (
                   commandLedger.runOnce(
                     rpcRequest,
                     executeRpcRequest(providerService, rpcRequest, purgeThread).pipe(
-                      Effect.map(
-                        (value): ProviderDaemonRpcEnvelope => ({
-                          ok: true,
-                          value: value === undefined ? null : value,
-                        }),
-                      ),
+                      Effect.map((value): ProviderDaemonRpcEnvelope => ({
+                        ok: true,
+                        value: value === undefined ? null : value,
+                      })),
                       Effect.catch((error) => Effect.succeed(toRpcError(error))),
                     ),
                   ),

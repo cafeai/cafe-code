@@ -152,6 +152,7 @@ If a tradeoff is required, choose correctness, durability, and debuggability ove
 ## OpenAI Realtime Dictation
 
 - The macOS global-dictation NSPanel must not change Cafe's application-wide activation policy. Pass `skipTransformProcessType: true` when enabling `setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, ... })`; Electron 42 otherwise calls process-wide `DockHide()` and panel closure does not restore the app's Dock presence. Keep the panel's Spaces/fullscreen collection flags and passive HUD behavior. Do not compensate with repeated `app.dock.show()` calls, which can change focus and race native process transformations. Cover the coordinator options in unit tests and use the explicit isolated Dock smoke for real Electron verification.
+
 <!-- Last updated: 2026-09-24 21:21:39 JST (UTC+0900) -->
 
 - Dictation is an opt-in, transcription-only OpenAI Realtime integration. After the owner submits a new key through the dedicated password input and authenticated mutation, the canonical permanent OpenAI API key lives only in the server `ServerSecretStore` under the fixed `openai-realtime-api-key` name with the store's restrictive file permissions. Clear the transient input before awaiting the mutation response, never return the stored value, and never place it in `ServerSettings`, `ClientSettings`, renderer persistence/caches, debug output, traces, logs, process arguments, URLs, or public error causes. Clients may read only configured/manageable booleans; only an authenticated owner may set or clear the key.
