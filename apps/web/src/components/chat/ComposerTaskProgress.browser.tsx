@@ -426,7 +426,7 @@ describe("ComposerTaskProgress", () => {
     }
   });
 
-  it("offers a dock control and hides the composer pill when the session rail is visible", async () => {
+  it("closes the task popup when docking and opens with one press after undocking", async () => {
     const onShowOnSide = vi.fn();
     const plan: ComposerTaskProgressPlan = {
       steps: [{ step: "Keep the live pill after docking", status: "inProgress" }],
@@ -438,17 +438,29 @@ describe("ComposerTaskProgress", () => {
       await vi.waitFor(() => expect(progressPopup()).not.toBeNull());
       await page.getByRole("button", { name: "Show on the side" }).click();
       expect(onShowOnSide).toHaveBeenCalledTimes(1);
-    } finally {
-      await dockable.cleanup();
-    }
 
-    const docked = await mountProgress(plan, { sessionRailVisible: true });
-    try {
+      // Keep the same component mounted across the placement change: returning
+      // null while docked must not preserve the old press-open state and reopen
+      // its popup when the composer pill returns.
+      await dockable.screen.rerender(
+        <ComposerTaskProgress plan={plan} sessionRailVisible onShowOnSide={onShowOnSide} />,
+      );
       expect(progressTrigger()).toBeNull();
       expect(progressPopup()).toBeNull();
       expect(document.querySelector('[data-session-rail-dock="true"]')).toBeNull();
+
+      await dockable.screen.rerender(
+        <ComposerTaskProgress plan={plan} sessionRailVisible={false} onShowOnSide={onShowOnSide} />,
+      );
+      const trigger = page.getByRole("button", { name: /Task progress/ });
+      await expect.element(trigger).toHaveAttribute("aria-expanded", "false");
+      expect(progressPopup()).toBeNull();
+
+      await trigger.click();
+      await vi.waitFor(() => expect(progressPopup()).not.toBeNull());
+      await expect.element(trigger).toHaveAttribute("aria-expanded", "true");
     } finally {
-      await docked.cleanup();
+      await dockable.cleanup();
     }
   });
 });
