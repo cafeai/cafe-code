@@ -29,7 +29,7 @@ import {
 } from "@cafecode/contracts";
 import * as PlatformError from "effect/PlatformError";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { deepMerge } from "@cafecode/shared/Struct";
 import { createModelCapabilities } from "@cafecode/shared/model";
 import { applyServerSettingsPatch } from "@cafecode/shared/serverSettings";
@@ -81,11 +81,11 @@ const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const encodeUnknownJsonString = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 // Registry tests provide narrow process-spawner fakes for the provider under
-// test. Keep OpenCode disabled in that shared fixture so unrelated tests do not
-// try to boot a fake `opencode serve` process and wait for a readiness line the
-// fake was never designed to emit.
+// test. Keep unrelated OpenCode and Grok probes disabled in that shared fixture
+// so tests cannot launch an ambient provider or wait for a protocol handshake
+// that their Codex/Claude-only fake was never designed to emit.
 const encodedDefaultServerSettings = deepMerge(encodeServerSettings(DEFAULT_SERVER_SETTINGS), {
-  providers: { opencode: { enabled: false } },
+  providers: { opencode: { enabled: false }, grok: { enabled: false } },
 });
 
 const defaultClaudeSettings: ClaudeSettings = Schema.decodeSync(ClaudeSettings)({});
@@ -93,6 +93,10 @@ const defaultCodexSettings: CodexSettings = decodeCodexSettings({});
 const disabledCodexSettings: CodexSettings = decodeCodexSettings({
   enabled: false,
 });
+// A fake subprocess does not isolate the filesystem work performed after its
+// login response. Omit ambient HOME/CODEX_HOME and credentials from every
+// lightweight status fixture; explicit homes below contain synthetic auth only.
+const isolatedCodexProbeEnvironment: NodeJS.ProcessEnv = {};
 
 // ── Test helpers ────────────────────────────────────────────────────
 
@@ -554,10 +558,11 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
       it.effect("closes the app-server probe scope when provider status times out", () =>
         Effect.gen(function* () {
           const killCalls = yield* Ref.make(0);
-          const statusFiber = yield* checkCodexProviderStatus(defaultCodexSettings).pipe(
-            Effect.provide(hangingScopedSpawnerLayer(killCalls)),
-            Effect.forkChild,
-          );
+          const statusFiber = yield* checkCodexProviderStatus(
+            defaultCodexSettings,
+            undefined,
+            isolatedCodexProbeEnvironment,
+          ).pipe(Effect.provide(hangingScopedSpawnerLayer(killCalls)), Effect.forkChild);
 
           yield* Effect.yieldNow;
           yield* TestClock.adjust("11 seconds");
@@ -1833,13 +1838,21 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
       // snapshot never lands in `getProviders` and the assertions below fail.
       it.effect("propagates Codex probe failures to the aggregator at boot", () =>
         Effect.gen(function* () {
-          const missingBinary = `t3code_codex_missing_`;
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const isolatedCodexHome = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "cafe-provider-registry-boot-home-",
+          });
+          const missingBinary = path.join(
+            isolatedCodexHome,
+            process.platform === "win32" ? "missing-codex.exe" : "missing-codex",
+          );
           const serverSettings = yield* makeMutableServerSettingsService(
             decodeServerSettings(
               deepMerge(encodedDefaultServerSettings, {
                 providers: {
-                  // Disable every built-in probe that would otherwise spawn
-                  // on the CI host. `enabled: false` short-circuits each
+                  // Disable the remaining built-in probes that would otherwise
+                  // spawn on the CI host. `enabled: false` short-circuits each
                   // driver's probe *before* it touches the spawner, so the
                   // test environment stays isolated from the dev
                   // machine's PATH.
@@ -1861,7 +1874,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
                     enabled: true,
                     config: {
                       binaryPath: missingBinary,
-                      homePath: `/tmp/${missingBinary}_home`,
+                      homePath: isolatedCodexHome,
                     },
                   },
                 } as unknown as ContractServerSettings["providerInstances"],
@@ -1925,14 +1938,131 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
       //
       it.effect("re-probes when settings change the codex binaryPath", () =>
         Effect.gen(function* () {
-          const firstMissing = `t3code_codex_first_`;
-          const secondMissing = `t3code_codex_second_`;
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const nativeSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+          const fixtureRoot = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "cafe-provider-registry-reprobe-",
+          });
+          const isolatedCodexHome = path.join(fixtureRoot, "codex-home");
+          const fixtureTemp = path.join(fixtureRoot, "tmp");
+          yield* fileSystem.makeDirectory(isolatedCodexHome);
+          yield* fileSystem.makeDirectory(fixtureTemp);
+          const executableSuffix = process.platform === "win32" ? ".exe" : "";
+          const firstMissing = path.join(fixtureRoot, `missing-first${executableSuffix}`);
+          const secondMissing = path.join(fixtureRoot, `missing-second${executableSuffix}`);
+          const spawnedBinaries: string[] = [];
+          const rejectedFixtureOperations: string[] = [];
+          const isFixturePath = (filePath: string) => {
+            const relative = path.relative(fixtureRoot, path.resolve(filePath));
+            return (
+              relative === "" ||
+              (!path.isAbsolute(relative) &&
+                relative !== ".." &&
+                !relative.startsWith(`..${path.sep}`))
+            );
+          };
+          // A forgotten homePath can materialize the user's default auth
+          // overlay before the missing executable is ever spawned. Refuse
+          // that directory creation/enumeration, rather than discovering a
+          // real profile mutation only after the snapshot assertions fail.
+          const guardedFileSystem: FileSystem.FileSystem = {
+            ...fileSystem,
+            makeDirectory: (filePath, options) => {
+              if (!isFixturePath(filePath)) {
+                rejectedFixtureOperations.push("external-directory-create");
+                return Effect.die(
+                  new Error("Provider fixture attempted an external directory operation."),
+                );
+              }
+              return fileSystem.makeDirectory(filePath, options);
+            },
+            readDirectory: (filePath, options) => {
+              if (!isFixturePath(filePath)) {
+                rejectedFixtureOperations.push("external-directory-read");
+                return Effect.die(
+                  new Error("Provider fixture attempted an external directory operation."),
+                );
+              }
+              return fileSystem.readDirectory(filePath, options);
+            },
+          };
+          const isolatedSpawnEnvironment: NodeJS.ProcessEnv = {
+            HOME: fixtureRoot,
+            HOMEDRIVE:
+              process.platform === "win32"
+                ? path.parse(fixtureRoot).root.slice(0, -1)
+                : fixtureRoot,
+            HOMEPATH:
+              process.platform === "win32"
+                ? fixtureRoot.slice(path.parse(fixtureRoot).root.length - 1)
+                : fixtureRoot,
+            USERPROFILE: fixtureRoot,
+            APPDATA: path.join(fixtureRoot, "AppData", "Roaming"),
+            LOCALAPPDATA: path.join(fixtureRoot, "AppData", "Local"),
+            TEMP: fixtureTemp,
+            TMP: fixtureTemp,
+            TMPDIR: fixtureTemp,
+            PATH: fixtureRoot,
+            CODEX_HOME: isolatedCodexHome,
+            CODEX_SQLITE_HOME: isolatedCodexHome,
+            NODE_V8_COVERAGE: "",
+          };
+          // Only Windows' OS directory is inherited. ComSpec also points at
+          // its system executable, without changing the production command's
+          // native-versus-batch shell selection.
+          const windowsSystemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT;
+          if (process.platform === "win32") {
+            assert.isString(
+              windowsSystemRoot,
+              "Windows system directory is required by the fixture.",
+            );
+            isolatedSpawnEnvironment.SystemRoot = windowsSystemRoot;
+            isolatedSpawnEnvironment.WINDIR = windowsSystemRoot;
+            isolatedSpawnEnvironment.ComSpec = path.join(windowsSystemRoot!, "System32", "cmd.exe");
+            isolatedSpawnEnvironment.SYSTEMDRIVE = path.parse(windowsSystemRoot!).root.slice(0, -1);
+            // libuv restores these required keys from the parent if absent,
+            // even with an explicit env. Fixed values avoid inheriting the
+            // host's domain identity or a network logon-server address.
+            // Pinned Node's required_vars / make_program_env:
+            // https://github.com/nodejs/node/blob/v24.13.1/deps/uv/src/win/process.c
+            isolatedSpawnEnvironment.LOGONSERVER = "cafe-fixture";
+            isolatedSpawnEnvironment.USERDOMAIN = "cafe-fixture";
+            isolatedSpawnEnvironment.USERNAME = "cafe-fixture";
+          }
+          const guardedSpawner = ChildProcessSpawner.make((command) => {
+            // This test qualifies registry reconciliation with real ENOENT
+            // callbacks, not provider execution. Only its exact two absent
+            // binaries and version argv may reach the native spawner. Clearing
+            // extendEnv prevents Effect's ambient merge; explicit profile/temp
+            // values and disabled V8 coverage prevent Node/libuv from filling
+            // those omitted keys back in from the parent environment.
+            if (
+              command._tag !== "StandardCommand" ||
+              (command.command !== firstMissing && command.command !== secondMissing) ||
+              command.args.length !== 1 ||
+              command.args[0] !== "--version" ||
+              command.options.env?.CODEX_HOME !== isolatedCodexHome
+            ) {
+              rejectedFixtureOperations.push("unexpected-provider-spawn");
+              return Effect.die(new Error("Unexpected provider process fixture request."));
+            }
+            spawnedBinaries.push(command.command);
+            return nativeSpawner.spawn(
+              ChildProcess.make(command.command, command.args, {
+                ...command.options,
+                cwd: fixtureRoot,
+                env: isolatedSpawnEnvironment,
+                extendEnv: false,
+              }),
+            );
+          });
           const reprobeModel = "settings-reprobe-marker";
           const serverSettings = yield* makeMutableServerSettingsService(
             decodeServerSettings(
               deepMerge(encodedDefaultServerSettings, {
                 providers: {
-                  codex: { enabled: true, binaryPath: firstMissing },
+                  codex: { enabled: true, binaryPath: firstMissing, homePath: isolatedCodexHome },
                   claudeAgent: { enabled: false },
                 },
               }),
@@ -1944,28 +2074,35 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             Layer.provideMerge(ProviderInstanceRegistryHydrationLive),
             Layer.provideMerge(Layer.succeed(ServerSettingsService, serverSettings)),
             Layer.provideMerge(
-              ServerConfig.layerTest(process.cwd(), {
-                prefix: "t3-provider-registry-",
-              }),
+              ServerConfig.layerTest(fixtureRoot, path.join(fixtureRoot, "server")),
             ),
             Layer.provideMerge(TestHttpClientLive),
             Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
             Layer.provideMerge(OpenCodeRuntimeLive),
-            // `it.live` does not inherit layers from the outer `it.layer`
-            // wrapper, so provide `NodeServices.layer` inline. This is the
-            // same real `ChildProcessSpawner` + `FileSystem` + `Path`
-            // services that production uses.
-            Layer.provideMerge(NodeServices.layer),
+            Layer.provideMerge(
+              Layer.mergeAll(
+                NodeServices.layer,
+                Layer.succeed(FileSystem.FileSystem, guardedFileSystem),
+                Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, guardedSpawner),
+              ),
+            ),
           );
           const runtimeServices = yield* Layer.build(providerRegistryLayer).pipe(
             Scope.provide(scope),
           );
           const runtimeServicesWithMutator = runtimeServices as unknown as Context.Context<
-            ProviderRegistry | ProviderInstanceRegistryMutator
+            ProviderRegistry | ProviderInstanceRegistry | ProviderInstanceRegistryMutator
           >;
 
           yield* Effect.gen(function* () {
             const registry = yield* ProviderRegistry;
+            const instanceRegistry = yield* ProviderInstanceRegistry;
+            const codexInstanceId = ProviderInstanceId.make("codex");
+            const initialInstance = yield* instanceRegistry.getInstance(codexInstanceId);
+            assert.strictEqual(
+              initialInstance?.continuationIdentity.continuationKey,
+              `codex:home:${path.resolve(isolatedCodexHome)}`,
+            );
             // Boot-time probe: the default codex instance is enabled with
             // `firstMissing`, so the real spawner yields ENOENT and the
             // snapshot should be `status: "error"` / `installed: false`.
@@ -1996,6 +2133,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
                 codex: {
                   enabled: true,
                   binaryPath: secondMissing,
+                  homePath: isolatedCodexHome,
                   customModels: [reprobeModel],
                 },
               },
@@ -2040,6 +2178,15 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               true,
               "Expected a fresh probe after settings change, got the stale snapshot",
             );
+            const refreshedInstance = yield* instanceRegistry.getInstance(codexInstanceId);
+            assert.strictEqual(
+              refreshedInstance?.continuationIdentity.continuationKey,
+              `codex:home:${path.resolve(isolatedCodexHome)}`,
+            );
+            assert.include(spawnedBinaries, firstMissing);
+            assert.include(spawnedBinaries, secondMissing);
+            assert.deepStrictEqual(rejectedFixtureOperations, []);
+            assert.deepStrictEqual(yield* fileSystem.readDirectory(isolatedCodexHome), []);
           }).pipe(Effect.provide(runtimeServicesWithMutator));
         }),
       );
@@ -2135,9 +2282,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
                 stderr: outputChannel === "stderr" ? output : "",
                 code: 1,
               }));
-              const status = yield* checkCodexCliProviderStatus(defaultCodexSettings).pipe(
-                Effect.provide(layer),
-              );
+              const status = yield* checkCodexCliProviderStatus(
+                defaultCodexSettings,
+                isolatedCodexProbeEnvironment,
+              ).pipe(Effect.provide(layer));
 
               assert.strictEqual(status.installed, true);
               assert.strictEqual(status.status, "error");
@@ -2171,7 +2319,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             "Missing optional dependency @openai/codex-darwin-arm64-unrelated.",
             "Unknown launcher failure with private-secret-sentinel at /private/user/provider-install; Node.js v25.9.0",
           ]) {
-            const status = yield* checkCodexCliProviderStatus(defaultCodexSettings).pipe(
+            const status = yield* checkCodexCliProviderStatus(
+              defaultCodexSettings,
+              isolatedCodexProbeEnvironment,
+            ).pipe(
               Effect.provide(mockSpawnerLayer(() => ({ stdout: detail, stderr: detail, code: 1 }))),
             );
             assert.strictEqual(status.status, "error");
@@ -2187,7 +2338,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
 
       it.effect("does not expose a failed version probe's spawn exception", () =>
         Effect.gen(function* () {
-          const status = yield* checkCodexCliProviderStatus(defaultCodexSettings).pipe(
+          const status = yield* checkCodexCliProviderStatus(
+            defaultCodexSettings,
+            isolatedCodexProbeEnvironment,
+          ).pipe(
             Effect.provide(
               Layer.succeed(
                 ChildProcessSpawner.ChildProcessSpawner,
@@ -2244,7 +2398,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
 
       it.effect("uses the Codex CLI login status path for lightweight provider status", () =>
         Effect.gen(function* () {
-          const status = yield* checkCodexCliProviderStatus(defaultCodexSettings).pipe(
+          const status = yield* checkCodexCliProviderStatus(
+            defaultCodexSettings,
+            isolatedCodexProbeEnvironment,
+          ).pipe(
             Effect.provide(
               mockSpawnerLayer((args) => {
                 const joined = args.join(" ");
@@ -2350,7 +2507,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           );
           yield* fileSystem.chmod(authPath, 0o600);
 
-          const status = yield* checkCodexCliProviderStatus(decodeCodexSettings({ homePath })).pipe(
+          const status = yield* checkCodexCliProviderStatus(
+            decodeCodexSettings({ homePath }),
+            isolatedCodexProbeEnvironment,
+          ).pipe(
             Effect.provide(
               mockSpawnerLayer((args) => {
                 const joined = args.join(" ");
@@ -2432,6 +2592,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             });
             const status = yield* checkCodexCliProviderStatus(
               decodeCodexSettings({ homePath }),
+              isolatedCodexProbeEnvironment,
             ).pipe(Effect.provide(layer));
             assert.strictEqual(status.auth.label, testCase.label);
             assert.strictEqual(status.auth.status, "authenticated");
@@ -2460,6 +2621,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             }) as typeof fetch;
             const status = yield* checkCodexCliProviderStatus(
               decodeCodexSettings({ homePath }),
+              isolatedCodexProbeEnvironment,
             ).pipe(
               Effect.provide(
                 mockSpawnerLayer((args) => {
@@ -2602,7 +2764,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             });
           }) as typeof fetch;
 
-          const status = yield* checkCodexCliProviderStatus(decodeCodexSettings({ homePath })).pipe(
+          const status = yield* checkCodexCliProviderStatus(
+            decodeCodexSettings({ homePath }),
+            isolatedCodexProbeEnvironment,
+          ).pipe(
             Effect.provide(
               mockSpawnerLayer((args) => {
                 const joined = args.join(" ");
@@ -2939,7 +3104,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             }),
           );
 
-          const status = yield* checkCodexCliProviderStatus(decodeCodexSettings({ homePath })).pipe(
+          const status = yield* checkCodexCliProviderStatus(
+            decodeCodexSettings({ homePath }),
+            isolatedCodexProbeEnvironment,
+          ).pipe(
             Effect.provide(
               mockSpawnerLayer((args) => {
                 const joined = args.join(" ");
@@ -2972,11 +3140,15 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             }
             throw new Error(`Unexpected args: ${joined}`);
           });
-          const homePath = "/tmp/cafecode-codex-status-home";
+          const fileSystem = yield* FileSystem.FileSystem;
+          const homePath = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "cafecode-codex-status-home-",
+          });
 
-          const status = yield* checkCodexCliProviderStatus(decodeCodexSettings({ homePath })).pipe(
-            Effect.provide(layer),
-          );
+          const status = yield* checkCodexCliProviderStatus(
+            decodeCodexSettings({ homePath }),
+            isolatedCodexProbeEnvironment,
+          ).pipe(Effect.provide(layer));
 
           assert.strictEqual(status.status, "ready");
           assert.deepStrictEqual(
@@ -2992,7 +3164,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
 
       it.effect("returns unauthenticated when Codex CLI reports not logged in", () =>
         Effect.gen(function* () {
-          const status = yield* checkCodexCliProviderStatus(defaultCodexSettings).pipe(
+          const status = yield* checkCodexCliProviderStatus(
+            defaultCodexSettings,
+            isolatedCodexProbeEnvironment,
+          ).pipe(
             Effect.provide(
               mockSpawnerLayer((args) => {
                 const joined = args.join(" ");

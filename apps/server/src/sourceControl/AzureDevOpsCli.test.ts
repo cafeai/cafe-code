@@ -237,7 +237,13 @@ describe("AzureDevOpsCli.layer", () => {
   it.effect("creates pull requests using the body file as the Azure description", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
-      const bodyFile = `/tmp/t3code-azure-devops-cli-.md`;
+      // The body is a real file, even though the Azure command is mocked. A
+      // scoped native path avoids collisions between workers and owns cleanup
+      // without assuming that the host has a POSIX /tmp directory.
+      const bodyFile = yield* fileSystem.makeTempFileScoped({
+        prefix: "t3code-azure-devops-cli-",
+        suffix: ".md",
+      });
       yield* fileSystem.writeFileString(bodyFile, "Generated body");
       mockRun.mockReturnValueOnce(Effect.succeed(processOutput("{}")));
 

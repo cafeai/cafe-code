@@ -94,6 +94,14 @@ jobs:
       - name: Test
         run: corepack yarn test
 
+      - name: Isolated Codex command and fixture qualification
+        # Repeat the focused boundary uncached on each native host. Copied Node
+        # and synthetic peers only: no installed providers, profiles or auth.
+        run: |
+          corepack yarn workspace effect-codex-app-server test src/client.test.ts
+          corepack yarn workspace @cafeai/cafe-code test src/provider/Layers/CodexProvider.test.ts src/provider/Layers/CodexSessionRuntime.exit.test.ts src/provider/Layers/ProviderRegistry.test.ts src/launcher.test.ts src/sourceControl/AzureDevOpsCli.test.ts
+          corepack yarn workspace @cafeai/cafe-code test src/textGeneration/CodexTextGeneration.test.ts
+
       - name: Isolated Windows editor launcher
         # Synthetic copied Node/CLI fixture: no installed editor, provider,
         # credentials or live user profile participates in this native test.
