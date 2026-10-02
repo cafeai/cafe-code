@@ -1,0 +1,142 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "baseBranchPatterns": ["dev"],
+  "enabledManagers": ["npm", "github-actions"],
+  "dependencyDashboard": true,
+  "dependencyDashboardTitle": "Dependency maintenance",
+  "dependencyDashboardHeader": "Routine updates target dev and require review plus full cross-platform CI. Effect, provider SDKs, native packaging, toolchains and security resolutions stay on the manual audited path. Check GitHub Dependabot alerts separately for excluded dependencies and main; an empty dashboard is not security clearance. See docs/dependency-updates.md.",
+  "timezone": "Asia/Tokyo",
+  "schedule": ["* 0-6 * * 1"],
+  "prConcurrentLimit": 3,
+  "branchConcurrentLimit": 3,
+  "prHourlyLimit": 1,
+  "minimumReleaseAge": "7 days",
+  "minimumReleaseAgeBehaviour": "timestamp-required",
+  "internalChecksFilter": "strict",
+  "automerge": false,
+  "platformAutomerge": false,
+  "ignoreScripts": true,
+  "ignoreUnstable": true,
+  "rangeStrategy": "bump",
+  "separateMajorMinor": true,
+  "lockFileMaintenance": { "enabled": false },
+  "ignorePaths": [
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/build/**",
+    "**/target/**",
+    ".explorations/**",
+    ".plans/**",
+    "**/__fixtures__/**",
+    "**/fixtures/**"
+  ],
+  "prBodyNotes": [
+    "Human review and all applicable Linux/macOS/Windows quality and native artifact checks are required; do not merge a failed or incomplete update.",
+    "Provider, patched Effect, native-runtime, toolchain and security-resolution upgrades require the manual audits documented in AGENTS.md and docs/dependency-updates.md."
+  ],
+  "vulnerabilityAlerts": { "enabled": false },
+  "packageRules": [
+    {
+      "description": "Keep matching React runtime and type packages together without combining unrelated upgrades.",
+      "matchManagers": ["npm"],
+      "matchPackageNames": ["react", "react-dom", "scheduler", "@types/react", "@types/react-dom"],
+      "groupName": "React"
+    },
+    {
+      "description": "Keep the Vite compiler and its integration packages aligned.",
+      "matchManagers": ["npm"],
+      "matchPackageNames": ["vite", "@vitejs/**", "rolldown", "@rolldown/**"],
+      "groupName": "Vite build tooling"
+    },
+    {
+      "description": "The Vitest runner, coverage and browser integration share version-sensitive interfaces.",
+      "matchManagers": ["npm"],
+      "matchPackageNames": ["vitest", "@vitest/**", "vitest-browser-react"],
+      "groupName": "Vitest"
+    },
+    {
+      "description": "Keep lint/format executables and their plugin API in one reviewable tooling change.",
+      "matchManagers": ["npm"],
+      "matchPackageNames": ["oxlint", "oxfmt", "@oxlint/**"],
+      "groupName": "Ox tooling"
+    },
+    {
+      "matchManagers": ["npm"],
+      "matchPackageNames": ["tailwindcss", "@tailwindcss/**"],
+      "groupName": "Tailwind"
+    },
+    {
+      "matchManagers": ["npm"],
+      "matchPackageNames": ["lexical", "@lexical/**"],
+      "groupName": "Lexical"
+    },
+    {
+      "matchManagers": ["npm"],
+      "matchPackageNames": ["@tanstack/**"],
+      "groupName": "TanStack"
+    },
+    {
+      "matchManagers": ["npm"],
+      "matchPackageNames": ["@dnd-kit/**"],
+      "groupName": "DnD Kit"
+    },
+    {
+      "description": "Pin action code to immutable commits; action updates remain proposals, never automatic merges.",
+      "matchManagers": ["github-actions"],
+      "groupName": "GitHub Actions",
+      "pinDigests": true,
+      "minimumReleaseAge": null
+    },
+    {
+      "description": "Major API changes need dashboard approval before a branch/PR is created, then normal human review and CI.",
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "Security resolutions are deliberate overrides, not ordinary version pins; changing or relaxing them requires a separate audit.",
+      "matchManagers": ["npm"],
+      "matchDepTypes": ["resolutions"],
+      "enabled": false
+    },
+    {
+      "description": "Effect prereleases and the version-bound RPC patch must move atomically after a manual patch rebase and compatibility audit.",
+      "matchManagers": ["npm"],
+      "matchPackageNames": ["effect", "@effect/**"],
+      "enabled": false
+    },
+    {
+      "description": "Provider SDKs require protocol, token/lifecycle and package-integrity audits; Claude also requires its complete-package age/signature review.",
+      "matchManagers": ["npm"],
+      "matchPackageNames": [
+        "@anthropic-ai/**",
+        "@openai/codex",
+        "@openai/codex-*",
+        "@modelcontextprotocol/**",
+        "@opencode-ai/**",
+        "openai"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "Native and desktop packaging dependencies require audited, synchronized source/staged pins and native qualification.",
+      "matchManagers": ["npm"],
+      "matchPackageNames": [
+        "electron",
+        "electron-builder",
+        "electron-updater",
+        "@electron/**",
+        "app-builder-lib",
+        "node-pty",
+        "playwright",
+        "playwright-core",
+        "@playwright/**"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "Node and Yarn are exact repository-wide policies, including workflow/code/archive checks that a manifest-only update cannot synchronize.",
+      "matchDepNames": ["node", "yarn"],
+      "enabled": false
+    }
+  ]
+}
