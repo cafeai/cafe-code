@@ -36,6 +36,8 @@ export type ProviderThreadGoalSupport = "supported" | "unsupported";
 export type ProviderSessionForkSupport = "supported" | "unsupported";
 
 export interface ProviderAdapterCapabilities {
+  /** Supported only after the configured native CLI's version is qualified. */
+  readonly subagentConcurrency?: boolean;
   /**
    * Declares how changing a model or its provider-owned traits is applied.
    * `restart-resume` preserves the native conversation while atomically

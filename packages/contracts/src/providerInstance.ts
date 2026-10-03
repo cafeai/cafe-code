@@ -35,6 +35,7 @@
  */
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import { MaxConcurrentSubagents } from "./subagentLimits.ts";
 import { TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 const PROVIDER_SLUG_MAX_CHARS = 64;
@@ -162,6 +163,8 @@ export const ProviderInstanceConfig = Schema.Struct({
   config: Schema.optionalKey(Schema.Unknown),
   defaultModel: Schema.optionalKey(TrimmedNonEmptyString),
   defaultModelOptions: Schema.optionalKey(Schema.Array(ProviderInstanceDefaultOption)),
+  // New-chat intent only; changing this must not retire the instance's scope.
+  defaultMaxConcurrentSubagents: Schema.optionalKey(MaxConcurrentSubagents),
 });
 export type ProviderInstanceConfig = typeof ProviderInstanceConfig.Type;
 

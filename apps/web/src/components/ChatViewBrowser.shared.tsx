@@ -51,6 +51,7 @@ import { deriveLogicalProjectKeyFromSettings } from "../logicalProject";
 import { selectBootstrapCompleteForActiveEnvironment, selectThreadByRef, useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
 import { useTaskAtriumStore } from "./atrium/taskAtriumStore";
+import { buildSubagentConcurrencyEditorKey } from "./chat/ChatComposer";
 import { toastManager } from "./ui/toast";
 import { createFollowUpQueuePersistence } from "./chat/followUpQueuePersistence";
 import { createAuthenticatedSessionHandlers } from "../../test/authHttpHandlers";
@@ -425,6 +426,7 @@ function toShellThread(thread: OrchestrationReadModel["threads"][number]) {
     modelSelection: thread.modelSelection,
     runtimeMode: thread.runtimeMode,
     interactionMode: thread.interactionMode,
+    ...(thread.subagentLimits !== undefined ? { subagentLimits: thread.subagentLimits } : {}),
     branch: thread.branch,
     worktreePath: thread.worktreePath,
     latestTurn: thread.latestTurn,
@@ -6437,6 +6439,913 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       }
     });
 
+    it("edits the exact standalone chat policy, preserves the other driver and sends its captured override", async () => {
+      const base = createSnapshotForTargetUser({
+        targetMessageId: MessageId.make("limit-integration"),
+        targetText: "History",
+      });
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: {
+          ...base,
+          projects: [],
+          threads: base.threads.map((thread) => ({
+            ...thread,
+            projectId: null,
+            branch: null,
+            worktreePath: null,
+            subagentLimits: { codex: 3, claude: 8 },
+            session: thread.session ? { ...thread.session, maxConcurrentSubagents: 3 } : null,
+          })),
+        },
+        configureFixture: (next) => {
+          next.serverConfig = {
+            ...next.serverConfig,
+            providers: next.serverConfig.providers.map((provider) => ({
+              ...provider,
+              runtimeCapabilities: {
+                liveSteer: "unsupported",
+                threadGoals: "unsupported",
+                ...provider.runtimeCapabilities,
+                subagentConcurrency: true,
+              },
+            })),
+          };
+        },
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
+      });
+      try {
+        await waitForServerConfigToApply();
+        await page.getByRole("button", { name: "More composer controls", exact: true }).click();
+        await page.getByRole("menuitem", { name: "Subagent limit…", exact: true }).click();
+        await page
+          .getByRole("spinbutton", { name: "Maximum concurrent subagents", exact: true })
+          .fill("4");
+        await page.getByRole("button", { name: "Save", exact: true }).click();
+        await vi.waitFor(() =>
+          expect(
+            wsRequests.find(
+              (body) =>
+                body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+                body.type === "thread.meta.update",
+            ),
+          ).toMatchObject({ threadId: THREAD_ID, subagentLimits: { codex: 4, claude: 8 } }),
+        );
+        expect(
+          useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.subagentLimits,
+        ).toEqual({ codex: 4, claude: 8 });
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, "Use this saved policy");
+        await vi.waitFor(() =>
+          expect(document.querySelector('[contenteditable="true"]')?.textContent).toContain(
+            "Use this saved policy",
+          ),
+        );
+        (await waitForSendButton()).click();
+        await vi.waitFor(() =>
+          expect(
+            wsRequests.find(
+              (body) =>
+                body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+                body.type === "thread.turn.start",
+            ),
+          ).toMatchObject({ threadId: THREAD_ID, subagentLimits: { codex: 4, claude: 8 } }),
+        );
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    describe("acknowledged subagent-policy ownership", () => {
+      const alternateAccount = ProviderInstanceId.make("codex_limit_alternate");
+      function policySnapshot() {
+        const base = createSnapshotForTargetUser({
+          targetMessageId: MessageId.make("limit-ownership"),
+          targetText: "Synthetic policy history",
+        });
+        return {
+          ...base,
+          threads: base.threads.map((thread) => ({
+            ...thread,
+            subagentLimits: { codex: 3, claude: 8 },
+            session: thread.session ? { ...thread.session, maxConcurrentSubagents: 3 } : null,
+          })),
+        };
+      }
+      function configureLimitFixture(next: TestFixture) {
+        const baseProvider = next.serverConfig.providers[0]!;
+        next.serverConfig = {
+          ...next.serverConfig,
+          providers: [
+            ...next.serverConfig.providers,
+            {
+              ...baseProvider,
+              instanceId: alternateAccount,
+              displayName: "Alternate policy account",
+            },
+          ].map((provider) => ({
+            ...provider,
+            runtimeCapabilities: {
+              liveSteer: "unsupported",
+              threadGoals: "unsupported",
+              ...provider.runtimeCapabilities,
+              subagentConcurrency: true,
+            },
+          })),
+          settings: {
+            ...next.serverConfig.settings,
+            providerInstances: {
+              ...next.serverConfig.settings.providerInstances,
+              [alternateAccount]: { driver: ProviderDriverKind.make("codex"), enabled: true },
+            },
+          },
+        };
+      }
+      function publishPolicy(limits: { codex?: number; claude?: number }) {
+        const snapshotSequence = fixture.snapshot.snapshotSequence + 1;
+        const thread = { ...fixture.snapshot.threads[0]!, subagentLimits: limits };
+        fixture.snapshot = { ...fixture.snapshot, snapshotSequence, threads: [thread] };
+        rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+          kind: "snapshot",
+          snapshot: { snapshotSequence, thread },
+        });
+      }
+      async function openPolicyEditor() {
+        await page.getByRole("button", { name: "More composer controls", exact: true }).click();
+        await page.getByRole("menuitem", { name: /^Subagent limit…/ }).click();
+        await expect.element(page.getByRole("dialog", { name: "Subagent limit" })).toBeVisible();
+      }
+      async function waitForPolicy(limits: { codex?: number; claude?: number }) {
+        await vi.waitFor(() =>
+          expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.subagentLimits).toEqual(
+            limits,
+          ),
+        );
+      }
+      async function revokeRuntimeCapability() {
+        fixture.serverConfig = {
+          ...fixture.serverConfig,
+          providers: fixture.serverConfig.providers.map((provider) => ({
+            ...provider,
+            runtimeCapabilities: { liveSteer: "unsupported", threadGoals: "unsupported" },
+          })),
+        };
+        rpcHarness.emitStreamValue(WS_METHODS.subscribeServerConfig, {
+          version: 1,
+          type: "snapshot",
+          config: encodeServerConfig(fixture.serverConfig),
+        });
+        await vi.waitFor(() =>
+          expect(getServerConfig()?.providers[0]?.runtimeCapabilities?.subagentConcurrency).toBe(
+            undefined,
+          ),
+        );
+      }
+      it("keeps delimiter-bearing targets and draft/server ownership distinct", () => {
+        const first = {
+          environmentId: EnvironmentId.make("environment:a"),
+          threadId: "b" as ThreadId,
+          instanceId: ProviderInstanceId.make("codex"),
+          draftId: null,
+          isServerThread: true,
+        };
+        const second = {
+          ...first,
+          environmentId: EnvironmentId.make("environment"),
+          threadId: "a:b" as ThreadId,
+        };
+        // These are legal imported ids and collide under colon concatenation.
+        expect(`${first.environmentId}:${first.threadId}:${first.instanceId}`).toBe(
+          `${second.environmentId}:${second.threadId}:${second.instanceId}`,
+        );
+        expect(buildSubagentConcurrencyEditorKey(first)).not.toBe(
+          buildSubagentConcurrencyEditorKey(second),
+        );
+        expect(buildSubagentConcurrencyEditorKey(first)).not.toBe(
+          buildSubagentConcurrencyEditorKey({
+            ...first,
+            draftId: DraftId.make("draft-a"),
+            isServerThread: false,
+          }),
+        );
+        expect(buildSubagentConcurrencyEditorKey(first)).not.toBe(
+          buildSubagentConcurrencyEditorKey({
+            ...first,
+            instanceId: alternateAccount,
+          }),
+        );
+      });
+      it.each([
+        { timing: "before ACK", reset: false },
+        { timing: "before ACK", reset: true },
+        { timing: "after ACK", reset: false },
+        { timing: "after ACK", reset: true },
+      ])(
+        "never restores an obsolete limit over a newer canonical policy ($timing, reset=$reset)",
+        async ({ timing, reset }) => {
+          let resolveAck!: (result: { sequence: number }) => void;
+          const acknowledgement = new Promise<{ sequence: number }>((resolve) => {
+            resolveAck = resolve;
+          });
+          const requested = reset ? { claude: 8 } : { codex: 6, claude: 8 };
+          const mounted = await mountChatView({
+            viewport: DEFAULT_VIEWPORT,
+            snapshot: policySnapshot(),
+            configureFixture: configureLimitFixture,
+            resolveRpc: (body) =>
+              body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+                ? body.type === "thread.meta.update"
+                  ? acknowledgement
+                  : { sequence: 20 }
+                : undefined,
+          });
+          try {
+            await openPolicyEditor();
+            if (!reset)
+              await page
+                .getByRole("spinbutton", { name: "Maximum concurrent subagents" })
+                .fill("6");
+            await page.getByRole("button", { name: reset ? "Reset" : "Save", exact: true }).click();
+            await vi.waitFor(() =>
+              expect(
+                wsRequests.find(
+                  (body) =>
+                    body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+                    body.type === "thread.meta.update",
+                ),
+              ).toMatchObject({ threadId: THREAD_ID, subagentLimits: requested }),
+            );
+            if (timing === "before ACK") {
+              publishPolicy(requested);
+              await waitForPolicy(requested);
+            } else {
+              resolveAck({ sequence: 2 });
+              await vi.waitFor(() =>
+                expect(
+                  useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.subagentLimits,
+                ).toEqual(requested),
+              );
+            }
+            const newer = { codex: 9, claude: 8 };
+            publishPolicy(newer);
+            await waitForPolicy(newer);
+            if (timing === "before ACK") resolveAck({ sequence: 2 });
+            await vi.waitFor(() => {
+              expect(document.querySelector('[role="dialog"]')).toBeNull();
+              expect(
+                useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.subagentLimits,
+              ).toBeUndefined();
+            });
+            await openPolicyEditor();
+            await expect
+              .element(page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }))
+              .toHaveValue(9);
+            await page
+              .getByRole("dialog")
+              .getByRole("button", { name: "Close", exact: true })
+              .click();
+            useComposerDraftStore.getState().setPrompt(THREAD_REF, "Use the latest durable policy");
+            (await waitForSendButton()).click();
+            await vi.waitFor(() =>
+              expect(
+                wsRequests.find(
+                  (body) =>
+                    body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+                    body.type === "thread.turn.start",
+                ),
+              ).toMatchObject({ threadId: THREAD_ID, subagentLimits: newer }),
+            );
+          } finally {
+            resolveAck({ sequence: 2 });
+            await mounted.cleanup();
+          }
+        },
+      );
+      it("does not install an overlay when the acknowledged policy already arrived", async () => {
+        let resolveAck!: (result: { sequence: number }) => void;
+        const acknowledgement = new Promise<{ sequence: number }>((resolve) => {
+          resolveAck = resolve;
+        });
+        const mounted = await mountChatView({
+          viewport: DEFAULT_VIEWPORT,
+          snapshot: policySnapshot(),
+          configureFixture: configureLimitFixture,
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? acknowledgement : undefined,
+        });
+        try {
+          await openPolicyEditor();
+          await page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }).fill("6");
+          await page.getByRole("button", { name: "Save", exact: true }).click();
+          await vi.waitFor(() =>
+            expect(wsRequests.some((body) => body.type === "thread.meta.update")).toBe(true),
+          );
+          publishPolicy({ codex: 6, claude: 8 });
+          await waitForPolicy({ codex: 6, claude: 8 });
+          resolveAck({ sequence: 2 });
+          await vi.waitFor(() => {
+            expect(document.querySelector('[role="dialog"]')).toBeNull();
+            expect(
+              useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.subagentLimits,
+            ).toBeUndefined();
+          });
+        } finally {
+          resolveAck({ sequence: 2 });
+          await mounted.cleanup();
+        }
+      });
+      it.each([false, true])(
+        "preserves our newer ACK over earlier external projection until exact policy catches up (reset=%s)",
+        async (reset) => {
+          let resolveAck!: (result: { sequence: number }) => void;
+          const acknowledgement = new Promise<{ sequence: number }>((resolve) => {
+            resolveAck = resolve;
+          });
+          const requested = reset ? { claude: 8 } : { codex: 6, claude: 8 };
+          const mounted = await mountChatView({
+            viewport: DEFAULT_VIEWPORT,
+            snapshot: policySnapshot(),
+            configureFixture: configureLimitFixture,
+            resolveRpc: (body) =>
+              body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+                ? body.type === "thread.meta.update"
+                  ? acknowledgement
+                  : { sequence: 4 }
+                : undefined,
+          });
+          try {
+            await openPolicyEditor();
+            if (!reset)
+              await page
+                .getByRole("spinbutton", { name: "Maximum concurrent subagents" })
+                .fill("6");
+            await page.getByRole("button", { name: reset ? "Reset" : "Save", exact: true }).click();
+            await vi.waitFor(() =>
+              expect(wsRequests.some((body) => body.type === "thread.meta.update")).toBe(true),
+            );
+            publishPolicy({ codex: 9, claude: 8 }); // External commit at sequence2.
+            await waitForPolicy({ codex: 9, claude: 8 });
+            resolveAck({ sequence: 3 }); // Our save committed after that external update.
+            await vi.waitFor(() =>
+              expect(
+                useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.subagentLimits,
+              ).toEqual(requested),
+            );
+            useComposerDraftStore
+              .getState()
+              .setPrompt(THREAD_REF, "Use the acknowledged newer policy");
+            (await waitForSendButton()).click();
+            await vi.waitFor(() =>
+              expect(wsRequests.find((body) => body.type === "thread.turn.start")).toMatchObject({
+                subagentLimits: requested,
+              }),
+            );
+            publishPolicy(requested); // Exact thread snapshot reaches ACK sequence3.
+            await waitForPolicy(requested);
+            await vi.waitFor(() =>
+              expect(
+                useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.subagentLimits,
+              ).toBeUndefined(),
+            );
+            // The other channel may still deliver its older policy. It must
+            // not replace either the canonical value or its exact authority.
+            rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeShell, {
+              kind: "thread-upserted",
+              sequence: 2,
+              thread: {
+                ...toShellThread(fixture.snapshot.threads[0]!),
+                subagentLimits: { codex: 9, claude: 8 },
+              },
+            });
+            await waitForLayout();
+            expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.subagentLimits).toEqual(
+              requested,
+            );
+            expect(
+              useStore.getState().environmentStateById[LOCAL_ENVIRONMENT_ID]
+                ?.subagentPolicySequenceByThreadId?.[THREAD_ID],
+            ).toBe(3);
+          } finally {
+            resolveAck({ sequence: 3 });
+            await mounted.cleanup();
+          }
+        },
+      );
+      it("does not retire an ACK bridge through another chat or an omission-only metadata event", async () => {
+        const mounted = await mountChatView({
+          viewport: DEFAULT_VIEWPORT,
+          snapshot: policySnapshot(),
+          configureFixture: configureLimitFixture,
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 3 } : undefined,
+        });
+        try {
+          await openPolicyEditor();
+          await page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }).fill("6");
+          await page.getByRole("button", { name: "Save", exact: true }).click();
+          await vi.waitFor(() =>
+            expect(
+              useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.subagentLimits,
+            ).toEqual({ codex: 6, claude: 8 }),
+          );
+          const unrelatedId = "unrelated-policy-chat" as ThreadId;
+          const unrelated = addThreadToSnapshot(fixture.snapshot, unrelatedId).threads.find(
+            (thread) => thread.id === unrelatedId,
+          )!;
+          rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeShell, {
+            kind: "thread-upserted",
+            sequence: 20,
+            thread: { ...toShellThread(unrelated), subagentLimits: { codex: 20 } },
+          });
+          rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+            kind: "event",
+            event: {
+              type: "thread.meta-updated",
+              sequence: 2,
+              eventId: EventId.make("omitted-policy-meta"),
+              aggregateKind: "thread",
+              aggregateId: THREAD_ID,
+              occurredAt: NOW_ISO,
+              commandId: null,
+              causationEventId: null,
+              correlationId: null,
+              metadata: {},
+              payload: { threadId: THREAD_ID, title: "Unrelated title update", updatedAt: NOW_ISO },
+            },
+          });
+          await vi.waitFor(() =>
+            expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.title).toBe(
+              "Unrelated title update",
+            ),
+          );
+          expect(
+            useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.subagentLimits,
+          ).toEqual({ codex: 6, claude: 8 });
+          expect(
+            useStore.getState().environmentStateById[LOCAL_ENVIRONMENT_ID]
+              ?.subagentPolicySequenceByThreadId?.[THREAD_ID],
+          ).toBe(1);
+          // A full exact-thread witness does certify policy, including when
+          // its scalar value is unchanged from the earlier canonical value.
+          fixture.snapshot = { ...fixture.snapshot, snapshotSequence: 2 };
+          publishPolicy({ codex: 3, claude: 8 });
+          await vi.waitFor(() =>
+            expect(
+              useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.subagentLimits,
+            ).toBeUndefined(),
+          );
+          expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.subagentLimits).toEqual({
+            codex: 3,
+            claude: 8,
+          });
+        } finally {
+          await mounted.cleanup();
+        }
+      });
+      it("keeps control-only compaction available with an unsupported remembered numeric policy", async () => {
+        const base = policySnapshot();
+        const mounted = await mountChatView({
+          viewport: DEFAULT_VIEWPORT,
+          snapshot: {
+            ...base,
+            threads: base.threads.map((thread) => ({
+              ...thread,
+              subagentLimits: { codex: 6 },
+              session: thread.session
+                ? { ...thread.session, providerInstanceId: ProviderInstanceId.make("codex") }
+                : null,
+            })),
+          },
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
+        });
+        try {
+          useComposerDraftStore.getState().setPrompt(THREAD_REF, "/compact");
+          (await waitForSendButton()).click();
+          await vi.waitFor(() =>
+            expect(wsRequests.find((body) => body.type === "thread.compact")).toMatchObject({
+              threadId: THREAD_ID,
+              providerInstanceId: "codex",
+            }),
+          );
+          expect(
+            wsRequests.some(
+              (body) => body.type === "thread.turn.start" || body.type === "thread.create",
+            ),
+          ).toBe(false);
+          expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.subagentLimits).toEqual({
+            codex: 6,
+          });
+          expect(document.body.textContent).not.toContain(
+            "does not support the saved subagent limit",
+          );
+        } finally {
+          await mounted.cleanup();
+        }
+      });
+      it("discards a restored orphan server overlay without losing unsent content", async () => {
+        const base = policySnapshot();
+        const canonical = { codex: 9, claude: 8 };
+        const mounted = await mountChatView({
+          viewport: DEFAULT_VIEWPORT,
+          snapshot: {
+            ...base,
+            threads: base.threads.map((thread) => ({ ...thread, subagentLimits: canonical })),
+          },
+          configureFixture: (next) => {
+            configureLimitFixture(next);
+            // A browser reload can restore persistent storage without running
+            // the old pane's cleanup. No ACK scope survives to own this value.
+            useComposerDraftStore.getState().setSubagentLimits(THREAD_REF, { codex: 6, claude: 8 });
+            useComposerDraftStore
+              .getState()
+              .setPrompt(THREAD_REF, "Unsent content survives reload");
+          },
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 20 } : undefined,
+        });
+        try {
+          await vi.waitFor(() => {
+            const draft = useComposerDraftStore.getState().getComposerDraft(THREAD_REF);
+            expect(draft?.subagentLimits).toBeUndefined();
+            expect(draft?.prompt).toBe("Unsent content survives reload");
+          });
+          await openPolicyEditor();
+          await expect
+            .element(page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }))
+            .toHaveValue(9);
+          await page
+            .getByRole("dialog")
+            .getByRole("button", { name: "Close", exact: true })
+            .click();
+          (await waitForSendButton()).click();
+          await vi.waitFor(() =>
+            expect(wsRequests.find((body) => body.type === "thread.turn.start")).toMatchObject({
+              threadId: THREAD_ID,
+              subagentLimits: canonical,
+            }),
+          );
+        } finally {
+          await mounted.cleanup();
+        }
+      });
+      it("preserves a remembered draft on an unsupported runtime and permits reset before bootstrap", async () => {
+        const mounted = await mountChatView({
+          viewport: DEFAULT_VIEWPORT,
+          snapshot: createProjectlessSnapshot(),
+          initialPath: "/",
+          configureFixture: (next) => {
+            configureStandaloneShortcut(next);
+            next.serverConfig = {
+              ...next.serverConfig,
+              settings: {
+                ...next.serverConfig.settings,
+                defaultProviderInstanceId: ProviderInstanceId.make("codex"),
+                providerInstances: {
+                  ...next.serverConfig.settings.providerInstances,
+                  [ProviderInstanceId.make("codex")]: {
+                    driver: ProviderDriverKind.make("codex"),
+                    defaultModel: "gpt-5",
+                    defaultMaxConcurrentSubagents: 6,
+                  },
+                },
+              },
+            };
+          },
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
+        });
+        try {
+          newChatShortcut();
+          await vi.waitFor(() =>
+            expect(mounted.router.state.location.pathname).toMatch(UUID_ROUTE_RE),
+          );
+          const draftId = draftIdFromPath(mounted.router.state.location.pathname);
+          const prompt = "Retain this prompt until the unsupported request is reset";
+          expect(
+            useComposerDraftStore.getState().getComposerDraft(draftId)?.subagentLimits,
+          ).toEqual({ codex: 6 });
+          useComposerDraftStore.getState().setPrompt(draftId, prompt);
+          await waitForStandaloneComposerText(prompt);
+          (await waitForSendButton()).click();
+          await vi.waitFor(() =>
+            expect(document.body.textContent).toContain(
+              "This provider runtime does not support the saved subagent limit. Reset it in More composer controls before sending.",
+            ),
+          );
+          expect(wsRequests.some((body) => body.type === "thread.turn.start")).toBe(false);
+          expect(useComposerDraftStore.getState().getComposerDraft(draftId)?.prompt).toBe(prompt);
+          await openPolicyEditor();
+          await expect
+            .element(page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }))
+            .toBeDisabled();
+          await expect
+            .element(page.getByRole("button", { name: "Save", exact: true }))
+            .toBeDisabled();
+          await page.getByRole("button", { name: "Reset", exact: true }).click();
+          await vi.waitFor(() =>
+            expect(
+              useComposerDraftStore.getState().getComposerDraft(draftId)?.subagentLimits,
+            ).toEqual({}),
+          );
+          (await waitForSendButton()).click();
+          await vi.waitFor(() =>
+            expect(wsRequests.find((body) => body.type === "thread.turn.start")).toMatchObject({
+              threadId: draftThreadIdFor(draftId),
+              subagentLimits: {},
+              bootstrap: { createThread: { projectId: null, subagentLimits: {} } },
+            }),
+          );
+        } finally {
+          await mounted.cleanup();
+        }
+      });
+      it.each([false, true])(
+        "admits plan implementation in a new chat only after supported policy or explicit reset (supported=%s)",
+        async (supported) => {
+          const base = createSnapshotWithPlanFollowUpPrompt();
+          const requested = { codex: 6, claude: 8 };
+          const mounted = await mountChatView({
+            viewport: WIDE_FOOTER_VIEWPORT,
+            snapshot: {
+              ...base,
+              threads: base.threads.map((thread) => ({
+                ...thread,
+                subagentLimits: requested,
+              })),
+            },
+            configureFixture: (next) => {
+              configureLimitFixture(next);
+              if (!supported) {
+                next.serverConfig = {
+                  ...next.serverConfig,
+                  providers: next.serverConfig.providers.map((provider) => ({
+                    ...provider,
+                    runtimeCapabilities: { liveSteer: "unsupported", threadGoals: "unsupported" },
+                  })),
+                };
+              }
+            },
+            resolveRpc: (body) => {
+              if (body._tag !== ORCHESTRATION_WS_METHODS.dispatchCommand) return undefined;
+              if (body.type === "thread.create") {
+                const nextId = body.threadId as ThreadId;
+                const snapshotSequence = fixture.snapshot.snapshotSequence + 1;
+                fixture.snapshot = {
+                  ...addThreadToSnapshot(fixture.snapshot, nextId),
+                  snapshotSequence,
+                };
+                const created = fixture.snapshot.threads.find((thread) => thread.id === nextId)!;
+                const thread = {
+                  ...created,
+                  subagentLimits: supported ? requested : { claude: 8 },
+                };
+                fixture.snapshot = {
+                  ...fixture.snapshot,
+                  threads: fixture.snapshot.threads.map((entry) =>
+                    entry.id === nextId ? thread : entry,
+                  ),
+                };
+                rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeShell, {
+                  kind: "thread-upserted",
+                  sequence: snapshotSequence,
+                  thread: { ...toShellThread(thread), subagentLimits: thread.subagentLimits },
+                });
+              }
+              return { sequence: fixture.snapshot.snapshotSequence + 1 };
+            },
+          });
+          const implementInNewChat = async () => {
+            await waitForElement(
+              () =>
+                document.querySelector<HTMLButtonElement>(
+                  'button[aria-label="Implementation actions"]',
+                ),
+              "plan implementation actions",
+            );
+            await expect
+              .element(page.getByRole("button", { name: "Implementation actions", exact: true }))
+              .toBeVisible();
+            await page.getByRole("button", { name: "Implementation actions", exact: true }).click();
+            await page
+              .getByRole("menuitem", { name: "Implement in a new thread", exact: true })
+              .click();
+          };
+          try {
+            await waitForButtonByText("Implement");
+            await vi.waitFor(() =>
+              expect(
+                document.querySelector('[data-chat-composer-implement-actions="true"]'),
+                `Expected composer plan actions; thread mode=${selectThreadByRef(useStore.getState(), THREAD_REF)?.interactionMode}, draft mode=${useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.interactionMode}, prompt=${JSON.stringify(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt)}`,
+              ).not.toBeNull(),
+            );
+            if (!supported) {
+              await implementInNewChat();
+              await vi.waitFor(() =>
+                expect(document.body.textContent).toContain(
+                  "This provider runtime does not support the saved subagent limit. Reset it in More composer controls before sending.",
+                ),
+              );
+              // Admission precedes allocation and creation: there is neither
+              // a new conversation to clean up nor a paid/native submission.
+              expect(
+                wsRequests.some(
+                  (body) => body.type === "thread.create" || body.type === "thread.turn.start",
+                ),
+              ).toBe(false);
+              expect(mounted.router.state.location.pathname).toBe(
+                `/${LOCAL_ENVIRONMENT_ID}/${THREAD_ID}`,
+              );
+              await openPolicyEditor();
+              await page.getByRole("button", { name: "Reset", exact: true }).click();
+              await vi.waitFor(() =>
+                expect(
+                  useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.subagentLimits,
+                ).toEqual({ claude: 8 }),
+              );
+            }
+            await implementInNewChat();
+            await vi.waitFor(() => {
+              const create = wsRequests.find((body) => body.type === "thread.create");
+              const turn = wsRequests.find((body) => body.type === "thread.turn.start");
+              const expected = supported ? requested : { claude: 8 };
+              expect(create).toMatchObject({
+                projectId: PROJECT_ID,
+                runtimeMode: "full-access",
+                subagentLimits: expected,
+              });
+              expect(turn).toMatchObject({
+                threadId: create?.threadId,
+                subagentLimits: expected,
+                sourceProposedPlan: { threadId: THREAD_ID, planId: "plan-follow-up-browser-test" },
+              });
+            });
+          } finally {
+            await mounted.cleanup();
+          }
+        },
+      );
+      it.each([false, true])(
+        "uses current durable policy for a parked queue, including runtime downgrade=%s",
+        async (downgraded) => {
+          const base = policySnapshot();
+          const thread = base.threads[0]!;
+          const running = {
+            ...base,
+            threads: [
+              {
+                ...thread,
+                session: thread.session ? { ...thread.session, status: "running" as const } : null,
+              },
+            ],
+          };
+          const mounted = await mountChatView({
+            viewport: DEFAULT_VIEWPORT,
+            snapshot: running,
+            configureFixture: configureLimitFixture,
+            resolveRpc: (body) =>
+              body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
+          });
+          try {
+            await openPolicyEditor();
+            await page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }).fill("6");
+            await page.getByRole("button", { name: "Save", exact: true }).click();
+            await vi.waitFor(() =>
+              expect(
+                useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.subagentLimits,
+              ).toEqual({ codex: 6, claude: 8 }),
+            );
+            useComposerDraftStore
+              .getState()
+              .setPrompt(THREAD_REF, "Queue before the other client changes policy");
+            await page.getByRole("button", { name: "Queue message", exact: true }).click();
+            await vi.waitFor(() =>
+              expect(
+                document.querySelector('[data-cafe-followup-queue="true"]')?.textContent,
+              ).toContain("Queue before the other client changes policy"),
+            );
+            publishPolicy({ codex: 9, claude: 8 });
+            await waitForPolicy({ codex: 9, claude: 8 });
+            if (downgraded) await revokeRuntimeCapability();
+            const current = fixture.snapshot.threads[0]!;
+            const snapshotSequence = fixture.snapshot.snapshotSequence + 1;
+            const idle = {
+              ...current,
+              session: current.session ? { ...current.session, status: "ready" as const } : null,
+            };
+            fixture.snapshot = { ...fixture.snapshot, snapshotSequence, threads: [idle] };
+            rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+              kind: "snapshot",
+              snapshot: { snapshotSequence, thread: idle },
+            });
+            rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeShell, {
+              kind: "thread-upserted",
+              sequence: snapshotSequence,
+              thread: { ...toShellThread(idle), subagentLimits: idle.subagentLimits },
+            });
+            if (downgraded) {
+              await vi.waitFor(() =>
+                expect(
+                  document.querySelector('[data-cafe-followup-queue="true"]')?.textContent,
+                ).toContain(
+                  "This provider runtime does not support the saved subagent limit. Reset it in More composer controls before sending.",
+                ),
+              );
+              expect(wsRequests.some((body) => body.type === "thread.turn.start")).toBe(false);
+              expect(
+                document.querySelector('[data-cafe-followup-queue="true"]')?.textContent,
+              ).toContain("Queue before the other client changes policy");
+            } else
+              await vi.waitFor(() => {
+                const queued = wsRequests.find(
+                  (body) =>
+                    body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+                    body.type === "thread.turn.start",
+                );
+                expect(queued).toMatchObject({ threadId: THREAD_ID });
+                expect(queued).not.toHaveProperty("subagentLimits");
+                expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.subagentLimits).toEqual({
+                  codex: 9,
+                  claude: 8,
+                });
+              });
+          } finally {
+            await mounted.cleanup();
+          }
+        },
+      );
+      it.each([
+        { change: "account", afterAck: false },
+        { change: "thread", afterAck: false },
+        { change: "unmount", afterAck: false },
+        { change: "account", afterAck: true },
+        { change: "thread", afterAck: true },
+        { change: "unmount", afterAck: true },
+      ])(
+        "releases exact-owner ACK authority after $change changes (after ACK=$afterAck)",
+        async ({ change, afterAck }) => {
+          let resolveAck!: (result: { sequence: number }) => void;
+          const acknowledgement = new Promise<{ sequence: number }>((resolve) => {
+            resolveAck = resolve;
+          });
+          const base = policySnapshot();
+          const secondId = "limit-other-thread" as ThreadId;
+          const mounted = await mountChatView({
+            viewport: DEFAULT_VIEWPORT,
+            snapshot: addThreadToSnapshot(base, secondId),
+            configureFixture: configureLimitFixture,
+            resolveRpc: (body) =>
+              body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? acknowledgement : undefined,
+          });
+          let cleaned = false;
+          try {
+            await openPolicyEditor();
+            await page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }).fill("6");
+            await page.getByRole("button", { name: "Save", exact: true }).click();
+            await vi.waitFor(() =>
+              expect(wsRequests.some((body) => body.type === "thread.meta.update")).toBe(true),
+            );
+            if (afterAck) {
+              resolveAck({ sequence: 3 });
+              await vi.waitFor(() =>
+                expect(
+                  useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.subagentLimits,
+                ).toEqual({ codex: 6, claude: 8 }),
+              );
+            }
+            if (change === "account")
+              useComposerDraftStore
+                .getState()
+                .setModelSelection(THREAD_REF, createModelSelection(alternateAccount, "gpt-5"));
+            else if (change === "thread")
+              await mounted.router.navigate({
+                to: "/$environmentId/$threadId",
+                params: { environmentId: LOCAL_ENVIRONMENT_ID, threadId: secondId },
+              });
+            else {
+              await mounted.cleanup();
+              cleaned = true;
+            }
+            await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull());
+            resolveAck({ sequence: 3 });
+            await waitForLayout();
+            await vi.waitFor(() => {
+              expect(
+                useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.subagentLimits,
+              ).toBeUndefined();
+              expect(
+                useComposerDraftStore.getState().getComposerDraft(threadRefFor(secondId))
+                  ?.subagentLimits,
+              ).toBeUndefined();
+            });
+          } finally {
+            resolveAck({ sequence: 3 });
+            if (!cleaned) await mounted.cleanup();
+          }
+        },
+      );
+    });
+
     it("uses global account and model defaults while an unrelated project is active", async () => {
       const account = ProviderInstanceId.make("codex_standalone_default");
       const base = createSnapshotForTargetUser({
@@ -6476,6 +7385,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
                   driver: ProviderDriverKind.make("codex"),
                   displayName: "Global chat account",
                   defaultModel: "gpt-5",
+                  defaultMaxConcurrentSubagents: 6,
                 },
               },
             },
@@ -6491,6 +7401,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         expect(useComposerDraftStore.getState().getDraftSession(draftId)?.projectId).toBeNull();
         expect(useComposerDraftStore.getState().getComposerDraft(draftId)).toMatchObject({
           activeProvider: account,
+          subagentLimits: { codex: 6 },
           modelSelectionByProvider: { [account]: { instanceId: account, model: "gpt-5" } },
         });
         expect(
@@ -6506,7 +7417,20 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         viewport: DEFAULT_VIEWPORT,
         snapshot: createProjectlessSnapshot(),
         initialPath: "/",
-        configureFixture: configureStandaloneShortcut,
+        configureFixture: (next) => {
+          configureStandaloneShortcut(next);
+          next.serverConfig = {
+            ...next.serverConfig,
+            providers: next.serverConfig.providers.map((provider) => ({
+              ...provider,
+              runtimeCapabilities: {
+                liveSteer: "unsupported",
+                threadGoals: "unsupported",
+                subagentConcurrency: true,
+              },
+            })),
+          };
+        },
         resolveRpc: (body) =>
           body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
       });
@@ -6517,6 +7441,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         );
         const first = draftIdFromPath(mounted.router.state.location.pathname);
         const firstThreadId = draftThreadIdFor(first);
+        useComposerDraftStore.getState().setSubagentLimits(first, { codex: 5 });
         useComposerDraftStore.getState().setPrompt(first, "First independent conversation");
         await waitForStandaloneComposerText("First independent conversation");
         await page
@@ -6558,7 +7483,15 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           expect(request).toMatchObject({
             threadId: firstThreadId,
             runtimeMode: "approval-required",
-            bootstrap: { createThread: { projectId: null, branch: null, worktreePath: null } },
+            subagentLimits: { codex: 5 },
+            bootstrap: {
+              createThread: {
+                projectId: null,
+                branch: null,
+                worktreePath: null,
+                subagentLimits: { codex: 5 },
+              },
+            },
           });
           const bootstrap = (request as { bootstrap?: Record<string, unknown> } | undefined)
             ?.bootstrap;

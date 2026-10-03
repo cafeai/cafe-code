@@ -333,6 +333,7 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
       provider: ProviderDriverKind.make("codex"),
       status: "ready" as const,
       runtimeMode: this.options.runtimeMode,
+      maxConcurrentSubagents: this.options.maxConcurrentSubagents ?? null,
       threadId: this.options.threadId,
       cwd: this.options.cwd,
       ...(this.options.model ? { model: this.options.model } : {}),
@@ -407,6 +408,10 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   );
 
   public readonly closeImpl = vi.fn(() => Promise.resolve(undefined));
+  public readonly closeIfIdleImpl = vi.fn(() => Promise.resolve(true));
+  closeIfIdle = Effect.promise(() => this.closeIfIdleImpl()).pipe(
+    Effect.tap((idle) => (idle ? this.close : Effect.void)),
+  );
 
   /** Test-only hook that runs after the provider interrupt promise ACKs. */
   public afterInterruptAcknowledged: Effect.Effect<void> | undefined;
@@ -515,11 +520,135 @@ function makeRuntimeFactory() {
 
   return {
     factory,
+    runtimes,
     get lastRuntime(): FakeCodexRuntime | undefined {
       return runtimes.at(-1);
     },
   };
 }
+
+function makeConcurrencyTestLayer(
+  factory: ReturnType<typeof makeRuntimeFactory>,
+  instanceLimit?: number,
+) {
+  return Layer.effect(
+    CodexAdapter,
+    makeCodexAdapter(
+      decodeCodexSettings({
+        ...(instanceLimit !== undefined ? { maxConcurrentSubagents: instanceLimit } : {}),
+      }),
+      { makeRuntime: factory.factory, getSubagentConcurrencySupport: () => true },
+    ),
+  ).pipe(
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(ServerSettingsService.layerTest()),
+    Layer.provideMerge(providerSessionDirectoryTestLayer),
+    Layer.provideMerge(NodeServices.layer),
+  );
+}
+
+it.effect(
+  "keeps Codex chat overrides isolated and preserves configured evidence across fork/resume",
+  () => {
+    const factory = makeRuntimeFactory();
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const one = yield* adapter.startSession({
+        threadId: asThreadId("limit-one"),
+        runtimeMode: "full-access",
+        maxConcurrentSubagents: 1,
+      });
+      const two = yield* adapter.startSession({
+        threadId: asThreadId("limit-two"),
+        runtimeMode: "full-access",
+        maxConcurrentSubagents: 64,
+      });
+      const inherited = yield* adapter.startSession({
+        threadId: asThreadId("limit-inherited"),
+        runtimeMode: "full-access",
+        maxConcurrentSubagents: null,
+      });
+      assert.equal(one.maxConcurrentSubagents, 1);
+      assert.equal(two.maxConcurrentSubagents, 64);
+      assert.equal(inherited.maxConcurrentSubagents, 12);
+      assert.deepEqual(
+        factory.runtimes.map((runtime) => runtime.options.maxConcurrentSubagents),
+        [1, 64, 12],
+      );
+      const fork = yield* adapter.forkSession!({
+        operationId: "limit-fork",
+        sourceThreadId: one.threadId,
+        targetThreadId: asThreadId("limit-forked"),
+        title: "Fork",
+      });
+      assert.equal(fork.maxConcurrentSubagents, 1);
+      yield* adapter.stopSession(one.threadId);
+      const resumed = yield* adapter.startSession({
+        threadId: one.threadId,
+        runtimeMode: "full-access",
+        resumeCursor: fork.resumeCursor,
+        maxConcurrentSubagents: fork.maxConcurrentSubagents,
+      });
+      assert.equal(resumed.maxConcurrentSubagents, 1);
+      assert.equal(factory.lastRuntime?.options.maxConcurrentSubagents, 1);
+    }).pipe(Effect.provide(makeConcurrencyTestLayer(factory, 12)));
+  },
+);
+
+it.effect(
+  "guarded Codex reconfiguration retains active/uncertain native work and validates before teardown",
+  () => {
+    const factory = makeRuntimeFactory();
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const session = yield* adapter.startSession({
+        threadId: asThreadId("limit-guard"),
+        runtimeMode: "full-access",
+        maxConcurrentSubagents: 8,
+      });
+      const original = factory.lastRuntime!;
+      original.closeIfIdleImpl.mockResolvedValue(false);
+      const denied = yield* adapter
+        .startSession({
+          threadId: session.threadId,
+          runtimeMode: "full-access",
+          maxConcurrentSubagents: 4,
+          requireIdleForSubagentLimitChange: true,
+        })
+        .pipe(Effect.result);
+      assert.equal(denied._tag, "Failure");
+      if (denied._tag === "Failure")
+        assert.equal(
+          "remoteErrorTag" in denied.failure ? denied.failure.remoteErrorTag : null,
+          "subagent-concurrency-active",
+        );
+      assert.equal(original.closeImpl.mock.calls.length, 0);
+      assert.equal(factory.runtimes.length, 1);
+      for (const limit of [0, 65, 1.5, NaN, Infinity]) {
+        const invalid = yield* adapter
+          .startSession({
+            threadId: session.threadId,
+            runtimeMode: "full-access",
+            maxConcurrentSubagents: limit,
+          })
+          .pipe(Effect.result);
+        assert.equal(invalid._tag, "Failure");
+      }
+      assert.equal(original.closeImpl.mock.calls.length, 0);
+      original.closeIfIdleImpl.mockResolvedValue(true);
+      const restarted = yield* adapter.startSession({
+        threadId: session.threadId,
+        runtimeMode: "full-access",
+        maxConcurrentSubagents: null,
+        resumeCursor: session.resumeCursor,
+        requireIdleForSubagentLimitChange: true,
+      });
+      assert.equal(restarted.maxConcurrentSubagents, null);
+      assert.equal(factory.lastRuntime?.options.maxConcurrentSubagents, undefined);
+      assert.deepEqual(factory.lastRuntime?.options.resumeCursor, session.resumeCursor);
+    }).pipe(Effect.provide(makeConcurrencyTestLayer(factory)));
+  },
+);
 
 function makeScopedRuntimeFactory(options?: { readonly failConstruction?: boolean }) {
   const runtimes: Array<FakeCodexRuntime> = [];
@@ -1281,6 +1410,72 @@ function startLifecycleRuntime() {
 }
 
 lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
+  it.effect(
+    "publishes authoritative resumed child terminal and bounded native rename without replaying a start",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* CodexAdapter;
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          runtimeMode: "full-access",
+          resumeCursor: { threadId: "resumed-native-root" },
+        });
+        const runtime = lifecycleRuntimeFactory.lastRuntime;
+        assert.ok(runtime);
+        assert.deepEqual(runtime.options.resumeCursor, { threadId: "resumed-native-root" });
+        const events = yield* Stream.take(adapter.streamEvents, 2).pipe(
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        // These are the two exact canonical edges emitted by bounded native
+        // child metadata reconciliation, not synthesized activity from age.
+        for (const [index, method, payload] of [
+          [
+            0,
+            "codex.subagent/threadStatusChanged",
+            { threadId: "resumed-exact-child", status: { type: "idle" } },
+          ],
+          [
+            1,
+            "codex.subagent/threadNameUpdated",
+            { threadId: "resumed-exact-child", threadName: "Latest native child name" },
+          ],
+        ] as const)
+          yield* runtime.emit({
+            id: asEventId(`resumed-child-reconciliation-${index}`),
+            kind: "notification",
+            provider: ProviderDriverKind.make("codex"),
+            threadId: asThreadId("thread-1"),
+            createdAt: `2026-10-03T00:00:0${index}.000Z`,
+            turnId: asTurnId("resumed-original-turn"),
+            method,
+            payload,
+          });
+        const result = Array.from(yield* Fiber.join(events));
+        assert.deepEqual(
+          result.map((event) => event.type),
+          ["task.completed", "task.progress"],
+        );
+        for (const event of result) {
+          assert.equal(event.turnId, "resumed-original-turn");
+          assert.equal(
+            "taskId" in event.payload ? event.payload.taskId : undefined,
+            "resumed-exact-child",
+          );
+          assert.equal(
+            "subagent" in event.payload ? event.payload.subagent?.status : undefined,
+            "completed",
+          );
+        }
+        const renamed = result[1]!;
+        assert.equal(
+          "subagent" in renamed.payload ? renamed.payload.subagent?.label : undefined,
+          "Latest native child name",
+        );
+      }),
+  );
+
   it.effect("maps private interaction lifecycle without raw schema or answer payloads", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
@@ -2520,6 +2715,87 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         startedAt: "2026-01-01T00:00:00.000Z",
       });
     }),
+  );
+
+  it.effect(
+    "keeps renamed terminal child metadata fresh without replay reopening, then admits real reuse",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 5)).pipe(
+          Effect.forkChild,
+        );
+        const emit = (index: number, method: string, payload: unknown) =>
+          runtime.emit({
+            id: asEventId(`child-refresh-${index}`),
+            kind: "notification",
+            provider: ProviderDriverKind.make("codex"),
+            threadId: asThreadId("thread-1"),
+            turnId: asTurnId("parent-refresh"),
+            createdAt: `2026-10-03T00:00:0${index}.000Z`,
+            method,
+            payload,
+          });
+        yield* emit(0, "item/started", {
+          startedAtMs: 1_791_072_000_000,
+          threadId: "native-parent",
+          turnId: "parent-refresh",
+          item: {
+            type: "subAgentActivity",
+            id: "started-0",
+            kind: "started",
+            agentThreadId: "renamed-child",
+            agentPath: "workers/original",
+          },
+        });
+        // This is also exactly the canonical notification emitted after a safe,
+        // unchanged native thread/read idle snapshot (no elapsed-time inference).
+        yield* emit(1, "codex.subagent/threadStatusChanged", {
+          threadId: "renamed-child",
+          status: { type: "idle" },
+        });
+        yield* emit(2, "codex.subagent/threadNameUpdated", {
+          threadId: "renamed-child",
+          threadName: "Updated child name",
+        });
+        yield* emit(3, "codex.subagent/itemCompleted", {
+          completedAtMs: 1_791_072_003_000,
+          threadId: "renamed-child",
+          turnId: "completed-native-turn",
+          item: {
+            type: "webSearch",
+            id: "late-child-search",
+            query: "synthetic query",
+            action: null,
+          },
+        });
+        yield* emit(4, "item/started", {
+          startedAtMs: Date.parse("2026-10-03T00:00:04.000Z"),
+          threadId: "native-parent",
+          turnId: "parent-refresh",
+          item: {
+            type: "subAgentActivity",
+            id: "started-4",
+            kind: "started",
+            agentThreadId: "renamed-child",
+            agentPath: "workers/updated",
+          },
+        });
+        const events = Array.from(yield* Fiber.join(eventsFiber));
+        assert.deepEqual(
+          events.map((event) => event.type),
+          ["task.started", "task.completed", "task.progress", "task.progress", "task.started"],
+        );
+        const presentations = events.map((event) =>
+          "subagent" in event.payload ? event.payload.subagent : undefined,
+        );
+        assert.equal(presentations[2]?.label, "Updated child name");
+        assert.equal(presentations[2]?.status, "completed");
+        assert.equal(presentations[3]?.label, "Updated child name");
+        assert.equal(presentations[3]?.status, "completed");
+        assert.equal(presentations[4]?.status, "active");
+        assert.equal(presentations[4]?.startedAt, "2026-10-03T00:00:04.000Z");
+      }),
   );
 
   it.effect("bounds large turn diff updates before they enter the canonical runtime stream", () =>

@@ -60,6 +60,20 @@ export interface CodexAppServerPatchedProtocolOptions {
   readonly onNotification?: (
     notification: CodexAppServerIncomingNotification,
   ) => Effect.Effect<void, never>;
+  /**
+   * Content-free synchronous receipt hook, after wire admission and before
+   * decoded logging/queue publication. The paired data hooks cover earlier raw
+   * logging and unparsed lines. It must only update bounded in-memory state;
+   * never perform I/O or dispatch user/provider work on the response reader.
+   */
+  readonly onNotificationReceived?: () => void;
+  /**
+   * Paired, content-free synchronous ingress hooks. Receipt covers an entire
+   * pulled byte batch before decoder/logging awaits; processed reports whether
+   * an incomplete frame remains. Callbacks only update bounded local state.
+   */
+  readonly onIncomingDataReceived?: () => void;
+  readonly onIncomingDataProcessed?: (hasIncompleteFrame: boolean) => void;
   readonly onRequest?: (
     request: CodexAppServerIncomingRequest,
   ) => Effect.Effect<unknown, CodexError.CodexAppServerError>;
@@ -509,6 +523,11 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
       }).pipe(
         Effect.flatMap(() => decodeWireMessage(line)),
         Effect.tap((decoded) =>
+          Effect.sync(() => {
+            if (isIncomingNotification(decoded)) options.onNotificationReceived?.();
+          }),
+        ),
+        Effect.tap((decoded) =>
           logProtocol({
             direction: "incoming",
             stage: "decoded",
@@ -530,10 +549,13 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
       );
     };
 
-    yield* options.stdio.stdin.pipe(
-      Stream.decodeText(),
-      Stream.runForEach((chunk) =>
-        Ref.modify<IncomingLineRemainder, IncomingChunkSplit>(
+    const incomingDecoder = new TextDecoder();
+    let lastIncomingByte: number | undefined;
+    const handleIncomingBuffer = (buffer: Uint8Array) =>
+      Effect.suspend(() => {
+        if (buffer.length > 0) lastIncomingByte = buffer[buffer.length - 1];
+        const chunk = incomingDecoder.decode(buffer, { stream: true });
+        return Ref.modify<IncomingLineRemainder, IncomingChunkSplit>(
           remainder,
           (current): readonly [IncomingChunkSplit, IncomingLineRemainder] => {
             const split = splitIncomingChunk(current, chunk, maxIncomingLineBytes);
@@ -552,6 +574,32 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
             split.ok
               ? Effect.forEach(split.lines, handleLine, { discard: true })
               : Effect.fail(split.error),
+          ),
+        );
+      });
+    yield* options.stdio.stdin.pipe(
+      // runForEach handles a pulled batch sequentially. A later child-start
+      // chunk in that already-observed batch must not hide behind an earlier
+      // raw logger await. Account the complete batch synchronously, then keep
+      // one processed-callback owner until every buffer has been handled.
+      // Decode and bound each buffer in turn: joining the entire batch first
+      // would allocate a combined string before the existing line-size guard.
+      Stream.mapArray((buffers) => {
+        options.onIncomingDataReceived?.();
+        return buffers;
+      }),
+      Stream.runForEachArray((buffers) =>
+        Effect.forEach(buffers, handleIncomingBuffer, { discard: true }).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              // A trailing partial UTF-8 sequence may yield no decoded text.
+              // The last byte boundary keeps that unresolved frame fail-closed
+              // until a later complete newline, without exposing its contents.
+              options.onIncomingDataProcessed?.(
+                Ref.getUnsafe(remainder).text.length > 0 ||
+                  (lastIncomingByte !== undefined && lastIncomingByte !== 0x0a),
+              );
+            }),
           ),
         ),
       ),

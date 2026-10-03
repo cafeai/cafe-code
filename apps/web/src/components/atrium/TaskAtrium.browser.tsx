@@ -153,6 +153,12 @@ const atriumHarness = vi.hoisted(() => {
     cacheSavings: 0,
     raw: null,
   };
+  const subagentDetailReads = vi.fn(async (_request: unknown) => ({
+    provider: "claudeAgent",
+    messages: [{ key: "public-report", role: "assistant", text: "Latest worker report" }],
+    gaps: [],
+    truncated: false,
+  }));
   const loadedUsage = {
     cost: 2.5,
     tokens: 3_539_966_200,
@@ -229,6 +235,7 @@ const atriumHarness = vi.hoisted(() => {
       dismissedTaskAtriumErrors: [],
     },
     useStore,
+    subagentDetailReads,
   };
 });
 
@@ -257,6 +264,14 @@ vi.mock("../../store", () => ({
   selectAnyThreadRunning: () => true,
   useStore: atriumHarness.useStore,
 }));
+
+vi.mock("../../environmentApi", () => ({
+  readEnvironmentApi: (environmentId: string) =>
+    environmentId === "env-1"
+      ? { orchestration: { getThreadTurnSubagentDetail: atriumHarness.subagentDetailReads } }
+      : undefined,
+}));
+vi.mock("../../localApi", () => ({ readLocalApi: () => undefined }));
 
 vi.mock("../../environments/runtime/service", () => ({
   retainThreadDetailSubscription: atriumHarness.retainThreadDetailSubscription,
@@ -610,6 +625,63 @@ describe("TaskAtriumBoard", () => {
     }
   });
 
+  it("opens exact worker activity and refreshes terminal names without resurrecting stale work", async () => {
+    const restore = installStructuredSubagents(1);
+    atriumHarness.subagentDetailReads.mockClear();
+    const { host, screen } = await renderInTheme("dark");
+    try {
+      await page
+        .getByRole("button", { name: "View Claude worker 1 activity", exact: true })
+        .click();
+      await expect
+        .element(page.getByRole("region", { name: "Subagent detail: Claude worker 1" }))
+        .toBeVisible();
+      await expect.element(page.getByText("Latest worker report", { exact: true })).toBeVisible();
+      expect(atriumHarness.subagentDetailReads).toHaveBeenCalledExactlyOnceWith({
+        threadId: "thread-1",
+        turnId: "turn-1",
+        subagentId: "claude-task-1",
+      });
+      const environment = atriumHarness.useStore.getState().environmentStateById["env-1"]!;
+      const previous = environment.activityByThreadId["thread-1"] as unknown as Record<
+        string,
+        Record<string, unknown>
+      >;
+      const previousIds = environment.activityIdsByThreadId["thread-1"]!;
+      const terminal = {
+        ...previous["subagent-1"]!,
+        id: "terminal-worker",
+        kind: "task.completed",
+        createdAt: new Date().toISOString(),
+        payload: {
+          taskId: "claude-task-1",
+          status: "completed",
+          subagent: { threadId: "claude-task-1", label: "Finished audit", status: "completed" },
+        },
+      };
+      environment.activityByThreadId["thread-1"] = {
+        ...previous,
+        "terminal-worker": terminal,
+      } as unknown as (typeof environment.activityByThreadId)["thread-1"];
+      environment.activityIdsByThreadId["thread-1"] = [...previousIds, "terminal-worker"];
+      await expect
+        .element(page.getByRole("region", { name: "Subagent detail: Finished audit" }))
+        .toBeVisible();
+      await vi.waitFor(() => expect(atriumHarness.subagentDetailReads).toHaveBeenCalledTimes(2));
+      await page.getByRole("button", { name: "Back to conversation", exact: true }).click();
+      await expect
+        .element(page.getByRole("button", { name: "View Finished audit activity", exact: true }))
+        .toBeVisible();
+      const row = host.querySelector('[data-cafe-atrium-subagent-row="true"]');
+      expect(row?.textContent).toContain("Done");
+      expect(row?.textContent).not.toContain("Working");
+    } finally {
+      restore();
+      await screen.unmount();
+      host.remove();
+    }
+  });
+
   it("collapses only completed subagents and expands them without navigating", async () => {
     const statuses: readonly FixtureSubagentStatus[] = [
       "active",
@@ -892,8 +964,100 @@ async function mountOverlay() {
 }
 
 const overlay = () => document.querySelector('[data-cafe-task-atrium-overlay="true"]');
+const subagentPopup = () =>
+  document.querySelector<HTMLElement>('[data-cafe-atrium-subagent-popup="true"]');
 
 describe("TaskAtriumOverlay", () => {
+  it.each([
+    { platform: "Win32", scale: 0.8, inset: 40 },
+    { platform: "Win32", scale: 1.3, inset: 40 },
+    { platform: "MacIntel", scale: 1, inset: 0 },
+    { platform: "Linux x86_64", scale: 1, inset: 0 },
+  ])(
+    "fits portalled worker detail into the usable short window ($platform, scale=$scale)",
+    async ({ platform, scale, inset }) => {
+      const root = document.documentElement;
+      const originalFontSize = root.style.fontSize;
+      const originalWco = root.classList.contains("wco");
+      const originalViewport = { width: window.innerWidth, height: window.innerHeight };
+      const platformSpy = vi.spyOn(navigator, "platform", "get").mockReturnValue(platform);
+      const restoreSubagents = installStructuredSubagents(1);
+      root.style.fontSize = `${16 * scale}px`;
+      root.classList.add("wco");
+      await page.viewport(640, 720);
+      useTaskAtriumStore.getState().setOpen(true);
+      const { host, screen } = await mountOverlay();
+      try {
+        await page
+          .getByRole("button", { name: "View Claude worker 1 activity", exact: true })
+          .click();
+        await vi.waitFor(() => {
+          expect(
+            page.getByRole("button", { name: "Back to conversation" }).element(),
+          ).toBeVisible();
+        });
+        await page.viewport(640, 220);
+        await vi.waitFor(() => {
+          const detail = subagentPopup();
+          expect(detail).not.toBeNull();
+          if (!detail) throw new Error("Portalled worker detail did not mount");
+          const bounds = detail.getBoundingClientRect();
+          const usableHeight = window.innerHeight - inset;
+          const expectedHeight = Math.min(
+            window.innerHeight * 0.85,
+            60 * 16 * scale,
+            inset > 0 ? usableHeight - 2 * 16 * scale : Infinity,
+          );
+          expect(detail.className.includes("wco:[--cafe-atrium-detail-titlebar-inset")).toBe(
+            inset > 0,
+          );
+          expect(bounds.height).toBeCloseTo(expectedHeight, 1);
+          expect(bounds.top + bounds.height / 2).toBeCloseTo(inset + usableHeight / 2, 1);
+          expect(bounds.left + bounds.width / 2).toBeCloseTo(window.innerWidth / 2, 1);
+          expect(bounds.top).toBeGreaterThanOrEqual(inset);
+          expect(bounds.bottom).toBeLessThanOrEqual(window.innerHeight);
+          expect(bounds.width).toBeLessThanOrEqual(window.innerWidth);
+          expect(detail.getAttribute("data-cafe-window-no-drag")).toBe("true");
+          expect(getComputedStyle(detail).getPropertyValue("-webkit-app-region")).toBe("no-drag");
+          const back = page.getByRole("button", { name: "Back to conversation" }).element();
+          expect(back.getBoundingClientRect().top).toBeGreaterThanOrEqual(inset);
+          expect(back.getBoundingClientRect().bottom).toBeLessThanOrEqual(bounds.bottom);
+          // App-region is not inherited as a computed CSS value. Bind the
+          // interactive child to the exact explicitly non-draggable surface.
+          expect(back.closest('[data-cafe-window-no-drag="true"]')).toBe(detail);
+        });
+
+        // Fullscreen changes native-controls visibility without remounting
+        // either dialog. The child must immediately regain the base geometry.
+        const samePopup = subagentPopup();
+        root.classList.remove("wco");
+        await vi.waitFor(() => {
+          expect(subagentPopup()).toBe(samePopup);
+          const bounds = subagentPopup()!.getBoundingClientRect();
+          expect(bounds.height).toBeCloseTo(window.innerHeight * 0.85, 1);
+          expect(bounds.top + bounds.height / 2).toBeCloseTo(window.innerHeight / 2, 1);
+        });
+        root.classList.add("wco");
+        await vi.waitFor(() => {
+          const bounds = subagentPopup()!.getBoundingClientRect();
+          expect(bounds.top + bounds.height / 2).toBeCloseTo((window.innerHeight + inset) / 2, 1);
+        });
+        await page.getByRole("button", { name: "Back to conversation" }).click();
+        await vi.waitFor(() => expect(subagentPopup()).toBeNull());
+        expect(useTaskAtriumStore.getState().open).toBe(true);
+      } finally {
+        useTaskAtriumStore.getState().setOpen(false);
+        restoreSubagents();
+        await screen.unmount();
+        host.remove();
+        root.style.fontSize = originalFontSize;
+        root.classList.toggle("wco", originalWco);
+        platformSpy.mockRestore();
+        await page.viewport(originalViewport.width, originalViewport.height);
+      }
+    },
+  );
+
   it.each([
     { platform: "Win32", scale: 0.8, inset: 40 },
     { platform: "Win32", scale: 1.3, inset: 40 },

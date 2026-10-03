@@ -974,6 +974,7 @@ describe("UsageStatsPanel", () => {
   );
 
   it("filters usage and cost figures immediately while retaining the full Activity calendar", async () => {
+    await page.viewport(1400, 1000);
     const usage = createRangeUsageDetail();
     usageHarness.reset(usage, usage);
     mounted = await render(<UsageStatsPanel />);
@@ -992,6 +993,19 @@ describe("UsageStatsPanel", () => {
     ).not.toBe(0);
     const heatmap = requiredElement('[role="img"][aria-label^="Daily generating time"]');
     expect(heatmap.getAttribute("aria-label")).toContain("from 2026-04-22 through 2026-07-21");
+    // Verify the actual Settings opt-in, not only the shared heatmap fixture:
+    // a short lifetime calendar uses larger capped squares, centers within the
+    // available card and keeps its legend attached to that same calendar width.
+    await vi.waitFor(() => {
+      const firstCell = requiredElement('[data-activity-day="2026-04-22"]');
+      const row = heatmap.parentElement!.getBoundingClientRect();
+      const scroller = requiredElement('[data-activity-heatmap-scroll="true"]');
+      const viewport = scroller.getBoundingClientRect();
+      const legend = requiredElement('[data-activity-heatmap-legend="true"]');
+      expect(firstCell.getBoundingClientRect().width).toBeCloseTo(24, 1);
+      expect(row.left - viewport.left).toBeCloseTo(viewport.right - row.right, 1);
+      expect(legend.getBoundingClientRect().right).toBeCloseTo(row.right, 1);
+    });
     const activityColors = usage.days.map(({ day }) => ({
       day,
       cell: requiredElement(`[data-activity-day="${day}"][data-activity-in-range="true"]`),
@@ -1143,7 +1157,7 @@ describe("UsageStatsPanel", () => {
     expect(costQualityValue("Priced")).toBe("0.0%");
     expect(costQualityValue("Unpriced")).toBe("100.0%");
     expect(
-      requiredElement('[aria-label="Token usage by provider and model"]').textContent,
+      requiredElement('[aria-label="Output token usage by provider and model"]').textContent,
     ).toContain("550,000");
     expect(document.body.textContent).not.toContain("grok-legacy-model");
     expect(activeActivityCellCount()).toBe(8);
@@ -1406,7 +1420,7 @@ describe("UsageStatsPanel", () => {
   it("renders stored provider and model token attribution with unattributed usage separated", async () => {
     mounted = await render(<UsageStatsPanel />);
 
-    await expect.element(page.getByText("Tokens by provider and model")).toBeVisible();
+    await expect.element(page.getByText("Output tokens by provider and model")).toBeVisible();
     await expect.element(page.getByText("200,000 attributed")).toBeVisible();
     // Provider and model names now appear in the Cost section as well, so these
     // match more than once. Both are legitimate renders and the assertion is
@@ -1426,6 +1440,97 @@ describe("UsageStatsPanel", () => {
     expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(1);
     expect(usageHarness.subscribeConnectionOpened).toHaveBeenCalledTimes(1);
     expect(usageHarness.subscribeUsageStats).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps input-only Fable visible without assigning its processed tokens to generated output", async () => {
+    const codex = ProviderDriverKind.make("codex");
+    const claude = ProviderDriverKind.make("claudeAgent");
+    const rows: UsageStatsTokenBreakdownEntry[] = [
+      {
+        provider: codex,
+        model: "gpt-6-astra",
+        inputTokens: 1_453_045_932,
+        outputTokens: 5_037_075,
+      },
+      {
+        provider: codex,
+        model: "gpt-6.1-sol",
+        inputTokens: 1_174_928_287,
+        outputTokens: 4_975_605,
+      },
+      { provider: claude, model: "claude-fable-5-1", inputTokens: 2_853_296, outputTokens: 0 },
+    ].map((row) => ({
+      ...row,
+      cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      reasoningOutputTokens: 0,
+    }));
+    const today: UsageStatsDay = {
+      ...emptyTotals,
+      day: "2026-07-21",
+      inputTokens: 2_630_827_515,
+      outputTokens: 10_012_680,
+    };
+    const usage: UsageStatsGetResult = {
+      ...snapshot,
+      totals: today,
+      today,
+      days: [today],
+      tokenBreakdown: rows,
+      tokenBreakdownDays: rows.map((row) => ({ ...row, day: today.day })),
+    };
+    usageHarness.reset(usage, usage);
+    mounted = await render(<UsageStatsPanel />);
+    await vi.waitFor(() => {
+      expect(overviewValue("Tokens generated")).toBe("10,012,680");
+      expect(displayedRawCount("processed")).toBe(2_640_840_195);
+    });
+    await expect.element(page.getByText("Output tokens by provider and model")).toBeVisible();
+    await expect
+      .element(
+        page.getByText("Generated output only; processed-token totals above also include input."),
+      )
+      .toBeVisible();
+    for (const range of ["7 days", "90 days", "All", "30 days"] as const) {
+      await page.getByRole("button", { name: range, exact: true }).click();
+      const provider = requiredElement('[data-usage-output-provider="claudeAgent"]');
+      expect(provider.textContent).toContain("Claude");
+      expect(provider.textContent).toContain("claude-fable-5-1");
+      expect(provider.textContent).toContain("No output recorded");
+      expect(provider.textContent).toContain("2,853,296 processed tokens");
+      expect(modelCostRows().find((row) => row.model === "claude-fable-5-1")?.tokens).toBe(
+        "2,853,296",
+      );
+      expect(page.getByText("10,012,680 attributed", { exact: true }).element()).toBeVisible();
+      expect(overviewValue("Tokens generated")).toBe("10,012,680");
+    }
+    expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(1);
+
+    // The same atomic detailed response can later include validated output.
+    // It replaces the input-only presentation without treating input as output,
+    // inventing a provider call or retaining a stale zero-output explanation.
+    const completedRows = rows.map((row) =>
+      row.provider === claude ? { ...row, outputTokens: 200 } : row,
+    );
+    const completedToday = { ...today, outputTokens: 10_012_880 };
+    usageHarness.refreshDetail({
+      ...usage,
+      totals: completedToday,
+      today: completedToday,
+      days: [completedToday],
+      tokenBreakdown: completedRows,
+      tokenBreakdownDays: completedRows.map((row) => ({ ...row, day: today.day })),
+    });
+    await vi.waitFor(() => {
+      const provider = requiredElement('[data-usage-output-provider="claudeAgent"]');
+      expect(provider.textContent).not.toContain("No output recorded");
+      expect(provider.textContent).not.toContain("processed tokens");
+      expect(provider.textContent).toContain("200");
+      expect(overviewValue("Tokens generated")).toBe("10,012,880");
+      expect(modelCostRows().find((row) => row.model === "claude-fable-5-1")?.tokens).toBe(
+        "2,853,496",
+      );
+    });
   });
 
   it("explains an omitted effective model while retaining its exact counted and unpriced usage", async () => {
@@ -1472,7 +1577,7 @@ describe("UsageStatsPanel", () => {
 
     const costLabel = requiredElement("[data-usage-cost-breakdown] tbody span[title]");
     const tokenLabel = requiredElement(
-      '[aria-label="Token usage by provider and model"] span[title]',
+      '[aria-label="Output token usage by provider and model"] span[title]',
     );
     const explanation =
       "The provider reported token usage without identifying the effective model. Tokens remain counted; cost is unpriced unless you set a custom rate.";
@@ -1504,7 +1609,8 @@ describe("UsageStatsPanel", () => {
         explanation,
       );
       expect(
-        requiredElement('[aria-label="Token usage by provider and model"] span[title]').title,
+        requiredElement('[aria-label="Output token usage by provider and model"] span[title]')
+          .title,
       ).toBe(explanation);
     }
     expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(1);
@@ -1526,9 +1632,7 @@ describe("UsageStatsPanel", () => {
 
     await expect
       .element(
-        page.getByText(
-          "Provider and model attribution will appear after output tokens are recorded.",
-        ),
+        page.getByText("Provider and model attribution will appear after token usage is recorded."),
       )
       .toBeVisible();
   });

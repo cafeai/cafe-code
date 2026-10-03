@@ -112,6 +112,7 @@ import {
 import { isCodexRootAgentPath, normalizeCodexAgentPath } from "./CodexSubagentPath.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import type { CodexShadowHomeError } from "../Drivers/CodexHomeLayout.ts";
+import { resolveConfiguredSubagentLimit } from "../Drivers/SubagentConcurrency.ts";
 const isCodexAppServerProcessExitedError = Schema.is(CodexErrors.CodexAppServerProcessExitedError);
 const CODEX_SUBAGENT_HISTORY_READ_TIMEOUT_MS = 15_000;
 const isCodexAppServerTransportError = Schema.is(CodexErrors.CodexAppServerTransportError);
@@ -166,6 +167,8 @@ class CodexTransportPolicyFileError extends Data.TaggedError("CodexTransportPoli
 }
 
 export interface CodexAdapterLiveOptions {
+  /** Cached owning-driver status only; this getter must never launch a probe. */
+  readonly getSubagentConcurrencySupport?: () => boolean;
   readonly instanceId?: ProviderInstanceId;
   readonly environment?: NodeJS.ProcessEnv;
   readonly prepareRuntimeHome?: Effect.Effect<void, CodexShadowHomeError>;
@@ -2015,11 +2018,19 @@ function enrichCodexSubagentPresentations(
       previous?.status === "completed" ||
       previous?.status === "failed" ||
       previous?.status === "stopped";
-    const restarting = event.type === "task.started" && previousTerminal;
+    // thread/started can be a loaded idle snapshot, not a new child turn. It
+    // must not reopen an already terminal task. A concrete active start still
+    // reopens it, and metadata-only progress continues updating its name.
+    const passiveSnapshot =
+      event.type === "task.started" && previousTerminal && incoming.status === "waiting";
+    const restarting = event.type === "task.started" && previousTerminal && !passiveSnapshot;
     const merged: RuntimeSubagentPresentation = {
       ...previous,
       ...incoming,
       threadId: incoming.threadId,
+      ...(previousTerminal && (event.type === "task.progress" || passiveSnapshot)
+        ? { status: previous.status }
+        : {}),
       // Child item/status notifications often omit display metadata. Repeat
       // the last complete descriptor on every canonical edge so bounded
       // projection snapshots remain self-describing after the spawn activity
@@ -2041,9 +2052,11 @@ function enrichCodexSubagentPresentations(
     }
     return {
       ...event,
+      ...(passiveSnapshot ? { type: "task.progress" as const } : {}),
       payload: {
         ...event.payload,
         subagent: merged,
+        ...(passiveSnapshot ? { description: "Child metadata refreshed" } : {}),
       },
     } as ProviderRuntimeEvent;
   });
@@ -4391,6 +4404,35 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         }
 
         const existing = sessions.get(input.threadId);
+        const maxConcurrentSubagents = yield* Effect.try({
+          try: () =>
+            resolveConfiguredSubagentLimit(
+              input.maxConcurrentSubagents,
+              codexConfig.maxConcurrentSubagents,
+            ),
+          catch: () =>
+            new ProviderAdapterValidationError({
+              provider: PROVIDER,
+              operation: "startSession",
+              issue: "Subagent concurrency must be an integer between 1 and 64.",
+            }),
+        });
+        if (input.requireIdleForSubagentLimitChange) {
+          if (
+            !options?.getSubagentConcurrencySupport?.() ||
+            (existing &&
+              !existing.stopped &&
+              (!existing.runtime.closeIfIdle || !(yield* existing.runtime.closeIfIdle)))
+          ) {
+            return yield* new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "session/reconfigure",
+              remoteErrorTag: "subagent-concurrency-active",
+              detail:
+                "Subagent concurrency cannot change while provider work is active or uncertain.",
+            });
+          }
+        }
         if (existing && !existing.stopped) {
           yield* Effect.suspend(() => stopSessionInternal(existing));
         }
@@ -4454,9 +4496,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ? { additionalDirectories: input.additionalDirectories }
             : {}),
           binaryPath: codexConfig.binaryPath,
-          ...(codexConfig.maxConcurrentSubagents !== undefined
-            ? { maxConcurrentSubagents: codexConfig.maxConcurrentSubagents }
-            : {}),
+          ...(maxConcurrentSubagents !== null ? { maxConcurrentSubagents } : {}),
           ...(options?.environment ? { environment: options.environment } : {}),
           ...(codexConfig.homePath ? { homePath: codexConfig.homePath } : {}),
           ...(isCodexResumeCursorSchema(input.resumeCursor)
@@ -4917,6 +4957,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         provider: PROVIDER,
         providerInstanceId: boundInstanceId,
         runtimeMode: sourceSession.runtimeMode,
+        maxConcurrentSubagents: sourceSession.maxConcurrentSubagents ?? null,
         ...(sourceSession.interactionMode !== undefined
           ? { interactionMode: sourceSession.interactionMode }
           : {}),
@@ -5394,6 +5435,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   return {
     provider: PROVIDER,
     capabilities: {
+      get subagentConcurrency() {
+        return options?.getSubagentConcurrencySupport?.() ?? false;
+      },
       sessionModelSwitch: "in-session",
       liveSteer: "supported",
       manualCompaction: "supported",

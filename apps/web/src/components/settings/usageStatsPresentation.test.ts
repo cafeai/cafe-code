@@ -101,19 +101,101 @@ describe("usageStatsPresentation", () => {
         {
           provider: CLAUDE,
           outputTokens: 75,
-          models: [{ model: "claude-opus", outputTokens: 75 }],
+          processedTokens: 75,
+          models: [{ model: "claude-opus", outputTokens: 75, processedTokens: 75 }],
         },
         {
           provider: CODEX,
           outputTokens: 70,
+          processedTokens: 70,
           models: [
-            { model: "gpt-large", outputTokens: 40 },
-            { model: "gpt-small", outputTokens: 30 },
+            { model: "gpt-large", outputTokens: 40, processedTokens: 40 },
+            { model: "gpt-small", outputTokens: 30, processedTokens: 30 },
           ],
         },
       ],
       attributedOutputTokens: 145,
       unattributedOutputTokens: 55,
+    });
+  });
+
+  it("retains input-only Fable without changing generated-output totals or adding cache twice", () => {
+    const detail = [
+      {
+        provider: CODEX,
+        model: "gpt-6-astra",
+        inputTokens: 1_453_045_932,
+        outputTokens: 5_037_075,
+      },
+      {
+        provider: CODEX,
+        model: "gpt-6.1-sol",
+        inputTokens: 1_174_928_287,
+        outputTokens: 4_975_605,
+      },
+      { provider: CLAUDE, model: "claude-fable-5-1", inputTokens: 2_853_296, outputTokens: 0 },
+    ].map((row) => ({
+      ...row,
+      cachedInputTokens: 1_000_000,
+      cacheWriteInputTokens: 10_000,
+      reasoningOutputTokens: 0,
+    }));
+    const view = buildUsageTokenBreakdownView(detail, 10_012_680);
+    expect(view.attributedOutputTokens).toBe(10_012_680);
+    expect(view.unattributedOutputTokens).toBe(0);
+    expect(view.providers.map((provider) => provider.provider)).toEqual([CODEX, CLAUDE]);
+    expect(view.providers[1]).toEqual({
+      provider: CLAUDE,
+      outputTokens: 0,
+      processedTokens: 2_853_296,
+      models: [{ model: "claude-fable-5-1", outputTokens: 0, processedTokens: 2_853_296 }],
+    });
+    expect(view.providers.reduce((sum, provider) => sum + provider.processedTokens, 0)).toBe(
+      2_640_840_195,
+    );
+    expect(
+      formatUsagePercentage(view.providers[1]!.outputTokens, view.attributedOutputTokens),
+    ).toBe("0%");
+  });
+
+  it("merges input-only duplicates and orders them without fabricating output or unattributed usage", () => {
+    const base = {
+      provider: CLAUDE,
+      inputTokens: 100,
+      cachedInputTokens: 90,
+      cacheWriteInputTokens: 10,
+      outputTokens: 0,
+      reasoningOutputTokens: 0,
+    };
+    const view = buildUsageTokenBreakdownView(
+      [
+        { ...base, model: "small" },
+        { ...base, model: "large", inputTokens: 150 },
+        { ...base, model: "large" },
+        { ...base, model: "empty", inputTokens: 0, cachedInputTokens: 0, cacheWriteInputTokens: 0 },
+        {
+          ...base,
+          model: "invalid",
+          inputTokens: Number.NaN,
+          outputTokens: Number.POSITIVE_INFINITY,
+        },
+      ],
+      0,
+    );
+    expect(view).toEqual({
+      providers: [
+        {
+          provider: CLAUDE,
+          outputTokens: 0,
+          processedTokens: 350,
+          models: [
+            { model: "large", outputTokens: 0, processedTokens: 250 },
+            { model: "small", outputTokens: 0, processedTokens: 100 },
+          ],
+        },
+      ],
+      attributedOutputTokens: 0,
+      unattributedOutputTokens: 0,
     });
   });
 

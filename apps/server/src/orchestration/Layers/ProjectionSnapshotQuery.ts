@@ -48,8 +48,11 @@ import { ProjectionState } from "../../persistence/Services/ProjectionState.ts";
 import { ProjectionThreadActivity } from "../../persistence/Services/ProjectionThreadActivities.ts";
 import { ProjectionThreadMessage } from "../../persistence/Services/ProjectionThreadMessages.ts";
 import { ProjectionThreadProposedPlan } from "../../persistence/Services/ProjectionThreadProposedPlans.ts";
-import { ProjectionThreadSession } from "../../persistence/Services/ProjectionThreadSessions.ts";
-import { ProjectionThread } from "../../persistence/Services/ProjectionThreads.ts";
+import { ProjectionThreadSessionSqlRow } from "../../persistence/Services/ProjectionThreadSessions.ts";
+import {
+  ProjectionThread,
+  ProjectionThreadSqlRow,
+} from "../../persistence/Services/ProjectionThreads.ts";
 import { RepositoryIdentityResolver } from "../../project/Services/RepositoryIdentityResolver.ts";
 import { buildCodexSteerClientCorrelationId } from "../../provider/codexSteerCorrelation.ts";
 import {
@@ -93,11 +96,7 @@ const ProjectionThreadMessageDbRowSchema = ProjectionThreadMessage.mapFields(
 );
 type ProjectionThreadMessageDbRow = Schema.Schema.Type<typeof ProjectionThreadMessageDbRowSchema>;
 const ProjectionThreadProposedPlanDbRowSchema = ProjectionThreadProposedPlan;
-const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
-  Struct.assign({
-    modelSelection: Schema.fromJsonString(ModelSelection),
-  }),
-);
+const ProjectionThreadDbRowSchema = ProjectionThreadSqlRow;
 const ProjectionThreadActivityDbRowSchema = ProjectionThreadActivity.mapFields(
   Struct.assign({
     payload: Schema.fromJsonString(Schema.Unknown),
@@ -109,7 +108,7 @@ const ProjectionThreadDetailActivityDbRowSchema = Schema.Struct({
   /** One metadata-only warning bit shared by every row in a detail result. */
   subagentRetentionTruncated: Schema.Number,
 });
-const ProjectionThreadSessionDbRowSchema = ProjectionThreadSession;
+const ProjectionThreadSessionDbRowSchema = ProjectionThreadSessionSqlRow;
 const ProjectionThreadGoalDbRowSchema = ProviderThreadGoal;
 const ProjectionCheckpointDbRowSchema = ProjectionCheckpoint.mapFields(
   Struct.assign({
@@ -388,6 +387,9 @@ function mapSessionRow(
     providerName: row.providerName,
     ...(row.providerInstanceId !== null ? { providerInstanceId: row.providerInstanceId } : {}),
     runtimeMode: row.runtimeMode,
+    ...(row.maxConcurrentSubagents !== undefined
+      ? { maxConcurrentSubagents: row.maxConcurrentSubagents }
+      : {}),
     activeTurnId: row.activeTurnId,
     lastError: row.lastError,
     updatedAt: row.updatedAt,
@@ -670,6 +672,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           project_id AS "projectId",
           title,
           model_selection_json AS "modelSelection",
+          subagent_limits_json AS "subagentLimits",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
           branch,
@@ -698,6 +701,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           project_id AS "projectId",
           title,
           model_selection_json AS "modelSelection",
+          subagent_limits_json AS "subagentLimits",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
           branch,
@@ -728,6 +732,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           project_id AS "projectId",
           title,
           model_selection_json AS "modelSelection",
+          subagent_limits_json AS "subagentLimits",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
           branch,
@@ -758,6 +763,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           project_id AS "projectId",
           title,
           model_selection_json AS "modelSelection",
+          subagent_limits_json AS "subagentLimits",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
           branch,
@@ -853,6 +859,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           provider_session_id AS "providerSessionId",
           provider_thread_id AS "providerThreadId",
           runtime_mode AS "runtimeMode",
+          max_concurrent_subagents AS "maxConcurrentSubagents",
+          max_concurrent_subagents_known AS "maxConcurrentSubagentsKnown",
           active_turn_id AS "activeTurnId",
           last_error AS "lastError",
           updated_at AS "updatedAt"
@@ -893,6 +901,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sessions.provider_session_id AS "providerSessionId",
           sessions.provider_thread_id AS "providerThreadId",
           sessions.runtime_mode AS "runtimeMode",
+          sessions.max_concurrent_subagents AS "maxConcurrentSubagents",
+          sessions.max_concurrent_subagents_known AS "maxConcurrentSubagentsKnown",
           sessions.active_turn_id AS "activeTurnId",
           sessions.last_error AS "lastError",
           sessions.updated_at AS "updatedAt"
@@ -918,6 +928,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sessions.provider_session_id AS "providerSessionId",
           sessions.provider_thread_id AS "providerThreadId",
           sessions.runtime_mode AS "runtimeMode",
+          sessions.max_concurrent_subagents AS "maxConcurrentSubagents",
+          sessions.max_concurrent_subagents_known AS "maxConcurrentSubagentsKnown",
           sessions.active_turn_id AS "activeTurnId",
           sessions.last_error AS "lastError",
           sessions.updated_at AS "updatedAt"
@@ -943,6 +955,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sessions.provider_session_id AS "providerSessionId",
           sessions.provider_thread_id AS "providerThreadId",
           sessions.runtime_mode AS "runtimeMode",
+          sessions.max_concurrent_subagents AS "maxConcurrentSubagents",
+          sessions.max_concurrent_subagents_known AS "maxConcurrentSubagentsKnown",
           sessions.active_turn_id AS "activeTurnId",
           sessions.last_error AS "lastError",
           sessions.updated_at AS "updatedAt"
@@ -1207,6 +1221,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           project_id AS "projectId",
           title,
           model_selection_json AS "modelSelection",
+          subagent_limits_json AS "subagentLimits",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
           branch,
@@ -2548,6 +2563,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           provider_name AS "providerName",
           provider_instance_id AS "providerInstanceId",
           runtime_mode AS "runtimeMode",
+          max_concurrent_subagents AS "maxConcurrentSubagents",
+          max_concurrent_subagents_known AS "maxConcurrentSubagentsKnown",
           active_turn_id AS "activeTurnId",
           last_error AS "lastError",
           updated_at AS "updatedAt"
@@ -2885,6 +2902,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 projectId: row.projectId,
                 title: row.title,
                 modelSelection: row.modelSelection,
+                ...(row.subagentLimits !== undefined ? { subagentLimits: row.subagentLimits } : {}),
                 runtimeMode: row.runtimeMode,
                 interactionMode: row.interactionMode,
                 branch: row.branch,
@@ -3113,6 +3131,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   projectId: row.projectId,
                   title: row.title,
                   modelSelection: row.modelSelection,
+                  ...(row.subagentLimits !== undefined
+                    ? { subagentLimits: row.subagentLimits }
+                    : {}),
                   runtimeMode: row.runtimeMode,
                   interactionMode: row.interactionMode,
                   branch: row.branch,
@@ -3247,6 +3268,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   projectId: row.projectId,
                   title: row.title,
                   modelSelection: row.modelSelection,
+                  ...(row.subagentLimits !== undefined
+                    ? { subagentLimits: row.subagentLimits }
+                    : {}),
                   runtimeMode: row.runtimeMode,
                   interactionMode: row.interactionMode,
                   branch: row.branch,
@@ -3383,6 +3407,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 projectId: row.projectId,
                 title: row.title,
                 modelSelection: row.modelSelection,
+                ...(row.subagentLimits !== undefined ? { subagentLimits: row.subagentLimits } : {}),
                 runtimeMode: row.runtimeMode,
                 interactionMode: row.interactionMode,
                 branch: row.branch,
@@ -3525,6 +3550,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 projectId: row.projectId,
                 title: row.title,
                 modelSelection: row.modelSelection,
+                ...(row.subagentLimits !== undefined ? { subagentLimits: row.subagentLimits } : {}),
                 runtimeMode: row.runtimeMode,
                 interactionMode: row.interactionMode,
                 branch: row.branch,
@@ -3753,6 +3779,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         projectId: threadRow.value.projectId,
         title: threadRow.value.title,
         modelSelection: threadRow.value.modelSelection,
+        ...(threadRow.value.subagentLimits !== undefined
+          ? { subagentLimits: threadRow.value.subagentLimits }
+          : {}),
         runtimeMode: threadRow.value.runtimeMode,
         interactionMode: threadRow.value.interactionMode,
         branch: threadRow.value.branch,
@@ -4315,6 +4344,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         projectId: threadRow.value.projectId,
         title: threadRow.value.title,
         modelSelection: threadRow.value.modelSelection,
+        ...(threadRow.value.subagentLimits !== undefined
+          ? { subagentLimits: threadRow.value.subagentLimits }
+          : {}),
         runtimeMode: threadRow.value.runtimeMode,
         interactionMode: threadRow.value.interactionMode,
         branch: threadRow.value.branch,

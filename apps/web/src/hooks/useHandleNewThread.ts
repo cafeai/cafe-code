@@ -166,7 +166,10 @@ function useNewThreadState() {
           envMode: options?.envMode ?? "local",
           runtimeMode: DEFAULT_RUNTIME_MODE,
         });
-        applyStickyState(draftId, newChatDefaults);
+        // Project defaults are the initial provider only when neither an
+        // explicit global default nor the existing sticky picker wins. Copy
+        // that exact account's numeric default once, never a same-driver peer.
+        applyStickyState(draftId, newChatDefaults, project?.defaultModelSelection?.instanceId);
 
         await router.navigate({
           to: "/draft/$draftId",

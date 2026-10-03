@@ -5,6 +5,7 @@ import { type ContextWindowSnapshot, formatContextWindowTokens } from "~/lib/con
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { ContextWindowDetails } from "./ContextWindowDetails";
 import { SessionPlacementButton } from "./SessionRail";
+import type { SubagentConcurrencyPresentation } from "../../subagentConcurrency";
 
 function formatPercentage(value: number | null): string | null {
   if (value === null || !Number.isFinite(value)) {
@@ -20,6 +21,7 @@ export function ContextWindowMeter(props: {
   usage: ContextWindowSnapshot;
   codexRateLimits?: ServerProviderAccountRateLimits | null | undefined;
   onShowOnSide?: () => void;
+  subagentConcurrency?: SubagentConcurrencyPresentation | null | undefined;
 }) {
   const { usage } = props;
   const usedPercentage = formatPercentage(usage.usedPercentage);
@@ -90,6 +92,7 @@ export function ContextWindowMeter(props: {
           usage={usage}
           rateLimits={props.codexRateLimits}
           layout="popover"
+          subagentConcurrency={props.subagentConcurrency}
           {...(props.onShowOnSide
             ? {
                 headerAction: (

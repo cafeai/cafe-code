@@ -228,6 +228,8 @@ export const ServerProviderThreadGoalSupport = Schema.Literals(["supported", "un
 export type ServerProviderThreadGoalSupport = typeof ServerProviderThreadGoalSupport.Type;
 
 export const ServerProviderRuntimeCapabilities = Schema.Struct({
+  // Older emitters cannot promise a per-chat override; absence is unsupported.
+  subagentConcurrency: Schema.optional(Schema.Boolean),
   liveSteer: ServerProviderLiveSteerSupport.pipe(
     Schema.withDecodingDefault(Effect.succeed("unsupported" as const)),
   ),

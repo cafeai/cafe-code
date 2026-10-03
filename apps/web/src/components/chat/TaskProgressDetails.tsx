@@ -3,7 +3,11 @@ import { memo } from "react";
 
 import type { WorkLogEntry } from "../../session-logic";
 import { cn } from "~/lib/utils";
-import { SubagentRosterRow, type SubagentRosterEntry } from "../subagents/SubagentRosterRow";
+import {
+  isLiveSubagentStatus,
+  SubagentRosterRow,
+  type SubagentRosterEntry,
+} from "../subagents/SubagentRosterRow";
 import {
   displayTaskProgressSteps,
   sanitizePlanText,
@@ -21,7 +25,10 @@ export const TaskProgressDetails = memo(function TaskProgressDetails(props: {
   const plan = props.plan;
   const hasPlan = Boolean(plan && plan.steps.length > 0);
   const subagents = (props.subagents ?? []).filter(
-    (entry): entry is SubagentRosterEntry => entry.subagent !== undefined,
+    // Tasks is the current-work surface; Atrium owns the historical roster.
+    // Reuse the canonical derived status, never elapsed time or label text.
+    (entry): entry is SubagentRosterEntry =>
+      entry.subagent !== undefined && isLiveSubagentStatus(entry.subagent.status),
   );
   const displaySteps = plan ? displayTaskProgressSteps(plan) : [];
 

@@ -126,7 +126,7 @@ function TokenBreakdownSection({
 
   return (
     <SettingsSection
-      title="Tokens by provider and model"
+      title="Output tokens by provider and model"
       headerAction={
         breakdown.attributedOutputTokens > 0 ? (
           <span className="text-[11px] tabular-nums text-muted-foreground">
@@ -135,8 +135,14 @@ function TokenBreakdownSection({
         ) : null
       }
     >
+      <p className="border-b border-border/45 px-4 py-2.5 text-[11px] text-muted-foreground sm:px-5">
+        Generated output only; processed-token totals above also include input.
+      </p>
       {hasRows ? (
-        <div aria-label="Token usage by provider and model" className="divide-y divide-border/60">
+        <div
+          aria-label="Output token usage by provider and model"
+          className="divide-y divide-border/60"
+        >
           {breakdown.providers.map((providerUsage) => {
             const ProviderIcon = PROVIDER_ICON_BY_PROVIDER[providerUsage.provider];
             const providerPercentage = formatUsagePercentage(
@@ -149,7 +155,11 @@ function TokenBreakdownSection({
                 : 0;
 
             return (
-              <div key={providerUsage.provider} className="px-4 py-4 sm:px-5">
+              <div
+                key={providerUsage.provider}
+                data-usage-output-provider={providerUsage.provider}
+                className="px-4 py-4 sm:px-5"
+              >
                 <div className="flex min-w-0 items-center gap-3">
                   <span className="flex size-8 shrink-0 items-center justify-center rounded-md border border-border/70 bg-muted/35 text-foreground/80">
                     {ProviderIcon ? <ProviderIcon aria-hidden className="size-4" /> : null}
@@ -168,6 +178,9 @@ function TokenBreakdownSection({
                         {integerFormat.format(providerUsage.outputTokens)}
                       </span>
                     </div>
+                    {providerUsage.outputTokens === 0 ? (
+                      <p className="mt-1 text-[11px] text-muted-foreground">No output recorded</p>
+                    ) : null}
                     <div className="mt-2 h-1 overflow-hidden rounded-full bg-muted">
                       <div
                         aria-hidden
@@ -185,13 +198,20 @@ function TokenBreakdownSection({
                       className="flex min-w-0 items-center justify-between gap-3 py-2 first:pt-0 last:pb-0"
                     >
                       <span
-                        className="min-w-0 truncate font-mono text-[11px] text-muted-foreground"
+                        className="min-w-0"
                         title={
                           getUsageModelExplanation(modelUsage.model) ??
                           formatUsageModelLabel(modelUsage.model)
                         }
                       >
-                        {formatUsageModelLabel(modelUsage.model)}
+                        <span className="block truncate font-mono text-[11px] text-muted-foreground">
+                          {formatUsageModelLabel(modelUsage.model)}
+                        </span>
+                        {modelUsage.outputTokens === 0 ? (
+                          <span className="mt-0.5 block text-[10px] text-muted-foreground/70">
+                            {integerFormat.format(modelUsage.processedTokens)} processed tokens
+                          </span>
+                        ) : null}
                       </span>
                       <div className="flex shrink-0 items-center gap-2 text-[11px] tabular-nums">
                         <span className="text-muted-foreground/70">
@@ -232,7 +252,7 @@ function TokenBreakdownSection({
         </div>
       ) : (
         <p className="px-4 py-6 text-center text-xs text-muted-foreground sm:px-5">
-          Provider and model attribution will appear after output tokens are recorded.
+          Provider and model attribution will appear after token usage is recorded.
         </p>
       )}
     </SettingsSection>
@@ -341,6 +361,7 @@ export function UsageStatsPanel() {
             <ActivityHeatmap
               days={initial.days}
               bounds={activityBounds}
+              layout="responsive"
               today={
                 totals
                   ? { ...initial.today, generatingMs: Math.round(totals.todayGeneratingMs) }

@@ -584,6 +584,9 @@ const makeWsRpcLayer = (
                 projectId: bootstrap.createThread.projectId,
                 title: bootstrap.createThread.title,
                 modelSelection: bootstrap.createThread.modelSelection,
+                ...(bootstrap.createThread.subagentLimits !== undefined
+                  ? { subagentLimits: bootstrap.createThread.subagentLimits }
+                  : {}),
                 runtimeMode: bootstrap.createThread.runtimeMode,
                 interactionMode: bootstrap.createThread.interactionMode,
                 branch: bootstrap.createThread.branch,

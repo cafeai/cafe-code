@@ -5145,6 +5145,86 @@ describe("ProviderRuntimeIngestion", () => {
     expect(finalMessage?.streaming).toBe(false);
   });
 
+  it.each([true, false])(
+    "preserves standalone whitespace/number deltas through streaming=%s and exact completion",
+    async (enableAssistantStreaming) => {
+      const harness = await createHarness({ serverSettings: { enableAssistantStreaming } });
+      const now = "2026-01-01T00:00:00.000Z";
+      const turnId = asTurnId("turn-numeric-whitespace");
+      const itemId = asItemId("item-numeric-whitespace");
+      const deltas = [
+        "record",
+        " ",
+        "0",
+        "87",
+        " and",
+        " ",
+        "2",
+        "7",
+        " from",
+        " ",
+        "0",
+        "78",
+        ".",
+        " Code: `record087`; URL: https://example.test/from078",
+      ];
+      const expected = deltas.join("");
+      harness.emit({
+        type: "turn.started",
+        eventId: asEventId("numeric-whitespace-started"),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: now,
+        threadId: asThreadId("thread-1"),
+        turnId,
+      });
+      await waitForThread(harness.readModel, (thread) => thread.session?.activeTurnId === turnId);
+      for (const [index, delta] of deltas.entries()) {
+        harness.emit({
+          type: "content.delta",
+          eventId: asEventId(`numeric-whitespace-delta-${index}`),
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: now,
+          threadId: asThreadId("thread-1"),
+          turnId,
+          itemId,
+          payload: { streamKind: "assistant_text", delta },
+        });
+      }
+      await harness.drain();
+      // The canonical completion includes every observed space. It is admitted
+      // through the normal exact-prefix commitment, not a prose-spacing repair.
+      harness.emit({
+        type: "item.completed",
+        eventId: asEventId("numeric-whitespace-completed"),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: now,
+        threadId: asThreadId("thread-1"),
+        turnId,
+        itemId,
+        payload: { itemType: "assistant_message", status: "completed", detail: expected },
+      });
+      const thread = await waitForThread(harness.readModel, (entry) =>
+        entry.messages.some(
+          (message) => message.id === "assistant:item-numeric-whitespace" && !message.streaming,
+        ),
+      );
+      expect(
+        thread.messages.find((message) => message.id === "assistant:item-numeric-whitespace")?.text,
+      ).toBe(expected);
+      const events = await Effect.runPromise(Stream.runCollect(harness.engine.readEvents(0)));
+      const appendText = Array.from(events)
+        .filter(
+          (event): event is Extract<typeof event, { type: "thread.message-sent" }> =>
+            event.type === "thread.message-sent" &&
+            event.payload.messageId === "assistant:item-numeric-whitespace" &&
+            event.payload.streaming,
+        )
+        .map((event) => event.payload.text)
+        .join("");
+      expect(appendText).toBe(expected);
+    },
+  );
+
   it("coalesces streaming assistant deltas after the first visible bytes", async () => {
     const harness = await createHarness({ serverSettings: { enableAssistantStreaming: true } });
     const now = "2026-01-01T00:00:00.000Z";

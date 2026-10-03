@@ -23,6 +23,7 @@ import {
   RuntimeMode,
 } from "./orchestration.ts";
 import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
+import { MaxConcurrentSubagents } from "./subagentLimits.ts";
 
 const ProviderSessionStatus = Schema.Literals([
   "connecting",
@@ -51,6 +52,9 @@ export const ProviderSession = Schema.Struct({
   // with the process that is actually materialized instead of relying on a
   // renderer draft or an in-memory command cache after backend recovery.
   modelSelection: Schema.optional(ModelSelection),
+  // Missing is legacy unknown; null means no explicit process override was
+  // materialized. A number records configured policy, not universal enforcement.
+  maxConcurrentSubagents: Schema.optional(Schema.NullOr(MaxConcurrentSubagents)),
   threadId: ThreadId,
   resumeCursor: Schema.optional(Schema.Unknown),
   activeTurnId: Schema.optional(TurnId),
@@ -86,6 +90,12 @@ export const ProviderSessionStartInput = Schema.Struct({
   cwd: Schema.optional(TrimmedNonEmptyString),
   additionalDirectories: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
   modelSelection: Schema.optional(ModelSelection),
+  // Null/omitted delegates to the existing instance/native launch policy.
+  maxConcurrentSubagents: Schema.optional(Schema.NullOr(MaxConcurrentSubagents)),
+  // Internal replacement admission: atomically prove the entire native tree
+  // idle before retiring a process for this policy change. Never persist this
+  // guard as runtime policy or interpret it as renderer-authored permission.
+  requireIdleForSubagentLimitChange: Schema.optional(Schema.Boolean),
   resumeCursor: Schema.optional(Schema.Unknown),
   approvalPolicy: Schema.optional(ProviderApprovalPolicy),
   sandboxMode: Schema.optional(ProviderSandboxMode),
@@ -122,6 +132,7 @@ export const ProviderSessionForkResult = Schema.Struct({
   additionalDirectories: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
   model: Schema.optional(TrimmedNonEmptyString),
   modelSelection: Schema.optional(ModelSelection),
+  maxConcurrentSubagents: Schema.optional(Schema.NullOr(MaxConcurrentSubagents)),
   resumeCursor: Schema.Unknown,
 });
 export type ProviderSessionForkResult = typeof ProviderSessionForkResult.Type;

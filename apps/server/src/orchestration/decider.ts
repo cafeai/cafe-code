@@ -260,6 +260,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           projectId: command.projectId,
           title: command.title,
           modelSelection: command.modelSelection,
+          ...(command.subagentLimits !== undefined
+            ? { subagentLimits: command.subagentLimits }
+            : {}),
           // Standalone admission is approval-required even when a legacy or
           // malicious client supplies the project's more permissive default.
           // Subsequent explicit runtime-mode changes retain their normal policy.
@@ -306,6 +309,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             projectId: sourceThread.projectId,
             title: command.title,
             modelSelection: sourceThread.modelSelection,
+            ...(sourceThread.subagentLimits !== undefined
+              ? { subagentLimits: sourceThread.subagentLimits }
+              : {}),
             runtimeMode: sourceThread.runtimeMode,
             interactionMode: sourceThread.interactionMode,
             branch: sourceThread.branch,
@@ -391,6 +397,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             title: command.title,
             modelSelection: sourceThread.modelSelection,
             runtimeMode: sourceThread.runtimeMode,
+            ...(sourceThread.subagentLimits !== undefined
+              ? { subagentLimits: sourceThread.subagentLimits }
+              : {}),
             interactionMode: sourceThread.interactionMode,
             branch: sourceThread.branch,
             worktreePath: sourceThread.worktreePath,
@@ -581,6 +590,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(command.modelSelection !== undefined
             ? { modelSelection: command.modelSelection }
             : {}),
+          ...(command.subagentLimits !== undefined
+            ? { subagentLimits: command.subagentLimits }
+            : {}),
           ...(associationChanged
             ? { branch: null }
             : command.branch !== undefined
@@ -668,7 +680,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           command.runtimeMode !== targetThread.runtimeMode ||
           command.interactionMode !== targetThread.interactionMode ||
           (command.modelSelection !== undefined &&
-            !isDeepStrictEqual(command.modelSelection, targetThread.modelSelection))
+            !isDeepStrictEqual(command.modelSelection, targetThread.modelSelection)) ||
+          (command.subagentLimits !== undefined &&
+            !isDeepStrictEqual(command.subagentLimits, targetThread.subagentLimits ?? {}))
         ) {
           return yield* new OrchestrationCommandInvariantError({
             commandType: command.type,
@@ -734,7 +748,29 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             createdAt: command.createdAt,
           },
         };
-        return [userMessageEvent, turnSteerRequestedEvent];
+        // A stale-ready submit can become a native steer. Retain its requested
+        // policy as pending metadata, but never turn that edit into authority
+        // to replace the process that still owns the active root/children.
+        const pendingLimits: ReadonlyArray<PlannedOrchestrationEvent> =
+          command.subagentLimits === undefined
+            ? []
+            : [
+                {
+                  ...withEventBase({
+                    aggregateKind: "thread",
+                    aggregateId: command.threadId,
+                    occurredAt: command.createdAt,
+                    commandId: command.commandId,
+                  }),
+                  type: "thread.meta-updated",
+                  payload: {
+                    threadId: command.threadId,
+                    subagentLimits: command.subagentLimits,
+                    updatedAt: command.createdAt,
+                  },
+                },
+              ];
+        return [...pendingLimits, userMessageEvent, turnSteerRequestedEvent];
       }
       // An explicit provider-instance change cannot be represented as a live
       // steer: provider steering APIs keep using the session that already owns
@@ -806,6 +842,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           messageId: command.message.messageId,
           ...(command.modelSelection !== undefined
             ? { modelSelection: command.modelSelection }
+            : {}),
+          ...(command.subagentLimits !== undefined
+            ? { subagentLimits: command.subagentLimits }
             : {}),
           ...(command.titleSeed !== undefined ? { titleSeed: command.titleSeed } : {}),
           runtimeMode: targetThread.runtimeMode,

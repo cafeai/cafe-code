@@ -35,6 +35,17 @@ function cell(day: string): HTMLElement {
   return requiredElement(`[data-activity-day="${day}"]`);
 }
 
+function calendarRow(): HTMLElement {
+  const row = requiredElement('[role="img"]').parentElement;
+  expect(row).not.toBeNull();
+  return row!;
+}
+
+function centerX(element: HTMLElement): number {
+  const box = element.getBoundingClientRect();
+  return box.left + box.width / 2;
+}
+
 async function hoverCell(day: string): Promise<HTMLElement> {
   // A synthetic pointerover does not move Chromium's real pointer. Scrolling
   // a virtual calendar underneath that pointer can deliver a later trusted
@@ -418,4 +429,231 @@ describe("ActivityHeatmap selected calendars", () => {
       expect(scroller.scrollWidth).toBeLessThanOrEqual(scroller.clientWidth + 1);
     },
   );
+
+  it("centers a responsive 13-week calendar and attached legend with capped square cells", async () => {
+    await page.viewport(1_024, 800);
+    applyInterfaceScalePercent(100);
+    const bounds = { startDay: "2026-07-05", endDay: "2026-10-03" };
+    const content = (generatingMs: number) => (
+      <section
+        data-heatmap-panel="true"
+        className="min-w-0 rounded-xl border p-4"
+        style={{ width: "calc(100vw - 2rem)", margin: "1rem auto" }}
+      >
+        <ActivityHeatmap
+          layout="responsive"
+          days={[]}
+          bounds={{ ...bounds }}
+          today={activity(bounds.endDay, generatingMs)}
+        />
+      </section>
+    );
+    mounted = await render(content(1_000));
+    const scroller = requiredElement('[data-activity-heatmap-scroll="true"]');
+    const calendar = requiredElement('[role="img"]');
+    const endCell = cell(bounds.endDay);
+    await vi.waitFor(() => expect(endCell.getBoundingClientRect().width).toBeCloseTo(24, 1));
+    expect(endCell.getBoundingClientRect().height).toBeCloseTo(24, 1);
+    expect(selectedDays()).toHaveLength(91);
+    expect(calendar.children).toHaveLength(13);
+    const row = calendarRow().getBoundingClientRect();
+    const legend = requiredElement('[data-activity-heatmap-legend="true"]');
+    const legendBox = legend.getBoundingClientRect();
+    expect(row.width).toBeCloseTo(28 + 3 + 13 * 24 + 12 * 3, 1);
+    expect(centerX(calendarRow())).toBeCloseTo(centerX(scroller), 1);
+    expect(centerX(legend)).toBeCloseTo(centerX(scroller), 1);
+    expect(legendBox.width).toBeCloseTo(row.width, 1);
+    expect(legendBox.left).toBeCloseTo(row.left, 1);
+    expect(legendBox.right).toBeCloseTo(row.right, 1);
+    expect(scroller.scrollWidth).toBeLessThanOrEqual(scroller.clientWidth + 1);
+
+    expect((await hoverCell(bounds.endDay)).textContent).toContain("1s generating");
+    await mounted.rerender(content(2_000));
+    // Live data must not remount the range or move its centered geometry.
+    expect(requiredElement('[role="img"]')).toBe(calendar);
+    expect(cell(bounds.endDay)).toBe(endCell);
+    expect(requiredElement('[data-activity-heatmap-scroll="true"]')).toBe(scroller);
+    expect(scroller.scrollLeft).toBe(0);
+    expect(requiredElement('[role="tooltip"]').textContent).toContain("2s generating");
+    expect(calendarRow().getBoundingClientRect().width).toBeCloseTo(row.width, 1);
+    expect(legend.getBoundingClientRect().left).toBeCloseTo(legendBox.left, 1);
+  });
+
+  it.each([80, 130] as const)(
+    "keeps responsive calendars and legends inside a 320px panel at %i%% scale",
+    async (scale) => {
+      await page.viewport(320, 800);
+      applyInterfaceScalePercent(scale);
+      mounted = await render(
+        <section
+          data-heatmap-panel="true"
+          className="min-w-0 rounded-xl border p-4"
+          style={{ width: "calc(100vw - 2rem)", margin: "1rem auto" }}
+        >
+          <ActivityHeatmap
+            layout="responsive"
+            days={[activity("2026-10-03", 2_000)]}
+            bounds={{ startDay: "2026-07-05", endDay: "2026-10-03" }}
+          />
+        </section>,
+      );
+      const panel = requiredElement('[data-heatmap-panel="true"]');
+      const scroller = requiredElement('[data-activity-heatmap-scroll="true"]');
+      const legend = requiredElement('[data-activity-heatmap-legend="true"]');
+      await vi.waitFor(() => {
+        expect(panel.scrollWidth).toBeLessThanOrEqual(panel.clientWidth + 1);
+        expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth);
+        expect(legend.getBoundingClientRect().width).toBeLessThanOrEqual(scroller.clientWidth + 1);
+        expect(centerX(legend)).toBeCloseTo(centerX(scroller), 1);
+      });
+      const first = cell("2026-07-05").getBoundingClientRect();
+      expect(first.width).toBeGreaterThanOrEqual((14 * scale) / 100 - 0.1);
+      expect(first.width).toBeLessThanOrEqual((24 * scale) / 100 + 0.1);
+      expect(first.height).toBeCloseTo(first.width, 1);
+      if (scroller.scrollWidth > scroller.clientWidth + 1) {
+        // Overflow remains local to the full-width viewport, not the document.
+        expect(first.width).toBeCloseTo((14 * scale) / 100, 1);
+        scroller.scrollLeft = scroller.scrollWidth;
+      }
+      const tooltip = await hoverCell("2026-10-03");
+      expect(tooltip.textContent).toContain("2s generating");
+      expect(tooltip.getBoundingClientRect().left).toBeGreaterThanOrEqual(
+        scroller.getBoundingClientRect().left - 1,
+      );
+      expect(tooltip.getBoundingClientRect().right).toBeLessThanOrEqual(
+        scroller.getBoundingClientRect().right + 1,
+      );
+      expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth);
+    },
+  );
+
+  it("adapts a responsive calendar on wide-to-narrow-to-wide resize and hovers exact cells", async () => {
+    await page.viewport(900, 800);
+    applyInterfaceScalePercent(100);
+    mounted = await render(
+      <section
+        className="min-w-0 border p-4"
+        style={{ width: "calc(100vw - 2rem)", margin: "1rem auto" }}
+      >
+        <ActivityHeatmap
+          layout="responsive"
+          days={[activity("2026-10-03", 3_000)]}
+          bounds={{ startDay: "2026-07-05", endDay: "2026-10-03" }}
+        />
+      </section>,
+    );
+    const calendar = requiredElement('[role="img"]');
+    const scroller = requiredElement('[data-activity-heatmap-scroll="true"]');
+    await vi.waitFor(() =>
+      expect(cell("2026-10-03").getBoundingClientRect().width).toBeCloseTo(24, 1),
+    );
+    expect((await hoverCell("2026-10-03")).textContent).toContain("3s generating");
+    await page.viewport(320, 800);
+    await vi.waitFor(() => {
+      const size = cell("2026-10-03").getBoundingClientRect().width;
+      expect(size).toBeLessThan(24);
+      expect(size).toBeGreaterThanOrEqual(13.9);
+      // Resizing invalidates captured cell coordinates. A stale tooltip must
+      // disappear until the pointer deliberately enters a newly laid-out cell.
+      expect(document.querySelector('[role="tooltip"]')).toBeNull();
+      expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth);
+    });
+    const narrowTooltip = await hoverCell("2026-10-03");
+    expect(narrowTooltip.textContent).toContain("Oct 3, 2026");
+    expect(narrowTooltip.getBoundingClientRect().right).toBeLessThanOrEqual(
+      scroller.getBoundingClientRect().right + 1,
+    );
+    await page.viewport(900, 800);
+    await vi.waitFor(() => {
+      expect(cell("2026-10-03").getBoundingClientRect().width).toBeCloseTo(24, 1);
+      expect(centerX(calendarRow())).toBeCloseTo(centerX(scroller), 1);
+      expect(document.querySelector('[role="tooltip"]')).toBeNull();
+    });
+    expect(requiredElement('[role="img"]')).toBe(calendar);
+    expect(requiredElement('[data-activity-heatmap-scroll="true"]')).toBe(scroller);
+    expect(scroller.scrollLeft).toBe(0);
+    expect((await hoverCell("2026-10-03")).textContent).toContain("3s generating");
+  });
+
+  it.each([
+    ["2026-07-05", "2026-07-11"],
+    ["2026-07-15", "2026-07-21"],
+  ] as const)(
+    "keeps a short responsive history compact from %s through %s",
+    async (startDay, endDay) => {
+      await page.viewport(1_024, 800);
+      applyInterfaceScalePercent(100);
+      mounted = await render(
+        <section
+          className="min-w-0 p-4"
+          style={{ width: "calc(100vw - 2rem)", margin: "1rem auto" }}
+        >
+          <ActivityHeatmap layout="responsive" days={[]} bounds={{ startDay, endDay }} />
+        </section>,
+      );
+      const scroller = requiredElement('[data-activity-heatmap-scroll="true"]');
+      const legend = requiredElement('[data-activity-heatmap-legend="true"]');
+      expect(cell(startDay).getBoundingClientRect().width).toBeCloseTo(14, 1);
+      expect(cell(startDay).getBoundingClientRect().height).toBeCloseTo(14, 1);
+      expect(selectedDays()).toHaveLength(7);
+      expect(centerX(calendarRow())).toBeCloseTo(centerX(scroller), 1);
+      expect(centerX(legend)).toBeCloseTo(centerX(scroller), 1);
+      expect(legend.getBoundingClientRect().width).toBeGreaterThanOrEqual(9 * 16 - 1);
+      expect(scroller.scrollWidth).toBeLessThanOrEqual(scroller.clientWidth + 1);
+    },
+  );
+
+  it("keeps responsive virtualized history compact and preserves scroll on live updates", async () => {
+    await page.viewport(768, 800);
+    applyInterfaceScalePercent(100);
+    const bounds = { startDay: "2022-01-01", endDay: "2026-07-21" };
+    const content = (generatingMs: number) => (
+      <section
+        className="min-w-0 border p-4"
+        style={{ width: "calc(100vw - 2rem)", margin: "1rem auto" }}
+      >
+        <ActivityHeatmap
+          layout="responsive"
+          days={[]}
+          bounds={{ ...bounds }}
+          today={activity(bounds.endDay, generatingMs)}
+        />
+      </section>
+    );
+    mounted = await render(content(1_000));
+    const scroller = requiredElement('[data-activity-heatmap-scroll="true"]');
+    expect(scroller.getAttribute("role")).toBe("region");
+    expect(selectedDays().length).toBeLessThan(500);
+    expect(cell(bounds.startDay).getBoundingClientRect().width).toBeCloseTo(14, 1);
+    expect(scroller.scrollWidth).toBeGreaterThan(scroller.clientWidth);
+    scroller.scrollLeft = scroller.scrollWidth;
+    await vi.waitFor(() =>
+      expect(document.querySelector(`[data-activity-day="${bounds.endDay}"]`)).not.toBeNull(),
+    );
+    const previousScrollLeft = scroller.scrollLeft;
+    expect((await hoverCell(bounds.endDay)).textContent).toContain("1s generating");
+    await mounted.rerender(content(2_000));
+    expect(requiredElement('[data-activity-heatmap-scroll="true"]')).toBe(scroller);
+    expect(scroller.scrollLeft).toBe(previousScrollLeft);
+    expect(requiredElement('[role="tooltip"]').textContent).toContain("2s generating");
+    expect(cell(bounds.endDay).getBoundingClientRect().width).toBeCloseTo(14, 1);
+    expect(selectedDays().length).toBeLessThan(500);
+    expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth);
+  });
+
+  it("does not change the unbounded compact calendar when responsive layout is requested", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(2026, 6, 21, 12));
+    mounted = await render(<ActivityHeatmap days={[]} />);
+    const originalCalendar = requiredElement('[role="img"]');
+    const originalBox = originalCalendar.getBoundingClientRect();
+    const originalCellSize = cell("2026-07-21").getBoundingClientRect().width;
+    await mounted.rerender(<ActivityHeatmap layout="responsive" days={[]} />);
+    expect(requiredElement('[role="img"]')).toBe(originalCalendar);
+    expect(originalCalendar.children).toHaveLength(26);
+    expect(selectedDays()).toHaveLength(178);
+    expect(originalCalendar.getBoundingClientRect().width).toBeCloseTo(originalBox.width, 1);
+    expect(cell("2026-07-21").getBoundingClientRect().width).toBeCloseTo(originalCellSize, 1);
+    expect(document.querySelector('[data-activity-heatmap-scroll="true"]')).toBeNull();
+  });
 });

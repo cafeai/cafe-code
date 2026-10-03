@@ -160,6 +160,23 @@ describe("ComposerTaskProgress", () => {
         },
       },
     ];
+    // Historical workers remain available to Atrium, but must not contribute
+    // either rows or the current-work trigger count on this Tasks surface.
+    for (const status of ["completed", "failed", "stopped"] as const) {
+      subagents.push({
+        id: `historical-${status}`,
+        label: `Historical ${status}`,
+        tone: "thinking",
+        createdAt: "2026-08-25T10:00:00.000Z",
+        subagent: {
+          id: `historical-${status}`,
+          label: `Historical ${status}`,
+          status,
+          startedAt: "2026-08-25T10:00:00.000Z",
+          updatedAt: "2026-08-25T10:00:00.000Z",
+        },
+      });
+    }
     const mounted = await mountProgress(null, { subagents, onOpenSubagentDetail });
 
     try {
@@ -174,9 +191,36 @@ describe("ComposerTaskProgress", () => {
       expect(document.querySelectorAll('[data-composer-subagent-list="true"] button')).toHaveLength(
         2,
       );
+      expect(progressPopup()?.textContent).not.toContain("Historical");
       await page.getByRole("button", { name: /^Audit Claude history, Working\./ }).click();
       expect(onOpenSubagentDetail).toHaveBeenCalledWith(subagents[0], progressTrigger());
       await vi.waitFor(() => expect(progressPopup()).toBeNull());
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("does not keep an agents-only Tasks control for a terminal historical roster", async () => {
+    const subagents: WorkLogEntry[] = (["completed", "failed", "stopped"] as const).map(
+      (status, index) => ({
+        id: `historical-${index}`,
+        label: "Historical worker",
+        tone: "thinking",
+        createdAt: "2026-08-25T10:00:00.000Z",
+        subagent: {
+          id: `historical-${index}`,
+          label: "Historical worker",
+          status,
+          startedAt: "2026-08-25T10:00:00.000Z",
+          updatedAt: "2026-08-25T10:00:00.000Z",
+        },
+      }),
+    );
+    const mounted = await mountProgress(null, { subagents });
+    try {
+      expect(progressTrigger()).toBeNull();
+      expect(progressPopup()).toBeNull();
+      expect(subagents).toHaveLength(3);
     } finally {
       await mounted.cleanup();
     }

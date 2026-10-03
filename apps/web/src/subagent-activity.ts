@@ -187,7 +187,19 @@ function upsertStructuredSubagent(
   // Durable provider order is authoritative. A delayed/replayed progress edge
   // after completion must not resurrect a child or restart its clock. Only an
   // explicit new task.started edge can reopen the same provider identity.
-  if (previousTerminal && !isRestart) return true;
+  if (previousTerminal && !isRestart) {
+    // A native thread rename can arrive after completion. Keep presentation
+    // metadata fresh without reopening work, moving its terminal clock, or
+    // rebinding the historical transcript to a different opaque history id.
+    const label =
+      safeLine(presentation.label, 96) ??
+      pathLabel(safeLine(presentation.path, 256)) ??
+      previous.label;
+    if (label !== previous.label) {
+      byId.set(key, { ...previous, label, lifecycleRevision: lifecycleRevision(activity) });
+    }
+    return true;
+  }
   const status = terminalStatusFromPayload(
     payload,
     structuredStatus(presentation.status, activity.kind),
@@ -200,7 +212,7 @@ function upsertStructuredSubagent(
     ? meaningfulDetail
     : activity.kind === "task.progress"
       ? (meaningfulDetail ?? previous?.description)
-      : activity.kind === "task.completed" && (status === "failed" || status === "stopped")
+      : activity.kind === "task.completed"
         ? (meaningfulDetail ?? previous?.description)
         : (previous?.description ?? meaningfulDetail);
   const label =

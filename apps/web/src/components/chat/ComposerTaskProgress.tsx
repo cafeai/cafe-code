@@ -2,7 +2,7 @@ import { BotIcon } from "lucide-react";
 import { memo, useRef, useState } from "react";
 
 import type { WorkLogEntry } from "../../session-logic";
-import { type SubagentRosterEntry } from "../subagents/SubagentRosterRow";
+import { isLiveSubagentStatus, type SubagentRosterEntry } from "../subagents/SubagentRosterRow";
 import { Button } from "../ui/button";
 import { Popover, PopoverPopup, PopoverTitle, PopoverTrigger } from "../ui/popover";
 import { SessionPlacementButton } from "./SessionRail";
@@ -40,7 +40,8 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
   const openModeRef = useRef<"hover" | "press" | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const subagents = (props.subagents ?? []).filter(
-    (entry): entry is SubagentRosterEntry => entry.subagent !== undefined,
+    (entry): entry is SubagentRosterEntry =>
+      entry.subagent !== undefined && isLiveSubagentStatus(entry.subagent.status),
   );
   const hasPlan = Boolean(plan && plan.steps.length > 0);
   const hasSubagents = subagents.length > 0;

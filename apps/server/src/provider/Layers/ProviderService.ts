@@ -13,6 +13,7 @@ import { ProviderCompactThreadInput } from "@cafecode/contracts";
 import {
   EventId,
   ModelSelection,
+  MaxConcurrentSubagents,
   NonNegativeInt,
   ThreadId,
   ProviderInterruptTurnInput,
@@ -38,8 +39,7 @@ import {
   type ProviderInstanceId,
   ProviderDriverKind,
   OrchestrationThreadTurnSubagentDetailBody,
-  THREAD_TURN_SUBAGENT_ID_MAX_LENGTH,
-  TrimmedNonEmptyString,
+  ThreadTurnSubagentId,
   type ProviderRuntimeEvent,
   type ProviderSession,
 } from "@cafecode/contracts";
@@ -148,10 +148,8 @@ const ProviderReadThreadInput = Schema.Struct({
 const ProviderReadSubagentDetailInput = Schema.Struct({
   threadId: ThreadId,
   turnId: TurnId,
-  subagentId: TrimmedNonEmptyString.check(Schema.isMaxLength(THREAD_TURN_SUBAGENT_ID_MAX_LENGTH)),
-  historyId: Schema.optional(
-    TrimmedNonEmptyString.check(Schema.isMaxLength(THREAD_TURN_SUBAGENT_ID_MAX_LENGTH)),
-  ),
+  subagentId: ThreadTurnSubagentId,
+  historyId: Schema.optional(ThreadTurnSubagentId),
 });
 
 const ProviderRuntimeRestartInput = ServerProviderRuntimeRestartInput;
@@ -373,6 +371,12 @@ function toRuntimePayloadFromSession(
     model: session.model ?? null,
     activeTurnId: session.activeTurnId ?? null,
     lastError: session.lastError ?? null,
+    // Null is a materialized inherited policy, not a missing field. Retain it
+    // explicitly so a later reset cannot resurrect a former numeric override
+    // through the directory's partial runtime-payload merge.
+    ...(session.maxConcurrentSubagents !== undefined
+      ? { maxConcurrentSubagents: session.maxConcurrentSubagents }
+      : {}),
     ...(extra?.modelSelection !== undefined ? { modelSelection: extra.modelSelection } : {}),
     ...(extra?.lastRuntimeEvent !== undefined ? { lastRuntimeEvent: extra.lastRuntimeEvent } : {}),
     ...(extra?.lastRuntimeEventAt !== undefined
@@ -390,6 +394,17 @@ function readPersistedModelSelection(
   }
   const raw = "modelSelection" in runtimePayload ? runtimePayload.modelSelection : undefined;
   return isModelSelection(raw) ? raw : undefined;
+}
+
+function readPersistedMaxConcurrentSubagents(
+  runtimePayload: ProviderRuntimeBinding["runtimePayload"],
+): number | null | undefined {
+  if (!runtimePayload || typeof runtimePayload !== "object" || Array.isArray(runtimePayload)) {
+    return undefined;
+  }
+  const raw =
+    "maxConcurrentSubagents" in runtimePayload ? runtimePayload.maxConcurrentSubagents : undefined;
+  return raw === null || Schema.is(MaxConcurrentSubagents)(raw) ? raw : undefined;
 }
 
 function readPersistedCwd(
@@ -1424,6 +1439,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         input.binding.runtimePayload,
       );
       const persistedModelSelection = readPersistedModelSelection(input.binding.runtimePayload);
+      const persistedMaxConcurrentSubagents = readPersistedMaxConcurrentSubagents(
+        input.binding.runtimePayload,
+      );
 
       const startInput = {
         threadId: input.binding.threadId,
@@ -1434,6 +1452,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           ? { additionalDirectories: persistedAdditionalDirectories }
           : {}),
         ...(persistedModelSelection ? { modelSelection: persistedModelSelection } : {}),
+        ...(persistedMaxConcurrentSubagents !== undefined
+          ? { maxConcurrentSubagents: persistedMaxConcurrentSubagents }
+          : {}),
         ...(hasResumeCursor ? { resumeCursor: input.binding.resumeCursor } : {}),
         runtimeMode: input.binding.runtimeMode ?? "full-access",
       } satisfies ProviderSessionStartInput;
@@ -1645,6 +1666,15 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           (persistedBinding?.providerInstanceId === resolvedInstanceId
             ? readPersistedAdditionalDirectories(persistedBinding.runtimePayload)
             : undefined);
+        // Explicit null requests inheritance and must win over an older saved
+        // numeric policy. Only omission may recover that exact instance's
+        // previously materialized value; sibling accounts are never a source.
+        const effectiveMaxConcurrentSubagents =
+          input.maxConcurrentSubagents !== undefined
+            ? input.maxConcurrentSubagents
+            : persistedBinding?.providerInstanceId === resolvedInstanceId
+              ? readPersistedMaxConcurrentSubagents(persistedBinding.runtimePayload)
+              : undefined;
         yield* Effect.annotateCurrentSpan({
           "provider.kind": resolvedProvider,
           "provider.resume_cursor.source":
@@ -1674,6 +1704,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             ? { additionalDirectories: effectiveAdditionalDirectories }
             : {}),
           ...(effectiveResumeCursor !== undefined ? { resumeCursor: effectiveResumeCursor } : {}),
+          ...(effectiveMaxConcurrentSubagents !== undefined
+            ? { maxConcurrentSubagents: effectiveMaxConcurrentSubagents }
+            : {}),
         } satisfies ProviderSessionStartInput;
         const recoveredFromRejectedResumeCursor = yield* Ref.make(false);
         const session = yield* adapter.startSession(startInput).pipe(
@@ -1824,6 +1857,13 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           ...(readPersistedModelSelection(existingTarget.runtimePayload)
             ? { modelSelection: readPersistedModelSelection(existingTarget.runtimePayload) }
             : {}),
+          ...(readPersistedMaxConcurrentSubagents(existingTarget.runtimePayload) !== undefined
+            ? {
+                maxConcurrentSubagents: readPersistedMaxConcurrentSubagents(
+                  existingTarget.runtimePayload,
+                ),
+              }
+            : {}),
           resumeCursor: existingTarget.resumeCursor,
         } satisfies ProviderSessionForkResult;
       }
@@ -1902,6 +1942,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           model: fork.model ?? null,
           modelSelection: fork.modelSelection ?? null,
           interactionMode: fork.interactionMode ?? null,
+          ...(fork.maxConcurrentSubagents !== undefined
+            ? { maxConcurrentSubagents: fork.maxConcurrentSubagents }
+            : {}),
           activeTurnId: null,
           lastError: null,
           lastRuntimeEvent: "provider.session.forked",

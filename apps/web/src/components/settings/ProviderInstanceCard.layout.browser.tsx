@@ -229,6 +229,56 @@ function expectNoHorizontalOverflow(element: HTMLElement) {
   expect(element.scrollWidth).toBeLessThanOrEqual(element.clientWidth + 1);
 }
 
+it("edits a scoped new-chat concurrency default without changing runtime config or restarting", async () => {
+  const fixture = cardFixture("minimal", true);
+  const instance = { ...fixture.instance, config: { maxConcurrentSubagents: 6 } };
+  const card = (current: ProviderInstanceConfig) => (
+    <TooltipProvider>
+      <ProviderInstanceCard
+        instanceId={fixture.instanceId}
+        instance={current}
+        driverOption={DRIVER_OPTION_BY_VALUE[fixture.instance.driver]}
+        liveProvider={fixture.provider}
+        isSettingsOpen
+        onSettingsOpenChange={fixture.onSettingsOpenChange}
+        isDefaultProvider={false}
+        onSetDefaultProvider={fixture.onSetDefaultProvider}
+        onUpdate={fixture.onUpdate}
+        onRestartRuntime={fixture.onRestartRuntime}
+        hiddenModels={[]}
+        favoriteModels={[]}
+        modelOrder={[]}
+        onHiddenModelsChange={vi.fn()}
+        onFavoriteModelsChange={vi.fn()}
+        onModelOrderChange={vi.fn()}
+      />
+    </TooltipProvider>
+  );
+  mounted = await render(card(instance));
+  const input = page.getByRole("spinbutton", { name: "Default subagent limit", exact: true });
+  await input.fill("12");
+  await page.getByRole("heading", { name: `${fixture.displayName} settings`, exact: true }).click();
+  expect(fixture.onUpdate).toHaveBeenLastCalledWith(
+    expect.objectContaining({
+      defaultMaxConcurrentSubagents: 12,
+      config: { maxConcurrentSubagents: 6 },
+    }),
+  );
+  // Mirror the settings acknowledgement before testing reset: an unchanged
+  // blank value is deliberately not an update in the shared blur editor.
+  await mounted.rerender(card({ ...instance, defaultMaxConcurrentSubagents: 12 }));
+  fixture.onUpdate.mockClear();
+  await input.fill("65");
+  await page.getByRole("heading", { name: `${fixture.displayName} settings`, exact: true }).click();
+  expect(fixture.onUpdate).not.toHaveBeenCalled();
+  await input.fill("");
+  await page.getByRole("heading", { name: `${fixture.displayName} settings`, exact: true }).click();
+  expect(fixture.onUpdate).toHaveBeenLastCalledWith(
+    expect.not.objectContaining({ defaultMaxConcurrentSubagents: expect.anything() }),
+  );
+  expect(fixture.onRestartRuntime).not.toHaveBeenCalled();
+});
+
 function unwrappedTextWidth(element: HTMLElement) {
   // Measure the same synthetic text/font without wrapping. Deriving the fit
   // from the rendered row alone would let a stretched half-card column hide

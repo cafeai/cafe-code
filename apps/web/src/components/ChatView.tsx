@@ -19,6 +19,7 @@ import {
   ProviderInteractionMode,
   ProviderDriverKind,
   RuntimeMode,
+  type SubagentLimits,
   type UploadChatAttachment as OrchestrationUploadChatAttachment,
 } from "@cafecode/contracts";
 import { scopedThreadKey, scopeProjectRef, scopeThreadRef } from "@cafecode/client-runtime";
@@ -46,6 +47,14 @@ import { useNavigate } from "@tanstack/react-router";
 import { useShallow } from "zustand/react/shallow";
 import { useGitStatus } from "~/lib/gitStatusState";
 import { supportsStandaloneChats } from "../lib/standaloneChats";
+import { subagentConcurrencyAdmissionError } from "../lib/subagentConcurrencyAdmission";
+import { getSavedEnvironmentRuntimeState } from "../environments/runtime/catalog";
+import {
+  configuredInstanceSubagentLimit,
+  deriveSubagentConcurrencyPresentation,
+  subagentLimitKey,
+  validSubagentLimit,
+} from "../subagentConcurrency";
 import { useDesktopDebugEnabled } from "~/lib/desktopDebugState";
 import { readPrimaryEnvironmentDescriptor, usePrimaryEnvironmentId } from "../environments/primary";
 import { readEnvironmentApi } from "../environmentApi";
@@ -236,6 +245,7 @@ import {
 import {
   useServerAvailableEditors,
   useServerConfig,
+  getServerConfig,
   useServerKeybindings,
   useServerTerminal,
 } from "~/rpc/serverState";
@@ -470,6 +480,7 @@ type ChatViewProps = { readonly navigationSlot?: ReactNode } & (
 );
 
 interface ComposerSendSnapshot {
+  readonly subagentLimits?: SubagentLimits;
   promptText: string;
   images: ComposerImageAttachment[];
   files: import("@cafecode/contracts").ChatFileAttachment[];
@@ -480,6 +491,27 @@ interface ComposerSendSnapshot {
   modelSelection: ModelSelection;
   runtimeMode: RuntimeMode;
   interactionMode: ProviderInteractionMode;
+}
+
+/** Read capability authority at admission, never from a captured picker snapshot. */
+function readSubagentConcurrencyAdmissionError(input: {
+  readonly environmentId: EnvironmentId;
+  readonly modelSelection: ModelSelection;
+  readonly provider: ProviderDriverKind;
+  readonly limits: SubagentLimits | undefined;
+}): string | null {
+  const primary = getServerConfig();
+  const configuration =
+    primary?.environment.environmentId === input.environmentId
+      ? primary
+      : getSavedEnvironmentRuntimeState(input.environmentId)?.serverConfig;
+  return subagentConcurrencyAdmissionError({
+    environmentId: input.environmentId,
+    instanceId: input.modelSelection.instanceId,
+    provider: input.provider,
+    limits: input.limits,
+    configuration,
+  });
 }
 
 interface FollowUpQueueItem extends ComposerSendSnapshot {
@@ -896,6 +928,9 @@ export default function ChatView(props: ChatViewProps) {
   );
   const composerInteractionMode = useComposerDraftStore(
     (store) => store.getComposerDraft(composerDraftTarget)?.interactionMode ?? null,
+  );
+  const composerSubagentLimits = useComposerDraftStore(
+    (store) => store.getComposerDraft(composerDraftTarget)?.subagentLimits,
   );
   const composerActiveProvider = useComposerDraftStore(
     (store) => store.getComposerDraft(composerDraftTarget)?.activeProvider ?? null,
@@ -1940,6 +1975,23 @@ export default function ChatView(props: ChatViewProps) {
         interactionMode: DEFAULT_INTERACTION_MODE,
         ...input,
       });
+      // This PR-specific creation path intentionally keeps its existing project
+      // model resolution (no sticky picker changes), but must still copy that
+      // exact initial account's numeric new-chat default once. Reused drafts
+      // above never revisit settings or erase an intentional reset.
+      const initialInstanceId =
+        activeProject.defaultModelSelection?.instanceId ?? ProviderInstanceId.make("codex");
+      const initialInstance = settings.providerInstances?.[initialInstanceId];
+      const limitKey = initialInstance ? subagentLimitKey(initialInstance.driver) : null;
+      if (
+        initialInstance?.enabled !== false &&
+        limitKey &&
+        validSubagentLimit(initialInstance?.defaultMaxConcurrentSubagents)
+      ) {
+        useComposerDraftStore.getState().setSubagentLimits(nextDraftId, {
+          [limitKey]: initialInstance.defaultMaxConcurrentSubagents,
+        });
+      }
       await navigate({
         to: "/draft/$draftId",
         params: buildDraftThreadRouteParams(nextDraftId),
@@ -1957,6 +2009,7 @@ export default function ChatView(props: ChatViewProps) {
       routeKind,
       setDraftThreadContext,
       setLogicalProjectDraftThreadId,
+      settings.providerInstances,
     ],
   );
 
@@ -4217,9 +4270,38 @@ export default function ChatView(props: ChatViewProps) {
     ],
   );
 
-  const readComposerSnapshotForDispatch = (): ComposerSendSnapshot | null => {
+  const admitComposerTurnPolicy = (input: {
+    modelSelection: ModelSelection;
+    provider: ProviderDriverKind;
+    subagentLimits?: SubagentLimits | undefined;
+  }): boolean => {
+    if (!activeThread) return false;
+    const concurrencyIssue = readSubagentConcurrencyAdmissionError({
+      environmentId,
+      modelSelection: input.modelSelection,
+      provider: input.provider,
+      limits: input.subagentLimits ?? activeThread.subagentLimits,
+    });
+    if (concurrencyIssue) {
+      setThreadError(activeThread.id, concurrencyIssue);
+      return false;
+    }
+    return true;
+  };
+
+  const readComposerSnapshotForDispatch = (checkTurnPolicy = true): ComposerSendSnapshot | null => {
     const sendCtx = composerRef.current?.getSendContext();
     if (!sendCtx || !activeThread) return null;
+    if (
+      checkTurnPolicy &&
+      !admitComposerTurnPolicy({
+        modelSelection: sendCtx.selectedModelSelection,
+        provider: sendCtx.selectedProvider,
+        subagentLimits: sendCtx.subagentLimits,
+      })
+    ) {
+      return null;
+    }
     if (
       sendCtx.images.length > 0 &&
       !modelAcceptsImages(
@@ -4253,6 +4335,9 @@ export default function ChatView(props: ChatViewProps) {
       providerModels: sendCtx.selectedProviderModels,
       promptEffort: sendCtx.selectedPromptEffort,
       modelSelection: sendCtx.selectedModelSelection,
+      ...(sendCtx.subagentLimits !== undefined
+        ? { subagentLimits: { ...sendCtx.subagentLimits } }
+        : {}),
       runtimeMode,
       interactionMode,
     };
@@ -4526,6 +4611,18 @@ export default function ChatView(props: ChatViewProps) {
       blockFollowUpQueueItem(item.threadId, item.id, "Project metadata is not loaded yet.");
       return;
     }
+    const concurrencyIssue = readSubagentConcurrencyAdmissionError({
+      environmentId: queuedThread.environmentId,
+      modelSelection: item.modelSelection,
+      provider: item.provider,
+      // Queued input intentionally does not replace durable policy with a
+      // captured old preference. The current owning thread is authoritative.
+      limits: queuedThread.subagentLimits,
+    });
+    if (concurrencyIssue) {
+      blockFollowUpQueueItem(item.threadId, item.id, concurrencyIssue);
+      return;
+    }
     if (
       sendInFlightRef.current ||
       queueDispatchInFlightRef.current ||
@@ -4657,6 +4754,10 @@ export default function ChatView(props: ChatViewProps) {
         if (!claimed.ok) throw new Error(claimed.error);
       }
       providerSubmissionAttempted = true;
+      // Concurrency belongs to the chat, not the queued message. Omit the
+      // optional replacement here so the server reads its current durable
+      // policy; an edit made during awaited attachment preparation must not
+      // be overwritten by the older queuedThread snapshot.
       await api.orchestration.dispatchCommand({
         type: "thread.turn.start",
         commandId: commandIdForSend,
@@ -5059,7 +5160,10 @@ export default function ChatView(props: ChatViewProps) {
       onAdvanceActivePendingUserInput();
       return;
     }
-    const snapshot = readComposerSnapshotForDispatch();
+    // Control-only commands do not request a new numeric process policy. Keep
+    // /compact and goal inspection/editing available while a pending override
+    // needs Reset; ordinary sends are admitted below before any dispatch.
+    const snapshot = readComposerSnapshotForDispatch(false);
     if (!snapshot) return;
     const {
       images: composerImages,
@@ -5106,7 +5210,7 @@ export default function ChatView(props: ChatViewProps) {
           createdAt,
         });
         // Do not erase text or attachments added while the request was pending.
-        const current = readComposerSnapshotForDispatch();
+        const current = readComposerSnapshotForDispatch(false);
         if (
           current?.promptText === promptForSend &&
           current.images.length === 0 &&
@@ -5197,6 +5301,7 @@ export default function ChatView(props: ChatViewProps) {
       scheduleComposerFocus();
       return;
     }
+    if (!admitComposerTurnPolicy(snapshot)) return;
     // Sending new user intent explicitly releases a prior Stop barrier. The
     // queue watchdog itself never clears this state.
     updateManualStopBarrier(activeThread.id, null);
@@ -5384,6 +5489,9 @@ export default function ChatView(props: ChatViewProps) {
                       modelSelection: threadCreateModelSelection,
                       runtimeMode,
                       interactionMode,
+                      ...(snapshot.subagentLimits !== undefined
+                        ? { subagentLimits: snapshot.subagentLimits }
+                        : {}),
                       branch: activeThread.projectId === null ? null : activeThreadBranch,
                       worktreePath:
                         activeThread.projectId === null ? null : activeThread.worktreePath,
@@ -5416,6 +5524,9 @@ export default function ChatView(props: ChatViewProps) {
         },
         modelSelection: ctxSelectedModelSelection,
         titleSeed: title,
+        ...(snapshot.subagentLimits !== undefined
+          ? { subagentLimits: snapshot.subagentLimits }
+          : {}),
         runtimeMode,
         interactionMode,
         ...(bootstrap ? { bootstrap } : {}),
@@ -5550,12 +5661,13 @@ export default function ChatView(props: ChatViewProps) {
       onAdvanceActivePendingUserInput();
       return;
     }
-    const snapshot = readComposerSnapshotForDispatch();
+    const snapshot = readComposerSnapshotForDispatch(false);
     if (!snapshot) return;
     if (parseComposerCompactionCommand(snapshot.provider, snapshot.promptText) !== null) {
       await onSend(e);
       return;
     }
+    if (!admitComposerTurnPolicy(snapshot)) return;
     const { hasSendableContent } = deriveComposerSendState({
       prompt: snapshot.promptText,
       imageCount: snapshot.images.length,
@@ -6454,6 +6566,9 @@ export default function ChatView(props: ChatViewProps) {
           },
           modelSelection: ctxSelectedModelSelection,
           titleSeed: activeThread.title,
+          ...(sendCtx.subagentLimits !== undefined
+            ? { subagentLimits: sendCtx.subagentLimits }
+            : {}),
           runtimeMode,
           interactionMode: nextInteractionMode,
           ...(nextInteractionMode === "default" && activeProposedPlan
@@ -6528,6 +6643,20 @@ export default function ChatView(props: ChatViewProps) {
       selectedModelSelection: ctxSelectedModelSelection,
     } = sendCtx;
 
+    // The plan implementation button bypasses the ordinary composer send path.
+    // Check its exact owning runtime before creating a thread, so an older
+    // server cannot silently discard a remembered numeric execution policy.
+    const concurrencyIssue = readSubagentConcurrencyAdmissionError({
+      environmentId,
+      modelSelection: ctxSelectedModelSelection,
+      provider: ctxSelectedProvider,
+      limits: sendCtx.subagentLimits ?? activeThread.subagentLimits,
+    });
+    if (concurrencyIssue) {
+      setThreadError(activeThread.id, concurrencyIssue);
+      return;
+    }
+
     const createdAt = new Date().toISOString();
     const nextThreadId = newThreadId();
     const planMarkdown = activeProposedPlan.planMarkdown;
@@ -6558,6 +6687,7 @@ export default function ChatView(props: ChatViewProps) {
         threadId: nextThreadId,
         projectId: activeThread.projectId,
         title: nextThreadTitle,
+        ...(sendCtx.subagentLimits !== undefined ? { subagentLimits: sendCtx.subagentLimits } : {}),
         modelSelection: nextThreadModelSelection,
         runtimeMode: nextRuntimeMode,
         interactionMode: "default",
@@ -6578,6 +6708,9 @@ export default function ChatView(props: ChatViewProps) {
           },
           modelSelection: ctxSelectedModelSelection,
           titleSeed: nextThreadTitle,
+          ...(sendCtx.subagentLimits !== undefined
+            ? { subagentLimits: sendCtx.subagentLimits }
+            : {}),
           runtimeMode: nextRuntimeMode,
           interactionMode: "default",
           sourceProposedPlan: {
@@ -6633,6 +6766,7 @@ export default function ChatView(props: ChatViewProps) {
     resetLocalDispatch,
     runtimeMode,
     setSendInFlight,
+    setThreadError,
     composerRef,
     environmentId,
     sendInFlightRef,
@@ -7104,6 +7238,20 @@ export default function ChatView(props: ChatViewProps) {
                 onOpenSubagentDetail={openSubagentDetail}
                 usage={sessionRailUsage}
                 rateLimits={sessionRailRateLimits}
+                subagentConcurrency={
+                  activeThread
+                    ? deriveSubagentConcurrencyPresentation({
+                        provider:
+                          activeProviderStatus?.driver ?? activeThread.session?.provider ?? "codex",
+                        limits: composerSubagentLimits ?? activeThread.subagentLimits,
+                        inheritedLimit: configuredInstanceSubagentLimit(
+                          settings,
+                          activeThread.modelSelection.instanceId,
+                        ),
+                        configuredLimit: activeThread.session?.maxConcurrentSubagents,
+                      })
+                    : null
+                }
                 usageResetAction={
                   <ProviderUsageResetButton
                     key={`${environmentId}:${activeProviderStatus?.instanceId ?? ""}`}

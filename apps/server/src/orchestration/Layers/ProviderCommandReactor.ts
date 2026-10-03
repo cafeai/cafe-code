@@ -51,6 +51,11 @@ import type { ProviderServiceError } from "../../provider/Errors.ts";
 import { hasLiveProviderRuntimeOwner } from "../../provider/providerRuntimeOwnerEvidence.ts";
 import { getCodexRootTurnCompletion } from "../../provider/codexRootTurnCompletion.ts";
 import { makeProviderSessionTitle } from "../../provider/providerSessionTitle.ts";
+import {
+  resolveSubagentConcurrencyPolicy,
+  hasSubagentConcurrencyChange,
+  hasActiveSubagentSessionWork,
+} from "../../provider/subagentConcurrencyPolicy.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProviderAdapterRegistry } from "../../provider/Services/ProviderAdapterRegistry.ts";
@@ -1494,6 +1499,34 @@ const make = Effect.gen(function* () {
       });
     }
     const preferredProvider: ProviderDriverKind = desiredDriverKind;
+    const settingsForConcurrency = yield* serverSettingsService.getSettings;
+    const concurrencyPolicy = resolveSubagentConcurrencyPolicy({
+      driver: desiredDriverKind,
+      ...(thread.subagentLimits !== undefined ? { limits: thread.subagentLimits } : {}),
+      instanceConfig: settingsForConcurrency.providerInstances[desiredInstanceId]?.config,
+    });
+    const desiredCapabilities = yield* providerService.getCapabilities(desiredInstanceId);
+    if (
+      concurrencyPolicy.requested !== undefined &&
+      desiredCapabilities.subagentConcurrency !== true
+    ) {
+      return yield* new ProviderAdapterRequestError({
+        provider: providerErrorLabel(desiredDriverKind),
+        method: "thread.turn.start",
+        detail: "This provider runtime does not support per-chat subagent limits.",
+      });
+    }
+    // A materialized policy belongs to its exact native instance. Never carry
+    // a former Codex process limit across an account/driver switch.
+    const concurrencyChanged =
+      activeSession !== undefined &&
+      activeSession.providerInstanceId === desiredInstanceId &&
+      (desiredDriverKind === "codex" || desiredDriverKind === "claudeAgent") &&
+      hasSubagentConcurrencyChange(activeSession, concurrencyPolicy);
+    const concurrencyPending =
+      activeSession !== undefined &&
+      concurrencyChanged &&
+      hasActiveSubagentSessionWork(activeSession);
     const requestedInstanceChange = desiredInstanceId !== currentInstanceId;
     const currentInfo = requestedInstanceChange
       ? activeSession === undefined
@@ -1555,6 +1588,16 @@ const make = Effect.gen(function* () {
         // otherwise restore persisted former-project roots after a move.
         additionalDirectories: effectiveAdditionalDirectories,
         modelSelection: desiredModelSelection,
+        // Explicit null revokes a previous chat override without letting the
+        // service recover its old durable numeric value. Active work keeps its
+        // current configuration; only a later idle materialization may apply
+        // a pending request. Native final admission checks children as well.
+        maxConcurrentSubagents: concurrencyPending
+          ? (activeSession?.maxConcurrentSubagents ?? null)
+          : concurrencyPolicy.configured,
+        ...(concurrencyChanged && !concurrencyPending
+          ? { requireIdleForSubagentLimitChange: true }
+          : {}),
         ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
         interactionMode: desiredInteractionMode,
         runtimeMode: desiredRuntimeMode,
@@ -1614,6 +1657,9 @@ const make = Effect.gen(function* () {
             providerName: session.provider,
             providerInstanceId: session.providerInstanceId,
             runtimeMode: desiredRuntimeMode,
+            ...(session.maxConcurrentSubagents !== undefined
+              ? { maxConcurrentSubagents: session.maxConcurrentSubagents }
+              : {}),
             // Provider turn ids are not orchestration turn ids.
             activeTurnId: null,
             lastError: session.lastError ?? null,
@@ -1636,8 +1682,7 @@ const make = Effect.gen(function* () {
         effectiveAdditionalDirectories,
         activeSession?.additionalDirectories,
       );
-      const sessionModelSwitch = (yield* providerService.getCapabilities(desiredInstanceId))
-        .sessionModelSwitch;
+      const sessionModelSwitch = desiredCapabilities.sessionModelSwitch;
       const modelChanged =
         requestedModelSelection !== undefined &&
         requestedModelSelection.model !== activeSession?.model;
@@ -1656,6 +1701,17 @@ const make = Effect.gen(function* () {
           requestedModelSelection !== undefined &&
           !Equal.equals(previousModelSelection, requestedModelSelection));
 
+      const concurrencyOnlyReplacement =
+        concurrencyChanged &&
+        !runtimeModeChanged &&
+        !grokInteractionModeChanged &&
+        !cwdChanged &&
+        !additionalDirectoriesChanged &&
+        !instanceChanged &&
+        !providerResumeIdentityChanged &&
+        !shouldRestartForModelChange &&
+        !shouldRestartForModelSelectionChange;
+
       if (
         !runtimeModeChanged &&
         !grokInteractionModeChanged &&
@@ -1664,7 +1720,8 @@ const make = Effect.gen(function* () {
         !instanceChanged &&
         !providerResumeIdentityChanged &&
         !shouldRestartForModelChange &&
-        !shouldRestartForModelSelectionChange
+        !shouldRestartForModelSelectionChange &&
+        (!concurrencyChanged || concurrencyPending)
       ) {
         return activeSession;
       }
@@ -1702,11 +1759,34 @@ const make = Effect.gen(function* () {
         shouldRestartForModelChange,
         shouldRestartForModelSelectionChange,
         restartResumeModelSelectionChanged,
+        concurrencyChanged,
         hasResumeCursor: resumeCursor !== undefined,
       });
       const restartedSession = yield* startProviderSession(
         resumeCursor !== undefined ? { resumeCursor } : undefined,
+      ).pipe(
+        // A child can wake between the advisory snapshot and native locked
+        // admission. That exact rejection leaves the process intact: continue
+        // with its old policy and retain the desired change as pending. Never
+        // convert arbitrary startup failures into success or replay a prompt.
+        Effect.catch((error) =>
+          isProviderAdapterRequestError(error) &&
+          error.remoteErrorTag === "subagent-concurrency-active" &&
+          concurrencyOnlyReplacement
+            ? Effect.succeed(activeSession)
+            : Effect.fail(error),
+        ),
       );
+      if (restartedSession === activeSession) {
+        // The native whole-tree guard retained the original process. Do not
+        // publish a replacement binding or claim a restart in diagnostics;
+        // desired metadata remains pending without altering native ownership.
+        yield* Effect.logInfo("provider command reactor deferred subagent limit change", {
+          threadId,
+          provider: activeSession.provider,
+        });
+        return activeSession;
+      }
       yield* Effect.logInfo("provider command reactor restarted provider session", {
         threadId,
         previousSessionId: existingSessionThreadId,

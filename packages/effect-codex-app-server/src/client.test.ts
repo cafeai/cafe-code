@@ -32,6 +32,147 @@ const encoder = new TextEncoder();
 const encodeJsonl = (value: unknown) => encoder.encode(`${encodeUnknownJsonString(value)}\n`);
 const decodeJson = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
 
+for (const loggerStage of ["raw", "decoded"] as const) {
+  for (const shape of ["multiline", "multi-chunk"] as const) {
+    it.effect(
+      `fences the complete pulled ${shape} batch while ${loggerStage} logging is held`,
+      () =>
+        Effect.gen(function* () {
+          const { stdio, input } = yield* makeInMemoryStdio();
+          const loggerEntered = yield* Deferred.make<void>();
+          const releaseLogger = yield* Deferred.make<void>();
+          const processed = yield* Deferred.make<void>();
+          let pendingIngress = 0;
+          let incomplete = false;
+          let receivedNotifications = 0;
+          const first = encodeJsonl({
+            method: "warning",
+            params: { message: "synthetic earlier frame" },
+          });
+          const child = encodeJsonl({
+            method: "turn/started",
+            params: { threadId: "synthetic-later-child" },
+          });
+          // Queue before constructing the reader to make both chunks part of
+          // one observed batch, not two timing-dependent independent pulls.
+          yield* Queue.offerAll(
+            input,
+            shape === "multi-chunk" ? [first, child] : [Buffer.concat([first, child])],
+          );
+          const client = yield* CodexClient.make(stdio, {
+            onIncomingDataReceived: () => {
+              pendingIngress += 1;
+            },
+            onIncomingDataProcessed: (hasIncompleteFrame) => {
+              pendingIngress -= 1;
+              incomplete = hasIncompleteFrame;
+              Deferred.doneUnsafe(processed, Effect.void);
+            },
+            onNotificationReceived: () => {
+              receivedNotifications += 1;
+            },
+            logIncoming: true,
+            logger: (event) =>
+              event.stage === loggerStage
+                ? Deferred.succeed(loggerEntered, undefined).pipe(
+                    Effect.andThen(Deferred.await(releaseLogger)),
+                  )
+                : Effect.void,
+          });
+          yield* Effect.gen(function* () {
+            yield* Deferred.await(loggerEntered);
+            assert.equal(pendingIngress, 1);
+            // Even when the later child line has not been decoded yet, the
+            // whole observed batch already prevents a false native idle proof.
+            assert.equal(pendingIngress > 0 || incomplete || receivedNotifications > 0, true);
+            yield* Deferred.succeed(releaseLogger, undefined);
+            const frames = yield* Stream.runCollect(client.raw.notifications.pipe(Stream.take(2)));
+            assert.deepEqual(
+              Array.from(frames, (frame) => frame.method),
+              ["warning", "turn/started"],
+            );
+            // A distinct final callback is queued after routing, not a guess
+            // based on the public notification queue becoming empty.
+            yield* Deferred.await(processed);
+            assert.equal(pendingIngress, 0);
+            assert.equal(incomplete, false);
+            assert.equal(receivedNotifications, 2);
+          }).pipe(Effect.ensuring(Deferred.succeed(releaseLogger, undefined)));
+        }).pipe(Effect.scoped),
+    );
+  }
+}
+
+it.effect(
+  "reports a retained partial UTF-8 frame as unresolved ingress until its newline arrives",
+  () =>
+    Effect.gen(function* () {
+      const { stdio, input } = yield* makeInMemoryStdio();
+      const firstProcessed = yield* Deferred.make<void>();
+      const lastProcessed = yield* Deferred.make<void>();
+      let incomplete = false;
+      let processedCount = 0;
+      const client = yield* CodexClient.make(stdio, {
+        onIncomingDataProcessed: (hasIncompleteFrame) => {
+          incomplete = hasIncompleteFrame;
+          processedCount += 1;
+          Deferred.doneUnsafe(processedCount === 1 ? firstProcessed : lastProcessed, Effect.void);
+        },
+        logIncoming: true,
+        logger: () => Effect.void,
+      });
+      const prefix = encoder.encode('{"method":"future/child","params":{"name":"');
+      yield* Queue.offer(input, Buffer.concat([prefix, new Uint8Array([0xe2])]));
+      yield* Deferred.await(firstProcessed);
+      assert.equal(incomplete, true);
+      yield* Queue.offer(
+        input,
+        Buffer.concat([new Uint8Array([0x82, 0xac]), encoder.encode('"}}\n')]),
+      );
+      const frame = yield* Stream.runHead(client.raw.notifications);
+      assert.equal(frame._tag, "Some");
+      if (frame._tag === "Some") assert.deepEqual(frame.value.params, { name: "€" });
+      yield* Deferred.await(lastProcessed);
+      assert.equal(incomplete, false);
+    }).pipe(Effect.scoped),
+);
+
+it.effect("accounts native notification receipt before decoded logging or raw queue handoff", () =>
+  Effect.gen(function* () {
+    const { stdio, input } = yield* makeInMemoryStdio();
+    const loggerEntered = yield* Deferred.make<void>();
+    const releaseLogger = yield* Deferred.make<void>();
+    let received = 0;
+    const client = yield* CodexClient.make(stdio, {
+      onNotificationReceived: () => {
+        received += 1;
+      },
+      logIncoming: true,
+      logger: (event) =>
+        event.stage === "decoded"
+          ? Deferred.succeed(loggerEntered, undefined).pipe(
+              Effect.andThen(Deferred.await(releaseLogger)),
+            )
+          : Effect.void,
+    });
+    yield* Effect.gen(function* () {
+      yield* Queue.offer(
+        input,
+        encodeJsonl({ method: "turn/started", params: { threadId: "synthetic-child" } }),
+      );
+      yield* Deferred.await(loggerEntered);
+      // The reader is held before incomingNotifications publication. Cafe's
+      // native ingress count must already deny retirement in this interval.
+      assert.equal(received, 1);
+      yield* Deferred.succeed(releaseLogger, undefined);
+      const frame = yield* Stream.runHead(client.raw.notifications);
+      assert.equal(frame._tag, "Some");
+      if (frame._tag === "Some") assert.equal(frame.value.method, "turn/started");
+      assert.equal(received, 1);
+    }).pipe(Effect.ensuring(Deferred.succeed(releaseLogger, undefined)));
+  }).pipe(Effect.scoped),
+);
+
 const literalCommandArgs = [
   "space in argument",
   'literal"quote',

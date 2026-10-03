@@ -121,6 +121,9 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
             opaque: `resume-${String(input.threadId)}`,
           },
           cwd: input.cwd ?? process.cwd(),
+          ...(input.maxConcurrentSubagents !== undefined
+            ? { maxConcurrentSubagents: input.maxConcurrentSubagents }
+            : {}),
           createdAt: now,
           updatedAt: now,
         };
@@ -169,6 +172,9 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
         provider,
         providerInstanceId: source.providerInstanceId ?? ProviderInstanceId.make(String(provider)),
         runtimeMode: source.runtimeMode,
+        ...(source.maxConcurrentSubagents !== undefined
+          ? { maxConcurrentSubagents: source.maxConcurrentSubagents }
+          : {}),
         ...(source.cwd !== undefined ? { cwd: source.cwd } : {}),
         resumeCursor: { opaque: `fork-${String(input.targetThreadId)}` },
       });
@@ -1224,6 +1230,7 @@ nativeFork.layer("ProviderServiceLive native session forks", (it) => {
         threadId: sourceThreadId,
         runtimeMode: "full-access",
         cwd: "/repo/native-fork",
+        maxConcurrentSubagents: 3,
       });
 
       const request = {
@@ -1245,6 +1252,7 @@ nativeFork.layer("ProviderServiceLive native session forks", (it) => {
         forkOperationId: "cmd-native-fork",
         forkedFromThreadId: sourceThreadId,
         cwd: "/repo/native-fork",
+        maxConcurrentSubagents: 3,
       });
 
       const conflictingExit = yield* provider
@@ -1716,6 +1724,99 @@ it.effect("ProviderServiceLive rejects new sessions for disabled custom instance
 );
 
 const routing = makeProviderServiceLayer();
+
+it.effect(
+  "ProviderService recovery never borrows a former driver's or account's process limit",
+  () =>
+    Effect.gen(function* () {
+      const first = makeFakeCodexAdapter();
+      const second = makeFakeCodexAdapter();
+      const grokDriver = ProviderDriverKind.make("grok");
+      const grokInstanceId = ProviderInstanceId.make("grok");
+      const grok = makeFakeCodexAdapter(grokDriver);
+      const secondInstanceId = ProviderInstanceId.make("codex-second-policy-owner");
+      const base = makeAdapterRegistryMock({
+        [CODEX_DRIVER]: first.adapter,
+        [grokDriver]: grok.adapter,
+      });
+      const registry: ProviderAdapterRegistryShape = {
+        ...base,
+        getByInstance: (instanceId) =>
+          instanceId === secondInstanceId
+            ? Effect.succeed(second.adapter)
+            : base.getByInstance(instanceId),
+        getInstanceInfo: (instanceId) =>
+          instanceId === secondInstanceId
+            ? base.getInstanceInfo(codexInstanceId).pipe(
+                Effect.map((info) => ({
+                  ...info,
+                  instanceId,
+                  continuationIdentity: {
+                    driverKind: CODEX_DRIVER,
+                    continuationKey: `synthetic-policy-owner:${instanceId}`,
+                  },
+                })),
+              )
+            : base.getInstanceInfo(instanceId),
+        listInstances: () => Effect.succeed([codexInstanceId, secondInstanceId, grokInstanceId]),
+      };
+      const repositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
+        Layer.provide(SqlitePersistenceMemory),
+      );
+      const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(repositoryLayer));
+      const layer = Layer.mergeAll(
+        directoryLayer,
+        makeProviderServiceLive().pipe(
+          Layer.provide(Layer.succeed(ProviderAdapterRegistry, registry)),
+          Layer.provide(directoryLayer),
+          Layer.provide(defaultServerSettingsLayer),
+          Layer.provide(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const directory = yield* ProviderSessionDirectory;
+        const threadId = asThreadId("exact-process-limit-owner-recovery");
+        const start = (providerInstanceId: ProviderInstanceId, limit?: number) =>
+          provider.startSession(threadId, {
+            threadId,
+            providerInstanceId,
+            cwd: process.cwd(),
+            additionalDirectories: [],
+            runtimeMode: "approval-required",
+            ...(limit !== undefined ? { maxConcurrentSubagents: limit } : {}),
+          });
+        const assertUnknown = () =>
+          directory.getBinding(threadId).pipe(
+            Effect.map((binding) => {
+              assert.notProperty(
+                Option.getOrThrow(binding).runtimePayload,
+                "maxConcurrentSubagents",
+              );
+            }),
+          );
+
+        yield* start(codexInstanceId, 6);
+        yield* start(secondInstanceId);
+        assert.notProperty(second.startSession.mock.calls.at(-1)?.[0], "maxConcurrentSubagents");
+        yield* assertUnknown();
+        yield* second.stopAll();
+        yield* provider.sendTurn({ threadId, input: "Synthetic recovery", attachments: [] });
+        assert.notProperty(second.startSession.mock.calls.at(-1)?.[0], "maxConcurrentSubagents");
+        yield* assertUnknown();
+
+        // The second owner can report its own policy later. An unsupported new
+        // driver still must not recover that value as its configured evidence.
+        yield* start(secondInstanceId, 9);
+        yield* start(grokInstanceId);
+        yield* assertUnknown();
+        yield* grok.stopAll();
+        yield* provider.sendTurn({ threadId, input: "Synthetic Grok recovery", attachments: [] });
+        assert.notProperty(grok.startSession.mock.calls.at(-1)?.[0], "maxConcurrentSubagents");
+        yield* assertUnknown();
+      }).pipe(Effect.provide(layer));
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
 
 it.effect("ProviderServiceLive writes canonical events to the emitting thread segment", () =>
   Effect.gen(function* () {
@@ -2795,6 +2896,97 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
+  it.effect(
+    "keeps whitespace-variant child history tuples distinct at the provider detail boundary",
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const runtimeRepository = yield* ProviderSessionRuntimeRepository;
+        const sql = yield* SqlClient.SqlClient;
+        const threadId = asThreadId("thread-opaque-subagent-detail");
+        const turnId = asTurnId("turn-opaque-subagent-detail");
+        yield* sql`
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, branch, worktree_path,
+          latest_turn_id, created_at, updated_at
+        ) VALUES (
+          ${threadId}, NULL, 'Opaque child detail fixture', NULL, NULL, NULL,
+          '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
+        )
+      `;
+        const cwd = path.join(os.tmpdir(), "cafe-opaque-subagent-detail-fixture");
+        const session = yield* provider.startSession(threadId, {
+          provider: CLAUDE_AGENT_DRIVER,
+          providerInstanceId: claudeAgentInstanceId,
+          threadId,
+          cwd,
+          runtimeMode: "approval-required",
+        });
+        const variants = [
+          { subagentId: "child  exact", historyId: "history  exact" },
+          { subagentId: " child  exact ", historyId: " history  exact " },
+        ];
+        // Both real durable rows exist. Successful reads must resolve the exact
+        // selected tuple, not merely pass because a trimmed alias is absent.
+        for (const variant of variants) {
+          yield* runtimeRepository.upsertSubagentHistoryBinding({
+            threadId,
+            turnId,
+            ...variant,
+            providerName: CLAUDE_AGENT_DRIVER,
+            providerInstanceId: claudeAgentInstanceId,
+            resumeCursor: session.resumeCursor ?? null,
+            cwd,
+            createdAt: "2026-01-01T00:00:00.000Z",
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          });
+        }
+        routing.claude.readSubagentDetail.mockClear();
+        for (const [index, variant] of variants.entries()) {
+          const detail = yield* provider.readSubagentDetail({ threadId, turnId, ...variant });
+          assert.equal(detail.messages[0]?.text, `Assignment for ${variant.subagentId}`);
+          assert.deepEqual(routing.claude.readSubagentDetail.mock.calls[index], [
+            threadId,
+            variant.subagentId,
+            { resumeCursor: session.resumeCursor, cwd, historyId: variant.historyId },
+          ]);
+        }
+        const mismatchedTuple = yield* Effect.exit(
+          provider.readSubagentDetail({
+            threadId,
+            turnId,
+            subagentId: variants[0]!.subagentId,
+            historyId: variants[1]!.historyId,
+          }),
+        );
+        assert.equal(mismatchedTuple._tag, "Failure");
+        for (const invalid of [
+          "",
+          "x".repeat(513),
+          "child\u0000",
+          "child\n",
+          "child\u007f",
+          "child\u0085",
+          "child\u061c",
+          "child\u202e",
+          "child\u2066",
+        ]) {
+          for (const field of ["subagentId", "historyId"] as const) {
+            const denied = yield* Effect.exit(
+              provider.readSubagentDetail({
+                threadId,
+                turnId,
+                ...variants[0]!,
+                [field]: invalid,
+              }),
+            );
+            assert.equal(denied._tag, "Failure");
+          }
+        }
+        assert.equal(routing.claude.readSubagentDetail.mock.calls.length, 2);
+      }),
+  );
+
   it.effect("rejects subagent detail reads for adapters without a verified child protocol", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;
@@ -2986,6 +3178,61 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
+  it.effect(
+    "persists explicit inheritance and cannot resurrect a reset numeric limit during recovery",
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const directory = yield* ProviderSessionDirectory;
+        const threadId = asThreadId("reset-concurrency-policy");
+        const request = {
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          threadId,
+          runtimeMode: "full-access" as const,
+        };
+        yield* provider.startSession(threadId, { ...request, maxConcurrentSubagents: 4 });
+        yield* provider.startSession(threadId, { ...request, maxConcurrentSubagents: null });
+        assert.equal(
+          (
+            Option.getOrThrow(yield* directory.getBinding(threadId)).runtimePayload as Record<
+              string,
+              unknown
+            >
+          ).maxConcurrentSubagents,
+          null,
+        );
+        yield* routing.codex.stopAll();
+        routing.codex.startSession.mockClear();
+        yield* provider.sendTurn({ threadId, input: "Resume once", attachments: [] });
+        assert.equal(routing.codex.startSession.mock.calls.length, 1);
+        assert.equal(routing.codex.startSession.mock.calls[0]?.[0].maxConcurrentSubagents, null);
+      }),
+  );
+
+  it.effect(
+    "rejects invalid per-session concurrency policies before an adapter receives them",
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        routing.codex.startSession.mockClear();
+        for (const limit of [0, 65, 1.5]) {
+          const threadId = asThreadId(`invalid-concurrency-${limit}`);
+          const result = yield* provider
+            .startSession(threadId, {
+              provider: CODEX_DRIVER,
+              providerInstanceId: codexInstanceId,
+              threadId,
+              runtimeMode: "full-access",
+              maxConcurrentSubagents: limit,
+            })
+            .pipe(Effect.exit);
+          assert.isTrue(Exit.isFailure(result));
+        }
+        assert.equal(routing.codex.startSession.mock.calls.length, 0);
+      }),
+  );
+
   it.effect("recovers stale sessions for sendTurn using persisted cwd", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;
@@ -2995,6 +3242,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
         providerInstanceId: codexInstanceId,
         threadId: asThreadId("thread-1"),
         cwd: "/tmp/project-send-turn",
+        maxConcurrentSubagents: 4,
         runtimeMode: "full-access",
       });
 
@@ -3017,9 +3265,11 @@ routing.layer("ProviderServiceLive routing", (it) => {
           cwd?: string;
           resumeCursor?: unknown;
           threadId?: string;
+          maxConcurrentSubagents?: number | null;
         };
         assert.equal(startPayload.provider, "codex");
         assert.equal(startPayload.cwd, "/tmp/project-send-turn");
+        assert.equal(startPayload.maxConcurrentSubagents, 4);
         assert.deepEqual(startPayload.resumeCursor, initial.resumeCursor);
         assert.equal(startPayload.threadId, initial.threadId);
       }

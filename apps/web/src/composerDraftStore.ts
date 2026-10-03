@@ -11,6 +11,7 @@ import {
   ProviderDriverKind,
   ProviderOptionSelection,
   RuntimeMode,
+  SubagentLimits,
   type ServerProvider,
   type ScopedProjectRef,
   type ScopedThreadRef,
@@ -41,6 +42,7 @@ import {
   createMemoryStorage,
 } from "./lib/storage";
 import { getDefaultServerModel } from "./providerModels";
+import { subagentLimitKey, subagentLimitsEqual, validSubagentLimit } from "./subagentConcurrency";
 import { UnifiedSettings } from "@cafecode/contracts/settings";
 import {
   PersistedComposerFileAttachment,
@@ -50,10 +52,13 @@ import {
 } from "./attachments/composerFiles";
 const isRuntimeMode = Schema.is(RuntimeMode);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
+// Compile once: persistence normalization and frequent composer edits reuse
+// this admission instead of recompiling the same bounded schema per value.
+const isSubagentLimits = Schema.is(SubagentLimits);
 
 export const COMPOSER_DRAFT_STORAGE_KEY = "cafe-code:composer-drafts:v1";
 export const LEGACY_COMPOSER_DRAFT_STORAGE_KEY = "cafecode:composer-drafts:v1";
-const COMPOSER_DRAFT_STORAGE_VERSION = 7;
+const COMPOSER_DRAFT_STORAGE_VERSION = 8;
 const DraftThreadEnvModeSchema = Schema.Literals(["local", "worktree"]);
 export type DraftThreadEnvMode = typeof DraftThreadEnvModeSchema.Type;
 
@@ -122,6 +127,7 @@ const PersistedComposerThreadDraftState = Schema.Struct({
   activeProvider: Schema.optionalKey(Schema.NullOr(ProviderInstanceId)),
   runtimeMode: Schema.optionalKey(RuntimeMode),
   interactionMode: Schema.optionalKey(ProviderInteractionMode),
+  subagentLimits: Schema.optionalKey(SubagentLimits),
 });
 type PersistedComposerThreadDraftState = typeof PersistedComposerThreadDraftState.Type;
 
@@ -241,6 +247,8 @@ export interface ComposerThreadDraftState {
   activeProvider: ProviderInstanceId | null;
   runtimeMode: RuntimeMode | null;
   interactionMode: ProviderInteractionMode | null;
+  /** Whole-object desired policy, including an explicit empty reset. Never sticky. */
+  subagentLimits?: SubagentLimits;
 }
 
 /**
@@ -422,6 +430,7 @@ interface ComposerDraftStoreState {
   applyStickyState: (
     threadRef: ComposerThreadTarget,
     newChatDefaults?: NewChatComposerDefaults | null,
+    initialInstanceId?: ProviderInstanceId,
   ) => void;
   setProviderModelOptions: (
     threadRef: ComposerThreadTarget,
@@ -449,6 +458,7 @@ interface ComposerDraftStoreState {
     threadRef: ComposerThreadTarget,
     interactionMode: ProviderInteractionMode | null | undefined,
   ) => void;
+  setSubagentLimits: (threadRef: ComposerThreadTarget, limits: SubagentLimits | undefined) => void;
   addImage: (threadRef: ComposerThreadTarget, image: ComposerImageAttachment) => void;
   addImages: (threadRef: ComposerThreadTarget, images: ComposerImageAttachment[]) => void;
   removeImage: (threadRef: ComposerThreadTarget, imageId: string) => void;
@@ -506,6 +516,9 @@ export interface EffectiveComposerModelState {
 export interface NewChatComposerDefaults {
   activeProvider: ProviderInstanceId | null;
   modelSelectionByProvider: Partial<Record<ProviderInstanceId, ModelSelection>>;
+  subagentLimitsByInstance?: Partial<
+    Record<ProviderInstanceId, { provider: ProviderDriverKind; limit: number }>
+  >;
 }
 
 function isProviderInstanceEnabledInSettings(
@@ -535,10 +548,21 @@ export function deriveNewChatComposerDefaults(
   settings: UnifiedSettings,
 ): NewChatComposerDefaults | null {
   const modelSelectionByProvider: Partial<Record<ProviderInstanceId, ModelSelection>> = {};
+  const subagentLimitsByInstance: NonNullable<NewChatComposerDefaults["subagentLimitsByInstance"]> =
+    {};
   for (const [rawId, instance] of Object.entries(settings.providerInstances ?? {})) {
-    if (!instance.defaultModel) continue;
     if (instance.enabled === false || isRetiredProviderDriverKind(instance.driver)) continue;
     const instanceId = rawId as ProviderInstanceId;
+    if (
+      subagentLimitKey(instance.driver) &&
+      validSubagentLimit(instance.defaultMaxConcurrentSubagents)
+    ) {
+      subagentLimitsByInstance[instanceId] = {
+        provider: instance.driver,
+        limit: instance.defaultMaxConcurrentSubagents,
+      };
+    }
+    if (!instance.defaultModel) continue;
     modelSelectionByProvider[instanceId] = createModelSelection(
       instanceId,
       instance.defaultModel,
@@ -553,10 +577,18 @@ export function deriveNewChatComposerDefaults(
       ? configuredDefaultProvider
       : null;
 
-  if (activeProvider === null && Object.keys(modelSelectionByProvider).length === 0) {
+  if (
+    activeProvider === null &&
+    Object.keys(modelSelectionByProvider).length === 0 &&
+    Object.keys(subagentLimitsByInstance).length === 0
+  ) {
     return null;
   }
-  return { activeProvider, modelSelectionByProvider };
+  return {
+    activeProvider,
+    modelSelectionByProvider,
+    ...(Object.keys(subagentLimitsByInstance).length ? { subagentLimitsByInstance } : {}),
+  };
 }
 
 interface ComposerDraftModelState {
@@ -695,7 +727,8 @@ function shouldRemoveDraft(draft: ComposerThreadDraftState): boolean {
     Object.keys(draft.modelSelectionByProvider).length === 0 &&
     draft.activeProvider === null &&
     draft.runtimeMode === null &&
-    draft.interactionMode === null
+    draft.interactionMode === null &&
+    draft.subagentLimits === undefined
   );
 }
 
@@ -1602,6 +1635,9 @@ function normalizePersistedDraftsByThreadId(
       draftCandidate.interactionMode === "default"
         ? draftCandidate.interactionMode
         : null;
+    const subagentLimits = isSubagentLimits(draftCandidate.subagentLimits)
+      ? draftCandidate.subagentLimits
+      : undefined;
     const prompt = promptCandidate;
     // If the draft already has the v3 shape, use it directly
     const legacyDraftCandidate = draftValue as LegacyPersistedComposerThreadDraftState;
@@ -1657,7 +1693,8 @@ function normalizePersistedDraftsByThreadId(
       files.length === 0 &&
       !hasModelData &&
       !runtimeMode &&
-      !interactionMode
+      !interactionMode &&
+      subagentLimits === undefined
     ) {
       continue;
     }
@@ -1688,6 +1725,7 @@ function normalizePersistedDraftsByThreadId(
         : {}),
       ...(runtimeMode ? { runtimeMode } : {}),
       ...(interactionMode ? { interactionMode } : {}),
+      ...(subagentLimits !== undefined ? { subagentLimits } : {}),
     };
   }
 
@@ -1764,7 +1802,8 @@ function partializeComposerDraftStoreState(
       draft.files.length === 0 &&
       !hasModelData &&
       draft.runtimeMode === null &&
-      draft.interactionMode === null
+      draft.interactionMode === null &&
+      draft.subagentLimits === undefined
     ) {
       continue;
     }
@@ -1783,6 +1822,7 @@ function partializeComposerDraftStoreState(
         : {}),
       ...(draft.runtimeMode ? { runtimeMode: draft.runtimeMode } : {}),
       ...(draft.interactionMode ? { interactionMode: draft.interactionMode } : {}),
+      ...(draft.subagentLimits !== undefined ? { subagentLimits: draft.subagentLimits } : {}),
     };
     persistedDraftsByThreadKey[threadKey] = persistedDraft;
   }
@@ -2013,6 +2053,9 @@ function toHydratedThreadDraft(
     activeProvider,
     runtimeMode: persistedDraft.runtimeMode ?? null,
     interactionMode: persistedDraft.interactionMode ?? null,
+    ...(persistedDraft.subagentLimits !== undefined
+      ? { subagentLimits: persistedDraft.subagentLimits }
+      : {}),
   };
 }
 
@@ -2418,7 +2461,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             };
           });
         },
-        applyStickyState: (threadRef, newChatDefaults) => {
+        applyStickyState: (threadRef, newChatDefaults, initialInstanceId) => {
           const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
           if (threadKey.length === 0) {
             return;
@@ -2432,7 +2475,8 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               Object.keys(stickyMap).length === 0 &&
               stickyActiveProvider === null &&
               Object.keys(defaultsMap).length === 0 &&
-              defaultsActiveProvider === null
+              defaultsActiveProvider === null &&
+              Object.keys(newChatDefaults?.subagentLimitsByInstance ?? {}).length === 0
             ) {
               return state;
             }
@@ -2460,9 +2504,24 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               }
             }
             const nextActiveProvider = defaultsActiveProvider ?? stickyActiveProvider;
+            // Copy only the exact initial instance's default. Multiple accounts
+            // using the same driver must not overwrite each other's policy.
+            const concurrencyDefault =
+              newChatDefaults?.subagentLimitsByInstance?.[
+                nextActiveProvider ?? initialInstanceId ?? ProviderInstanceId.make("codex")
+              ];
+            const concurrencyKey = concurrencyDefault
+              ? subagentLimitKey(concurrencyDefault.provider)
+              : null;
+            const nextSubagentLimits =
+              base.subagentLimits ??
+              (concurrencyDefault && concurrencyKey
+                ? { [concurrencyKey]: concurrencyDefault.limit }
+                : undefined);
             if (
               Equal.equals(base.modelSelectionByProvider, nextMap) &&
-              base.activeProvider === nextActiveProvider
+              base.activeProvider === nextActiveProvider &&
+              subagentLimitsEqual(base.subagentLimits, nextSubagentLimits)
             ) {
               return state;
             }
@@ -2470,6 +2529,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               ...base,
               modelSelectionByProvider: nextMap,
               activeProvider: nextActiveProvider,
+              ...(nextSubagentLimits !== undefined ? { subagentLimits: nextSubagentLimits } : {}),
             };
             const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
             if (shouldRemoveDraft(nextDraft)) {
@@ -2709,6 +2769,23 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               nextDraftsByThreadKey[threadKey] = nextDraft;
             }
             return { draftsByThreadKey: nextDraftsByThreadKey };
+          });
+        },
+        setSubagentLimits: (threadRef, limits) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef);
+          if (!threadKey || (limits !== undefined && !isSubagentLimits(limits))) return;
+          set((state) => {
+            const base = state.draftsByThreadKey[threadKey] ?? createEmptyThreadDraft();
+            if (subagentLimitsEqual(base.subagentLimits, limits)) return state;
+            const { subagentLimits: _previous, ...rest } = base;
+            const next = {
+              ...rest,
+              ...(limits !== undefined ? { subagentLimits: { ...limits } } : {}),
+            };
+            const draftsByThreadKey = { ...state.draftsByThreadKey };
+            if (shouldRemoveDraft(next)) delete draftsByThreadKey[threadKey];
+            else draftsByThreadKey[threadKey] = next;
+            return { draftsByThreadKey };
           });
         },
         setInteractionMode: (threadRef, interactionMode) => {

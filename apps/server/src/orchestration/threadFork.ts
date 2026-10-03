@@ -93,6 +93,9 @@ export const dispatchProviderNativeThreadFork = Effect.fn("dispatchProviderNativ
         providerName: fork.provider,
         providerInstanceId: fork.providerInstanceId,
         runtimeMode: fork.runtimeMode,
+        ...(fork.maxConcurrentSubagents !== undefined
+          ? { maxConcurrentSubagents: fork.maxConcurrentSubagents }
+          : {}),
         activeTurnId: null,
         lastError: null,
         updatedAt: input.command.createdAt,

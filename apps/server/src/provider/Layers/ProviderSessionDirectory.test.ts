@@ -128,6 +128,122 @@ it.layer(makeDirectoryLayer(SqlitePersistenceMemory))("ProviderSessionDirectoryL
       }
     }));
 
+  it("keeps process-limit evidence only for the exact driver/account owner", () =>
+    Effect.gen(function* () {
+      const directory = yield* ProviderSessionDirectory;
+      const threadId = ThreadId.make("thread-policy-owner");
+      const codex = ProviderDriverKind.make("codex");
+      const firstAccount = ProviderInstanceId.make("codex-first-policy-owner");
+      const nextAccount = ProviderInstanceId.make("codex-next-policy-owner");
+      const grokAccount = ProviderInstanceId.make("grok-policy-owner");
+      const readPayload = () =>
+        directory
+          .getBinding(threadId)
+          .pipe(Effect.map((binding) => Option.getOrThrow(binding).runtimePayload));
+
+      yield* directory.upsert({
+        threadId,
+        provider: codex,
+        providerInstanceId: firstAccount,
+        runtimePayload: { cwd: "synthetic-root", maxConcurrentSubagents: 6 },
+      });
+      // Heartbeats are partial observations, not new process configuration.
+      yield* directory.upsert({
+        threadId,
+        provider: codex,
+        providerInstanceId: firstAccount,
+        runtimePayload: { activeTurnId: "synthetic-active" },
+      });
+      assert.deepEqual(yield* readPayload(), {
+        cwd: "synthetic-root",
+        maxConcurrentSubagents: 6,
+        activeTurnId: "synthetic-active",
+      });
+
+      yield* directory.upsert({
+        threadId,
+        provider: codex,
+        providerInstanceId: nextAccount,
+        runtimePayload: { activeTurnId: null },
+      });
+      assert.deepEqual(yield* readPayload(), { cwd: "synthetic-root", activeTurnId: null });
+      // Do not replace unknown with null: a future materialization can report
+      // a known inherited policy, but this account has not reported one yet.
+      yield* directory.upsert({
+        threadId,
+        provider: codex,
+        providerInstanceId: nextAccount,
+        runtimePayload: { maxConcurrentSubagents: null },
+      });
+      yield* directory.upsert({ threadId, provider: codex, providerInstanceId: nextAccount });
+      assert.deepEqual(yield* readPayload(), {
+        cwd: "synthetic-root",
+        activeTurnId: null,
+        maxConcurrentSubagents: null,
+      });
+      yield* directory.upsert({
+        threadId,
+        provider: codex,
+        providerInstanceId: nextAccount,
+        runtimePayload: { maxConcurrentSubagents: 9 },
+      });
+      // Driver switches are equally exact even when the new adapter does not
+      // support the additive process-limit evidence field at all.
+      yield* directory.upsert({
+        threadId,
+        provider: ProviderDriverKind.make("grok"),
+        providerInstanceId: grokAccount,
+        runtimePayload: { lastRuntimeEvent: "synthetic-grok-ready" },
+      });
+      assert.deepEqual(yield* readPayload(), {
+        cwd: "synthetic-root",
+        activeTurnId: null,
+        lastRuntimeEvent: "synthetic-grok-ready",
+      });
+      yield* directory.upsert({
+        threadId,
+        provider: codex,
+        providerInstanceId: firstAccount,
+        runtimePayload: { maxConcurrentSubagents: 4 },
+      });
+      assert.propertyVal(yield* readPayload(), "maxConcurrentSubagents", 4);
+    }));
+
+  it("preserves a legacy null-instance policy only for its promoted default account", () =>
+    Effect.gen(function* () {
+      const directory = yield* ProviderSessionDirectory;
+      const repository = yield* ProviderSessionRuntimeRepository;
+      const threadId = ThreadId.make("thread-legacy-policy-owner");
+      yield* repository.upsert({
+        threadId,
+        providerName: "codex",
+        providerInstanceId: null,
+        adapterKey: "codex",
+        runtimeMode: "full-access",
+        status: "stopped",
+        lastSeenAt: "2026-10-03T00:00:00.000Z",
+        resumeCursor: null,
+        runtimePayload: { maxConcurrentSubagents: 7, cwd: "synthetic-legacy-root" },
+      });
+      yield* directory.upsert({
+        threadId,
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+      });
+      assert.deepEqual(Option.getOrThrow(yield* directory.getBinding(threadId)).runtimePayload, {
+        maxConcurrentSubagents: 7,
+        cwd: "synthetic-legacy-root",
+      });
+      yield* directory.upsert({
+        threadId,
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: ProviderInstanceId.make("codex-different-legacy-owner"),
+      });
+      assert.deepEqual(Option.getOrThrow(yield* directory.getBinding(threadId)).runtimePayload, {
+        cwd: "synthetic-legacy-root",
+      });
+    }));
+
   it("keeps nested-agent history provenance immutable across provider replacement", () =>
     Effect.gen(function* () {
       const directory = yield* ProviderSessionDirectory;

@@ -5,6 +5,8 @@ import { cn } from "~/lib/utils";
 import { type ContextWindowSnapshot, formatContextWindowTokens } from "~/lib/contextWindow";
 import { formatCodexRateLimitPresentation } from "~/lib/codexRateLimits";
 import { ProviderAccountQuotaDetails, UsageMeterBar } from "../ProviderAccountQuotaDetails";
+import { SubagentConcurrencyDetails } from "./SubagentConcurrencyControl";
+import type { SubagentConcurrencyPresentation } from "../../subagentConcurrency";
 
 function formatPercentage(value: number | null): string | null {
   if (value === null || !Number.isFinite(value)) {
@@ -22,6 +24,7 @@ export function ContextWindowDetails(props: {
   readonly layout?: "popover" | "panel";
   readonly headerAction?: ReactNode;
   readonly usageResetAction?: ReactNode;
+  readonly subagentConcurrency?: SubagentConcurrencyPresentation | null | undefined;
 }) {
   const usage = props.usage ?? null;
   const layout = props.layout ?? "popover";
@@ -31,7 +34,7 @@ export function ContextWindowDetails(props: {
   const hasUsage = usage !== null;
   const hasRateLimits = quota !== null;
 
-  if (!hasUsage && !hasRateLimits) {
+  if (!hasUsage && !hasRateLimits && !props.subagentConcurrency) {
     return (
       <p className="text-[13px] text-muted-foreground/40">Waiting for usage from this thread.</p>
     );
@@ -116,6 +119,11 @@ export function ContextWindowDetails(props: {
             layout={layout}
             action={props.usageResetAction}
           />
+        </div>
+      ) : null}
+      {props.subagentConcurrency ? (
+        <div className="border-t border-border/60 pt-2">
+          <SubagentConcurrencyDetails presentation={props.subagentConcurrency} />
         </div>
       ) : null}
     </div>

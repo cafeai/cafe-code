@@ -147,8 +147,11 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
 
   readonly close = (): void => {
     this.closeCalls += 1;
+    if (this.closeFailure !== undefined) throw this.closeFailure;
     this.finish();
   };
+
+  closeFailure: unknown = undefined;
 
   [Symbol.asyncIterator](): AsyncIterator<SDKMessage> {
     return {
@@ -216,6 +219,8 @@ function makeSuccessfulClaudeResult(sessionId: string): SDKResultSuccess {
 }
 
 function makeHarness(config?: {
+  readonly subagentConcurrencySupported?: boolean;
+  readonly newQueryPerSession?: boolean;
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: ClaudeAdapterLiveOptions["nativeEventLogger"];
   readonly cwd?: string;
@@ -230,6 +235,11 @@ function makeHarness(config?: {
   readonly getNativeSubagentMessages?: ClaudeAdapterLiveOptions["getNativeSubagentMessages"];
 }) {
   const query = new FakeClaudeQuery();
+  const queries = [query];
+  const createInputs: Array<{
+    readonly prompt: AsyncIterable<SDKUserMessage>;
+    readonly options: ClaudeQueryOptions;
+  }> = [];
   let createInput:
     | {
         readonly prompt: AsyncIterable<SDKUserMessage>;
@@ -238,10 +248,17 @@ function makeHarness(config?: {
     | undefined;
 
   const adapterOptions: ClaudeAdapterLiveOptions = {
+    getSubagentConcurrencySupport: () => config?.subagentConcurrencySupported ?? false,
     ...(config?.instanceId ? { instanceId: config.instanceId } : {}),
     ...(config?.environment ? { environment: config.environment } : {}),
     createQuery: (input) => {
       createInput = input;
+      createInputs.push(input);
+      if (config?.newQueryPerSession && createInputs.length > 1) {
+        const next = new FakeClaudeQuery();
+        queries.push(next);
+        return next;
+      }
       return query;
     },
     ...(config?.nativeEventLogger
@@ -285,6 +302,8 @@ function makeHarness(config?: {
       Layer.provideMerge(NodeServices.layer),
     ),
     query,
+    queries,
+    createInputs,
     getLastCreateQueryInput: () => createInput,
   };
 }
@@ -403,6 +422,339 @@ describe("Claude project directory encoding", () => {
 });
 
 describe("ClaudeAdapterLive", () => {
+  it.effect(
+    "isolates per-chat Claude concurrency environments and snapshots inherited/reset overrides",
+    () => {
+      const baseEnvironment = Object.freeze({ CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: "128" });
+      const harness = makeHarness({
+        newQueryPerSession: true,
+        environment: baseEnvironment,
+        claudeConfig: { maxConcurrentSubagents: 20 },
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const first = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "full-access",
+          maxConcurrentSubagents: 1,
+        });
+        const firstEnvironment = harness.createInputs[0]?.options.env;
+        const second = yield* adapter.startSession({
+          threadId: ThreadId.make("claude-limit-sibling"),
+          runtimeMode: "full-access",
+          maxConcurrentSubagents: 64,
+        });
+        const inherited = yield* adapter.startSession({
+          threadId: ThreadId.make("claude-limit-inherited"),
+          runtimeMode: "full-access",
+          maxConcurrentSubagents: null,
+        });
+        assert.equal(first.maxConcurrentSubagents, 1);
+        assert.equal(second.maxConcurrentSubagents, 64);
+        assert.equal(inherited.maxConcurrentSubagents, 20);
+        assert.deepEqual(
+          harness.createInputs.map(
+            (input) => input.options.env?.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS,
+          ),
+          ["1", "64", "20"],
+        );
+        assert.equal(firstEnvironment?.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS, "1");
+        assert.notEqual(firstEnvironment, harness.createInputs[1]?.options.env);
+        assert.equal(baseEnvironment.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS, "128");
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect(
+    "guarded idle Claude restart preserves resume selection and delegates native defaults on reset",
+    () => {
+      const harness = makeHarness({
+        subagentConcurrencySupported: true,
+        newQueryPerSession: true,
+        environment: { CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: "32" },
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "full-access",
+          maxConcurrentSubagents: 8,
+        });
+        const reset = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "full-access",
+          maxConcurrentSubagents: null,
+          requireIdleForSubagentLimitChange: true,
+        });
+        assert.equal(reset.maxConcurrentSubagents, null);
+        assert.equal(harness.query.closeCalls, 1);
+        assert.equal(
+          harness.createInputs[1]?.options.env?.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS,
+          "32",
+        );
+        assert.equal(
+          harness.createInputs[0]?.options.env?.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS,
+          "8",
+        );
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect(
+    "rejects guarded active Claude replacement and malformed limits before process teardown",
+    () => {
+      const harness = makeHarness({ subagentConcurrencySupported: true, environment: {} });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "full-access",
+          maxConcurrentSubagents: 8,
+        });
+        yield* adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: "synthetic test input",
+          attachments: [],
+        });
+        const denied = yield* adapter
+          .startSession({
+            threadId: THREAD_ID,
+            runtimeMode: "full-access",
+            maxConcurrentSubagents: 4,
+            requireIdleForSubagentLimitChange: true,
+          })
+          .pipe(Effect.result);
+        assert.equal(denied._tag, "Failure");
+        if (denied._tag === "Failure")
+          assert.equal(
+            "remoteErrorTag" in denied.failure ? denied.failure.remoteErrorTag : null,
+            "subagent-concurrency-active",
+          );
+        for (const maxConcurrentSubagents of [0, 65, 1.5, NaN, Infinity]) {
+          const result = yield* adapter
+            .startSession({
+              threadId: THREAD_ID,
+              runtimeMode: "full-access",
+              maxConcurrentSubagents,
+            })
+            .pipe(Effect.result);
+          assert.equal(result._tag, "Failure");
+        }
+        assert.equal(harness.query.closeCalls, 0);
+        assert.equal(harness.query.interruptCalls.length, 0);
+        assert.equal(harness.createInputs.length, 1);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect(
+    "refuses concurrency replacement with an uncertain hidden child after an idle root",
+    () => {
+      const harness = makeHarness({ subagentConcurrencySupported: true, environment: {} });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "full-access",
+          maxConcurrentSubagents: 8,
+        });
+        const childObserved = yield* Stream.runHead(
+          adapter.streamEvents.pipe(Stream.filter((event) => event.type === "task.started")),
+        ).pipe(Effect.forkChild);
+        harness.query.emit({
+          type: "system",
+          subtype: "task_started",
+          task_id: "hidden-child",
+          tool_use_id: "hidden-tool",
+          task_type: "local_agent",
+          spawn_depth: 1,
+          skip_transcript: true,
+          description: "Private background child",
+          session_id: "synthetic-session",
+          uuid: "synthetic-hidden-start",
+        } as unknown as SDKMessage);
+        yield* Fiber.join(childObserved);
+        const denied = yield* adapter
+          .startSession({
+            threadId: THREAD_ID,
+            runtimeMode: "full-access",
+            maxConcurrentSubagents: 4,
+            requireIdleForSubagentLimitChange: true,
+          })
+          .pipe(Effect.result);
+        assert.equal(denied._tag, "Failure");
+        assert.equal(harness.query.closeCalls, 0);
+        assert.equal(harness.query.interruptCalls.length, 0);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect(
+    "refuses retirement while a consumed SDK child message is blocked before native status binding",
+    () =>
+      Effect.gen(function* () {
+        const loggerEntered = yield* Deferred.make<void>();
+        const releaseLogger = yield* Deferred.make<void>();
+        const harness = makeHarness({
+          subagentConcurrencySupported: true,
+          environment: {},
+          nativeEventLogger: {
+            filePath: "memory://in-flight-child-fixture",
+            write: () =>
+              Deferred.succeed(loggerEntered, undefined).pipe(
+                Effect.andThen(Deferred.await(releaseLogger)),
+              ),
+            close: () => Effect.void,
+          },
+        });
+        yield* Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          yield* adapter.startSession({
+            threadId: THREAD_ID,
+            runtimeMode: "full-access",
+            maxConcurrentSubagents: 8,
+          });
+          harness.query.emit({
+            type: "system",
+            subtype: "task_started",
+            task_id: "consumed-child",
+            tool_use_id: "consumed-tool",
+            task_type: "local_agent",
+            spawn_depth: 1,
+            skip_transcript: true,
+            description: "Synthetic child",
+            session_id: "synthetic-session",
+            uuid: "synthetic-consumed-start",
+          } as unknown as SDKMessage);
+          yield* Deferred.await(loggerEntered);
+          const denied = yield* adapter
+            .startSession({
+              threadId: THREAD_ID,
+              runtimeMode: "full-access",
+              maxConcurrentSubagents: 4,
+              requireIdleForSubagentLimitChange: true,
+            })
+            .pipe(Effect.result);
+          assert.equal(denied._tag, "Failure");
+          if (denied._tag === "Failure")
+            assert.equal(
+              "remoteErrorTag" in denied.failure ? denied.failure.remoteErrorTag : null,
+              "subagent-concurrency-active",
+            );
+          assert.equal(harness.query.closeCalls, 0);
+          assert.equal(harness.query.interruptCalls.length, 0);
+          assert.equal(harness.createInputs.length, 1);
+        }).pipe(
+          Effect.ensuring(Deferred.succeed(releaseLogger, undefined)),
+          Effect.provideService(Random.Random, makeDeterministicRandomService()),
+          Effect.provide(harness.layer),
+        );
+      }),
+  );
+
+  it.effect(
+    "does not launch a competing Claude query after guarded native closure is inconclusive",
+    () => {
+      const harness = makeHarness({
+        subagentConcurrencySupported: true,
+        newQueryPerSession: true,
+        environment: {},
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "full-access",
+          maxConcurrentSubagents: 8,
+        });
+        harness.query.closeFailure = new Error("private synthetic SDK close detail");
+        const denied = yield* adapter
+          .startSession({
+            threadId: THREAD_ID,
+            runtimeMode: "full-access",
+            maxConcurrentSubagents: 4,
+            requireIdleForSubagentLimitChange: true,
+          })
+          .pipe(Effect.result);
+        assert.equal(denied._tag, "Failure");
+        if (denied._tag === "Failure") {
+          assert.equal(
+            "remoteErrorTag" in denied.failure ? denied.failure.remoteErrorTag : null,
+            "subagent-concurrency-retirement-uncertain",
+          );
+          assert.equal(JSON.stringify(denied.failure).includes("private synthetic"), false);
+        }
+        const retry = yield* adapter
+          .startSession({
+            threadId: THREAD_ID,
+            runtimeMode: "full-access",
+            maxConcurrentSubagents: 4,
+          })
+          .pipe(Effect.result);
+        assert.equal(retry._tag, "Failure");
+        assert.equal(harness.createInputs.length, 1);
+        assert.equal(harness.query.closeCalls, 1);
+        // Explicit stop can retry the same query and discharge its ownership
+        // fence only when native closure is finally conclusive.
+        harness.query.closeFailure = undefined;
+        yield* adapter.stopSession(THREAD_ID);
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "full-access",
+          maxConcurrentSubagents: 4,
+        });
+        assert.equal(harness.query.closeCalls, 2);
+        assert.equal(harness.createInputs.length, 2);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect(
+    "fences an ordinary Claude replacement when native close fails during best-effort cleanup",
+    () => {
+      const harness = makeHarness({ newQueryPerSession: true, environment: {} });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "full-access" });
+        harness.query.closeFailure = new Error("private ordinary-close fixture detail");
+        const denied = yield* adapter
+          .startSession({ threadId: THREAD_ID, runtimeMode: "full-access" })
+          .pipe(Effect.result);
+        assert.equal(denied._tag, "Failure");
+        if (denied._tag === "Failure") {
+          assert.equal(
+            "remoteErrorTag" in denied.failure ? denied.failure.remoteErrorTag : null,
+            "subagent-concurrency-retirement-uncertain",
+          );
+        }
+        assert.equal(harness.createInputs.length, 1);
+        assert.equal(harness.query.closeCalls, 1);
+        harness.query.closeFailure = undefined;
+        yield* adapter.stopSession(THREAD_ID);
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "full-access" });
+        assert.equal(harness.createInputs.length, 2);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
   it.effect("returns validation error for non-claude provider on startSession", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -5373,6 +5725,46 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("refuses padded opaque Claude history keys before native history I/O", () => {
+    let listCount = 0;
+    let messageCount = 0;
+    const harness = makeHarness({
+      listNativeSubagents: async () => {
+        listCount += 1;
+        return ["agent-authorized-exact"];
+      },
+      getNativeSubagentMessages: async () => {
+        messageCount += 1;
+        return [];
+      },
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      assert.ok(adapter.readSubagentDetail);
+      for (const historyId of [" agent-authorized-exact", "agent-authorized-exact "]) {
+        const result = yield* adapter
+          .readSubagentDetail(THREAD_ID, "task-ended-exact", {
+            resumeCursor: { resume: "00000000-0000-4000-8000-000000000931", turnCount: 1 },
+            cwd: "/synthetic/exact-history-project",
+            historyId,
+          })
+          .pipe(Effect.result);
+        assert.equal(result._tag, "Failure");
+        if (
+          result._tag === "Failure" &&
+          result.failure._tag === "ProviderSubagentDetailReadError"
+        ) {
+          assert.equal(result.failure.reason, "invalid-request");
+        }
+      }
+      assert.equal(listCount, 0);
+      assert.equal(messageCount, 0);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect(
     "cryptographically bounds hostile Claude task and tool identities across the full lifecycle",
     () => {
@@ -8927,6 +9319,8 @@ describe("ClaudeAdapterLive", () => {
 
     let observedTitle: string | undefined;
     const harness = makeHarness({
+      newQueryPerSession: true,
+      environment: {},
       cwd,
       claudeConfig: { homePath },
       forkNativeSession: async (sessionId, options) => {
@@ -8962,6 +9356,7 @@ describe("ClaudeAdapterLive", () => {
           resume: sourceSessionId,
           turnCount: 3,
         },
+        maxConcurrentSubagents: 7,
         runtimeMode: "full-access",
       });
 
@@ -8972,6 +9367,18 @@ describe("ClaudeAdapterLive", () => {
         title: "Native Claude fork",
       });
       assert.equal(observedTitle, "Native Claude fork");
+      assert.equal(fork.maxConcurrentSubagents, 7);
+      const forkResumed = yield* adapter.startSession({
+        threadId: fork.targetThreadId,
+        cwd,
+        runtimeMode: "full-access",
+        resumeCursor: fork.resumeCursor,
+        maxConcurrentSubagents: fork.maxConcurrentSubagents,
+      });
+      assert.equal(forkResumed.maxConcurrentSubagents, 7);
+      assert.equal(harness.createInputs[1]?.options.resume, targetSessionId);
+      assert.equal(harness.createInputs[1]?.options.env?.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS, "7");
+      assert.equal(harness.createInputs[0]?.options.env?.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS, "7");
       assert.deepEqual(fork.resumeCursor, {
         threadId: ThreadId.make("thread-claude-fork-target"),
         resume: targetSessionId,

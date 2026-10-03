@@ -52,12 +52,28 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function mergeRuntimePayload(
   existing: unknown | null,
   next: unknown | null | undefined,
+  ownerChanged: boolean,
 ): unknown | null {
+  // Partial heartbeats intentionally preserve the current owner's process
+  // evidence. A new driver/account cannot inherit that evidence merely because
+  // its older/unsupported adapter omits the additive field. Remove only this
+  // owner's saved policy; absence stays unknown rather than becoming known null,
+  // and unrelated payload fields retain their existing merge semantics.
+  const prior =
+    ownerChanged &&
+    isRecord(existing) &&
+    (!isRecord(next) || next.maxConcurrentSubagents === undefined)
+      ? (() => {
+          const retained = { ...existing };
+          delete retained.maxConcurrentSubagents;
+          return retained;
+        })()
+      : existing;
   if (next === undefined) {
-    return existing ?? null;
+    return prior ?? null;
   }
-  if (isRecord(existing) && isRecord(next)) {
-    return { ...existing, ...next };
+  if (isRecord(prior) && isRecord(next)) {
+    return { ...prior, ...next };
   }
   return next;
 }
@@ -130,6 +146,14 @@ const makeProviderSessionDirectory = Effect.gen(function* () {
         issue: "providerInstanceId is required for provider session runtime bindings.",
       });
     }
+    // Read-side migration already promotes a legacy null instance id to this
+    // driver's default account. Compare that same identity here so an explicit
+    // migration publication does not revoke a legitimately same-owner policy.
+    const ownerChanged =
+      existingRuntime !== undefined &&
+      (providerChanged ||
+        (existingRuntime.providerInstanceId ?? defaultInstanceIdForDriver(binding.provider)) !==
+          providerInstanceId);
     yield* repository
       .upsert({
         threadId: resolvedThreadId,
@@ -148,6 +172,7 @@ const makeProviderSessionDirectory = Effect.gen(function* () {
         runtimePayload: mergeRuntimePayload(
           existingRuntime?.runtimePayload ?? null,
           binding.runtimePayload,
+          ownerChanged,
         ),
       })
       .pipe(Effect.mapError(toPersistenceError("ProviderSessionDirectory.upsert:upsert")));

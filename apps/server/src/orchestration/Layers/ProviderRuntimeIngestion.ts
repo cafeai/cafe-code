@@ -2896,6 +2896,13 @@ const make = Effect.gen(function* () {
                 ? { providerInstanceId: event.providerInstanceId }
                 : {}),
               runtimeMode: thread.session?.runtimeMode ?? "full-access",
+              // Lifecycle notifications do not independently report process
+              // configuration. Preserve exact same-account materialization
+              // evidence, never borrow a different account's old limit.
+              ...(thread.session?.maxConcurrentSubagents !== undefined &&
+              thread.session.providerInstanceId === event.providerInstanceId
+                ? { maxConcurrentSubagents: thread.session.maxConcurrentSubagents }
+                : {}),
               activeTurnId: nextActiveTurnId,
               lastError,
               updatedAt: now,

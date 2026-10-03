@@ -38,6 +38,7 @@ import {
   ThreadTurnStartRequestedPayload,
 } from "./Schemas.ts";
 import { isStaleProvisionalSessionReplay } from "./sessionLifecycle.ts";
+import { materializedSubagentLimitFields } from "./sessionSubagentLimits.ts";
 
 type ThreadPatch = Partial<Omit<OrchestrationThread, "id">>;
 const MAX_THREAD_MESSAGES = 2_000;
@@ -392,6 +393,9 @@ export function projectEvent(
             projectId: payload.projectId,
             title: payload.title,
             modelSelection: payload.modelSelection,
+            ...(payload.subagentLimits !== undefined
+              ? { subagentLimits: payload.subagentLimits }
+              : {}),
             runtimeMode: payload.runtimeMode,
             interactionMode: payload.interactionMode,
             branch: payload.branch,
@@ -525,6 +529,9 @@ export function projectEvent(
             ...(payload.modelSelection !== undefined
               ? { modelSelection: payload.modelSelection }
               : {}),
+            ...(payload.subagentLimits !== undefined
+              ? { subagentLimits: payload.subagentLimits }
+              : {}),
             ...(payload.branch !== undefined ? { branch: payload.branch } : {}),
             ...(payload.worktreePath !== undefined ? { worktreePath: payload.worktreePath } : {}),
             updatedAt: payload.updatedAt,
@@ -577,6 +584,9 @@ export function projectEvent(
               ...(payload.modelSelection !== undefined
                 ? { modelSelection: payload.modelSelection }
                 : {}),
+              ...(payload.subagentLimits !== undefined
+                ? { subagentLimits: payload.subagentLimits }
+                : {}),
               runtimeMode: payload.runtimeMode,
               interactionMode: payload.interactionMode,
               session: {
@@ -585,6 +595,9 @@ export function projectEvent(
                 providerName: thread.session?.providerName ?? null,
                 ...(thread.session?.providerInstanceId !== undefined
                   ? { providerInstanceId: thread.session.providerInstanceId }
+                  : {}),
+                ...(thread.session?.maxConcurrentSubagents !== undefined
+                  ? { maxConcurrentSubagents: thread.session.maxConcurrentSubagents }
                   : {}),
                 runtimeMode: payload.runtimeMode,
                 activeTurnId: null,
@@ -704,7 +717,10 @@ export function projectEvent(
 
         const session: OrchestrationSession = yield* decodeForEvent(
           OrchestrationSession,
-          payload.session,
+          {
+            ...payload.session,
+            ...materializedSubagentLimitFields(payload.session, thread.session),
+          },
           event.type,
           "session",
         );

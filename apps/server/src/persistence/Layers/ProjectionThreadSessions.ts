@@ -7,6 +7,7 @@ import { toPersistenceSqlError } from "../Errors.ts";
 
 import {
   ProjectionThreadSession,
+  ProjectionThreadSessionSqlRow,
   ProjectionThreadSessionRepository,
   type ProjectionThreadSessionRepositoryShape,
   DeleteProjectionThreadSessionInput,
@@ -26,6 +27,8 @@ const makeProjectionThreadSessionRepository = Effect.gen(function* () {
           provider_name,
           provider_instance_id,
           runtime_mode,
+          max_concurrent_subagents,
+          max_concurrent_subagents_known,
           active_turn_id,
           last_error,
           updated_at
@@ -36,6 +39,8 @@ const makeProjectionThreadSessionRepository = Effect.gen(function* () {
           ${row.providerName},
           ${row.providerInstanceId},
           ${row.runtimeMode},
+          ${row.maxConcurrentSubagents ?? null},
+          ${row.maxConcurrentSubagents === undefined ? 0 : 1},
           ${row.activeTurnId},
           ${row.lastError},
           ${row.updatedAt}
@@ -46,6 +51,8 @@ const makeProjectionThreadSessionRepository = Effect.gen(function* () {
           provider_name = excluded.provider_name,
           provider_instance_id = excluded.provider_instance_id,
           runtime_mode = excluded.runtime_mode,
+          max_concurrent_subagents = excluded.max_concurrent_subagents,
+          max_concurrent_subagents_known = excluded.max_concurrent_subagents_known,
           active_turn_id = excluded.active_turn_id,
           last_error = excluded.last_error,
           updated_at = excluded.updated_at
@@ -54,7 +61,7 @@ const makeProjectionThreadSessionRepository = Effect.gen(function* () {
 
   const getProjectionThreadSessionRow = SqlSchema.findOneOption({
     Request: GetProjectionThreadSessionInput,
-    Result: ProjectionThreadSession,
+    Result: ProjectionThreadSessionSqlRow,
     execute: ({ threadId }) =>
       sql`
         SELECT
@@ -63,6 +70,8 @@ const makeProjectionThreadSessionRepository = Effect.gen(function* () {
           provider_name AS "providerName",
           provider_instance_id AS "providerInstanceId",
           runtime_mode AS "runtimeMode",
+          max_concurrent_subagents AS "maxConcurrentSubagents",
+          max_concurrent_subagents_known AS "maxConcurrentSubagentsKnown",
           active_turn_id AS "activeTurnId",
           last_error AS "lastError",
           updated_at AS "updatedAt"

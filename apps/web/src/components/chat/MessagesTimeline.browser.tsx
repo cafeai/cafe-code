@@ -103,7 +103,7 @@ vi.mock("@legendapp/list/react", async () => {
 });
 
 import { MessagesTimeline } from "./MessagesTimeline";
-import type { SubagentDetailSelection } from "./SubagentDetailView";
+import { SubagentDetailView, type SubagentDetailSelection } from "./SubagentDetailView";
 
 const MESSAGE_CREATED_AT = "2026-04-13T12:00:00.000Z";
 
@@ -985,6 +985,100 @@ describe("MessagesTimeline", () => {
         expect.objectContaining({ threadId: destinationThreadId }),
       );
     } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("clears reused history immediately and reads historical children after a parent provider switch", async () => {
+    const threadId = ThreadId.make("history-binding-parent");
+    const turnId = TurnId.make("history-binding-turn");
+    let rejectReplacement!: (error: Error) => void;
+    const replacement = new Promise<never>((_resolve, reject) => {
+      rejectReplacement = reject;
+    });
+    // Observe the rejection immediately so assertion cleanup cannot leave a
+    // deliberately held request as an unhandled promise rejection.
+    void replacement.catch(() => undefined);
+    const read = vi.fn(async (input: { historyId?: string | undefined }) => {
+      if (input.historyId === "history-two") return replacement;
+      return {
+        provider: ProviderDriverKind.make("claudeAgent"),
+        messages: [{ key: "old", role: "assistant" as const, text: "First exact child history" }],
+        gaps: [],
+        truncated: false,
+      };
+    });
+    setSubagentDetailApi(read);
+    const entry = buildSubagentWorkEntry({
+      id: "same-row",
+      label: "Historical worker",
+      subagentId: "same-child",
+      turnId,
+      status: "completed",
+      historyId: "history-one",
+    });
+    const base = {
+      environmentId: EnvironmentId.make("environment-local"),
+      threadId,
+      provider: ProviderDriverKind.make("grok"),
+      markdownCwd: undefined,
+      additionalWorkspaceRoots: [],
+      skills: [],
+      backButtonRef: createRef<HTMLButtonElement>(),
+      onBack: vi.fn(),
+    };
+    const selection = {
+      environmentId: base.environmentId,
+      threadId,
+      rowId: entry.id,
+      turnId,
+      workEntry: entry.entry,
+    };
+    const screen = await render(<SubagentDetailView {...base} selection={selection} />);
+    try {
+      await expect
+        .element(page.getByText("First exact child history", { exact: true }))
+        .toBeVisible();
+      expect(read).toHaveBeenCalledWith({
+        threadId,
+        turnId,
+        subagentId: "same-child",
+        historyId: "history-one",
+      });
+      await screen.rerender(
+        <SubagentDetailView
+          {...base}
+          selection={{
+            ...selection,
+            workEntry: {
+              ...entry.entry,
+              subagent: {
+                ...entry.entry.subagent,
+                label: "Reused worker",
+                historyId: "history-two",
+                status: "active",
+              },
+            },
+          }}
+        />,
+      );
+      expect(document.body.textContent).not.toContain("First exact child history");
+      await vi.waitFor(() =>
+        expect(read).toHaveBeenCalledWith({
+          threadId,
+          turnId,
+          subagentId: "same-child",
+          historyId: "history-two",
+        }),
+      );
+      rejectReplacement(new Error("private transport failure"));
+      await vi.waitFor(() =>
+        expect(document.querySelector('[data-subagent-detail-unavailable="true"]')).not.toBeNull(),
+      );
+      expect(document.body.textContent).not.toContain("First exact child history");
+      expect(document.body.textContent).not.toContain("private transport failure");
+    } finally {
+      rejectReplacement(new Error("fixture cleanup"));
       await screen.unmount();
     }
   });

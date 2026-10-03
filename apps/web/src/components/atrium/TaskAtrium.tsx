@@ -1,5 +1,7 @@
 import {
   memo,
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useId,
@@ -17,7 +19,8 @@ import { useTheme } from "../../hooks/useTheme";
 import { normalizeAccentColor } from "../../themeAccent";
 import { useStore } from "../../store";
 import { buildThreadRouteParams } from "../../threadRoutes";
-import { cn } from "../../lib/utils";
+import { cn, isWindowsPlatform } from "../../lib/utils";
+import { isElectron } from "../../env";
 import { retainThreadDetailSubscription } from "../../environments/runtime/service";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { SubagentAvatar } from "../subagents/SubagentAvatar";
@@ -27,6 +30,7 @@ import { useUsageCostSummary } from "../stats/useUsageCostSummary";
 import { createAtriumScene, type AtriumScene } from "./atriumScene";
 import {
   EMPTY_ATRIUM,
+  formatAtriumCardElapsed,
   formatElapsed,
   mergeTaskAtriumErrorDismissals,
   selectAtriumSnapshot,
@@ -34,6 +38,15 @@ import {
   type AtriumCardState,
 } from "./taskAtriumData";
 import { useTaskAtriumStore } from "./taskAtriumStore";
+import { ProviderDriverKind } from "@cafecode/contracts";
+import { subagentToWorkLogEntry } from "../../session-logic";
+import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
+
+// Reuse the bounded, authorization-checked transcript reader. The potentially
+// large Markdown/detail bundle is loaded only when a worker is selected.
+const AtriumSubagentDetail = lazy(() =>
+  import("../chat/SubagentDetailView").then((module) => ({ default: module.SubagentDetailView })),
+);
 
 /**
  * Task Atrium — a read-only view of everything running, staged as a scene.
@@ -312,6 +325,7 @@ interface TaskAtriumCardViewProps {
   now: number;
   tint: string;
   onOpen: (card: AtriumCard) => void;
+  onOpenSubagent: (card: AtriumCard, rowKey: string) => void;
   onCardElement: (key: string, element: HTMLElement | null) => void;
 }
 
@@ -320,10 +334,11 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
   now,
   tint,
   onOpen,
+  onOpenSubagent,
   onCardElement,
 }: TaskAtriumCardViewProps) {
   const accent = stateColor(card.state, tint);
-  const elapsed = formatElapsed(card.startedAt, now);
+  const elapsed = formatAtriumCardElapsed(card, now);
   const titleId = useId();
   const subagentListId = useId();
   const [showAllCompletedSubagents, setShowAllCompletedSubagents] = useState(false);
@@ -442,45 +457,52 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
             {visibleSubagents.map((subagent) => (
               <li
                 key={subagent.rowKey}
-                className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2.5 rounded-lg px-0.5 py-1.5 text-[11px] text-[#4a4248] dark:text-white/75"
+                className="min-w-0 text-[11px] text-[#4a4248] dark:text-white/75"
                 data-cafe-atrium-subagent-row="true"
               >
-                <SubagentAvatar seed={subagent.id} className="size-7" />
-                <span className="min-w-0">
-                  <span className="block truncate font-semibold text-[#3c353a] dark:text-white/85">
-                    {subagent.label}
-                  </span>
-                  <span
-                    className="mt-0.5 block leading-4 text-[#6c636a] break-words dark:text-white/50"
-                    data-cafe-atrium-subagent-detail="true"
-                  >
-                    {subagent.detail}
-                  </span>
-                </span>
-                <span className="min-w-12 shrink-0 pt-0.5 text-right">
-                  <span
-                    className="block text-[9px] font-semibold uppercase tracking-[0.06em]"
-                    style={{ color: subagent.running ? accent : SETTLED_COLOR }}
-                  >
-                    {subagent.status === "waiting"
-                      ? "Waiting"
-                      : subagent.status === "active"
-                        ? "Working"
-                        : subagent.status === "failed"
-                          ? "Failed"
-                          : subagent.status === "stopped"
-                            ? "Stopped"
-                            : "Done"}
-                  </span>
-                  {subagent.startedAt !== null ? (
-                    <span className="mt-0.5 block font-mono text-[10px] tabular-nums text-[#8a8189] dark:text-white/45">
-                      {formatElapsed(
-                        subagent.startedAt,
-                        subagent.running ? now : (subagent.completedAt ?? now),
-                      )}
+                <button
+                  type="button"
+                  onClick={() => onOpenSubagent(card, subagent.rowKey)}
+                  aria-label={`View ${subagent.label} activity`}
+                  className="relative z-20 grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2.5 rounded-lg px-0.5 py-1.5 text-left hover:bg-black/5 dark:hover:bg-white/5 focus-visible:outline-2 focus-visible:outline-[var(--cafe-atrium-accent)]"
+                >
+                  <SubagentAvatar seed={subagent.id} className="size-7" />
+                  <span className="min-w-0">
+                    <span className="block truncate font-semibold text-[#3c353a] dark:text-white/85">
+                      {subagent.label}
                     </span>
-                  ) : null}
-                </span>
+                    <span
+                      className="mt-0.5 block leading-4 text-[#6c636a] break-words dark:text-white/50"
+                      data-cafe-atrium-subagent-detail="true"
+                    >
+                      {subagent.detail}
+                    </span>
+                  </span>
+                  <span className="min-w-12 shrink-0 pt-0.5 text-right">
+                    <span
+                      className="block text-[9px] font-semibold uppercase tracking-[0.06em]"
+                      style={{ color: subagent.running ? accent : SETTLED_COLOR }}
+                    >
+                      {subagent.status === "waiting"
+                        ? "Waiting"
+                        : subagent.status === "active"
+                          ? "Working"
+                          : subagent.status === "failed"
+                            ? "Failed"
+                            : subagent.status === "stopped"
+                              ? "Stopped"
+                              : "Done"}
+                    </span>
+                    {subagent.startedAt !== null ? (
+                      <span className="mt-0.5 block font-mono text-[10px] tabular-nums text-[#8a8189] dark:text-white/45">
+                        {formatElapsed(
+                          subagent.startedAt,
+                          subagent.running ? now : (subagent.completedAt ?? now),
+                        )}
+                      </span>
+                    ) : null}
+                  </span>
+                </button>
               </li>
             ))}
           </ul>
@@ -557,10 +579,12 @@ function areAtriumCardPropsEqual(
     previous.card.activityLabel === next.card.activityLabel &&
     previous.card.activityDetail === next.card.activityDetail &&
     previous.card.startedAt === next.card.startedAt &&
+    previous.card.completedAt === next.card.completedAt &&
     previous.card.subagents === next.card.subagents;
   if (
     !cardUnchanged ||
     previous.tint !== next.tint ||
+    previous.onOpenSubagent !== next.onOpenSubagent ||
     previous.onOpen !== next.onOpen ||
     previous.onCardElement !== next.onCardElement
   ) {
@@ -610,6 +634,26 @@ export function TaskAtriumBoard() {
   // signals — which also drives the elapsed readouts.
   const [now, setNow] = useState(() => Date.now());
   const [snapshot, setSnapshot] = useState(EMPTY_ATRIUM);
+  const [selectedWorker, setSelectedWorker] = useState<{ cardKey: string; rowKey: string } | null>(
+    null,
+  );
+  const detailBackRef = useRef<HTMLButtonElement | null>(null);
+  const selectedCard = selectedWorker
+    ? snapshot.cards.find((card) => card.key === selectedWorker.cardKey)
+    : undefined;
+  const selectedSubagent = selectedCard?.subagents.find(
+    (row) => row.rowKey === selectedWorker?.rowKey,
+  );
+  const openSubagent = useCallback(
+    (card: AtriumCard, rowKey: string) => setSelectedWorker({ cardKey: card.key, rowKey }),
+    [],
+  );
+  const closeSubagent = useCallback(() => setSelectedWorker(null), []);
+  useEffect(() => {
+    // Retraction/deletion of the exact lifecycle row revokes this local
+    // selection. Do not silently reopen it if the parent later reappears.
+    if (selectedWorker && !selectedSubagent) setSelectedWorker(null);
+  }, [selectedWorker, selectedSubagent]);
   useEffect(() => {
     let interval: number | null = null;
     const tick = () => {
@@ -761,8 +805,15 @@ export function TaskAtriumBoard() {
     // board never sits empty. The fixed slice remains a security boundary even
     // when an unusually tall viewport intersects many compact cards at once.
     const candidates = observed.length > 0 ? observed : filtered.slice(0, 1);
+    // Keep the selected worker's owner subscribed even if the board scrolls
+    // away or a provider filter changes. It still consumes one bounded slot.
+    if (selectedCard)
+      return [selectedCard, ...candidates.filter((card) => card.key !== selectedCard.key)].slice(
+        0,
+        MAX_ATRIUM_DETAIL_SUBSCRIPTIONS,
+      );
     return candidates.slice(0, MAX_ATRIUM_DETAIL_SUBSCRIPTIONS);
-  }, [detailHydrationReady, filtered, visibleCardKeys]);
+  }, [detailHydrationReady, filtered, visibleCardKeys, selectedCard]);
   useEffect(() => {
     const retained = retainedDetailsRef.current;
     const desired = new Set(detailHydrationCards.map((card) => card.key));
@@ -1057,6 +1108,7 @@ export function TaskAtriumBoard() {
                     now={now}
                     tint={tint}
                     onOpen={openCard}
+                    onOpenSubagent={openSubagent}
                     onCardElement={onCardElement}
                   />
                 ))}
@@ -1096,6 +1148,60 @@ export function TaskAtriumBoard() {
           )}
         </div>
       </div>
+      <DialogPrimitive.Root
+        open={selectedSubagent !== undefined}
+        onOpenChange={(open) => {
+          if (!open) closeSubagent();
+        }}
+      >
+        <DialogPrimitive.Portal>
+          <DialogPrimitive.Backdrop className="fixed inset-0 z-[70] bg-black/35 backdrop-blur-sm" />
+          <DialogPrimitive.Popup
+            aria-label="Subagent activity"
+            data-cafe-atrium-subagent-popup="true"
+            data-cafe-window-no-drag="true"
+            className={cn(
+              "fixed left-1/2 top-1/2 z-[80] h-[min(85dvh,60rem)] w-[min(94vw,70rem)] -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-xl border bg-background shadow-2xl outline-none [-webkit-app-region:no-drag]",
+              // Portals do not inherit the outer modal's native inset. Keep
+              // this child centered and bounded within the usable area, not
+              // beneath Electron's caption controls on a short window. Every
+              // layout override requires visible Windows native controls.
+              isElectron &&
+                isWindowsPlatform(navigator.platform) &&
+                "wco:[--cafe-atrium-detail-titlebar-inset:calc(env(titlebar-area-y,0px)+env(titlebar-area-height,40px))] wco:top-[calc(50%+var(--cafe-atrium-detail-titlebar-inset)/2)] wco:h-[min(85dvh,60rem,calc(100dvh-var(--cafe-atrium-detail-titlebar-inset)-2rem))]",
+            )}
+          >
+            {selectedCard && selectedSubagent ? (
+              <Suspense
+                fallback={
+                  <div className="p-6 text-sm text-muted-foreground">
+                    Loading subagent activity…
+                  </div>
+                }
+              >
+                <AtriumSubagentDetail
+                  key={`${selectedCard.key}:${selectedSubagent.rowKey}`}
+                  selection={{
+                    environmentId: selectedCard.environmentId,
+                    threadId: selectedCard.threadId,
+                    rowId: selectedSubagent.rowKey,
+                    turnId: selectedSubagent.activity.turnId,
+                    workEntry: subagentToWorkLogEntry(selectedSubagent.activity),
+                  }}
+                  environmentId={selectedCard.environmentId}
+                  threadId={selectedCard.threadId}
+                  provider={ProviderDriverKind.make(selectedCard.provider)}
+                  markdownCwd={undefined}
+                  additionalWorkspaceRoots={[]}
+                  skills={[]}
+                  backButtonRef={detailBackRef}
+                  onBack={closeSubagent}
+                />
+              </Suspense>
+            ) : null}
+          </DialogPrimitive.Popup>
+        </DialogPrimitive.Portal>
+      </DialogPrimitive.Root>
     </div>
   );
 }

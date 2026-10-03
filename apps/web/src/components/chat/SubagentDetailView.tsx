@@ -84,10 +84,6 @@ const DETAIL_REFRESH_MIN_INTERVAL_MS = 1_000;
 
 type DetailRefreshRequest = { readonly immediate?: boolean };
 
-function supportsSubagentTranscript(provider: ProviderDriverKind | null): boolean {
-  return provider === "codex" || provider === "claudeAgent";
-}
-
 /**
  * One selected worker owns at most one visibility-aware timer. Opening this
  * screen pauses the hidden list's shared clock, so the preserved scroll-state
@@ -133,11 +129,25 @@ function useDetailNow(enabled: boolean): string {
  * only bounded public user/assistant text; provider reasoning, tool payloads,
  * commands, paths, and raw errors never cross this boundary.
  */
-export function SubagentDetailView({
+export function SubagentDetailView(props: SubagentDetailViewProps) {
+  // The durable tuple, not the visible row/name or latest parent provider,
+  // owns a transcript snapshot. Reusing a row for a newly resumed history
+  // must synchronously discard its old text, including while the new read is
+  // pending or unavailable. Presentation-only renames keep the same instance.
+  const identity = JSON.stringify([
+    props.environmentId,
+    props.threadId,
+    props.selection.turnId,
+    props.selection.workEntry.subagent.id,
+    props.selection.workEntry.subagent.historyId ?? null,
+  ]);
+  return <BoundSubagentDetailView key={identity} {...props} />;
+}
+
+function BoundSubagentDetailView({
   selection,
   environmentId,
   threadId,
-  provider,
   markdownCwd,
   additionalWorkspaceRoots,
   skills,
@@ -179,7 +189,10 @@ export function SubagentDetailView({
   }, [onBack, pane.active, pane.visible]);
 
   useEffect(() => {
-    if (!supportsSubagentTranscript(provider) || threadId === null || selection.turnId === null) {
+    // The parent may since have switched providers. The authenticated server
+    // resolves the historical child's immutable provider binding; its response
+    // is authoritative for transcript formatting and availability.
+    if (threadId === null || selection.turnId === null) {
       setLoadState({ status: "idle" });
       return;
     }
@@ -291,15 +304,7 @@ export function SubagentDetailView({
       refreshDetailRef.current = () => undefined;
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [
-    environmentId,
-    provider,
-    retryRevision,
-    selection.turnId,
-    subagent.historyId,
-    subagent.id,
-    threadId,
-  ]);
+  }, [environmentId, retryRevision, selection.turnId, subagent.historyId, subagent.id, threadId]);
 
   useEffect(() => {
     const revision =
@@ -488,7 +493,9 @@ export function SubagentDetailView({
                       text={message.text}
                       cwd={markdownCwd}
                       additionalWorkspaceRoots={additionalWorkspaceRoots}
-                      normalizeCodexCitations={provider === "codex"}
+                      normalizeCodexCitations={
+                        loadState.status === "loaded" && loadState.detail.provider === "codex"
+                      }
                       skills={skills}
                     />
                     {message.omission ? (
@@ -508,7 +515,9 @@ export function SubagentDetailView({
                           text={message.omission.tail}
                           cwd={markdownCwd}
                           additionalWorkspaceRoots={additionalWorkspaceRoots}
-                          normalizeCodexCitations={provider === "codex"}
+                          normalizeCodexCitations={
+                            loadState.status === "loaded" && loadState.detail.provider === "codex"
+                          }
                           skills={skills}
                         />
                       </>

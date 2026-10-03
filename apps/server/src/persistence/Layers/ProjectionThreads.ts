@@ -2,8 +2,6 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Schema from "effect/Schema";
-import * as Struct from "effect/Struct";
 
 import { toPersistenceSqlError } from "../Errors.ts";
 import {
@@ -11,17 +9,10 @@ import {
   GetProjectionThreadInput,
   ListProjectionThreadsByProjectInput,
   ProjectionThread,
+  ProjectionThreadSqlRow,
   ProjectionThreadRepository,
   type ProjectionThreadRepositoryShape,
 } from "../Services/ProjectionThreads.ts";
-import { ModelSelection } from "@cafecode/contracts";
-
-const ProjectionThreadDbRow = ProjectionThread.mapFields(
-  Struct.assign({
-    modelSelection: Schema.fromJsonString(ModelSelection),
-  }),
-);
-type ProjectionThreadDbRow = typeof ProjectionThreadDbRow.Type;
 
 const makeProjectionThreadRepository = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -35,6 +26,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           project_id,
           title,
           model_selection_json,
+          subagent_limits_json,
           runtime_mode,
           interaction_mode,
           branch,
@@ -54,6 +46,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           ${row.projectId},
           ${row.title},
           ${JSON.stringify(row.modelSelection)},
+          ${row.subagentLimits === undefined ? null : JSON.stringify(row.subagentLimits)},
           ${row.runtimeMode},
           ${row.interactionMode},
           ${row.branch},
@@ -73,6 +66,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           project_id = excluded.project_id,
           title = excluded.title,
           model_selection_json = excluded.model_selection_json,
+          subagent_limits_json = excluded.subagent_limits_json,
           runtime_mode = excluded.runtime_mode,
           interaction_mode = excluded.interaction_mode,
           branch = excluded.branch,
@@ -91,7 +85,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
 
   const getProjectionThreadRow = SqlSchema.findOneOption({
     Request: GetProjectionThreadInput,
-    Result: ProjectionThreadDbRow,
+    Result: ProjectionThreadSqlRow,
     execute: ({ threadId }) =>
       sql`
         SELECT
@@ -99,6 +93,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           project_id AS "projectId",
           title,
           model_selection_json AS "modelSelection",
+          subagent_limits_json AS "subagentLimits",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
           branch,
@@ -119,7 +114,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
 
   const listProjectionThreadRows = SqlSchema.findAll({
     Request: ListProjectionThreadsByProjectInput,
-    Result: ProjectionThreadDbRow,
+    Result: ProjectionThreadSqlRow,
     execute: ({ projectId }) =>
       sql`
         SELECT
@@ -127,6 +122,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           project_id AS "projectId",
           title,
           model_selection_json AS "modelSelection",
+          subagent_limits_json AS "subagentLimits",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
           branch,

@@ -24,7 +24,7 @@ layer("080_StandaloneThreads", (it) => {
         const children = yield* sql`SELECT * FROM provider_subagent_history_bindings`;
         const schema =
           yield* sql`SELECT name, type, sql FROM sqlite_schema WHERE tbl_name = 'projection_threads' AND type IN ('index', 'trigger') ORDER BY name`;
-        yield* runMigrations();
+        yield* runMigrations({ toMigrationInclusive: 80 });
         assert.deepEqual(yield* sql`SELECT * FROM projection_threads`, parent);
         assert.deepEqual(yield* sql`SELECT * FROM attachment_content_commitments`, attachments);
         assert.deepEqual(yield* sql`SELECT * FROM provider_subagent_history_roots`, roots);
@@ -76,7 +76,7 @@ layer("080_StandaloneThreads", (it) => {
         const uploads = yield* sql`SELECT * FROM file_attachment_uploads`;
         const triggers =
           yield* sql`SELECT name, sql FROM sqlite_schema WHERE type = 'trigger' ORDER BY name`;
-        yield* runMigrations();
+        yield* runMigrations({ toMigrationInclusive: 80 });
         assert.deepEqual(yield* sql`SELECT * FROM projection_threads ORDER BY thread_id`, parents);
         assert.deepEqual(
           yield* sql`SELECT * FROM attachment_content_commitments ORDER BY attachment_id`,

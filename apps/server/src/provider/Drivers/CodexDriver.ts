@@ -58,6 +58,7 @@ import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import type { ProviderDriver, ProviderInstance } from "../ProviderDriver.ts";
 import type { ServerProviderDraft } from "../providerSnapshot.ts";
+import { supportsSubagentConcurrency } from "./SubagentConcurrency.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import {
   enrichProviderSnapshotWithVersionAdvisory,
@@ -132,6 +133,7 @@ const withInstanceIdentity =
       ...snapshot.runtimeCapabilities,
       liveSteer: "supported",
       threadGoals: "supported",
+      subagentConcurrency: supportsSubagentConcurrency("codex", snapshot.version),
     },
   });
 
@@ -182,7 +184,8 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
           ? "shadow"
           : "shared";
       const continuationIdentity = codexContinuationIdentity(homeLayout);
-      const stampIdentity = withInstanceIdentity({
+      let observedCliVersion: string | null = null;
+      const stampInstanceIdentity = withInstanceIdentity({
         instanceId,
         displayName,
         accentColor,
@@ -192,6 +195,10 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
             ? { login: true }
             : undefined,
       });
+      const stampIdentity = (snapshot: ServerProviderDraft): ServerProvider => {
+        observedCliVersion = snapshot.version;
+        return stampInstanceIdentity(snapshot);
+      };
       if (enabled) {
         yield* materializeCodexShadowHome(homeLayout, { authSource }).pipe(
           Effect.mapError(
@@ -254,6 +261,8 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       // here; the registry only has to worry about snapshot-build and
       // spawner-availability failures surfaced from the status probe below.
       const adapter = yield* makeCodexAdapter(effectiveConfig, {
+        getSubagentConcurrencySupport: () =>
+          supportsSubagentConcurrency("codex", observedCliVersion),
         instanceId,
         environment: effectiveEnvironment,
         prepareRuntimeHome: refreshCodexShadowHome,

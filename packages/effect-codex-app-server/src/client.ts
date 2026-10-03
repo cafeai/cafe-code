@@ -49,6 +49,11 @@ export interface CodexAppServerClientOptions {
    * exit, which hides the actionable protocol boundary from diagnostics.
    */
   readonly onTermination?: (error: CodexError.CodexAppServerError) => Effect.Effect<void, never>;
+  /** Content-free synchronous native receipt accounting before stream queues. */
+  readonly onNotificationReceived?: () => void;
+  /** Paired bounded ingress accounting, including pulled batches/partial frames. */
+  readonly onIncomingDataReceived?: () => void;
+  readonly onIncomingDataProcessed?: (hasIncompleteFrame: boolean) => void;
 }
 
 interface CodexAppServerClientRaw {
@@ -282,6 +287,15 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
       ? { maxIncomingLineBytes: options.maxIncomingLineBytes }
       : {}),
     ...(options.logger ? { logger: options.logger } : {}),
+    ...(options.onNotificationReceived
+      ? { onNotificationReceived: options.onNotificationReceived }
+      : {}),
+    ...(options.onIncomingDataReceived
+      ? { onIncomingDataReceived: options.onIncomingDataReceived }
+      : {}),
+    ...(options.onIncomingDataProcessed
+      ? { onIncomingDataProcessed: options.onIncomingDataProcessed }
+      : {}),
     onNotification: dispatchNotification,
     onRequest: dispatchRequest,
     ...(options.onTermination ? { onTermination: options.onTermination } : {}),

@@ -35,6 +35,7 @@ import {
 } from "../../lib/codexRateLimits";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { normalizeProviderAccentColor } from "../../providerInstances";
+import { subagentLimitKey, validSubagentLimit } from "../../subagentConcurrency";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import {
@@ -482,6 +483,9 @@ function ProviderInstanceDefaultsSection(props: {
   readonly hiddenModels: ReadonlyArray<string>;
   readonly defaultModel: string | undefined;
   readonly defaultModelOptions: ReadonlyArray<ProviderInstanceDefaultOption>;
+  readonly driver: ProviderDriverKind | null;
+  readonly defaultMaxConcurrentSubagents: number | undefined;
+  readonly onConcurrencyDefaultChange: (limit: number | undefined) => void;
   readonly onChange: (next: {
     readonly defaultModel: string | undefined;
     readonly defaultModelOptions: ReadonlyArray<ProviderInstanceDefaultOption> | undefined;
@@ -566,6 +570,45 @@ function ProviderInstanceDefaultsSection(props: {
         items={modelItems}
         onValueChange={handleModelChange}
       />
+      {props.driver && subagentLimitKey(props.driver) ? (
+        <div className="grid gap-1.5">
+          <label
+            className="text-xs font-medium text-foreground"
+            htmlFor={`provider-instance-${props.instanceId}-default-subagent-limit`}
+          >
+            Default subagent limit
+          </label>
+          <DraftInput
+            id={`provider-instance-${props.instanceId}-default-subagent-limit`}
+            aria-describedby={`provider-instance-${props.instanceId}-default-subagent-limit-description`}
+            type="number"
+            min={1}
+            max={64}
+            step={1}
+            value={
+              props.defaultMaxConcurrentSubagents === undefined
+                ? ""
+                : String(props.defaultMaxConcurrentSubagents)
+            }
+            placeholder="Provider / inherited default"
+            onCommit={(value) => {
+              if (value.trim() === "") props.onConcurrencyDefaultChange(undefined);
+              else if (validSubagentLimit(Number(value)))
+                props.onConcurrencyDefaultChange(Number(value));
+            }}
+          />
+          <span
+            id={`provider-instance-${props.instanceId}-default-subagent-limit-description`}
+            className="text-xs text-muted-foreground"
+          >
+            Enter 1–64, or leave blank. Copied only to new chats; changing this does not restart the
+            provider or change existing chats. The primary agent is not counted.{" "}
+            {props.driver === "claudeAgent"
+              ? "Claude limits Agent-tool spawning, not all running work."
+              : "Codex limits spawned resident agent threads."}
+          </span>
+        </div>
+      ) : null}
       {props.defaultModel && selectedModel && optionDescriptors.length === 0 ? (
         <p className="text-xs text-muted-foreground">
           This model does not report configurable options.
@@ -1235,6 +1278,15 @@ export function ProviderInstanceCard({
                     hiddenModels={hiddenModels}
                     defaultModel={instance.defaultModel}
                     defaultModelOptions={instance.defaultModelOptions ?? []}
+                    driver={driverKind}
+                    defaultMaxConcurrentSubagents={instance.defaultMaxConcurrentSubagents}
+                    onConcurrencyDefaultChange={(limit) => {
+                      const { defaultMaxConcurrentSubagents: _previous, ...rest } = instance;
+                      onUpdate({
+                        ...rest,
+                        ...(limit !== undefined ? { defaultMaxConcurrentSubagents: limit } : {}),
+                      });
+                    }}
                     onChange={updateNewChatDefaults}
                   />
                 </div>
@@ -1273,13 +1325,22 @@ export function ProviderInstanceCard({
               </div>
 
               {driverOption ? (
-                <ProviderSettingsForm
-                  definition={driverOption}
-                  value={instance.config}
-                  idPrefix={`provider-instance-${instanceId}`}
-                  variant="card"
-                  onChange={updateConfig}
-                />
+                <>
+                  {driverKind && subagentLimitKey(driverKind) ? (
+                    <p className="border-t border-border/60 px-4 pt-3 text-xs text-muted-foreground sm:px-5">
+                      Runtime configuration below affects this instance. Changing its legacy
+                      subagent limit reloads the instance and can interrupt active chats. Use the
+                      new-chat default or per-chat control for scoped changes.
+                    </p>
+                  ) : null}
+                  <ProviderSettingsForm
+                    definition={driverOption}
+                    value={instance.config}
+                    idPrefix={`provider-instance-${instanceId}`}
+                    variant="card"
+                    onChange={updateConfig}
+                  />
+                </>
               ) : null}
 
               {driverOption !== undefined ? (

@@ -489,7 +489,9 @@ function applyThreadDetailSnapshot(
     return;
   }
 
-  useStore.getState().syncServerThreadDetail(snapshot.thread, entry.environmentId);
+  useStore
+    .getState()
+    .syncServerThreadDetail(snapshot.thread, entry.environmentId, snapshot.snapshotSequence);
   markAppliedThreadDetailSequence(entry.environmentId, entry.threadId, snapshot.snapshotSequence);
 }
 
@@ -1203,6 +1205,10 @@ function applyRecoveredEventBatch(
     markPromotedDraftThreadByRef(scopeThreadRef(environmentId, threadId));
   }
   for (const threadId of batchEffects.clearDeletedThreadIds) {
+    // A newer exact-thread snapshot can have restored the row before this
+    // other channel's older deletion arrived. Preserve its local view state.
+    if (useStore.getState().environmentStateById[environmentId]?.threadShellById[threadId])
+      continue;
     draftStore.clearDraftThread(scopeThreadRef(environmentId, threadId));
     useUiStateStore
       .getState()
@@ -1259,6 +1265,10 @@ function applyShellEvent(event: OrchestrationShellStreamEvent, environmentId: En
       evictIdleThreadDetailSubscriptionsToCapacity();
       return;
     case "thread-removed":
+      // The store rejects removal older than a focused policy/row witness.
+      // Do not invalidate that retained row's detail generation or local draft.
+      if (useStore.getState().environmentStateById[environmentId]?.threadShellById[event.threadId])
+        return;
       if (threadRef) {
         disposeThreadDetailSubscriptionByKey(scopedThreadKey(threadRef));
         useComposerDraftStore.getState().clearDraftThread(threadRef);
@@ -1286,7 +1296,7 @@ function createEnvironmentConnectionHandlers() {
       markAppliedProjectionSnapshot(environmentId, snapshot);
       reconcileThreadDetailSubscriptionsForEnvironment(
         environmentId,
-        snapshot.threads.map((thread) => thread.id),
+        useStore.getState().environmentStateById[environmentId]?.threadIds ?? [],
       );
       reconcileThreadDetailSubscriptionEvictionForEnvironment(environmentId);
       reconcileSnapshotDerivedState();

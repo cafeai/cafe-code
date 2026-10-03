@@ -24,6 +24,48 @@ describe("ContextWindowDetails reset availability", () => {
   });
 
   it.each(["popover", "panel"] as const)(
+    "shows requested/configured concurrency without guessing native defaults in %s layout",
+    async (layout) => {
+      mounted = await render(
+        <ContextWindowDetails
+          usage={null}
+          layout={layout}
+          subagentConcurrency={{
+            requested: 12,
+            configured: 3,
+            source: "Chat override",
+            pending: true,
+          }}
+        />,
+      );
+      await expect.element(page.getByText("Requested: 12", { exact: true })).toBeVisible();
+      await expect.element(page.getByText("Configured: 3", { exact: true })).toBeVisible();
+      await expect
+        .element(page.getByText("Pending until a safe idle session boundary.", { exact: true }))
+        .toBeVisible();
+      await mounted.rerender(
+        <ContextWindowDetails
+          usage={null}
+          layout={layout}
+          subagentConcurrency={{
+            requested: undefined,
+            configured: undefined,
+            source: "Provider / inherited default",
+            pending: false,
+          }}
+        />,
+      );
+      await expect.element(page.getByText("Configured: Unknown", { exact: true })).toBeVisible();
+      await expect
+        .element(page.getByText("Native effective limit is not verified.", { exact: true }))
+        .toBeVisible();
+      await expect
+        .element(page.getByText("Pending until a safe idle session boundary.", { exact: true }))
+        .not.toBeInTheDocument();
+    },
+  );
+
+  it.each(["popover", "panel"] as const)(
     "puts the known count last in the %s summary, including zero",
     async (layout) => {
       mounted = await render(

@@ -47,6 +47,7 @@ import {
   type ProviderInstance,
 } from "../ProviderDriver.ts";
 import type { ServerProviderDraft } from "../providerSnapshot.ts";
+import { supportsSubagentConcurrency } from "./SubagentConcurrency.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import {
   enrichProviderSnapshotWithVersionAdvisory,
@@ -123,6 +124,7 @@ const withInstanceIdentity =
       // create/get/update/clear control plane. Keep it in the work log and do
       // not expose Codex goal controls for Claude instances.
       threadGoals: "unsupported",
+      subagentConcurrency: supportsSubagentConcurrency("claudeAgent", snapshot.version),
     },
   });
 
@@ -166,7 +168,8 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
               env: effectiveEnvironment,
             });
       const continuationGroupKey = yield* makeClaudeContinuationGroupKey(effectiveConfig);
-      const stampIdentity = withInstanceIdentity({
+      let observedCliVersion: string | null = null;
+      const stampInstanceIdentity = withInstanceIdentity({
         instanceId,
         displayName,
         accentColor,
@@ -176,6 +179,10 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
             ? { login: true }
             : undefined,
       });
+      const stampIdentity = (snapshot: ServerProviderDraft): ServerProvider => {
+        observedCliVersion = snapshot.version;
+        return stampInstanceIdentity(snapshot);
+      };
 
       // Track Claude auth failures observed at turn time. Expired/revoked
       // credentials are invisible to the local probes (`--version`, the
@@ -204,6 +211,8 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         undefined,
       );
       const adapterOptions = {
+        getSubagentConcurrencySupport: () =>
+          supportsSubagentConcurrency("claudeAgent", observedCliVersion),
         instanceId,
         environment: effectiveEnvironment,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),

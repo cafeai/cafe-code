@@ -8,6 +8,12 @@ const WEEKS = 26;
 /** Bounded calendars keep readable cells instead of stretching seven days across a card. */
 const BOUNDED_CELL_SIZE_REM = 0.875;
 const BOUNDED_CELL_GAP_REM = 0.1875;
+/** Settings may grow cells, but never turn a short calendar into enormous squares. */
+const RESPONSIVE_MAX_CELL_SIZE_REM = 1.5;
+/** Weekday labels share the same gutter in both month and day rows. */
+const WEEKDAY_GUTTER_REM = 1.75;
+/** The scale must fit even when a one-week calendar is narrower than its legend. */
+const MIN_LEGEND_WIDTH_REM = 9;
 /**
  * At most two years are cheap to lay out in full. Longer calendars retain their
  * complete scroll extent but materialize only the viewport plus nearby weeks.
@@ -155,6 +161,7 @@ export function ActivityHeatmap({
   days,
   today,
   bounds,
+  layout = "compact",
   className,
 }: {
   days: ReadonlyArray<UsageStatsDay>;
@@ -162,14 +169,22 @@ export function ActivityHeatmap({
   today?: UsageStatsDay | undefined;
   /** Inclusive server-local calendar keys. Omission preserves the 26-week default. */
   bounds?: { readonly startDay: string; readonly endDay: string } | undefined;
+  /** Opt-in Settings layout; compact/unbounded consumers retain their existing geometry. */
+  layout?: "compact" | "responsive";
   className?: string;
 }) {
   const [hovered, setHovered] = useState<HoveredCell | null>(null);
   const calendarViewportRef = useRef<HTMLDivElement>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
+  const viewportGeometryRef = useRef<{
+    readonly width: number;
+    readonly height: number;
+    readonly rootFontSize: number;
+  } | null>(null);
   const [viewport, setViewport] = useState<CalendarViewport | null>(null);
   const bounded = bounds !== undefined;
+  const responsive = bounded && layout === "responsive";
   const startDayKey = bounds?.startDay;
   const endDayKey = bounds?.endDay;
   const todayDayKey = today?.day;
@@ -232,12 +247,27 @@ export function ActivityHeatmap({
   // The viewport snapshot belongs to an exact calendar. Range changes begin at
   // its first week even before the layout effect resets the real scroll offset.
   const currentViewport = viewport?.calendarKey === calendarKey ? viewport : null;
-  const weekSizePx =
-    (BOUNDED_CELL_SIZE_REM + BOUNDED_CELL_GAP_REM) *
-    (currentViewport?.rootFontSize ?? DEFAULT_ROOT_FONT_SIZE);
-  const visibleWeekCount = Math.ceil(
-    (currentViewport?.width ?? DEFAULT_VIEWPORT_WIDTH) / weekSizePx,
-  );
+  const rootFontSize = currentViewport?.rootFontSize ?? DEFAULT_ROOT_FONT_SIZE;
+  const viewportWidth = currentViewport?.width ?? DEFAULT_VIEWPORT_WIDTH;
+  // Measure the full available viewport, not the centered, shrink-wrapped grid.
+  // Otherwise its initial compact width would prevent it from ever growing.
+  // Overflow and virtualized history keep the original pitch so resize does not
+  // change the day at an existing scroll offset. One/two-week calendars stay
+  // compact rather than visually overstating an extremely short history.
+  const availableGridWidthRem =
+    viewportWidth / rootFontSize - WEEKDAY_GUTTER_REM - BOUNDED_CELL_GAP_REM;
+  const fittedCellSizeRem =
+    (availableGridWidthRem - Math.max(0, weekCount - 1) * BOUNDED_CELL_GAP_REM) /
+    Math.max(1, weekCount);
+  const cellSizeRem =
+    responsive && !virtualized && weekCount > 2
+      ? Math.max(BOUNDED_CELL_SIZE_REM, Math.min(RESPONSIVE_MAX_CELL_SIZE_REM, fittedCellSizeRem))
+      : BOUNDED_CELL_SIZE_REM;
+  const weekPitchRem = cellSizeRem + BOUNDED_CELL_GAP_REM;
+  const gridWidthRem = weekCount * cellSizeRem + Math.max(0, weekCount - 1) * BOUNDED_CELL_GAP_REM;
+  const calendarWidthRem = WEEKDAY_GUTTER_REM + BOUNDED_CELL_GAP_REM + gridWidthRem;
+  const weekSizePx = weekPitchRem * rootFontSize;
+  const visibleWeekCount = Math.ceil(viewportWidth / weekSizePx);
   const firstVisibleWeek = Math.floor((currentViewport?.scrollLeft ?? 0) / weekSizePx);
   const firstRenderedWeek = virtualized ? Math.max(0, firstVisibleWeek - VIRTUAL_WEEK_OVERSCAN) : 0;
   const endRenderedWeek = virtualized
@@ -257,6 +287,21 @@ export function ActivityHeatmap({
         width: scroller.clientWidth,
         rootFontSize: rootFontSize > 0 ? rootFontSize : DEFAULT_ROOT_FONT_SIZE,
       };
+      const geometry = { ...next, height: scroller.clientHeight };
+      const previousGeometry = viewportGeometryRef.current;
+      // Hover anchors are pointer-entry coordinates. A centered calendar can
+      // move even when its capped cells keep the same size. Retire that anchor
+      // on a real geometry change instead of showing a tooltip over the old
+      // cell position; ordinary live updates keep both hover and scroll intact.
+      if (
+        previousGeometry &&
+        (previousGeometry.width !== geometry.width ||
+          previousGeometry.height !== geometry.height ||
+          previousGeometry.rootFontSize !== geometry.rootFontSize)
+      ) {
+        setHovered(null);
+      }
+      viewportGeometryRef.current = geometry;
       setViewport((current) =>
         current?.calendarKey === next.calendarKey &&
         current.scrollLeft === next.scrollLeft &&
@@ -352,11 +397,11 @@ export function ActivityHeatmap({
     gridTemplateColumns: `repeat(${renderedWeekCount}, minmax(0, 1fr))`,
     ...(bounded
       ? {
-          width: `${weekCount * BOUNDED_CELL_SIZE_REM + Math.max(0, weekCount - 1) * BOUNDED_CELL_GAP_REM}rem`,
+          width: `${gridWidthRem}rem`,
           // Padding replaces offscreen columns while preserving full extent and
           // the exact same week positions for cells and month labels.
-          paddingLeft: `${firstRenderedWeek * (BOUNDED_CELL_SIZE_REM + BOUNDED_CELL_GAP_REM)}rem`,
-          paddingRight: `${(weekCount - endRenderedWeek) * (BOUNDED_CELL_SIZE_REM + BOUNDED_CELL_GAP_REM)}rem`,
+          paddingLeft: `${firstRenderedWeek * weekPitchRem}rem`,
+          paddingRight: `${(weekCount - endRenderedWeek) * weekPitchRem}rem`,
         }
       : {}),
   };
@@ -417,7 +462,13 @@ export function ActivityHeatmap({
               : undefined
           }
         >
-          <div className={bounded ? "flex w-max flex-col gap-1.5" : "flex w-full flex-col gap-1.5"}>
+          <div
+            className={
+              bounded
+                ? `flex w-max flex-col gap-1.5 ${responsive ? "mx-auto" : ""}`
+                : "flex w-full flex-col gap-1.5"
+            }
+          >
             <div className={bounded ? "flex gap-[0.1875rem]" : "flex gap-[3px]"} aria-hidden>
               <div className="w-7 shrink-0" />
               <div
@@ -526,7 +577,21 @@ export function ActivityHeatmap({
           </div>
         </div>
         {bounded ? tooltip : null}
-        <div className="flex items-center justify-end gap-1.5 pt-0.5 text-[10px] leading-none text-muted-foreground/70">
+        <div
+          data-activity-heatmap-legend="true"
+          className="flex items-center justify-end gap-1.5 pt-0.5 text-[10px] leading-none text-muted-foreground/70"
+          style={
+            responsive
+              ? {
+                  // Keep the scale attached to the centered calendar, rather
+                  // than stranded at the far edge of a wide Settings card.
+                  width: `${Math.max(MIN_LEGEND_WIDTH_REM, calendarWidthRem)}rem`,
+                  maxWidth: "100%",
+                  marginInline: "auto",
+                }
+              : undefined
+          }
+        >
           <span>Less</span>
           {[0, 0.25, 0.5, 0.75, 1].map((intensity) => (
             <span

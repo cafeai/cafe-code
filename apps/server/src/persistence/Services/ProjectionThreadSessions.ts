@@ -8,6 +8,7 @@
  */
 import {
   RuntimeMode,
+  MaxConcurrentSubagents,
   IsoDateTime,
   OrchestrationSessionStatus,
   ProviderInstanceId,
@@ -16,6 +17,7 @@ import {
 } from "@cafecode/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as SchemaTransformation from "effect/SchemaTransformation";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 
@@ -27,11 +29,40 @@ export const ProjectionThreadSession = Schema.Struct({
   providerName: Schema.NullOr(Schema.String),
   providerInstanceId: Schema.NullOr(ProviderInstanceId),
   runtimeMode: RuntimeMode,
+  maxConcurrentSubagents: Schema.optional(Schema.NullOr(MaxConcurrentSubagents)),
   activeTurnId: Schema.NullOr(TurnId),
   lastError: Schema.NullOr(Schema.String),
   updatedAt: IsoDateTime,
 });
 export type ProjectionThreadSession = typeof ProjectionThreadSession.Type;
+
+/**
+ * SQL NULL alone cannot distinguish a legacy unknown observation from a new
+ * process intentionally launched without an override. A separate bounded bit
+ * preserves that distinction without inventing native effective policy.
+ */
+const ProjectionThreadSessionSqlFields = Schema.Struct({
+  ...ProjectionThreadSession.fields,
+  maxConcurrentSubagents: Schema.NullOr(MaxConcurrentSubagents),
+  maxConcurrentSubagentsKnown: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 1 })),
+});
+export const ProjectionThreadSessionSqlRow = ProjectionThreadSessionSqlFields.pipe(
+  Schema.decodeTo(
+    Schema.toType(ProjectionThreadSession),
+    SchemaTransformation.transform<
+      ProjectionThreadSession,
+      typeof ProjectionThreadSessionSqlFields.Type
+    >({
+      decode: ({ maxConcurrentSubagents, maxConcurrentSubagentsKnown, ...row }) =>
+        maxConcurrentSubagentsKnown === 1 ? { ...row, maxConcurrentSubagents } : row,
+      encode: (row) => ({
+        ...row,
+        maxConcurrentSubagents: row.maxConcurrentSubagents ?? null,
+        maxConcurrentSubagentsKnown: row.maxConcurrentSubagents === undefined ? 0 : 1,
+      }),
+    }),
+  ),
+);
 
 export const GetProjectionThreadSessionInput = Schema.Struct({
   threadId: ThreadId,

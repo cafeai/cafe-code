@@ -1,6 +1,6 @@
 # Usage statistics
 
-Last updated: 2026-10-02 23:09:22 JST (UTC+0900)
+Last updated: 2026-10-03 14:59:38 JST (UTC+0900)
 
 Settings → Usage has one date-range selector for its reporting statistics. The default is 30 days. Selecting 7 days, 30 days, 90 days or All updates generated tokens, chats sent, generating time, estimated USD cost, provider/model breakdowns, token composition, cache savings, cost quality and usage charts together. Activity always shows all recorded daily history, independently of this selector. Cost/Tokens changes the graph's measurement without changing the selected period. The shared detailed cost view in Atrium uses the same range semantics; Atrium's ambient lifetime counters remain lifetime counters.
 
@@ -26,9 +26,36 @@ Time follows the same 7/30/90/All calendar bounds, independently of token observ
 
 ## Estimates and missing history
 
+The cost table's tokens are **processed tokens**: recorded input plus output.
+Input already includes cache reads/writes, and output already includes reasoning;
+neither subset is added again. **Output tokens by provider and model** instead
+measures only recorded generated output, matching the headline Tokens generated.
+Its percentages therefore need not match processed-token or estimated-cost shares.
+
+Models with recorded input but zero recorded output remain visible in the output
+breakdown with their processed volume. Provider groups with zero recorded output
+also display **No output recorded**. Input-only models contribute zero to output
+totals and percentages. This does not mean the model generated nothing: Claude
+can publish a known input/cache lower bound before validated
+terminal model totals become available. Missing/inconclusive results or an
+unavailable resumed cumulative baseline can retain that input-only observation.
+Cafe does not guess missing output, reconstruct it from cost/input shares, retry
+inference, or rewrite historical usage to make the tables match. A later detailed
+response with confirmed output replaces the zero-output explanation normally.
+Aggregate usage rows cannot identify which of these causes affected one historical
+observation; diagnosing a missing terminal event requires separate evidence.
+
+Settings Activity adapts to the available card width: square cells grow within a
+readable cap, shorter calendars are centered, and the color legend stays aligned
+with the calendar rather than the card's far edge. Very short calendars remain
+compact instead of stretching a handful of days into huge squares. Long or
+overflowing calendars keep compact cells and horizontal scrolling. The default
+heatmap layout remains compact for other consumers; this is presentation only,
+with no fabricated history, added polling or changed collection/accounting.
+
 Long activity histories retain their complete scrollable extent while rendering only visible week columns plus a small overscan. This bounds page content even for an unusually old calendar, without imposing a historical date cutoff or hiding older records.
 
-Money is an API-equivalent USD estimate using the shared pricing table or explicit user overrides, not a subscription invoice. Long-context and speed-tier adjustments cannot be reconstructed from aggregate counters and remain excluded. Unknown model rates and missing model attribution remain unpriced; the priced/unpriced percentages include the recorded unattributed gap. The output breakdown identifies unattributed usage separately.
+Money is an API-equivalent USD estimate using the shared pricing table or explicit user overrides, not a subscription invoice. Long-context and speed-tier adjustments cannot be reconstructed from aggregate counters and remain excluded. Unknown model rates and missing model attribution remain unpriced; the priced/unpriced percentages include the recorded unattributed gap. The output breakdown identifies unattributed output separately.
 
 “Model not reported” means the provider is known but the effective serving model is absent from the recorded observation. One-shot Codex `exec --json` helpers report terminal token counts without authoritative model attribution; requested model settings and generic reroute text cannot reliably assign aggregate usage. Older ordinary records can also lack a model. Both the token breakdown and cost table explain this category on hover. Its tokens stay counted and unpriced by default, unless the user explicitly supplies a custom rate for that category; the UI never hides them or relabels historical usage with a guessed model. The [pinned Codex exec event definitions](https://github.com/openai/codex/blob/ff6aec96948b70d94983af2641a6b67c94faeff5/codex-rs/exec/src/exec_events.rs#L36-L68) and [terminal/reroute mapping](https://github.com/openai/codex/blob/ff6aec96948b70d94983af2641a6b67c94faeff5/codex-rs/exec/src/event_processor_with_jsonl_output.rs#L473-L514) document this attribution limitation.
 

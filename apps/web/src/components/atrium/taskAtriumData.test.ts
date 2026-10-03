@@ -11,6 +11,7 @@ import type {
 import type { AppState } from "../../store";
 import {
   formatElapsed,
+  formatAtriumCardElapsed,
   mergeTaskAtriumErrorDismissals,
   selectAtriumSnapshot,
 } from "./taskAtriumData";
@@ -114,6 +115,80 @@ function buildState(options: {
 }
 
 describe("selectAtriumSnapshot", () => {
+  it.each(["completed", "error"] as const)(
+    "freezes the %s parent duration across late worker/title updates",
+    (latestTurnState) => {
+      const completedAt = NOW - 5_000;
+      const state = buildState({
+        latestTurnState,
+        status: latestTurnState === "error" ? "error" : "ready",
+        completedAt: new Date(completedAt).toISOString(),
+        activities: [
+          activity("worker-completed", "task.completed", "Worker completed", {
+            taskId: "worker",
+            status: "completed",
+            subagent: { threadId: "worker", label: "Original name", status: "completed" },
+          }),
+        ],
+      });
+      const first = selectAtriumSnapshot(state, NOW).cards[0]!;
+      expect(first.completedAt).toBe(completedAt);
+      expect(formatAtriumCardElapsed(first, NOW)).toBe("40s");
+      const environment = state.environmentStateById[ENV]!;
+      environment.sidebarThreadSummaryById[THREAD]!.title = "Renamed after completion";
+      const rename = {
+        ...activity("worker-renamed", "task.progress", "Worker renamed", {
+          taskId: "worker",
+          subagent: { threadId: "worker", label: "Late worker name", status: "active" },
+        }),
+        createdAt: new Date(NOW + 30_000).toISOString(),
+      };
+      environment.activityIdsByThreadId[THREAD] = [
+        ...environment.activityIdsByThreadId[THREAD]!,
+        rename.id,
+      ];
+      environment.activityByThreadId[THREAD] = {
+        ...environment.activityByThreadId[THREAD],
+        [rename.id]: rename,
+      };
+      const later = selectAtriumSnapshot(state, NOW + 30_000).cards[0]!;
+      expect(later.title).toBe("Renamed after completion");
+      expect(later.subagents).not.toBe(first.subagents);
+      expect(later.completedAt).toBe(completedAt);
+      expect(formatAtriumCardElapsed(later, NOW + 30_000)).toBe("40s");
+    },
+  );
+
+  it("uses a session failure's own edge rather than an unrelated prior turn completion", () => {
+    const state = buildState({
+      status: "error",
+      latestTurnState: "completed",
+      sessionUpdatedAt: new Date(NOW - 1_000).toISOString(),
+    });
+    const card = selectAtriumSnapshot(state, NOW).cards[0]!;
+    expect(card.completedAt).toBe(NOW - 1_000);
+    expect(formatAtriumCardElapsed(card, NOW + 60_000)).toBe("44s");
+  });
+
+  it("keeps live parent time ticking but never guesses a missing terminal boundary", () => {
+    const card = selectAtriumSnapshot(buildState({}), NOW).cards[0]!;
+    expect(card.completedAt).toBeNull();
+    expect(formatAtriumCardElapsed(card, NOW)).toBe("45s");
+    expect(formatAtriumCardElapsed(card, NOW + 1_000)).toBe("46s");
+    expect(formatAtriumCardElapsed({ ...card, state: "done", completedAt: null }, NOW)).toBe("");
+  });
+
+  it("does not use a failed turn's dismissal-identity fallback as its completion time", () => {
+    const state = buildState({ latestTurnState: "error", status: "ready" });
+    const summary = state.environmentStateById[ENV]!.sidebarThreadSummaryById[THREAD]!;
+    summary.latestTurn = { ...summary.latestTurn!, completedAt: null };
+    const card = selectAtriumSnapshot(state, NOW).cards[0]!;
+    expect(card.state).toBe("error");
+    expect(card.errorDismissal?.observedAt).toBe(new Date(NOW - 45_000).toISOString());
+    expect(card.completedAt).toBeNull();
+    expect(formatAtriumCardElapsed(card, NOW + 30_000)).toBe("");
+  });
+
   it("surfaces a standalone running chat without a project or an eager detail lookup", () => {
     const state = buildState({});
     const environment = state.environmentStateById[ENV]!;
@@ -187,7 +262,7 @@ describe("selectAtriumSnapshot", () => {
       }),
       NOW,
     );
-    expect(snapshot.cards[0]?.subagents[0]).toEqual({
+    expect(snapshot.cards[0]?.subagents[0]).toMatchObject({
       rowKey: "a1",
       id: "sub-1",
       label: "Tests",
@@ -236,7 +311,7 @@ describe("selectAtriumSnapshot", () => {
       NOW,
     );
 
-    expect(snapshot.cards[0]?.subagents).toEqual([
+    expect(snapshot.cards[0]?.subagents).toMatchObject([
       {
         rowKey: "task-start",
         id: "claude-task-1",

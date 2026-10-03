@@ -13,11 +13,14 @@ import {
   ProjectId,
   ProviderInteractionMode,
   RuntimeMode,
+  SubagentLimits,
   ThreadId,
   TurnId,
 } from "@cafecode/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as SchemaTransformation from "effect/SchemaTransformation";
+import * as Struct from "effect/Struct";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 
@@ -28,6 +31,7 @@ export const ProjectionThread = Schema.Struct({
   projectId: Schema.NullOr(ProjectId),
   title: Schema.String,
   modelSelection: ModelSelection,
+  subagentLimits: Schema.optional(SubagentLimits),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   branch: Schema.NullOr(Schema.String),
@@ -43,6 +47,24 @@ export const ProjectionThread = Schema.Struct({
   deletedAt: Schema.NullOr(IsoDateTime),
 });
 export type ProjectionThread = typeof ProjectionThread.Type;
+
+/** One decoder shared by repository and snapshot reads; SQL NULL is legacy absence. */
+const ProjectionThreadSqlFields = ProjectionThread.mapFields(
+  Struct.assign({
+    modelSelection: Schema.fromJsonString(ModelSelection),
+    subagentLimits: Schema.NullOr(Schema.fromJsonString(SubagentLimits)),
+  }),
+);
+export const ProjectionThreadSqlRow = ProjectionThreadSqlFields.pipe(
+  Schema.decodeTo(
+    Schema.toType(ProjectionThread),
+    SchemaTransformation.transform<ProjectionThread, typeof ProjectionThreadSqlFields.Type>({
+      decode: ({ subagentLimits, ...row }) =>
+        subagentLimits === null ? row : { ...row, subagentLimits },
+      encode: (row) => ({ ...row, subagentLimits: row.subagentLimits ?? null }),
+    }),
+  ),
+);
 
 export const GetProjectionThreadInput = Schema.Struct({
   threadId: ThreadId,

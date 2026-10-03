@@ -86,11 +86,13 @@ export function formatCompactTokenCount(value: number): string {
 export interface UsageModelBreakdownView {
   readonly model: string;
   readonly outputTokens: number;
+  readonly processedTokens: number;
 }
 
 export interface UsageProviderBreakdownView {
   readonly provider: ProviderDriverKind;
   readonly outputTokens: number;
+  readonly processedTokens: number;
   readonly models: ReadonlyArray<UsageModelBreakdownView>;
 }
 
@@ -107,15 +109,23 @@ const compareText = (left: string, right: string): number =>
  * Collapse defensive duplicate rows and prepare a deterministic dense view.
  * The server normally returns one row per provider/model, but merging here
  * keeps stale or mixed-version servers from rendering duplicated model lines.
+ * Known input-only observations must stay visible without inventing output.
+ * Input already includes cache reads/writes; reasoning already belongs to
+ * output, so none of those subset counters are added to processed tokens.
  */
 export function buildUsageTokenBreakdownView(
   rows: ReadonlyArray<UsageStatsTokenBreakdownEntry>,
-  lifetimeOutputTokens: number,
+  recordedOutputTokens: number,
 ): UsageTokenBreakdownView {
-  const byProvider = new Map<ProviderDriverKind, Map<string, number>>();
+  const byProvider = new Map<
+    ProviderDriverKind,
+    Map<string, { outputTokens: number; processedTokens: number }>
+  >();
 
   for (const row of rows) {
-    if (row.outputTokens <= 0) {
+    const outputTokens = normalizedTokenCount(row.outputTokens);
+    const processedTokens = normalizedTokenCount(row.inputTokens) + outputTokens;
+    if (processedTokens <= 0) {
       continue;
     }
     let models = byProvider.get(row.provider);
@@ -123,25 +133,34 @@ export function buildUsageTokenBreakdownView(
       models = new Map();
       byProvider.set(row.provider, models);
     }
-    models.set(row.model, (models.get(row.model) ?? 0) + row.outputTokens);
+    const existing = models.get(row.model);
+    models.set(row.model, {
+      outputTokens: (existing?.outputTokens ?? 0) + outputTokens,
+      processedTokens: (existing?.processedTokens ?? 0) + processedTokens,
+    });
   }
 
   const providers = Array.from(byProvider.entries(), ([provider, models]) => {
-    const modelRows = Array.from(models.entries(), ([model, outputTokens]) => ({
+    const modelRows = Array.from(models.entries(), ([model, tokens]) => ({
       model,
-      outputTokens,
+      ...tokens,
     })).toSorted(
       (left, right) =>
-        right.outputTokens - left.outputTokens || compareText(left.model, right.model),
+        right.outputTokens - left.outputTokens ||
+        right.processedTokens - left.processedTokens ||
+        compareText(left.model, right.model),
     );
     return {
       provider,
       outputTokens: modelRows.reduce((sum, row) => sum + row.outputTokens, 0),
+      processedTokens: modelRows.reduce((sum, row) => sum + row.processedTokens, 0),
       models: modelRows,
     };
   }).toSorted(
     (left, right) =>
-      right.outputTokens - left.outputTokens || compareText(left.provider, right.provider),
+      right.outputTokens - left.outputTokens ||
+      right.processedTokens - left.processedTokens ||
+      compareText(left.provider, right.provider),
   );
 
   const attributedOutputTokens = providers.reduce(
@@ -155,7 +174,10 @@ export function buildUsageTokenBreakdownView(
     // Migration 61 intentionally did not guess provider/model attribution for
     // older aggregate rows. Surface that honest remainder instead of silently
     // making the visible provider totals appear to equal lifetime usage.
-    unattributedOutputTokens: Math.max(0, lifetimeOutputTokens - attributedOutputTokens),
+    unattributedOutputTokens: Math.max(
+      0,
+      normalizedTokenCount(recordedOutputTokens) - attributedOutputTokens,
+    ),
   };
 }
 

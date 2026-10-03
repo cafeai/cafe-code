@@ -13,6 +13,7 @@ import type {
   RuntimeMode,
   ScopedThreadRef,
   ServerProvider,
+  SubagentLimits,
   ThreadId,
 } from "@cafecode/contracts";
 import {
@@ -81,10 +82,20 @@ import { resolveComposerMenuActiveItemId } from "./composerMenuHighlight";
 import { searchSlashCommandItems } from "./composerSlashCommandSearch";
 import { getComposerProviderState, renderProviderTraitsMenuContent } from "./composerProviderState";
 import { ContextWindowMeter } from "./ContextWindowMeter";
+import { SubagentConcurrencyControl } from "./SubagentConcurrencyControl";
+import {
+  configuredInstanceSubagentLimit,
+  deriveSubagentConcurrencyPresentation,
+  subagentLimitKey,
+  subagentLimitsEqual,
+  withSubagentLimit,
+  type SubagentConcurrencyPresentation,
+} from "../../subagentConcurrency";
 import { ThreadGoalFooterButton } from "./ThreadGoalControl";
 import { buildExpandedImagePreview, type ExpandedImagePreview } from "./ExpandedImagePreview";
 import { basenameOfPath } from "../../vscode-icons";
-import { cn, randomUUID } from "~/lib/utils";
+import { cn, newCommandId, randomUUID } from "~/lib/utils";
+import { MenuItem } from "../ui/menu";
 import { resolveShortcutCommand } from "../../keybindings";
 import { Separator } from "../ui/separator";
 import { Button } from "../ui/button";
@@ -131,6 +142,7 @@ import { useSettings } from "../../hooks/useSettings";
 import { useComposerDictation } from "../../hooks/useComposerDictation";
 import { readDictationBrowserCapability } from "../../dictation/realtimeTranscription";
 import { requireEnvironmentConnection } from "../../environments/runtime";
+import { useStore } from "../../store";
 import { ProviderUsageResetButton } from "../ProviderUsageResetButton";
 import { dictationStatusQueryOptions } from "../../lib/dictationReactQuery";
 import { domSnapshot, mobileDebugLog } from "../../lib/mobileDebugLog";
@@ -144,6 +156,23 @@ import {
 const IMAGE_SIZE_LIMIT_LABEL = `${Math.round(PROVIDER_SEND_TURN_MAX_IMAGE_BYTES / (1024 * 1024))}MB`;
 
 const COMPOSER_PATH_QUERY_DEBOUNCE_MS = 120;
+
+/** Exact ownership identity for an editor and every asynchronous save it starts. */
+export function buildSubagentConcurrencyEditorKey(input: {
+  environmentId: EnvironmentId;
+  threadId: ThreadId | null;
+  instanceId: ProviderInstanceId;
+  draftId: DraftId | null | undefined;
+  isServerThread: boolean;
+}): string {
+  return JSON.stringify([
+    input.environmentId,
+    input.threadId,
+    input.instanceId,
+    input.draftId ?? null,
+    input.isServerThread,
+  ]);
+}
 // React clears a queued follow-up draft immediately after submit. Retain the
 // harmless Send affordance across the ordinary double-click/tap window so the
 // same pointer coordinates cannot turn into the destructive Stop action
@@ -252,6 +281,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   activeContextWindow: ReturnType<typeof deriveLatestContextWindowSnapshot>;
   codexRateLimits: ServerProvider["accountRateLimits"] | null;
   usageResetAction: ReactNode;
+  subagentConcurrency?: SubagentConcurrencyPresentation | null;
   sessionRailVisible: boolean;
   onShowSessionRail?: () => void;
   isPreparingWorktree: boolean;
@@ -285,6 +315,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         <ContextWindowMeter
           usage={props.activeContextWindow}
           codexRateLimits={props.codexRateLimits}
+          subagentConcurrency={props.subagentConcurrency}
           {...(props.onShowSessionRail ? { onShowOnSide: props.onShowSessionRail } : {})}
         />
       ) : null}
@@ -363,6 +394,7 @@ export interface ChatComposerHandle {
     selectedProvider: ProviderDriverKind;
     selectedModel: string;
     selectedProviderModels: ReadonlyArray<ServerProvider["models"][number]>;
+    subagentLimits?: SubagentLimits;
   };
 }
 
@@ -857,7 +889,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activeThreadId,
     activeThreadEnvironmentId: _activeThreadEnvironmentId,
     activeThread,
-    isServerThread: _isServerThread,
+    isServerThread,
     isLocalDraftThread: _isLocalDraftThread,
     phase,
     isConnecting,
@@ -1137,6 +1169,180 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     () => selectedProviderEntry?.models ?? [],
     [selectedProviderEntry],
   );
+  // Open state is bound to the exact pane/account identity. A route or picker
+  // change closes the editor in the same render, before any user event can
+  // reach a different target; an effect would leave one transient open frame.
+  // Imported opaque ids may contain delimiters. A tuple must remain injective
+  // so a different chat/account cannot inherit another editor's unsaved input.
+  const concurrencyEditorKey = buildSubagentConcurrencyEditorKey({
+    environmentId,
+    threadId: activeThreadId,
+    instanceId: selectedInstanceId,
+    draftId,
+    isServerThread,
+  });
+  const [concurrencyEditorState, setConcurrencyEditorState] = useState({
+    key: concurrencyEditorKey,
+    open: false,
+  });
+  if (concurrencyEditorState.key !== concurrencyEditorKey) {
+    setConcurrencyEditorState({ key: concurrencyEditorKey, open: false });
+  }
+  const concurrencyEditorOpen =
+    concurrencyEditorState.key === concurrencyEditorKey && concurrencyEditorState.open;
+  const setConcurrencyEditorOpen = (open: boolean) =>
+    setConcurrencyEditorState({ key: concurrencyEditorKey, open });
+  const desiredSubagentLimits = composerDraft.subagentLimits ?? activeThread?.subagentLimits;
+  const concurrencyKey = subagentLimitKey(selectedProvider);
+  const concurrencySupported =
+    selectedProviderStatus?.runtimeCapabilities?.subagentConcurrency === true;
+  const configuredLimit =
+    activeThread?.session?.providerInstanceId === selectedInstanceId
+      ? activeThread.session.maxConcurrentSubagents
+      : undefined;
+  const concurrencyPresentation = deriveSubagentConcurrencyPresentation({
+    provider: selectedProvider,
+    limits: desiredSubagentLimits,
+    inheritedLimit: configuredInstanceSubagentLimit(settings, selectedInstanceId),
+    configuredLimit,
+  });
+  const concurrencySaveScope = useRef<{
+    active: boolean;
+    dispose: (() => void) | null;
+  } | null>(null);
+  useLayoutEffect(() => {
+    if (isServerThread && activeThreadId) {
+      // A reload need not run cleanup. Persisted server-thread overlays have
+      // no surviving ACK owner, so canonical metadata must win on fresh mount.
+      // Local drafts are deliberately excluded: their unsent defaults/reset
+      // are still the authoritative source for first-send bootstrap.
+      useComposerDraftStore
+        .getState()
+        .setSubagentLimits({ environmentId, threadId: activeThreadId }, undefined);
+    }
+    const scope = { active: true, dispose: null as (() => void) | null };
+    concurrencySaveScope.current = scope;
+    return () => {
+      // The preference is already durable after ACK. This pane's overlay is
+      // only a projection-lag bridge, not a second source of saved metadata.
+      // Releasing it also prevents a late ACK from writing after a target or
+      // account switch, or retaining a subscription after pane disposal.
+      scope.active = false;
+      scope.dispose?.();
+      if (concurrencySaveScope.current === scope) concurrencySaveScope.current = null;
+    };
+  }, [concurrencyEditorKey, environmentId, activeThreadId, isServerThread]);
+  useEffect(() => {
+    // Restored/promoted draft metadata can already match the durable read
+    // model without an in-flight save in this component. Retire that redundant
+    // overlay as well; an explicit empty reset remains distinct from absence.
+    if (
+      isServerThread &&
+      composerDraft.subagentLimits !== undefined &&
+      subagentLimitsEqual(composerDraft.subagentLimits, activeThread?.subagentLimits)
+    ) {
+      useComposerDraftStore.getState().setSubagentLimits(composerDraftTarget, undefined);
+    }
+  }, [
+    activeThread?.subagentLimits,
+    composerDraft.subagentLimits,
+    composerDraftTarget,
+    isServerThread,
+  ]);
+  const saveSubagentLimit = async (value: number | undefined) => {
+    if (!concurrencyKey || (value !== undefined && !concurrencySupported))
+      throw new Error("Unsupported runtime");
+    const store = useComposerDraftStore.getState();
+    if (isServerThread && activeThreadId) {
+      const scope = concurrencySaveScope.current;
+      if (!scope?.active) throw new Error("Chat no longer active");
+      const readCanonical = () =>
+        useStore.getState().environmentStateById[environmentId]?.threadShellById[activeThreadId]
+          ?.subagentLimits;
+      const readCanonicalSequence = () =>
+        useStore.getState().environmentStateById[environmentId]?.subagentPolicySequenceByThreadId?.[
+          activeThreadId
+        ];
+      const current =
+        store.getComposerDraft(composerDraftTarget)?.subagentLimits ?? readCanonical();
+      const next = withSubagentLimit(current, selectedProvider, value);
+      scope.dispose?.();
+      let acknowledgedSequence: number | null = null;
+      let installedOverlay = false;
+      const dispose = () => {
+        unsubscribe();
+        if (
+          installedOverlay &&
+          subagentLimitsEqual(store.getComposerDraft(composerDraftTarget)?.subagentLimits, next)
+        ) {
+          store.setSubagentLimits(composerDraftTarget, undefined);
+        }
+        installedOverlay = false;
+        if (scope.dispose === dispose) scope.dispose = null;
+      };
+      const unsubscribe = useStore.subscribe(() => {
+        const sequence = readCanonicalSequence();
+        // Earlier-arriving projections may precede our durable save. Only an
+        // exact-thread policy witness at/after its ACK proves canonical policy
+        // has caught up. Equal-policy snapshots also retire the lag bridge.
+        if (
+          acknowledgedSequence !== null &&
+          sequence !== undefined &&
+          sequence >= acknowledgedSequence
+        )
+          dispose();
+      });
+      scope.dispose = dispose;
+      // Bind this write to the exact owner environment/thread before awaiting;
+      // switching panes cannot redirect a late save into another conversation.
+      try {
+        const acknowledgement = await requireEnvironmentConnection(
+          environmentId,
+        ).client.orchestration.dispatchCommand({
+          type: "thread.meta.update",
+          commandId: newCommandId(),
+          threadId: activeThreadId,
+          subagentLimits: next,
+        });
+        acknowledgedSequence = acknowledgement.sequence;
+        const canonicalSequence = readCanonicalSequence();
+        if (
+          scope.active &&
+          concurrencySaveScope.current === scope &&
+          scope.dispose === dispose &&
+          (canonicalSequence === undefined || canonicalSequence < acknowledgedSequence) &&
+          !subagentLimitsEqual(readCanonical(), next)
+        ) {
+          // Preserve an acknowledged choice until exact-thread canonical
+          // authority catches up to that save. Earlier scalar changes are not
+          // newer policy authority. Queued sends independently omit this optional
+          // replacement and consume the server's current durable preference.
+          installedOverlay = true;
+          store.setSubagentLimits(composerDraftTarget, next);
+        }
+      } finally {
+        if (!installedOverlay) dispose();
+      }
+      return;
+    }
+    const current =
+      store.getComposerDraft(composerDraftTarget)?.subagentLimits ?? activeThread?.subagentLimits;
+    const next = withSubagentLimit(current, selectedProvider, value);
+    store.setSubagentLimits(composerDraftTarget, next);
+  };
+  const concurrencyMenuItem = concurrencyKey ? (
+    <MenuItem
+      disabled={!concurrencySupported && desiredSubagentLimits?.[concurrencyKey] === undefined}
+      title={
+        !concurrencySupported
+          ? "This provider runtime cannot apply a numeric subagent limit. An existing chat override can still be reset."
+          : undefined
+      }
+      onClick={() => setConcurrencyEditorOpen(true)}
+    >
+      Subagent limit…{concurrencyPresentation?.pending ? " (pending)" : ""}
+    </MenuItem>
+  ) : null;
 
   const composerProviderState = useMemo(
     () =>
@@ -2821,6 +3027,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         selectedProvider,
         selectedModel,
         selectedProviderModels,
+        ...(desiredSubagentLimits !== undefined ? { subagentLimits: desiredSubagentLimits } : {}),
       }),
     }),
     [
@@ -2845,6 +3052,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       selectedPromptEffort,
       selectedProvider,
       selectedProviderModels,
+      desiredSubagentLimits,
     ],
   );
 
@@ -3480,6 +3688,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     showGoalControl={goalControlsSupported}
                     goalStatus={activeThread?.goal?.status ?? null}
                     traitsMenuContent={providerTraitsMenuContent}
+                    subagentConcurrencyControl={concurrencyMenuItem}
                     traitsTriggerLabel={
                       providerTraitsMenuContent ? composerProviderState.traitsTriggerLabel : null
                     }
@@ -3501,6 +3710,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       runtimeMode={runtimeMode}
                       showInteractionModeToggle={selectedProviderUsesNativePermissionModes}
                       traitsMenuContent={providerTraitsMenuContent}
+                      subagentConcurrencyControl={concurrencyMenuItem}
                       traitsTriggerLabel={
                         providerTraitsMenuContent ? composerProviderState.traitsTriggerLabel : null
                       }
@@ -3572,6 +3782,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       }
                     />
                   }
+                  subagentConcurrency={concurrencyPresentation}
                   sessionRailVisible={sessionRailVisible}
                   {...(onShowSessionRail ? { onShowSessionRail } : {})}
                   pendingAction={pendingPrimaryAction}
@@ -3598,6 +3809,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           )}
         </div>
       </div>
+      {concurrencyKey ? (
+        <SubagentConcurrencyControl
+          key={concurrencyEditorKey}
+          open={concurrencyEditorOpen}
+          onOpenChange={setConcurrencyEditorOpen}
+          provider={selectedProvider}
+          supported={concurrencySupported}
+          override={desiredSubagentLimits?.[concurrencyKey]}
+          presentation={concurrencyPresentation}
+          isRunning={phase === "running"}
+          onChange={saveSubagentLimit}
+        />
+      ) : null}
     </form>
   );
 });

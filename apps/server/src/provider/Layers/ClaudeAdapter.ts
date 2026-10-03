@@ -37,6 +37,7 @@ import {
   type SessionMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import { parseCliArgs } from "@cafecode/shared/cliArgs";
+import { resolveConfiguredSubagentLimit } from "../Drivers/SubagentConcurrency.ts";
 import {
   getSafeInteractionUrl,
   normalizeElicitationRequest,
@@ -453,6 +454,14 @@ type RuntimeFork = <A, E>(effect: Effect.Effect<A, E, never>) => Fiber.Fiber<A, 
 
 interface ClaudeSessionContext {
   session: ProviderSession;
+  /** Frozen per-query environment; never shared or mutated by a sibling chat. */
+  readonly environment: NodeJS.ProcessEnv;
+  /** A forgotten live child cannot later authorize destructive idle retirement. */
+  taskLivenessUncertain: boolean;
+  /** SDK messages consumed from the iterator but not fully projected. */
+  inFlightSdkMessageCount: number;
+  /** Native close threw; never admit another owner until explicit recovery. */
+  queryClosureUncertain: boolean;
   readonly promptQueue: Queue.Queue<PromptQueueItem>;
   readonly query: ClaudeQueryRuntime;
   readonly runFork: RuntimeFork;
@@ -526,6 +535,34 @@ interface ClaudeSessionContext {
   stopped: boolean;
 }
 
+/** Provider visibility is not liveness authority: ambient children count too. */
+function reserveClaudeIdleRetirement(context: ClaudeSessionContext): boolean {
+  if (
+    context.stopped ||
+    context.session.status !== "ready" ||
+    context.session.activeTurnId !== undefined ||
+    context.turnState !== undefined ||
+    context.deferredTurnResult !== undefined ||
+    context.inFlightTools.size > 0 ||
+    context.pendingApprovals.size > 0 ||
+    context.pendingUserInputs.size > 0 ||
+    context.promptLifecycleByUuid.size > 0 ||
+    context.backgroundTaskIds.size > 0 ||
+    context.taskLivenessUncertain ||
+    context.failClosedTaskVisibilityOverflow ||
+    context.inFlightSdkMessageCount > 0 ||
+    context.queryClosureUncertain ||
+    Array.from(context.taskBindingsByTaskId.values()).some(
+      (binding) => binding.isSubagent && !context.terminalTaskIds.has(String(binding.taskId)),
+    )
+  )
+    return false;
+  // Synchronous check and reservation: no stream callback/send can interleave
+  // before stopped=true. Teardown happens later with this exact reservation.
+  context.stopped = true;
+  return true;
+}
+
 interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
   readonly interrupt: () => Promise<SDKControlInterruptResponse | undefined>;
   // The 0.3.228 runtime implements this control request, but its public Query
@@ -541,6 +578,8 @@ interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
 }
 
 export interface ClaudeAdapterLiveOptions {
+  /** Cached owning-driver status only; this getter must never launch a probe. */
+  readonly getSubagentConcurrencySupport?: () => boolean;
   readonly instanceId?: ProviderInstanceId;
   readonly environment?: NodeJS.ProcessEnv;
   /** Read only the owning driver's already-observed initialization metadata. */
@@ -843,6 +882,10 @@ function upsertClaudeTaskBinding(
     const oldest = context.taskBindingsByTaskId.keys().next().value;
     if (typeof oldest !== "string") {
       break;
+    }
+    const forgotten = context.taskBindingsByTaskId.get(oldest);
+    if (forgotten?.isSubagent && !context.terminalTaskIds.has(String(forgotten.taskId))) {
+      context.taskLivenessUncertain = true;
     }
     context.taskBindingsByTaskId.delete(oldest);
   }
@@ -6755,11 +6798,34 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const runSdkStream = (
     context: ClaudeSessionContext,
   ): Effect.Effect<void, ProviderAdapterProcessError> =>
-    Stream.fromAsyncIterable(context.query, (cause) =>
-      toProcessError(cause, "Claude runtime stream failed.", context.session.threadId),
+    Stream.fromAsyncIterable(
+      {
+        [Symbol.asyncIterator]() {
+          const iterator = context.query[Symbol.asyncIterator]();
+          return {
+            async next() {
+              const message = await iterator.next();
+              // Count before stream batching or logger/normalizer awaits can
+              // hide a consumed task_started edge from idle retirement.
+              if (!message.done) context.inFlightSdkMessageCount += 1;
+              return message;
+            },
+            ...(iterator.return ? { return: () => iterator.return!() } : {}),
+          };
+        },
+      },
+      (cause) => toProcessError(cause, "Claude runtime stream failed.", context.session.threadId),
     ).pipe(
       Stream.takeWhile(() => !context.stopped),
-      Stream.runForEach((message) => handleSdkMessage(context, message)),
+      Stream.runForEach((message) =>
+        handleSdkMessage(context, message).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              context.inFlightSdkMessageCount = Math.max(0, context.inFlightSdkMessageCount - 1);
+            }),
+          ),
+        ),
+      ),
     );
 
   const handleStreamExit = Effect.fn("handleStreamExit")(function* (
@@ -6795,11 +6861,19 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   const stopSessionInternal = Effect.fn("stopSessionInternal")(function* (
     context: ClaudeSessionContext,
-    options?: { readonly emitExitEvent?: boolean; readonly interruptStreamFiber?: boolean },
+    options?: {
+      readonly emitExitEvent?: boolean;
+      readonly interruptStreamFiber?: boolean;
+      readonly retirementReserved?: boolean;
+      readonly queryAlreadyClosed?: boolean;
+    },
   ) {
-    if (context.stopped) return;
+    if (context.stopped && !options?.retirementReserved && !context.queryClosureUncertain) return;
 
     context.stopped = true;
+    // Any cleanup failure before query.close is also inconclusive teardown.
+    // Keep the ownership fence until that exact query is proven closed.
+    context.queryClosureUncertain = options?.queryAlreadyClosed !== true;
 
     for (const [requestId, pending] of context.pendingApprovals) {
       yield* Deferred.succeed(pending.decision, "cancel");
@@ -6843,7 +6917,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     yield* Effect.try({
-      try: () => context.query.close(),
+      try: () => {
+        if (!options?.queryAlreadyClosed) context.query.close();
+        context.queryClosureUncertain = false;
+      },
       catch: (cause) =>
         new ProviderAdapterProcessError({
           provider: PROVIDER,
@@ -6852,15 +6929,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           cause,
         }),
     }).pipe(
-      Effect.catch((cause) =>
-        emitRuntimeError(context, "Failed to close Claude runtime query.", cause),
-      ),
+      Effect.catch((cause) => {
+        context.queryClosureUncertain = true;
+        return emitRuntimeError(context, "Failed to close Claude runtime query.", cause);
+      }),
     );
 
     const updatedAt = yield* nowIso;
     context.session = {
       ...context.session,
-      status: "closed",
+      status: context.queryClosureUncertain ? "error" : "closed",
       activeTurnId: undefined,
       updatedAt,
     };
@@ -6881,7 +6959,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
     }
 
-    sessions.delete(context.session.threadId);
+    if (!context.queryClosureUncertain) sessions.delete(context.session.threadId);
   });
 
   const requireSession = (
@@ -6918,24 +6996,116 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       }
 
       const existingContext = sessions.get(input.threadId);
+      // A failed native close is not proof of retirement. Keep its ownership
+      // fence until an explicit stop successfully closes that exact query;
+      // neither ordinary replacement nor a concurrency change may start a
+      // competing query while the old process could still be alive.
+      if (existingContext?.queryClosureUncertain) {
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "session/reconfigure",
+          remoteErrorTag: "subagent-concurrency-retirement-uncertain",
+          detail: "The existing provider runtime could not be conclusively retired.",
+        });
+      }
+      const maxConcurrentSubagents = yield* Effect.try({
+        try: () =>
+          resolveConfiguredSubagentLimit(
+            input.maxConcurrentSubagents,
+            claudeSettings.maxConcurrentSubagents,
+          ),
+        catch: () =>
+          new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "startSession",
+            issue: "Subagent concurrency must be an integer between 1 and 64.",
+          }),
+      });
+      if (input.requireIdleForSubagentLimitChange && !options?.getSubagentConcurrencySupport?.()) {
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "session/reconfigure",
+          remoteErrorTag: "subagent-concurrency-active",
+          detail: "Subagent concurrency is unavailable for this configured provider runtime.",
+        });
+      }
+      const sessionEnvironment = yield* makeClaudeEnvironment(
+        {
+          homePath: claudeSettings.homePath,
+          ...(maxConcurrentSubagents !== null ? { maxConcurrentSubagents } : {}),
+        },
+        options?.environment,
+      ).pipe(Effect.provideService(Path.Path, path));
       if (existingContext) {
         yield* Effect.logWarning("claude.session.replacing", {
           threadId: input.threadId,
           existingSessionStatus: existingContext.session.status,
           reason: "startSession called with existing active session",
         });
-        yield* stopSessionInternal(existingContext, {
-          emitExitEvent: false,
-        }).pipe(
-          // Replacement cleanup is best-effort: never block the new session on
-          // either typed failures or unexpected defects from tearing down the old one.
-          Effect.catchCause((cause) =>
-            Effect.logWarning("claude.session.replace.stop-failed", {
-              threadId: input.threadId,
-              cause,
-            }),
-          ),
-        );
+        const stopExisting = Effect.suspend(() => {
+          if (
+            input.requireIdleForSubagentLimitChange &&
+            !reserveClaudeIdleRetirement(existingContext)
+          ) {
+            return Effect.fail(
+              new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "session/reconfigure",
+                remoteErrorTag: "subagent-concurrency-active",
+                detail:
+                  "Subagent concurrency cannot change while provider work is active or uncertain.",
+              }),
+            );
+          }
+          if (!input.requireIdleForSubagentLimitChange) {
+            return stopSessionInternal(existingContext, { emitExitEvent: false });
+          }
+          // The SDK's close is synchronous. Reserve above and close before any
+          // fallible cleanup awaits, so admission is atomic with native
+          // retirement. A thrown close must not be hidden by best-effort stop
+          // cleanup, or mistaken for an active-limit deferral by the reactor.
+          return Effect.try({
+            try: () => existingContext.query.close(),
+            catch: () => {
+              existingContext.queryClosureUncertain = true;
+              existingContext.session = { ...existingContext.session, status: "error" };
+              return new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "session/reconfigure",
+                remoteErrorTag: "subagent-concurrency-retirement-uncertain",
+                detail: "The existing provider runtime could not be conclusively retired.",
+              });
+            },
+          }).pipe(
+            Effect.andThen(
+              stopSessionInternal(existingContext, {
+                emitExitEvent: false,
+                retirementReserved: true,
+                queryAlreadyClosed: true,
+              }),
+            ),
+          );
+        });
+        yield* input.requireIdleForSubagentLimitChange
+          ? stopExisting
+          : stopExisting.pipe(
+              // Replacement cleanup is best-effort: never block the new session on
+              // either typed failures or unexpected defects from tearing down the old one.
+              Effect.catchCause((cause) =>
+                Effect.logWarning("claude.session.replace.stop-failed", {
+                  threadId: input.threadId,
+                  cause,
+                }),
+              ),
+            );
+        if (existingContext.queryClosureUncertain) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "session/reconfigure",
+            remoteErrorTag: "subagent-concurrency-retirement-uncertain",
+            detail: "The existing provider runtime could not be conclusively retired.",
+          });
+        }
       }
 
       const startedAt = yield* nowIso;
@@ -7404,9 +7574,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       if (durableResumeState?.resume && input.cwd) {
         const recovery = yield* Effect.promise((signal) =>
           recoverClaudeResume({
-            configDirectory: resolveClaudeConfigDirectory(path, claudeEnvironment),
+            configDirectory: resolveClaudeConfigDirectory(path, sessionEnvironment),
             projectKey:
-              claudeEnvironment.CLAUDE_CODE_PROJECT_DIR_NAME?.trim() ||
+              sessionEnvironment.CLAUDE_CODE_PROJECT_DIR_NAME?.trim() ||
               claudeProjectDirectoryName(path, input.cwd!),
             sessionId: durableResumeState!.resume!,
             ...(durableResumeState?.resumeSessionAt
@@ -7444,9 +7614,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ? input.cwd
           ? yield* Effect.promise((signal) =>
               readClaudeUsageBaseline({
-                configDirectory: resolveClaudeConfigDirectory(path, claudeEnvironment),
+                configDirectory: resolveClaudeConfigDirectory(path, sessionEnvironment),
                 projectKey:
-                  claudeEnvironment.CLAUDE_CODE_PROJECT_DIR_NAME?.trim() ||
+                  sessionEnvironment.CLAUDE_CODE_PROJECT_DIR_NAME?.trim() ||
                   claudeProjectDirectoryName(path, input.cwd!),
                 sessionId: existingResumeSessionId,
                 signal,
@@ -7546,7 +7716,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             ),
           );
         },
-        env: claudeEnvironment,
+        env: sessionEnvironment,
         ...(claudeAdditionalDirectories.length > 0
           ? { additionalDirectories: [...claudeAdditionalDirectories] }
           : {}),
@@ -7612,6 +7782,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         providerInstanceId: boundInstanceId,
         status: "ready",
         runtimeMode: input.runtimeMode,
+        maxConcurrentSubagents,
         ...(input.cwd ? { cwd: input.cwd } : {}),
         ...(input.additionalDirectories !== undefined
           ? { additionalDirectories: input.additionalDirectories }
@@ -7625,6 +7796,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
       const context: ClaudeSessionContext = {
         session,
+        environment: sessionEnvironment,
+        taskLivenessUncertain: false,
+        inFlightSdkMessageCount: 0,
+        queryClosureUncertain: false,
         promptQueue,
         query: queryRuntime,
         runFork,
@@ -7778,9 +7953,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     const artifactStatus = yield* Effect.promise((signal) =>
       recoverClaudeResume({
-        configDirectory: resolveClaudeConfigDirectory(path, claudeEnvironment),
+        configDirectory: resolveClaudeConfigDirectory(path, source.environment),
         projectKey:
-          claudeEnvironment.CLAUDE_CODE_PROJECT_DIR_NAME?.trim() ||
+          source.environment.CLAUDE_CODE_PROJECT_DIR_NAME?.trim() ||
           claudeProjectDirectoryName(path, cwd),
         sessionId: source.resumeSessionId!,
         signal,
@@ -7796,7 +7971,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     const sessionStore = makeClaudeForkSessionStore({
       path,
-      env: claudeEnvironment,
+      env: source.environment,
       cwd,
     });
     const forked = yield* Effect.tryPromise({
@@ -7827,6 +8002,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       provider: PROVIDER,
       providerInstanceId: boundInstanceId,
       runtimeMode: source.session.runtimeMode,
+      maxConcurrentSubagents: source.session.maxConcurrentSubagents ?? null,
       ...(source.session.interactionMode !== undefined
         ? { interactionMode: source.session.interactionMode }
         : {}),
@@ -8112,6 +8288,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       if (exactClaudeProviderIdentity(subagentId) !== subagentId) {
         return yield* makeProviderSubagentDetailReadError("invalid-request");
       }
+      const authorizedHistoryId = exactClaudeProviderIdentity(readContext?.historyId, {
+        pathSegment: true,
+      });
+      // Opaque authorization keys are exact, not user-facing names. Trimming
+      // a supplied key could read a canonical sibling the caller never named.
+      if (readContext?.historyId !== undefined && authorizedHistoryId !== readContext.historyId) {
+        return yield* makeProviderSubagentDetailReadError("invalid-request");
+      }
 
       const currentLiveSession = sessions.get(threadId);
       const persistedResumeSessionId = readClaudeResumeState(readContext?.resumeCursor)?.resume;
@@ -8147,12 +8331,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         sessionId: resumeSessionId,
       });
 
-      const authorizedHistoryId = exactClaudeProviderIdentity(readContext?.historyId, {
-        pathSegment: true,
-      });
-      if (readContext?.historyId !== undefined && authorizedHistoryId === undefined) {
-        return yield* makeProviderSubagentDetailReadError("invalid-request");
-      }
       if (
         liveBinding?.historyId !== undefined &&
         authorizedHistoryId !== undefined &&
@@ -8382,7 +8560,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   const stopSession: ClaudeAdapterShape["stopSession"] = Effect.fn("stopSession")(
     function* (threadId) {
-      const context = yield* requireSession(threadId);
+      // A guarded close failure deliberately retains a stopped ownership
+      // context. Explicit stop is allowed to retry that exact native query;
+      // other operations still require a live, non-fenced session.
+      const retained = sessions.get(threadId);
+      const context = retained?.queryClosureUncertain ? retained : yield* requireSession(threadId);
       yield* stopSessionInternal(context, {
         emitExitEvent: true,
       });
@@ -8489,6 +8671,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   return {
     provider: PROVIDER,
     capabilities: {
+      get subagentConcurrency() {
+        return options?.getSubagentConcurrencySupport?.() ?? false;
+      },
       sessionModelSwitch: "in-session",
       liveSteer: "supported",
       sessionFork: "supported",

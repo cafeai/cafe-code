@@ -1541,6 +1541,76 @@ describe("composerDraftStore sticky composer settings", () => {
 });
 
 describe("deriveNewChatComposerDefaults", () => {
+  it("copies the exact project account's default when no global or sticky provider overrides it", () => {
+    resetComposerDraftStore();
+    const target = scopeThreadRef(TEST_ENVIRONMENT_ID, ThreadId.make("project-limit-chat"));
+    const projectInstance = ProviderInstanceId.make("claude-project");
+    const peerInstance = ProviderInstanceId.make("claude-peer");
+    const defaults = deriveNewChatComposerDefaults({
+      ...DEFAULT_UNIFIED_SETTINGS,
+      providerInstances: {
+        [CODEX_INSTANCE]: { driver: CODEX_DRIVER, defaultMaxConcurrentSubagents: 3 },
+        [projectInstance]: { driver: CLAUDE_AGENT_DRIVER, defaultMaxConcurrentSubagents: 20 },
+        [peerInstance]: { driver: CLAUDE_AGENT_DRIVER, defaultMaxConcurrentSubagents: 64 },
+      },
+    });
+    const store = useComposerDraftStore.getState();
+    store.applyStickyState(target, defaults, projectInstance);
+    expect(store.getComposerDraft(target)?.subagentLimits).toEqual({ claude: 20 });
+    // Neither an explicit reset nor a persisted draft is reinitialized later.
+    store.setSubagentLimits(target, {});
+    store.applyStickyState(target, defaults, peerInstance);
+    expect(store.getComposerDraft(target)?.subagentLimits).toEqual({});
+    resetComposerDraftStore();
+  });
+
+  it("copies the initial instance's numeric default once, without sticky or retroactive changes", () => {
+    resetComposerDraftStore();
+    const target = scopeThreadRef(TEST_ENVIRONMENT_ID, ThreadId.make("new-limit-chat"));
+    const settings = {
+      ...DEFAULT_UNIFIED_SETTINGS,
+      defaultProviderInstanceId: CODEX_INSTANCE,
+      providerInstances: {
+        [CODEX_INSTANCE]: { driver: CODEX_DRIVER, defaultMaxConcurrentSubagents: 12 },
+      },
+    };
+    const store = useComposerDraftStore.getState();
+    store.applyStickyState(target, deriveNewChatComposerDefaults(settings));
+    expect(store.getComposerDraft(target)?.subagentLimits).toEqual({ codex: 12 });
+    store.applyStickyState(
+      target,
+      deriveNewChatComposerDefaults({
+        ...settings,
+        providerInstances: {
+          [CODEX_INSTANCE]: { driver: CODEX_DRIVER, defaultMaxConcurrentSubagents: 24 },
+        },
+      }),
+    );
+    expect(store.getComposerDraft(target)?.subagentLimits).toEqual({ codex: 12 });
+    store.setModelSelection(target, createModelSelection(CLAUDE_AGENT_INSTANCE, "claude-test"));
+    expect(store.getComposerDraft(target)?.subagentLimits).toEqual({ codex: 12 });
+    expect(
+      useComposerDraftStore.getState().stickyModelSelectionByProvider[CODEX_INSTANCE]?.options,
+    ).toBeUndefined();
+  });
+
+  it("round-trips two driver choices and an empty reset even without content", () => {
+    resetComposerDraftStore();
+    const target = scopeThreadRef(TEST_ENVIRONMENT_ID, ThreadId.make("persisted-limit-chat"));
+    const store = useComposerDraftStore.getState();
+    const options = useComposerDraftStore.persist.getOptions();
+    for (const limits of [{ codex: 12, claude: 20 }, {}]) {
+      store.setSubagentLimits(target, limits);
+      const persisted = options.partialize!(useComposerDraftStore.getState());
+      useComposerDraftStore.setState(
+        options.merge!(JSON.parse(JSON.stringify(persisted)), useComposerDraftStore.getState()),
+      );
+      expect(store.getComposerDraft(target)?.subagentLimits).toEqual(limits);
+    }
+    store.setSubagentLimits(target, { codex: 65 });
+    expect(store.getComposerDraft(target)?.subagentLimits).toEqual({});
+    resetComposerDraftStore();
+  });
   it("returns null when nothing is configured", () => {
     expect(deriveNewChatComposerDefaults(DEFAULT_UNIFIED_SETTINGS)).toBeNull();
   });

@@ -165,6 +165,7 @@ function makeState(thread: Thread): AppState {
         modelSelection: thread.modelSelection,
         runtimeMode: thread.runtimeMode,
         interactionMode: thread.interactionMode,
+        subagentLimits: thread.subagentLimits,
         error: thread.error,
         createdAt: thread.createdAt,
         archivedAt: thread.archivedAt,
@@ -262,6 +263,116 @@ function projectsOf(state: AppState) {
 function threadsOf(state: AppState) {
   return selectThreadsAcrossEnvironments(state);
 }
+
+describe("thread concurrency projection", () => {
+  it.each(["thread.duplicated", "thread.forked"] as const)(
+    "copies both driver choices and explicit reset through %s without copying session evidence",
+    (kind) => {
+      for (const limits of [{ codex: 12, claude: 20 }, {}]) {
+        const source = makeThread({ subagentLimits: limits });
+        const targetId = ThreadId.make("target-limit-chat");
+        const target = {
+          id: targetId,
+          projectId: source.projectId,
+          title: "Copied chat",
+          modelSelection: source.modelSelection,
+          runtimeMode: source.runtimeMode,
+          interactionMode: source.interactionMode,
+          // The authoritative created/copied shell already carries the copied
+          // policy. A later context-copy event must not replace newer evidence.
+          subagentLimits: { ...limits },
+          branch: null,
+          worktreePath: null,
+          latestTurn: null,
+          createdAt: source.createdAt,
+          updatedAt: source.createdAt,
+          archivedAt: null,
+          deletedAt: null,
+          session: null,
+          latestUserMessageAt: null,
+          hasPendingApprovals: false,
+          hasPendingUserInput: false,
+          hasActionableProposedPlan: false,
+        };
+        const state = applyShellEvent(
+          makeState(source),
+          { kind: "thread-upserted", sequence: 1, thread: target },
+          localEnvironmentId,
+        );
+        const payload = { sourceThreadId: source.id, targetThreadId: targetId };
+        const event =
+          kind === "thread.duplicated"
+            ? makeEvent(kind, { ...payload, duplicatedAt: source.createdAt })
+            : makeEvent(kind, { ...payload, forkedAt: source.createdAt });
+        const copied = selectThreadByRef(
+          applyOrchestrationEvent(state, event, localEnvironmentId),
+          scopeThreadRef(localEnvironmentId, targetId),
+        );
+        expect(copied?.subagentLimits).toEqual(limits);
+        expect(copied?.session).toBeNull();
+        expect(copied?.subagentLimits).not.toBe(limits);
+      }
+    },
+  );
+
+  it("round-trips desired policy and explicit reset independently from configured session evidence", () => {
+    const thread = makeThread();
+    let state = applyOrchestrationEvent(
+      makeState(thread),
+      makeEvent("thread.meta-updated", {
+        threadId: thread.id,
+        subagentLimits: { codex: 12, claude: 20 },
+        updatedAt: "2026-10-03T00:00:00.000Z",
+      }),
+      localEnvironmentId,
+    );
+    expect(threadsOf(state)[0]?.subagentLimits).toEqual({ codex: 12, claude: 20 });
+    state = applyOrchestrationEvent(
+      state,
+      makeEvent("thread.session-set", {
+        threadId: thread.id,
+        session: {
+          threadId: thread.id,
+          status: "ready",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          maxConcurrentSubagents: 3,
+          updatedAt: "2026-10-03T00:00:01.000Z",
+        },
+      }),
+      localEnvironmentId,
+    );
+    expect(threadsOf(state)[0]?.session?.maxConcurrentSubagents).toBe(3);
+    expect(threadsOf(state)[0]?.subagentLimits).toEqual({ codex: 12, claude: 20 });
+    state = applyOrchestrationEvent(
+      state,
+      {
+        ...makeEvent("thread.meta-updated", {
+          threadId: thread.id,
+          subagentLimits: {},
+          updatedAt: "2026-10-03T00:00:02.000Z",
+        }),
+        sequence: 2,
+      },
+      localEnvironmentId,
+    );
+    expect(threadsOf(state)[0]?.subagentLimits).toEqual({});
+    expect(threadsOf(state)[0]?.session?.maxConcurrentSubagents).toBe(3);
+    state = applyOrchestrationEvent(
+      state,
+      makeEvent("thread.meta-updated", {
+        threadId: thread.id,
+        title: "Renamed",
+        updatedAt: "2026-10-03T00:00:03.000Z",
+      }),
+      localEnvironmentId,
+    );
+    expect(threadsOf(state)[0]?.subagentLimits).toEqual({});
+  });
+});
 
 describe("bootstrap selectors", () => {
   it("reads bootstrap completion for an explicit environment", () => {
@@ -435,7 +546,12 @@ describe("thread selection memoization", () => {
     const populated = applyShellEvent(state, shellEvent, localEnvironmentId);
     const repeated = applyShellEvent(populated, { ...shellEvent, sequence: 2 }, localEnvironmentId);
 
-    expect(repeated).toBe(populated);
+    // Exact-thread policy authority advances even for equal data, but UI
+    // shells retain identity so unrelated selectors need not rerender.
+    expect(localEnvironmentStateOf(repeated).threadShellById).toBe(
+      localEnvironmentStateOf(populated).threadShellById,
+    );
+    expect(localEnvironmentStateOf(repeated).subagentPolicySequenceByThreadId?.[thread.id]).toBe(2);
   });
 
   it("returns stable thread references for repeated reads of the same state", () => {

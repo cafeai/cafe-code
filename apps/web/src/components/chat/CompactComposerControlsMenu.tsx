@@ -94,6 +94,7 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
   showGoalControl?: boolean;
   goalStatus?: ProviderThreadGoalStatus | null;
   traitsMenuContent?: ReactNode;
+  subagentConcurrencyControl?: ReactNode;
   traitsTriggerLabel?: string | null;
   onToggleInteractionMode: () => void;
   onNativePermissionModeChange: (mode: ClaudePermissionMode) => void;
@@ -139,6 +140,12 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
       </MenuTrigger>
       <MenuPopup align="start" className="w-[min(18rem,calc(100vw-1rem))] max-w-[calc(100vw-1rem)]">
         {props.traitsMenuContent}
+        {props.subagentConcurrencyControl ? (
+          <>
+            {hasTraits ? <MenuDivider /> : null}
+            {props.subagentConcurrencyControl}
+          </>
+        ) : null}
         {props.showInteractionModeToggle ? (
           <>
             {hasTraits ? <MenuDivider /> : null}

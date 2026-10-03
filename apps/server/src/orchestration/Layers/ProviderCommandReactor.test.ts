@@ -37,7 +37,7 @@ import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { deriveServerPaths, ServerConfig } from "../../config.ts";
 import { TextGenerationError } from "@cafecode/contracts";
@@ -208,6 +208,7 @@ describe("ProviderCommandReactor", () => {
     readonly providerDisplayNames?: ReadonlyMap<string, string>;
     readonly testClock?: TestClock.TestClock;
     readonly standalone?: boolean;
+    readonly subagentConcurrency?: boolean;
   }) {
     const now = "2026-01-01T00:00:00.000Z";
     const baseDir = input?.baseDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "t3code-reactor-"));
@@ -226,7 +227,7 @@ describe("ProviderCommandReactor", () => {
       instanceId: ProviderInstanceId.make("codex"),
       model: "gpt-5-codex",
     };
-    const startSession = vi.fn((_: unknown, input: unknown) => {
+    const startSession = vi.fn<ProviderServiceShape["startSession"]>((_, input) => {
       const sessionIndex = nextSessionIndex++;
       const resumeCursor =
         typeof input === "object" && input !== null && "resumeCursor" in input
@@ -286,6 +287,9 @@ describe("ProviderCommandReactor", () => {
           : {}),
         ...(inputModelSelection ? { modelSelection: inputModelSelection } : {}),
         threadId,
+        ...(typeof input === "object" && input !== null && "maxConcurrentSubagents" in input
+          ? { maxConcurrentSubagents: input.maxConcurrentSubagents as number | null }
+          : {}),
         resumeCursor: resumeCursor ?? { opaque: `resume-${sessionIndex}` },
         createdAt: now,
         updatedAt: now,
@@ -446,6 +450,7 @@ describe("ProviderCommandReactor", () => {
           liveSteer: input?.liveSteer ?? "unsupported",
           threadGoals: input?.threadGoals ?? "unsupported",
           manualCompaction: input?.manualCompaction ?? "unsupported",
+          subagentConcurrency: input?.subagentConcurrency ?? true,
         }),
       getInstanceInfo: (instanceId) => {
         const raw = String(instanceId);
@@ -732,6 +737,153 @@ describe("ProviderCommandReactor", () => {
     };
   }
 
+  describe("per-chat subagent process policy", () => {
+    const threadId = ThreadId.make("thread-1");
+    let sendIndex = 0;
+    beforeEach(() => {
+      sendIndex = 0;
+    });
+    async function send(
+      harness: Awaited<ReturnType<typeof createHarness>>,
+      key: string,
+      fails = false,
+    ) {
+      const sentBefore = harness.sendTurn.mock.calls.length;
+      const turnId = asTurnId(`${key}-native-turn`);
+      // Real native turns have distinct identities. Reusing the harness's
+      // default turn-1 would deliberately hit the completed-turn replay fence
+      // after the first readiness transition instead of testing replacement.
+      harness.sendTurn.mockImplementationOnce((input) =>
+        Effect.succeed({
+          threadId: input.threadId,
+          turnId,
+        }),
+      );
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make(key),
+          threadId,
+          message: { messageId: asMessageId(key), role: "user", text: "Hello", attachments: [] },
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, ++sendIndex * 2 - 1)).toISOString(),
+        }),
+      );
+      // drain waits admitted reactor work, not the PubSub consumer's next
+      // scheduling turn. Observe the outcome before draining its final writes.
+      await waitFor(async () =>
+        fails
+          ? (await harness.readThreadDetail(threadId))?.activities.some(
+              (activity) => activity.kind === "provider.turn.start.failed",
+            ) === true
+          : harness.sendTurn.mock.calls.length === sentBefore + 1,
+      );
+      await harness.drain();
+      if (!fails) {
+        // The provider acknowledgement's presentation write is intentionally
+        // detached from delivery. Wait for that exact marker before the test
+        // emits its terminal ready edge, so a late ACK cannot reopen the fake
+        // idle session after markThreadReady has run.
+        await waitFor(async () => {
+          const session = (await harness.readThreadDetail(threadId))?.session;
+          return session?.status === "running" && session.activeTurnId === turnId;
+        });
+      }
+    }
+    async function change(
+      harness: Awaited<ReturnType<typeof createHarness>>,
+      key: string,
+      limits: { codex?: number; claude?: number },
+    ) {
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make(key),
+          threadId,
+          subagentLimits: limits,
+        }),
+      );
+      await harness.drain();
+    }
+
+    it("materializes only on the next send and keeps a child-wake race pending without replay", async () => {
+      const harness = await createHarness({ standalone: true });
+      await change(harness, "limit-three", { codex: 3, claude: 8 });
+      expect(harness.startSession).not.toHaveBeenCalled();
+      await send(harness, "initial-limit-send");
+      expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({ maxConcurrentSubagents: 3 });
+      expect(harness.runtimeSessions[0]?.maxConcurrentSubagents).toBe(3);
+      await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
+      await change(harness, "limit-seven", { codex: 7, claude: 8 });
+      expect((await harness.readThreadDetail(threadId))?.session).toMatchObject({
+        status: "ready",
+        activeTurnId: null,
+      });
+      expect(harness.runtimeSessions[0]).toMatchObject({
+        status: "ready",
+        maxConcurrentSubagents: 3,
+      });
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      await send(harness, "changed-limit-send");
+      expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+        maxConcurrentSubagents: 7,
+        requireIdleForSubagentLimitChange: true,
+      });
+
+      await harness.markThreadReady(threadId, "2026-01-01T00:00:04.000Z");
+      await change(harness, "limit-nine", { codex: 9, claude: 8 });
+      harness.startSession.mockImplementationOnce(() =>
+        Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: "codex",
+            method: "startSession",
+            detail: "Subagent work is active.",
+            remoteErrorTag: "subagent-concurrency-active",
+          }),
+        ),
+      );
+      await send(harness, "child-woke-send");
+      expect(harness.sendTurn).toHaveBeenCalledTimes(3);
+      expect(harness.runtimeSessions[0]?.maxConcurrentSubagents).toBe(7);
+      expect((await harness.readThreadDetail(threadId))?.subagentLimits).toEqual({
+        codex: 9,
+        claude: 8,
+      });
+      expect(harness.stopSession).not.toHaveBeenCalled();
+
+      await harness.markThreadReady(threadId, "2026-01-01T00:00:06.000Z");
+      await change(harness, "reset-limit", {});
+      await send(harness, "reset-limit-send");
+      expect(harness.startSession.mock.calls.at(-1)?.[1]).toMatchObject({
+        maxConcurrentSubagents: null,
+        requireIdleForSubagentLimitChange: true,
+      });
+      expect(harness.runtimeSessions[0]?.maxConcurrentSubagents).toBeNull();
+    });
+
+    it("rejects a requested override when the configured runtime is unqualified", async () => {
+      const harness = await createHarness({ standalone: true, subagentConcurrency: false });
+      await change(harness, "unsupported-limit", { codex: 2 });
+      await send(harness, "unsupported-limit-send", true);
+      expect(harness.startSession).not.toHaveBeenCalled();
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      const thread = await harness.readThreadDetail(threadId);
+      expect(
+        thread?.activities.some((activity) => activity.kind === "provider.turn.start.failed"),
+      ).toBe(true);
+    });
+
+    it("does not restart running root work to apply a newly saved limit", async () => {
+      const harness = await createHarness({ standalone: true, liveSteer: "supported" });
+      await harness.setRunningCodexTurn(asTurnId("busy-root"), "2026-01-01T00:00:01.000Z");
+      await change(harness, "busy-limit-change", { codex: 2 });
+      expect(harness.startSession).not.toHaveBeenCalled();
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      expect((await harness.readThreadDetail(threadId))?.subagentLimits).toEqual({ codex: 2 });
+    });
+  });
+
   it("starts a standalone turn without any project using stable private cwd and explicit empty roots", async () => {
     const harness = await createHarness({ standalone: true });
     const threadId = ThreadId.make("thread-1");
@@ -755,7 +907,7 @@ describe("ProviderCommandReactor", () => {
     await harness.drain();
     const request = harness.startSession.mock.calls[0]?.[1] as {
       cwd: string;
-      additionalDirectories: string[];
+      additionalDirectories: readonly string[];
       runtimeMode: string;
     };
     expect(request.runtimeMode).toBe("approval-required");
@@ -847,7 +999,7 @@ describe("ProviderCommandReactor", () => {
       expect(harness.startSession).toHaveBeenCalledTimes(1);
       const request = harness.startSession.mock.calls[0]?.[1] as {
         cwd: string;
-        additionalDirectories: string[];
+        additionalDirectories: readonly string[];
         resumeCursor: unknown;
       };
       expect(request.additionalDirectories).toEqual([]);

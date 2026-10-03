@@ -17,6 +17,7 @@ import type {
   CheckpointRef,
   ProviderInteractionMode,
   RuntimeMode,
+  SubagentLimits,
   ChatFileAttachment,
 } from "@cafecode/contracts";
 
@@ -97,6 +98,7 @@ export interface Thread {
   modelSelection: ModelSelection;
   runtimeMode: RuntimeMode;
   interactionMode: ProviderInteractionMode;
+  subagentLimits?: SubagentLimits | undefined;
   session: ThreadSession | null;
   messages: ChatMessage[];
   proposedPlans: ProposedPlan[];
@@ -122,6 +124,7 @@ export interface ThreadShell {
   modelSelection: ModelSelection;
   runtimeMode: RuntimeMode;
   interactionMode: ProviderInteractionMode;
+  subagentLimits?: SubagentLimits | undefined;
   error: string | null;
   createdAt: string;
   archivedAt: string | null;
@@ -163,4 +166,6 @@ export interface ThreadSession {
   updatedAt: string;
   lastError?: string;
   orchestrationStatus: OrchestrationSessionStatus;
+  /** Materialized Cafe override only; absence is older/unknown evidence. */
+  maxConcurrentSubagents?: number | null | undefined;
 }

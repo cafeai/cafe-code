@@ -1095,7 +1095,7 @@ describe("deriveWorkLogEntries", () => {
       id: " provider-child-locate-footer ",
       label: "Locate footer label",
       objective: "Find where the footer status label is assembled",
-      description: "Refining trigger label filtering",
+      description: "Located the footer label source",
       status: "completed",
       startedAt: "2026-02-23T00:00:01.000Z",
       completedAt: "2026-02-23T00:01:06.000Z",
@@ -1122,7 +1122,7 @@ describe("deriveWorkLogEntries", () => {
     );
     expect(afterDelayedProgress[0]?.subagent).toMatchObject({
       status: "completed",
-      description: "Refining trigger label filtering",
+      description: "Located the footer label source",
       completedAt: "2026-02-23T00:01:06.000Z",
     });
 
@@ -1153,6 +1153,57 @@ describe("deriveWorkLogEntries", () => {
       startedAt: "2026-02-23T00:02:00.000Z",
     });
     expect(afterRestart[0]?.subagent?.completedAt).toBeUndefined();
+  });
+
+  it("refreshes a completed worker's name without reopening work or rebinding history", () => {
+    const turnId = TurnId.make("rename-completed-worker");
+    const completed = makeActivity({
+      id: "completed-worker",
+      kind: "task.completed",
+      summary: "Subagent completed",
+      turnId,
+      createdAt: "2026-10-03T00:00:00.000Z",
+      sequence: 1,
+      payload: {
+        taskId: "worker",
+        status: "completed",
+        subagent: {
+          threadId: "worker",
+          label: "Old name",
+          status: "completed",
+          historyId: "exact-history",
+          startedAt: "2026-10-02T23:59:00.000Z",
+        },
+      },
+    });
+    const rename = makeActivity({
+      id: "worker-renamed",
+      kind: "task.progress",
+      summary: "Subagent update",
+      turnId,
+      createdAt: "2026-10-03T00:01:00.000Z",
+      sequence: 2,
+      payload: {
+        taskId: "worker",
+        detail: "Late progress",
+        subagent: {
+          threadId: "worker",
+          label: "New name",
+          status: "active",
+          historyId: "different-history",
+        },
+      },
+    });
+    const [entry] = deriveSubagentWorkEntries([completed, rename], turnId);
+    expect(entry?.label).toBe("New name");
+    expect(entry?.subagent).toMatchObject({
+      label: "New name",
+      status: "completed",
+      historyId: "exact-history",
+      startedAt: "2026-10-02T23:59:00.000Z",
+      completedAt: "2026-10-03T00:00:00.000Z",
+      lifecycleRevision: "sequence:2:14:worker-renamed",
+    });
   });
 
   it("settles legacy Codex control rows when their parent turn is terminal", () => {

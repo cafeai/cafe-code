@@ -5,10 +5,11 @@ import { forwardRef, memo, type ReactNode } from "react";
 import type { ContextWindowSnapshot } from "~/lib/contextWindow";
 import { cn } from "~/lib/utils";
 import type { WorkLogEntry } from "../../session-logic";
-import { type SubagentRosterEntry } from "../subagents/SubagentRosterRow";
+import { isLiveSubagentStatus, type SubagentRosterEntry } from "../subagents/SubagentRosterRow";
 import { Button } from "../ui/button";
 import { ScrollArea } from "../ui/scroll-area";
 import { ContextWindowDetails } from "./ContextWindowDetails";
+import type { SubagentConcurrencyPresentation } from "../../subagentConcurrency";
 import { TaskProgressDetails } from "./TaskProgressDetails";
 import {
   deriveTaskProgressPresentation,
@@ -52,6 +53,7 @@ interface SessionRailProps {
   readonly usage: ContextWindowSnapshot | null;
   readonly rateLimits?: ServerProviderAccountRateLimits | null | undefined;
   readonly usageResetAction?: ReactNode;
+  readonly subagentConcurrency?: SubagentConcurrencyPresentation | null;
   readonly onShowInComposer: () => void;
   readonly className?: string;
 }
@@ -61,7 +63,8 @@ export const SessionRail = memo(
     const plan = props.plan;
     const hasPlan = Boolean(plan && plan.steps.length > 0);
     const subagents = (props.subagents ?? []).filter(
-      (entry): entry is SubagentRosterEntry => entry.subagent !== undefined,
+      (entry): entry is SubagentRosterEntry =>
+        entry.subagent !== undefined && isLiveSubagentStatus(entry.subagent.status),
     );
     const hasSubagents = subagents.length > 0;
     const { completedCount } = plan ? deriveTaskProgressPresentation(plan) : { completedCount: 0 };
@@ -119,6 +122,7 @@ export const SessionRail = memo(
             rateLimits={props.rateLimits}
             usageResetAction={props.usageResetAction}
             layout="panel"
+            subagentConcurrency={props.subagentConcurrency}
           />
         </div>
       </div>

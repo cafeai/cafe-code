@@ -732,7 +732,9 @@ function isSubagentWorkActivity(activity: OrchestrationThreadActivity): boolean 
   );
 }
 
-function subagentToWorkLogEntry(subagent: DerivedSubagentActivity): WorkLogEntry {
+export function subagentToWorkLogEntry(subagent: DerivedSubagentActivity): WorkLogEntry & {
+  readonly subagent: NonNullable<WorkLogEntry["subagent"]>;
+} {
   const fallback =
     subagent.status === "waiting"
       ? "Waiting"

@@ -2,6 +2,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 import { ProviderOptionSelections } from "./model.ts";
+import { MaxConcurrentSubagents, SubagentLimits } from "./subagentLimits.ts";
 import { RepositoryIdentity } from "./environment.ts";
 import {
   ApprovalRequestId,
@@ -315,6 +316,7 @@ export const OrchestrationSession = Schema.Struct({
   status: OrchestrationSessionStatus,
   providerName: Schema.NullOr(TrimmedNonEmptyString),
   providerInstanceId: Schema.optional(ProviderInstanceId),
+  maxConcurrentSubagents: Schema.optional(Schema.NullOr(MaxConcurrentSubagents)),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   activeTurnId: Schema.NullOr(TurnId),
   lastError: Schema.NullOr(TrimmedNonEmptyString),
@@ -390,6 +392,7 @@ export const OrchestrationThread = Schema.Struct({
   projectId: Schema.NullOr(ProjectId),
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
+  subagentLimits: Schema.optional(SubagentLimits),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
@@ -441,6 +444,7 @@ export const OrchestrationThreadShell = Schema.Struct({
   projectId: Schema.NullOr(ProjectId),
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
+  subagentLimits: Schema.optional(SubagentLimits),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
@@ -590,8 +594,17 @@ export const THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_CHARS =
 export const THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_CHARS =
   THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_BYTES;
 
-const ThreadTurnSubagentId = TrimmedNonEmptyString.check(
+/**
+ * Provider-owned authorization keys are opaque, not display strings. Never
+ * trim or otherwise normalize them: two whitespace variants can identify
+ * different immutable child/history bindings. Keep both transport boundaries
+ * on this same bounded validator, rejecting control and bidi-control text
+ * without modifying any admitted ordinary whitespace.
+ */
+export const ThreadTurnSubagentId = Schema.String.check(
+  Schema.isNonEmpty(),
   Schema.isMaxLength(THREAD_TURN_SUBAGENT_ID_MAX_LENGTH),
+  Schema.isPattern(/^[^\p{Cc}\p{Bidi_Control}]+$/u),
 );
 
 export const OrchestrationThreadTurnSubagentDetailInput = Schema.Struct({
@@ -852,6 +865,7 @@ const ThreadCreateCommand = Schema.Struct({
   projectId: Schema.NullOr(ProjectId),
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
+  subagentLimits: Schema.optional(SubagentLimits),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
@@ -911,6 +925,7 @@ const ThreadMetaUpdateCommand = Schema.Struct({
   projectId: Schema.optional(Schema.NullOr(ProjectId)),
   title: Schema.optional(TrimmedNonEmptyString),
   modelSelection: Schema.optional(ModelSelection),
+  subagentLimits: Schema.optional(SubagentLimits),
   branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
 });
@@ -935,6 +950,7 @@ const ThreadTurnStartBootstrapCreateThread = Schema.Struct({
   projectId: Schema.NullOr(ProjectId),
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
+  subagentLimits: Schema.optional(SubagentLimits),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   branch: Schema.NullOr(TrimmedNonEmptyString),
@@ -980,6 +996,7 @@ export const ThreadTurnStartCommand = Schema.Struct({
     attachments: Schema.Array(ChatAttachment),
   }),
   modelSelection: Schema.optional(ModelSelection),
+  subagentLimits: Schema.optional(SubagentLimits),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   interactionMode: ProviderInteractionMode.pipe(
@@ -1002,6 +1019,7 @@ const ClientThreadTurnStartCommand = Schema.Struct({
     attachments: Schema.Array(UploadChatAttachment),
   }),
   modelSelection: Schema.optional(ModelSelection),
+  subagentLimits: Schema.optional(SubagentLimits),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
@@ -1426,6 +1444,7 @@ export const ThreadCreatedPayload = Schema.Struct({
   projectId: Schema.NullOr(ProjectId),
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
+  subagentLimits: Schema.optional(SubagentLimits),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   interactionMode: ProviderInteractionMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
@@ -1474,6 +1493,7 @@ export const ThreadMetaUpdatedPayload = Schema.Struct({
   projectId: Schema.optional(Schema.NullOr(ProjectId)),
   title: Schema.optional(TrimmedNonEmptyString),
   modelSelection: Schema.optional(ModelSelection),
+  subagentLimits: Schema.optional(SubagentLimits),
   branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   updatedAt: IsoDateTime,
@@ -1525,6 +1545,7 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
   threadId: ThreadId,
   messageId: MessageId,
   modelSelection: Schema.optional(ModelSelection),
+  subagentLimits: Schema.optional(SubagentLimits),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   interactionMode: ProviderInteractionMode.pipe(

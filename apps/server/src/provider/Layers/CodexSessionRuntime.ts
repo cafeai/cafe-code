@@ -597,6 +597,8 @@ export interface CodexSessionRuntimeShape {
   ) => Effect.Effect<string, CodexSessionRuntimeError>;
   readonly events: Stream.Stream<ProviderEvent, never>;
   readonly close: Effect.Effect<void>;
+  /** Atomically fences an idle root and every known descendant before teardown. */
+  readonly closeIfIdle?: Effect.Effect<boolean>;
 }
 
 export type CodexSessionRuntimeError =
@@ -840,7 +842,227 @@ export interface CodexChildConversationLiveness {
   readonly state: CodexChildConversationLivenessState;
   readonly observedAt: string;
   readonly method: string;
+  /** Exact child turn identity prevents a completed turn's item replay reopening it. */
+  readonly nativeTurnId?: string | undefined;
 }
+
+export interface CodexChildLivenessSnapshot {
+  readonly providerThreadId: string;
+  readonly state: "active" | "inactive" | undefined;
+  readonly terminalStatus?: "idle" | "notLoaded" | "systemError" | "stopped" | undefined;
+  readonly threadName?: string | undefined;
+}
+
+export const CODEX_RESUME_CHILD_RECONCILIATION_LIMIT = 128;
+
+/**
+ * Discover exact native child references from only the newest admitted turn.
+ * Historical spawn envelopes are not live starts: every new binding stays
+ * unknown until a child metadata read proves its state. Existing live/terminal
+ * bindings are never overwritten by a delayed resume snapshot. A generous
+ * finite discovery ceiling bounds local RPC work independently of turn age;
+ * overflow remains an explicit inconclusive retirement fence, not truncation
+ * that could manufacture an idle proof.
+ */
+export function seedCodexResumedChildConversations(input: {
+  readonly providerThread: CodexSnapshotThread;
+  readonly routes: ReadonlyMap<string, TurnId>;
+  readonly children: ReadonlyMap<string, CodexChildConversationLiveness>;
+  readonly observedAt: string;
+}): {
+  readonly routes: Map<string, TurnId>;
+  readonly children: Map<string, CodexChildConversationLiveness>;
+  readonly parentTurnIds: ReadonlyArray<TurnId>;
+  readonly overflowed: boolean;
+  readonly inconclusive: boolean;
+} {
+  const routes = new Map(input.routes);
+  const children = new Map(input.children);
+  const parentTurnIds = new Set<TurnId>();
+  let discovered = 0;
+  let overflowed = false;
+  const turn = input.providerThread.turns.at(-1);
+  const hasItemBodies =
+    turn === undefined || turn.itemsView === "summary" || turn.itemsView === "full";
+  if (turn && hasItemBodies) {
+    const parentTurnId = TurnId.make(turn.id);
+    for (const item of turn.items) {
+      const candidates = new Map<string, TurnId>();
+      rememberCodexChildConversationTurns(
+        candidates,
+        {
+          method: "item/completed",
+          params: { threadId: input.providerThread.id, turnId: turn.id, item },
+        },
+        parentTurnId,
+        input.providerThread.id,
+      );
+      for (const [childId, owner] of candidates) {
+        if (routes.has(childId)) continue;
+        if (discovered >= CODEX_RESUME_CHILD_RECONCILIATION_LIMIT) {
+          overflowed = true;
+          continue;
+        }
+        discovered += 1;
+        routes.set(childId, owner);
+        children.set(childId, {
+          parentTurnId: owner,
+          state: "unknown",
+          observedAt: input.observedAt,
+          method: "session-resume-child-discovery",
+        });
+        parentTurnIds.add(owner);
+      }
+    }
+  }
+  return {
+    routes,
+    children,
+    parentTurnIds: Array.from(parentTurnIds),
+    overflowed,
+    inconclusive: overflowed || !hasItemBodies,
+  };
+}
+
+/** A delayed discovery cannot establish authority for a newer root generation. */
+export function reconcileCodexResumedChildSnapshot(input: {
+  readonly providerThread: CodexSnapshotThread;
+  readonly expectedProviderThreadId: string;
+  readonly currentProviderThreadId: string | undefined;
+  readonly sampledEpoch: symbol;
+  readonly currentEpoch: symbol;
+  readonly closed: boolean;
+  readonly routes: ReadonlyMap<string, TurnId>;
+  readonly children: ReadonlyMap<string, CodexChildConversationLiveness>;
+  readonly observedAt: string;
+}): ReturnType<typeof seedCodexResumedChildConversations> | undefined {
+  if (
+    input.closed ||
+    input.sampledEpoch !== input.currentEpoch ||
+    input.providerThread.id !== input.expectedProviderThreadId ||
+    input.currentProviderThreadId !== input.expectedProviderThreadId
+  )
+    return undefined;
+  return seedCodexResumedChildConversations(input);
+}
+
+/**
+ * A bounded read is authoritative only for the unchanged child sampled before
+ * I/O. A concurrently restarted/rebound child must not inherit its old read.
+ * Return only freshly applied terminal facts for canonical task publication.
+ */
+export function reconcileCodexChildLivenessSnapshots(input: {
+  readonly turnId: TurnId;
+  readonly observedAt: string;
+  readonly sampled: ReadonlyMap<string, CodexChildConversationLiveness>;
+  readonly current: ReadonlyMap<string, CodexChildConversationLiveness>;
+  readonly routes: ReadonlyMap<string, TurnId>;
+  readonly results: ReadonlyArray<CodexChildLivenessSnapshot>;
+}): {
+  readonly liveness: Map<string, CodexChildConversationLiveness>;
+  readonly terminals: ReadonlyArray<CodexChildLivenessSnapshot>;
+} {
+  const liveness = new Map(input.current);
+  const terminals: CodexChildLivenessSnapshot[] = [];
+  for (const result of input.results) {
+    if (
+      result.state === undefined ||
+      input.routes.get(result.providerThreadId) !== input.turnId ||
+      input.current.get(result.providerThreadId) !== input.sampled.get(result.providerThreadId)
+    )
+      continue;
+    liveness.set(result.providerThreadId, {
+      ...input.current.get(result.providerThreadId),
+      parentTurnId: input.turnId,
+      state: result.state,
+      observedAt: input.observedAt,
+      method: "thread/read",
+    });
+    if (result.state === "inactive" && result.terminalStatus !== undefined) terminals.push(result);
+  }
+  return { liveness, terminals };
+}
+
+/** Pure proof used only while the runtime's aggregate lifecycle permit is held. */
+export function codexTreeIsIdleForConcurrencyChange(input: {
+  readonly session: ProviderSession;
+  readonly rootStartPending: boolean;
+  readonly compactionPending: boolean;
+  readonly unsettledCount: number;
+  readonly queuedNotificationCount: number;
+  readonly routes: ReadonlyMap<string, TurnId>;
+  readonly children: ReadonlyMap<string, CodexChildConversationLiveness>;
+}): boolean {
+  return (
+    input.session.status === "ready" &&
+    input.session.activeTurnId === undefined &&
+    !input.rootStartPending &&
+    !input.compactionPending &&
+    input.unsettledCount === 0 &&
+    input.queuedNotificationCount === 0 &&
+    Array.from(input.routes).every(([id, parentTurnId]) => {
+      const child = input.children.get(id);
+      return child?.parentTurnId === parentTurnId && child.state === "inactive";
+    })
+  );
+}
+
+/**
+ * Bind native notification ownership from admission through handler completion.
+ * Queue consumers may batch/dequeue before their first handler runs, so queue
+ * length alone is not an idle proof. Synchronous data/notification receipt
+ * counters span the earlier transport queues, logging, and partial frames.
+ * Relay admission shares the retirement permit: once closed is reserved, a
+ * delayed relay cannot reenter. The final reservation rechecks all counters
+ * atomically, without claiming authority over unread OS/native buffers.
+ */
+export const makeCodexNotificationRetirementFence = Effect.fn(
+  "makeCodexNotificationRetirementFence",
+)(function* (input: {
+  readonly closed: Ref.Ref<boolean>;
+  readonly semaphore: Semaphore.Semaphore;
+}) {
+  let pending = 0;
+  let pendingIngress = 0;
+  let incompleteFrame = false;
+  let overflowed = false;
+  return {
+    // This callback is installed at protocol wire admission, before either
+    // the protocol raw queue or Cafe's relay can hide a received frame.
+    // Overflow is inconclusive forever for this process generation.
+    observeReceived: () => {
+      if (pending >= 65_536) overflowed = true;
+      else pending += 1;
+    },
+    observeIncomingData: () => {
+      if (pendingIngress >= 65_536) overflowed = true;
+      else pendingIngress += 1;
+    },
+    observeIncomingDataProcessed: (hasIncompleteFrame: boolean) => {
+      pendingIngress = Math.max(0, pendingIngress - 1);
+      incompleteFrame = hasIncompleteFrame;
+    },
+    pendingCount: Effect.sync(() =>
+      overflowed ? 1 : pending + pendingIngress + (incompleteFrame ? 1 : 0),
+    ),
+    isSettled: () => !overflowed && pending === 0 && pendingIngress === 0 && !incompleteFrame,
+    admit: <A, E, R>(enqueue: Effect.Effect<A, E, R>) =>
+      input.semaphore.withPermits(1)(
+        Effect.gen(function* () {
+          if (yield* Ref.get(input.closed)) return;
+          yield* enqueue;
+        }),
+      ),
+    handle: <A, E, R>(handler: Effect.Effect<A, E, R>) =>
+      handler.pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            pending = Math.max(0, pending - 1);
+          }),
+        ),
+      ),
+  };
+});
 
 export interface CodexAggregateRootCompletion {
   readonly turnId: TurnId;
@@ -2496,9 +2718,62 @@ export const readCodexBoundedThreadSnapshotWithClient = Effect.fn(
     ...metadata,
     thread: {
       ...metadata.thread,
-      turns: recentTurns.data,
+      turns: recentTurns.data.slice(0, CODEX_BOUNDED_SNAPSHOT_TURN_LIMIT),
     },
   } satisfies EffectCodexSchema.V2ThreadReadResponse;
+});
+
+/**
+ * Exact, metadata-only child read used for both live and reconnect repair.
+ * Transport errors, timeouts and mismatched response identities remain unknown;
+ * only public terminal status or conclusive native not-found/deletion is final.
+ */
+export const readCodexChildLivenessSnapshotWithClient = Effect.fn(
+  "CodexSessionRuntime.readCodexChildLivenessSnapshotWithClient",
+)(function* (input: {
+  readonly client: CodexBoundedThreadSnapshotClient;
+  readonly providerThreadId: string;
+}) {
+  const { providerThreadId } = input;
+  return yield* input.client
+    .request("thread/read", { threadId: providerThreadId, includeTurns: false })
+    .pipe(
+      Effect.timeoutOption(CODEX_SEND_TURN_SNAPSHOT_BACKFILL_READ_TIMEOUT),
+      Effect.map(
+        Option.match({
+          onNone: (): CodexChildLivenessSnapshot => ({ providerThreadId, state: undefined }),
+          onSome: (response): CodexChildLivenessSnapshot => {
+            if (response.thread.id !== providerThreadId)
+              return { providerThreadId, state: undefined };
+            const status = readCodexSnapshotThreadStatusType(response.thread.status);
+            // Names are inert presentation, unlike exact opaque child identities.
+            // Keep them small/single-line before publishing a canonical rename.
+            const threadName =
+              typeof response.thread.name === "string"
+                ? response.thread.name
+                    .replace(/[\p{Cc}\p{Zl}\p{Zp}\p{Bidi_Control}]/gu, " ")
+                    .trim()
+                    .slice(0, 160)
+                : undefined;
+            return {
+              providerThreadId,
+              ...(threadName ? { threadName } : {}),
+              terminalStatus: status !== undefined && status !== "active" ? status : undefined,
+              state: status === "active" ? "active" : status === undefined ? undefined : "inactive",
+            };
+          },
+        }),
+      ),
+      // Provider exception text can contain private paths. The result is bounded
+      // lifecycle evidence, never a raw diagnostic or permission to retry a turn.
+      Effect.catch((error): Effect.Effect<CodexChildLivenessSnapshot> =>
+        Effect.succeed({
+          providerThreadId,
+          terminalStatus: isTerminalCodexChildThreadReadError(error) ? "stopped" : undefined,
+          state: isTerminalCodexChildThreadReadError(error) ? "inactive" : undefined,
+        }),
+      ),
+    );
 });
 
 export function isCodexPrivateMetadataNotification(method: string): boolean {
@@ -2993,6 +3268,7 @@ export function updateCodexChildConversationLiveness(
         // authoritative liveness. Apply the same signal even though the
         // notification itself is emitted on the initiating parent thread.
         next.set(activityThreadId, {
+          ...next.get(activityThreadId),
           parentTurnId: activityParentTurnId,
           state,
           observedAt,
@@ -3005,6 +3281,17 @@ export function updateCodexChildConversationLiveness(
   const providerThreadId = readNotificationThreadId(notification);
   const parentTurnId = providerThreadId ? childConversationTurns.get(providerThreadId) : undefined;
   if (!providerThreadId || !parentTurnId) {
+    return next;
+  }
+
+  const previousChild = next.get(providerThreadId);
+  const nativeTurnId = readNotificationTurnId(notification);
+  if (
+    notification.method === "turn/completed" &&
+    previousChild?.nativeTurnId !== undefined &&
+    nativeTurnId !== undefined &&
+    previousChild.nativeTurnId !== String(nativeTurnId)
+  ) {
     return next;
   }
 
@@ -3037,6 +3324,14 @@ export function updateCodexChildConversationLiveness(
     }
     default:
       if (isCodexChildConversationWorkNotification(notification)) {
+        // A late item/control completion is not a new native child turn. Keep
+        // terminal truth for its exact turn; a new native start/status, or a
+        // distinct concrete turn id, remains positive liveness authority.
+        if (
+          previousChild?.state === "inactive" &&
+          (nativeTurnId === undefined || previousChild.nativeTurnId === String(nativeTurnId))
+        )
+          break;
         state = "active";
       }
       break;
@@ -3044,10 +3339,12 @@ export function updateCodexChildConversationLiveness(
 
   if (state !== undefined) {
     next.set(providerThreadId, {
+      ...previousChild,
       parentTurnId,
       state,
       observedAt,
       method: notification.method,
+      ...(nativeTurnId !== undefined ? { nativeTurnId: String(nativeTurnId) } : {}),
     });
   }
   return next;
@@ -4459,6 +4756,7 @@ export const makeCodexSessionRuntime = (
     const childConversationLivenessRef = yield* Ref.make(
       new Map<string, CodexChildConversationLiveness>(),
     );
+    const resumeChildDiscoveryUncertainRef = yield* Ref.make(false);
     const aggregateRootCompletionsRef = yield* Ref.make(
       new Map<string, CodexAggregateRootCompletion>(),
     );
@@ -4482,6 +4780,14 @@ export const makeCodexSessionRuntime = (
     // late ACK can never overwrite an already-authoritative terminal state.
     const steerLifecycleSemaphore = yield* Semaphore.make(1);
     const closedRef = yield* Ref.make(false);
+    // Queue.size becomes zero as soon as a batch is consumed, before its
+    // handler awaits observation/normalization and binds child work. Count
+    // every admitted notification through the entire handler finalizer so
+    // strict retirement cannot miss that consumed-but-unprojected interval.
+    const notificationRetirementFence = yield* makeCodexNotificationRetirementFence({
+      closed: closedRef,
+      semaphore: aggregateLifecycleSemaphore,
+    });
     const snapshotBackfillEventIdsRef = yield* Ref.make(new Set<string>());
     const turnStartObservationsRef = yield* Ref.make(new Map<string, CodexTurnStartObservation>());
     const snapshotBackfillWatcherTurnIdsRef = yield* Ref.make<ReadonlySet<string>>(new Set());
@@ -4547,6 +4853,9 @@ export const makeCodexSessionRuntime = (
       | undefined
     >(undefined);
     const clientContext = yield* CodexClient.layerChildProcess(child, {
+      onNotificationReceived: notificationRetirementFence.observeReceived,
+      onIncomingDataReceived: notificationRetirementFence.observeIncomingData,
+      onIncomingDataProcessed: notificationRetirementFence.observeIncomingDataProcessed,
       logger: (event) =>
         Effect.logWarning("codex.app-server.protocol.diagnostic", {
           threadId: options.threadId,
@@ -4601,6 +4910,7 @@ export const makeCodexSessionRuntime = (
       ...(options.providerInstanceId ? { providerInstanceId: options.providerInstanceId } : {}),
       status: "connecting",
       runtimeMode: options.runtimeMode,
+      maxConcurrentSubagents: options.maxConcurrentSubagents ?? null,
       cwd: options.cwd,
       ...(options.additionalDirectories !== undefined
         ? { additionalDirectories: options.additionalDirectories }
@@ -5674,48 +5984,7 @@ export const makeCodexSessionRuntime = (
         const results = yield* Effect.forEach(
           childThreadIds,
           (providerThreadId) =>
-            client
-              .request("thread/read", {
-                threadId: providerThreadId,
-                includeTurns: false,
-              })
-              .pipe(
-                Effect.timeoutOption(CODEX_SEND_TURN_SNAPSHOT_BACKFILL_READ_TIMEOUT),
-                Effect.map(
-                  Option.match({
-                    onNone: () => ({ providerThreadId, state: undefined }),
-                    onSome: (response) => {
-                      const status = readCodexSnapshotThreadStatusType(response.thread.status);
-                      return {
-                        providerThreadId,
-                        state:
-                          status === "active"
-                            ? ("active" as const)
-                            : status === undefined
-                              ? undefined
-                              : ("inactive" as const),
-                      };
-                    },
-                  }),
-                ),
-                Effect.catch((error) =>
-                  Effect.logWarning("codex.aggregateTurn.childThreadReadFailed", {
-                    threadId: options.threadId,
-                    providerInstanceId: options.providerInstanceId ?? PROVIDER,
-                    turnId,
-                    providerThreadId,
-                    terminal: isTerminalCodexChildThreadReadError(error),
-                    cause: error.message,
-                  }).pipe(
-                    Effect.as({
-                      providerThreadId,
-                      state: isTerminalCodexChildThreadReadError(error)
-                        ? ("inactive" as const)
-                        : undefined,
-                    }),
-                  ),
-                ),
-              ),
+            readCodexChildLivenessSnapshotWithClient({ client, providerThreadId }),
           { concurrency: 4 },
         );
         const observedAt = yield* nowIso;
@@ -5723,21 +5992,47 @@ export const makeCodexSessionRuntime = (
         yield* aggregateLifecycleSemaphore.withPermits(1)(
           Effect.gen(function* () {
             const currentRoutes = yield* Ref.get(collabReceiverTurnsRef);
-            yield* Ref.update(childConversationLivenessRef, (current) => {
-              const next = new Map(current);
-              for (const result of results) {
-                if (result.state === undefined) continue;
-                const parentTurnId = currentRoutes.get(result.providerThreadId);
-                if (!parentTurnId || String(parentTurnId) !== String(turnId)) continue;
-                next.set(result.providerThreadId, {
-                  parentTurnId,
-                  state: result.state,
-                  observedAt,
-                  method: "thread/read",
+            const reconciled = reconcileCodexChildLivenessSnapshots({
+              turnId,
+              observedAt,
+              routes: currentRoutes,
+              sampled: childLiveness,
+              current: yield* Ref.get(childConversationLivenessRef),
+              results,
+            });
+            yield* Ref.set(childConversationLivenessRef, reconciled.liveness);
+            // Native snapshot reconciliation must publish the same canonical
+            // child terminal edge as a live notification. Private aggregate
+            // liveness alone leaves Atrium's task row stuck at its last output.
+            for (const terminal of reconciled.terminals) {
+              yield* emitEvent({
+                kind: "notification",
+                threadId: options.threadId,
+                turnId,
+                method:
+                  terminal.terminalStatus === "stopped"
+                    ? "codex.subagent/threadStopped"
+                    : "codex.subagent/threadStatusChanged",
+                payload: {
+                  threadId: terminal.providerThreadId,
+                  ...(terminal.terminalStatus === "stopped"
+                    ? {}
+                    : { status: { type: terminal.terminalStatus } }),
+                },
+              });
+              if (terminal.threadName !== undefined) {
+                // Emit the bounded native name after terminal authority. The
+                // adapter's monotonic cache then refreshes a completed label
+                // without replaying a historical start or reopening the row.
+                yield* emitEvent({
+                  kind: "notification",
+                  threadId: options.threadId,
+                  turnId,
+                  method: "codex.subagent/threadNameUpdated",
+                  payload: { threadId: terminal.providerThreadId, threadName: terminal.threadName },
                 });
               }
-              return next;
-            });
+            }
           }),
         );
       });
@@ -6116,39 +6411,44 @@ export const makeCodexSessionRuntime = (
         if (!shouldForwardCodexRootGoalNotification(notification, rootProviderThreadId)) {
           return;
         }
-        const collabReceiverTurns = new Map(yield* Ref.get(collabReceiverTurnsRef));
-        const childRoute = resolveCodexChildConversationNotification(
-          collabReceiverTurns,
-          notification,
-          rootProviderThreadId,
-        );
-        const routedTurnId = childRoute?.parentTurnId ?? route.turnId;
-        const emittedMethod = codexAggregateNotificationMethod(
-          notification.method,
-          childRoute !== undefined,
-        );
-        const subagentProjectionMethod = childRoute
-          ? codexSubagentProjectionMethod(notification)
-          : undefined;
-        const isCurrentRootTurnCompletion =
-          childRoute === undefined &&
-          notification.method === "turn/completed" &&
-          (yield* notificationBelongsToCurrentSession(notification));
-
-        // Use the already-routed parent turn when a subagent creates another
-        // subagent. This keeps arbitrary-depth multi-agent output attached to
-        // the original visible Cafe turn instead of manufacturing child turns
-        // that can terminalize the primary conversation.
-        rememberCodexChildConversationTurns(
-          collabReceiverTurns,
-          notification,
-          routedTurnId,
-          rootProviderThreadId,
-        );
-
         const observedAt = observation.observedAt;
-        yield* aggregateLifecycleSemaphore.withPermits(1)(
+        const {
+          childRoute,
+          routedTurnId,
+          emittedMethod,
+          subagentProjectionMethod,
+          isCurrentRootTurnCompletion,
+        } = yield* aggregateLifecycleSemaphore.withPermits(1)(
           Effect.gen(function* () {
+            // Resolve ownership and mutate the exact same current route map
+            // under one permit. A detached reconnect discovery must not be
+            // overwritten by an earlier clone, nor should a newly discovered
+            // child's queued notification be mistaken for native root work.
+            const collabReceiverTurns = new Map(yield* Ref.get(collabReceiverTurnsRef));
+            const childRoute = resolveCodexChildConversationNotification(
+              collabReceiverTurns,
+              notification,
+              rootProviderThreadId,
+            );
+            const routedTurnId = childRoute?.parentTurnId ?? route.turnId;
+            const emittedMethod = codexAggregateNotificationMethod(
+              notification.method,
+              childRoute !== undefined,
+            );
+            const subagentProjectionMethod = childRoute
+              ? codexSubagentProjectionMethod(notification)
+              : undefined;
+            const isCurrentRootTurnCompletion =
+              childRoute === undefined &&
+              notification.method === "turn/completed" &&
+              (yield* notificationBelongsToCurrentSession(notification));
+            // Descendant spawns retain the already-routed visible parent turn.
+            rememberCodexChildConversationTurns(
+              collabReceiverTurns,
+              notification,
+              routedTurnId,
+              rootProviderThreadId,
+            );
             yield* Ref.set(collabReceiverTurnsRef, collabReceiverTurns);
             yield* Ref.update(childConversationLivenessRef, (current) =>
               updateCodexChildConversationLiveness(
@@ -6158,6 +6458,13 @@ export const makeCodexSessionRuntime = (
                 observedAt,
               ),
             );
+            return {
+              childRoute,
+              routedTurnId,
+              emittedMethod,
+              subagentProjectionMethod,
+              isCurrentRootTurnCompletion,
+            };
           }),
         );
 
@@ -6556,14 +6863,16 @@ export const makeCodexSessionRuntime = (
 
     yield* client.raw.notifications.pipe(
       Stream.runForEach((notification) =>
-        Queue.offer(
-          serverNotifications,
-          makeCodexServerNotification(
-            notification.method,
-            notification.params,
-            notification.emittedAtMs,
+        notificationRetirementFence.admit(
+          Queue.offer(
+            serverNotifications,
+            makeCodexServerNotification(
+              notification.method,
+              notification.params,
+              notification.emittedAtMs,
+            ),
           ),
-        ).pipe(Effect.asVoid),
+        ),
       ),
       Effect.catchCause((cause) =>
         Effect.logWarning("codex.raw.notification.stream.failed", {
@@ -6577,25 +6886,27 @@ export const makeCodexSessionRuntime = (
 
     yield* Stream.fromQueue(serverNotifications).pipe(
       Stream.runForEach((notification) =>
-        handleRawNotification(notification).pipe(
-          Effect.catchCause((cause) =>
-            Effect.logWarning("codex.raw.notification.projection.failed", {
-              threadId: options.threadId,
-              providerInstanceId: options.providerInstanceId ?? PROVIDER,
-              method: notification.method,
-              cause: Cause.pretty(cause),
-            }).pipe(
-              Effect.andThen(
-                emitEvent({
-                  kind: "error",
-                  threadId: options.threadId,
-                  method: "codex.rawNotification/projectionFailed",
-                  message: "Codex notification projection failed",
-                  payload: {
-                    method: notification.method,
-                    cause: Cause.pretty(cause),
-                  },
-                }).pipe(Effect.catchCause(() => Effect.void)),
+        notificationRetirementFence.handle(
+          handleRawNotification(notification).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("codex.raw.notification.projection.failed", {
+                threadId: options.threadId,
+                providerInstanceId: options.providerInstanceId ?? PROVIDER,
+                method: notification.method,
+                cause: Cause.pretty(cause),
+              }).pipe(
+                Effect.andThen(
+                  emitEvent({
+                    kind: "error",
+                    threadId: options.threadId,
+                    method: "codex.rawNotification/projectionFailed",
+                    message: "Codex notification projection failed",
+                    payload: {
+                      method: notification.method,
+                      cause: Cause.pretty(cause),
+                    },
+                  }).pipe(Effect.catchCause(() => Effect.void)),
+                ),
               ),
             ),
           ),
@@ -6754,6 +7065,56 @@ export const makeCodexSessionRuntime = (
         providerThread: opened.thread,
         reason: readResumeCursorThreadId(options.resumeCursor) ? "session-resume" : "session-start",
       });
+      if (readResumeCursorThreadId(options.resumeCursor) === providerThreadId) {
+        // Resume's initial notLoaded page deliberately omits item bodies. One
+        // ordinary bounded summary read discovers this latest turn's child
+        // references without replaying starts or hydrating older history.
+        // This is metadata-only and detached from provider start acceptance.
+        const sampledEpoch = yield* Ref.get(rootTurnLifecycleEpochRef);
+        // Pending/failed discovery is not evidence that the tree is empty.
+        // Reserve uncertainty before detaching the read from startup.
+        yield* Ref.set(resumeChildDiscoveryUncertainRef, true);
+        yield* Effect.gen(function* () {
+          const snapshot = yield* readCodexBoundedThreadSnapshotWithClient({
+            client,
+            providerThreadId,
+          }).pipe(Effect.timeoutOption(CODEX_SEND_TURN_SNAPSHOT_BACKFILL_READ_TIMEOUT));
+          if (Option.isNone(snapshot) || snapshot.value.thread.id !== providerThreadId) return;
+          const parentTurnIds = yield* aggregateLifecycleSemaphore.withPermits(1)(
+            Effect.gen(function* () {
+              const seeded = reconcileCodexResumedChildSnapshot({
+                providerThread: snapshot.value.thread,
+                expectedProviderThreadId: providerThreadId,
+                currentProviderThreadId: yield* currentSessionProviderThreadId,
+                sampledEpoch,
+                currentEpoch: yield* Ref.get(rootTurnLifecycleEpochRef),
+                closed: yield* Ref.get(closedRef),
+                routes: yield* Ref.get(collabReceiverTurnsRef),
+                children: yield* Ref.get(childConversationLivenessRef),
+                observedAt: yield* nowIso,
+              });
+              // Stale/failed discovery keeps the conservative pending fence.
+              // Only a fresh explicit resume can establish the missing evidence.
+              if (seeded === undefined) return [] as ReadonlyArray<TurnId>;
+              yield* Ref.set(collabReceiverTurnsRef, seeded.routes);
+              yield* Ref.set(childConversationLivenessRef, seeded.children);
+              yield* Ref.set(resumeChildDiscoveryUncertainRef, seeded.inconclusive);
+              return seeded.parentTurnIds;
+            }),
+          );
+          yield* Effect.forEach(parentTurnIds, refreshAggregateChildLivenessFromThreadRead, {
+            discard: true,
+          });
+        }).pipe(
+          Effect.catchCause(() =>
+            Effect.logWarning("codex.resume.child-metadata-unavailable", {
+              threadId: options.threadId,
+            }),
+          ),
+          Effect.forkIn(runtimeScope),
+          Effect.asVoid,
+        );
+      }
       if (activeSnapshotTurnId) {
         yield* scheduleSendTurnSnapshotBackfill({
           providerThreadId,
@@ -6779,11 +7140,10 @@ export const makeCodexSessionRuntime = (
       return providerThreadId;
     });
 
-    const close = Effect.gen(function* () {
-      const alreadyClosed = yield* Ref.getAndSet(closedRef, true);
-      if (alreadyClosed) {
-        return;
-      }
+    // Retirement is split into the lifecycle reservation and cleanup. Holding
+    // the notification semaphore while closing runtimeScope would deadlock a
+    // notification fiber waiting for that same permit during finalization.
+    const closeReserved = Effect.gen(function* () {
       yield* settlePendingApprovals("cancel");
       yield* settlePendingUserInputs({});
       for (const pending of (yield* Ref.get(pendingInteractionsRef)).values()) {
@@ -6798,9 +7158,56 @@ export const makeCodexSessionRuntime = (
       yield* Queue.shutdown(serverNotifications);
       yield* Queue.shutdown(events);
     });
+    const close = Effect.gen(function* () {
+      if (yield* Ref.getAndSet(closedRef, true)) return;
+      yield* closeReserved;
+    });
+    const closeIfIdle = Effect.gen(function* () {
+      const reserved = yield* aggregateLifecycleSemaphore.withPermits(1)(
+        Effect.gen(function* () {
+          if (yield* Ref.get(closedRef)) return false;
+          const session = yield* Ref.get(sessionRef);
+          const routes = yield* Ref.get(collabReceiverTurnsRef);
+          const children = yield* Ref.get(childConversationLivenessRef);
+          if (
+            !codexTreeIsIdleForConcurrencyChange({
+              session,
+              routes,
+              children,
+              rootStartPending: yield* Ref.get(nativeTurnStartPendingRef),
+              compactionPending:
+                (yield* Ref.get(manualCompactionPendingRef)) ||
+                (yield* Ref.get(activeContextCompactionsRef)).size > 0,
+              unsettledCount:
+                ((yield* Ref.get(resumeChildDiscoveryUncertainRef)) ? 1 : 0) +
+                (yield* Ref.get(pendingSteerProcessingRef)).size +
+                (yield* Ref.get(pendingAggregateCompletionsRef)).size +
+                (yield* Ref.get(pendingApprovalsRef)).size +
+                (yield* Ref.get(pendingUserInputsRef)).size +
+                (yield* Ref.get(pendingInteractionsRef)).size,
+              queuedNotificationCount: yield* notificationRetirementFence.pendingCount,
+            })
+          )
+            return false;
+          // Reserve before the first teardown await. Existing send/compact
+          // admission and delayed ACKs already consult this native fence.
+          return yield* Ref.modify(closedRef, (closed) => {
+            // Native receipt accounting is deliberately synchronous and does
+            // not await this semaphore. Recheck it in the very same atomic
+            // callback that reserves closed, not across an Effect yield.
+            if (closed || !notificationRetirementFence.isSettled()) return [false, closed] as const;
+            return [true, true] as const;
+          });
+        }),
+      );
+      if (!reserved) return false;
+      yield* closeReserved;
+      return true;
+    });
 
     return {
       start,
+      closeIfIdle,
       getSession: aggregateLifecycleSemaphore.withPermits(1)(
         Effect.gen(function* () {
           const session = yield* Ref.get(sessionRef);

@@ -259,7 +259,7 @@ it.effect("bounds subagent detail identities and public transcript payloads", ()
     assert.deepStrictEqual(input, {
       threadId: "thread-1",
       turnId: "turn-1",
-      subagentId: "child-1",
+      subagentId: " child-1 ",
     });
 
     const detail = yield* decodeThreadTurnSubagentDetail({
@@ -369,6 +369,61 @@ it.effect("bounds subagent detail identities and public transcript payloads", ()
       }),
     );
     assert.strictEqual(reverseOrderedGaps._tag, "Failure");
+  }),
+);
+
+it.effect("preserves opaque subagent tuple whitespace and rejects bounded unsafe identities", () =>
+  Effect.gen(function* () {
+    const variants = [
+      { subagentId: "child  exact", historyId: "history  exact" },
+      { subagentId: " child  exact ", historyId: " history  exact " },
+    ];
+    const decoded = [];
+    for (const variant of variants) {
+      const expected = { threadId: "parent", turnId: "turn", ...variant };
+      const value = yield* decodeThreadTurnSubagentDetailInput(expected);
+      assert.deepStrictEqual(value, expected);
+      assert.deepStrictEqual(
+        yield* Schema.encodeEffect(OrchestrationThreadTurnSubagentDetailInput)(value),
+        expected,
+      );
+      decoded.push(value);
+    }
+    assert.notDeepStrictEqual(decoded[0], decoded[1]);
+    const maximalIdentity = ` ${"x".repeat(510)} `;
+    assert.strictEqual(
+      (yield* decodeThreadTurnSubagentDetailInput({
+        threadId: "parent",
+        turnId: "turn",
+        subagentId: maximalIdentity,
+        historyId: maximalIdentity,
+      })).historyId,
+      maximalIdentity,
+    );
+    for (const invalid of [
+      "",
+      "x".repeat(513),
+      "child\u0000",
+      "child\n",
+      "child\u007f",
+      "child\u0085",
+      "child\u061c",
+      "child\u202e",
+      "child\u2066",
+    ]) {
+      for (const field of ["subagentId", "historyId"] as const) {
+        const result = yield* Effect.exit(
+          decodeThreadTurnSubagentDetailInput({
+            threadId: "parent",
+            turnId: "turn",
+            subagentId: "child",
+            historyId: "history",
+            [field]: invalid,
+          }),
+        );
+        assert.strictEqual(result._tag, "Failure");
+      }
+    }
   }),
 );
 

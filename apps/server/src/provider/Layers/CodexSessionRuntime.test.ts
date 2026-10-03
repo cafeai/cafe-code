@@ -5,6 +5,7 @@ import { it as effectIt } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
@@ -33,6 +34,7 @@ import {
   CODEX_SUMMARY_HISTORY_MAX_TURNS,
   CODEX_SUMMARY_HISTORY_PAGE_TURN_LIMIT,
   CODEX_PENDING_STEER_UNRESOLVED_CAPACITY,
+  CODEX_RESUME_CHILD_RECONCILIATION_LIMIT,
   acknowledgeCodexPendingSteerProcessing,
   acknowledgeCodexSteerLifecycleBoundary,
   acknowledgeCodexTurnStartLifecycleBoundary,
@@ -78,6 +80,7 @@ import {
   publishCodexTurnCompletionAfterLifecycleBoundary,
   readCodexBoundedSummaryThreadWithClient,
   readCodexBoundedThreadSnapshotWithClient,
+  readCodexChildLivenessSnapshotWithClient,
   readCodexExpectedActiveTurnMismatchActualTurnId,
   readCodexSubagentThreadWithInitializedClient,
   readCodexNotificationEmittedAtIso,
@@ -95,6 +98,11 @@ import {
   summarizeCodexAppServerChildProcesses,
   terminalizeCodexPendingSteerProcessing,
   updateCodexChildConversationLiveness,
+  codexTreeIsIdleForConcurrencyChange,
+  reconcileCodexChildLivenessSnapshots,
+  reconcileCodexResumedChildSnapshot,
+  seedCodexResumedChildConversations,
+  makeCodexNotificationRetirementFence,
   updateCodexActiveContextCompactions,
   updateCodexPendingSteerProcessingFromNotification,
   validateCodexSubagentThreadReadMetadata,
@@ -111,6 +119,210 @@ import {
 } from "../codexSteerCorrelation.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
 const decodeMessageId = Schema.decodeUnknownSync(MessageId);
+
+effectIt.effect(
+  "denies retirement after a child notification is dequeued but before its handler binds work",
+  () =>
+    Effect.gen(function* () {
+      const closed = yield* Ref.make(false);
+      const semaphore = yield* Semaphore.make(1);
+      const fence = yield* makeCodexNotificationRetirementFence({ closed, semaphore });
+      const queue = yield* Queue.unbounded<string>();
+      const handlerEntered = yield* Deferred.make<void>();
+      const releaseHandler = yield* Deferred.make<void>();
+      fence.observeIncomingData();
+      assert.equal(fence.isSettled(), false);
+      fence.observeIncomingDataProcessed(true);
+      assert.equal(fence.isSettled(), false);
+      fence.observeIncomingData();
+      fence.observeIncomingDataProcessed(false);
+      assert.equal(fence.isSettled(), true);
+      // Native protocol receipt precedes both its raw stream queue and Cafe's
+      // relay. Before the relay starts, that earlier handoff is already fenced.
+      fence.observeReceived();
+      assert.equal(yield* fence.pendingCount, 1);
+      yield* fence.admit(Queue.offer(queue, "turn/started"));
+      const notification = yield* Queue.take(queue);
+      const handling = yield* fence
+        .handle(
+          Effect.gen(function* () {
+            assert.equal(notification, "turn/started");
+            yield* Deferred.succeed(handlerEntered, undefined);
+            // Mirrors observation/native logging before the child liveness write.
+            yield* Deferred.await(releaseHandler);
+          }),
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(handlerEntered);
+      assert.equal(yield* Queue.size(queue), 0);
+      const proof = {
+        session: {
+          threadId: ThreadId.make("inflight-parent"),
+          provider: ProviderDriverKind.make("codex"),
+          status: "ready" as const,
+          runtimeMode: "full-access" as const,
+          createdAt: "2026-10-03T00:00:00.000Z",
+          updatedAt: "2026-10-03T00:00:00.000Z",
+        },
+        rootStartPending: false,
+        compactionPending: false,
+        unsettledCount: 0,
+        routes: new Map<string, TurnId>(),
+        children: new Map(),
+        queuedNotificationCount: yield* fence.pendingCount,
+      };
+      assert.equal(codexTreeIsIdleForConcurrencyChange(proof), false);
+      yield* Deferred.succeed(releaseHandler, undefined);
+      yield* Fiber.join(handling);
+      assert.equal(yield* fence.pendingCount, 0);
+      // Once retirement reserves the shared fence, late callbacks cannot enqueue.
+      yield* semaphore.withPermits(1)(Ref.set(closed, true));
+      yield* fence.admit(Queue.offer(queue, "late-child"));
+      assert.equal(yield* Queue.size(queue), 0);
+      assert.equal(yield* fence.pendingCount, 0);
+    }),
+);
+
+it("requires native root and every descendant to be conclusively idle before concurrency retirement", () => {
+  const parent = TurnId.make("idle-retirement-parent");
+  const session = {
+    threadId: ThreadId.make("idle-retirement-thread"),
+    provider: ProviderDriverKind.make("codex"),
+    status: "ready" as const,
+    runtimeMode: "full-access" as const,
+    createdAt: "2026-10-03T00:00:00.000Z",
+    updatedAt: "2026-10-03T00:00:00.000Z",
+  };
+  const child = {
+    parentTurnId: parent,
+    state: "inactive" as const,
+    observedAt: session.createdAt,
+    method: "turn/completed",
+  };
+  const proof = {
+    session,
+    rootStartPending: false,
+    compactionPending: false,
+    unsettledCount: 0,
+    queuedNotificationCount: 0,
+    routes: new Map([["child", parent]]),
+    children: new Map([["child", child]]),
+  };
+  assert.equal(codexTreeIsIdleForConcurrencyChange(proof), true);
+  for (const patch of [
+    { rootStartPending: true },
+    { compactionPending: true },
+    { unsettledCount: 1 },
+    { queuedNotificationCount: 1 },
+    { session: { ...session, status: "running" as const } },
+    { session: { ...session, activeTurnId: parent } },
+    { children: new Map() },
+    { children: new Map([["child", { ...child, state: "active" as const }]]) },
+    { children: new Map([["child", { ...child, state: "unknown" as const }]]) },
+    { children: new Map([["child", { ...child, parentTurnId: TurnId.make("different-parent") }]]) },
+  ])
+    assert.equal(codexTreeIsIdleForConcurrencyChange({ ...proof, ...patch }), false);
+});
+
+it("publishes snapshot child terminal facts only while the exact sampled binding remains unchanged", () => {
+  const turnId = TurnId.make("snapshot-parent");
+  const child = {
+    parentTurnId: turnId,
+    state: "active" as const,
+    observedAt: "2026-10-03T00:00:00.000Z",
+    method: "turn/started",
+  };
+  const sampled = new Map([["child", child]]);
+  const input = {
+    turnId,
+    observedAt: "2026-10-03T00:00:01.000Z",
+    sampled,
+    current: sampled,
+    routes: new Map([["child", turnId]]),
+    results: [
+      { providerThreadId: "child", state: "inactive" as const, terminalStatus: "idle" as const },
+    ],
+  };
+  const applied = reconcileCodexChildLivenessSnapshots(input);
+  assert.equal(applied.liveness.get("child")?.state, "inactive");
+  assert.deepEqual(applied.terminals, input.results);
+  const restarted = new Map([["child", { ...child, observedAt: "2026-10-03T00:00:00.500Z" }]]);
+  assert.deepEqual(
+    reconcileCodexChildLivenessSnapshots({ ...input, current: restarted }).terminals,
+    [],
+  );
+  assert.deepEqual(
+    reconcileCodexChildLivenessSnapshots({
+      ...input,
+      routes: new Map([["child", TurnId.make("new-parent")]]),
+    }).terminals,
+    [],
+  );
+  assert.deepEqual(
+    reconcileCodexChildLivenessSnapshots({
+      ...input,
+      results: [{ providerThreadId: "child", state: undefined }],
+    }).terminals,
+    [],
+  );
+});
+
+it("keeps a child turn terminal across delayed item replay, while admitting an explicit new turn", () => {
+  const parent = TurnId.make("replay-parent");
+  const routes = new Map([["child", parent]]);
+  let states = updateCodexChildConversationLiveness(
+    new Map(),
+    routes,
+    {
+      method: "turn/started",
+      params: { threadId: "child", turn: { id: "first", status: "inProgress" } },
+    },
+    "2026-10-03T00:00:00.000Z",
+  );
+  states = updateCodexChildConversationLiveness(
+    states,
+    routes,
+    {
+      method: "turn/completed",
+      params: { threadId: "child", turn: { id: "first", status: "completed" } },
+    },
+    "2026-10-03T00:00:01.000Z",
+  );
+  states = updateCodexChildConversationLiveness(
+    states,
+    routes,
+    {
+      method: "item/completed",
+      params: {
+        threadId: "child",
+        turnId: "first",
+        item: { type: "agentMessage", text: "delayed old item" },
+      },
+    },
+    "2026-10-03T00:00:02.000Z",
+  );
+  assert.equal(states.get("child")?.state, "inactive");
+  states = updateCodexChildConversationLiveness(
+    states,
+    routes,
+    {
+      method: "turn/started",
+      params: { threadId: "child", turn: { id: "second", status: "inProgress" } },
+    },
+    "2026-10-03T00:00:03.000Z",
+  );
+  states = updateCodexChildConversationLiveness(
+    states,
+    routes,
+    {
+      method: "turn/completed",
+      params: { threadId: "child", turn: { id: "first", status: "completed" } },
+    },
+    "2026-10-03T00:00:04.000Z",
+  );
+  assert.equal(states.get("child")?.state, "active");
+  assert.equal(states.get("child")?.nativeTurnId, "second");
+});
 
 function makePendingSteerProcessingFixture(index: number): CodexPendingSteerProcessing {
   return {
@@ -150,6 +362,248 @@ function makeCodexMetadataResponseFixture(threadId: string) {
     },
   };
 }
+
+function makeCodexResumeChildSnapshot(childIds: ReadonlyArray<string>) {
+  return {
+    ...makeCodexMetadataResponseFixture("resume-root").thread,
+    turns: [
+      {
+        ...makeCodexSummaryTurnFixture("resume-latest-turn"),
+        items: childIds.map((agentThreadId, index) => ({
+          type: "subAgentActivity" as const,
+          id: `resume-child-item-${index}`,
+          kind: "started" as const,
+          agentThreadId,
+          agentPath: `/workers/${index}`,
+        })),
+      },
+    ],
+  };
+}
+
+describe("Codex bounded reconnect child reconciliation", () => {
+  it("seeds only latest-turn exact references as unknown without rebinding older history", () => {
+    const existingTurn = TurnId.make("previous-parent");
+    const existingChild = {
+      parentTurnId: existingTurn,
+      state: "inactive" as const,
+      observedAt: "2026-10-03T00:00:00.000Z",
+      method: "turn/completed",
+    };
+    const latest = makeCodexResumeChildSnapshot(["new-child", "existing-child", "resume-root"]);
+    const oldest = makeCodexResumeChildSnapshot(["old-unreferenced-child"]).turns[0]!;
+    const snapshot = { ...latest, turns: [{ ...oldest, id: "old-turn" }, ...latest.turns] };
+    const result = seedCodexResumedChildConversations({
+      providerThread: snapshot,
+      routes: new Map([["existing-child", existingTurn]]),
+      children: new Map([["existing-child", existingChild]]),
+      observedAt: "2026-10-03T00:00:01.000Z",
+    });
+    assert.equal(result.inconclusive, false);
+    assert.equal(result.routes.has("old-unreferenced-child"), false);
+    assert.equal(result.routes.has("resume-root"), false);
+    assert.equal(result.routes.get("existing-child"), existingTurn);
+    assert.equal(result.children.get("existing-child"), existingChild);
+    assert.equal(result.children.get("new-child")?.state, "unknown");
+    assert.equal(result.children.get("new-child")?.nativeTurnId, undefined);
+    assert.deepEqual(result.parentTurnIds, [TurnId.make("resume-latest-turn")]);
+    assert.equal(
+      codexAggregateTurnHasUnfinishedChildren(
+        result.routes,
+        result.children,
+        result.parentTurnIds[0]!,
+      ),
+      true,
+    );
+  });
+
+  it("bounds discovered child reads and keeps overflow or omitted item bodies inconclusive", () => {
+    const input = {
+      providerThread: makeCodexResumeChildSnapshot(
+        Array.from(
+          { length: CODEX_RESUME_CHILD_RECONCILIATION_LIMIT + 2 },
+          (_, index) => `bounded-child-${index}`,
+        ),
+      ),
+      routes: new Map<string, TurnId>(),
+      children: new Map(),
+      observedAt: "2026-10-03T00:00:00.000Z",
+    };
+    const result = seedCodexResumedChildConversations(input);
+    assert.equal(result.routes.size, CODEX_RESUME_CHILD_RECONCILIATION_LIMIT);
+    assert.equal(result.overflowed, true);
+    assert.equal(result.inconclusive, true);
+    for (const itemsView of ["notLoaded" as const, undefined]) {
+      const turn = input.providerThread.turns[0]!;
+      const { itemsView: _itemsView, ...withoutView } = turn;
+      const providerThread = {
+        ...input.providerThread,
+        turns: [itemsView === undefined ? withoutView : { ...withoutView, itemsView }],
+      };
+      const omitted = seedCodexResumedChildConversations({ ...input, providerThread });
+      assert.equal(omitted.routes.size, 0);
+      assert.equal(omitted.inconclusive, true);
+    }
+  });
+
+  it("refuses late discovery after root generation, native identity or closed authority changes", () => {
+    const epoch = Symbol("sampled root generation");
+    const input = {
+      providerThread: makeCodexResumeChildSnapshot(["child"]),
+      expectedProviderThreadId: "resume-root",
+      currentProviderThreadId: "resume-root",
+      sampledEpoch: epoch,
+      currentEpoch: epoch,
+      closed: false,
+      routes: new Map<string, TurnId>(),
+      children: new Map(),
+      observedAt: "2026-10-03T00:00:00.000Z",
+    };
+    assert.equal(reconcileCodexResumedChildSnapshot(input)?.inconclusive, false);
+    for (const patch of [
+      { currentEpoch: Symbol("new root generation") },
+      { closed: true },
+      { currentProviderThreadId: "new-native-root" },
+      { providerThread: { ...input.providerThread, id: "foreign-native-root" } },
+    ])
+      assert.equal(reconcileCodexResumedChildSnapshot({ ...input, ...patch }), undefined);
+    // The caller leaves its pre-read uncertainty reservation unchanged when
+    // discovery is unavailable/stale. Empty routes are not an idle proof.
+    assert.equal(
+      codexTreeIsIdleForConcurrencyChange({
+        session: {
+          threadId: ThreadId.make("resume-cafe-thread"),
+          provider: ProviderDriverKind.make("codex"),
+          status: "ready",
+          runtimeMode: "full-access",
+          createdAt: input.observedAt,
+          updatedAt: input.observedAt,
+        },
+        rootStartPending: false,
+        compactionPending: false,
+        unsettledCount: 1,
+        queuedNotificationCount: 0,
+        routes: input.routes,
+        children: input.children,
+      }),
+      false,
+    );
+  });
+
+  effectIt.effect(
+    "repairs referenced children through one summary and exact metadata reads only",
+    () =>
+      Effect.gen(function* () {
+        const calls: Array<{ method: string; payload: unknown }> = [];
+        const root = makeCodexResumeChildSnapshot([
+          "idle-child",
+          "unloaded-child",
+          "error-child",
+          "foreign-child",
+        ]);
+        const request = ((method: string, payload: unknown) =>
+          Effect.sync(() => {
+            calls.push({ method, payload });
+            const threadId = (payload as { threadId: string }).threadId;
+            if (method === "thread/turns/list")
+              return {
+                data: [...root.turns, makeCodexSummaryTurnFixture("provider-ignored-limit")],
+                nextCursor: "older-history-never-followed",
+              };
+            const response = makeCodexMetadataResponseFixture(threadId);
+            if (threadId === "idle-child")
+              return { thread: { ...response.thread, name: "Updated native child name" } };
+            if (threadId === "foreign-child")
+              return makeCodexMetadataResponseFixture("different-child");
+            if (threadId === "unloaded-child")
+              return { thread: { ...response.thread, status: { type: "notLoaded" } } };
+            if (threadId === "error-child")
+              return { thread: { ...response.thread, status: { type: "systemError" } } };
+            return response;
+          })) as CodexBoundedThreadSnapshotClient["request"];
+        const snapshot = yield* readCodexBoundedThreadSnapshotWithClient({
+          client: { request },
+          providerThreadId: "resume-root",
+        });
+        assert.equal(snapshot.thread.turns.length, 1);
+        assert.equal(snapshot.thread.turns[0]?.id, "resume-latest-turn");
+        const seeded = seedCodexResumedChildConversations({
+          providerThread: snapshot.thread,
+          routes: new Map(),
+          children: new Map(),
+          observedAt: "2026-10-03T00:00:00.000Z",
+        });
+        const results = yield* Effect.forEach(
+          Array.from(seeded.routes.keys()),
+          (providerThreadId) =>
+            readCodexChildLivenessSnapshotWithClient({ client: { request }, providerThreadId }),
+        );
+        const reconciled = reconcileCodexChildLivenessSnapshots({
+          turnId: seeded.parentTurnIds[0]!,
+          observedAt: "2026-10-03T00:00:01.000Z",
+          sampled: seeded.children,
+          current: seeded.children,
+          routes: seeded.routes,
+          results,
+        });
+        assert.deepEqual(
+          reconciled.terminals.map((result) => result.terminalStatus),
+          ["idle", "notLoaded", "systemError"],
+        );
+        assert.equal(reconciled.terminals[0]?.threadName, "Updated native child name");
+        assert.equal(reconciled.liveness.get("foreign-child")?.state, "unknown");
+        assert.deepEqual(calls, [
+          { method: "thread/read", payload: { threadId: "resume-root", includeTurns: false } },
+          {
+            method: "thread/turns/list",
+            payload: {
+              threadId: "resume-root",
+              limit: 1,
+              sortDirection: "desc",
+              itemsView: "summary",
+            },
+          },
+          ...Array.from(seeded.routes.keys()).map((threadId) => ({
+            method: "thread/read",
+            payload: { threadId, includeTurns: false },
+          })),
+        ]);
+      }),
+  );
+
+  effectIt.effect(
+    "keeps unavailable native child metadata unknown rather than completing by age",
+    () =>
+      Effect.gen(function* () {
+        const failing = {
+          request: ((_method: string, _payload: unknown) =>
+            Effect.fail(
+              new CodexErrors.CodexAppServerTransportError({
+                detail: "synthetic unavailable",
+                cause: undefined,
+              }),
+            )) as CodexBoundedThreadSnapshotClient["request"],
+        };
+        assert.deepEqual(
+          yield* readCodexChildLivenessSnapshotWithClient({
+            client: failing,
+            providerThreadId: "child",
+          }),
+          { providerThreadId: "child", state: undefined, terminalStatus: undefined },
+        );
+        const pending = {
+          request: ((_method: string, _payload: unknown) =>
+            Effect.never) as CodexBoundedThreadSnapshotClient["request"],
+        };
+        const read = yield* readCodexChildLivenessSnapshotWithClient({
+          client: pending,
+          providerThreadId: "child",
+        }).pipe(Effect.forkChild);
+        yield* TestClock.adjust("10 seconds");
+        assert.deepEqual(yield* Fiber.join(read), { providerThreadId: "child", state: undefined });
+      }),
+  );
+});
 
 describe("Codex non-blocking user input", () => {
   effectIt.effect("submits an empty answer map after the upstream 120-second deadline", () =>
@@ -727,6 +1181,14 @@ describe("buildCodexAppServerArgs", () => {
       "-c",
       "features.multi_agent_v2.max_concurrent_threads_per_session=13",
     ]);
+    for (const limit of [1, 64]) {
+      const args = buildCodexAppServerArgs({ maxConcurrentSubagents: limit });
+      assert.equal(args.includes(`agents.max_concurrent_threads_per_session=${limit}`), true);
+      assert.equal(
+        args.includes(`features.multi_agent_v2.max_concurrent_threads_per_session=${limit + 1}`),
+        true,
+      );
+    }
   });
 
   it("uses a Cafe-scoped OpenAI provider when Responses WebSockets are disabled", () => {

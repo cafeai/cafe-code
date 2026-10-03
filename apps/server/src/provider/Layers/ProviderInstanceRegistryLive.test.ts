@@ -255,17 +255,30 @@ describe("ProviderInstanceRegistryLive — non-runtime settings", () => {
         yield* Deferred.await(fixture.subscribed);
         // Both merged stream branches must subscribe before the first rename.
         yield* Effect.yieldNow;
-        const updates: readonly Partial<ProviderInstanceConfig>[] = [
+        const updates: readonly (Partial<ProviderInstanceConfig> | "clear-subagent-default")[] = [
           { displayName: "Renamed" },
           { accentColor: "#222222" },
           { defaultModel: "gpt-6-astra" },
           { defaultModelOptions: [{ id: "reasoningEffort", value: "max" }] },
           { defaultModelOptions: [{ id: "reasoningEffort", value: "ultra" }] },
+          // This default seeds only new-chat intent. Editing or clearing it
+          // must not retire a running provider or duplicate its subscription.
+          { defaultMaxConcurrentSubagents: 4 },
+          { defaultMaxConcurrentSubagents: 64 },
+          "clear-subagent-default",
           { displayName: undefined, accentColor: undefined },
         ];
         let entry = initialEntry;
         for (const update of updates) {
-          entry = Object.assign({}, entry, update);
+          if (update === "clear-subagent-default") {
+            // Reset uses real key omission, matching the settings schema's
+            // exact optional field rather than retaining an undefined value.
+            const { defaultMaxConcurrentSubagents: _previousDefault, ...resetEntry } = entry;
+            entry = resetEntry;
+            expect("defaultMaxConcurrentSubagents" in entry).toBe(false);
+          } else {
+            entry = Object.assign({}, entry, update);
+          }
           yield* mutator.reconcile({ [id]: entry });
           const current = (yield* registry.getInstance(id))!;
           expect(current).toBe(initial);
@@ -278,7 +291,10 @@ describe("ProviderInstanceRegistryLive — non-runtime settings", () => {
             displayName: entry.displayName ?? fixture.driver.metadata.displayName,
             accentColor: entry.accentColor,
           });
-          if ("displayName" in update || "accentColor" in update) {
+          if (
+            update !== "clear-subagent-default" &&
+            ("displayName" in update || "accentColor" in update)
+          ) {
             expect(yield* Queue.take(observed)).toMatchObject({
               displayName: entry.displayName ?? fixture.driver.metadata.displayName,
               accentColor: entry.accentColor,

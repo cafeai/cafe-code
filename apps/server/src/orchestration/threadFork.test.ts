@@ -73,6 +73,7 @@ const nativeFork = {
   providerInstanceId: ProviderInstanceId.make("codex"),
   runtimeMode: "full-access",
   cwd: "/repo/fork",
+  maxConcurrentSubagents: 4,
   resumeCursor: { threadId: "provider-fork-id" },
 } satisfies ProviderSessionForkResult;
 
@@ -113,6 +114,11 @@ it.effect("compensates only the owned native fork when the domain commit fails",
       title: "Source (fork)",
     });
     assert.equal(dispatch.mock.calls[0]?.[0].type, "thread.fork.commit");
+    const committed = dispatch.mock.calls[0]?.[0];
+    assert.equal(
+      committed?.type === "thread.fork.commit" && committed.session.maxConcurrentSubagents,
+      4,
+    );
     assert.deepEqual(discardSessionFork.mock.calls[0]?.[0], { fork: nativeFork });
   });
 });

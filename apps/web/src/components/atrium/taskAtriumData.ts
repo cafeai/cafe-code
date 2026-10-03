@@ -10,7 +10,11 @@ import {
 } from "@cafecode/contracts";
 
 import type { AppState } from "../../store";
-import { deriveSubagentActivities, type SubagentRunStatus } from "../../subagent-activity";
+import {
+  deriveSubagentActivities,
+  type DerivedSubagentActivity,
+  type SubagentRunStatus,
+} from "../../subagent-activity";
 
 /**
  * Data derivation for the Task Atrium.
@@ -38,6 +42,8 @@ const RECENTLY_DONE_MS = 3 * 60 * 1000;
 const RECENTLY_ERRORED_MS = 12 * 60 * 60 * 1000;
 
 export type AtriumSubagent = {
+  /** Exact latest lifecycle binding for the existing authorized detail reader. */
+  activity: DerivedSubagentActivity;
   /** Stable lifecycle-row identity. Unlike `id`, this remains unique when one child is reused. */
   rowKey: string;
   /** Provider child identity, shared across turns and used only as the deterministic avatar seed. */
@@ -66,6 +72,8 @@ export type AtriumCard = {
   activityDetail: string;
   /** Epoch ms the current turn started, for the elapsed readout. */
   startedAt: number | null;
+  /** Recorded parent completion/failure edge, never a child update or UI clock. */
+  completedAt: number | null;
   subagents: AtriumSubagent[];
   /** Exact terminal failure that the presentation-only clear action dismisses. */
   errorDismissal: TaskAtriumErrorDismissal | null;
@@ -175,6 +183,7 @@ function collectSubagents(
     activities,
     terminalTurnIds.size > 0 ? { terminalTurnIds } : {},
   ).map((subagent) => ({
+    activity: subagent,
     rowKey: subagent.rowId,
     id: subagent.id,
     label: subagent.label,
@@ -421,6 +430,19 @@ export function selectAtriumSnapshot(
         activityLabel: lastActivity ? cleanActivityLabel(lastActivity.summary) : "",
         activityDetail: activityPayloadField(lastActivity, "detail") ?? "",
         startedAt: toEpoch(latestTurn?.startedAt ?? latestTurn?.requestedAt),
+        // A session-level failure can belong to a different attempt from the
+        // latest completed turn. Only a recorded completion or session-error
+        // transition can end the clock: dismissal's start/request fallback is
+        // an occurrence identity, not evidence of terminal timing. Completed
+        // parents may still have live children; their own duration is frozen
+        // independently of card state and late child progress/title updates.
+        completedAt:
+          cardState === "error"
+            ? (toEpoch(latestTurn?.state === "error" ? latestTurn.completedAt : null) ??
+              (status === "error" ? toEpoch(session?.updatedAt) : null))
+            : latestTurn?.state !== "running"
+              ? toEpoch(latestTurn?.completedAt)
+              : null,
         subagents: rows,
         errorDismissal,
       });
@@ -458,4 +480,14 @@ export function formatElapsed(startedAt: number | null, now: number): string {
   if (minutes < 60) return `${minutes}m ${String(seconds % 60).padStart(2, "0")}s`;
   const hours = Math.floor(minutes / 60);
   return `${hours}h ${String(minutes % 60).padStart(2, "0")}m`;
+}
+
+/** Terminal parent clocks require recorded evidence; absence stays unknown. */
+export function formatAtriumCardElapsed(
+  card: Pick<AtriumCard, "startedAt" | "completedAt" | "state">,
+  now: number,
+): string {
+  const end =
+    card.completedAt ?? (card.state === "running" || card.state === "holding" ? now : null);
+  return end === null ? "" : formatElapsed(card.startedAt, end);
 }

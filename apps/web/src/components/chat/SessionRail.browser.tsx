@@ -34,6 +34,64 @@ describe("SessionRail", () => {
     document.body.innerHTML = "";
   });
 
+  it("counts only current workers and clears terminal rows without deleting historical input", async () => {
+    const history: WorkLogEntry[] = (
+      ["active", "waiting", "completed", "failed", "stopped"] as const
+    ).map((status) => ({
+      id: `rail-${status}`,
+      label: `Rail worker ${status}`,
+      tone: "thinking",
+      createdAt: "2020-01-01T00:00:00.000Z",
+      subagent: {
+        id: `rail-${status}`,
+        label: `Rail worker ${status}`,
+        status,
+        startedAt: "2020-01-01T00:00:00.000Z",
+        updatedAt: "2020-01-01T00:00:00.000Z",
+      },
+    }));
+    const onShowInComposer = vi.fn();
+    const screen = await render(
+      <SessionRail
+        plan={null}
+        subagents={history}
+        usage={null}
+        onShowInComposer={onShowInComposer}
+      />,
+    );
+    try {
+      await expect.element(page.getByText("2 active", { exact: true })).toBeVisible();
+      expect(document.querySelectorAll('[data-composer-subagent-list="true"] button')).toHaveLength(
+        2,
+      );
+      for (const status of ["completed", "failed", "stopped"])
+        expect(document.body.textContent).not.toContain(`Rail worker ${status}`);
+      await screen.rerender(
+        <SessionRail
+          plan={null}
+          subagents={history.map((entry) =>
+            entry.subagent
+              ? { ...entry, subagent: { ...entry.subagent, status: "completed" as const } }
+              : entry,
+          )}
+          usage={null}
+          onShowInComposer={onShowInComposer}
+        />,
+      );
+      await expect.element(page.getByText("No tasks yet.", { exact: true })).toBeVisible();
+      expect(document.querySelector('[data-composer-subagent-list="true"]')).toBeNull();
+      expect(history.map((entry) => entry.subagent?.status)).toEqual([
+        "active",
+        "waiting",
+        "completed",
+        "failed",
+        "stopped",
+      ]);
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("pins usage under the complete task list and can return to the composer", async () => {
     document.documentElement.style.setProperty("--primary", "#dc2626");
     const onShowInComposer = vi.fn();

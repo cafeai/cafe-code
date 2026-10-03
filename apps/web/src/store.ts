@@ -44,6 +44,7 @@ import { resolveEnvironmentHttpUrl } from "./environments/runtime";
 import { sanitizeThreadErrorMessage } from "./rpc/transportError";
 import { getThreadFromEnvironmentState } from "./threadDerivation";
 import { readTurnConfiguration } from "./turnConfiguration";
+import { subagentLimitsEqual } from "./subagentConcurrency";
 const isProviderDriverKindValue = Schema.is(ProviderDriverKind);
 
 export interface EnvironmentState {
@@ -68,6 +69,12 @@ export interface EnvironmentState {
   // equivalent data.
   // ---------------------------------------------------------------------------
   threadShellById: Record<ThreadId, ThreadShell>;
+  /**
+   * Exact-thread policy authority, committed atomically with its shell. This
+   * is not the environment cursor: another chat's event proves nothing about
+   * this chat's policy. Optional for existing in-memory fixture/state shapes.
+   */
+  subagentPolicySequenceByThreadId?: Record<ThreadId, number>;
   threadSessionById: Record<ThreadId, ThreadSession | null>;
   threadTurnStateById: Record<ThreadId, ThreadTurnState>;
 
@@ -108,6 +115,7 @@ const initialEnvironmentState: EnvironmentState = {
   threadIds: [],
   threadIdsByProjectId: {},
   threadShellById: {},
+  subagentPolicySequenceByThreadId: {},
   threadSessionById: {},
   threadTurnStateById: {},
   messageIdsByThreadId: {},
@@ -182,6 +190,9 @@ function mapSession(session: OrchestrationSession): ThreadSession {
     activeTurnId: session.activeTurnId ?? undefined,
     createdAt: session.updatedAt,
     updatedAt: session.updatedAt,
+    ...(session.maxConcurrentSubagents !== undefined
+      ? { maxConcurrentSubagents: session.maxConcurrentSubagents }
+      : {}),
     ...(session.lastError ? { lastError: session.lastError } : {}),
   };
 }
@@ -271,6 +282,7 @@ function mapThread(thread: OrchestrationThread, environmentId: EnvironmentId): T
     modelSelection: normalizeModelSelection(thread.modelSelection),
     runtimeMode: thread.runtimeMode,
     interactionMode: thread.interactionMode,
+    subagentLimits: thread.subagentLimits,
     session: thread.session ? mapSession(thread.session) : null,
     messages: thread.messages.map((message) => mapMessage(environmentId, message)),
     proposedPlans: thread.proposedPlans.map(mapProposedPlan),
@@ -306,6 +318,7 @@ function mapThreadShell(
     modelSelection: normalizeModelSelection(thread.modelSelection),
     runtimeMode: thread.runtimeMode,
     interactionMode: thread.interactionMode,
+    subagentLimits: thread.subagentLimits,
     error: sanitizeThreadErrorMessage(thread.session?.lastError),
     createdAt: thread.createdAt,
     archivedAt: thread.archivedAt,
@@ -354,6 +367,7 @@ function toThreadShell(thread: Thread): ThreadShell {
     modelSelection: thread.modelSelection,
     runtimeMode: thread.runtimeMode,
     interactionMode: thread.interactionMode,
+    subagentLimits: thread.subagentLimits,
     error: thread.error,
     createdAt: thread.createdAt,
     archivedAt: thread.archivedAt,
@@ -424,6 +438,7 @@ function cloneThreadContextForDuplicate(input: {
 
   return {
     ...targetThread,
+    subagentLimits: sourceThread.subagentLimits ? { ...sourceThread.subagentLimits } : undefined,
     latestTurn,
     pendingSourceProposedPlan: latestTurn?.sourceProposedPlan,
     session: null,
@@ -544,7 +559,8 @@ function threadSessionsEqual(
     left.activeTurnId === right.activeTurnId &&
     left.createdAt === right.createdAt &&
     left.updatedAt === right.updatedAt &&
-    left.lastError === right.lastError
+    left.lastError === right.lastError &&
+    left.maxConcurrentSubagents === right.maxConcurrentSubagents
   );
 }
 
@@ -583,6 +599,7 @@ function threadShellsEqual(left: ThreadShell | undefined, right: ThreadShell): b
     modelSelectionsEqual(left.modelSelection, right.modelSelection) &&
     left.runtimeMode === right.runtimeMode &&
     left.interactionMode === right.interactionMode &&
+    subagentLimitsEqual(left.subagentLimits, right.subagentLimits) &&
     left.error === right.error &&
     left.createdAt === right.createdAt &&
     left.archivedAt === right.archivedAt &&
@@ -729,28 +746,56 @@ function ensureThreadRegistered(
   return nextState;
 }
 
+/** Reconcile exact-thread policy and its witness in the same state transaction. */
+function reconcileThreadSubagentPolicy(
+  state: EnvironmentState,
+  shell: ThreadShell,
+  sequence: number | undefined,
+): { state: EnvironmentState; shell: ThreadShell } {
+  const previousSequence = state.subagentPolicySequenceByThreadId?.[shell.id];
+  if (previousSequence !== undefined && (sequence === undefined || sequence <= previousSequence)) {
+    const previous = state.threadShellById[shell.id]?.subagentLimits;
+    return {
+      state,
+      shell: subagentLimitsEqual(previous, shell.subagentLimits)
+        ? shell
+        : { ...shell, subagentLimits: previous },
+    };
+  }
+  if (sequence === undefined) return { state, shell };
+  return {
+    shell,
+    state: {
+      ...state,
+      subagentPolicySequenceByThreadId: {
+        ...state.subagentPolicySequenceByThreadId,
+        [shell.id]: sequence,
+      },
+    },
+  };
+}
+
 /**
- * Write thread state from the **detail stream** (per-thread subscription).
- *
- * Owns: messages, activities, proposed plans, turn diff summaries.
- * Also writes threadShellById / threadSessionById / threadTurnStateById so
- * the active thread has up-to-date state even if the shell stream event
- * hasn't arrived yet (both streams use structural equality checks to avoid
- * unnecessary re-renders when delivering equivalent data).
- * Does NOT write sidebarThreadSummaryById — that is shell-stream-only.
+ * Detail-stream writer owns messages, activities, plans and diffs, but also
+ * keeps the shared shell/session/turn current. The policy watermark travels
+ * with its map atomically; sidebar summaries remain shell-stream-only.
  */
 function writeThreadState(
   state: EnvironmentState,
   nextThread: Thread,
   previousThread?: Thread,
+  policySequence?: number,
 ): EnvironmentState {
-  const nextShell = toThreadShell(nextThread);
+  // Local lifecycle/error changes carry no policy witness. Qualified stream
+  // snapshots/events alone may replace a previously sequenced policy.
+  const policy = reconcileThreadSubagentPolicy(state, toThreadShell(nextThread), policySequence);
+  const nextShell = policy.shell;
   const nextTurnState = toThreadTurnState(nextThread);
   const previousShell = state.threadShellById[nextThread.id];
   const previousTurnState = state.threadTurnStateById[nextThread.id];
 
   let nextState = ensureThreadRegistered(
-    state,
+    policy.state,
     nextThread.id,
     nextThread.projectId,
     previousThread?.projectId,
@@ -868,11 +913,14 @@ function writeThreadShellState(
     turnState: ThreadTurnState;
     summary: SidebarThreadSummary;
   },
+  policySequence: number,
 ): EnvironmentState {
+  const policy = reconcileThreadSubagentPolicy(state, nextThread.shell, policySequence);
+  nextThread = { ...nextThread, shell: policy.shell };
   const previousShell = state.threadShellById[nextThread.shell.id];
 
   let nextState = ensureThreadRegistered(
-    state,
+    policy.state,
     nextThread.shell.id,
     nextThread.shell.projectId,
     previousShell?.projectId,
@@ -967,6 +1015,8 @@ function removeThreadState(state: EnvironmentState, threadId: ThreadId): Environ
           };
 
   const { [threadId]: _removedShell, ...threadShellById } = state.threadShellById;
+  const { [threadId]: _removedPolicySequence, ...subagentPolicySequenceByThreadId } =
+    state.subagentPolicySequenceByThreadId ?? {};
   const { [threadId]: _removedSession, ...threadSessionById } = state.threadSessionById;
   const { [threadId]: _removedTurnState, ...threadTurnStateById } = state.threadTurnStateById;
   const { [threadId]: _removedMessageIds, ...messageIdsByThreadId } = state.messageIdsByThreadId;
@@ -987,6 +1037,7 @@ function removeThreadState(state: EnvironmentState, threadId: ThreadId): Environ
     threadIds: nextThreadIds,
     threadIdsByProjectId: nextThreadIdsByProjectId,
     threadShellById,
+    subagentPolicySequenceByThreadId,
     threadSessionById,
     threadTurnStateById,
     messageIdsByThreadId,
@@ -1339,6 +1390,7 @@ function updateThreadState(
   state: EnvironmentState,
   threadId: ThreadId,
   updater: (thread: Thread) => Thread,
+  policySequence?: number,
 ): EnvironmentState {
   const currentThread = getThreadFromEnvironmentState(state, threadId);
   if (!currentThread) {
@@ -1348,7 +1400,7 @@ function updateThreadState(
   if (nextThread === currentThread) {
     return state;
   }
-  return writeThreadState(state, nextThread, currentThread);
+  return writeThreadState(state, nextThread, currentThread, policySequence);
 }
 
 function mergeThreadMessage(previous: ChatMessage, incoming: ChatMessage): ChatMessage {
@@ -1663,15 +1715,36 @@ function syncEnvironmentShellSnapshot(
 ): EnvironmentState {
   const nextProjects = snapshot.projects.map((project) => mapProject(project, environmentId));
   const nextThreadIds = new Set(snapshot.threads.map((thread) => thread.id));
+  // A focused stream may already prove a row exists after this older shell
+  // snapshot's cut. Omission at that cut is not a newer deletion authority.
+  const newerOmittedIds = new Set(
+    Object.values(state.threadShellById)
+      .filter(
+        (thread) =>
+          !nextThreadIds.has(thread.id) &&
+          (state.subagentPolicySequenceByThreadId?.[thread.id] ?? -1) > snapshot.snapshotSequence,
+      )
+      .map((thread) => thread.id),
+  );
+  for (const id of newerOmittedIds) nextThreadIds.add(id);
   let nextState: EnvironmentState = {
     ...state,
     ...buildProjectState(nextProjects),
     threadIds: [],
     threadIdsByProjectId: {},
-    threadShellById: {},
-    threadSessionById: {},
-    threadTurnStateById: {},
-    sidebarThreadSummaryById: {},
+    // Keep prior policy and its exact cursor available while reconciling a
+    // lagging shell snapshot against a newer focused detail stream.
+    threadShellById: retainThreadScopedRecord(state.threadShellById, nextThreadIds),
+    subagentPolicySequenceByThreadId: retainThreadScopedRecord(
+      state.subagentPolicySequenceByThreadId ?? {},
+      nextThreadIds,
+    ),
+    threadSessionById: retainThreadScopedRecord(state.threadSessionById, newerOmittedIds),
+    threadTurnStateById: retainThreadScopedRecord(state.threadTurnStateById, newerOmittedIds),
+    sidebarThreadSummaryById: retainThreadScopedRecord(
+      state.sidebarThreadSummaryById,
+      newerOmittedIds,
+    ),
     messageIdsByThreadId: retainThreadScopedRecord(state.messageIdsByThreadId, nextThreadIds),
     messageByThreadId: retainThreadScopedRecord(state.messageByThreadId, nextThreadIds),
     activityIdsByThreadId: retainThreadScopedRecord(state.activityIdsByThreadId, nextThreadIds),
@@ -1690,7 +1763,19 @@ function syncEnvironmentShellSnapshot(
   };
 
   for (const thread of snapshot.threads) {
-    nextState = writeThreadShellState(nextState, mapThreadShell(thread, environmentId));
+    nextState = writeThreadShellState(
+      nextState,
+      mapThreadShell(thread, environmentId),
+      snapshot.snapshotSequence,
+    );
+  }
+  for (const id of newerOmittedIds) {
+    nextState = ensureThreadRegistered(
+      nextState,
+      id,
+      state.threadShellById[id]!.projectId,
+      undefined,
+    );
   }
 
   return nextState;
@@ -1716,13 +1801,19 @@ export function syncServerThreadDetail(
   state: AppState,
   thread: OrchestrationThread,
   environmentId: EnvironmentId,
+  snapshotSequence?: number,
 ): AppState {
   const environmentState = getStoredEnvironmentState(state, environmentId);
   const previousThread = getThreadFromEnvironmentState(environmentState, thread.id);
   return commitEnvironmentState(
     state,
     environmentId,
-    writeThreadState(environmentState, mapThread(thread, environmentId), previousThread),
+    writeThreadState(
+      environmentState,
+      mapThread(thread, environmentId),
+      previousThread,
+      snapshotSequence,
+    ),
   );
 }
 
@@ -1842,6 +1933,7 @@ function applyEnvironmentOrchestrationEvent(
           modelSelection: event.payload.modelSelection,
           runtimeMode: event.payload.runtimeMode,
           interactionMode: event.payload.interactionMode,
+          subagentLimits: event.payload.subagentLimits,
           branch: event.payload.branch,
           worktreePath: event.payload.worktreePath,
           latestTurn: null,
@@ -1858,7 +1950,7 @@ function applyEnvironmentOrchestrationEvent(
         },
         environmentId,
       );
-      return writeThreadState(state, nextThread, previousThread);
+      return writeThreadState(state, nextThread, previousThread, event.sequence);
     }
 
     case "thread.duplicated": {
@@ -1932,7 +2024,10 @@ function applyEnvironmentOrchestrationEvent(
     }
 
     case "thread.deleted":
-      return removeThreadState(state, event.payload.threadId);
+      return (state.subagentPolicySequenceByThreadId?.[event.payload.threadId] ?? -1) >
+        event.sequence
+        ? state
+        : removeThreadState(state, event.payload.threadId);
 
     case "thread.restored":
       return state;
@@ -1952,19 +2047,27 @@ function applyEnvironmentOrchestrationEvent(
       }));
 
     case "thread.meta-updated": {
-      const nextState = updateThreadState(state, event.payload.threadId, (thread) => ({
-        ...thread,
-        ...(event.payload.projectId !== undefined ? { projectId: event.payload.projectId } : {}),
-        ...(event.payload.title !== undefined ? { title: event.payload.title } : {}),
-        ...(event.payload.modelSelection !== undefined
-          ? { modelSelection: normalizeModelSelection(event.payload.modelSelection) }
-          : {}),
-        ...(event.payload.branch !== undefined ? { branch: event.payload.branch } : {}),
-        ...(event.payload.worktreePath !== undefined
-          ? { worktreePath: event.payload.worktreePath }
-          : {}),
-        updatedAt: event.payload.updatedAt,
-      }));
+      const nextState = updateThreadState(
+        state,
+        event.payload.threadId,
+        (thread) => ({
+          ...thread,
+          ...(event.payload.projectId !== undefined ? { projectId: event.payload.projectId } : {}),
+          ...(event.payload.title !== undefined ? { title: event.payload.title } : {}),
+          ...(event.payload.subagentLimits !== undefined
+            ? { subagentLimits: event.payload.subagentLimits }
+            : {}),
+          ...(event.payload.modelSelection !== undefined
+            ? { modelSelection: normalizeModelSelection(event.payload.modelSelection) }
+            : {}),
+          ...(event.payload.branch !== undefined ? { branch: event.payload.branch } : {}),
+          ...(event.payload.worktreePath !== undefined
+            ? { worktreePath: event.payload.worktreePath }
+            : {}),
+          updatedAt: event.payload.updatedAt,
+        }),
+        event.payload.subagentLimits !== undefined ? event.sequence : undefined,
+      );
       const currentSummary = nextState.sidebarThreadSummaryById[event.payload.threadId];
       if (!currentSummary) {
         return nextState;
@@ -2012,30 +2115,41 @@ function applyEnvironmentOrchestrationEvent(
       }));
 
     case "thread.turn-start-requested":
-      return updateThreadState(state, event.payload.threadId, (thread) => {
-        const previousSession = thread.session;
-        return {
-          ...thread,
-          ...(event.payload.modelSelection !== undefined
-            ? { modelSelection: normalizeModelSelection(event.payload.modelSelection) }
-            : {}),
-          runtimeMode: event.payload.runtimeMode,
-          interactionMode: event.payload.interactionMode,
-          pendingSourceProposedPlan: event.payload.sourceProposedPlan,
-          session: {
-            provider: previousSession?.provider ?? ProviderDriverKind.make("codex"),
-            ...(previousSession?.providerInstanceId !== undefined
-              ? { providerInstanceId: previousSession.providerInstanceId }
+      return updateThreadState(
+        state,
+        event.payload.threadId,
+        (thread) => {
+          const previousSession = thread.session;
+          return {
+            ...thread,
+            ...(event.payload.modelSelection !== undefined
+              ? { modelSelection: normalizeModelSelection(event.payload.modelSelection) }
               : {}),
-            status: "connecting",
-            orchestrationStatus: "starting",
-            activeTurnId: undefined,
-            createdAt: previousSession?.createdAt ?? event.payload.createdAt,
-            updatedAt: event.payload.createdAt,
-          },
-          updatedAt: event.occurredAt,
-        };
-      });
+            runtimeMode: event.payload.runtimeMode,
+            interactionMode: event.payload.interactionMode,
+            ...(event.payload.subagentLimits !== undefined
+              ? { subagentLimits: event.payload.subagentLimits }
+              : {}),
+            pendingSourceProposedPlan: event.payload.sourceProposedPlan,
+            session: {
+              ...(previousSession?.maxConcurrentSubagents !== undefined
+                ? { maxConcurrentSubagents: previousSession.maxConcurrentSubagents }
+                : {}),
+              provider: previousSession?.provider ?? ProviderDriverKind.make("codex"),
+              ...(previousSession?.providerInstanceId !== undefined
+                ? { providerInstanceId: previousSession.providerInstanceId }
+                : {}),
+              status: "connecting",
+              orchestrationStatus: "starting",
+              activeTurnId: undefined,
+              createdAt: previousSession?.createdAt ?? event.payload.createdAt,
+              updatedAt: event.payload.createdAt,
+            },
+            updatedAt: event.occurredAt,
+          };
+        },
+        event.payload.subagentLimits !== undefined ? event.sequence : undefined,
+      );
 
     case "thread.turn-interrupt-requested": {
       if (event.payload.turnId === undefined) {
@@ -2383,9 +2497,15 @@ function applyEnvironmentShellEvent(
       };
     }
     case "thread-upserted":
-      return writeThreadShellState(state, mapThreadShell(event.thread, environmentId));
+      return writeThreadShellState(
+        state,
+        mapThreadShell(event.thread, environmentId),
+        event.sequence,
+      );
     case "thread-removed":
-      return removeThreadState(state, event.threadId);
+      return (state.subagentPolicySequenceByThreadId?.[event.threadId] ?? -1) > event.sequence
+        ? state
+        : removeThreadState(state, event.threadId);
   }
 }
 
@@ -2697,7 +2817,11 @@ interface AppStore extends AppState {
     snapshot: OrchestrationShellSnapshot,
     environmentId: EnvironmentId,
   ) => void;
-  syncServerThreadDetail: (thread: OrchestrationThread, environmentId: EnvironmentId) => void;
+  syncServerThreadDetail: (
+    thread: OrchestrationThread,
+    environmentId: EnvironmentId,
+    snapshotSequence?: number,
+  ) => void;
   applyOrchestrationEvent: (event: OrchestrationEvent, environmentId: EnvironmentId) => void;
   applyOrchestrationEvents: (
     events: ReadonlyArray<OrchestrationEvent>,
@@ -2720,8 +2844,8 @@ export const useStore = create<AppStore>((set) => ({
     set((state) => removeEnvironmentState(state, environmentId)),
   syncServerShellSnapshot: (snapshot, environmentId) =>
     set((state) => syncServerShellSnapshot(state, snapshot, environmentId)),
-  syncServerThreadDetail: (thread, environmentId) =>
-    set((state) => syncServerThreadDetail(state, thread, environmentId)),
+  syncServerThreadDetail: (thread, environmentId, snapshotSequence) =>
+    set((state) => syncServerThreadDetail(state, thread, environmentId, snapshotSequence)),
   applyOrchestrationEvent: (event, environmentId) =>
     set((state) => applyOrchestrationEvent(state, event, environmentId)),
   applyOrchestrationEvents: (events, environmentId) =>

@@ -12,6 +12,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { materializedSubagentLimitFields } from "../sessionSubagentLimits.ts";
 
 import { toPersistenceSqlError, type ProjectionRepositoryError } from "../../persistence/Errors.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
@@ -905,6 +906,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             projectId: event.payload.projectId,
             title: event.payload.title,
             modelSelection: event.payload.modelSelection,
+            ...(event.payload.subagentLimits !== undefined
+              ? { subagentLimits: event.payload.subagentLimits }
+              : {}),
             runtimeMode: event.payload.runtimeMode,
             interactionMode: event.payload.interactionMode,
             branch: event.payload.branch,
@@ -1027,6 +1031,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             ...(event.payload.modelSelection !== undefined
               ? { modelSelection: event.payload.modelSelection }
               : {}),
+            ...(event.payload.subagentLimits !== undefined
+              ? { subagentLimits: event.payload.subagentLimits }
+              : {}),
             ...(event.payload.branch !== undefined ? { branch: event.payload.branch } : {}),
             ...(event.payload.worktreePath !== undefined
               ? { worktreePath: event.payload.worktreePath }
@@ -1077,6 +1084,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             ...existingRow.value,
             ...(event.payload.modelSelection !== undefined
               ? { modelSelection: event.payload.modelSelection }
+              : {}),
+            ...(event.payload.subagentLimits !== undefined
+              ? { subagentLimits: event.payload.subagentLimits }
               : {}),
             runtimeMode: event.payload.runtimeMode,
             interactionMode: event.payload.interactionMode,
@@ -1719,6 +1729,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             ? existingSession.value.providerInstanceId
             : null,
           runtimeMode: event.payload.runtimeMode,
+          ...(Option.isSome(existingSession) &&
+          existingSession.value.maxConcurrentSubagents !== undefined
+            ? { maxConcurrentSubagents: existingSession.value.maxConcurrentSubagents }
+            : {}),
           activeTurnId: null,
           lastError: null,
           updatedAt: Option.isSome(existingSession)
@@ -1757,6 +1771,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           providerName: existingSession.value.providerName,
           providerInstanceId: existingSession.value.providerInstanceId,
           runtimeMode: existingSession.value.runtimeMode,
+          ...materializedSubagentLimitFields(existingSession.value),
           activeTurnId: null,
           lastError: existingSession.value.lastError,
           updatedAt: maxIso(existingSession.value.updatedAt, event.payload.createdAt),
@@ -1783,6 +1798,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           providerName: existingSession.value.providerName,
           providerInstanceId: existingSession.value.providerInstanceId,
           runtimeMode: existingSession.value.runtimeMode,
+          ...materializedSubagentLimitFields(existingSession.value),
           activeTurnId: null,
           lastError: status === "ready" ? null : existingSession.value.lastError,
           updatedAt: maxIso(existingSession.value.updatedAt, event.payload.completedAt),
@@ -1829,6 +1845,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           providerName: event.payload.session.providerName,
           providerInstanceId: event.payload.session.providerInstanceId ?? null,
           runtimeMode: event.payload.session.runtimeMode,
+          ...materializedSubagentLimitFields(
+            event.payload.session,
+            Option.getOrUndefined(existingSession),
+          ),
           activeTurnId: null,
           lastError: status === "ready" ? null : event.payload.session.lastError,
           updatedAt: maxIso(
@@ -1927,6 +1947,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             providerName: event.payload.session.providerName,
             providerInstanceId: event.payload.session.providerInstanceId ?? null,
             runtimeMode: event.payload.session.runtimeMode,
+            ...materializedSubagentLimitFields(
+              event.payload.session,
+              Option.getOrUndefined(existingSession),
+            ),
             activeTurnId: null,
             lastError: status === "ready" ? null : event.payload.session.lastError,
             updatedAt: maxIso(
@@ -1989,6 +2013,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         providerName: event.payload.session.providerName,
         providerInstanceId: event.payload.session.providerInstanceId ?? null,
         runtimeMode: event.payload.session.runtimeMode,
+        ...materializedSubagentLimitFields(
+          event.payload.session,
+          Option.getOrUndefined(existingSession),
+        ),
         activeTurnId: event.payload.session.activeTurnId,
         lastError: event.payload.session.lastError,
         updatedAt: Option.isSome(existingSession)

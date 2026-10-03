@@ -206,6 +206,8 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
           {isConnecting || isSendBusy ? "Sending..." : "Implement"}
         </Button>
         <Menu>
+          {/* This popup owns focus. Preventing its pointer default, unlike an
+              immediate Send/Implement action, suppresses Base UI activation. */}
           <MenuTrigger
             render={
               <Button
@@ -213,7 +215,6 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
                 variant="default"
                 className="h-9 rounded-l-none rounded-r-full border-l-white/12 px-2 sm:h-8"
                 aria-label="Implementation actions"
-                {...pointerFocusProps}
                 disabled={isSendBusy || isConnecting || isEnvironmentUnavailable}
               />
             }
