@@ -829,6 +829,11 @@ function createSnapshotWithRuntimeTaskProgress(options?: {
   };
 }
 
+// Live child fixtures model evidence from one actual provider runtime, rather
+// than persisted task history alone. Reuse this identity on the session, child
+// lifecycle edges, and their terminal updates just as the native bridge does.
+const SUBAGENT_RUNTIME_ID = "b73284bf-01be-4dbf-94c8-b54e54f17801";
+
 function createSnapshotWithActiveSubagent(): OrchestrationReadModel {
   const snapshot = createSnapshotForTargetUser({
     targetMessageId: "msg-user-active-subagent" as MessageId,
@@ -860,6 +865,7 @@ function createSnapshotWithActiveSubagent(): OrchestrationReadModel {
                   taskType: "subagent",
                   subagent: {
                     threadId: "provider-child-browser-audit",
+                    runtimeId: SUBAGENT_RUNTIME_ID,
                     label: "Browser lifecycle audit",
                     path: "/root/browser_lifecycle_audit",
                     objective: "Verify Atrium navigation",
@@ -874,6 +880,7 @@ function createSnapshotWithActiveSubagent(): OrchestrationReadModel {
             ],
             session: {
               ...thread.session,
+              subagentRuntimeId: SUBAGENT_RUNTIME_ID,
               status: "running" as const,
               activeTurnId: turnId,
               updatedAt: isoAt(1_001),
@@ -925,6 +932,7 @@ function createSnapshotWithCrossTurnActiveSubagent(): OrchestrationReadModel {
                   taskType: "subagent",
                   subagent: {
                     threadId: "provider-child-cross-turn-roster",
+                    runtimeId: SUBAGENT_RUNTIME_ID,
                     label: "Cross-turn roster audit",
                     path: "/root/cross_turn_roster_audit",
                     objective: "Verify the child survives latest-turn filtering",
@@ -939,6 +947,7 @@ function createSnapshotWithCrossTurnActiveSubagent(): OrchestrationReadModel {
             ],
             session: {
               ...thread.session,
+              subagentRuntimeId: SUBAGENT_RUNTIME_ID,
               status: "running" as const,
               activeTurnId: latestTurnId,
               updatedAt: isoAt(1_011),
@@ -2603,6 +2612,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
                   detail: "Verified cross-turn roster behavior",
                   subagent: {
                     threadId: "provider-child-cross-turn-roster",
+                    runtimeId: SUBAGENT_RUNTIME_ID,
                     label: "Cross-turn roster audit",
                     path: "/root/cross_turn_roster_audit",
                     objective: "Verify the child survives latest-turn filtering",
@@ -2632,6 +2642,92 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           expect(findComposerTaskProgressTrigger()).toBeNull();
         });
       } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("removes a child from active tasks when runtime evidence is cleared but keeps its history inspectable", async () => {
+      const mounted = await mountChatView({
+        viewport: WIDE_FOOTER_VIEWPORT,
+        snapshot: createSnapshotWithCrossTurnActiveSubagent(),
+        configureFixture: (nextFixture) => {
+          nextFixture.serverConfig = {
+            ...nextFixture.serverConfig,
+            clientSettings: {
+              ...nextFixture.serverConfig.clientSettings,
+              ambianceAtriumEnabled: true,
+            },
+          };
+        },
+      });
+
+      try {
+        await page.getByRole("button", { name: /^1 active subagent\. Show task list$/i }).click();
+        await page.getByRole("button", { name: "Show on the side" }).click();
+        await vi.waitFor(() => {
+          expect(findSessionRail()?.textContent).toContain("Cross-turn roster audit");
+        });
+
+        const session = fixture.snapshot.threads.find((thread) => thread.id === THREAD_ID)?.session;
+        expect(session).toBeDefined();
+        // This is an authoritative native-session clear, not a renderer socket
+        // reconnect or a child completion. Leave the parent's running status,
+        // latest turn, and original active child event unchanged: generation
+        // evidence alone must invalidate the roster and its ticking clock.
+        rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+          kind: "event",
+          event: {
+            type: "thread.session-set",
+            sequence: fixture.snapshot.snapshotSequence + 1,
+            eventId: EventId.make("event-cross-turn-subagent-runtime-cleared"),
+            aggregateKind: "thread",
+            aggregateId: THREAD_ID,
+            occurredAt: isoAt(1_020),
+            commandId: null,
+            causationEventId: null,
+            correlationId: null,
+            metadata: {},
+            payload: {
+              threadId: THREAD_ID,
+              session: {
+                ...session,
+                subagentRuntimeId: null,
+                updatedAt: isoAt(1_020),
+              },
+            },
+          },
+        });
+
+        await vi.waitFor(() => {
+          const thread = selectThreadByRef(useStore.getState(), THREAD_REF);
+          expect(thread?.session?.subagentRuntimeId).toBeNull();
+          expect(thread?.session?.orchestrationStatus).toBe("running");
+          expect(findSessionRail()?.textContent).not.toContain("Cross-turn roster audit");
+          expect(findSessionRail()?.textContent).toContain("No tasks yet.");
+          expect(findSessionRail()?.textContent).not.toContain("1 active");
+        });
+        await page.getByRole("button", { name: "Show in composer" }).click();
+        await vi.waitFor(() => {
+          expect(findSessionRail()).toBeNull();
+          expect(findComposerTaskProgressTrigger()).toBeNull();
+        });
+
+        useTaskAtriumStore.getState().setOpen(true);
+        const historicalChild = page.getByRole("button", {
+          name: "View Cross-turn roster audit activity",
+          exact: true,
+        });
+        await expect.element(historicalChild).toBeVisible();
+        await expect.element(historicalChild).toMatchTextContent("Status unavailable");
+        await historicalChild.click();
+        const detail = page.getByRole("region", {
+          name: "Subagent detail: Cross-turn roster audit",
+        });
+        await expect.element(detail.getByText("Status unavailable", { exact: true })).toBeVisible();
+        expect(document.querySelector('[data-subagent-detail-elapsed="true"]')).toBeNull();
+        expect(document.querySelector('[data-subagent-live-elapsed="true"]')).toBeNull();
+      } finally {
+        useTaskAtriumStore.getState().setOpen(false);
         await mounted.cleanup();
       }
     });

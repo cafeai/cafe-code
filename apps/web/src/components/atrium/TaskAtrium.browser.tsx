@@ -1018,6 +1018,18 @@ describe("TaskAtriumBoard", () => {
       );
       expect(subagentContainer).not.toBeNull();
       if (!subagentContainer) throw new Error("Subagent container did not mount");
+      const card = subagentContainer.closest<HTMLElement>('[data-cafe-atrium-task-card="true"]');
+      expect(card).not.toBeNull();
+      if (!card) throw new Error("Task card containing subagents did not mount");
+      // Cards intentionally use content-visibility:auto. Before scrolling, an
+      // off-screen card may still have its 14rem intrinsic placeholder height
+      // even though querying its children forces their full layout. Materialize
+      // this exact card as a user would before checking for real inner clipping;
+      // keep the production containment and the original pixel bounds intact.
+      card.scrollIntoView({ block: "center" });
+      await vi.waitFor(() => {
+        expect(card.scrollHeight).toBeLessThanOrEqual(card.clientHeight + 1);
+      });
       expect(getComputedStyle(subagentContainer).overflowY).toBe("visible");
       expect(subagentContainer.scrollHeight).toBeLessThanOrEqual(
         subagentContainer.clientHeight + 1,
@@ -1039,9 +1051,6 @@ describe("TaskAtriumBoard", () => {
         subagentContainer.getBoundingClientRect().bottom + 1,
       );
 
-      const card = subagentContainer.closest<HTMLElement>('[data-cafe-atrium-task-card="true"]');
-      expect(card).not.toBeNull();
-      if (!card) throw new Error("Task card containing subagents did not mount");
       expect(card.scrollHeight).toBeLessThanOrEqual(card.clientHeight + 1);
       expect(lastRow.getBoundingClientRect().bottom).toBeLessThanOrEqual(
         card.getBoundingClientRect().bottom + 1,
