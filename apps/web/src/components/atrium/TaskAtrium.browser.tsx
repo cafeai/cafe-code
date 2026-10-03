@@ -375,7 +375,7 @@ function addRunningThreads(count: number): () => void {
   };
 }
 
-type FixtureSubagentStatus = "waiting" | "active" | "completed" | "failed" | "stopped";
+type FixtureSubagentStatus = "waiting" | "active" | "completed" | "failed" | "stopped" | "unknown";
 
 function installStructuredSubagents(
   count: number,
@@ -418,14 +418,16 @@ function installStructuredSubagents(
         ...(terminal ? { status } : {}),
         detail:
           index === count - 1
-            ? `Visible task description ${index + 1} stays completely readable even when the bounded provider text wraps across several narrow card lines without an inner clip.`
+            ? `Visible task description ${index + 1} has a bounded preview when the provider text wraps across several narrow card lines; its complete text remains available in the worker detail.`
             : `Visible task description ${index + 1}`,
         subagent: {
           threadId: `claude-task-${index + 1}`,
-          runtimeId: "native-runtime-a",
+          // Unknown is a projection of missing/current-generation evidence,
+          // not a native progress status: providers emit progress as active.
+          runtimeId: status === "unknown" ? "unverified-native-runtime" : "native-runtime-a",
           label: `Claude worker ${index + 1}`,
           objective: `Original task objective ${index + 1}`,
-          status,
+          status: status === "unknown" ? "active" : status,
           startedAt: new Date(fixtureNow - (count - index) * 1_000 - 60_000).toISOString(),
         },
       },
@@ -569,15 +571,41 @@ function taskCard(host: HTMLElement, title: string): HTMLElement {
   return card;
 }
 
+/** Assert exact ordered identities rather than matching worker-name prefixes. */
+function visibleSubagentNames(host: HTMLElement): string[] {
+  return Array.from(
+    host.querySelectorAll<HTMLButtonElement>(
+      '[data-cafe-atrium-subagent-row="true"] button[aria-label]',
+    ),
+    (button) => button.getAttribute("aria-label") ?? "",
+  );
+}
+
+function workerNames(...indices: number[]): string[] {
+  return indices.map((index) => `View Claude worker ${index} activity`);
+}
+
+const workerView = () =>
+  page.getByRole("group", { name: "Subagent view for Port the ambiance engine to WebGL" });
+const workerPages = () =>
+  page.getByRole("group", { name: "Subagent pages for Port the ambiance engine to WebGL" });
+
+function subagentPageStatus(host: HTMLElement): string | null | undefined {
+  return host.querySelector('[data-cafe-atrium-subagent-page-status="true"]')?.textContent;
+}
+
 describe("TaskAtriumBoard", () => {
   for (const theme of ["dark", "light"] as const) {
-    it(`renders running work, its subagents and legible text in ${theme} mode`, async () => {
+    it(`renders running work, inspectable legacy history and legible text in ${theme} mode`, async () => {
       const { host, screen } = await renderInTheme(theme);
       try {
+        // Old prose-only activity has no generation evidence. It belongs to
+        // retained history even while the owning parent is currently running.
+        await workerView().getByRole("button", { name: "History (1)", exact: true }).click();
         await vi.waitFor(
           () => {
             expect(host.textContent).toContain("Port the ambiance engine to WebGL");
-            // The subagent row proves Claude Task items are represented.
+            // Historical Claude Task items remain reachable explicitly.
             expect(host.textContent).toContain("explore");
             expect(host.textContent).toContain("mapping canvas call sites");
             // Latest non-subagent activity is the card's current-action line.
@@ -881,6 +909,7 @@ describe("TaskAtriumBoard", () => {
   it("keeps card details browseable beside a separate full-card navigation button", async () => {
     const { host, screen } = await renderInTheme("dark");
     try {
+      await workerView().getByRole("button", { name: "History (1)", exact: true }).click();
       await vi.waitFor(() => {
         expect(
           host.querySelector('button[aria-label="Open Port the ambiance engine to WebGL"]'),
@@ -999,19 +1028,27 @@ describe("TaskAtriumBoard", () => {
     }
   });
 
-  it("expands a task card for every subagent and delegates scrolling to the Atrium pane", async () => {
+  it("bounds each subagent page and delegates scrolling to the Atrium pane", async () => {
     const restoreSubagents = installStructuredSubagents(8);
     const { host, screen } = await renderInTheme("dark");
     host.style.width = "390px";
     host.style.height = "420px";
     try {
       await vi.waitFor(() => {
-        expect(host.querySelectorAll('[data-cafe-atrium-subagent-row="true"]')).toHaveLength(8);
+        expect(visibleSubagentNames(host)).toEqual(workerNames(1, 2, 3, 4, 5));
       });
       expect(host.textContent).toContain("Visible task description 1");
+      expect(
+        host.querySelector('[data-cafe-atrium-subagent-list="true"]')?.textContent,
+      ).not.toContain("Visible task description 8");
+      expect(host.querySelectorAll('[data-cafe-subagent-avatar="true"]')).toHaveLength(5);
+      await workerPages().getByRole("button", { name: "Next subagents page" }).click();
+      await vi.waitFor(() => {
+        expect(visibleSubagentNames(host)).toEqual(workerNames(6, 7, 8));
+      });
       expect(host.textContent).toContain("Visible task description 8");
       expect(host.textContent).not.toContain("and more");
-      expect(host.querySelectorAll('[data-cafe-subagent-avatar="true"]')).toHaveLength(8);
+      expect(host.querySelectorAll('[data-cafe-subagent-avatar="true"]')).toHaveLength(3);
 
       const subagentContainer = host.querySelector<HTMLElement>(
         '[data-cafe-atrium-subagent-list="true"]',
@@ -1043,10 +1080,15 @@ describe("TaskAtriumBoard", () => {
         subagentContainer.querySelectorAll<HTMLElement>(
           '[data-cafe-atrium-subagent-detail="true"]',
         ),
-      ).find((detail) => detail.textContent?.includes("without an inner clip"));
+      ).find((detail) => detail.textContent?.includes("complete text remains available"));
       expect(wrappedDetail).not.toBeUndefined();
       if (!wrappedDetail) throw new Error("Wrapped subagent description did not mount");
-      expect(wrappedDetail.scrollHeight).toBeLessThanOrEqual(wrappedDetail.clientHeight + 1);
+      // The preview is intentionally bounded to two lines; the full provider
+      // text remains in its title and the exact worker's detail surface.
+      expect(wrappedDetail.title).toBe(wrappedDetail.textContent);
+      expect(wrappedDetail.clientHeight).toBeLessThanOrEqual(
+        Number.parseFloat(getComputedStyle(wrappedDetail).lineHeight) * 2 + 1,
+      );
       expect(lastRow.getBoundingClientRect().bottom).toBeLessThanOrEqual(
         subagentContainer.getBoundingClientRect().bottom + 1,
       );
@@ -1124,7 +1166,15 @@ describe("TaskAtriumBoard", () => {
         .element(page.getByRole("region", { name: "Subagent detail: Finished audit" }))
         .toBeVisible();
       await vi.waitFor(() => expect(atriumHarness.subagentDetailReads).toHaveBeenCalledTimes(2));
+      // The selected worker moved out of Active, but selection must still
+      // resolve against retained history and refresh its terminal metadata.
+      expect(visibleSubagentNames(host)).toEqual([]);
+      expect(host.textContent).toContain("No active subagents");
       await page.getByRole("button", { name: "Back to conversation", exact: true }).click();
+      await expect
+        .element(page.getByRole("button", { name: "View Finished audit activity", exact: true }))
+        .not.toBeInTheDocument();
+      await workerView().getByRole("button", { name: "History (1)", exact: true }).click();
       await expect
         .element(page.getByRole("button", { name: "View Finished audit activity", exact: true }))
         .toBeVisible();
@@ -1153,6 +1203,8 @@ describe("TaskAtriumBoard", () => {
       await expect.element(worker).toBeVisible();
       await expect.element(worker).toMatchTextContent("Working");
       summary.session = { ...previousSession, subagentRuntimeId: "native-runtime-replacement" };
+      await expect.element(worker).not.toBeInTheDocument();
+      await workerView().getByRole("button", { name: "History (1)", exact: true }).click();
       await expect.element(worker).toMatchTextContent("Status unavailable");
       const row = host.querySelector('[data-cafe-atrium-subagent-row="true"]');
       expect(row?.querySelector(".font-mono")).toBeNull();
@@ -1173,6 +1225,8 @@ describe("TaskAtriumBoard", () => {
       expect(host.querySelector('[data-subagent-live-elapsed="true"]')).toBeNull();
       await page.getByRole("button", { name: "Back to conversation", exact: true }).click();
       summary.session = previousSession;
+      await expect.element(worker).not.toBeInTheDocument();
+      await workerView().getByRole("button", { name: "Active (1)", exact: true }).click();
       await expect.element(worker).toMatchTextContent("Working");
     } finally {
       summary.session = previousSession;
@@ -1182,13 +1236,13 @@ describe("TaskAtriumBoard", () => {
     }
   });
 
-  it("collapses only completed subagents and expands them without navigating", async () => {
+  it("shows only active workers by default and pages every retained history status without navigating", async () => {
     const statuses: readonly FixtureSubagentStatus[] = [
       "active",
       "waiting",
       "failed",
       "stopped",
-      "completed",
+      "unknown",
       "completed",
       "completed",
       "completed",
@@ -1206,45 +1260,55 @@ describe("TaskAtriumBoard", () => {
     host.style.height = "420px";
     try {
       await vi.waitFor(() => {
-        expect(host.querySelectorAll('[data-cafe-atrium-subagent-row="true"]')).toHaveLength(7);
+        expect(visibleSubagentNames(host)).toEqual(workerNames(1, 2));
       });
-
-      // Every actionable or abnormal row remains present. Of the six
-      // successful completions, only the three newest are previewed.
-      for (const worker of [1, 2, 3, 4, 8, 9, 10]) {
-        expect(host.textContent).toContain(`Claude worker ${worker}`);
-      }
-      for (const worker of [5, 6, 7]) {
-        expect(host.textContent).not.toContain(`Claude worker ${worker}`);
-      }
-      expect(host.querySelectorAll('[data-cafe-subagent-avatar="true"]')).toHaveLength(7);
-
-      const expand = page.getByRole("button", {
-        name: "Show 3 more completed subagents for Port the ambiance engine to WebGL",
-      });
-      expect(expand.element().textContent).toContain("Show 3 more completed");
-      expect(expand.element().getAttribute("aria-expanded")).toBe("false");
-      const controlledId = expand.element().getAttribute("aria-controls");
+      const active = workerView().getByRole("button", { name: "Active (2)", exact: true });
+      const history = workerView().getByRole("button", { name: "History (8)", exact: true });
+      await expect.element(active).toHaveAttribute("aria-pressed", "true");
+      await expect.element(history).toHaveAttribute("aria-pressed", "false");
+      expect(subagentPageStatus(host)).toBeUndefined();
+      await expect.element(workerPages()).not.toBeInTheDocument();
+      const controlledId = history.element().getAttribute("aria-controls");
       expect(controlledId).toBeTruthy();
       expect(host.querySelector(`#${CSS.escape(controlledId ?? "")}`)).not.toBeNull();
-
-      await expand.click();
+      await history.click();
       await vi.waitFor(() => {
-        expect(host.querySelectorAll('[data-cafe-atrium-subagent-row="true"]')).toHaveLength(10);
-        expect(host.querySelectorAll('[data-cafe-subagent-avatar="true"]')).toHaveLength(10);
-        expect(navigations).toHaveLength(0);
-        expect(useTaskAtriumStore.getState().open).toBe(true);
+        expect(visibleSubagentNames(host)).toEqual(workerNames(10, 9, 8, 7, 6));
       });
-
-      const collapse = page.getByRole("button", {
-        name: "Show fewer completed subagents for Port the ambiance engine to WebGL",
-      });
-      expect(collapse.element().textContent).toContain("Show less");
-      expect(collapse.element().getAttribute("aria-expanded")).toBe("true");
-      await collapse.click();
+      await expect.element(history).toHaveAttribute("aria-pressed", "true");
+      await expect.element(active).toHaveAttribute("aria-pressed", "false");
+      expect(subagentPageStatus(host)).toBe("1–5 of 8 · Page 1 of 2");
+      expect(host.querySelectorAll('[data-cafe-subagent-avatar="true"]')).toHaveLength(5);
+      await workerPages().getByRole("button", { name: "Next subagents page" }).click();
       await vi.waitFor(() => {
-        expect(host.querySelectorAll('[data-cafe-atrium-subagent-row="true"]')).toHaveLength(7);
+        expect(visibleSubagentNames(host)).toEqual(workerNames(5, 4, 3));
       });
+      expect(subagentPageStatus(host)).toBe("6–8 of 8 · Page 2 of 2");
+      await expect
+        .element(page.getByRole("button", { name: "View Claude worker 5 activity", exact: true }))
+        .toMatchTextContent("Status unavailable");
+      await expect
+        .element(page.getByRole("button", { name: "View Claude worker 4 activity", exact: true }))
+        .toMatchTextContent("Stopped");
+      await expect
+        .element(page.getByRole("button", { name: "View Claude worker 3 activity", exact: true }))
+        .toMatchTextContent("Failed");
+      await expect
+        .element(workerPages().getByRole("button", { name: "Next subagents page" }))
+        .toBeDisabled();
+
+      // Page selection is independent for each view and resets on switching;
+      // neither the view nor page controls activate the full-card navigation.
+      await active.click();
+      expect(visibleSubagentNames(host)).toEqual(workerNames(1, 2));
+      await history.click();
+      expect(visibleSubagentNames(host)).toEqual(workerNames(10, 9, 8, 7, 6));
+      await workerPages().getByRole("button", { name: "Next subagents page" }).click();
+      await workerPages().getByRole("button", { name: "Previous subagents page" }).click();
+      expect(visibleSubagentNames(host)).toEqual(workerNames(10, 9, 8, 7, 6));
+      expect(navigations).toHaveLength(0);
+      expect(useTaskAtriumStore.getState().open).toBe(true);
+      expect(host.textContent).not.toMatch(/Show (?:all|less|\d+ more completed)/);
 
       const list = host.querySelector<HTMLElement>('[data-cafe-atrium-subagent-list="true"]');
       const card = list?.closest<HTMLElement>('[data-cafe-atrium-task-card="true"]');
@@ -1255,12 +1319,230 @@ describe("TaskAtriumBoard", () => {
       if (!list || !card || !pane) throw new Error("Responsive Atrium surface did not mount");
       expect(getComputedStyle(list).overflowY).toBe("visible");
       expect(list.scrollHeight).toBeLessThanOrEqual(list.clientHeight + 1);
-      expect(card.scrollHeight).toBeLessThanOrEqual(card.clientHeight + 1);
+      card.scrollIntoView({ block: "center" });
+      await vi.waitFor(() => {
+        expect(card.scrollHeight).toBeLessThanOrEqual(card.clientHeight + 1);
+      });
       expect(getComputedStyle(pane).overflowY).toBe("auto");
       expect(pane.scrollWidth).toBeLessThanOrEqual(pane.clientWidth + 1);
     } finally {
       useTaskAtriumStore.getState().setOpen(false);
       restoreSubagents();
+      await screen.unmount();
+      host.remove();
+    }
+  });
+
+  it("keeps 800 historical workers out of the initial DOM and reads exact details from bounded pages", async () => {
+    const restore = installStructuredSubagents(800, () => "completed");
+    atriumHarness.subagentDetailReads.mockClear();
+    navigations.length = 0;
+    const { host, screen } = await renderInTheme("dark");
+    try {
+      await expect
+        .element(workerView().getByRole("button", { name: "Active (0)", exact: true }))
+        .toHaveAttribute("aria-pressed", "true");
+      expect(visibleSubagentNames(host)).toEqual([]);
+      expect(host.querySelectorAll('[data-cafe-subagent-avatar="true"]')).toHaveLength(0);
+      expect(host.textContent).toContain("No active subagents");
+      expect(atriumHarness.subagentDetailReads).not.toHaveBeenCalled();
+
+      await workerView().getByRole("button", { name: "History (800)", exact: true }).click();
+      expect(visibleSubagentNames(host)).toEqual(workerNames(800, 799, 798, 797, 796));
+      expect(subagentPageStatus(host)).toBe("1–5 of 800 · Page 1 of 160");
+      expect(host.querySelectorAll('[data-cafe-subagent-avatar="true"]')).toHaveLength(5);
+      await workerPages().getByRole("button", { name: "Next subagents page" }).click();
+      expect(visibleSubagentNames(host)).toEqual(workerNames(795, 794, 793, 792, 791));
+      expect(subagentPageStatus(host)).toBe("6–10 of 800 · Page 2 of 160");
+      await page
+        .getByRole("button", { name: "View Claude worker 791 activity", exact: true })
+        .click();
+      await expect
+        .element(page.getByRole("region", { name: "Subagent detail: Claude worker 791" }))
+        .toBeVisible();
+      await expect.element(page.getByText("Latest worker report", { exact: true })).toBeVisible();
+      expect(atriumHarness.subagentDetailReads).toHaveBeenCalledExactlyOnceWith({
+        threadId: "thread-1",
+        turnId: "turn-1",
+        subagentId: "claude-task-791",
+      });
+      await page.getByRole("button", { name: "Back to conversation", exact: true }).click();
+      expect(visibleSubagentNames(host)).toEqual(workerNames(795, 794, 793, 792, 791));
+      expect(subagentPageStatus(host)).toBe("6–10 of 800 · Page 2 of 160");
+      expect(navigations).toHaveLength(0);
+    } finally {
+      restore();
+      await screen.unmount();
+      host.remove();
+    }
+  });
+
+  it.each([1, 1.3, 1.5])(
+    "keeps view controls, pagination, unknown status and long previews inside a 390px card at scale %s",
+    async (scale) => {
+      const root = document.documentElement;
+      const originalFontSize = root.style.fontSize;
+      const originalViewport = { width: window.innerWidth, height: window.innerHeight };
+      const restore = installStructuredSubagents(10, (index) =>
+        index < 2 ? "active" : index === 4 ? "unknown" : "completed",
+      );
+      root.style.fontSize = `${16 * scale}px`;
+      await page.viewport(390, 720);
+      const { host, screen } = await renderInTheme("dark");
+      try {
+        await workerView().getByRole("button", { name: "History (8)", exact: true }).click();
+        const card = taskCard(host, "Port the ambiance engine to WebGL");
+        const pane = host.querySelector<HTMLElement>('[data-cafe-atrium-pane-scroll="true"]');
+        expect(pane).not.toBeNull();
+        if (!pane) throw new Error("Atrium scroll pane did not mount");
+
+        const assertPageFits = async () => {
+          card.scrollIntoView({ block: "center" });
+          await vi.waitFor(() => {
+            const list = card.querySelector<HTMLElement>('[data-cafe-atrium-subagent-list="true"]');
+            expect(list).not.toBeNull();
+            if (!list) throw new Error("Paged worker list did not mount");
+            const rows = Array.from(list.querySelectorAll<HTMLElement>("li"));
+            const controls = [workerView().element(), workerPages().element()];
+            for (const element of [pane, card, list, ...rows, ...controls]) {
+              expect(element.scrollWidth).toBeLessThanOrEqual(element.clientWidth + 1);
+              expect(element.getBoundingClientRect().right).toBeLessThanOrEqual(
+                host.getBoundingClientRect().right + 1,
+              );
+            }
+            for (const row of rows) {
+              expect(row.getBoundingClientRect().height).toBeLessThanOrEqual(7 * 16 * scale);
+            }
+            expect(getComputedStyle(list).overflowY).toBe("visible");
+            expect(list.scrollHeight).toBeLessThanOrEqual(list.clientHeight + 1);
+            expect(card.scrollHeight).toBeLessThanOrEqual(card.clientHeight + 1);
+            expect(getComputedStyle(pane).overflowY).toBe("auto");
+          });
+        };
+        await assertPageFits();
+        const longPreview = card.querySelector<HTMLElement>(
+          '[data-cafe-atrium-subagent-detail="true"]',
+        );
+        expect(longPreview?.textContent).toContain("complete text remains available");
+        expect(longPreview?.title).toBe(longPreview?.textContent);
+        await workerPages().getByRole("button", { name: "Next subagents page" }).click();
+        await expect
+          .element(page.getByRole("button", { name: "View Claude worker 5 activity", exact: true }))
+          .toMatchTextContent("Status unavailable");
+        await assertPageFits();
+      } finally {
+        restore();
+        await screen.unmount();
+        host.remove();
+        root.style.fontSize = originalFontSize;
+        await page.viewport(originalViewport.width, originalViewport.height);
+      }
+    },
+  );
+
+  it("pages more than five active pages and clamps a live roster shrink to the last remaining page", async () => {
+    const restore = installStructuredSubagents(31);
+    const restoreRosterChanges: Array<() => void> = [];
+    navigations.length = 0;
+    const { host, screen } = await renderInTheme("dark");
+    try {
+      await expect
+        .element(workerView().getByRole("button", { name: "Active (31)", exact: true }))
+        .toHaveAttribute("aria-pressed", "true");
+      expect(visibleSubagentNames(host)).toEqual(workerNames(1, 2, 3, 4, 5));
+      for (let pageIndex = 1; pageIndex < 7; pageIndex += 1) {
+        await workerPages().getByRole("button", { name: "Next subagents page" }).click();
+        const first = pageIndex * 5 + 1;
+        const indices = Array.from(
+          { length: Math.min(5, 32 - first) },
+          (_, index) => first + index,
+        );
+        expect(visibleSubagentNames(host)).toEqual(workerNames(...indices));
+        expect(subagentPageStatus(host)).toBe(
+          `${first}–${Math.min(first + 4, 31)} of 31 · Page ${pageIndex + 1} of 7`,
+        );
+      }
+      await expect
+        .element(workerPages().getByRole("button", { name: "Next subagents page" }))
+        .toBeDisabled();
+
+      // Replace the immutable roster while the user is on page seven. The
+      // surviving sixth worker belongs to page two, not a now-empty page seven.
+      restoreRosterChanges.push(installStructuredSubagents(6));
+      await vi.waitFor(
+        () => {
+          expect(visibleSubagentNames(host)).toEqual(workerNames(6));
+          expect(subagentPageStatus(host)).toBe("6–6 of 6 · Page 2 of 2");
+        },
+        { timeout: 3_000 },
+      );
+      await workerPages().getByRole("button", { name: "Previous subagents page" }).click();
+      expect(visibleSubagentNames(host)).toEqual(workerNames(1, 2, 3, 4, 5));
+      await workerPages().getByRole("button", { name: "Next subagents page" }).click();
+      restoreRosterChanges.push(installStructuredSubagents(3));
+      await vi.waitFor(
+        () => {
+          expect(visibleSubagentNames(host)).toEqual(workerNames(1, 2, 3));
+          expect(subagentPageStatus(host)).toBeUndefined();
+        },
+        { timeout: 3_000 },
+      );
+      await expect.element(workerPages()).not.toBeInTheDocument();
+      restoreRosterChanges.push(installStructuredSubagents(11));
+      await vi.waitFor(
+        () => {
+          expect(visibleSubagentNames(host)).toEqual(workerNames(1, 2, 3, 4, 5));
+          expect(subagentPageStatus(host)).toBe("1–5 of 11 · Page 1 of 3");
+        },
+        { timeout: 3_000 },
+      );
+      await workerPages().getByRole("button", { name: "Next subagents page" }).click();
+      await workerView().getByRole("button", { name: "History (0)", exact: true }).click();
+      expect(visibleSubagentNames(host)).toEqual([]);
+      expect(host.textContent).toContain("No subagent history");
+      await workerView().getByRole("button", { name: "Active (11)", exact: true }).click();
+      expect(visibleSubagentNames(host)).toEqual(workerNames(1, 2, 3, 4, 5));
+      expect(subagentPageStatus(host)).toBe("1–5 of 11 · Page 1 of 3");
+      expect(navigations).toHaveLength(0);
+    } finally {
+      for (const restoreRoster of restoreRosterChanges.toReversed()) restoreRoster();
+      restore();
+      await screen.unmount();
+      host.remove();
+    }
+  });
+
+  it("keeps the selected historical worker detail when newer history moves its row off the page", async () => {
+    const restore = installStructuredSubagents(6, () => "completed");
+    let restoreGrowth: (() => void) | undefined;
+    const { host, screen } = await renderInTheme("dark");
+    try {
+      await workerView().getByRole("button", { name: "History (6)", exact: true }).click();
+      await page
+        .getByRole("button", { name: "View Claude worker 6 activity", exact: true })
+        .click();
+      const detail = page.getByRole("region", { name: "Subagent detail: Claude worker 6" });
+      await expect.element(detail).toBeVisible();
+      restoreGrowth = installStructuredSubagents(12, () => "completed");
+      await vi.waitFor(
+        () => {
+          expect(visibleSubagentNames(host)).toEqual(workerNames(12, 11, 10, 9, 8));
+        },
+        { timeout: 3_000 },
+      );
+      await expect.element(detail).toBeVisible();
+      await expect.element(detail.getByText("Completed", { exact: true })).toBeVisible();
+      await expect.element(page.getByText("Latest worker report", { exact: true })).toBeVisible();
+      await page.getByRole("button", { name: "Back to conversation", exact: true }).click();
+      await workerPages().getByRole("button", { name: "Next subagents page" }).click();
+      expect(visibleSubagentNames(host)).toEqual(workerNames(7, 6, 5, 4, 3));
+      await page
+        .getByRole("button", { name: "View Claude worker 6 activity", exact: true })
+        .click();
+      await expect.element(detail).toBeVisible();
+    } finally {
+      restoreGrowth?.();
+      restore();
       await screen.unmount();
       host.remove();
     }
@@ -1301,6 +1583,7 @@ describe("TaskAtriumBoard", () => {
     await page.viewport(390, 720);
     const { host, screen } = await renderInTheme("dark");
     try {
+      await workerView().getByRole("button", { name: "History (1)", exact: true }).click();
       await vi.waitFor(() => {
         expect(host.querySelectorAll('[data-cafe-atrium-task-card="true"]')).toHaveLength(3);
       });

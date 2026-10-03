@@ -75,9 +75,22 @@ to the same surviving daemon preserves its confirmed workers; a new native
 runtime cannot inherit the previous runtime's Working claims. See
 [runtime-bound observation](decisions/subagent-runtime-observation.md).
 Closed, completed, failed, and stopped workers leave those active rosters.
-Atrium retains finished work, supports expanded history, and opens a worker's
-authorized public transcript and latest durable summary. Names can update after
-completion without reopening a worker or advancing its completion clock.
+Atrium cards start on **Active (N)**, showing confirmed active/waiting workers.
+Choose **History (N)** to inspect completed, failed, stopped, or unverified workers.
+Both views show at most five rows per page, adding **Previous** / **Next** controls
+and a visible range/page count when more than one page is needed. History is newest
+first. A card with only historical work says **No active subagents** instead of
+expanding that history automatically.
+Switching views returns to the first page, and live roster changes keep the
+selected page within the available range.
+
+This is presentation-only pagination of the retained roster: history and aggregate
+counts are unchanged, and switching pages makes no provider request. Click a worker
+to open its authorized public transcript and latest durable summary. An open detail
+view stays bound to that exact worker even if it finishes or moves off the visible
+page. Names can update after completion without reopening a worker or advancing
+its completion clock. Cards share the Atrium's main scroll pane rather than adding
+individual scrollbars.
 
 New and reused workers follow durable event order, including when an old status
 refresh and a fresh start have identical timestamps. The compact roster retains

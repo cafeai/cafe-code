@@ -16,7 +16,9 @@ Live numeric changes in the detailed cost view use the same eased ticker as the
 headline counts: model cost, exact/compact token counts, recorded generation
 duration, reasoning tokens, cache savings and quality/input percentages. All
 counters share one animation-frame scheduler and one reduced-motion listener;
-there is no per-row timer, added polling or model-time extrapolation. Reduced
+there is no per-row timer, added polling or model-time extrapolation. Easing uses
+actual elapsed frame time, so delayed frames or a background pause catch up to
+the reported target instead of leaving the counter behind. Reduced
 motion shows each new value directly. A selected-period change still remounts the
 period-specific counters, rather than animating unrelated date ranges into each
 other. Unknown, unpriced and “Not recorded” values remain explicit text states.

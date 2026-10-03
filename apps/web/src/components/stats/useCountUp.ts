@@ -119,7 +119,10 @@ export function useCountUp(
 
     let last = performance.now();
     const step = (now: number): boolean => {
-      const dt = Math.min(64, now - last);
+      // Exponential easing already bounds each step between the current value
+      // and its target. Use all elapsed time so throttled/background frames do
+      // not permanently discard progress and leave exact totals lagging behind.
+      const dt = Math.max(0, now - last);
       last = now;
       const diff = target - displayRef.current;
       if (Math.abs(diff) < quantum / 2) {

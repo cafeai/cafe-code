@@ -598,9 +598,14 @@ function activeActivityCellCount(): number {
 }
 
 async function hoverActivityCell(day: string): Promise<HTMLElement> {
-  requiredElement(`[data-activity-day="${day}"][data-activity-in-range="true"]`).dispatchEvent(
-    new PointerEvent("pointerover", { bubbles: true }),
-  );
+  // The Activity calendar can be below the fold or still resizing after fresh
+  // detail replaces its bounds. A synthetic event bypasses layout stability
+  // and leaves the native pointer elsewhere, so a later resize/scroll can
+  // correctly retire that stale tooltip anchor. Move the real pointer to the
+  // exact actionable cell, as the dedicated ActivityHeatmap fixtures do.
+  await page
+    .elementLocator(requiredElement(`[data-activity-day="${day}"][data-activity-in-range="true"]`))
+    .hover();
   await vi.waitFor(() =>
     expect(requiredElement('[role="tooltip"]').getAttribute("data-activity-tooltip-day")).toBe(day),
   );

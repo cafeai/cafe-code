@@ -339,7 +339,9 @@ describe("ProviderModelPicker", () => {
     });
 
     try {
-      const trigger = page.getByRole("button");
+      // Keep the trigger distinct from favorite buttons that can remain in
+      // the closing popup until its exit transition retires the portal.
+      const trigger = page.getByRole("button", { name: "GPT-5 Codex", exact: true });
       await trigger.click();
       await vi.waitFor(() => {
         expect(onRequestModelsRefresh).toHaveBeenCalledTimes(1);
@@ -349,6 +351,7 @@ describe("ProviderModelPicker", () => {
       // Rerenders while the picker remains open must not generate duplicate
       // model/list requests; close and reopen is the next explicit refresh.
       await userEvent.keyboard("{Escape}");
+      await expect.element(trigger).toHaveAttribute("aria-expanded", "false");
       await trigger.click();
       await vi.waitFor(() => {
         expect(onRequestModelsRefresh).toHaveBeenCalledTimes(2);

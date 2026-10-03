@@ -12,7 +12,7 @@ import {
 } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { scopeThreadRef } from "@cafecode/client-runtime";
-import { ChevronDownIcon, ChevronUpIcon, CircleCheckIcon } from "lucide-react";
+import { CircleCheckIcon } from "lucide-react";
 
 import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
 import { useTheme } from "../../hooks/useTheme";
@@ -38,6 +38,11 @@ import {
   type AtriumCardState,
 } from "./taskAtriumData";
 import { useTaskAtriumStore } from "./taskAtriumStore";
+import {
+  paginateAtriumSubagents,
+  partitionAtriumSubagents,
+  type AtriumSubagentView,
+} from "./atriumSubagentPagination";
 import { ProviderDriverKind } from "@cafecode/contracts";
 import { subagentToWorkLogEntry } from "../../session-logic";
 import { presentTurnConfiguration } from "../../turnConfiguration";
@@ -61,8 +66,8 @@ const AtriumSubagentDetail = lazy(() =>
  * It is not a provider control surface: no approve, no deny, no stop. A card
  * says a thread is waiting on you because that is information about what is
  * going on, but the decision happens in the thread where the request is
- * visible. Its only local state mutation clears exact historical error cards
- * from the presentation; it never alters provider or orchestration state.
+ * visible. Its local controls filter/page retained child observations or clear
+ * exact historical error cards; none alters provider or orchestration state.
  */
 
 const FALLBACK_TINT = "#48cfff";
@@ -89,8 +94,6 @@ const MAX_ATRIUM_DETAIL_SUBSCRIPTIONS = 24;
 const ATRIUM_DETAIL_PREFETCH_MARGIN_PX = 320;
 /** Give the tiny usage RPC priority over multi-megabyte thread detail hydration. */
 const ATRIUM_USAGE_PRIORITY_WINDOW_MS = 750;
-/** Keep recent completions useful without letting historical rows dominate a card. */
-const COMPLETED_SUBAGENT_PREVIEW_COUNT = 3;
 
 const STATE_LABEL: Record<AtriumCardState, string> = {
   holding: "Waiting on you",
@@ -347,42 +350,28 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
   const titleId = useId();
   const configurationId = useId();
   const subagentListId = useId();
-  const [showAllCompletedSubagents, setShowAllCompletedSubagents] = useState(false);
-  const completedSubagents = useMemo(
-    () =>
-      card.subagents
-        .filter((subagent) => subagent.status === "completed")
-        .toSorted((left, right) => {
-          // Completion time answers which historical work is most useful now.
-          // Imported legacy rows can lack it, so their start time is the
-          // deterministic fallback and the stable row key breaks exact ties.
-          const leftTime = left.completedAt ?? left.startedAt ?? 0;
-          const rightTime = right.completedAt ?? right.startedAt ?? 0;
-          return leftTime - rightTime || left.rowKey.localeCompare(right.rowKey);
-        }),
-    [card.subagents],
+  const [subagentSelection, setSubagentSelection] = useState<{
+    view: AtriumSubagentView;
+    pageIndex: number;
+  }>({ view: "active", pageIndex: 0 });
+  // The board's one-second elapsed clock must not repeatedly partition/sort
+  // hundreds of retained history rows. Only immutable roster changes rebuild
+  // these groups; pagination itself slices at most five display rows.
+  const subagentGroups = useMemo(() => partitionAtriumSubagents(card.subagents), [card.subagents]);
+  const selectedSubagents = subagentGroups[subagentSelection.view];
+  const subagentPage = useMemo(
+    () => paginateAtriumSubagents(selectedSubagents, subagentSelection.pageIndex),
+    [selectedSubagents, subagentSelection.pageIndex],
   );
-  const hiddenCompletedSubagentCount = Math.max(
-    0,
-    completedSubagents.length - COMPLETED_SUBAGENT_PREVIEW_COUNT,
-  );
-  const visibleSubagents = useMemo(() => {
-    if (showAllCompletedSubagents || hiddenCompletedSubagentCount === 0) {
-      return card.subagents;
-    }
-
-    // Only successful historical work is eligible for disclosure. Waiting,
-    // active, failed, and stopped children always stay visible so this compact
-    // presentation can never hide work or a condition that needs attention.
-    const recentCompletedRowKeys = new Set(
-      completedSubagents
-        .slice(-COMPLETED_SUBAGENT_PREVIEW_COUNT)
-        .map((subagent) => subagent.rowKey),
+  useEffect(() => {
+    if (subagentSelection.pageIndex === subagentPage.pageIndex) return;
+    // Rendering already uses the clamped page. Retire the stale cursor as well
+    // so a later roster growth cannot unexpectedly jump back to the old page.
+    // Do not overwrite a view/page choice made after this render's observation.
+    setSubagentSelection((current) =>
+      current === subagentSelection ? { ...current, pageIndex: subagentPage.pageIndex } : current,
     );
-    return card.subagents.filter(
-      (subagent) => subagent.status !== "completed" || recentCompletedRowKeys.has(subagent.rowKey),
-    );
-  }, [card.subagents, completedSubagents, hiddenCompletedSubagentCount, showAllCompletedSubagents]);
+  }, [subagentSelection, subagentPage.pageIndex]);
   const cardRef = useCallback(
     (element: HTMLElement | null) => onCardElement(card.key, element),
     [card.key, onCardElement],
@@ -478,14 +467,48 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
 
       {/* The reference's photo window becomes the live subagent list. */}
       {card.subagents.length > 0 ? (
-        <div className="mt-3 rounded-xl bg-[#ece7e2] p-2.5 dark:bg-white/8">
+        <div
+          className="mt-3 rounded-xl bg-[#ece7e2] p-2.5 dark:bg-white/8"
+          data-cafe-atrium-subagent-view={subagentSelection.view}
+        >
+          <div
+            role="group"
+            aria-label={`Subagent view for ${card.title}`}
+            className="relative z-20 mb-2 grid grid-cols-2 gap-1 rounded-lg bg-black/5 p-1 dark:bg-black/15"
+          >
+            {(["active", "history"] as const).map((view) => (
+              <button
+                key={view}
+                type="button"
+                aria-pressed={subagentSelection.view === view}
+                aria-controls={subagentListId}
+                className={cn(
+                  "min-h-8 min-w-0 rounded-md px-2 text-[11px] font-medium tabular-nums",
+                  "outline-none focus-visible:ring-2 focus-visible:ring-[var(--cafe-atrium-accent)]",
+                  subagentSelection.view === view
+                    ? "bg-white/80 text-[#3c353a] shadow-sm dark:bg-white/12 dark:text-white/90"
+                    : "text-[#6c636a] hover:bg-white/40 dark:text-white/60 dark:hover:bg-white/5",
+                )}
+                onClick={(event) => {
+                  // These are local presentation controls above the card's
+                  // full-surface navigation button, never provider actions.
+                  event.stopPropagation();
+                  if (view !== subagentSelection.view) {
+                    setSubagentSelection({ view, pageIndex: 0 });
+                  }
+                }}
+              >
+                {view === "active" ? "Active" : "History"} ({subagentGroups[view].length})
+              </button>
+            ))}
+          </div>
           <ul
             id={subagentListId}
             aria-label={`Subagents for ${card.title}`}
             className="flex flex-col gap-1"
             data-cafe-atrium-subagent-list="true"
           >
-            {visibleSubagents.map((subagent) => (
+            {subagentPage.rows.map((subagent) => (
               <li
                 key={subagent.rowKey}
                 className="min-w-0 text-[11px] text-[#4a4248] dark:text-white/75"
@@ -503,13 +526,14 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
                       {subagent.label}
                     </span>
                     <span
-                      className="mt-0.5 block leading-4 text-[#6c636a] break-words dark:text-white/50"
+                      className="mt-0.5 line-clamp-2 leading-4 text-[#6c636a] break-words dark:text-white/50"
                       data-cafe-atrium-subagent-detail="true"
+                      title={subagent.detail}
                     >
                       {subagent.detail}
                     </span>
                   </span>
-                  <span className="min-w-12 shrink-0 pt-0.5 text-right">
+                  <span className="w-[5.5rem] min-w-0 shrink-0 pt-0.5 text-right break-words">
                     <span
                       className="block text-[9px] font-semibold uppercase tracking-[0.06em]"
                       style={{ color: subagent.running ? accent : SETTLED_COLOR }}
@@ -541,43 +565,52 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
               </li>
             ))}
           </ul>
-          {hiddenCompletedSubagentCount > 0 ? (
-            <button
-              type="button"
-              aria-controls={subagentListId}
-              aria-expanded={showAllCompletedSubagents}
-              aria-label={
-                showAllCompletedSubagents
-                  ? `Show fewer completed subagents for ${card.title}`
-                  : `Show ${hiddenCompletedSubagentCount} more completed subagents for ${card.title}`
-              }
-              className={cn(
-                "relative z-20 mt-1 flex min-h-9 w-full items-center justify-center gap-1.5 border-t border-black/10 pt-2",
-                "rounded-b-lg text-[11px] font-semibold text-[#6c636a] transition-colors hover:text-[#3c353a]",
-                "outline-none focus-visible:ring-2 focus-visible:ring-[var(--cafe-atrium-accent)]",
-                "dark:border-white/10 dark:text-white/55 dark:hover:text-white/85",
-              )}
-              data-cafe-atrium-completed-subagent-toggle="true"
-              onClick={(event) => {
-                // The card has a full-surface navigation button beneath this
-                // disclosure. Consume the click so expanding history cannot
-                // unexpectedly leave the Atrium.
-                event.stopPropagation();
-                setShowAllCompletedSubagents((expanded) => !expanded);
-              }}
+          {subagentPage.total === 0 ? (
+            <p className="px-1 py-3 text-center text-[11px] text-[#6c636a] dark:text-white/55">
+              {subagentSelection.view === "active" ? "No active subagents" : "No subagent history"}
+            </p>
+          ) : subagentPage.pageCount > 1 ? (
+            <div
+              role="group"
+              aria-label={`Subagent pages for ${card.title}`}
+              className="relative z-20 mt-2 border-t border-black/10 pt-2 dark:border-white/10"
             >
-              {showAllCompletedSubagents ? (
-                <>
-                  Show less
-                  <ChevronUpIcon aria-hidden="true" className="size-3.5" />
-                </>
-              ) : (
-                <>
-                  Show {hiddenCompletedSubagentCount} more completed
-                  <ChevronDownIcon aria-hidden="true" className="size-3.5" />
-                </>
-              )}
-            </button>
+              <p
+                role="status"
+                className="text-center text-[10px] text-[#6c636a] tabular-nums dark:text-white/55"
+                data-cafe-atrium-subagent-page-status="true"
+              >
+                {subagentPage.start}–{subagentPage.end} of {subagentPage.total} · Page{" "}
+                {subagentPage.pageIndex + 1} of {subagentPage.pageCount}
+              </p>
+              <div className="mt-1 grid grid-cols-2 gap-2">
+                {(["previous", "next"] as const).map((direction) => (
+                  <button
+                    key={direction}
+                    type="button"
+                    aria-controls={subagentListId}
+                    aria-label={
+                      direction === "previous" ? "Previous subagents page" : "Next subagents page"
+                    }
+                    disabled={
+                      direction === "previous"
+                        ? subagentPage.pageIndex === 0
+                        : subagentPage.pageIndex + 1 >= subagentPage.pageCount
+                    }
+                    className="min-h-8 min-w-0 rounded-md px-2 text-[11px] font-medium text-[#4a4248] outline-none hover:bg-black/5 focus-visible:ring-2 focus-visible:ring-[var(--cafe-atrium-accent)] disabled:cursor-default disabled:opacity-40 dark:text-white/75 dark:hover:bg-white/5"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setSubagentSelection({
+                        view: subagentSelection.view,
+                        pageIndex: subagentPage.pageIndex + (direction === "previous" ? -1 : 1),
+                      });
+                    }}
+                  >
+                    {direction === "previous" ? "Previous" : "Next"}
+                  </button>
+                ))}
+              </div>
+            </div>
           ) : null}
         </div>
       ) : null}

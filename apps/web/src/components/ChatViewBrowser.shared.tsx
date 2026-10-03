@@ -2717,6 +2717,8 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           name: "View Cross-turn roster audit activity",
           exact: true,
         });
+        await expect.element(historicalChild).not.toBeInTheDocument();
+        await page.getByRole("button", { name: "History (1)", exact: true }).click();
         await expect.element(historicalChild).toBeVisible();
         await expect.element(historicalChild).toMatchTextContent("Status unavailable");
         await historicalChild.click();

@@ -31,6 +31,7 @@ const harness = vi.hoisted(() => {
                 taskId: "browser-worker",
                 subagent: {
                   threadId: "browser-worker",
+                  runtimeId: "browser-runtime",
                   label: "Browser worker",
                   objective: "Synthetic layout fixture",
                   status: "active",
@@ -48,7 +49,11 @@ const harness = vi.hoisted(() => {
             environmentId: "browser-env",
             projectId: null,
             title: "Synthetic browser chat",
-            session: { provider: "claudeAgent", orchestrationStatus: "running" },
+            session: {
+              provider: "claudeAgent",
+              orchestrationStatus: "running",
+              subagentRuntimeId: "browser-runtime",
+            },
             createdAt: startedAt,
             archivedAt: null,
             latestTurn: {
