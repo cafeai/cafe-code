@@ -24,7 +24,7 @@ describe("ContextWindowDetails reset availability", () => {
   });
 
   it.each(["popover", "panel"] as const)(
-    "shows requested/configured concurrency without guessing native defaults in %s layout",
+    "shows selected, current, and pending concurrency without guessing provider enforcement in %s layout",
     async (layout) => {
       mounted = await render(
         <ContextWindowDetails
@@ -38,11 +38,44 @@ describe("ContextWindowDetails reset availability", () => {
           }}
         />,
       );
-      await expect.element(page.getByText("Requested: 12", { exact: true })).toBeVisible();
-      await expect.element(page.getByText("Configured: 3", { exact: true })).toBeVisible();
+      const details = document.querySelector<HTMLElement>(
+        '[data-subagent-concurrency-details="true"]',
+      );
+      expect(details).not.toBeNull();
+      expect(details?.textContent?.match(/Subagent limit/g)).toHaveLength(1);
       await expect
-        .element(page.getByText("Pending until a safe idle session boundary.", { exact: true }))
+        .element(page.getByText("Selected for this chat: 12 at once", { exact: true }))
         .toBeVisible();
+      await expect
+        .element(page.getByText("Current session: 3 at once", { exact: true }))
+        .toBeVisible();
+      await expect
+        .element(
+          page.getByText(
+            "Waiting to apply — applies before a new turn when the session can safely restart.",
+            { exact: true },
+          ),
+        )
+        .toBeVisible();
+      await mounted.rerender(
+        <ContextWindowDetails
+          usage={null}
+          layout={layout}
+          subagentConcurrency={{
+            requested: 5,
+            configured: null,
+            source: "Legacy instance configuration",
+            pending: true,
+          }}
+        />,
+      );
+      await expect
+        .element(page.getByText("Account setting: 5 at once", { exact: true }))
+        .toBeVisible();
+      await expect
+        .element(page.getByText("Current session: Provider-managed", { exact: true }))
+        .toBeVisible();
+      await expect.element(page.getByText(/^Waiting to apply/)).toBeVisible();
       await mounted.rerender(
         <ContextWindowDetails
           usage={null}
@@ -55,13 +88,15 @@ describe("ContextWindowDetails reset availability", () => {
           }}
         />,
       );
-      await expect.element(page.getByText("Configured: Unknown", { exact: true })).toBeVisible();
       await expect
-        .element(page.getByText("Native effective limit is not verified.", { exact: true }))
+        .element(page.getByText("Selected limit: Provider-managed", { exact: true }))
         .toBeVisible();
       await expect
-        .element(page.getByText("Pending until a safe idle session boundary.", { exact: true }))
-        .not.toBeInTheDocument();
+        .element(page.getByText("Current session: Not recorded", { exact: true }))
+        .toBeVisible();
+      await expect.element(page.getByText(/^Waiting to apply/)).not.toBeInTheDocument();
+      expect(document.body.textContent).not.toContain("Source:");
+      expect(document.body.textContent).not.toContain("Native effective limit is not verified.");
     },
   );
 

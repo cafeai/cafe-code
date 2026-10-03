@@ -1,13 +1,14 @@
 import "../../index.css";
 import { useState } from "react";
 import { ProviderDriverKind } from "@cafecode/contracts";
-import { page } from "vitest/browser";
+import { page, userEvent } from "vitest/browser";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 import { MenuItem } from "../ui/menu";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
 import { SubagentConcurrencyControl } from "./SubagentConcurrencyControl";
 import { applyInterfaceScalePercent } from "../../interfaceScale";
+import type { SubagentConcurrencyPresentation } from "../../subagentConcurrency";
 
 function Harness(props: {
   onChange: (value: number | undefined) => Promise<void>;
@@ -16,10 +17,14 @@ function Harness(props: {
   provider?: "codex" | "claudeAgent";
   configured?: number | null;
   override?: number;
+  presentationRequested?: number;
+  presentationSource?: SubagentConcurrencyPresentation["source"];
+  presentationPending?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const provider = ProviderDriverKind.make(props.provider ?? "codex");
   const supported = props.supported ?? true;
+  const requested = props.presentationRequested ?? props.override;
   return (
     <>
       <CompactComposerControlsMenu
@@ -52,10 +57,14 @@ function Harness(props: {
         isRunning={props.running ?? false}
         onChange={props.onChange}
         presentation={{
-          requested: props.override,
+          requested,
           configured: props.configured,
-          source: "Chat override",
-          pending: props.configured !== undefined && props.override !== props.configured,
+          source:
+            props.presentationSource ??
+            (props.override === undefined ? "Provider / inherited default" : "Chat override"),
+          pending:
+            props.presentationPending ??
+            (props.configured !== undefined && (requested ?? null) !== props.configured),
         }}
       />
     </>
@@ -79,17 +88,40 @@ describe("per-chat subagent concurrency editor", () => {
     document.documentElement.style.fontSize = fontSize;
     await page.viewport(viewport.width, viewport.height);
   });
-  it("survives menu dismissal and saves a bounded explicit number without native-effect claims", async () => {
+  it("distinguishes the selected chat limit from the current session and explains verification", async () => {
     const onChange = vi.fn(async () => {});
-    mounted = await render(<Harness onChange={onChange} override={12} configured={3} running />);
+    mounted = await render(<Harness onChange={onChange} override={5} configured={3} running />);
     await openEditor();
-    await expect.element(page.getByText("Configured: 3", { exact: true })).toBeVisible();
     await expect
-      .element(page.getByText("Pending until a safe idle session boundary.", { exact: true }))
+      .element(page.getByText("Selected for this chat: 5 at once", { exact: true }))
       .toBeVisible();
     await expect
-      .element(page.getByText("Native effective limit is not verified.", { exact: true }))
+      .element(page.getByText("Current session: 3 at once", { exact: true }))
       .toBeVisible();
+    await expect
+      .element(
+        page.getByText(
+          "Waiting to apply — applies before a new turn when the session can safely restart.",
+          { exact: true },
+        ),
+      )
+      .toBeVisible();
+    expect(document.body.textContent).not.toContain("Source:");
+    expect(document.body.textContent).not.toContain("Native effective limit is not verified.");
+
+    const information = page.getByRole("button", { name: "About subagent limits" });
+    const tooltipCopy =
+      "Cafe shows the configured setting, but can’t independently confirm the limit the provider enforces.";
+    const tooltip = page.getByText(tooltipCopy, { exact: true });
+    page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }).element().focus();
+    await userEvent.keyboard("{Tab}");
+    expect(document.activeElement).toBe(information.element());
+    await expect.element(tooltip).toBeVisible();
+    await userEvent.keyboard("{Tab}");
+    await expect.element(tooltip).not.toBeInTheDocument();
+    await information.hover();
+    await expect.element(tooltip).toBeVisible();
+
     await page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }).fill("24");
     await page.getByRole("button", { name: "Save", exact: true }).click();
     expect(onChange).toHaveBeenCalledExactlyOnceWith(24);
@@ -112,11 +144,35 @@ describe("per-chat subagent concurrency editor", () => {
     );
     await openEditor();
     await expect
-      .element(page.getByText("Configured: No Cafe numeric override", { exact: true }))
+      .element(page.getByText("Selected for this chat: 20 at once", { exact: true }))
+      .toBeVisible();
+    await expect
+      .element(page.getByText("Current session: Provider-managed", { exact: true }))
       .toBeVisible();
     await expect.element(page.getByText(/Claude limits Agent-tool admission/)).toBeVisible();
     await page.getByRole("button", { name: "Reset", exact: true }).click();
     expect(onChange).toHaveBeenCalledExactlyOnceWith(undefined);
+  });
+  it("labels a numeric inherited account setting without calling it a chat choice", async () => {
+    mounted = await render(
+      <Harness
+        onChange={async () => {}}
+        presentationRequested={5}
+        presentationSource="Legacy instance configuration"
+        configured={5}
+      />,
+    );
+    await openEditor();
+    await expect
+      .element(page.getByText("Account setting: 5 at once", { exact: true }))
+      .toBeVisible();
+    await expect
+      .element(page.getByText("Current session: 5 at once", { exact: true }))
+      .toBeVisible();
+    await expect.element(page.getByText(/^Waiting to apply/)).not.toBeInTheDocument();
+    await expect
+      .element(page.getByText("Selected for this chat:", { exact: false }))
+      .not.toBeInTheDocument();
   });
   it("gates an older unsupported runtime without presenting an enabled editor", async () => {
     const onChange = vi.fn(async () => {});
@@ -173,7 +229,13 @@ describe("per-chat subagent concurrency editor", () => {
     applyInterfaceScalePercent(130);
     mounted = await render(<Harness onChange={async () => {}} />);
     await openEditor();
-    await expect.element(page.getByText("Configured: Unknown", { exact: true })).toBeVisible();
+    await expect
+      .element(page.getByText("Selected limit: Provider-managed", { exact: true }))
+      .toBeVisible();
+    await expect
+      .element(page.getByText("Current session: Not recorded", { exact: true }))
+      .toBeVisible();
+    await expect.element(page.getByText(/^Waiting to apply/)).not.toBeInTheDocument();
     expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth);
     const box = document.querySelector('[role="dialog"]')!.getBoundingClientRect();
     expect(box.left).toBeGreaterThanOrEqual(0);
@@ -195,6 +257,8 @@ describe("per-chat subagent concurrency editor", () => {
       .element(page.getByRole("alert"))
       .toHaveTextContent("Could not save this chat's subagent limit. Try again when connected.");
     expect(document.body.textContent).not.toContain("private provider detail");
-    await expect.element(page.getByText("Configured: 3", { exact: true })).toBeVisible();
+    await expect
+      .element(page.getByText("Current session: 3 at once", { exact: true }))
+      .toBeVisible();
   });
 });

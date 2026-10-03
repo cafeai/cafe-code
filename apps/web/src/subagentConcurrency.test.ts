@@ -7,6 +7,7 @@ import {
 import {
   configuredInstanceSubagentLimit,
   deriveSubagentConcurrencyPresentation,
+  formatSubagentConcurrencyDetails,
   subagentLimitKey,
   subagentLimitsEqual,
   validSubagentLimit,
@@ -91,5 +92,77 @@ describe("subagent concurrency policy", () => {
         id,
       ),
     ).toBeUndefined();
+  });
+
+  it("explains a selected chat limit separately from the provider-managed running session", () => {
+    const presentation = deriveSubagentConcurrencyPresentation({
+      provider: codex,
+      limits: { codex: 5 },
+      inheritedLimit: undefined,
+      configuredLimit: null,
+    })!;
+    expect(formatSubagentConcurrencyDetails(presentation)).toEqual({
+      selected: "Selected for this chat: 5 at once",
+      currentSession: "Current session: Provider-managed",
+      pending: "Waiting to apply — applies before a new turn when the session can safely restart.",
+    });
+  });
+
+  it("retains account provenance inline after resetting a chat override", () => {
+    const presentation = deriveSubagentConcurrencyPresentation({
+      provider: claude,
+      limits: {},
+      inheritedLimit: 6,
+      configuredLimit: 6,
+    })!;
+    expect(formatSubagentConcurrencyDetails(presentation)).toEqual({
+      selected: "Account setting: 6 at once",
+      currentSession: "Current session: 6 at once",
+      pending: null,
+    });
+  });
+
+  it("keeps an unrecorded process policy distinct from a known provider-managed policy", () => {
+    const presentation = deriveSubagentConcurrencyPresentation({
+      provider: codex,
+      limits: {},
+      inheritedLimit: undefined,
+      configuredLimit: undefined,
+    })!;
+    expect(formatSubagentConcurrencyDetails(presentation)).toEqual({
+      selected: "Selected limit: Provider-managed",
+      currentSession: "Current session: Not recorded",
+      pending: null,
+    });
+    expect(
+      formatSubagentConcurrencyDetails({ ...presentation, configured: null }).currentSession,
+    ).toBe("Current session: Provider-managed");
+  });
+
+  it("does not invent a pending/applied state when only the saved chat request is known", () => {
+    const presentation = deriveSubagentConcurrencyPresentation({
+      provider: claude,
+      limits: { claude: 12 },
+      inheritedLimit: undefined,
+      configuredLimit: undefined,
+    })!;
+    expect(formatSubagentConcurrencyDetails(presentation)).toEqual({
+      selected: "Selected for this chat: 12 at once",
+      currentSession: "Current session: Not recorded",
+      pending: null,
+    });
+  });
+
+  it("describes a pending reset without pretending it immediately changes the current session", () => {
+    const presentation = deriveSubagentConcurrencyPresentation({
+      provider: codex,
+      limits: {},
+      inheritedLimit: undefined,
+      configuredLimit: 8,
+    })!;
+    const wording = formatSubagentConcurrencyDetails(presentation);
+    expect(wording.selected).toBe("Selected limit: Provider-managed");
+    expect(wording.currentSession).toBe("Current session: 8 at once");
+    expect(wording.pending).not.toBeNull();
   });
 });

@@ -17,8 +17,18 @@ older server. Another driver's remembered value does not block the current one.
 
 ## Requested versus configured
 
-The context details show the requested policy, last configured process limit,
-and whether a change is pending. Saving during work changes durable chat metadata
+The context popover, pinned rail and limit editor show **Selected for this chat**
+(or an inherited **Account setting**) separately from **Current session**. Both
+numeric labels describe Cafe's settings, not an independently verified hard cap.
+**Provider-managed** means Cafe has not set a numeric override for that session;
+**Not recorded** means there is no known process-policy evidence. Neither means
+a known numeric provider default. A mismatched known setting shows **Waiting to
+apply**, conditional on a new turn and a safe session restart. The enforcement
+caveat is available through the labelled **About subagent limits** info tooltip,
+not a permanent extra line. These labels use the same shared presentation in all
+three surfaces and do not add provider calls or change runtime policy.
+
+Saving during work changes durable chat metadata
 only. Cafe applies a changed process limit at the next safe idle send boundary;
 it does not stop running children or replay a prompt to apply a preference.
 Unknown child liveness or incomplete event processing prevents replacement.

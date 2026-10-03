@@ -111,7 +111,15 @@ jobs:
         run: corepack yarn typecheck --concurrency=1
 
       - name: Test
+        if: runner.os != 'Windows'
         run: corepack yarn test
+
+      - name: Test (Windows bounded workers)
+        # Bound both independent workspace runners and their fork pools after
+        # an observed startup exit. Keep the full suite and fail on pool errors;
+        # the original failure did not prove a resource or transport cause.
+        if: runner.os == 'Windows'
+        run: corepack yarn test --concurrency=2 -- --maxWorkers=2
 
       - name: Isolated Effect test cancellation qualification
         # The child runner intentionally times out one synthetic case, then

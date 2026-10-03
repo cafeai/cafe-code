@@ -29,6 +29,7 @@ interface Step {
   readonly run?: string;
   readonly with?: Readonly<Record<string, unknown>>;
   readonly env?: Readonly<Record<string, string>>;
+  readonly "continue-on-error"?: boolean;
   readonly "timeout-minutes"?: number;
 }
 
@@ -38,6 +39,8 @@ interface Workflow {
       string,
       {
         readonly "runs-on"?: string;
+        readonly "timeout-minutes"?: number;
+        readonly "continue-on-error"?: boolean;
         readonly strategy?: {
           readonly matrix?: {
             readonly os?: ReadonlyArray<string>;
@@ -104,6 +107,51 @@ describe("qualified major Actions and Ubuntu runner boundaries", () => {
       for (const job of Object.values(readWorkflow(name).jobs)) {
         if (job["runs-on"]?.startsWith("ubuntu-")) expect(job["runs-on"]).toBe("ubuntu-26.04");
       }
+    }
+  });
+
+  it("bounds only Windows default-suite scheduling without suppressing failures", () => {
+    const quality = readWorkflow("ci.yml").jobs.quality!;
+    const steps = quality.steps ?? [];
+    const defaultTests = steps.filter((step) => step.run === "corepack yarn test");
+    const boundedTests = steps.filter(
+      (step) => step.run === "corepack yarn test --concurrency=2 -- --maxWorkers=2",
+    );
+    expect(defaultTests).toHaveLength(1);
+    expect(defaultTests[0]!.if).toBe("runner.os != 'Windows'");
+    expect(boundedTests).toHaveLength(1);
+    expect(boundedTests[0]!.if).toBe("runner.os == 'Windows'");
+    expect(boundedTests[0]!.env).toBeUndefined();
+    expect(boundedTests[0]!["continue-on-error"]).toBeUndefined();
+    expect(boundedTests[0]!["timeout-minutes"]).toBeUndefined();
+    expect(quality["timeout-minutes"]).toBe(45);
+    expect(quality["continue-on-error"]).toBeUndefined();
+
+    // Turbo forwards the worker option to every default-suite script. Keep
+    // that admission bound to direct Vitest commands: a future wrapper or a
+    // different test runner needs deliberate review instead of silently
+    // receiving an unsupported flag. Do not replace a suite with a filter.
+    const workspaceManifests = [
+      "apps/desktop/package.json",
+      "apps/server/package.json",
+      "apps/web/package.json",
+      "oxlint-plugin-cafecode/package.json",
+      "packages/client-runtime/package.json",
+      "packages/contracts/package.json",
+      "packages/effect-acp/package.json",
+      "packages/effect-codex-app-server/package.json",
+      "packages/shared/package.json",
+      "scripts/package.json",
+    ];
+    const rootPackage = JSON.parse(readFileSync(resolve(repoRoot, "package.json"), "utf8")) as {
+      scripts: { test: string };
+    };
+    expect(rootPackage.scripts.test).toBe("turbo run test");
+    for (const manifestPath of workspaceManifests) {
+      const manifest = JSON.parse(readFileSync(resolve(repoRoot, manifestPath), "utf8")) as {
+        scripts: { test: string };
+      };
+      expect(manifest.scripts.test, manifestPath).toMatch(/^vitest run(?: |$)/);
     }
   });
 
