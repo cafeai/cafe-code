@@ -71,6 +71,12 @@ Atrium retains finished work, supports expanded history, and opens a worker's
 authorized public transcript and latest durable summary. Names can update after
 completion without reopening a worker or advancing its completion clock.
 
+New and reused workers follow durable event order, including when an old status
+refresh and a fresh start have identical timestamps. The compact roster retains
+lifecycle authority across parent turns; ordinary Work Log volume is not evidence
+that a quiet worker finished. See the [ordered retention decision](decisions/subagent-lifecycle-retention.md)
+for the bounded history-repair and reconnect behavior.
+
 Elapsed time alone never proves completion. Native terminal events and bounded
 authoritative child-state reconciliation update the durable lifecycle. Late tool
 completion/progress notifications cannot resurrect a finished child. Transcript

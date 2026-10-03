@@ -10,11 +10,17 @@ import {
   type UsageStatsTokenBreakdownEntry,
   type UsageStatsTotals,
 } from "@cafecode/contracts";
+import { rollUpCost } from "@cafecode/shared/modelPricing";
 
 import { applyInterfaceScalePercent } from "../../interfaceScale";
 import { resetUsageStatsDetailResourceForTests } from "../stats/usageStatsDetailResource";
 import { UsageCostContent } from "./UsageCostSection";
 import { UsageStatsPanel } from "./UsageStatsPanel";
+import {
+  formatCompactTokenCount,
+  formatFullTokenCount,
+  formatGeneratingTime,
+} from "./usageStatsPresentation";
 
 /** Independent time observations deliberately do not follow token-row values. */
 function createModelTimeUsageDetail(): UsageStatsGetResult {
@@ -182,6 +188,71 @@ function createUsageDetail(): UsageStatsGetResult {
     tokenBreakdown,
     tokenBreakdownDays: tokenBreakdown.map((entry) => ({ ...entry, day: today.day })),
   } as unknown as UsageStatsGetResult;
+}
+
+function createAnimatedUsageUpdate(): readonly [UsageStatsGetResult, UsageStatsGetResult] {
+  const initial = createUsageDetail();
+  const codex = ProviderDriverKind.make("codex");
+  const first: UsageStatsGetResult = {
+    ...initial,
+    modelGeneratingTime: {
+      startedAt: "2026-07-21T00:00:00.000Z",
+      totals: [{ provider: codex, model: "gpt-5.6-codex", generatingMs: 60_000 }],
+      days: [
+        {
+          day: initial.today.day,
+          provider: codex,
+          model: "gpt-5.6-codex",
+          generatingMs: 60_000,
+        },
+      ],
+    },
+  };
+  const tokenBreakdown = first.tokenBreakdown
+    .map((entry) =>
+      entry.provider === codex && entry.model === "gpt-5.6-codex"
+        ? {
+            ...entry,
+            inputTokens: entry.inputTokens + 400_000,
+            cachedInputTokens: entry.cachedInputTokens + 200_000,
+            outputTokens: entry.outputTokens + 400_000,
+            reasoningOutputTokens: entry.reasoningOutputTokens + 20_000,
+          }
+        : entry,
+    )
+    .concat({
+      provider: ProviderDriverKind.make("opencode"),
+      model: "unpriced-live-model",
+      inputTokens: 1_000_000,
+      cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      outputTokens: 0,
+      reasoningOutputTokens: 0,
+    });
+  const second: UsageStatsGetResult = {
+    ...first,
+    totals: {
+      ...first.totals,
+      inputTokens: first.totals.inputTokens + 1_400_000,
+      cachedInputTokens: first.totals.cachedInputTokens + 200_000,
+      outputTokens: first.totals.outputTokens + 400_000,
+      reasoningOutputTokens: first.totals.reasoningOutputTokens + 20_000,
+    },
+    tokenBreakdown,
+    modelGeneratingTime: {
+      ...first.modelGeneratingTime!,
+      totals: [{ provider: codex, model: "gpt-5.6-codex", generatingMs: 180_000 }],
+      days: [
+        {
+          day: first.today.day,
+          provider: codex,
+          model: "gpt-5.6-codex",
+          generatingMs: 180_000,
+        },
+      ],
+    },
+  };
+  return [first, second];
 }
 
 const emptyTotals: UsageStatsTotals = {
@@ -474,15 +545,46 @@ function modelCostRows() {
 }
 
 function requiredModelTime(model: string, provider?: string): HTMLElement {
+  const row = requiredModelRow(model, provider);
+  const time = row.querySelector<HTMLElement>("[data-usage-model-generating-time]");
+  expect(time).not.toBeNull();
+  return time!;
+}
+
+function requiredModelRow(model: string, provider?: string): HTMLElement {
   const row = Array.from(document.querySelectorAll<HTMLElement>("[data-usage-model]")).find(
     (element) =>
       element.dataset.usageModel === model &&
       (provider === undefined || element.dataset.usageProvider === provider),
   );
   expect(row).toBeDefined();
-  const time = row!.querySelector<HTMLElement>("[data-usage-model-generating-time]");
-  expect(time).not.toBeNull();
-  return time!;
+  return row!;
+}
+
+const testCurrency = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
+function expectedUsd(value: number): string {
+  return `${testCurrency.format(value)} USD`;
+}
+
+function parseUsd(value: string | null): number {
+  expect(value).not.toBeNull();
+  const normalized = value!.replaceAll(",", "").replace("USD", "").trim();
+  const sign = normalized.startsWith("-") ? -1 : 1;
+  const numeric = Number(normalized.replaceAll("-", "").replace("$", ""));
+  expect(Number.isFinite(numeric)).toBe(true);
+  return sign * numeric;
+}
+
+function parseFullTokenFigure(element: Element): number {
+  const numeric = element.textContent?.match(/[\d,]+/)?.[0];
+  expect(numeric).toBeDefined();
+  return Number(numeric!.replaceAll(",", ""));
 }
 
 function activeActivityCellCount(): number {
@@ -818,7 +920,9 @@ describe("UsageStatsPanel", () => {
         }}
       />,
     );
-    expect(requiredModelTime("gpt-5.6-codex").textContent).toBe("1m 01s");
+    await vi.waitFor(() => expect(requiredModelTime("gpt-5.6-codex").textContent).toBe("1m 01s"), {
+      timeout: 4_000,
+    });
     // These token/helper rows occurred after recording began. Their lack of a
     // time observation still means unavailable, never a guessed zero duration.
     expect(requiredModelTime("gpt-5.6-codex-mini").textContent).toBe("Not recorded");
@@ -890,8 +994,9 @@ describe("UsageStatsPanel", () => {
         ),
       },
     });
-    await vi.waitFor(() =>
-      expect(requiredModelTime("gpt-5.6-codex").textContent).toBe("2h 31m 01s"),
+    await vi.waitFor(
+      () => expect(requiredModelTime("gpt-5.6-codex").textContent).toBe("2h 31m 01s"),
+      { timeout: 4_000 },
     );
     await page.getByRole("button", { name: "All", exact: true }).click();
     expect(requiredModelTime("gpt-5.6-codex").textContent).toBe("1d 16h 01m 00s");
@@ -1521,16 +1626,19 @@ describe("UsageStatsPanel", () => {
       tokenBreakdown: completedRows,
       tokenBreakdownDays: completedRows.map((row) => ({ ...row, day: today.day })),
     });
-    await vi.waitFor(() => {
-      const provider = requiredElement('[data-usage-output-provider="claudeAgent"]');
-      expect(provider.textContent).not.toContain("No output recorded");
-      expect(provider.textContent).not.toContain("processed tokens");
-      expect(provider.textContent).toContain("200");
-      expect(overviewValue("Tokens generated")).toBe("10,012,880");
-      expect(modelCostRows().find((row) => row.model === "claude-fable-5-1")?.tokens).toBe(
-        "2,853,496",
-      );
-    });
+    await vi.waitFor(
+      () => {
+        const provider = requiredElement('[data-usage-output-provider="claudeAgent"]');
+        expect(provider.textContent).not.toContain("No output recorded");
+        expect(provider.textContent).not.toContain("processed tokens");
+        expect(provider.textContent).toContain("200");
+        expect(overviewValue("Tokens generated")).toBe("10,012,880");
+        expect(modelCostRows().find((row) => row.model === "claude-fable-5-1")?.tokens).toBe(
+          "2,853,496",
+        );
+      },
+      { timeout: 4_000 },
+    );
   });
 
   it("explains an omitted effective model while retaining its exact counted and unpriced usage", async () => {
@@ -1805,6 +1913,234 @@ describe("UsageStatsPanel", () => {
     );
     await vi.waitFor(() => expect(displayedRawCount("processed")).toBe(3_000_010), {
       timeout: 3_000,
+    });
+  });
+
+  it("animates live model, composition, savings, and cost-quality figures together", async () => {
+    const [initialUsage, updatedUsage] = createAnimatedUsageUpdate();
+    mounted = await render(<UsageCostContent usage={initialUsage} range="all" />);
+
+    expect(document.querySelector<HTMLElement>("[data-usage-model]")?.dataset.usageModel).not.toBe(
+      "gpt-5.6-codex",
+    );
+    const initialModel = requiredModelRow("gpt-5.6-codex", "codex");
+    const initialModelTokens = parseFullTokenFigure(
+      initialModel.querySelector('[data-usage-token-full="model"]')!,
+    );
+    const initialModelCost = parseUsd(
+      initialModel.querySelector("[data-usage-model-cost-value]")!.textContent,
+    );
+    const initialModelTime = requiredModelTime("gpt-5.6-codex", "codex").textContent;
+    const initialReasoning = parseFullTokenFigure(
+      requiredElement('[data-usage-token-full="reasoning"]'),
+    );
+    const initialSavings = parseUsd(
+      requiredElement('[data-usage-composition-value="cache-savings"]').textContent,
+    );
+    const initialPriced = Number.parseFloat(costQualityValue("Priced")!);
+
+    const updatedModel = updatedUsage.tokenBreakdown.find(
+      (entry) => entry.provider === "codex" && entry.model === "gpt-5.6-codex",
+    )!;
+    const targetModelTokens = updatedModel.inputTokens + updatedModel.outputTokens;
+    const targetModelCost = rollUpCost([updatedModel]).cost;
+    const targetModelTime = updatedUsage.modelGeneratingTime!.totals.find(
+      (entry) => entry.provider === "codex" && entry.model === "gpt-5.6-codex",
+    )!.generatingMs;
+    const targetRollup = rollUpCost(updatedUsage.tokenBreakdown);
+    const targetProcessed = updatedUsage.totals.inputTokens + updatedUsage.totals.outputTokens;
+    const targetFresh = Math.max(
+      0,
+      updatedUsage.totals.inputTokens -
+        updatedUsage.totals.cachedInputTokens -
+        updatedUsage.totals.cacheWriteInputTokens,
+    );
+    const targetShare = Math.max(
+      targetProcessed,
+      targetRollup.pricedTokens + targetRollup.unpricedTokens,
+    );
+    const targetPriced = (targetRollup.pricedTokens / targetShare) * 100;
+
+    await mounted.rerender(<UsageCostContent usage={updatedUsage} range="all" />);
+    // Target ordering updates immediately, but the keyed row must carry its
+    // old displayed figures into the new position and count from there.
+    expect(document.querySelector<HTMLElement>("[data-usage-model]")?.dataset.usageModel).toBe(
+      "gpt-5.6-codex",
+    );
+
+    await vi.waitFor(
+      () => {
+        const row = requiredModelRow("gpt-5.6-codex", "codex");
+        const tokens = parseFullTokenFigure(row.querySelector('[data-usage-token-full="model"]')!);
+        const compact = row.querySelector('[data-usage-token-compact="model"]')!.textContent;
+        const cost = parseUsd(row.querySelector("[data-usage-model-cost-value]")!.textContent);
+        const time = requiredModelTime("gpt-5.6-codex", "codex").textContent;
+        const reasoning = parseFullTokenFigure(
+          requiredElement('[data-usage-token-full="reasoning"]'),
+        );
+        const savings = parseUsd(
+          requiredElement('[data-usage-composition-value="cache-savings"]').textContent,
+        );
+        const priced = Number.parseFloat(costQualityValue("Priced")!);
+
+        expect(tokens).toBeGreaterThan(initialModelTokens);
+        expect(tokens).toBeLessThan(targetModelTokens);
+        expect(compact).toBe(formatCompactTokenCount(tokens));
+        expect(cost).toBeGreaterThan(initialModelCost);
+        expect(cost).toBeLessThan(targetModelCost);
+        expect(time).not.toBe(initialModelTime);
+        expect(time).not.toBe(formatGeneratingTime(targetModelTime));
+        expect(reasoning).toBeGreaterThan(initialReasoning);
+        expect(reasoning).toBeLessThan(updatedUsage.totals.reasoningOutputTokens);
+        expect(savings).toBeGreaterThan(Math.min(initialSavings, targetRollup.cacheSavings));
+        expect(savings).toBeLessThan(Math.max(initialSavings, targetRollup.cacheSavings));
+        expect(priced).toBeLessThan(initialPriced);
+        expect(priced).toBeGreaterThan(targetPriced);
+      },
+      { interval: 10, timeout: 1_500 },
+    );
+
+    await vi.waitFor(
+      () => {
+        const row = requiredModelRow("gpt-5.6-codex", "codex");
+        expect(row.querySelector("[data-usage-model-cost-value]")!.textContent).toBe(
+          expectedUsd(targetModelCost),
+        );
+        expect(row.querySelector('[data-usage-token-full="model"]')!.textContent).toBe(
+          formatFullTokenCount(targetModelTokens),
+        );
+        expect(row.querySelector('[data-usage-token-compact="model"]')!.textContent).toBe(
+          formatCompactTokenCount(targetModelTokens),
+        );
+        expect(requiredModelTime("gpt-5.6-codex", "codex").textContent).toBe(
+          formatGeneratingTime(targetModelTime),
+        );
+        expect(displayedRawCount("processed")).toBe(targetProcessed);
+        expect(displayedRawCount("cached")).toBe(updatedUsage.totals.cachedInputTokens);
+        expect(displayedRawCount("uncached")).toBe(targetFresh);
+        expect(displayedRawCount("output")).toBe(updatedUsage.totals.outputTokens);
+        expect(requiredElement('[data-usage-token-full="reasoning"]').textContent).toBe(
+          `${formatFullTokenCount(updatedUsage.totals.reasoningOutputTokens)} reasoning tokens`,
+        );
+        expect(requiredElement('[data-usage-composition-value="cache-savings"]').textContent).toBe(
+          expectedUsd(targetRollup.cacheSavings),
+        );
+        expect(requiredElement("[data-usage-cost-quality-cache-savings]").textContent).toBe(
+          expectedUsd(targetRollup.cacheSavings),
+        );
+        expect(requiredElement("[data-usage-composition-tile='cached']").textContent).toContain(
+          `${((updatedUsage.totals.cachedInputTokens / updatedUsage.totals.inputTokens) * 100).toFixed(1)}% of input`,
+        );
+        expect(costQualityValue("Priced")).toBe(`${targetPriced.toFixed(1)}%`);
+        expect(costQualityValue("Unpriced")).toBe(`${(100 - targetPriced).toFixed(1)}%`);
+      },
+      { timeout: 4_000 },
+    );
+  });
+
+  it("snaps every live usage figure when reduced motion is requested", async () => {
+    settleLayoutCountersImmediately();
+    const [initialUsage, updatedUsage] = createAnimatedUsageUpdate();
+    mounted = await render(<UsageCostContent usage={initialUsage} range="all" />);
+    const targetModel = updatedUsage.tokenBreakdown.find(
+      (entry) => entry.provider === "codex" && entry.model === "gpt-5.6-codex",
+    )!;
+    const targetModelTokens = targetModel.inputTokens + targetModel.outputTokens;
+    const targetRollup = rollUpCost(updatedUsage.tokenBreakdown);
+
+    // With RAF callbacks deliberately withheld, only the reduced-motion snap
+    // path can paint the new values. This guards every row/stat without making
+    // the test depend on an animation-frame race.
+    const animationFrame = vi
+      .spyOn(window, "requestAnimationFrame")
+      .mockImplementation(() => 91_337);
+    await mounted.rerender(<UsageCostContent usage={updatedUsage} range="all" />);
+
+    await vi.waitFor(() => {
+      const row = requiredModelRow("gpt-5.6-codex", "codex");
+      expect(row.querySelector("[data-usage-model-cost-value]")!.textContent).toBe(
+        expectedUsd(rollUpCost([targetModel]).cost),
+      );
+      expect(row.querySelector('[data-usage-token-full="model"]')!.textContent).toBe(
+        formatFullTokenCount(targetModelTokens),
+      );
+      expect(requiredModelTime("gpt-5.6-codex", "codex").textContent).toBe("3m 00s");
+      expect(displayedRawCount("processed")).toBe(
+        updatedUsage.totals.inputTokens + updatedUsage.totals.outputTokens,
+      );
+      expect(requiredElement('[data-usage-token-full="reasoning"]').textContent).toBe(
+        `${formatFullTokenCount(updatedUsage.totals.reasoningOutputTokens)} reasoning tokens`,
+      );
+      expect(requiredElement('[data-usage-composition-value="cache-savings"]').textContent).toBe(
+        expectedUsd(targetRollup.cacheSavings),
+      );
+    });
+    expect(animationFrame).not.toHaveBeenCalled();
+  });
+
+  it("snaps a lower reporting range instead of relabeling animated lifetime values", async () => {
+    const usage = createModelTimeUsageDetail();
+    mounted = await render(<UsageCostContent usage={usage} range="all" />);
+    expect(displayedRawCount("processed")).toBe(rangeExpectations.All.processed);
+    expect(requiredModelTime("gpt-5.6-codex", "codex").textContent).toBe("1d 16h 00m 00s");
+
+    const animationFrame = vi
+      .spyOn(window, "requestAnimationFrame")
+      .mockImplementation(() => 73_311);
+    await mounted.rerender(<UsageCostContent usage={usage} range="7" />);
+
+    expect(displayedRawCount("processed")).toBe(rangeExpectations["7 days"].processed);
+    expect(displayedRawCount("cached")).toBe(rangeExpectations["7 days"].cached);
+    expect(requiredModelTime("gpt-5.6-codex", "codex").textContent).toBe("2h 30m 01s");
+    expect(modelCostRows().find((row) => row.model === "gpt-5.6-codex")).toEqual(
+      rangeExpectations["7 days"].models[0],
+    );
+    expect(modelCostRows().find((row) => row.model === "waiting-only")).toEqual({
+      model: "waiting-only",
+      cost: "—",
+      tokens: "0",
+    });
+    expect(costQualityValue("Priced")).toBe(rangeExpectations["7 days"].priced);
+    expect(animationFrame).not.toHaveBeenCalled();
+  });
+
+  it("keeps a tiny positive animated cost-quality share visible below 0.1%", async () => {
+    const baseline = createUsageDetail();
+    const unpriced = {
+      provider: ProviderDriverKind.make("opencode"),
+      model: "unpriced-dominant-model",
+      inputTokens: 2_000_000,
+      cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      outputTokens: 0,
+      reasoningOutputTokens: 0,
+    };
+    const initialUsage: UsageStatsGetResult = {
+      ...baseline,
+      totals: { ...emptyTotals, inputTokens: unpriced.inputTokens },
+      tokenBreakdown: [unpriced],
+    };
+    const onePricedToken = {
+      provider: ProviderDriverKind.make("codex"),
+      model: "gpt-5.6-codex",
+      inputTokens: 1,
+      cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      outputTokens: 0,
+      reasoningOutputTokens: 0,
+    };
+    const updatedUsage: UsageStatsGetResult = {
+      ...initialUsage,
+      totals: { ...emptyTotals, inputTokens: unpriced.inputTokens + 1 },
+      tokenBreakdown: [unpriced, onePricedToken],
+    };
+    mounted = await render(<UsageCostContent usage={initialUsage} range="all" />);
+    expect(costQualityValue("Priced")).toBe("0.0%");
+
+    await mounted.rerender(<UsageCostContent usage={updatedUsage} range="all" />);
+    await vi.waitFor(() => {
+      expect(costQualityValue("Priced")).toBe("<0.1%");
+      expect(costQualityValue("Unpriced")).toBe("100.0%");
     });
   });
 

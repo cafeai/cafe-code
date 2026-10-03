@@ -330,9 +330,7 @@ function BoundSubagentDetailView({
 
   const elapsed = formatElapsed(subagent.startedAt, live ? now : subagent.completedAt);
   const primaryDescription =
-    subagent.description ??
-    subagent.objective ??
-    (subagent.status === "waiting" ? "Waiting to start" : "Working");
+    subagent.description ?? subagent.objective ?? statusLabel(subagent.status);
   const messages =
     loadState.status === "loaded" ? loadState.detail.messages : EMPTY_SUBAGENT_DETAIL_MESSAGES;
   const keyedMessages = useMemo(

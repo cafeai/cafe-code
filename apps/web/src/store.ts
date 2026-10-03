@@ -1152,18 +1152,30 @@ function compareActivities(
   return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
 }
 
+function boundedSubagentIdentity(value: unknown): string | undefined {
+  // Keep this authorization-adjacent provider identity byte-exact, matching the
+  // renderer coalescer. Trimming or whitespace normalization could collapse two
+  // distinct provider children into one retention slot. The value never becomes
+  // display text; controls and bidi controls fail closed before it is used as a
+  // compact-state key.
+  return typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 512 &&
+    !/[\p{Cc}\p{Bidi_Control}]/u.test(value)
+    ? value
+    : undefined;
+}
+
 function structuredSubagentLifecycleKeys(
   activity: OrchestrationThreadActivity,
-  currentTurnId: TurnId | null | undefined,
-): { identity: string; lifecycle: string } | undefined {
+): ReadonlyArray<{ identity: string; lifecycle: string }> {
   if (
     activity.turnId === null ||
-    activity.turnId !== currentTurnId ||
     (activity.kind !== "task.started" &&
       activity.kind !== "task.progress" &&
       activity.kind !== "task.completed")
   ) {
-    return undefined;
+    return [];
   }
   const payload =
     typeof activity.payload === "object" &&
@@ -1177,27 +1189,40 @@ function structuredSubagentLifecycleKeys(
     !Array.isArray(payload.subagent)
       ? (payload.subagent as Record<string, unknown>)
       : null;
-  const identity = typeof subagent?.threadId === "string" ? subagent.threadId.trim() : "";
-  if (identity.length === 0 || identity.length > 512) return undefined;
-  return {
+  const presentationIdentity = boundedSubagentIdentity(subagent?.threadId);
+  const ambientTaskIdentity =
+    payload?.visibility === "ambient" ? boundedSubagentIdentity(payload.taskId) : undefined;
+  // An ambient edge is an authoritative visibility tombstone and is allowed to
+  // omit presentation metadata. Retain its exact task identity so an older
+  // visible start cannot reappear merely because the tombstone left the normal
+  // 500-row tail. When both identities are present, preserve both deletion
+  // targets exactly as `deriveSubagentActivities` does.
+  const identities = [presentationIdentity, ambientTaskIdentity].filter(
+    (identity, index, all): identity is string =>
+      identity !== undefined && all.indexOf(identity) === index,
+  );
+  return identities.map((identity) => ({
     identity: JSON.stringify([activity.turnId, identity]),
     lifecycle: JSON.stringify([activity.turnId, identity, activity.kind]),
-  };
+  }));
 }
 
 /**
  * Retain the ordinary bounded tail plus the minimum durable state needed by
- * compact, current-turn renderer projections.
+ * compact renderer projections across every turn that can still own live work.
  *
  * A subagent may stay silent while hundreds of unrelated tool rows arrive. If
  * its lifecycle edges were treated like ordinary history, it would disappear
  * from chat/Atrium before it finished. Keeping the latest start, progress, and
- * terminal edge per current-turn identity reconstructs restarts and rejects a
- * delayed post-terminal progress replay without making the full activity
- * history unbounded. The latest plan snapshot follows the same established
- * compact-retention rule. One validated configuration for the exact current
- * turn also survives the tail, so a 16-hour run keeps its account/model sanity
- * check without retaining settings for every historical turn.
+ * terminal edge per `(turn, child)` identity reconstructs restarts and rejects
+ * a delayed post-terminal progress replay without making the full activity
+ * history unbounded. Retaining only the latest three events overall would be
+ * incorrect: three later progress snapshots could evict the authoritative
+ * completion or explicit restart. The latest plan snapshot follows the same
+ * established compact-retention rule. One validated configuration for the
+ * exact current turn also survives the tail, so a 16-hour run keeps its
+ * account/model sanity check without retaining settings for every historical
+ * turn.
  */
 function retainThreadActivityWindow(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
@@ -1223,18 +1248,18 @@ function retainThreadActivityWindow(
   const retainedSubagentIdentities = new Set<string>();
   const latestSubagentLifecycleByKey = new Map<string, OrchestrationThreadActivity>();
   // Walk newest-first so an adversarial stream of unique ids cannot make the
-  // compact exception unbounded. Once the identity ceiling is reached, older
-  // identities fall back to the ordinary 500-row activity tail.
+  // compact exception unbounded across many turns. Once the identity ceiling is
+  // reached, older identities fall back to the ordinary 500-row activity tail.
   for (let index = ordered.length - 1; index >= 0; index -= 1) {
     const activity = ordered[index]!;
-    const keys = structuredSubagentLifecycleKeys(activity, currentTurnId);
-    if (!keys) continue;
-    if (!retainedSubagentIdentities.has(keys.identity)) {
-      if (retainedSubagentIdentities.size >= MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN) continue;
-      retainedSubagentIdentities.add(keys.identity);
-    }
-    if (!latestSubagentLifecycleByKey.has(keys.lifecycle)) {
-      latestSubagentLifecycleByKey.set(keys.lifecycle, activity);
+    for (const keys of structuredSubagentLifecycleKeys(activity)) {
+      if (!retainedSubagentIdentities.has(keys.identity)) {
+        if (retainedSubagentIdentities.size >= MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN) continue;
+        retainedSubagentIdentities.add(keys.identity);
+      }
+      if (!latestSubagentLifecycleByKey.has(keys.lifecycle)) {
+        latestSubagentLifecycleByKey.set(keys.lifecycle, activity);
+      }
     }
   }
   for (const activity of latestSubagentLifecycleByKey.values()) retainedIds.add(activity.id);
@@ -2397,12 +2422,21 @@ function applyEnvironmentOrchestrationEvent(
 
     case "thread.activity-appended":
       return updateThreadState(state, event.payload.threadId, (thread) => {
+        // The enclosing orchestration event is the canonical durable order for
+        // every append. A nested activity sequence can be absent or belong to
+        // a provider/session-local namespace which resets after resume. Always
+        // project the aggregate sequence so equal-millisecond lifecycle edges
+        // cannot fall back to opaque ids or disagree after reconnect.
+        const appendedActivity: OrchestrationThreadActivity = {
+          ...event.payload.activity,
+          sequence: event.sequence,
+        };
         const activities = retainThreadActivityWindow(
           [
-            ...thread.activities.filter((activity) => activity.id !== event.payload.activity.id),
-            { ...event.payload.activity },
+            ...thread.activities.filter((activity) => activity.id !== appendedActivity.id),
+            appendedActivity,
           ],
-          thread.latestTurn?.turnId ?? event.payload.activity.turnId,
+          thread.latestTurn?.turnId ?? appendedActivity.turnId,
         );
         const latestTurn =
           // Accepted settings are presentation metadata, not a model execution

@@ -1,6 +1,6 @@
 # Usage statistics
 
-Last updated: 2026-10-03 14:59:38 JST (UTC+0900)
+Last updated: 2026-10-04 00:42:33 JST (UTC+0900)
 
 Settings → Usage has one date-range selector for its reporting statistics. The default is 30 days. Selecting 7 days, 30 days, 90 days or All updates generated tokens, chats sent, generating time, estimated USD cost, provider/model breakdowns, token composition, cache savings, cost quality and usage charts together. Activity always shows all recorded daily history, independently of this selector. Cost/Tokens changes the graph's measurement without changing the selected period. The shared detailed cost view in Atrium uses the same range semantics; Atrium's ambient lifetime counters remain lifetime counters.
 
@@ -11,6 +11,15 @@ A finite period includes the server's current local day and the preceding N−1 
 `apps/web/src/components/stats/usageRange.ts` derives the selected view from the existing decoded usage response. It independently sums generating time, chats, input/output and cache/reasoning counters, then aggregates only model observations within the same daily bounds. Cache reads and writes are subsets of input; reasoning is a subset of output and is never added again to processed tokens. Range changes reset period-specific numeric animations and generation-time floors so values from a larger period cannot briefly masquerade as a smaller period's usage. Activity instead uses the unfiltered response and All calendar bounds. Its current-day time floor, colors and scroll position survive range changes; the daily floor resets only when the detailed response advances the server calendar day.
 
 The existing primary-environment shared detail resource single-flights one refresh every five seconds while visible consumers exist, and refreshes after transport reconnection. Counted dashboard figures derive from the same detailed response, including its provider/model observations. The aggregate live stream supplies current generation status, not guessed model/day attribution; aggregate generation time can advance between detailed reads. A fresher detailed response takes precedence over a stale stream event. Date-range presentation adds no polling loop, provider calls, credentials or persistent renderer cache; prospective model timing uses the additive storage and detailed-response dimension described below.
+
+Live numeric changes in the detailed cost view use the same eased ticker as the
+headline counts: model cost, exact/compact token counts, recorded generation
+duration, reasoning tokens, cache savings and quality/input percentages. All
+counters share one animation-frame scheduler and one reduced-motion listener;
+there is no per-row timer, added polling or model-time extrapolation. Reduced
+motion shows each new value directly. A selected-period change still remounts the
+period-specific counters, rather than animating unrelated date ranges into each
+other. Unknown, unpriced and “Not recorded” values remain explicit text states.
 
 ## Time spent generating per model
 

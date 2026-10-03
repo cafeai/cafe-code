@@ -96,6 +96,7 @@ import Migration0078 from "./Migrations/078_RepairUsageStatsTokenDetail.ts";
 import Migration0079 from "./Migrations/079_UsageStatsModelGeneratingTime.ts";
 import Migration0080 from "./Migrations/080_StandaloneThreads.ts";
 import Migration0081 from "./Migrations/081_ThreadSubagentLimits.ts";
+import Migration0082 from "./Migrations/082_SubagentLifecycleRetention.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -193,6 +194,7 @@ export const migrationEntries = [
   [79, "UsageStatsModelGeneratingTime", Migration0079],
   [80, "StandaloneThreads", Migration0080],
   [81, "ThreadSubagentLimits", Migration0081],
+  [82, "SubagentLifecycleRetention", Migration0082],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

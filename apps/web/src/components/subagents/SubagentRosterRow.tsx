@@ -117,9 +117,7 @@ export const SubagentRosterRow = memo(function SubagentRosterRow(props: {
     ? formatElapsed(subagent.startedAt, subagent.completedAt)
     : null;
   const primaryDescription =
-    subagent.description ??
-    subagent.objective ??
-    (subagent.status === "waiting" ? "Waiting" : "Working");
+    subagent.description ?? subagent.objective ?? subagentStatusLabel(subagent.status);
   const objectiveDescription =
     subagent.objective &&
     subagent.description &&

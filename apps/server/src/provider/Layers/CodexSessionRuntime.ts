@@ -854,6 +854,49 @@ export interface CodexChildLivenessSnapshot {
 }
 
 export const CODEX_RESUME_CHILD_RECONCILIATION_LIMIT = 128;
+// Match the adapter's complete-item receiver ceiling. Splitting one legacy
+// collaboration envelope by immutable parent ownership must not multiply that
+// ceiling by the number of parent groups or admit an unbounded route table.
+export const CODEX_CHILD_ACTIVITY_RECEIVER_LIMIT = 256;
+// Routes retain immutable historical ownership, including terminal children.
+// Never evict an active or terminal identity merely to admit an unknown child:
+// that would allow later native output to masquerade as ordinary root output.
+export const CODEX_CHILD_CONVERSATION_ROUTE_LIMIT = 4096;
+
+/**
+ * One bounded, sticky loss-of-authority bit for this exact runtime generation.
+ * It stores no overflow identities. Discovery cannot subsequently clear it or
+ * prove an incomplete tree idle; explicit Stop remains an independent action.
+ * The caller supplies a fixed, content-free diagnostic, emitted at most once.
+ */
+export const makeCodexChildConversationAdmissionFence = Effect.fn(
+  "makeCodexChildConversationAdmissionFence",
+)(function* (onFirstIncomplete: Effect.Effect<void>) {
+  const incomplete = yield* Ref.make(false);
+  return {
+    isIncomplete: Ref.get(incomplete),
+    observeIncomplete: (observed: boolean) =>
+      Effect.gen(function* () {
+        if (observed && !(yield* Ref.getAndSet(incomplete, true))) yield* onFirstIncomplete;
+      }),
+    acceptsNotification: (input: {
+      readonly notification: CodexServerNotification;
+      readonly routes: ReadonlyMap<string, TurnId>;
+      readonly rootProviderThreadId: string | undefined;
+    }) =>
+      Effect.gen(function* () {
+        if (!(yield* Ref.get(incomplete))) return true;
+        const source = readNotificationThreadId(input.notification);
+        // Before overflow, unknown-source frames retain missing-start
+        // compatibility. Afterwards an explicit unknown nonroot identity is
+        // quarantined before liveness, descendant registration or publication.
+        // Frames without native thread proof keep their existing root path.
+        return (
+          source === undefined || source === input.rootProviderThreadId || input.routes.has(source)
+        );
+      }),
+  };
+});
 
 /**
  * Discover exact native child references from only the newest admitted turn.
@@ -888,18 +931,22 @@ export function seedCodexResumedChildConversations(input: {
     const parentTurnId = TurnId.make(turn.id);
     for (const item of turn.items) {
       const candidates = new Map<string, TurnId>();
-      rememberCodexChildConversationTurns(
-        candidates,
-        {
-          method: "item/completed",
-          params: { threadId: input.providerThread.id, turnId: turn.id, item },
-        },
-        parentTurnId,
-        input.providerThread.id,
-      );
+      overflowed =
+        rememberCodexChildConversationTurns(
+          candidates,
+          {
+            method: "item/completed",
+            params: { threadId: input.providerThread.id, turnId: turn.id, item },
+          },
+          parentTurnId,
+          input.providerThread.id,
+        ) || overflowed;
       for (const [childId, owner] of candidates) {
         if (routes.has(childId)) continue;
-        if (discovered >= CODEX_RESUME_CHILD_RECONCILIATION_LIMIT) {
+        if (
+          discovered >= CODEX_RESUME_CHILD_RECONCILIATION_LIMIT ||
+          routes.size >= CODEX_CHILD_CONVERSATION_ROUTE_LIMIT
+        ) {
           overflowed = true;
           continue;
         }
@@ -992,6 +1039,7 @@ export function codexTreeIsIdleForConcurrencyChange(input: {
   readonly queuedNotificationCount: number;
   readonly routes: ReadonlyMap<string, TurnId>;
   readonly children: ReadonlyMap<string, CodexChildConversationLiveness>;
+  readonly admissionIncomplete?: boolean | undefined;
 }): boolean {
   return (
     input.session.status === "ready" &&
@@ -1000,6 +1048,7 @@ export function codexTreeIsIdleForConcurrencyChange(input: {
     !input.compactionPending &&
     input.unsettledCount === 0 &&
     input.queuedNotificationCount === 0 &&
+    !input.admissionIncomplete &&
     Array.from(input.routes).every(([id, parentTurnId]) => {
       const child = input.children.get(id);
       return child?.parentTurnId === parentTurnId && child.state === "inactive";
@@ -2993,7 +3042,7 @@ export function rememberCodexChildConversationTurns(
   notification: CodexServerNotification,
   parentTurnId: TurnId | undefined,
   rootProviderThreadId?: string,
-): void {
+): boolean {
   // A child can send input back to `/root`. In multi_agents_v2 that produces a
   // `subAgentActivity` whose `agentThreadId` is the primary thread, not a new
   // child. Never let that reverse edge poison the child routing table. Remove
@@ -3004,32 +3053,41 @@ export function rememberCodexChildConversationTurns(
   }
 
   if (!parentTurnId) {
-    return;
+    return false;
   }
 
   if (notification.method !== "item/started" && notification.method !== "item/completed") {
-    return;
+    return false;
   }
 
   const params = readRecord(notification.params);
   const item = params ? readRecord(params.item) : undefined;
   if (!item) {
-    return;
+    return false;
   }
 
-  // Upstream Codex TUI 0.144.3 records both multi-agent protocol shapes in
-  // `AgentNavigationState`: legacy collab tool calls identify receivers through
-  // `receiverThreadIds`, while multi_agents_v2 emits a completed
-  // `subAgentActivity` item with the new child's `agentThreadId` immediately
-  // before that child emits `turn/started`. Cafe presents one aggregate thread
-  // instead of separate TUI channels, so retain the same relationship here and
-  // route descendant output back to the initiating Cafe turn.
+  // Codex 0.159.0's multi_agents_v2/message_tool.rs emits `interacted` for
+  // both send_message and followup_task; referencing a child is not a spawn.
+  // Its TUI AgentNavigationState likewise preserves first-seen thread identity.
+  // Cafe's canonical/detail identity includes the initiating visible turn, so
+  // retain that owner for the lifetime of this exact runtime/root. Rebinding a
+  // still-live child to a newer root turn would leave the original UI row live
+  // and authorize a second historical row for the same native child. Explicit
+  // reuse can reopen the existing owner; it does not create a new child.
   const childThreadIds =
     item.type === "subAgentActivity" && !isCodexRootAgentPath(item.agentPath)
       ? [item.agentThreadId]
       : item.type === "collabAgentToolCall" && Array.isArray(item.receiverThreadIds)
-        ? item.receiverThreadIds
+        ? item.receiverThreadIds.slice(0, CODEX_CHILD_ACTIVITY_RECEIVER_LIMIT)
         : [];
+
+  // Check the raw length in constant time rather than scanning attacker-sized
+  // envelopes to count valid receivers. Even an invalid truncated tail cannot
+  // authorize idle/completion after the complete reference set was omitted.
+  let incomplete =
+    item.type === "collabAgentToolCall" &&
+    Array.isArray(item.receiverThreadIds) &&
+    item.receiverThreadIds.length > CODEX_CHILD_ACTIVITY_RECEIVER_LIMIT;
 
   for (const childThreadId of childThreadIds) {
     if (typeof childThreadId !== "string" || childThreadId.length === 0) {
@@ -3038,8 +3096,156 @@ export function rememberCodexChildConversationTurns(
     if (rootProviderThreadId && childThreadId === rootProviderThreadId) {
       continue;
     }
-    childConversationTurns.set(childThreadId, parentTurnId);
+    if (!childConversationTurns.has(childThreadId)) {
+      if (childConversationTurns.size >= CODEX_CHILD_CONVERSATION_ROUTE_LIMIT) {
+        incomplete = true;
+      } else {
+        childConversationTurns.set(childThreadId, parentTurnId);
+      }
+    }
   }
+  return incomplete;
+}
+
+/**
+ * Bind collaboration activity to its target's immutable visible owner, not
+ * whichever newer native parent turn happened to send a message or wait.
+ * `undefined` is ordinary native work; an empty array is an inadmissible child
+ * activity. The original notification is observed/logged once. These bounded
+ * copies only feed canonical subagent mapping, which already consumes collab
+ * envelopes instead of producing ordinary tool/work-log rows.
+ */
+export function buildCodexChildActivityNotifications(
+  childConversationTurns: ReadonlyMap<string, TurnId>,
+  childLiveness: ReadonlyMap<string, CodexChildConversationLiveness>,
+  notification: CodexServerNotification,
+):
+  | ReadonlyArray<{
+      readonly parentTurnId: TurnId;
+      readonly notification: CodexServerNotification;
+    }>
+  | undefined {
+  if (notification.method !== "item/started" && notification.method !== "item/completed") {
+    return undefined;
+  }
+  const params = readRecord(notification.params);
+  const item = params ? readRecord(params.item) : undefined;
+  if (!params || !item) return undefined;
+  if (!acceptsCodexChildNotification(childLiveness, notification, childConversationTurns))
+    return [];
+
+  if (item.type === "subAgentActivity") {
+    // A /root target is reverse communication, never a child. Only the
+    // already-owned distinct source child can supply its canonical identity.
+    const providerThreadId = isCodexRootAgentPath(item.agentPath)
+      ? readNotificationThreadId(notification)
+      : readString(item.agentThreadId);
+    if (
+      !providerThreadId ||
+      (providerThreadId === item.agentThreadId && isCodexRootAgentPath(item.agentPath))
+    ) {
+      return [];
+    }
+    const parentTurnId = childConversationTurns.get(providerThreadId);
+    return parentTurnId ? [{ parentTurnId, notification }] : [];
+  }
+  if (item.type !== "collabAgentToolCall" || !Array.isArray(item.receiverThreadIds)) {
+    return undefined;
+  }
+
+  // One legacy envelope can address children owned by different visible turns.
+  // Partition only the receiver portion; keep native sender, item/turn identity,
+  // status, objective and model metadata intact. Filter state keys as well so
+  // a copy never carries another owner's receiver metadata. Never mutate the
+  // provider notification, nor fan out beyond the original total bound.
+  const groups = new Map<TurnId, string[]>();
+  for (const candidate of item.receiverThreadIds.slice(0, CODEX_CHILD_ACTIVITY_RECEIVER_LIMIT)) {
+    const providerThreadId = readString(candidate);
+    const parentTurnId = providerThreadId
+      ? childConversationTurns.get(providerThreadId)
+      : undefined;
+    if (!providerThreadId || !parentTurnId) continue;
+    const receivers = groups.get(parentTurnId);
+    if (receivers) receivers.push(providerThreadId);
+    else groups.set(parentTurnId, [providerThreadId]);
+  }
+  const states = readRecord(item.agentsStates);
+  return Array.from(groups, ([parentTurnId, receiverThreadIds]) => ({
+    parentTurnId,
+    notification: {
+      ...notification,
+      params: {
+        ...params,
+        item: {
+          ...item,
+          receiverThreadIds,
+          agentsStates: Object.fromEntries(
+            receiverThreadIds
+              .filter((providerThreadId) => states && Object.hasOwn(states, providerThreadId))
+              .map((providerThreadId) => [providerThreadId, states?.[providerThreadId]]),
+          ),
+        },
+      },
+    },
+  }));
+}
+
+/** Share exact native generation authority between routing, liveness and publication. */
+export function acceptsCodexChildNotification(
+  childLiveness: ReadonlyMap<string, CodexChildConversationLiveness>,
+  notification: CodexServerNotification,
+  childConversationTurns?: ReadonlyMap<string, TurnId>,
+): boolean {
+  // A concrete native start is positive replacement authority. Every other
+  // child-scoped event with an explicit turn must belong to the known current
+  // generation, including reasoning/tool snapshots and non-retrying errors.
+  // Otherwise stale progress could replace native identity or stale errors
+  // could close the fresh task through the ordinary canonical event path.
+  if (notification.method === "turn/started") return true;
+  const sourceThreadId = readNotificationThreadId(notification);
+  const sourceTurnId = readNotificationTurnId(notification);
+  const currentSourceTurnId =
+    sourceThreadId &&
+    (childConversationTurns === undefined || childConversationTurns.has(sourceThreadId))
+      ? childLiveness.get(sourceThreadId)?.nativeTurnId
+      : undefined;
+  if (
+    sourceTurnId !== undefined &&
+    currentSourceTurnId !== undefined &&
+    sourceTurnId !== currentSourceTurnId
+  )
+    return false;
+
+  let providerThreadId: string | undefined;
+  let nativeTurnId: string | undefined;
+  if (notification.method === "turn/completed") {
+    providerThreadId = readNotificationThreadId(notification);
+    nativeTurnId = readNotificationTurnId(notification);
+  } else if (notification.method === "item/started" || notification.method === "item/completed") {
+    const params = readRecord(notification.params);
+    const item = params ? readRecord(params.item) : undefined;
+    // Official core/agent/control/completion.rs binds completed activity to
+    // outcome.turn_id with this exact prefix. Unknown older item-id spellings
+    // carry no child-turn proof and retain the existing compatibility path.
+    const prefix = "subagent-completed-";
+    const itemId = readString(item?.id);
+    if (
+      item?.type === "subAgentActivity" &&
+      item.kind === "completed" &&
+      itemId?.startsWith(prefix)
+    ) {
+      providerThreadId = readString(item.agentThreadId);
+      nativeTurnId = itemId.slice(prefix.length) || undefined;
+    }
+  }
+  const currentTurnId =
+    providerThreadId &&
+    (childConversationTurns === undefined || childConversationTurns.has(providerThreadId))
+      ? childLiveness.get(providerThreadId)?.nativeTurnId
+      : undefined;
+  return (
+    nativeTurnId === undefined || currentTurnId === undefined || nativeTurnId === currentTurnId
+  );
 }
 
 function shouldSuppressChildConversationNotification(method: string): boolean {
@@ -3116,7 +3322,11 @@ export function codexAggregateNotificationMethod(
  */
 export function codexSubagentProjectionMethod(
   notification: CodexServerNotification,
+  childLiveness: ReadonlyMap<string, CodexChildConversationLiveness> = new Map(),
+  childConversationTurns?: ReadonlyMap<string, TurnId>,
 ): string | undefined {
+  if (!acceptsCodexChildNotification(childLiveness, notification, childConversationTurns))
+    return undefined;
   switch (notification.method) {
     case "thread/started":
       return "codex.subagent/threadStarted";
@@ -3248,6 +3458,8 @@ export function updateCodexChildConversationLiveness(
     }
   }
 
+  if (!acceptsCodexChildNotification(next, notification, childConversationTurns)) return next;
+
   if (notification.method === "item/started" || notification.method === "item/completed") {
     const params = readRecord(notification.params);
     const item = params ? readRecord(params.item) : undefined;
@@ -3286,14 +3498,6 @@ export function updateCodexChildConversationLiveness(
 
   const previousChild = next.get(providerThreadId);
   const nativeTurnId = readNotificationTurnId(notification);
-  if (
-    notification.method === "turn/completed" &&
-    previousChild?.nativeTurnId !== undefined &&
-    nativeTurnId !== undefined &&
-    previousChild.nativeTurnId !== String(nativeTurnId)
-  ) {
-    return next;
-  }
 
   let state: CodexChildConversationLivenessState | undefined;
   switch (notification.method) {
@@ -3325,8 +3529,10 @@ export function updateCodexChildConversationLiveness(
     default:
       if (isCodexChildConversationWorkNotification(notification)) {
         // A late item/control completion is not a new native child turn. Keep
-        // terminal truth for its exact turn; a new native start/status, or a
-        // distinct concrete turn id, remains positive liveness authority.
+        // terminal truth for its exact turn. Concrete start/status remains
+        // positive authority; work with no retained native identity keeps the
+        // legacy missing-start compatibility path. Explicit mismatched native
+        // identities were rejected before any state mutation above.
         if (
           previousChild?.state === "inactive" &&
           (nativeTurnId === undefined || previousChild.nativeTurnId === String(nativeTurnId))
@@ -3350,11 +3556,50 @@ export function updateCodexChildConversationLiveness(
   return next;
 }
 
+/**
+ * Caller holds the aggregate permit and supplies its freshly checked native
+ * admission. A rejected second check must perform no route/liveness mutation,
+ * even if the frame was admitted earlier before observation/snapshot I/O.
+ * Keep this complete state-commit boundary shared with deterministic races.
+ */
+export const commitCodexChildConversationNotification = Effect.fn(
+  "commitCodexChildConversationNotification",
+)(function* (input: {
+  readonly admitted: boolean;
+  readonly routes: Map<string, TurnId>;
+  readonly children: ReadonlyMap<string, CodexChildConversationLiveness>;
+  readonly routesRef: Ref.Ref<Map<string, TurnId>>;
+  readonly childrenRef: Ref.Ref<Map<string, CodexChildConversationLiveness>>;
+  readonly notification: CodexServerNotification;
+  readonly parentTurnId: TurnId | undefined;
+  readonly rootProviderThreadId: string | undefined;
+  readonly observedAt: string;
+}) {
+  if (!input.admitted) return undefined;
+  const incomplete = rememberCodexChildConversationTurns(
+    input.routes,
+    input.notification,
+    input.parentTurnId,
+    input.rootProviderThreadId,
+  );
+  const children = updateCodexChildConversationLiveness(
+    input.children,
+    input.routes,
+    input.notification,
+    input.observedAt,
+  );
+  yield* Ref.set(input.routesRef, input.routes);
+  yield* Ref.set(input.childrenRef, children);
+  return { routes: input.routes, children, incomplete };
+});
+
 export function codexAggregateTurnHasUnfinishedChildren(
   childConversationTurns: ReadonlyMap<string, TurnId>,
   childLiveness: ReadonlyMap<string, CodexChildConversationLiveness>,
   parentTurnId: TurnId,
+  admissionIncomplete = false,
 ): boolean {
+  if (admissionIncomplete) return true;
   const childThreadIds = codexChildConversationThreadIdsForTurn(
     childConversationTurns,
     parentTurnId,
@@ -3367,6 +3612,20 @@ export function codexAggregateTurnHasUnfinishedChildren(
       liveness.state !== "inactive"
     );
   });
+}
+
+/** Root-only snapshots cannot prove success for an unresolved aggregate tree. */
+export function codexSuccessfulRootSnapshotIsBlocked(input: {
+  readonly status: string | undefined;
+  readonly turnId: TurnId | undefined;
+  readonly unresolvedTurnIds: ReadonlySet<string>;
+  readonly admissionIncomplete: boolean;
+}): boolean {
+  return (
+    input.status === "completed" &&
+    (input.admissionIncomplete ||
+      (input.turnId !== undefined && input.unresolvedTurnIds.has(String(input.turnId))))
+  );
 }
 
 /**
@@ -4756,6 +5015,14 @@ export const makeCodexSessionRuntime = (
     const childConversationLivenessRef = yield* Ref.make(
       new Map<string, CodexChildConversationLiveness>(),
     );
+    const childAdmissionFence = yield* makeCodexChildConversationAdmissionFence(
+      Effect.logWarning("codex.child-routing.admission-incomplete", {
+        // Deliberately no native IDs, payloads, prompts or error text. This
+        // fixed diagnostic describes lost authority, not an inferred idle tree.
+        routeCapacity: CODEX_CHILD_CONVERSATION_ROUTE_LIMIT,
+        receiverCapacity: CODEX_CHILD_ACTIVITY_RECEIVER_LIMIT,
+      }),
+    );
     const resumeChildDiscoveryUncertainRef = yield* Ref.make(false);
     const aggregateRootCompletionsRef = yield* Ref.make(
       new Map<string, CodexAggregateRootCompletion>(),
@@ -5443,6 +5710,24 @@ export const makeCodexSessionRuntime = (
               observedAt: event.createdAt,
               publish: Queue.offer(events, event).pipe(Effect.asVoid),
             });
+          } else if (event.method === "turn/completed" && state === "completed") {
+            // Recheck atomically at publication, not only in the earlier
+            // backfill filter. Detached discovery/native registration may
+            // have made the tree incomplete while snapshot I/O was pending.
+            yield* aggregateLifecycleSemaphore.withPermits(1)(
+              Effect.gen(function* () {
+                if (
+                  codexSuccessfulRootSnapshotIsBlocked({
+                    status: state,
+                    turnId: event.turnId,
+                    unresolvedTurnIds: yield* Ref.get(aggregateManagedTurnIdsRef),
+                    admissionIncomplete: yield* childAdmissionFence.isIncomplete,
+                  })
+                )
+                  return;
+                yield* Queue.offer(events, event);
+              }),
+            );
           } else {
             yield* Queue.offer(events, event);
           }
@@ -5564,58 +5849,50 @@ export const makeCodexSessionRuntime = (
       readonly threadStatusType: "notLoaded" | "idle" | "systemError" | "active" | null;
       readonly turn: CodexSnapshotTurn;
     }) =>
-      Effect.gen(function* () {
-        if (input.turn.status === "inProgress") {
-          return;
-        }
+      aggregateLifecycleSemaphore.withPermits(1)(
+        Effect.gen(function* () {
+          if (input.turn.status === "inProgress") {
+            return;
+          }
 
-        if (
-          input.turn.status === "completed" &&
-          (yield* Ref.get(pendingAggregateCompletionsRef)).has(String(input.turnId))
-        ) {
-          // The root provider thread is terminal, but Cafe's visible turn is an
-          // aggregate of that root plus routed subagent channels. A root-only
-          // thread/read snapshot cannot close the aggregate while child
-          // liveness remains pending. Failed/interrupted root outcomes are
-          // terminal independently of those descendants and must not wait.
-          return;
-        }
+          if (
+            codexSuccessfulRootSnapshotIsBlocked({
+              status: input.turn.status,
+              turnId: input.turnId,
+              unresolvedTurnIds: yield* Ref.get(pendingAggregateCompletionsRef),
+              admissionIncomplete: yield* childAdmissionFence.isIncomplete,
+            })
+          ) {
+            // The root provider thread is terminal, but Cafe's visible turn is an
+            // aggregate of that root plus routed subagent channels. A root-only
+            // thread/read snapshot cannot close the aggregate while child
+            // liveness remains pending. Failed/interrupted root outcomes are
+            // terminal independently of those descendants and must not wait.
+            // Overflow is equally inconclusive even before a live root edge has
+            // created a pending aggregate row. Hold the permit through native
+            // session mutation so a later overflow cannot race this admission.
+            return;
+          }
 
-        const observedAt = yield* nowIso;
-        // A successful authoritative terminal snapshot supersedes an older
-        // runtime error. Apply the same patch as the live completion path so
-        // reconnect reconciliation cannot replay a recovered failure.
-        const reconciledActiveTurn = yield* reconcileCodexTerminalSnapshotSteerLifecycle({
-          semaphore: steerLifecycleSemaphore,
-          pendingRef: pendingSteerProcessingRef,
-          sessionRef,
-          turnId: input.turnId,
-          turnStatus: input.turn.status,
-          errorMessage: input.turn.error?.message,
-          observedAt,
-        });
-        if (!reconciledActiveTurn) {
-          return;
-        }
-        yield* Effect.logInfo("codex.turnProgress.reconciledFromThreadRead", {
-          threadId: options.threadId,
-          providerInstanceId: options.providerInstanceId ?? PROVIDER,
-          providerThreadId: input.providerThreadId,
-          turnId: input.turnId,
-          reason: input.reason,
-          threadStatus: input.threadStatusType,
-          turnStatus: input.turn.status,
-          itemCount: input.turn.items.length,
-          itemsView: input.turn.itemsView ?? null,
-        });
-        yield* emitEvent({
-          kind: "notification",
-          threadId: options.threadId,
-          method: "codex.turnProgress/reconciledFromThreadRead",
-          turnId: input.turnId,
-          message:
-            "Codex thread/read reported a terminal active turn; Cafe Code reconciled the session.",
-          payload: {
+          const observedAt = yield* nowIso;
+          // A successful authoritative terminal snapshot supersedes an older
+          // runtime error. Apply the same patch as the live completion path so
+          // reconnect reconciliation cannot replay a recovered failure.
+          const reconciledActiveTurn = yield* reconcileCodexTerminalSnapshotSteerLifecycle({
+            semaphore: steerLifecycleSemaphore,
+            pendingRef: pendingSteerProcessingRef,
+            sessionRef,
+            turnId: input.turnId,
+            turnStatus: input.turn.status,
+            errorMessage: input.turn.error?.message,
+            observedAt,
+          });
+          if (!reconciledActiveTurn) {
+            return;
+          }
+          yield* Effect.logInfo("codex.turnProgress.reconciledFromThreadRead", {
+            threadId: options.threadId,
+            providerInstanceId: options.providerInstanceId ?? PROVIDER,
             providerThreadId: input.providerThreadId,
             turnId: input.turnId,
             reason: input.reason,
@@ -5623,12 +5900,29 @@ export const makeCodexSessionRuntime = (
             turnStatus: input.turn.status,
             itemCount: input.turn.items.length,
             itemsView: input.turn.itemsView ?? null,
-            observedAt,
-            semantics:
-              "Official Codex app-server docs make turn/completed terminal, and thread/read returns authoritative turn statuses. Cafe only clears an active turn from thread-status reconciliation after thread/read reports that same turn as terminal.",
-          },
-        });
-      });
+          });
+          yield* emitEvent({
+            kind: "notification",
+            threadId: options.threadId,
+            method: "codex.turnProgress/reconciledFromThreadRead",
+            turnId: input.turnId,
+            message:
+              "Codex thread/read reported a terminal active turn; Cafe Code reconciled the session.",
+            payload: {
+              providerThreadId: input.providerThreadId,
+              turnId: input.turnId,
+              reason: input.reason,
+              threadStatus: input.threadStatusType,
+              turnStatus: input.turn.status,
+              itemCount: input.turn.items.length,
+              itemsView: input.turn.itemsView ?? null,
+              observedAt,
+              semantics:
+                "Official Codex app-server docs make turn/completed terminal, and thread/read returns authoritative turn statuses. Cafe only clears an active turn from thread-status reconciliation after thread/read reports that same turn as terminal.",
+            },
+          });
+        }),
+      );
 
     const reconcileActiveTurnFromThreadRead = (input: {
       readonly providerThreadId: string;
@@ -5909,7 +6203,12 @@ export const makeCodexSessionRuntime = (
           const childConversationTurns = yield* Ref.get(collabReceiverTurnsRef);
           const childLiveness = yield* Ref.get(childConversationLivenessRef);
           if (
-            codexAggregateTurnHasUnfinishedChildren(childConversationTurns, childLiveness, turnId)
+            codexAggregateTurnHasUnfinishedChildren(
+              childConversationTurns,
+              childLiveness,
+              turnId,
+              yield* childAdmissionFence.isIncomplete,
+            )
           ) {
             return false;
           }
@@ -6053,6 +6352,7 @@ export const makeCodexSessionRuntime = (
           while (!(yield* Ref.get(closedRef))) {
             const pending = yield* Ref.get(pendingAggregateCompletionsRef);
             if (!pending.has(key)) return;
+            if (yield* childAdmissionFence.isIncomplete) return;
             const delay =
               CODEX_AGGREGATE_CHILD_LIVENESS_POLL_DELAYS[
                 Math.min(attempt, CODEX_AGGREGATE_CHILD_LIVENESS_POLL_DELAYS.length - 1)
@@ -6103,6 +6403,7 @@ export const makeCodexSessionRuntime = (
                 routes,
                 liveness,
                 turnId,
+                yield* childAdmissionFence.isIncomplete,
               ),
             });
             if (result.action === "duplicate") {
@@ -6146,7 +6447,10 @@ export const makeCodexSessionRuntime = (
             return true;
           }),
         );
-        if (deferred) {
+        // Unknown omitted children cannot be discovered by polling only known
+        // routes. Do not create an endless metadata poll for a permanently
+        // incomplete runtime; explicit failure/interruption/Stop still settles.
+        if (deferred && !(yield* childAdmissionFence.isIncomplete)) {
           yield* scheduleAggregateCompletionWatcher(turnId);
         }
         return deferred;
@@ -6360,6 +6664,28 @@ export const makeCodexSessionRuntime = (
         if (isCodexPrivateMetadataNotification(notification.method)) {
           return;
         }
+        const rootProviderThreadId = yield* currentSessionProviderThreadId;
+        const initiallyAdmitted = yield* aggregateLifecycleSemaphore.withPermits(1)(
+          Effect.gen(function* () {
+            const routes = yield* Ref.get(collabReceiverTurnsRef);
+            return (
+              (yield* childAdmissionFence.acceptsNotification({
+                notification,
+                routes,
+                rootProviderThreadId,
+              })) &&
+              acceptsCodexChildNotification(
+                yield* Ref.get(childConversationLivenessRef),
+                notification,
+                routes,
+              )
+            );
+          }),
+        );
+        // Admission precedes all callbacks, observation and private/ordinary
+        // projection. Recheck under the mutation permit below because detached
+        // resume discovery can make the route set incomplete while we await.
+        if (!initiallyAdmitted) return;
         // Native cancellation wins even for child-owned or standalone MCP
         // requests. Compare the actual RPC id and provider thread, never an
         // item-id guess or the currently focused Cafe thread.
@@ -6407,7 +6733,6 @@ export const makeCodexSessionRuntime = (
 
         const payload = notification.params;
         const route = readCodexNotificationRouteFields(notification);
-        const rootProviderThreadId = yield* currentSessionProviderThreadId;
         if (!shouldForwardCodexRootGoalNotification(notification, rootProviderThreadId)) {
           return;
         }
@@ -6417,6 +6742,8 @@ export const makeCodexSessionRuntime = (
           routedTurnId,
           emittedMethod,
           subagentProjectionMethod,
+          childActivityNotifications,
+          nativeNotificationAdmitted,
           isCurrentRootTurnCompletion,
         } = yield* aggregateLifecycleSemaphore.withPermits(1)(
           Effect.gen(function* () {
@@ -6435,38 +6762,69 @@ export const makeCodexSessionRuntime = (
               notification.method,
               childRoute !== undefined,
             );
+            const currentChildLiveness = yield* Ref.get(childConversationLivenessRef);
+            const nativeNotificationAdmitted =
+              (yield* childAdmissionFence.acceptsNotification({
+                notification,
+                routes: collabReceiverTurns,
+                rootProviderThreadId,
+              })) &&
+              acceptsCodexChildNotification(
+                currentChildLiveness,
+                notification,
+                collabReceiverTurns,
+              );
             const subagentProjectionMethod = childRoute
-              ? codexSubagentProjectionMethod(notification)
+              ? codexSubagentProjectionMethod(
+                  notification,
+                  currentChildLiveness,
+                  collabReceiverTurns,
+                )
               : undefined;
             const isCurrentRootTurnCompletion =
               childRoute === undefined &&
               notification.method === "turn/completed" &&
               (yield* notificationBelongsToCurrentSession(notification));
-            // Descendant spawns retain the already-routed visible parent turn.
-            rememberCodexChildConversationTurns(
-              collabReceiverTurns,
+            // The second admission check fences the entire state commit, not
+            // merely descendant registration or downstream publication. An
+            // unknown source could address a known child in a collab frame.
+            const committed = yield* commitCodexChildConversationNotification({
+              admitted: nativeNotificationAdmitted,
+              routes: collabReceiverTurns,
+              children: currentChildLiveness,
+              routesRef: collabReceiverTurnsRef,
+              childrenRef: childConversationLivenessRef,
               notification,
-              routedTurnId,
+              parentTurnId: routedTurnId,
               rootProviderThreadId,
-            );
-            yield* Ref.set(collabReceiverTurnsRef, collabReceiverTurns);
-            yield* Ref.update(childConversationLivenessRef, (current) =>
-              updateCodexChildConversationLiveness(
-                current,
-                collabReceiverTurns,
-                notification,
-                observedAt,
-              ),
-            );
+              observedAt,
+            });
+            if (committed) yield* childAdmissionFence.observeIncomplete(committed.incomplete);
+            const childActivityNotifications = committed
+              ? buildCodexChildActivityNotifications(
+                  committed.routes,
+                  committed.children,
+                  notification,
+                )
+              : undefined;
             return {
               childRoute,
               routedTurnId,
               emittedMethod,
               subagentProjectionMethod,
+              childActivityNotifications,
+              nativeNotificationAdmitted,
               isCurrentRootTurnCompletion,
             };
           }),
         );
+
+        // Reject the complete stale child edge, not merely its private UI copy.
+        // This also fences canonical child errors, ordinary item projection,
+        // aggregate reopen and descendant registration against a newer native
+        // generation. Observation/private exact old-turn callback retirement
+        // above remains safe; no guessed generation or lifecycle is published.
+        if (!nativeNotificationAdmitted) return;
 
         if (childRoute && subagentProjectionMethod) {
           // This event retains the provider child thread id inside the typed
@@ -6543,22 +6901,46 @@ export const makeCodexSessionRuntime = (
             });
           }
         }
-        const publish = emitEvent(
-          {
-            kind: "notification",
-            threadId: options.threadId,
-            method: emittedMethod,
-            ...(turnId ? { turnId } : {}),
-            ...(itemId ? { itemId } : {}),
-            ...(requestId ? { requestId } : {}),
-            ...(requestKind ? { requestKind } : {}),
-            ...(notification.method === "item/agentMessage/delta"
-              ? { textDelta: readNotificationParamString(notification, "delta") ?? "" }
-              : {}),
-            ...(payload !== undefined ? { payload } : {}),
-          },
-          observedAt,
-        );
+        // Child collaboration items are exclusive subagent lifecycle inputs
+        // in CodexAdapter. Publish one fresh event identity per owner group,
+        // never the unsplit original as well. All ordinary notifications keep
+        // their original source routing and exactly one publication.
+        const publish =
+          childActivityNotifications !== undefined
+            ? Effect.forEach(
+                childActivityNotifications,
+                ({ parentTurnId, notification: ownedNotification }) =>
+                  emitEvent(
+                    {
+                      kind: "notification",
+                      threadId: options.threadId,
+                      method: emittedMethod,
+                      turnId: parentTurnId,
+                      ...(itemId ? { itemId } : {}),
+                      ...(ownedNotification.params !== undefined
+                        ? { payload: ownedNotification.params }
+                        : {}),
+                    },
+                    observedAt,
+                  ),
+                { discard: true },
+              )
+            : emitEvent(
+                {
+                  kind: "notification",
+                  threadId: options.threadId,
+                  method: emittedMethod,
+                  ...(turnId ? { turnId } : {}),
+                  ...(itemId ? { itemId } : {}),
+                  ...(requestId ? { requestId } : {}),
+                  ...(requestKind ? { requestKind } : {}),
+                  ...(notification.method === "item/agentMessage/delta"
+                    ? { textDelta: readNotificationParamString(notification, "delta") ?? "" }
+                    : {}),
+                  ...(payload !== undefined ? { payload } : {}),
+                },
+                observedAt,
+              );
         if (isCurrentRootTurnCompletion && turnId) {
           const turnStatus = readNotificationTurnStatus(notification) ?? "completed";
           yield* publishCodexTurnCompletionAfterLifecycleBoundary({
@@ -7098,6 +7480,7 @@ export const makeCodexSessionRuntime = (
               if (seeded === undefined) return [] as ReadonlyArray<TurnId>;
               yield* Ref.set(collabReceiverTurnsRef, seeded.routes);
               yield* Ref.set(childConversationLivenessRef, seeded.children);
+              yield* childAdmissionFence.observeIncomplete(seeded.overflowed);
               yield* Ref.set(resumeChildDiscoveryUncertainRef, seeded.inconclusive);
               return seeded.parentTurnIds;
             }),
@@ -7174,6 +7557,7 @@ export const makeCodexSessionRuntime = (
               session,
               routes,
               children,
+              admissionIncomplete: yield* childAdmissionFence.isIncomplete,
               rootStartPending: yield* Ref.get(nativeTurnStartPendingRef),
               compactionPending:
                 (yield* Ref.get(manualCompactionPendingRef)) ||

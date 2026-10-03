@@ -135,6 +135,55 @@ function TokenCountFigure({
   );
 }
 
+/**
+ * A model row owns independent targets but uses the page-wide count-up frame
+ * source. Keeping these hooks in a keyed component preserves each model's
+ * displayed value across resorting without creating per-row RAF timers.
+ */
+function UsageModelRow({ entry }: { entry: ModelCostRow }) {
+  const Icon = PROVIDER_ICON_BY_PROVIDER[entry.provider as never];
+  const displayedCost = useCountUp(entry.cost, { decimals: 2 });
+  const displayedTokens = useCountUp(entry.tokens);
+  const displayedGeneratingMs = useCountUp(entry.generatingMs ?? 0);
+
+  return (
+    <tr
+      className="border-t border-border/50"
+      data-usage-model={entry.model}
+      data-usage-provider={entry.provider}
+    >
+      <td className="max-w-[20rem] py-1.5 pr-3">
+        <span className="flex min-w-0 items-center gap-1.5">
+          {Icon ? <Icon className="size-3.5 shrink-0 opacity-70" /> : null}
+          <span className="truncate" title={getUsageModelExplanation(entry.model)}>
+            {formatUsageModelLabel(entry.model)}
+          </span>
+        </span>
+      </td>
+      <td className="py-1.5 pl-3 text-right tabular-nums" data-usage-model-cost-value="true">
+        {!entry.hasTokenUsage ? (
+          <span className="text-muted-foreground">—</span>
+        ) : entry.priced ? (
+          formatUsd(displayedCost)
+        ) : (
+          <span className="text-muted-foreground">unpriced</span>
+        )}
+      </td>
+      <td className="py-1.5 pl-3 text-right tabular-nums text-muted-foreground">
+        <TokenCountFigure value={displayedTokens} context="model" primarySuffix="" align="right" />
+      </td>
+      <td
+        className="whitespace-nowrap py-1.5 pl-4 text-right text-[11px] tabular-nums text-muted-foreground"
+        data-usage-model-generating-time
+      >
+        {entry.generatingMs === undefined
+          ? "Not recorded"
+          : formatGeneratingTime(displayedGeneratingMs)}
+      </td>
+    </tr>
+  );
+}
+
 type TokenCompositionId = "processed" | "cached" | "uncached" | "output";
 type StatTileProps =
   | {
@@ -362,13 +411,16 @@ function UsageCostMetrics({
 
   // Same shared counter as the token odometer; currency just settles on cents.
   const costDisplay = useCountUp(view.rollup.cost, { decimals: 2 });
-  // These four hooks are aggregate and cardinality-bounded. They animate the
-  // full counters alongside their compact forms without creating one RAF loop
-  // per provider or model row.
+  // Aggregate figures and keyed model rows all subscribe to the same shared
+  // frame source, so adding the full table does not create a RAF loop per row.
   const processedDisplay = useCountUp(view.processed);
   const cachedDisplay = useCountUp(view.cached);
   const freshDisplay = useCountUp(view.fresh);
   const outputDisplay = useCountUp(view.output);
+  const reasoningDisplay = useCountUp(view.reasoning);
+  const cacheSavingsDisplay = useCountUp(view.rollup.cacheSavings, { decimals: 2 });
+  const cachedInputPercent = view.input > 0 ? (view.cached / view.input) * 100 : 0;
+  const cachedInputPercentDisplay = useCountUp(cachedInputPercent, { decimals: 1 });
 
   const chart = useMemo(() => {
     const days = usage?.days ?? [];
@@ -443,6 +495,11 @@ function UsageCostMetrics({
   const share = Math.max(view.processed, view.rollup.pricedTokens + view.rollup.unpricedTokens);
   const unpricedTokens = Math.max(0, share - view.rollup.pricedTokens);
   const pricedPercent = share === 0 ? null : (view.rollup.pricedTokens / share) * 100;
+  // Keep extra precision around the honest `<0.1%` boundary. Quantizing the
+  // ticker itself to one decimal would turn a real 0.05% share into 0.1%.
+  const pricedPercentDisplay = useCountUp(pricedPercent ?? 0, { decimals: 3 });
+  const displayedPricedPercent = Math.max(0, Math.min(100, pricedPercentDisplay));
+  const displayedUnpricedPercent = 100 - displayedPricedPercent;
   const maxProviderCost = Math.max(0, ...view.providers.map((entry) => entry.cost));
   const recordingStartedAt = view.modelTimeAvailable
     ? usage?.modelGeneratingTime?.startedAt
@@ -609,11 +666,7 @@ function UsageCostMetrics({
           id="cached"
           label="Cached input"
           rawTokens={cachedDisplay}
-          detail={
-            view.input > 0
-              ? `${((view.cached / view.input) * 100).toFixed(1)}% of input`
-              : undefined
-          }
+          detail={view.input > 0 ? `${cachedInputPercentDisplay.toFixed(1)}% of input` : undefined}
         />
         <StatTile id="uncached" label="Uncached input" rawTokens={freshDisplay} />
         <StatTile
@@ -623,7 +676,7 @@ function UsageCostMetrics({
           detail={
             view.reasoning > 0 ? (
               <TokenCountFigure
-                value={view.reasoning}
+                value={reasoningDisplay}
                 context="reasoning"
                 primarySuffix=" reasoning tokens"
                 primaryClassName="text-[11px] font-normal text-muted-foreground/70"
@@ -634,7 +687,7 @@ function UsageCostMetrics({
         <StatTile
           id="cache-savings"
           label="Net cache savings (USD)"
-          value={formatUsd(view.rollup.cacheSavings)}
+          value={formatUsd(cacheSavingsDisplay)}
           detail={
             view.rollup.cacheSavings < 0
               ? "Cache writes cost more than reads have saved"
@@ -688,57 +741,12 @@ function UsageCostMetrics({
                   (showAllModels
                     ? view.models
                     : view.models.slice(0, INITIAL_VISIBLE_MODEL_ROWS)
-                  ).map((entry) => {
-                    const Icon = PROVIDER_ICON_BY_PROVIDER[entry.provider as never];
-                    return (
-                      <tr
-                        key={JSON.stringify([entry.provider, entry.model])}
-                        className="border-t border-border/50"
-                        data-usage-model={entry.model}
-                        data-usage-provider={entry.provider}
-                      >
-                        <td className="max-w-[20rem] py-1.5 pr-3">
-                          <span className="flex min-w-0 items-center gap-1.5">
-                            {Icon ? <Icon className="size-3.5 shrink-0 opacity-70" /> : null}
-                            <span
-                              className="truncate"
-                              title={getUsageModelExplanation(entry.model)}
-                            >
-                              {formatUsageModelLabel(entry.model)}
-                            </span>
-                          </span>
-                        </td>
-                        <td
-                          className="py-1.5 pl-3 text-right tabular-nums"
-                          data-usage-model-cost-value="true"
-                        >
-                          {!entry.hasTokenUsage ? (
-                            <span className="text-muted-foreground">—</span>
-                          ) : entry.priced ? (
-                            formatUsd(entry.cost)
-                          ) : (
-                            <span className="text-muted-foreground">unpriced</span>
-                          )}
-                        </td>
-                        <td className="py-1.5 pl-3 text-right tabular-nums text-muted-foreground">
-                          <TokenCountFigure
-                            value={entry.tokens}
-                            context="model"
-                            primarySuffix=""
-                            align="right"
-                          />
-                        </td>
-                        <td
-                          className="whitespace-nowrap py-1.5 pl-4 text-right text-[11px] tabular-nums text-muted-foreground"
-                          data-usage-model-generating-time
-                        >
-                          {entry.generatingMs === undefined
-                            ? "Not recorded"
-                            : formatGeneratingTime(entry.generatingMs)}
-                        </td>
-                      </tr>
-                    );
-                  })
+                  ).map((entry) => (
+                    <UsageModelRow
+                      key={JSON.stringify([entry.provider, entry.model])}
+                      entry={entry}
+                    />
+                  ))
                 )}
               </tbody>
             </table>
@@ -776,13 +784,21 @@ function UsageCostMetrics({
               <dd className="ml-auto tabular-nums">
                 {pricedPercent === null
                   ? "—"
-                  : formatShare(pricedPercent, view.rollup.pricedTokens)}
+                  : formatShare(
+                      displayedPricedPercent,
+                      Math.max(view.rollup.pricedTokens, displayedPricedPercent > 0 ? 1 : 0),
+                    )}
               </dd>
             </div>
             <div className="flex items-baseline gap-2">
               <dt className="text-muted-foreground">Unpriced</dt>
               <dd className="ml-auto tabular-nums">
-                {pricedPercent === null ? "—" : formatShare(100 - pricedPercent, unpricedTokens)}
+                {pricedPercent === null
+                  ? "—"
+                  : formatShare(
+                      displayedUnpricedPercent,
+                      Math.max(unpricedTokens, displayedUnpricedPercent > 0 ? 1 : 0),
+                    )}
               </dd>
             </div>
             <div className="flex items-baseline gap-2">
@@ -791,7 +807,7 @@ function UsageCostMetrics({
                 className="ml-auto break-words text-right tabular-nums [overflow-wrap:anywhere]"
                 data-usage-cost-quality-cache-savings="true"
               >
-                {formatUsd(view.rollup.cacheSavings)}
+                {formatUsd(cacheSavingsDisplay)}
               </dd>
             </div>
           </dl>

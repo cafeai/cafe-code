@@ -33,6 +33,7 @@ import {
   type AppState,
   type EnvironmentState,
 } from "./store";
+import { deriveActiveSubagentWorkEntries, deriveSubagentWorkEntries } from "./session-logic";
 import { DEFAULT_INTERACTION_MODE, DEFAULT_RUNTIME_MODE, type Thread } from "./types";
 
 const localEnvironmentId = EnvironmentId.make("environment-local");
@@ -1750,6 +1751,159 @@ describe("incremental orchestration updates", () => {
     expect(threadsOf(withLateTool)[0]?.latestTurn?.completedAt).toBe(activity.createdAt);
   });
 
+  it("uses aggregate order for same-millisecond subagent restarts live and after reconnect", () => {
+    const turnId = TurnId.make("turn-same-millisecond-subagent-restart");
+    const childId = "provider-reused-child";
+    const priorStartedAt = "2026-02-27T00:00:01.000Z";
+    const restartedAt = "2026-02-27T00:10:36.000Z";
+    const collidedAt = "2026-02-27T00:10:36.745Z";
+    const priorTerminal: Thread["activities"][number] = {
+      id: EventId.make("prior-terminal-edge"),
+      tone: "info",
+      kind: "task.completed",
+      summary: "Subagent completed",
+      payload: {
+        taskId: childId,
+        status: "completed",
+        subagent: {
+          threadId: childId,
+          label: "Source factory",
+          status: "completed",
+          startedAt: priorStartedAt,
+        },
+      },
+      turnId,
+      sequence: 10,
+      createdAt: "2026-02-27T00:07:34.448Z",
+    };
+    const delayedTerminalProgress: Thread["activities"][number] = {
+      // The id deliberately sorts after the restart id. Opaque identity order
+      // must never decide which equal-millisecond lifecycle edge wins.
+      id: EventId.make("z-delayed-terminal-progress"),
+      tone: "info",
+      kind: "task.progress",
+      summary: "Turn settings",
+      payload: {
+        taskId: childId,
+        status: "completed",
+        subagent: {
+          threadId: childId,
+          label: "Source factory",
+          status: "completed",
+          startedAt: priorStartedAt,
+        },
+      },
+      turnId,
+      // This obsolete provider/session-local value conflicts with canonical
+      // aggregate order and must be replaced by the enclosing event sequence.
+      sequence: 999,
+      createdAt: collidedAt,
+    };
+    const restart: Thread["activities"][number] = {
+      id: EventId.make("a-new-generation-start"),
+      tone: "info",
+      kind: "task.started",
+      summary: "Subagent started",
+      payload: {
+        taskId: childId,
+        subagent: {
+          threadId: childId,
+          label: "Source factory",
+          status: "active",
+          startedAt: restartedAt,
+        },
+      },
+      turnId,
+      sequence: 1,
+      createdAt: collidedAt,
+    };
+    const thread = makeThread({
+      latestTurn: {
+        turnId,
+        state: "running",
+        requestedAt: "2026-02-27T00:10:35.000Z",
+        startedAt: "2026-02-27T00:10:35.000Z",
+        completedAt: null,
+        assistantMessageId: null,
+      },
+      activities: [priorTerminal],
+    });
+
+    const afterDelayedProgress = applyOrchestrationEvent(
+      makeState(thread),
+      makeEvent(
+        "thread.activity-appended",
+        { threadId: thread.id, activity: delayedTerminalProgress },
+        { sequence: 20 },
+      ),
+      localEnvironmentId,
+    );
+    const live = applyOrchestrationEvent(
+      afterDelayedProgress,
+      makeEvent(
+        "thread.activity-appended",
+        { threadId: thread.id, activity: restart },
+        { sequence: 21 },
+      ),
+      localEnvironmentId,
+    );
+    const liveThread = threadsOf(live)[0]!;
+    expect(
+      liveThread.activities
+        .filter((activity) => activity.createdAt === collidedAt)
+        .map((activity) => [activity.id, activity.sequence]),
+    ).toEqual([
+      ["z-delayed-terminal-progress", 20],
+      ["a-new-generation-start", 21],
+    ]);
+    expect(
+      deriveActiveSubagentWorkEntries(liveThread.activities, turnId)[0]?.subagent,
+    ).toMatchObject({
+      id: childId,
+      status: "active",
+      startedAt: restartedAt,
+    });
+
+    // A detail reconnect does not have the enclosing events. The server
+    // snapshot therefore carries their canonical aggregate sequences on each
+    // activity. Reverse the transport array to prove semantic reconstruction
+    // is sequence-driven and matches the live reducer.
+    const reconnected = syncServerThreadDetail(
+      makeEmptyState(),
+      {
+        id: thread.id,
+        projectId: thread.projectId,
+        title: thread.title,
+        modelSelection: thread.modelSelection,
+        runtimeMode: thread.runtimeMode,
+        interactionMode: thread.interactionMode,
+        branch: thread.branch,
+        worktreePath: thread.worktreePath,
+        latestTurn: thread.latestTurn,
+        createdAt: thread.createdAt,
+        updatedAt: collidedAt,
+        archivedAt: null,
+        deletedAt: null,
+        messages: [],
+        proposedPlans: [],
+        activities: liveThread.activities.toReversed(),
+        checkpoints: [],
+        session: null,
+        goal: null,
+      },
+      localEnvironmentId,
+      21,
+    );
+    const reconnectedActivities = threadsOf(reconnected)[0]?.activities ?? [];
+    expect(
+      deriveActiveSubagentWorkEntries(reconnectedActivities, turnId)[0]?.subagent,
+    ).toMatchObject({
+      id: childId,
+      status: "active",
+      startedAt: restartedAt,
+    });
+  });
+
   it.each(["running", "completed"] as const)(
     "retains only one valid exact-current configuration beyond 500 rows while %s and after snapshot reload",
     (state) => {
@@ -1798,7 +1952,11 @@ describe("incremental orchestration updates", () => {
       };
       const next = applyOrchestrationEvent(
         makeState(thread),
-        makeEvent("thread.activity-appended", { threadId: thread.id, activity: newestActivity }),
+        makeEvent(
+          "thread.activity-appended",
+          { threadId: thread.id, activity: newestActivity },
+          { sequence: 505 },
+        ),
         localEnvironmentId,
       );
       const retained = threadsOf(next)[0]!.activities;
@@ -1839,10 +1997,18 @@ describe("incremental orchestration updates", () => {
       expect(threadsOf(snapshot)[0]?.activities).toHaveLength(501);
       const afterReload = applyOrchestrationEvent(
         snapshot,
-        makeEvent("thread.activity-appended", {
-          threadId: thread.id,
-          activity: { ...newestActivity, id: EventId.make("settings-after-reload"), sequence: 506 },
-        }),
+        makeEvent(
+          "thread.activity-appended",
+          {
+            threadId: thread.id,
+            activity: {
+              ...newestActivity,
+              id: EventId.make("settings-after-reload"),
+              sequence: 506,
+            },
+          },
+          { sequence: 506 },
+        ),
         localEnvironmentId,
       );
       const afterReloadActivities = threadsOf(afterReload)[0]!.activities;
@@ -1853,7 +2019,7 @@ describe("incremental orchestration updates", () => {
     },
   );
 
-  it("retains compact current-turn subagent lifecycle state beyond the live activity tail", () => {
+  it("retains compact subagent lifecycle state beyond the live activity tail", () => {
     const turnId = TurnId.make("turn-long-subagents");
     const child = {
       threadId: "provider-child-1",
@@ -1961,8 +2127,355 @@ describe("incremental orchestration updates", () => {
     ).toEqual(["subagent-start", "subagent-progress-latest", "subagent-completed"]);
   });
 
-  it("caps compact lifecycle retention across adversarial unique subagent identities", () => {
+  it("retains an active structured child from an older turn across a later turn's activity tail", () => {
+    const olderTurnId = TurnId.make("turn-background-child");
+    const currentTurnId = TurnId.make("turn-current-work");
+    const start: Thread["activities"][number] = {
+      id: EventId.make("older-turn-subagent-start"),
+      tone: "info",
+      kind: "task.started",
+      summary: "Subagent started",
+      payload: {
+        taskId: "provider-background-child",
+        subagent: {
+          threadId: "provider-background-child",
+          label: "Background audit",
+          status: "active",
+          startedAt: "2026-02-27T00:00:01.000Z",
+        },
+      },
+      turnId: olderTurnId,
+      sequence: 1,
+      createdAt: "2026-02-27T00:00:01.000Z",
+    };
+    const ordinaryTail: Thread["activities"] = Array.from({ length: 500 }, (_, index) => ({
+      id: EventId.make(`cross-turn-ordinary-${String(index + 1).padStart(4, "0")}`),
+      tone: "tool" as const,
+      kind: "tool.completed",
+      summary: "Ordinary current-turn activity",
+      payload: {},
+      turnId: currentTurnId,
+      sequence: index + 2,
+      createdAt: "2026-02-27T00:01:00.000Z",
+    }));
+    const thread = makeThread({
+      latestTurn: {
+        turnId: currentTurnId,
+        state: "running",
+        requestedAt: "2026-02-27T00:00:30.000Z",
+        startedAt: "2026-02-27T00:00:30.000Z",
+        completedAt: null,
+        assistantMessageId: null,
+      },
+      activities: [start, ...ordinaryTail],
+    });
+
+    const next = applyOrchestrationEvent(
+      makeState(thread),
+      makeEvent(
+        "thread.activity-appended",
+        {
+          threadId: thread.id,
+          activity: {
+            ...ordinaryTail[0]!,
+            id: EventId.make("cross-turn-ordinary-newest"),
+            sequence: 502,
+            createdAt: "2026-02-27T00:02:00.000Z",
+          },
+        },
+        { sequence: 2_050 },
+      ),
+      localEnvironmentId,
+    );
+
+    const retained = threadsOf(next)[0]?.activities ?? [];
+    expect(retained).toHaveLength(501);
+    expect(retained).toContainEqual(start);
+    expect(
+      deriveActiveSubagentWorkEntries(retained, currentTurnId).map((entry) => entry.subagent?.id),
+    ).toEqual(["provider-background-child"]);
+  });
+
+  it("retains prior-turn terminal authority when delayed progress outlives the ordinary tail", () => {
+    const olderTurnId = TurnId.make("turn-terminal-background-child");
+    const currentTurnId = TurnId.make("turn-after-terminal-child");
+    const presentation = {
+      threadId: "provider-terminal-child",
+      label: "Completed audit",
+      status: "active",
+      startedAt: "2026-02-27T00:00:01.000Z",
+    } as const;
+    const lifecycle: Thread["activities"] = [
+      {
+        id: EventId.make("prior-child-start"),
+        tone: "info",
+        kind: "task.started",
+        summary: "Subagent started",
+        payload: { taskId: presentation.threadId, subagent: presentation },
+        turnId: olderTurnId,
+        sequence: 1,
+        createdAt: "2026-02-27T00:00:01.000Z",
+      },
+      {
+        id: EventId.make("prior-child-completed"),
+        tone: "info",
+        kind: "task.completed",
+        summary: "Subagent completed",
+        payload: {
+          taskId: presentation.threadId,
+          status: "completed",
+          subagent: { ...presentation, status: "completed" },
+        },
+        turnId: olderTurnId,
+        sequence: 2,
+        createdAt: "2026-02-27T00:00:02.000Z",
+      },
+      {
+        id: EventId.make("prior-child-delayed-progress"),
+        tone: "info",
+        kind: "task.progress",
+        summary: "Subagent update",
+        payload: {
+          taskId: presentation.threadId,
+          detail: "Delayed replay",
+          subagent: presentation,
+        },
+        turnId: olderTurnId,
+        sequence: 3,
+        createdAt: "2026-02-27T00:00:03.000Z",
+      },
+    ];
+    const ordinaryTail: Thread["activities"] = Array.from({ length: 500 }, (_, index) => ({
+      id: EventId.make(`terminal-boundary-ordinary-${String(index + 1).padStart(4, "0")}`),
+      tone: "tool" as const,
+      kind: "tool.completed",
+      summary: "Ordinary later-turn activity",
+      payload: {},
+      turnId: currentTurnId,
+      sequence: index + 4,
+      createdAt: "2026-02-27T00:01:00.000Z",
+    }));
+    const thread = makeThread({
+      latestTurn: {
+        turnId: currentTurnId,
+        state: "running",
+        requestedAt: "2026-02-27T00:00:30.000Z",
+        startedAt: "2026-02-27T00:00:30.000Z",
+        completedAt: null,
+        assistantMessageId: null,
+      },
+      activities: [...lifecycle, ...ordinaryTail],
+    });
+
+    const next = applyOrchestrationEvent(
+      makeState(thread),
+      makeEvent(
+        "thread.activity-appended",
+        {
+          threadId: thread.id,
+          activity: {
+            ...ordinaryTail[0]!,
+            id: EventId.make("terminal-boundary-ordinary-newest"),
+            sequence: 504,
+            createdAt: "2026-02-27T00:02:00.000Z",
+          },
+        },
+        { sequence: 2_060 },
+      ),
+      localEnvironmentId,
+    );
+
+    const retained = threadsOf(next)[0]?.activities ?? [];
+    expect(
+      retained.filter((activity) => activity.turnId === olderTurnId).map((activity) => activity.id),
+    ).toEqual(["prior-child-start", "prior-child-completed", "prior-child-delayed-progress"]);
+    expect(deriveSubagentWorkEntries(retained, olderTurnId)[0]?.subagent).toMatchObject({
+      id: presentation.threadId,
+      status: "completed",
+      completedAt: "2026-02-27T00:00:02.000Z",
+    });
+    expect(deriveActiveSubagentWorkEntries(retained, currentTurnId)).toEqual([]);
+  });
+
+  it("retains explicit restart authority after a prior-turn terminal edge", () => {
+    const olderTurnId = TurnId.make("turn-restarted-background-child");
+    const currentTurnId = TurnId.make("turn-after-restarted-child");
+    const childId = "provider-restarted-child";
+    const lifecycle: Thread["activities"] = [
+      {
+        id: EventId.make("restarted-child-completed"),
+        tone: "info",
+        kind: "task.completed",
+        summary: "Subagent completed",
+        payload: {
+          taskId: childId,
+          status: "completed",
+          subagent: { threadId: childId, label: "Reusable worker", status: "completed" },
+        },
+        turnId: olderTurnId,
+        sequence: 1,
+        createdAt: "2026-02-27T00:00:01.000Z",
+      },
+      {
+        id: EventId.make("restarted-child-start"),
+        tone: "info",
+        kind: "task.started",
+        summary: "Subagent restarted",
+        payload: {
+          taskId: childId,
+          subagent: {
+            threadId: childId,
+            label: "Reusable worker",
+            status: "active",
+            startedAt: "2026-02-27T00:00:02.000Z",
+          },
+        },
+        turnId: olderTurnId,
+        sequence: 2,
+        createdAt: "2026-02-27T00:00:02.000Z",
+      },
+      {
+        id: EventId.make("restarted-child-progress"),
+        tone: "info",
+        kind: "task.progress",
+        summary: "Subagent update",
+        payload: {
+          taskId: childId,
+          detail: "Working after restart",
+          subagent: { threadId: childId, label: "Reusable worker", status: "active" },
+        },
+        turnId: olderTurnId,
+        sequence: 3,
+        createdAt: "2026-02-27T00:00:03.000Z",
+      },
+    ];
+    const ordinaryTail: Thread["activities"] = Array.from({ length: 500 }, (_, index) => ({
+      id: EventId.make(`restart-boundary-ordinary-${String(index + 1).padStart(4, "0")}`),
+      tone: "tool" as const,
+      kind: "tool.completed",
+      summary: "Ordinary later-turn activity",
+      payload: {},
+      turnId: currentTurnId,
+      sequence: index + 4,
+      createdAt: "2026-02-27T00:01:00.000Z",
+    }));
+    const thread = makeThread({
+      latestTurn: {
+        turnId: currentTurnId,
+        state: "running",
+        requestedAt: "2026-02-27T00:00:30.000Z",
+        startedAt: "2026-02-27T00:00:30.000Z",
+        completedAt: null,
+        assistantMessageId: null,
+      },
+      activities: [...lifecycle, ...ordinaryTail],
+    });
+    const next = applyOrchestrationEvent(
+      makeState(thread),
+      makeEvent(
+        "thread.activity-appended",
+        {
+          threadId: thread.id,
+          activity: {
+            ...ordinaryTail[0]!,
+            id: EventId.make("restart-boundary-ordinary-newest"),
+            sequence: 504,
+          },
+        },
+        { sequence: 2_070 },
+      ),
+      localEnvironmentId,
+    );
+    const retained = threadsOf(next)[0]?.activities ?? [];
+
+    expect(
+      retained.filter((activity) => activity.turnId === olderTurnId).map((activity) => activity.id),
+    ).toEqual(["restarted-child-completed", "restarted-child-start", "restarted-child-progress"]);
+    expect(deriveActiveSubagentWorkEntries(retained, currentTurnId)[0]?.subagent).toMatchObject({
+      id: childId,
+      status: "active",
+      startedAt: "2026-02-27T00:00:02.000Z",
+    });
+  });
+
+  it("retains an older visible start and its ambient visibility tombstone together", () => {
+    const olderTurnId = TurnId.make("turn-ambient-background-child");
+    const currentTurnId = TurnId.make("turn-after-ambient-child");
+    const childId = "provider-ambient-child";
+    const lifecycle: Thread["activities"] = [
+      {
+        id: EventId.make("ambient-boundary-start"),
+        tone: "info",
+        kind: "task.started",
+        summary: "Subagent started",
+        payload: {
+          taskId: childId,
+          visibility: "visible",
+          subagent: { threadId: childId, label: "Ambient worker", status: "active" },
+        },
+        turnId: olderTurnId,
+        sequence: 1,
+        createdAt: "2026-02-27T00:00:01.000Z",
+      },
+      {
+        id: EventId.make("ambient-boundary-hidden"),
+        tone: "info",
+        kind: "task.progress",
+        summary: "Subagent visibility changed",
+        payload: { taskId: childId, visibility: "ambient" },
+        turnId: olderTurnId,
+        sequence: 2,
+        createdAt: "2026-02-27T00:00:02.000Z",
+      },
+    ];
+    const ordinaryTail: Thread["activities"] = Array.from({ length: 500 }, (_, index) => ({
+      id: EventId.make(`ambient-boundary-ordinary-${String(index + 1).padStart(4, "0")}`),
+      tone: "tool" as const,
+      kind: "tool.completed",
+      summary: "Ordinary later-turn activity",
+      payload: {},
+      turnId: currentTurnId,
+      sequence: index + 3,
+      createdAt: "2026-02-27T00:01:00.000Z",
+    }));
+    const thread = makeThread({
+      latestTurn: {
+        turnId: currentTurnId,
+        state: "running",
+        requestedAt: "2026-02-27T00:00:30.000Z",
+        startedAt: "2026-02-27T00:00:30.000Z",
+        completedAt: null,
+        assistantMessageId: null,
+      },
+      activities: [...lifecycle, ...ordinaryTail],
+    });
+    const next = applyOrchestrationEvent(
+      makeState(thread),
+      makeEvent(
+        "thread.activity-appended",
+        {
+          threadId: thread.id,
+          activity: {
+            ...ordinaryTail[0]!,
+            id: EventId.make("ambient-boundary-ordinary-newest"),
+            sequence: 503,
+          },
+        },
+        { sequence: 2_080 },
+      ),
+      localEnvironmentId,
+    );
+    const retained = threadsOf(next)[0]?.activities ?? [];
+
+    expect(
+      retained.filter((activity) => activity.turnId === olderTurnId).map((activity) => activity.id),
+    ).toEqual(["ambient-boundary-start", "ambient-boundary-hidden"]);
+    expect(deriveSubagentWorkEntries(retained, olderTurnId)).toEqual([]);
+  });
+
+  it("caps compact lifecycle retention across adversarial identities from multiple turns", () => {
     const turnId = TurnId.make("turn-subagent-cardinality-limit");
+    const olderTurnId = TurnId.make("turn-subagent-cardinality-older");
     const lifecycle: Thread["activities"] = Array.from(
       { length: MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN + 1 },
       (_, index) => ({
@@ -1974,7 +2487,7 @@ describe("incremental orchestration updates", () => {
           taskId: `child-${index}`,
           subagent: { threadId: `child-${index}`, status: "active" },
         },
-        turnId,
+        turnId: index % 2 === 0 ? olderTurnId : turnId,
         sequence: index + 1,
         createdAt: "2026-02-27T00:00:01.000Z",
       }),

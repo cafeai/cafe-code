@@ -467,6 +467,41 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain("1m 5s");
   });
 
+  it("uses terminal state copy when a completed subagent has no durable description", async () => {
+    const { MessagesTimeline } = readMessagesTimelineModule();
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            id: "subagent-completed-without-description",
+            kind: "work",
+            createdAt: "2026-03-17T19:12:28.000Z",
+            entry: {
+              id: "subagent-completed-without-description",
+              createdAt: "2026-03-17T19:12:28.000Z",
+              label: "Source factory",
+              detail: "Completed",
+              tone: "info",
+              itemType: "collab_agent_tool_call",
+              subagent: {
+                id: "provider-child-source-factory",
+                label: "Source factory",
+                status: "completed",
+                startedAt: "2026-03-17T19:12:28.000Z",
+                completedAt: "2026-03-17T19:12:28.000Z",
+              },
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(markup).toContain('aria-label="Source factory, Done. Done. Open details"');
+    expect(markup).toContain('data-subagent-description="true">Done</p>');
+    expect(markup).not.toContain("Working");
+  });
+
   it("formats changed file paths from the workspace root", async () => {
     const { MessagesTimeline } = readMessagesTimelineModule();
     const markup = renderToStaticMarkup(

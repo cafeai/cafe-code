@@ -35,14 +35,18 @@ import {
   CODEX_SUMMARY_HISTORY_PAGE_TURN_LIMIT,
   CODEX_PENDING_STEER_UNRESOLVED_CAPACITY,
   CODEX_RESUME_CHILD_RECONCILIATION_LIMIT,
+  CODEX_CHILD_ACTIVITY_RECEIVER_LIMIT,
+  CODEX_CHILD_CONVERSATION_ROUTE_LIMIT,
   acknowledgeCodexPendingSteerProcessing,
   acknowledgeCodexSteerLifecycleBoundary,
   acknowledgeCodexTurnStartLifecycleBoundary,
   acknowledgeCodexReasoningEffortRequest,
+  acceptsCodexChildNotification,
   admitCodexTurnStartLifecycleBoundary,
   admitCodexPendingSteerProcessing,
   admitCodexReasoningEffortRequest,
   buildCodexAppServerArgs,
+  buildCodexChildActivityNotifications,
   buildCodexActiveContextCompactionSteerError,
   buildCodexPendingSteerCapacityError,
   buildCodexThreadSnapshotBackfillEvents,
@@ -53,7 +57,9 @@ import {
   claimCodexRestartedSteerProcessingObservation,
   codexAggregateNotificationMethod,
   codexAggregateTurnHasUnfinishedChildren,
+  codexSuccessfulRootSnapshotIsBlocked,
   commitCodexAggregateRootCompletion,
+  commitCodexChildConversationNotification,
   canReopenCodexAggregateRootCompletion,
   reconcileCodexAggregateRootCompletion,
   readCodexAggregateRootCompletion,
@@ -103,6 +109,7 @@ import {
   reconcileCodexResumedChildSnapshot,
   seedCodexResumedChildConversations,
   makeCodexNotificationRetirementFence,
+  makeCodexChildConversationAdmissionFence,
   updateCodexActiveContextCompactions,
   updateCodexPendingSteerProcessingFromNotification,
   validateCodexSubagentThreadReadMetadata,
@@ -214,6 +221,7 @@ it("requires native root and every descendant to be conclusively idle before con
     { compactionPending: true },
     { unsettledCount: 1 },
     { queuedNotificationCount: 1 },
+    { admissionIncomplete: true },
     { session: { ...session, status: "running" as const } },
     { session: { ...session, activeTurnId: parent } },
     { children: new Map() },
@@ -222,6 +230,511 @@ it("requires native root and every descendant to be conclusively idle before con
     { children: new Map([["child", { ...child, parentTurnId: TurnId.make("different-parent") }]]) },
   ])
     assert.equal(codexTreeIsIdleForConcurrencyChange({ ...proof, ...patch }), false);
+});
+
+describe("Codex bounded child route admission", () => {
+  it("retains exact owners across multiple batches and never evicts at the lifetime ceiling", () => {
+    const firstOwner = TurnId.make("first-owner");
+    const laterOwner = TurnId.make("later-owner");
+    const routes = new Map<string, TurnId>();
+    for (
+      let offset = 0;
+      offset < CODEX_CHILD_CONVERSATION_ROUTE_LIMIT;
+      offset += CODEX_CHILD_ACTIVITY_RECEIVER_LIMIT
+    ) {
+      assert.equal(
+        rememberCodexChildConversationTurns(
+          routes,
+          {
+            method: "item/started",
+            params: {
+              threadId: "root",
+              item: {
+                type: "collabAgentToolCall",
+                receiverThreadIds: Array.from(
+                  { length: CODEX_CHILD_ACTIVITY_RECEIVER_LIMIT },
+                  (_, index) => `child-${offset + index}`,
+                ),
+              },
+            },
+          },
+          firstOwner,
+          "root",
+        ),
+        false,
+      );
+    }
+    assert.equal(routes.size, CODEX_CHILD_CONVERSATION_ROUTE_LIMIT);
+    assert.equal(
+      rememberCodexChildConversationTurns(
+        routes,
+        {
+          method: "item/completed",
+          params: {
+            threadId: "root",
+            item: {
+              type: "collabAgentToolCall",
+              receiverThreadIds: ["child-0", "root", "unadmitted-child"],
+            },
+          },
+        },
+        laterOwner,
+        "root",
+      ),
+      true,
+    );
+    assert.equal(routes.size, CODEX_CHILD_CONVERSATION_ROUTE_LIMIT);
+    assert.equal(routes.get("child-0"), firstOwner);
+    assert.equal(routes.get(`child-${CODEX_CHILD_CONVERSATION_ROUTE_LIMIT - 1}`), firstOwner);
+    assert.equal(routes.has("root"), false);
+    assert.equal(routes.has("unadmitted-child"), false);
+    // Repeated references and explicit reuse never consume another slot or
+    // rebind a terminal/active owner's stable history identity.
+    assert.equal(
+      rememberCodexChildConversationTurns(
+        routes,
+        {
+          method: "item/started",
+          params: {
+            threadId: "root",
+            item: {
+              type: "subAgentActivity",
+              kind: "started",
+              agentThreadId: "child-0",
+              agentPath: "/root/reused",
+            },
+          },
+        },
+        laterOwner,
+        "root",
+      ),
+      false,
+    );
+    assert.equal(routes.get("child-0"), firstOwner);
+  });
+
+  it("marks a truncated receiver envelope incomplete without scanning or admitting its tail", () => {
+    const routes = new Map<string, TurnId>();
+    const receiverThreadIds = Array.from(
+      { length: CODEX_CHILD_ACTIVITY_RECEIVER_LIMIT },
+      (_, index) => `child-${index}`,
+    );
+    Object.defineProperty(receiverThreadIds, CODEX_CHILD_ACTIVITY_RECEIVER_LIMIT, {
+      get: () => {
+        throw new Error("Unbounded receiver tail must not be read");
+      },
+    });
+    assert.equal(
+      rememberCodexChildConversationTurns(
+        routes,
+        {
+          method: "item/started",
+          params: { threadId: "root", item: { type: "collabAgentToolCall", receiverThreadIds } },
+        },
+        TurnId.make("owner"),
+        "root",
+      ),
+      true,
+    );
+    assert.equal(routes.size, CODEX_CHILD_ACTIVITY_RECEIVER_LIMIT);
+    assert.equal(routes.has(`child-${CODEX_CHILD_ACTIVITY_RECEIVER_LIMIT}`), false);
+  });
+
+  it("bounds reconnect additions against the same lifetime route capacity", () => {
+    const priorOwner = TurnId.make("prior-owner");
+    const routes = new Map(
+      Array.from(
+        { length: CODEX_CHILD_CONVERSATION_ROUTE_LIMIT - 1 },
+        (_, index) => [`prior-${index}`, priorOwner] as const,
+      ),
+    );
+    const result = seedCodexResumedChildConversations({
+      providerThread: makeCodexResumeChildSnapshot(["new-child", "overflow-child", "prior-0"]),
+      routes,
+      children: new Map(),
+      observedAt: "2026-10-04T00:00:00.000Z",
+    });
+    assert.equal(result.routes.size, CODEX_CHILD_CONVERSATION_ROUTE_LIMIT);
+    assert.equal(result.routes.get("prior-0"), priorOwner);
+    assert.equal(result.routes.has("overflow-child"), false);
+    assert.equal(result.children.get("new-child")?.state, "unknown");
+    assert.equal(result.overflowed, true);
+    assert.equal(result.inconclusive, true);
+    assert.equal(routes.size, CODEX_CHILD_CONVERSATION_ROUTE_LIMIT - 1);
+  });
+
+  effectIt.effect(
+    "quarantines unknown child frames only after sticky overflow and reports once",
+    () =>
+      Effect.gen(function* () {
+        let diagnostics = 0;
+        const fence = yield* makeCodexChildConversationAdmissionFence(
+          Effect.sync(() => {
+            diagnostics += 1;
+          }),
+        );
+        const owner = TurnId.make("known-owner");
+        const routes = new Map([["known-child", owner]]);
+        const originalRoutes = new Map(routes);
+        const children = updateCodexChildConversationLiveness(
+          new Map(),
+          routes,
+          {
+            method: "turn/started",
+            params: { threadId: "known-child", turn: { id: "known-native" } },
+          },
+          "2026-10-04T00:00:00.000Z",
+        );
+        const input = {
+          rootProviderThreadId: "root",
+          routes,
+          notification: {
+            method: "turn/started",
+            params: { threadId: "unknown-child", turn: { id: "unknown-native" } },
+          },
+        };
+        assert.equal(yield* fence.acceptsNotification(input), true);
+        assert.equal(yield* fence.isIncomplete, false);
+        yield* fence.observeIncomplete(true);
+        yield* fence.observeIncomplete(false); // A conclusive later discovery is not a reset.
+        yield* fence.observeIncomplete(true);
+        assert.equal(yield* fence.isIncomplete, true);
+        assert.equal(diagnostics, 1);
+        const projected: unknown[] = [];
+        for (const notification of [
+          input.notification,
+          {
+            method: "turn/completed",
+            params: {
+              threadId: "unknown-child",
+              turn: { id: "unknown-native", status: "completed" },
+            },
+          },
+          {
+            method: "error",
+            params: { threadId: "unknown-child", turnId: "unknown-native", willRetry: false },
+          },
+          {
+            method: "item/completed",
+            params: {
+              threadId: "unknown-child",
+              turnId: "unknown-native",
+              item: { type: "reasoning", id: "reasoning" },
+            },
+          },
+          {
+            method: "item/started",
+            params: {
+              threadId: "unknown-child",
+              turnId: "unknown-native",
+              item: {
+                type: "subAgentActivity",
+                kind: "started",
+                agentThreadId: "unowned-grandchild",
+                agentPath: "/root/unknown/nested",
+              },
+            },
+          },
+        ]) {
+          const admitted = yield* fence.acceptsNotification({ ...input, notification });
+          assert.equal(admitted, false);
+          // The runtime uses this boundary before callbacks, liveness, route
+          // registration, private projection and ordinary publication alike.
+          if (admitted) {
+            rememberCodexChildConversationTurns(routes, notification, owner, "root");
+            projected.push(
+              updateCodexChildConversationLiveness(
+                children,
+                routes,
+                notification,
+                "2026-10-04T00:00:01.000Z",
+              ),
+            );
+            projected.push(codexSubagentProjectionMethod(notification, children, routes));
+            projected.push(buildCodexChildActivityNotifications(routes, children, notification));
+            projected.push(codexAggregateNotificationMethod(notification.method, false));
+          }
+        }
+        assert.deepEqual(projected, []);
+        assert.deepEqual(routes, originalRoutes);
+        const knownProgress = {
+          method: "item/completed",
+          params: {
+            threadId: "known-child",
+            turnId: "known-native",
+            item: { type: "reasoning", id: "current" },
+          },
+        };
+        assert.equal(
+          yield* fence.acceptsNotification({ ...input, notification: knownProgress }),
+          true,
+        );
+        assert.equal(
+          codexSubagentProjectionMethod(knownProgress, children, routes),
+          "codex.subagent/itemCompleted",
+        );
+        const rootProgress = {
+          ...knownProgress,
+          params: { ...knownProgress.params, threadId: "root", turnId: "root-native" },
+        };
+        assert.equal(
+          yield* fence.acceptsNotification({ ...input, notification: rootProgress }),
+          true,
+        );
+        assert.equal(
+          resolveCodexChildConversationNotification(routes, rootProgress, "root"),
+          undefined,
+        );
+        assert.equal(
+          codexAggregateNotificationMethod(rootProgress.method, false),
+          "item/completed",
+        );
+        assert.equal(
+          yield* fence.acceptsNotification({
+            ...input,
+            notification: { method: "warning", params: {} },
+          }),
+          true,
+        );
+      }),
+  );
+
+  it("fences incomplete successful completion but preserves failure, interruption and explicit Stop", () => {
+    const turnId = TurnId.make("overflow-root-turn");
+    const hasUnfinishedChildren = codexAggregateTurnHasUnfinishedChildren(
+      new Map(),
+      new Map(),
+      turnId,
+      true,
+    );
+    assert.equal(hasUnfinishedChildren, true);
+    for (const state of ["completed", "failed", "interrupted", "cancelled"] as const) {
+      const result = reconcileCodexAggregateRootCompletion({
+        completion: { turnId, state, observedAt: "2026-10-04T00:00:00.000Z" },
+        completions: new Map(),
+        managed: new Set(),
+        pending: new Set(),
+        hasUnfinishedChildren,
+      });
+      assert.equal(result.action, state === "completed" ? "defer" : "terminal");
+      assert.equal(result.pending.has(String(turnId)), state === "completed");
+    }
+    // Explicit Stop remains the unconditional native scope teardown, not the
+    // guarded automatic idle-retirement path. Existing lifecycle tests also
+    // prove its closed reservation fences late native start/steer ACKs.
+    const runtimeSource = readFileSync(
+      new URL("./CodexSessionRuntime.ts", import.meta.url),
+      "utf8",
+    );
+    const explicitClose = runtimeSource.slice(
+      runtimeSource.indexOf("    const close = Effect.gen"),
+      runtimeSource.indexOf("    const closeIfIdle = Effect.gen"),
+    );
+    assert.match(explicitClose, /Ref\.getAndSet\(closedRef, true\)/);
+    assert.match(explicitClose, /yield\* closeReserved/);
+    assert.doesNotMatch(explicitClose, /childAdmissionFence|codexTreeIsIdle|childConversation/);
+  });
+
+  effectIt.effect(
+    "does not mutate a known child when overflow rejects the second admission check",
+    () =>
+      Effect.gen(function* () {
+        const owner = TurnId.make("race-owner");
+        const routes = new Map([["known-child", owner]]);
+        const children = updateCodexChildConversationLiveness(
+          new Map(),
+          routes,
+          {
+            method: "turn/started",
+            params: { threadId: "known-child", turn: { id: "known-native" } },
+          },
+          "2026-10-04T00:00:00.000Z",
+        );
+        const notification = {
+          method: "item/completed",
+          params: {
+            threadId: "unknown-source",
+            turnId: "unknown-native",
+            item: {
+              type: "subAgentActivity",
+              id: "subagent-completed-known-native",
+              kind: "completed",
+              agentThreadId: "known-child",
+              agentPath: "/root/known",
+            },
+          },
+        };
+        // This payload can terminalize a known receiver if mutation bypasses
+        // source admission. Establish that the regression is not vacuous.
+        assert.equal(
+          updateCodexChildConversationLiveness(
+            children,
+            routes,
+            notification,
+            "2026-10-04T00:00:01.000Z",
+          ).get("known-child")?.state,
+          "inactive",
+        );
+        const routesRef = yield* Ref.make(routes);
+        const childrenRef = yield* Ref.make(children);
+        const semaphore = yield* Semaphore.make(1);
+        const fence = yield* makeCodexChildConversationAdmissionFence(Effect.void);
+        const firstAdmission = yield* Deferred.make<void>();
+        const releaseObservation = yield* Deferred.make<void>();
+        const frame = yield* Effect.gen(function* () {
+          assert.equal(
+            yield* semaphore.withPermits(1)(
+              fence.acceptsNotification({ notification, routes, rootProviderThreadId: "root" }),
+            ),
+            true,
+          );
+          yield* Deferred.succeed(firstAdmission, undefined);
+          yield* Deferred.await(releaseObservation);
+          return yield* semaphore.withPermits(1)(
+            Effect.gen(function* () {
+              const currentRoutes = new Map(yield* Ref.get(routesRef));
+              const currentChildren = yield* Ref.get(childrenRef);
+              const admitted =
+                (yield* fence.acceptsNotification({
+                  notification,
+                  routes: currentRoutes,
+                  rootProviderThreadId: "root",
+                })) && acceptsCodexChildNotification(currentChildren, notification, currentRoutes);
+              assert.equal(admitted, false);
+              // This is the runtime's complete mutation boundary, not a simulated
+              // conditional reducer: rejection must write neither Ref nor clone.
+              const committed = yield* commitCodexChildConversationNotification({
+                admitted,
+                routes: currentRoutes,
+                children: currentChildren,
+                routesRef,
+                childrenRef,
+                notification,
+                parentTurnId: owner,
+                rootProviderThreadId: "root",
+                observedAt: "2026-10-04T00:00:02.000Z",
+              });
+              assert.equal(committed, undefined);
+              assert.deepEqual(currentRoutes, routes);
+              return committed;
+            }),
+          );
+        }).pipe(Effect.forkChild);
+        yield* Deferred.await(firstAdmission);
+        // Detached discovery acquires the same mutation permit while observation
+        // is pending and makes all unknown native sources inconclusive.
+        yield* semaphore.withPermits(1)(fence.observeIncomplete(true));
+        yield* Deferred.succeed(releaseObservation, undefined);
+        assert.equal(yield* Fiber.join(frame), undefined);
+        assert.equal(yield* Ref.get(routesRef), routes);
+        assert.equal(yield* Ref.get(childrenRef), children);
+        assert.equal((yield* Ref.get(childrenRef)).get("known-child")?.state, "active");
+        assert.equal(
+          (yield* Ref.get(childrenRef)).get("known-child")?.nativeTurnId,
+          "known-native",
+        );
+      }),
+  );
+
+  effectIt.effect(
+    "rejects root-only success snapshots after overflow before either projection or session retirement",
+    () =>
+      Effect.gen(function* () {
+        const turnId = TurnId.make("snapshot-overflow-root");
+        const semaphore = yield* Semaphore.make(1);
+        const fence = yield* makeCodexChildConversationAdmissionFence(Effect.void);
+        const snapshotWaiting = yield* Deferred.make<void>();
+        const releaseSnapshot = yield* Deferred.make<void>();
+        const published = yield* Queue.unbounded<string>();
+        const pendingRef = yield* Ref.make(new Map<string, CodexPendingSteerProcessing>());
+        const sessionRef = yield* Ref.make<ProviderSession>({
+          threadId: ThreadId.make("snapshot-overflow-thread"),
+          provider: ProviderDriverKind.make("codex"),
+          status: "running",
+          activeTurnId: turnId,
+          runtimeMode: "full-access",
+          createdAt: "2026-10-04T00:00:00.000Z",
+          updatedAt: "2026-10-04T00:00:00.000Z",
+        });
+        // A root snapshot can start before overflow and finish after it. The
+        // absence of a pending/managed aggregate record is not success authority.
+        const snapshot = yield* Effect.gen(function* () {
+          yield* Deferred.succeed(snapshotWaiting, undefined);
+          yield* Deferred.await(releaseSnapshot);
+          yield* semaphore.withPermits(1)(
+            Effect.gen(function* () {
+              const input = {
+                status: "completed",
+                turnId,
+                unresolvedTurnIds: new Set<string>(),
+                admissionIncomplete: yield* fence.isIncomplete,
+              };
+              assert.equal(codexSuccessfulRootSnapshotIsBlocked(input), true);
+              if (!codexSuccessfulRootSnapshotIsBlocked(input))
+                yield* Queue.offer(published, "turn/completed");
+              if (!codexSuccessfulRootSnapshotIsBlocked(input))
+                yield* reconcileCodexTerminalSnapshotSteerLifecycle({
+                  semaphore: yield* Semaphore.make(1),
+                  pendingRef,
+                  sessionRef,
+                  turnId,
+                  turnStatus: "completed",
+                  observedAt: "2026-10-04T00:00:02.000Z",
+                });
+            }),
+          );
+        }).pipe(Effect.forkChild);
+        yield* Deferred.await(snapshotWaiting);
+        yield* semaphore.withPermits(1)(fence.observeIncomplete(true));
+        yield* Deferred.succeed(releaseSnapshot, undefined);
+        yield* Fiber.join(snapshot);
+        assert.equal(yield* Queue.size(published), 0);
+        assert.equal((yield* Ref.get(sessionRef)).status, "running");
+        assert.equal((yield* Ref.get(sessionRef)).activeTurnId, turnId);
+        // Native terminal failure/interruption still has authority, independent
+        // from both unknown children and a prior deferred successful snapshot.
+        for (const status of ["failed", "interrupted", "cancelled"] as const) {
+          assert.equal(
+            codexSuccessfulRootSnapshotIsBlocked({
+              status,
+              turnId,
+              unresolvedTurnIds: new Set([String(turnId)]),
+              admissionIncomplete: true,
+            }),
+            false,
+          );
+        }
+        assert.equal(
+          codexSuccessfulRootSnapshotIsBlocked({
+            status: "completed",
+            turnId,
+            unresolvedTurnIds: new Set(),
+            admissionIncomplete: false,
+          }),
+          false,
+        );
+        assert.equal(
+          codexSuccessfulRootSnapshotIsBlocked({
+            status: "completed",
+            turnId,
+            unresolvedTurnIds: new Set([String(turnId)]),
+            admissionIncomplete: false,
+          }),
+          true,
+        );
+        yield* reconcileCodexTerminalSnapshotSteerLifecycle({
+          semaphore,
+          pendingRef,
+          sessionRef,
+          turnId,
+          turnStatus: "failed",
+          errorMessage: "Synthetic root failure",
+          observedAt: "2026-10-04T00:00:03.000Z",
+        });
+        assert.equal((yield* Ref.get(sessionRef)).status, "error");
+        assert.equal((yield* Ref.get(sessionRef)).activeTurnId, undefined);
+      }),
+  );
 });
 
 it("publishes snapshot child terminal facts only while the exact sampled binding remains unchanged", () => {
@@ -1951,6 +2464,505 @@ describe("Codex child conversation routing", () => {
         "thread-parent",
       ),
       undefined,
+    );
+  });
+
+  it.each(["interacted", "started", "completed", "interrupted"] as const)(
+    "preserves exact child owner for paired %s activity from a newer root turn",
+    (kind) => {
+      const firstParent = TurnId.make("original-parent");
+      const laterParent = TurnId.make("later-parent");
+      const routes = new Map([["child", firstParent]]);
+      const initial = updateCodexChildConversationLiveness(
+        new Map(),
+        routes,
+        { method: "turn/started", params: { threadId: "child", turn: { id: "native-active" } } },
+        "2026-10-04T00:00:00.000Z",
+      );
+      let states = initial;
+      for (const method of ["item/started", "item/completed"]) {
+        const notification = {
+          method,
+          params: {
+            threadId: "root",
+            turnId: String(laterParent),
+            item: {
+              id: "activity",
+              type: "subAgentActivity",
+              kind,
+              agentThreadId: "child",
+              agentPath: "/root/audit",
+            },
+          },
+        };
+        rememberCodexChildConversationTurns(routes, notification, laterParent, "root");
+        states = updateCodexChildConversationLiveness(
+          states,
+          routes,
+          notification,
+          "2026-10-04T00:00:01.000Z",
+        );
+        const publications = buildCodexChildActivityNotifications(routes, states, notification);
+        assert.deepEqual(publications, [{ parentTurnId: firstParent, notification }]);
+      }
+      assert.deepEqual([...routes], [["child", firstParent]]);
+      assert.equal(states.get("child")?.nativeTurnId, "native-active");
+      assert.equal(states.get("child")?.parentTurnId, firstParent);
+      if (kind === "interacted") {
+        // Sending another task to a still-active child neither resets liveness
+        // nor creates a second [turn,child] row/detail authorization tuple.
+        assert.equal(states.get("child"), initial.get("child"));
+        assert.equal(codexAggregateTurnHasUnfinishedChildren(routes, states, firstParent), true);
+        assert.equal(codexAggregateTurnHasUnfinishedChildren(routes, states, laterParent), false);
+      }
+    },
+  );
+
+  it("reopens explicit reused-child work under its original history owner, with late rename still there", () => {
+    const owner = TurnId.make("spawn-parent");
+    const routes = new Map([["child", owner]]);
+    const terminal = updateCodexChildConversationLiveness(
+      new Map(),
+      routes,
+      {
+        method: "turn/completed",
+        params: { threadId: "child", turn: { id: "native-old", status: "completed" } },
+      },
+      "2026-10-04T00:00:00.000Z",
+    );
+    const restart = {
+      method: "item/started",
+      params: {
+        threadId: "root",
+        turnId: "later-parent",
+        item: {
+          id: "resume-call",
+          type: "collabAgentToolCall",
+          tool: "resumeAgent",
+          status: "inProgress",
+          senderThreadId: "root",
+          receiverThreadIds: ["child"],
+          prompt: null,
+          model: null,
+          reasoningEffort: null,
+          agentsStates: { child: { status: "running", message: null } },
+        },
+      },
+    };
+    rememberCodexChildConversationTurns(routes, restart, TurnId.make("later-parent"), "root");
+    assert.equal(
+      buildCodexChildActivityNotifications(routes, terminal, restart)?.[0]?.parentTurnId,
+      owner,
+    );
+    const running = updateCodexChildConversationLiveness(
+      terminal,
+      routes,
+      {
+        method: "turn/started",
+        params: { threadId: "child", turn: { id: "native-new", status: "inProgress" } },
+      },
+      "2026-10-04T00:00:01.000Z",
+    );
+    const rename = {
+      method: "thread/name/updated",
+      params: { threadId: "child", threadName: "Renamed audit" },
+    };
+    assert.deepEqual(resolveCodexChildConversationNotification(routes, rename, "root"), {
+      parentTurnId: owner,
+      suppressLifecycle: true,
+    });
+    assert.equal(
+      codexSubagentProjectionMethod(rename, running),
+      "codex.subagent/threadNameUpdated",
+    );
+    const afterRename = updateCodexChildConversationLiveness(
+      running,
+      routes,
+      rename,
+      "2026-10-04T00:00:02.000Z",
+    );
+    assert.equal(afterRename.get("child"), running.get("child"));
+    assert.equal(afterRename.get("child")?.state, "active");
+    assert.equal(afterRename.get("child")?.nativeTurnId, "native-new");
+    assert.deepEqual([...routes], [["child", owner]]);
+  });
+
+  it.each(["turn/completed", "item/started", "item/completed"])(
+    "rejects stale %s completion in both liveness and canonical publication after child reuse",
+    (method) => {
+      const owner = TurnId.make("original-parent");
+      const routes = new Map([["child", owner]]);
+      const current = updateCodexChildConversationLiveness(
+        new Map(),
+        routes,
+        {
+          method: "turn/started",
+          params: { threadId: "child", turn: { id: "native-current", status: "inProgress" } },
+        },
+        "2026-10-04T00:00:00.000Z",
+      );
+      const lateProgress = updateCodexChildConversationLiveness(
+        current,
+        routes,
+        {
+          method: "item/completed",
+          params: {
+            threadId: "child",
+            turnId: "native-retired",
+            item: { type: "reasoning", id: "old-reasoning", summary: ["Old work"] },
+          },
+        },
+        "2026-10-04T00:00:01.000Z",
+      );
+      assert.equal(lateProgress.get("child"), current.get("child"));
+      const stale =
+        method === "turn/completed"
+          ? {
+              method,
+              params: { threadId: "child", turn: { id: "native-retired", status: "completed" } },
+            }
+          : {
+              method,
+              params: {
+                threadId: "root",
+                turnId: "original-parent",
+                item: {
+                  type: "subAgentActivity",
+                  id: "subagent-completed-native-retired",
+                  kind: "completed",
+                  agentThreadId: "child",
+                  agentPath: "/root/audit",
+                },
+              },
+            };
+      const afterStale = updateCodexChildConversationLiveness(
+        lateProgress,
+        routes,
+        stale,
+        "2026-10-04T00:00:02.000Z",
+      );
+      assert.equal(afterStale.get("child"), current.get("child"));
+      assert.equal(codexSubagentProjectionMethod(stale, afterStale), undefined);
+      if (method !== "turn/completed") {
+        assert.deepEqual(buildCodexChildActivityNotifications(routes, afterStale, stale), []);
+      }
+      const currentCompletion =
+        method === "turn/completed"
+          ? {
+              method,
+              params: { threadId: "child", turn: { id: "native-current", status: "completed" } },
+            }
+          : {
+              method,
+              params: {
+                threadId: "root",
+                turnId: "later-parent",
+                item: {
+                  type: "subAgentActivity",
+                  id: "subagent-completed-native-current",
+                  kind: "completed",
+                  agentThreadId: "child",
+                  agentPath: "/root/audit",
+                },
+              },
+            };
+      const settled = updateCodexChildConversationLiveness(
+        afterStale,
+        routes,
+        currentCompletion,
+        "2026-10-04T00:00:03.000Z",
+      );
+      assert.equal(settled.get("child")?.state, "inactive");
+      assert.equal(settled.get("child")?.parentTurnId, owner);
+      assert.equal(
+        method === "turn/completed"
+          ? codexSubagentProjectionMethod(currentCompletion, settled)
+          : buildCodexChildActivityNotifications(routes, settled, currentCompletion)?.[0]
+              ?.parentTurnId,
+        method === "turn/completed" ? "codex.subagent/turnCompleted" : owner,
+      );
+    },
+  );
+
+  it.each(["error", "reasoning", "nested-spawn"])(
+    "rejects stale child %s before routing, liveness, private and ordinary publication",
+    (kind) => {
+      const owner = TurnId.make("original-parent");
+      const routes = new Map([["child", owner]]);
+      const current = updateCodexChildConversationLiveness(
+        new Map(),
+        routes,
+        {
+          method: "turn/started",
+          params: { threadId: "child", turn: { id: "native-current" } },
+        },
+        "2026-10-04T00:00:00.000Z",
+      );
+      const params = {
+        threadId: "child",
+        turnId: "native-retired",
+        ...(kind === "error"
+          ? { willRetry: false, error: { message: "Old child failure" } }
+          : {
+              item:
+                kind === "reasoning"
+                  ? { type: "reasoning", id: "old-reasoning", summary: ["Old work"] }
+                  : {
+                      type: "subAgentActivity",
+                      id: "old-nested-spawn",
+                      kind: "started",
+                      agentThreadId: "grandchild",
+                      agentPath: "/root/audit/nested",
+                    },
+            }),
+      };
+      const notification = {
+        method:
+          kind === "error" ? "error" : kind === "reasoning" ? "item/completed" : "item/started",
+        params,
+      };
+      const admitted = acceptsCodexChildNotification(current, notification, routes);
+      assert.equal(admitted, false);
+      // The live handler uses this exact shared predicate before remembering
+      // descendants and returns before *any* canonical publication, including
+      // ordinary child errors that have no private projection method.
+      if (admitted) rememberCodexChildConversationTurns(routes, notification, owner, "root");
+      assert.equal(routes.has("grandchild"), false);
+      assert.equal(
+        updateCodexChildConversationLiveness(
+          current,
+          routes,
+          notification,
+          "2026-10-04T00:00:01.000Z",
+        ).get("child"),
+        current.get("child"),
+      );
+      assert.equal(codexSubagentProjectionMethod(notification, current, routes), undefined);
+      if (kind !== "error")
+        assert.deepEqual(buildCodexChildActivityNotifications(routes, current, notification), []);
+      assert.equal(
+        admitted ? codexAggregateNotificationMethod(notification.method, true) : undefined,
+        undefined,
+      );
+
+      const matching = { ...notification, params: { ...params, turnId: "native-current" } };
+      assert.equal(acceptsCodexChildNotification(current, matching, routes), true);
+      const { turnId: _retiredTurn, ...withoutTurnProof } = params;
+      const compatible = { ...notification, params: withoutTurnProof };
+      assert.equal(acceptsCodexChildNotification(current, compatible, routes), true);
+      if (kind === "error") {
+        assert.equal(
+          updateCodexChildConversationLiveness(
+            current,
+            routes,
+            matching,
+            "2026-10-04T00:00:02.000Z",
+          ).get("child")?.state,
+          "inactive",
+        );
+        assert.equal(
+          updateCodexChildConversationLiveness(
+            current,
+            routes,
+            compatible,
+            "2026-10-04T00:00:02.000Z",
+          ).get("child")?.state,
+          "inactive",
+        );
+      } else if (kind === "reasoning") {
+        assert.equal(
+          codexSubagentProjectionMethod(matching, current, routes),
+          "codex.subagent/itemCompleted",
+        );
+        assert.equal(
+          codexSubagentProjectionMethod(compatible, current, routes),
+          "codex.subagent/itemCompleted",
+        );
+      } else {
+        rememberCodexChildConversationTurns(routes, matching, owner, "root");
+        assert.equal(routes.get("grandchild"), owner);
+        assert.equal(
+          buildCodexChildActivityNotifications(routes, current, matching)?.[0]?.parentTurnId,
+          owner,
+        );
+      }
+      const explicitNewStart = {
+        method: "turn/started",
+        params: { threadId: "child", turn: { id: "native-next" } },
+      };
+      assert.equal(acceptsCodexChildNotification(current, explicitNewStart, routes), true);
+      assert.equal(
+        updateCodexChildConversationLiveness(
+          current,
+          routes,
+          explicitNewStart,
+          "2026-10-04T00:00:03.000Z",
+        ).get("child")?.nativeTurnId,
+        "native-next",
+      );
+    },
+  );
+
+  it("retains compatible completion admission when older envelopes provide no exact native turn proof", () => {
+    const owner = TurnId.make("owner");
+    const routes = new Map([["child", owner]]);
+    const current = updateCodexChildConversationLiveness(
+      new Map(),
+      routes,
+      { method: "turn/started", params: { threadId: "child", turn: { id: "current" } } },
+      "2026-10-04T00:00:00.000Z",
+    );
+    const notification = {
+      method: "item/completed",
+      params: {
+        threadId: "root",
+        item: {
+          type: "subAgentActivity",
+          id: "older-opaque-completion-id",
+          kind: "completed",
+          agentThreadId: "child",
+          agentPath: "/root/audit",
+        },
+      },
+    };
+    const settled = updateCodexChildConversationLiveness(
+      current,
+      routes,
+      notification,
+      "2026-10-04T00:00:01.000Z",
+    );
+    assert.equal(settled.get("child")?.state, "inactive");
+    assert.equal(
+      buildCodexChildActivityNotifications(routes, settled, notification)?.[0]?.parentTurnId,
+      owner,
+    );
+    assert.equal(
+      codexSubagentProjectionMethod(
+        { method: "turn/completed", params: { threadId: "child", turn: { status: "completed" } } },
+        current,
+      ),
+      "codex.subagent/turnCompleted",
+    );
+  });
+
+  it("splits legacy lifecycle only by receiver owner without changing native source or leaking other groups", () => {
+    const first = TurnId.make("first");
+    const second = TurnId.make("second");
+    const routes = new Map([
+      ["child-a", first],
+      ["child-b", second],
+    ]);
+    const original = {
+      method: "item/completed",
+      params: {
+        threadId: "root",
+        turnId: "latest-root",
+        startedAtMs: 123,
+        item: {
+          id: "one-native-item",
+          type: "collabAgentToolCall",
+          tool: "wait",
+          status: "completed",
+          senderThreadId: "native-sender",
+          receiverThreadIds: ["child-a", "child-b"],
+          prompt: "Delegated objective",
+          agentsStates: {
+            "child-a": { status: "completed", message: "A" },
+            "child-b": { status: "running", message: "B" },
+            unrelated: { status: "running", message: "Do not copy" },
+          },
+        },
+      },
+    };
+    rememberCodexChildConversationTurns(routes, original, TurnId.make("latest-root"), "root");
+    const copies = buildCodexChildActivityNotifications(routes, new Map(), original);
+    assert.equal(copies?.length, 2);
+    assert.deepEqual(
+      copies?.map((copy) => copy.parentTurnId),
+      [first, second],
+    );
+    for (const [index, copy] of (copies ?? []).entries()) {
+      const child = index === 0 ? "child-a" : "child-b";
+      assert.deepEqual(copy.notification, {
+        ...original,
+        params: {
+          ...original.params,
+          item: {
+            ...original.params.item,
+            receiverThreadIds: [child],
+            agentsStates: {
+              [child]: original.params.item.agentsStates[child as "child-a" | "child-b"],
+            },
+          },
+        },
+      });
+      assert.notEqual(copy.notification, original);
+    }
+    assert.deepEqual(original.params.item.receiverThreadIds, ["child-a", "child-b"]);
+    assert.equal(Object.keys(original.params.item.agentsStates).length, 3);
+    assert.deepEqual(
+      buildCodexChildActivityNotifications(routes, new Map(), {
+        method: "item/completed",
+        params: { threadId: "root", item: { type: "reasoning", summary: ["ordinary work"] } },
+      }),
+      undefined,
+    );
+  });
+
+  it("bounds all legacy ownership groups together and never registers a root or overflow receiver", () => {
+    const receivers = Array.from(
+      { length: CODEX_CHILD_ACTIVITY_RECEIVER_LIMIT + 10 },
+      (_, index) => `child-${index}`,
+    );
+    const routes = new Map(receivers.map((child, index) => [child, TurnId.make(`owner-${index}`)]));
+    const original = {
+      method: "item/started",
+      params: {
+        threadId: "root",
+        item: {
+          type: "collabAgentToolCall",
+          receiverThreadIds: receivers,
+          agentsStates: {},
+        },
+      },
+    };
+    const copies = buildCodexChildActivityNotifications(routes, new Map(), original);
+    assert.equal(copies?.length, CODEX_CHILD_ACTIVITY_RECEIVER_LIMIT);
+    const newlyRegistered = new Map<string, TurnId>();
+    rememberCodexChildConversationTurns(newlyRegistered, original, TurnId.make("owner"), "root");
+    assert.equal(newlyRegistered.size, CODEX_CHILD_ACTIVITY_RECEIVER_LIMIT);
+    assert.equal(newlyRegistered.has(`child-${CODEX_CHILD_ACTIVITY_RECEIVER_LIMIT}`), false);
+    const rootInteraction = {
+      method: "item/completed",
+      params: {
+        threadId: "child-0",
+        item: {
+          type: "subAgentActivity",
+          kind: "interacted",
+          id: "reverse",
+          agentThreadId: "root",
+          agentPath: "/root",
+        },
+      },
+    };
+    rememberCodexChildConversationTurns(
+      newlyRegistered,
+      rootInteraction,
+      TurnId.make("later"),
+      "root",
+    );
+    assert.equal(newlyRegistered.has("root"), false);
+    assert.equal(
+      buildCodexChildActivityNotifications(newlyRegistered, new Map(), rootInteraction)?.[0]
+        ?.parentTurnId,
+      TurnId.make("owner"),
+    );
+    assert.deepEqual(
+      buildCodexChildActivityNotifications(newlyRegistered, new Map(), {
+        ...rootInteraction,
+        params: { ...rootInteraction.params, threadId: "unknown-source" },
+      }),
+      [],
     );
   });
 

@@ -1,21 +1,81 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+
+type CountUpFrameListener = (now: number) => boolean;
+
+const countUpFrameListeners = new Set<CountUpFrameListener>();
+let countUpFrameId: number | null = null;
+
+function runCountUpFrame(now: number): void {
+  countUpFrameId = null;
+  for (const listener of [...countUpFrameListeners]) {
+    // React cleanup can remove another listener while this snapshot is being
+    // visited. Never update an unmounted counter from that stale callback.
+    if (!countUpFrameListeners.has(listener)) continue;
+    if (!listener(now)) countUpFrameListeners.delete(listener);
+  }
+  scheduleCountUpFrame();
+}
+
+function scheduleCountUpFrame(): void {
+  if (countUpFrameId !== null || countUpFrameListeners.size === 0) return;
+  countUpFrameId = window.requestAnimationFrame(runCountUpFrame);
+}
+
+/**
+ * Every count-up on the page shares one animation-frame source. Model tables
+ * can contain many independently changing values; a single browser frame loop
+ * keeps them synchronized without allocating one timer per row.
+ */
+function subscribeCountUpFrame(listener: CountUpFrameListener): () => void {
+  countUpFrameListeners.add(listener);
+  scheduleCountUpFrame();
+  return () => {
+    countUpFrameListeners.delete(listener);
+    if (countUpFrameListeners.size === 0 && countUpFrameId !== null) {
+      window.cancelAnimationFrame(countUpFrameId);
+      countUpFrameId = null;
+    }
+  };
+}
+
+const reducedMotionListeners = new Set<() => void>();
+let reducedMotionQuery: MediaQueryList | null = null;
+
+function getReducedMotionQuery(): MediaQueryList | null {
+  if (typeof window === "undefined") return null;
+  reducedMotionQuery ??= window.matchMedia("(prefers-reduced-motion: reduce)");
+  return reducedMotionQuery;
+}
+
+function readPrefersReducedMotion(): boolean {
+  return getReducedMotionQuery()?.matches ?? false;
+}
+
+function emitReducedMotionChange(): void {
+  for (const listener of reducedMotionListeners) listener();
+}
+
+function subscribeReducedMotion(listener: () => void): () => void {
+  const query = getReducedMotionQuery();
+  if (query === null) return () => undefined;
+  if (reducedMotionListeners.size === 0) {
+    query.addEventListener("change", emitReducedMotionChange);
+  }
+  reducedMotionListeners.add(listener);
+  return () => {
+    reducedMotionListeners.delete(listener);
+    if (reducedMotionListeners.size === 0) {
+      query.removeEventListener("change", emitReducedMotionChange);
+      // Tests and embedded browser surfaces can replace matchMedia between
+      // complete mounts. Reacquire it for the next subscriber rather than
+      // retaining a detached query object forever.
+      reducedMotionQuery = null;
+    }
+  };
+}
 
 function usePrefersReducedMotion(): boolean {
-  const [reduced, setReduced] = useState(
-    () =>
-      typeof window !== "undefined" &&
-      window.matchMedia("(prefers-reduced-motion: reduce)").matches,
-  );
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-    const query = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const onChange = () => setReduced(query.matches);
-    query.addEventListener("change", onChange);
-    return () => query.removeEventListener("change", onChange);
-  }, []);
-  return reduced;
+  return useSyncExternalStore(subscribeReducedMotion, readPrefersReducedMotion, () => false);
 }
 
 /**
@@ -40,7 +100,6 @@ export function useCountUp(
   const reduced = usePrefersReducedMotion();
   const displayRef = useRef(target);
   const [display, setDisplay] = useState(target);
-  const rafRef = useRef<number | null>(null);
 
   useEffect(() => {
     // Derived inside the effect: `decimals` is the real dependency, and
@@ -59,31 +118,21 @@ export function useCountUp(
     }
 
     let last = performance.now();
-    const step = (now: number) => {
+    const step = (now: number): boolean => {
       const dt = Math.min(64, now - last);
       last = now;
       const diff = target - displayRef.current;
       if (Math.abs(diff) < quantum / 2) {
         displayRef.current = target;
         setDisplay(quantize(target));
-        rafRef.current = null;
-        return;
+        return false;
       }
       displayRef.current += diff * (1 - Math.exp(-dt / timeConstantMs));
       setDisplay(quantize(displayRef.current));
-      rafRef.current = requestAnimationFrame(step);
+      return true;
     };
 
-    if (rafRef.current !== null) {
-      cancelAnimationFrame(rafRef.current);
-    }
-    rafRef.current = requestAnimationFrame(step);
-    return () => {
-      if (rafRef.current !== null) {
-        cancelAnimationFrame(rafRef.current);
-        rafRef.current = null;
-      }
-    };
+    return subscribeCountUpFrame(step);
   }, [target, reduced, timeConstantMs, decimals]);
 
   return display;

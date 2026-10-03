@@ -885,6 +885,71 @@ function createSnapshotWithActiveSubagent(): OrchestrationReadModel {
   };
 }
 
+/**
+ * Keep the parent session on a newer turn than the turn which spawned this
+ * child. Structured provider children can outlive their spawning turn, so the
+ * composer and side rail must derive their roster from the complete canonical
+ * activity history rather than silently applying the latest-turn transcript
+ * filter used by the ordinary work log.
+ */
+function createSnapshotWithCrossTurnActiveSubagent(): OrchestrationReadModel {
+  const snapshot = createSnapshotForTargetUser({
+    targetMessageId: "msg-user-cross-turn-active-subagent" as MessageId,
+    targetText: "keep the older-turn child visible while newer work runs",
+    sessionStatus: "running",
+  });
+  const spawningTurnId = "turn-cross-turn-subagent-spawn" as TurnId;
+  const latestTurnId = "turn-after-cross-turn-subagent-spawn" as TurnId;
+
+  return {
+    ...snapshot,
+    threads: snapshot.threads.map((thread) =>
+      thread.id === THREAD_ID
+        ? Object.assign({}, thread, {
+            latestTurn: {
+              turnId: latestTurnId,
+              state: "running" as const,
+              requestedAt: isoAt(1_010),
+              startedAt: isoAt(1_011),
+              completedAt: null,
+              assistantMessageId: null,
+            },
+            activities: [
+              {
+                id: EventId.make("activity-cross-turn-active-subagent"),
+                tone: "info" as const,
+                kind: "task.started",
+                summary: "Subagent started",
+                payload: {
+                  taskId: "provider-child-cross-turn-roster",
+                  taskType: "subagent",
+                  subagent: {
+                    threadId: "provider-child-cross-turn-roster",
+                    label: "Cross-turn roster audit",
+                    path: "/root/cross_turn_roster_audit",
+                    objective: "Verify the child survives latest-turn filtering",
+                    status: "active",
+                    startedAt: isoAt(1_001),
+                  },
+                },
+                turnId: spawningTurnId,
+                sequence: 1,
+                createdAt: isoAt(1_001),
+              },
+            ],
+            session: {
+              ...thread.session,
+              status: "running" as const,
+              activeTurnId: latestTurnId,
+              updatedAt: isoAt(1_011),
+            },
+            updatedAt: isoAt(1_011),
+          })
+        : thread,
+    ),
+  };
+}
+
 function createSnapshotWithSecondaryProject(options?: {
   includeSecondaryThread?: boolean;
   includeArchivedSecondaryThread?: boolean;
@@ -2472,6 +2537,99 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           expect(findComposerTaskProgressPopup()).toBeNull();
           expect(triggerElement.getAttribute("aria-expanded")).toBe("false");
           expect(document.activeElement).toBe(triggerElement);
+        });
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("keeps an older-turn active child in the task popover and docked rail until its canonical terminal event", async () => {
+      const mounted = await mountChatView({
+        viewport: WIDE_FOOTER_VIEWPORT,
+        snapshot: createSnapshotWithCrossTurnActiveSubagent(),
+      });
+
+      try {
+        // The current parent turn intentionally differs from the child's
+        // spawning turn. This is the production boundary where reusing the
+        // transcript's latest-turn filter would incorrectly hide the child.
+        expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.latestTurn?.turnId).toBe(
+          "turn-after-cross-turn-subagent-spawn",
+        );
+        await page.getByRole("button", { name: /^1 active subagent\. Show task list$/i }).click();
+
+        const subagentRow = page
+          .getByRole("region", { name: "Active subagents" })
+          .getByRole("button", {
+            name: /Cross-turn roster audit, Working\. Verify the child survives latest-turn filtering\. Open details/i,
+          });
+        await expect.element(subagentRow).toBeVisible();
+
+        await page.getByRole("button", { name: "Show on the side" }).click();
+        await vi.waitFor(() => {
+          expect(findSessionRail()).not.toBeNull();
+          expect(findSessionRail()?.textContent).toContain("Cross-turn roster audit");
+          expect(findComposerTaskProgressTrigger()).toBeNull();
+        });
+        await expect.element(subagentRow).toBeVisible();
+
+        // Exercise the canonical stream reducer instead of replacing the
+        // detail snapshot. The terminal edge belongs to the older spawning
+        // turn and must remove the child while leaving the newer turn current.
+        rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+          kind: "event",
+          event: {
+            type: "thread.activity-appended",
+            sequence: fixture.snapshot.snapshotSequence + 1,
+            eventId: EventId.make("event-cross-turn-active-subagent-completed"),
+            aggregateKind: "thread",
+            aggregateId: THREAD_ID,
+            occurredAt: isoAt(1_020),
+            commandId: null,
+            causationEventId: null,
+            correlationId: null,
+            metadata: {},
+            payload: {
+              threadId: THREAD_ID,
+              activity: {
+                id: EventId.make("activity-cross-turn-active-subagent-completed"),
+                tone: "info",
+                kind: "task.completed",
+                summary: "Subagent completed",
+                payload: {
+                  taskId: "provider-child-cross-turn-roster",
+                  taskType: "subagent",
+                  status: "completed",
+                  detail: "Verified cross-turn roster behavior",
+                  subagent: {
+                    threadId: "provider-child-cross-turn-roster",
+                    label: "Cross-turn roster audit",
+                    path: "/root/cross_turn_roster_audit",
+                    objective: "Verify the child survives latest-turn filtering",
+                    status: "completed",
+                    startedAt: isoAt(1_001),
+                  },
+                },
+                turnId: "turn-cross-turn-subagent-spawn" as TurnId,
+                sequence: 2,
+                createdAt: isoAt(1_020),
+              },
+            },
+          },
+        });
+
+        await vi.waitFor(() => {
+          expect(findSessionRail()?.textContent).not.toContain("Cross-turn roster audit");
+          expect(findSessionRail()?.textContent).toContain("No tasks yet.");
+          expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.latestTurn?.turnId).toBe(
+            "turn-after-cross-turn-subagent-spawn",
+          );
+        });
+
+        await page.getByRole("button", { name: "Show in composer" }).click();
+        await vi.waitFor(() => {
+          expect(findSessionRail()).toBeNull();
+          expect(findComposerTaskProgressTrigger()).toBeNull();
         });
       } finally {
         await mounted.cleanup();

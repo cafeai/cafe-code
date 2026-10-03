@@ -29,9 +29,12 @@ import {
   ThreadId,
 } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
 import * as Struct from "effect/Struct";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
@@ -62,6 +65,12 @@ import {
   readAcceptedCodexSteerRecoveryBarriers,
   type PersistedUnsettledCodexSteerIntent,
 } from "../codexSteerIntentLedger.ts";
+import { enrichLegacyActivityOrder } from "../legacyActivityOrder.ts";
+import {
+  hydrateSubagentLifecycleForThread,
+  hydrateSubagentLifecyclePage,
+  type SubagentLifecycleHydrationResult,
+} from "../subagentLifecycleRetention.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
 import {
   ProjectionSnapshotQuery,
@@ -107,6 +116,8 @@ const ProjectionThreadDetailActivityDbRowSchema = Schema.Struct({
   ...ProjectionThreadActivityDbRowSchema.fields,
   /** One metadata-only warning bit shared by every row in a detail result. */
   subagentRetentionTruncated: Schema.Number,
+  /** True only when the all-turn normalized lifecycle sidecar is complete. */
+  subagentRetentionHydrated: Schema.Number,
 });
 const ProjectionThreadSessionDbRowSchema = ProjectionThreadSessionSqlRow;
 const ProjectionThreadGoalDbRowSchema = ProviderThreadGoal;
@@ -579,6 +590,12 @@ function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: st
 const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const repositoryIdentityResolver = yield* RepositoryIdentityResolver;
+  const lifecycleHydrationScope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
+    Scope.close(scope, Exit.void),
+  );
+  const lifecycleHydrationSemaphore = yield* Semaphore.make(2);
+  const lifecycleHydrationThreads = new Set<string>();
+  const lifecycleHydrationAdmissionLimit = 8;
   /**
    * The historical Work Log count, page, and presence queries must agree on
    * exactly which persisted activities can produce a Work Log row. Keeping
@@ -609,6 +626,44 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   // Diagnostics are bounded and keyed only by Cafe thread/turn identity. Never
   // log provider child ids or presentation text when the safety ceiling trips.
   const reportedSubagentRetentionLimits = new Map<string, true>();
+  const fallbackHydrationResult: SubagentLifecycleHydrationResult = {
+    complete: false,
+    retired: false,
+    advanced: false,
+  };
+  const runForegroundLifecycleHydration = (threadId: ThreadId) =>
+    hydrateSubagentLifecyclePage(sql, threadId).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("foreground subagent lifecycle hydration failed").pipe(
+          Effect.annotateLogs({ reason: error.reason._tag }),
+          Effect.as(fallbackHydrationResult),
+        ),
+      ),
+    );
+  const scheduleLifecycleHydration = (threadId: ThreadId) =>
+    Effect.suspend(() => {
+      if (lifecycleHydrationThreads.has(threadId)) return Effect.void;
+      // Bound both active and semaphore-queued jobs. When full, do not leave a
+      // sticky marker: the next detail request retries admission after another
+      // exact-thread worker retires.
+      if (lifecycleHydrationThreads.size >= lifecycleHydrationAdmissionLimit) return Effect.void;
+      lifecycleHydrationThreads.add(threadId);
+      const worker = lifecycleHydrationSemaphore.withPermits(1)(
+        hydrateSubagentLifecycleForThread(sql, threadId).pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("background subagent lifecycle hydration failed").pipe(
+              Effect.annotateLogs({ reason: error.reason._tag }),
+            ),
+          ),
+          Effect.ensuring(
+            Effect.sync(() => {
+              lifecycleHydrationThreads.delete(threadId);
+            }),
+          ),
+        ),
+      );
+      return worker.pipe(Effect.forkIn(lifecycleHydrationScope), Effect.asVoid);
+    });
   const repositoryIdentityResolutionConcurrency = 4;
   const resolveRepositoryIdentitiesForProjects = Effect.fn(
     "ProjectionSnapshotQuery.resolveRepositoryIdentitiesForProjects",
@@ -2348,15 +2403,96 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             activity_id DESC
           LIMIT 1
         ),
-        current_turn_subagent_identities AS (
-          -- Keep the most recently active identities plus one sentinel row so
-          -- the caller can emit a metadata-only truncation diagnostic. The
-          -- output cap is a hard defense against a compromised provider
-          -- manufacturing unique ids to bypass the normal activity window.
+        subagent_hydration AS (
+          SELECT CASE
+            WHEN COUNT(*) = 3 AND COALESCE(SUM(completed), 0) = 3 THEN 1
+            ELSE 0
+          END AS complete
+          FROM projection_subagent_lifecycle_hydration
+          WHERE thread_id = ${threadId}
+        ),
+        global_subagent_latest_prefix AS (
+          -- Every identity contributes at most three materialized pointers.
+          -- Therefore 3 * (limit + sentinel) newest pointers are sufficient to
+          -- discover the newest 4,097 exact identities without parsing JSON or
+          -- walking unbounded progress history.
           SELECT
+            latest.turn_id,
+            latest.child_id,
+            latest.sequence_known,
+            latest.sequence,
+            latest.created_at,
+            latest.activity_id
+          FROM projection_subagent_lifecycle_latest AS latest
+            INDEXED BY idx_projection_subagent_latest_thread_order
+          CROSS JOIN subagent_hydration
+          WHERE latest.thread_id = ${threadId}
+            AND subagent_hydration.complete = 1
+          ORDER BY
+            latest.sequence_known DESC,
+            latest.sequence DESC,
+            latest.created_at DESC,
+            latest.activity_id DESC
+          LIMIT ${(MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN + 1) * 3}
+        ),
+        global_subagent_identity_heads AS (
+          SELECT turn_id, child_id, sequence_known, sequence, created_at, activity_id
+          FROM (
+            SELECT
+              prefix.*,
+              ROW_NUMBER() OVER (
+                PARTITION BY prefix.turn_id, prefix.child_id
+                ORDER BY
+                  prefix.sequence_known DESC,
+                  prefix.sequence DESC,
+                  prefix.created_at DESC,
+                  prefix.activity_id DESC
+              ) AS identity_rank
+            FROM global_subagent_latest_prefix AS prefix
+          )
+          WHERE identity_rank = 1
+          ORDER BY sequence_known DESC, sequence DESC, created_at DESC, activity_id DESC
+          LIMIT ${MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN + 1}
+        ),
+        retained_global_subagent_identities AS (
+          SELECT turn_id, child_id
+          FROM global_subagent_identity_heads
+          LIMIT ${MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN}
+        ),
+        global_subagent_lifecycle_activity_ids AS (
+          SELECT DISTINCT latest.activity_id
+          FROM projection_subagent_lifecycle_latest AS latest
+          INNER JOIN retained_global_subagent_identities AS identity
+            ON identity.turn_id = latest.turn_id
+            AND identity.child_id = latest.child_id
+          WHERE latest.thread_id = ${threadId}
+        ),
+        current_turn_lifecycle_rows AS (
+          -- This legacy lane remains authoritative only while exact-thread
+          -- hydration is incomplete. CASE guards every JSON function so old
+          -- malformed payload text cannot abort a thread detail snapshot.
+          SELECT
+            activities.activity_id,
             activities.turn_id,
-            json_extract(activities.payload_json, '$.subagent.threadId') AS subagent_thread_id
+            activities.kind,
+            activities.sequence,
+            activities.created_at,
+            CASE WHEN json_valid(activities.payload_json) THEN
+              CASE WHEN json_type(activities.payload_json, '$.subagent.threadId') = 'text'
+                THEN json_extract(activities.payload_json, '$.subagent.threadId')
+                ELSE NULL
+              END
+            ELSE NULL END AS presentation_child_id,
+            CASE WHEN json_valid(activities.payload_json) THEN
+              CASE WHEN json_type(activities.payload_json, '$.visibility') = 'text'
+                AND json_extract(activities.payload_json, '$.visibility') = 'ambient'
+                AND json_type(activities.payload_json, '$.taskId') = 'text'
+                THEN json_extract(activities.payload_json, '$.taskId')
+                ELSE NULL
+              END
+            ELSE NULL END AS ambient_task_id
           FROM projection_thread_activities AS activities
+          CROSS JOIN subagent_hydration
           WHERE activities.thread_id = ${threadId}
             AND activities.turn_id = (
               SELECT latest_turn_id
@@ -2365,65 +2501,105 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               LIMIT 1
             )
             AND activities.kind IN ('task.started', 'task.progress', 'task.completed')
-            AND json_type(activities.payload_json, '$.subagent.threadId') = 'text'
-          GROUP BY
-            activities.turn_id,
-            json_extract(activities.payload_json, '$.subagent.threadId')
-          ORDER BY
-            MAX(CASE WHEN activities.sequence IS NULL THEN 0 ELSE 1 END) DESC,
-            MAX(activities.sequence) DESC,
-            MAX(activities.created_at) DESC,
-            MAX(activities.activity_id) DESC
+            AND subagent_hydration.complete = 0
+        ),
+        raw_current_turn_subagent_identity_edges AS (
+          SELECT
+            activity_id, turn_id, kind, sequence, created_at,
+            presentation_child_id AS child_id
+          FROM current_turn_lifecycle_rows
+          UNION
+          SELECT
+            activity_id, turn_id, kind, sequence, created_at,
+            ambient_task_id AS child_id
+          FROM current_turn_lifecycle_rows
+        ),
+        current_turn_subagent_identity_edges AS (
+          SELECT *
+          FROM raw_current_turn_subagent_identity_edges
+          WHERE CASE
+            WHEN length(child_id) NOT BETWEEN 1 AND 512 THEN 0
+            WHEN length(CAST(child_id AS BLOB)) = length(child_id) THEN 1
+            ELSE (
+              WITH RECURSIVE utf16_length(character_offset, code_units) AS (
+                SELECT 0, 0
+                UNION ALL
+                SELECT
+                  character_offset + 1,
+                  code_units + CASE
+                    WHEN unicode(substr(child_id, character_offset + 1, 1)) > 65535
+                    THEN 2 ELSE 1
+                  END
+                FROM utf16_length
+                WHERE character_offset < length(child_id)
+              )
+              SELECT CASE WHEN code_units <= 512 THEN 1 ELSE 0 END
+              FROM utf16_length
+              WHERE character_offset = length(child_id)
+              LIMIT 1
+            )
+          END = 1
+            AND instr(CAST(child_id AS BLOB), X'00') = 0
+            AND child_id NOT GLOB ('*[' || char(1) || '-' || char(31) || char(127) || char(128) || '-' || char(159) || ']*')
+            AND instr(child_id, char(1564)) = 0
+            AND instr(child_id, char(8206)) = 0
+            AND instr(child_id, char(8207)) = 0
+            AND instr(child_id, char(8234)) = 0
+            AND instr(child_id, char(8235)) = 0
+            AND instr(child_id, char(8236)) = 0
+            AND instr(child_id, char(8237)) = 0
+            AND instr(child_id, char(8238)) = 0
+            AND instr(child_id, char(8294)) = 0
+            AND instr(child_id, char(8295)) = 0
+            AND instr(child_id, char(8296)) = 0
+            AND instr(child_id, char(8297)) = 0
+        ),
+        current_turn_subagent_identities AS (
+          SELECT turn_id, child_id, sequence_known, sequence, created_at, activity_id
+          FROM (
+            SELECT
+              edges.turn_id,
+              edges.child_id,
+              CASE WHEN edges.sequence IS NULL THEN 0 ELSE 1 END AS sequence_known,
+              edges.sequence,
+              edges.created_at,
+              edges.activity_id,
+              ROW_NUMBER() OVER (
+                PARTITION BY edges.turn_id, edges.child_id
+                ORDER BY
+                  CASE WHEN edges.sequence IS NULL THEN 0 ELSE 1 END DESC,
+                  edges.sequence DESC,
+                  edges.created_at DESC,
+                  edges.activity_id DESC
+              ) AS identity_rank
+            FROM current_turn_subagent_identity_edges AS edges
+          )
+          WHERE identity_rank = 1
+          ORDER BY sequence_known DESC, sequence DESC, created_at DESC, activity_id DESC
           LIMIT ${MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN + 1}
         ),
         retained_current_turn_subagent_identities AS (
-          SELECT turn_id, subagent_thread_id
+          SELECT turn_id, child_id
           FROM current_turn_subagent_identities
           LIMIT ${MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN}
         ),
-        latest_subagent_lifecycle_activity_ids AS (
-          -- The general activity window is intentionally bounded, but a quiet
-          -- child can run for hours while unrelated tool activity continues.
-          -- Retain the latest edge of each lifecycle kind for every subagent
-          -- on the current turn. Three edges (start/progress/completed) are
-          -- sufficient to reconstruct a restart-safe state machine, including
-          -- rejecting a delayed progress replay after a terminal edge, without
-          -- retaining the child's full activity history.
+        latest_current_turn_subagent_lifecycle_activity_ids AS (
           SELECT activity_id
           FROM (
             SELECT
-              activities.activity_id,
+              edges.activity_id,
               ROW_NUMBER() OVER (
-                PARTITION BY
-                  activities.turn_id,
-                  json_extract(activities.payload_json, '$.subagent.threadId'),
-                  activities.kind
+                PARTITION BY edges.turn_id, edges.child_id, edges.kind
                 ORDER BY
-                  CASE WHEN activities.sequence IS NULL THEN 0 ELSE 1 END DESC,
-                  activities.sequence DESC,
-                  activities.created_at DESC,
-                  activities.activity_id DESC
+                  CASE WHEN edges.sequence IS NULL THEN 0 ELSE 1 END DESC,
+                  edges.sequence DESC,
+                  edges.created_at DESC,
+                  edges.activity_id DESC
               ) AS lifecycle_rank
-            FROM projection_thread_activities AS activities
-            INNER JOIN retained_current_turn_subagent_identities AS identities
-              ON identities.turn_id = activities.turn_id
-              AND identities.subagent_thread_id =
-                json_extract(activities.payload_json, '$.subagent.threadId')
-            WHERE activities.thread_id = ${threadId}
-              -- The identity CTE contains only the current turn, but SQLite
-              -- cannot reliably push that fact through this JSON-expression
-              -- join. Without the explicit predicate it can scan and parse
-              -- every activity ever retained by a long-running thread. That
-              -- synchronous scan can exceed the WebSocket heartbeat window,
-              -- causing a reconnect that immediately repeats the same query.
-              AND activities.turn_id = (
-                SELECT latest_turn_id
-                FROM projection_threads
-                WHERE thread_id = ${threadId}
-                LIMIT 1
-              )
-              AND activities.kind IN ('task.started', 'task.progress', 'task.completed')
-              AND json_type(activities.payload_json, '$.subagent.threadId') = 'text'
+            FROM current_turn_subagent_identity_edges AS edges
+            INNER JOIN retained_current_turn_subagent_identities AS identity
+              ON identity.turn_id = edges.turn_id
+              AND identity.child_id = edges.child_id
           )
           WHERE lifecycle_rank = 1
         ),
@@ -2438,34 +2614,52 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           FROM latest_turn_configuration_activity_id
           UNION
           SELECT activity_id
-          FROM latest_subagent_lifecycle_activity_ids
+          FROM global_subagent_lifecycle_activity_ids
+          UNION
+          SELECT activity_id
+          FROM latest_current_turn_subagent_lifecycle_activity_ids
         )
-        SELECT
-          activities.activity_id AS "activityId",
-          activities.thread_id AS "threadId",
-          activities.turn_id AS "turnId",
-          activities.tone,
-          activities.kind,
-          activities.summary,
-          activities.payload_json AS "payload",
-          activities.sequence,
-          activities.created_at AS "createdAt",
-          CASE
-            WHEN (
-              SELECT COUNT(*)
-              FROM current_turn_subagent_identities
-            ) > ${MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN}
-            THEN 1
-            ELSE 0
-          END AS "subagentRetentionTruncated"
-        FROM projection_thread_activities activities
-        INNER JOIN retained_activity_ids retained
-          ON retained.activity_id = activities.activity_id
+        SELECT *
+        FROM (
+          SELECT
+            activities.activity_id AS "activityId",
+            activities.thread_id AS "threadId",
+            activities.turn_id AS "turnId",
+            activities.tone,
+            activities.kind,
+            activities.summary,
+            activities.payload_json AS "payload",
+            CASE WHEN subagent_hydration.complete = 1 THEN COALESCE(
+              (
+                SELECT source.sequence
+                FROM projection_subagent_lifecycle_sources AS source
+                WHERE source.activity_id = activities.activity_id
+                  AND source.sequence_known = 1
+                LIMIT 1
+              ),
+              activities.sequence
+            ) ELSE activities.sequence END AS sequence,
+            activities.created_at AS "createdAt",
+            CASE WHEN subagent_hydration.complete = 1 THEN
+              CASE WHEN (
+                SELECT COUNT(*) FROM global_subagent_identity_heads
+              ) > ${MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN} THEN 1 ELSE 0 END
+            ELSE
+              CASE WHEN (
+                SELECT COUNT(*) FROM current_turn_subagent_identities
+              ) > ${MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN} THEN 1 ELSE 0 END
+            END AS "subagentRetentionTruncated",
+            subagent_hydration.complete AS "subagentRetentionHydrated"
+          FROM projection_thread_activities activities
+          INNER JOIN retained_activity_ids retained
+            ON retained.activity_id = activities.activity_id
+          CROSS JOIN subagent_hydration
+        ) AS retained_activities
         ORDER BY
-          CASE WHEN activities.sequence IS NULL THEN 0 ELSE 1 END ASC,
-          activities.sequence ASC,
-          activities.created_at ASC,
-          activities.activity_id ASC
+          CASE WHEN sequence IS NULL THEN 0 ELSE 1 END ASC,
+          sequence ASC,
+          "createdAt" ASC,
+          "activityId" ASC
       `,
   });
 
@@ -4318,8 +4512,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       ]);
 
       if (activityRows[0]?.subagentRetentionTruncated === 1) {
-        const latestTurnId = Option.isSome(latestTurnRow) ? latestTurnRow.value.turnId : null;
-        const diagnosticKey = JSON.stringify([threadId, latestTurnId]);
+        const diagnosticKey = threadId;
         if (!reportedSubagentRetentionLimits.has(diagnosticKey)) {
           reportedSubagentRetentionLimits.set(diagnosticKey, true);
           while (reportedSubagentRetentionLimits.size > MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN) {
@@ -4329,14 +4522,16 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           }
           yield* Effect.logWarning("thread detail subagent retention reached safety limit", {
             threadId,
-            turnId: latestTurnId,
             retainedIdentityLimit: MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN,
           });
         }
       }
 
       if (Option.isNone(threadRow)) {
-        return Option.none<OrchestrationThread>();
+        return {
+          thread: Option.none<OrchestrationThread>(),
+          subagentRetentionHydrated: false,
+        };
       }
 
       const thread = {
@@ -4391,61 +4586,119 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         goal: Option.getOrNull(goalRow),
       };
 
-      return Option.some(
-        yield* decodeThread(thread).pipe(
-          Effect.mapError(
-            toPersistenceDecodeError("ProjectionSnapshotQuery.getThreadDetailById:decodeThread"),
+      return {
+        thread: Option.some(
+          yield* decodeThread(thread).pipe(
+            Effect.mapError(
+              toPersistenceDecodeError("ProjectionSnapshotQuery.getThreadDetailById:decodeThread"),
+            ),
           ),
         ),
-      );
+        subagentRetentionHydrated: activityRows[0]?.subagentRetentionHydrated === 1,
+      };
     });
 
-  const getThreadDetailById: ProjectionSnapshotQueryShape["getThreadDetailById"] = (threadId) =>
-    sql.withTransaction(loadThreadDetailById(threadId)).pipe(
-      Effect.mapError((error) => {
-        if (isPersistenceError(error)) {
-          return error;
-        }
-        return toPersistenceSqlError("ProjectionSnapshotQuery.getThreadDetailById:query")(error);
-      }),
+  const repairLegacyThreadActivityOrder = (thread: OrchestrationThread) =>
+    Effect.gen(function* () {
+      const repairRows = thread.activities.map((activity) => ({
+        ...activity,
+        threadId: thread.id,
+        activityId: activity.id,
+      }));
+      const enriched = yield* enrichLegacyActivityOrder(sql, repairRows);
+      const ordered = enriched.toSorted((left, right) => {
+        const leftKnown = left.sequence === undefined || left.sequence === null ? 0 : 1;
+        const rightKnown = right.sequence === undefined || right.sequence === null ? 0 : 1;
+        return (
+          leftKnown - rightKnown ||
+          (left.sequence ?? -1) - (right.sequence ?? -1) ||
+          left.createdAt.localeCompare(right.createdAt) ||
+          left.activityId.localeCompare(right.activityId)
+        );
+      });
+      return {
+        ...thread,
+        activities: ordered.map((row) => {
+          const { threadId: _threadId, activityId: _activityId, ...activity } = row;
+          return activity;
+        }),
+      } satisfies OrchestrationThread;
+    });
+
+  const repairLoadedThreadDetail = (
+    loaded: Effect.Success<ReturnType<typeof loadThreadDetailById>>,
+    operation: string,
+  ) => {
+    if (loaded.subagentRetentionHydrated || Option.isNone(loaded.thread)) {
+      return Effect.succeed(loaded.thread);
+    }
+    return repairLegacyThreadActivityOrder(loaded.thread.value).pipe(
+      Effect.map(Option.some),
+      Effect.mapError(toPersistenceSqlError(operation)),
     );
+  };
+
+  const getThreadDetailById: ProjectionSnapshotQueryShape["getThreadDetailById"] = (threadId) =>
+    Effect.gen(function* () {
+      const hydration = yield* runForegroundLifecycleHydration(threadId);
+      const loaded = yield* sql.withTransaction(loadThreadDetailById(threadId)).pipe(
+        Effect.mapError((error) => {
+          if (isPersistenceError(error)) return error;
+          return toPersistenceSqlError("ProjectionSnapshotQuery.getThreadDetailById:query")(error);
+        }),
+      );
+      const detail = yield* repairLoadedThreadDetail(
+        loaded,
+        "ProjectionSnapshotQuery.getThreadDetailById:repairLegacyActivityOrder",
+      );
+      if (!hydration.complete && !hydration.retired) {
+        yield* scheduleLifecycleHydration(threadId);
+      }
+      return detail;
+    });
 
   const getThreadDetailSnapshotById: ProjectionSnapshotQueryShape["getThreadDetailSnapshotById"] = (
     threadId,
   ) =>
-    sql
-      .withTransaction(
-        Effect.all([
-          loadThreadDetailById(threadId),
-          listProjectionStateRows(undefined).pipe(
-            Effect.mapError(
-              toPersistenceSqlOrDecodeError(
-                "ProjectionSnapshotQuery.getThreadDetailSnapshotById:listProjectionState:query",
-                "ProjectionSnapshotQuery.getThreadDetailSnapshotById:listProjectionState:decodeRows",
+    Effect.gen(function* () {
+      const hydration = yield* runForegroundLifecycleHydration(threadId);
+      const [loaded, stateRows] = yield* sql
+        .withTransaction(
+          Effect.all([
+            loadThreadDetailById(threadId),
+            listProjectionStateRows(undefined).pipe(
+              Effect.mapError(
+                toPersistenceSqlOrDecodeError(
+                  "ProjectionSnapshotQuery.getThreadDetailSnapshotById:listProjectionState:query",
+                  "ProjectionSnapshotQuery.getThreadDetailSnapshotById:listProjectionState:decodeRows",
+                ),
               ),
             ),
-          ),
-        ]),
-      )
-      .pipe(
-        Effect.map(([threadDetail, stateRows]) => {
-          if (Option.isNone(threadDetail)) {
-            return Option.none();
-          }
-          return Option.some({
-            snapshotSequence: computeSnapshotSequence(stateRows),
-            thread: threadDetail.value,
-          });
-        }),
-        Effect.mapError((error) => {
-          if (isPersistenceError(error)) {
-            return error;
-          }
-          return toPersistenceSqlError("ProjectionSnapshotQuery.getThreadDetailSnapshotById:query")(
-            error,
-          );
-        }),
+          ]),
+        )
+        .pipe(
+          Effect.mapError((error) => {
+            if (isPersistenceError(error)) {
+              return error;
+            }
+            return toPersistenceSqlError(
+              "ProjectionSnapshotQuery.getThreadDetailSnapshotById:query",
+            )(error);
+          }),
+        );
+      const threadDetail = yield* repairLoadedThreadDetail(
+        loaded,
+        "ProjectionSnapshotQuery.getThreadDetailSnapshotById:repairLegacyActivityOrder",
       );
+      if (!hydration.complete && !hydration.retired) {
+        yield* scheduleLifecycleHydration(threadId);
+      }
+      if (Option.isNone(threadDetail)) return Option.none();
+      return Option.some({
+        snapshotSequence: computeSnapshotSequence(stateRows),
+        thread: threadDetail.value,
+      });
+    });
 
   return {
     getCommandReadModel,

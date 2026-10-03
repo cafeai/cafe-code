@@ -19,7 +19,9 @@ it.layer(TestSqliteClient.layerMemory())("081_ThreadSubagentLimits", (it) => {
         const schema =
           yield* sql`SELECT name, type, sql FROM sqlite_schema WHERE type IN ('index', 'trigger') ORDER BY name`;
         const children = yield* sql`SELECT * FROM attachment_content_commitments`;
-        yield* runMigrations();
+        // Keep this migration's schema-only assertion scoped to migration 081.
+        // Later migrations intentionally add their own indexes and triggers.
+        yield* runMigrations({ toMigrationInclusive: 81 });
         assert.deepEqual(
           yield* sql`SELECT thread_id, title, subagent_limits_json FROM projection_threads`,
           [{ thread_id: "legacy", title: "Legacy", subagent_limits_json: null }],

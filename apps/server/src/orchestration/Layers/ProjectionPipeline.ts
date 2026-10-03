@@ -1591,9 +1591,11 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             kind: event.payload.activity.kind,
             summary: event.payload.activity.summary,
             payload: event.payload.activity.payload,
-            ...(event.payload.activity.sequence !== undefined
-              ? { sequence: event.payload.activity.sequence }
-              : {}),
+            // The append ledger is the only order shared by live delivery,
+            // replay and reconnect snapshots. Provider-local counters may
+            // reset on resume; millisecond timestamps and UUID ordering can
+            // put an old terminal descriptor after a child's explicit restart.
+            sequence: event.sequence,
             createdAt: event.payload.activity.createdAt,
           });
 

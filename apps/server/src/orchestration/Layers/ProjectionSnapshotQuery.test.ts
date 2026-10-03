@@ -25,6 +25,7 @@ import {
   THREAD_DETAIL_MESSAGE_LIMIT,
 } from "./ProjectionSnapshotQuery.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import { hydrateSubagentLifecycleForThread } from "../subagentLifecycleRetention.ts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
@@ -4935,6 +4936,242 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
               ),
           ),
           true,
+        );
+      }
+    }),
+  );
+
+  it.effect("gates partial legacy hydration then retains older-turn lifecycle edges globally", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("thread-all-turn-subagent-retention");
+
+      yield* sql`
+        INSERT INTO projection_projects(
+          project_id, title, workspace_root, default_model_selection_json,
+          scripts_json, created_at, updated_at, deleted_at
+        ) VALUES (
+          'project-all-turn-subagent-retention', 'All-turn retention', '/tmp/all-turn-retention',
+          NULL, '[]', '2026-10-04T00:00:00.000Z', '2026-10-04T00:00:00.000Z', NULL
+        )
+      `;
+      yield* sql`
+        INSERT INTO projection_threads(
+          thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode,
+          branch, worktree_path, latest_turn_id, latest_user_message_at,
+          pending_approval_count, pending_user_input_count, has_actionable_proposed_plan,
+          created_at, updated_at, deleted_at
+        ) VALUES (
+          ${threadId}, 'project-all-turn-subagent-retention', 'All-turn retention',
+          '{"provider":"codex","model":"gpt-5-codex"}',
+          'full-access', 'default', NULL, NULL, 'turn-current', NULL,
+          0, 0, 0, '2026-10-04T00:00:00.000Z', '2026-10-04T00:00:00.000Z', NULL
+        )
+      `;
+      yield* sql`
+        INSERT INTO projection_thread_activities(
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+        ) VALUES (
+          'older-turn-child-start', ${threadId}, 'turn-older', 'info', 'task.started',
+          'Older child started',
+          '{"taskId":"older-child","subagent":{"threadId":"older-child","status":"active"}}',
+          1, '2026-10-04T00:00:01.000Z'
+        )
+      `;
+      yield* sql`
+        WITH RECURSIVE child_numbers(index_value) AS (
+          SELECT 0 UNION ALL SELECT index_value + 1 FROM child_numbers WHERE index_value < 63
+        )
+        INSERT INTO projection_thread_activities(
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+        )
+        SELECT
+          printf('current-turn-child-%02d', index_value), ${threadId}, 'turn-current',
+          'info', 'task.started', 'Current child started',
+          printf('{"taskId":"current-child-%02d","subagent":{"threadId":"current-child-%02d","status":"active"}}', index_value, index_value),
+          index_value + 2,
+          printf('2026-10-04T00:01:%02d.000Z', index_value % 60)
+        FROM child_numbers
+      `;
+      const restartCreatedAt = "2026-10-04T00:02:00.000Z";
+      const terminalPayload = JSON.stringify({
+        threadId,
+        activity: {
+          id: "same-ms-terminal",
+          turnId: "turn-current",
+          kind: "task.completed",
+          createdAt: restartCreatedAt,
+        },
+      });
+      const startPayload = JSON.stringify({
+        threadId,
+        activity: {
+          id: "same-ms-start",
+          turnId: "turn-current",
+          kind: "task.started",
+          createdAt: restartCreatedAt,
+        },
+      });
+      // The provider-local counters deliberately put the restart before its
+      // prior terminal edge. Exact journal append witnesses establish the
+      // opposite durable order even though both timestamps are identical.
+      yield* sql`
+        INSERT INTO orchestration_events(
+          event_id, aggregate_kind, stream_id, stream_version, event_type,
+          occurred_at, command_id, causation_event_id, correlation_id,
+          actor_kind, payload_json, metadata_json
+        ) VALUES
+          (
+            'same-ms-terminal', 'thread', ${threadId}, 1, 'thread.activity-appended',
+            ${restartCreatedAt},
+            ${`provider:codex:${threadId}:same-ms-terminal:thread-activity-append:same-ms-terminal`},
+            NULL, NULL, 'provider', ${terminalPayload}, '{}'
+          ),
+          (
+            'same-ms-start', 'thread', ${threadId}, 2, 'thread.activity-appended',
+            ${restartCreatedAt},
+            ${`provider:codex:${threadId}:same-ms-start:thread-activity-append:same-ms-start`},
+            NULL, NULL, 'provider', ${startPayload}, '{}'
+          )
+      `;
+      yield* sql`
+        INSERT INTO projection_thread_activities(
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+        ) VALUES
+          (
+            'same-ms-terminal', ${threadId}, 'turn-current', 'info', 'task.completed',
+            'Previous generation completed',
+            '{"taskId":"restart-child","status":"completed","subagent":{"threadId":"restart-child","status":"completed"}}',
+            999, ${restartCreatedAt}
+          ),
+          (
+            'same-ms-start', ${threadId}, 'turn-current', 'info', 'task.started',
+            'New generation started',
+            '{"taskId":"restart-child","subagent":{"threadId":"restart-child","status":"active"}}',
+            0, ${restartCreatedAt}
+          )
+      `;
+      yield* sql`
+        INSERT INTO projection_thread_activities(
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+        ) VALUES
+          (
+            'fallback-utf16-accepted', ${threadId}, 'turn-current', 'info', 'task.started',
+            'Accepted exact identity',
+            ${JSON.stringify({ subagent: { threadId: "😀".repeat(256) } })},
+            1000, '2026-10-04T00:02:01.000Z'
+          ),
+          (
+            'fallback-utf16-rejected', ${threadId}, 'turn-current', 'info', 'task.started',
+            'Rejected overlong identity',
+            ${JSON.stringify({ subagent: { threadId: "😀".repeat(300) } })},
+            1001, '2026-10-04T00:02:02.000Z'
+          )
+      `;
+      yield* sql`
+        WITH RECURSIVE tail(index_value) AS (
+          SELECT 1 UNION ALL SELECT index_value + 1 FROM tail
+          WHERE index_value < ${THREAD_DETAIL_ACTIVITY_LIMIT + 20}
+        )
+        INSERT INTO projection_thread_activities(
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+        )
+        SELECT printf('all-turn-tail-a-%04d', index_value), ${threadId}, 'turn-current',
+          'tool', 'tool.completed', 'Tail', '{}', index_value + 1000,
+          '2026-10-04T01:00:00.000Z'
+        FROM tail
+      `;
+
+      // Model a pre-082 thread: no compact rows and no hydration watermarks.
+      // One foreground page covers the 64 current-turn children but leaves the
+      // older-turn child beyond its descending cursor, so the query must keep
+      // using the legacy current-turn lane instead of exposing partial global
+      // authority.
+      yield* sql`DELETE FROM projection_subagent_lifecycle_sources WHERE thread_id = ${threadId}`;
+      yield* sql`DELETE FROM projection_subagent_lifecycle_hydration WHERE thread_id = ${threadId}`;
+      const partialDetail = yield* snapshotQuery.getThreadDetailById(threadId);
+      assert.equal(partialDetail._tag, "Some");
+      if (partialDetail._tag === "Some") {
+        assert.isTrue(
+          partialDetail.value.activities.some(
+            (activity) => activity.id === asEventId("current-turn-child-00"),
+          ),
+        );
+        assert.isFalse(
+          partialDetail.value.activities.some(
+            (activity) => activity.id === asEventId("older-turn-child-start"),
+          ),
+        );
+        const sameMillisecondOrder = partialDetail.value.activities
+          .filter(
+            (activity) =>
+              activity.id === asEventId("same-ms-terminal") ||
+              activity.id === asEventId("same-ms-start"),
+          )
+          .map((activity) => activity.id);
+        assert.deepStrictEqual(sameMillisecondOrder, [
+          asEventId("same-ms-terminal"),
+          asEventId("same-ms-start"),
+        ]);
+        assert.isTrue(
+          partialDetail.value.activities.some(
+            (activity) => activity.id === asEventId("fallback-utf16-accepted"),
+          ),
+        );
+        assert.isFalse(
+          partialDetail.value.activities.some(
+            (activity) => activity.id === asEventId("fallback-utf16-rejected"),
+          ),
+        );
+      }
+
+      yield* hydrateSubagentLifecycleForThread(sql, threadId);
+      const hydratedDetail = yield* snapshotQuery.getThreadDetailById(threadId);
+      assert.equal(hydratedDetail._tag, "Some");
+      if (hydratedDetail._tag === "Some") {
+        assert.isTrue(
+          hydratedDetail.value.activities.some(
+            (activity) => activity.id === asEventId("older-turn-child-start"),
+          ),
+        );
+      }
+
+      yield* sql`
+        INSERT INTO projection_thread_activities(
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+        ) VALUES (
+          'older-turn-child-completed', ${threadId}, 'turn-older', 'info', 'task.completed',
+          'Older child completed',
+          '{"taskId":"older-child","status":"completed","subagent":{"threadId":"older-child","status":"completed"}}',
+          5000, '2026-10-04T02:00:00.000Z'
+        )
+      `;
+      yield* sql`
+        WITH RECURSIVE tail(index_value) AS (
+          SELECT 1 UNION ALL SELECT index_value + 1 FROM tail
+          WHERE index_value < ${THREAD_DETAIL_ACTIVITY_LIMIT + 20}
+        )
+        INSERT INTO projection_thread_activities(
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+        )
+        SELECT printf('all-turn-tail-b-%04d', index_value), ${threadId}, 'turn-current',
+          'tool', 'tool.completed', 'Later tail', '{}', index_value + 6000,
+          '2026-10-04T03:00:00.000Z'
+        FROM tail
+      `;
+      const terminalDetail = yield* snapshotQuery.getThreadDetailById(threadId);
+      assert.equal(terminalDetail._tag, "Some");
+      if (terminalDetail._tag === "Some") {
+        assert.deepStrictEqual(
+          terminalDetail.value.activities
+            .filter(
+              (activity) =>
+                activity.id === asEventId("older-turn-child-start") ||
+                activity.id === asEventId("older-turn-child-completed"),
+            )
+            .map((activity) => activity.id),
+          [asEventId("older-turn-child-start"), asEventId("older-turn-child-completed")],
         );
       }
     }),

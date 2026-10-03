@@ -53,6 +53,94 @@ const exists = (filePath: string) =>
 
 const BaseTestLayer = makeProjectionPipelinePrefixedTestLayer("t3-projection-pipeline-test-");
 
+it.layer(makeProjectionPipelinePrefixedTestLayer("activity-order-test-"))(
+  "Activity append ordering",
+  (it) => {
+    it.effect("keeps same-millisecond subagent restarts in durable append order on replay", () =>
+      Effect.gen(function* () {
+        const pipeline = yield* OrchestrationProjectionPipeline;
+        const events = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const threadId = ThreadId.make("same-millisecond-child");
+        const now = "2026-10-03T15:10:36.745Z";
+        yield* events.append({
+          type: "thread.created",
+          eventId: EventId.make("same-ms-thread-created"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: null,
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+          payload: {
+            threadId,
+            projectId: null,
+            title: "Ordering fixture",
+            modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-6.1-sol" },
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+        const saved = [];
+        // UUID lexical order and a provider-local counter deliberately disagree
+        // with append order. The terminal metadata belongs to the previous run;
+        // the explicit start after it must remain last even after DB rehydration.
+        for (const [id, kind, status, localSequence] of [
+          ["z-old-terminal-metadata", "task.progress", "completed", 900],
+          ["a-fresh-child-start", "task.started", "active", undefined],
+        ] as const) {
+          saved.push(
+            yield* events.append({
+              type: "thread.activity-appended",
+              eventId: EventId.make(`event-${id}`),
+              aggregateKind: "thread",
+              aggregateId: threadId,
+              occurredAt: now,
+              commandId: null,
+              causationEventId: null,
+              correlationId: null,
+              metadata: {},
+              payload: {
+                threadId,
+                activity: {
+                  id: EventId.make(id),
+                  kind,
+                  tone: "info",
+                  summary: "Subagent lifecycle",
+                  turnId: TurnId.make("parent-turn"),
+                  createdAt: now,
+                  ...(localSequence === undefined ? {} : { sequence: localSequence }),
+                  payload: { taskId: "child", subagent: { threadId: "child", status } },
+                },
+              },
+            }),
+          );
+        }
+        yield* pipeline.bootstrap;
+        // Idempotent overlap/reconnect must preserve the original durable order,
+        // not replace it with the provider-local counter from the payload.
+        for (const event of saved) yield* pipeline.projectEvent(event);
+        const rows = yield* sql<{ readonly id: string; readonly sequence: number }>`
+        SELECT activity_id AS id, sequence FROM projection_thread_activities
+        WHERE thread_id = ${threadId} ORDER BY sequence, created_at, activity_id
+      `;
+        assert.deepEqual(
+          rows,
+          saved.map((event) => {
+            if (event.type !== "thread.activity-appended")
+              throw new Error("Unexpected fixture event");
+            return { id: event.payload.activity.id, sequence: event.sequence };
+          }),
+        );
+      }),
+    );
+  },
+);
+
 it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
   it.effect("bootstraps all projection states and writes projection rows", () =>
     Effect.gen(function* () {

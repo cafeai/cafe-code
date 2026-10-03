@@ -1069,7 +1069,9 @@ export function projectEvent(
 
           const activities = [
             ...thread.activities.filter((entry) => entry.id !== payload.activity.id),
-            payload.activity,
+            // Match the SQL projection and renderer: provider-local activity
+            // counters are not comparable across sessions or accounts.
+            { ...payload.activity, sequence: event.sequence },
           ]
             .toSorted(compareThreadActivities)
             .slice(-500);

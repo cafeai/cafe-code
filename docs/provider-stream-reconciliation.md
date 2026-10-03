@@ -1,6 +1,6 @@
 # Provider stream reconciliation
 
-Last updated: 2026-10-03 13:05:03 JST (UTC+0900)
+Last updated: 2026-10-04 00:42:33 JST (UTC+0900)
 
 ## Ownership and exact text
 
@@ -21,6 +21,38 @@ Terminal, idle, startup-settlement, goal-settlement and runtime-error observatio
 Already-terminal historical starts/completions cannot consume a newer pending start. An exact indexed turn lookup supplies that fact without a transcript scan. Session-ready initialization metadata cannot clear a concrete active turn. Positive provider starts and independently verified ownership recovery keep their existing authority; generic output and historical replay do not gain authority to reopen terminal work, bypass Stop, or restart providers.
 
 This prevents future stale lifecycle mutations. It does not rewrite an already-damaged session, repair arbitrary historical state, or promise that every current native process is alive. Current live state must be verified independently before any recovery.
+
+## Subagent ordering and native ownership
+
+A subagent's restart and a metadata refresh for its previous completed run can
+arrive in the same millisecond. Timestamp plus opaque UUID sorting is not their
+order. The SQL activity projection, in-memory event projector, and live renderer
+use the enclosing durable orchestration sequence for every activity append.
+Provider-local counters can reset on resume and must not override that order.
+This preserves the explicit new start after old terminal metadata on both live
+delivery and reconnect, without using elapsed time to guess that an agent is
+working. See [subagent activity surfaces](subagent-concurrency.md#activity-surfaces).
+
+Within an exact Codex runtime/root/account, a child's first initiating visible
+turn remains its owner. A later root turn messaging, waiting on, or resuming that
+child does not create a second row under a different parent. V2 activity follows
+that owner; legacy multi-receiver control envelopes are partitioned by receiver
+owner within the existing total receiver ceiling, with no duplicate ordinary
+Work Log entries. Historical transcript authorization remains turn-qualified.
+
+Except for an explicit new native start, child notifications carrying a concrete
+native turn must match the child's known native turn before they can change
+routing, aggregate liveness or canonical UI status. The same fence applies
+to official parent completion activity that carries the native child turn in
+its item identity. A delayed old tool event cannot replace an already-active
+native turn identity and make a following stale completion appear current.
+Explicit native starts can reopen reused children; metadata alone cannot.
+
+The [official app-server lifecycle](https://learn.chatgpt.com/docs/app-server)
+separates item completion from turn completion. The implementation additionally
+uses the pinned native Codex multi-agent source to interpret child activity;
+MCP-server startup is not a subagent lifecycle event. These corrections require
+no inference calls, provider restart, or changes to platform launch behavior.
 
 ## Claude block snapshots and compatibility
 
@@ -50,4 +82,4 @@ Use the repository-pinned Node runtime and Yarn through Corepack, with the check
 - `yarn workspace @cafeai/cafe-code test src/orchestration/decider.test.ts src/orchestration/Layers/ProviderRuntimeIngestion.test.ts`: stale observations racing accepted new turns, historical resume start/completion, readiness while active, genuine completion across heartbeat-only changes, and exact rejection behavior on replay.
 - Run `yarn fmt`, `yarn lint`, `yarn typecheck`, and `yarn test`, followed by `yarn build:desktop --force` after tests. A successful build does not replace the already-running desktop/daemon processes; applying it requires the normal app restart lifecycle.
 
-These are corrections within the existing adapter/ingestion/projection contracts. They add no public protocol, persistence migration, provider inference or new repair authority.
+The stream-content corrections stay within the existing adapter/ingestion/projection contracts and add no persistence migration or new repair authority. The separate subagent retention correction adds schema-only migration 82 and bounded per-thread legacy hydration, as documented in the [retention decision](decisions/subagent-lifecycle-retention.md). Neither change adds public protocol or provider inference.

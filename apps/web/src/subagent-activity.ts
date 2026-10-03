@@ -53,6 +53,15 @@ function safeLine(value: unknown, limit = DISPLAY_TEXT_LIMIT): string | undefine
   return normalized.length > limit ? `${normalized.slice(0, limit - 3)}...` : normalized;
 }
 
+/**
+ * Provider progress can use this generic copy while a child is live. It is a
+ * state placeholder rather than a durable description, so a terminal edge
+ * must not keep presenting it as though the child were still running.
+ */
+function isGenericWorkingDescription(value: string | undefined): boolean {
+  return value !== undefined && /^working(?:\.{3})?$/iu.test(value);
+}
+
 function exactOpaqueIdentity(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   // Provider identities are authorization material, not display text. Never
@@ -207,7 +216,7 @@ function upsertStructuredSubagent(
   const objective = safeLine(presentation.objective) ?? previous?.objective;
   const historyId = exactOpaqueIdentity(presentation.historyId) ?? previous?.historyId;
   const detail = safeLine(payload.detail);
-  const meaningfulDetail = detail && !/^working(?:\.{3})?$/iu.test(detail) ? detail : undefined;
+  const meaningfulDetail = detail && !isGenericWorkingDescription(detail) ? detail : undefined;
   const nextDescription = isRestart
     ? meaningfulDetail
     : activity.kind === "task.progress"
@@ -302,13 +311,21 @@ function upsertLegacySubagent(
   const split = splitLegacyDetail(detail);
   const status = legacySubagentStatus(activity, detail, options.terminalTurnIds);
   const terminal = status === "completed" || status === "failed" || status === "stopped";
+  const priorMeaningfulDescription = isGenericWorkingDescription(previous?.description)
+    ? undefined
+    : previous?.description;
+  const description = terminal
+    ? isGenericWorkingDescription(split.description)
+      ? priorMeaningfulDescription
+      : split.description || priorMeaningfulDescription
+    : split.description || previous?.description || "Working";
   byId.set(key, {
     id,
     rowId: previous?.rowId ?? activity.id,
     turnId: activity.turnId,
     label: split.label || previous?.label || "Subagent",
     ...(previous?.objective ? { objective: previous.objective } : {}),
-    description: split.description || previous?.description || "Working",
+    ...(description ? { description } : {}),
     status,
     startedAt: previous?.startedAt ?? activity.createdAt,
     updatedAt: activity.createdAt,

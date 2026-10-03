@@ -1222,11 +1222,91 @@ describe("deriveWorkLogEntries", () => {
       },
     });
 
-    expect(deriveSubagentWorkEntries([legacy], turnId)[0]?.subagent?.status).toBe("active");
-    expect(
-      deriveSubagentWorkEntries([legacy], turnId, { terminalTurnIds: new Set([turnId]) })[0]
-        ?.subagent,
-    ).toMatchObject({ status: "completed", completedAt: legacy.createdAt });
+    expect(deriveSubagentWorkEntries([legacy], turnId)[0]?.subagent).toMatchObject({
+      status: "active",
+      description: "Working",
+    });
+    const [terminal] = deriveSubagentWorkEntries([legacy], turnId, {
+      terminalTurnIds: new Set([turnId]),
+    });
+    expect(terminal?.detail).toBe("Completed");
+    expect(terminal?.subagent).toMatchObject({
+      status: "completed",
+      completedAt: legacy.createdAt,
+    });
+    expect(terminal?.subagent?.description).toBeUndefined();
+  });
+
+  it("replaces generic live copy at completion while preserving meaningful progress", () => {
+    const turnId = TurnId.make("turn-terminal-subagent-description");
+    const lifecycle = (input: {
+      readonly id: string;
+      readonly childId: string;
+      readonly kind: "task.progress" | "task.completed";
+      readonly detail?: string;
+      readonly sequence: number;
+    }) =>
+      makeActivity({
+        id: input.id,
+        createdAt: `2026-02-23T00:02:0${input.sequence}.000Z`,
+        kind: input.kind,
+        summary: input.kind === "task.completed" ? "Subagent completed" : "Subagent update",
+        tone: "info",
+        turnId,
+        sequence: input.sequence,
+        payload: {
+          taskId: input.childId,
+          ...(input.detail ? { detail: input.detail } : {}),
+          ...(input.kind === "task.completed" ? { status: "completed" } : {}),
+          subagent: {
+            threadId: input.childId,
+            label: input.childId,
+            status: input.kind === "task.completed" ? "completed" : "active",
+          },
+        },
+      });
+    const genericProgress = lifecycle({
+      id: "generic-progress",
+      childId: "generic-worker",
+      kind: "task.progress",
+      detail: "Working",
+      sequence: 1,
+    });
+    const genericCompletion = lifecycle({
+      id: "generic-completion",
+      childId: "generic-worker",
+      kind: "task.completed",
+      sequence: 2,
+    });
+    const meaningfulProgress = lifecycle({
+      id: "meaningful-progress",
+      childId: "meaningful-worker",
+      kind: "task.progress",
+      detail: "Indexed the provider boundary",
+      sequence: 3,
+    });
+    const meaningfulCompletion = lifecycle({
+      id: "meaningful-completion",
+      childId: "meaningful-worker",
+      kind: "task.completed",
+      sequence: 4,
+    });
+
+    const entries = deriveSubagentWorkEntries(
+      [genericProgress, genericCompletion, meaningfulProgress, meaningfulCompletion],
+      turnId,
+    );
+    expect(entries[0]?.detail).toBe("Completed");
+    expect(entries[0]?.subagent).toMatchObject({
+      id: "generic-worker",
+      status: "completed",
+    });
+    expect(entries[0]?.subagent?.description).toBeUndefined();
+    expect(entries[1]?.subagent).toMatchObject({
+      id: "meaningful-worker",
+      description: "Indexed the provider boundary",
+      status: "completed",
+    });
   });
 
   it("keeps structured background children from older turns in the active composer roster", () => {
