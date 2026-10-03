@@ -36,7 +36,7 @@ Node qualification does not establish installed-provider or native GUI success.
 
 ## Reproduction
 
-Use repository-pinned Node 24.13.1 and Corepack Yarn 4.17.1 with an immutable
+Use the exact repository-pinned Node LTS from `.node-version` and Corepack Yarn 4.17.1 with an immutable
 install. Run these focused tests on the host being qualified:
 
 ```sh

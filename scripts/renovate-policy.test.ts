@@ -54,6 +54,7 @@ const singleRuleWithExactSet = (
   field:
     | "matchDepNames"
     | "matchDepTypes"
+    | "matchDatasources"
     | "matchManagers"
     | "matchPackageNames"
     | "matchUpdateTypes",
@@ -90,7 +91,7 @@ describe("Renovate repository policy", () => {
   it("targets dev with an explicit manager allowlist", () => {
     expect(config.$schema).toBe("https://docs.renovatebot.com/renovate-schema.json");
     expect(config.baseBranchPatterns).toEqual(["dev"]);
-    expect(config.enabledManagers).toEqual(["npm", "github-actions"]);
+    expect(config.enabledManagers).toEqual(["npm", "github-actions", "nodenv", "mise"]);
 
     // The repository policy deliberately does not extend any presets itself.
     // Renovate's hosted/global inherited policy is outside this local JSON and
@@ -189,7 +190,7 @@ describe("Renovate repository policy", () => {
     expect(Object.keys(resolutions).length).toBeGreaterThan(0);
   });
 
-  it("preserves the deliberate Effect, provider, native, and toolchain exclusions", () => {
+  it("preserves the deliberate Effect, provider, native, and Yarn exclusions", () => {
     const effectPackages = ["effect", "@effect/**"];
     const providerPackages = [
       "@anthropic-ai/**",
@@ -217,8 +218,8 @@ describe("Renovate repository policy", () => {
       expect(rule.enabled).toBe(false);
     }
 
-    const toolchainRule = singleRuleWithExactSet(packageRules, "matchDepNames", ["node", "yarn"]);
-    expect(toolchainRule.enabled).toBe(false);
+    const yarnRule = singleRuleWithExactSet(packageRules, "matchDepNames", ["yarn"]);
+    expect(yarnRule.enabled).toBe(false);
 
     const rootPackage = readJson("package.json");
     const dependenciesMeta = asObject(
@@ -236,6 +237,75 @@ describe("Renovate repository policy", () => {
     expect(packagesWithBuildScripts).toEqual(["electron", "node-pty"]);
     for (const packageName of packagesWithBuildScripts) {
       expect(nativePackages).toContain(packageName);
+    }
+  });
+
+  it("follows Node's official LTS promotion schedule without freezing a major or assuming parity", () => {
+    const runtimeRule = singleRuleWithExactSet(packageRules, "matchDatasources", ["node-version"]);
+    expect(runtimeRule.matchPackageNames).toEqual(["node"]);
+    expect(runtimeRule.versioning).toBe("node");
+    expect(runtimeRule.ignoreUnstable).toBe(true);
+    expect(runtimeRule.groupName).toBe("Node.js LTS");
+    expect(runtimeRule.groupSlug).toBe("node-lts");
+    expect(runtimeRule.schedule).toEqual(["at any time"]);
+    expect(runtimeRule.minimumReleaseAge).toBeNull();
+
+    // https://docs.renovatebot.com/modules/versioning/node/
+    // Renovate's official `node` versioning consults its bundled Node release
+    // schedule to decide stability. Plain npm/semver would call a new Current
+    // line stable immediately; a numeric/even-major allowedVersions rule would
+    // either freeze today's LTS or misclassify later promotion schedules.
+    // These are configuration invariants, not a partial reimplementation of
+    // Renovate's version lookup. Qualify the real matcher/validator separately
+    // using the documented, pinned official disposable tool.
+    for (const field of [
+      "allowedVersions",
+      "followTag",
+      "matchCurrentVersion",
+      "maxMajorIncrement",
+    ]) {
+      expect(runtimeRule).not.toHaveProperty(field);
+    }
+    expect(runtimeRule).not.toHaveProperty("enabled", false);
+    expect(runtimeRule).not.toHaveProperty("dependencyDashboardApproval", false);
+  });
+
+  it("aligns Node declarations with promoted LTS majors while preserving the npm age gate", () => {
+    const runtimeRule = singleRuleWithExactSet(packageRules, "matchDatasources", ["node-version"]);
+    const typesRule = singleRuleWithExactSet(packageRules, "matchPackageNames", ["@types/node"]);
+    expect(typesRule.matchManagers).toEqual(["npm"]);
+    expect(typesRule.versioning).toBe("node");
+    expect(typesRule.ignoreUnstable).toBe(true);
+    expect(typesRule.groupName).toBe(runtimeRule.groupName);
+    expect(typesRule.groupSlug).toBe(runtimeRule.groupSlug);
+    expect(typesRule.schedule).toEqual(["at any time"]);
+    // Runtime releases come from Node's official distribution datasource;
+    // declaration tarballs still come from npm and keep its seven-day gate.
+    expect(typesRule).not.toHaveProperty("minimumReleaseAge");
+    expect(typesRule).not.toHaveProperty("minimumReleaseAgeBehaviour");
+    expect(typesRule).not.toHaveProperty("allowedVersions");
+    expect(typesRule).not.toHaveProperty("followTag");
+    // Node runtime and declaration patch/minor numbers are independent. Keep
+    // npm's real @types/node releases, using Node versioning only to qualify
+    // their major's LTS status rather than replacing the datasource/package.
+    expect(typesRule).not.toHaveProperty("overrideDatasource");
+    expect(typesRule).not.toHaveProperty("overridePackageName");
+    expect(typesRule).not.toHaveProperty("enabled", false);
+    expect(typesRule).not.toHaveProperty("dependencyDashboardApproval", false);
+  });
+
+  it("admits mise only for Node and never exposes a new automatic toolchain path", () => {
+    const otherMiseTools = singleRuleWithExactSet(packageRules, "matchPackageNames", ["!node"]);
+    expect(otherMiseTools.matchManagers).toEqual(["mise"]);
+    expect(otherMiseTools.enabled).toBe(false);
+
+    // Every literal disable-by-name must still leave Node itself discoverable.
+    // This catches restoring the old combined node/yarn exclusion. We do not
+    // emulate glob semantics: the exact selectors above are separately checked
+    // against the official Renovate package-rule matcher during qualification.
+    for (const rule of packageRules.filter((candidate) => candidate.enabled === false)) {
+      expect(rule.matchDepNames ?? []).not.toContain("node");
+      expect(rule.matchPackageNames ?? []).not.toContain("node");
     }
   });
 

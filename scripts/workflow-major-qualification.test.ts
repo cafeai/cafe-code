@@ -3,6 +3,8 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
 
+import { REPOSITORY_NODE_VERSION } from "./lib/node-version.ts";
+
 const repoRoot = resolve(import.meta.dirname, "..");
 const workflowNames = [
   "ci.yml",
@@ -53,7 +55,7 @@ function readWorkflow(name: string): Workflow {
 }
 
 describe("qualified major Actions and Ubuntu runner boundaries", () => {
-  it("uses only the reviewed immutable Action commits while retaining project Node 24", () => {
+  it("uses reviewed immutable Action commits and the canonical exact standalone Node pin", () => {
     const actions = workflowNames.flatMap((name) =>
       Object.values(readWorkflow(name).jobs)
         .flatMap((job) => job.steps ?? [])
@@ -66,7 +68,15 @@ describe("qualified major Actions and Ubuntu runner boundaries", () => {
       expect(commit, step.uses).toMatch(/^[a-f0-9]{40}$/);
       // Checkout 7's guard must stay enabled even on pull_request_target jobs.
       expect(step.with ?? {}, step.uses).not.toHaveProperty("allow-unsafe-pr-checkout");
-      if (action === "actions/setup-node") expect(step.with?.["node-version"]).toBe("24.13.1");
+      if (action === "actions/setup-node") {
+        expect(step.with?.["node-version-file"]).toBe(".node-version");
+        expect(step.with).not.toHaveProperty("node-version");
+        // Resolve the exact checked-in value, not an LTS alias whose meaning
+        // could change between qualification and artifact publication.
+        expect(
+          readFileSync(resolve(repoRoot, String(step.with?.["node-version-file"])), "utf8").trim(),
+        ).toBe(REPOSITORY_NODE_VERSION);
+      }
     }
     const privilegedCheckout = readWorkflow("pr-size.yml").jobs.label?.steps?.find((step) =>
       step.uses?.startsWith("actions/checkout@"),

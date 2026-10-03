@@ -7,7 +7,7 @@ pkgbase = cafe-code
 	license = AGPL-3.0-or-later
 	makedepends = corepack>=0.34.6
 	makedepends = git
-	makedepends = nodejs>=24.13.1
+	makedepends = nodejs-lts-krypton>=24.21.0
 	depends = alsa-lib
 	depends = at-spi2-core
 	depends = cairo

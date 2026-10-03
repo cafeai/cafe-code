@@ -91,7 +91,7 @@ body:
     attributes:
       label: Environment
       description: OS, browser or desktop app version, Node/Yarn version, provider/model if relevant.
-      placeholder: macOS 15.3, Chrome 135, Node 24.13.1, Yarn 4.17.1, Codex app-server ...
+      placeholder: macOS 15.3, Chrome 135, Node version from .node-version, Yarn 4.17.1, Codex app-server ...
 
   - type: textarea
     id: logs

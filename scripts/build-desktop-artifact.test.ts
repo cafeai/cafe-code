@@ -1,12 +1,19 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
+import { createHash } from "node:crypto";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as Sink from "effect/Sink";
+import * as Stream from "effect/Stream";
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import {
   MANAGED_WINDOWS_NODE_VERSION,
   desktopArtifactListSatisfiesTarget,
+  extractManagedWindowsNodeArchive,
   resolveBuildOptions,
   resolveDesktopBuildIconAssets,
   resolveDesktopProductName,
@@ -21,6 +28,51 @@ import {
   shouldStageWindowsManagedRuntime,
 } from "./build-desktop-artifact.ts";
 import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
+import { REPOSITORY_NODE_VERSION } from "./lib/node-version.ts";
+
+// The extractor is replaced at the process service boundary. These fixtures
+// exercise the production byte verification, private snapshot, resource scope
+// and staging reads without downloading an archive or launching any process.
+function extractionPaths(command: ChildProcess.Command) {
+  if (!ChildProcess.isStandardCommand(command)) throw new Error("Expected one extraction command.");
+  if (process.platform !== "win32") {
+    assert.equal(command.command, "unzip");
+    assert.equal(command.args[0], "-q");
+    assert.equal(command.args[2], "-d");
+    return { archivePath: command.args[1]!, destination: command.args[3]! };
+  }
+  assert.equal(command.command, "powershell.exe");
+  assert.deepEqual(command.args.slice(0, 4), [
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-Command",
+  ]);
+  const invocation = command.args[4]!;
+  const literals =
+    /\b-LiteralPath '((?:[^']|'')*)' -DestinationPath '((?:[^']|'')*)' -Force$/u.exec(invocation);
+  assert.isNotNull(literals);
+  return {
+    archivePath: literals![1]!.replaceAll("''", "'"),
+    destination: literals![2]!.replaceAll("''", "'"),
+  };
+}
+
+function completedExtractionHandle() {
+  return ChildProcessSpawner.makeHandle({
+    pid: ChildProcessSpawner.ProcessId(1),
+    exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
+    isRunning: Effect.succeed(false),
+    kill: () => Effect.void,
+    unref: Effect.succeed(Effect.void),
+    stdin: Sink.drain,
+    stdout: Stream.empty,
+    stderr: Stream.empty,
+    all: Stream.empty,
+    getInputFd: () => Sink.drain,
+    getOutputFd: () => Stream.empty,
+  });
+}
 
 it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
   it("always emits deterministic official updater metadata", () => {
@@ -188,22 +240,187 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
   });
 
   it("pins Windows managed Node archives by version, arch, and hash", () => {
+    assert.equal(MANAGED_WINDOWS_NODE_VERSION, REPOSITORY_NODE_VERSION);
     assert.deepStrictEqual(resolveManagedWindowsNodeArchive("x64"), {
       arch: "x64",
       fileName: `node-v${MANAGED_WINDOWS_NODE_VERSION}-win-x64.zip`,
       sourceDirectoryName: `node-v${MANAGED_WINDOWS_NODE_VERSION}-win-x64`,
-      sha256: "fba577c4bb87df04d54dd87bbdaa5a2272f1f99a2acbf9152e1a91b8b5f0b279",
+      sha256: "158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541",
       url: `https://nodejs.org/dist/v${MANAGED_WINDOWS_NODE_VERSION}/node-v${MANAGED_WINDOWS_NODE_VERSION}-win-x64.zip`,
     });
     assert.deepStrictEqual(resolveManagedWindowsNodeArchive("arm64"), {
       arch: "arm64",
       fileName: `node-v${MANAGED_WINDOWS_NODE_VERSION}-win-arm64.zip`,
       sourceDirectoryName: `node-v${MANAGED_WINDOWS_NODE_VERSION}-win-arm64`,
-      sha256: "0cd29eeb64f3c649db2c4c868779ca277f5a4c49e26c69e5928d01fe0ae06da8",
+      sha256: "8779b1bde1d39f8d420e3b57aa657b39891af434d3de44a919044cec06785921",
       url: `https://nodejs.org/dist/v${MANAGED_WINDOWS_NODE_VERSION}/node-v${MANAGED_WINDOWS_NODE_VERSION}-win-arm64.zip`,
     });
     assert.equal(resolveManagedWindowsNodeArchive("universal"), null);
+    // A future canonical pin needs a newly reviewed archive tuple; constructing
+    // a new download URL while silently keeping an old hash cannot pass.
+    assert.throws(
+      () => resolveManagedWindowsNodeArchive("x64", "999.0.0"),
+      /no reviewed Windows archive hashes/,
+    );
+    assert.throws(() => resolveManagedWindowsNodeArchive("x64", "lts/*"), /one exact stable Node/);
   });
+
+  it.effect(
+    "stages a fresh verified extraction without trusting or deleting the old extracted cache",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const fixtureRoot = yield* fs.makeTempDirectoryScoped({ prefix: "cafecode-managed-node-" });
+        const cacheDir = path.join(fixtureRoot, "cache with spaces and ' quotes");
+        const verifiedBytes = new TextEncoder().encode("synthetic verified archive contents");
+        const archive = {
+          ...resolveManagedWindowsNodeArchive("x64")!,
+          sha256: createHash("sha256").update(verifiedBytes).digest("hex"),
+        };
+        const archivePath = path.join(cacheDir, archive.fileName);
+        const oldExtractedRoot = path.join(cacheDir, archive.sourceDirectoryName);
+        yield* fs.makeDirectory(oldExtractedRoot, { recursive: true });
+        yield* fs.writeFile(archivePath, verifiedBytes);
+        yield* fs.writeFileString(
+          path.join(oldExtractedRoot, "node.exe"),
+          "modified cached executable",
+        );
+        yield* fs.writeFileString(path.join(oldExtractedRoot, "npm.cmd"), "modified cached shim");
+        const stagedRoot = path.join(fixtureRoot, "stage");
+        let extractCount = 0;
+        let privateRoot: string | undefined;
+        const extractor = ChildProcessSpawner.make((command) =>
+          Effect.gen(function* () {
+            extractCount += 1;
+            const invocation = extractionPaths(command);
+            privateRoot = invocation.destination;
+            assert.equal(path.dirname(privateRoot), cacheDir);
+            assert.notEqual(privateRoot, cacheDir);
+            assert.equal(path.dirname(invocation.archivePath), privateRoot);
+            // Replacing the shared ZIP after admission cannot change the bytes
+            // handed to the extractor: it receives only the private snapshot.
+            yield* fs.writeFileString(archivePath, "concurrent shared cache replacement");
+            assert.deepEqual(yield* fs.readFile(invocation.archivePath), verifiedBytes);
+            const extractedRoot = path.join(privateRoot, archive.sourceDirectoryName);
+            yield* fs.makeDirectory(extractedRoot, { recursive: true });
+            yield* fs.writeFileString(path.join(extractedRoot, "node.exe"), "verified executable");
+            yield* fs.writeFileString(path.join(extractedRoot, "npm.cmd"), "verified shim");
+            yield* fs.writeFileString(
+              path.join(extractedRoot, "runtime-extra.txt"),
+              "verified extra file",
+            );
+            return completedExtractionHandle();
+          }),
+        );
+        const extractedRoot = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const freshRoot = yield* extractManagedWindowsNodeArchive(
+              archive,
+              archivePath,
+              cacheDir,
+              false,
+            );
+            assert.notEqual(freshRoot, oldExtractedRoot);
+            yield* fs.copy(freshRoot, stagedRoot);
+            return freshRoot;
+          }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, extractor)),
+        );
+        assert.equal(extractCount, 1);
+        assert.equal(yield* fs.exists(extractedRoot), false);
+        assert.equal(yield* fs.exists(privateRoot!), false);
+        assert.equal(
+          yield* fs.readFileString(path.join(stagedRoot, "node.exe")),
+          "verified executable",
+        );
+        assert.equal(
+          yield* fs.readFileString(path.join(stagedRoot, "runtime-extra.txt")),
+          "verified extra file",
+        );
+        assert.equal(
+          yield* fs.readFileString(path.join(oldExtractedRoot, "node.exe")),
+          "modified cached executable",
+        );
+        assert.equal(
+          yield* fs.readFileString(path.join(oldExtractedRoot, "npm.cmd")),
+          "modified cached shim",
+        );
+      }),
+  );
+
+  it.effect("rejects a replaced ZIP before the extractor can stage any files", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const cacheDir = yield* fs.makeTempDirectoryScoped({
+        prefix: "cafecode-managed-node-mismatch-",
+      });
+      const archive = resolveManagedWindowsNodeArchive("x64")!;
+      const archivePath = path.join(cacheDir, archive.fileName);
+      yield* fs.writeFileString(archivePath, "unverified ZIP");
+      let extractCount = 0;
+      const extractor = ChildProcessSpawner.make(() =>
+        Effect.sync(() => {
+          extractCount += 1;
+          return completedExtractionHandle();
+        }),
+      );
+      const error = yield* extractManagedWindowsNodeArchive(
+        archive,
+        archivePath,
+        cacheDir,
+        false,
+      ).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, extractor),
+        Effect.scoped,
+        Effect.flip,
+      );
+      assert.equal(error._tag, "BuildScriptError");
+      assert.match(error.message, /hash mismatch before extraction/);
+      assert.equal(extractCount, 0);
+      assert.deepEqual(yield* fs.readDirectory(cacheDir), [archive.fileName]);
+    }),
+  );
+
+  it.effect(
+    "cleans the scoped extraction when a verified archive omits its expected runtime files",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cacheDir = yield* fs.makeTempDirectoryScoped({
+          prefix: "cafecode-managed-node-incomplete-",
+        });
+        const bytes = new TextEncoder().encode("synthetic incomplete archive");
+        const archive = {
+          ...resolveManagedWindowsNodeArchive("x64")!,
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+        };
+        const archivePath = path.join(cacheDir, archive.fileName);
+        yield* fs.writeFile(archivePath, bytes);
+        let privateRoot: string | undefined;
+        const extractor = ChildProcessSpawner.make((command) =>
+          Effect.sync(() => {
+            privateRoot = extractionPaths(command).destination;
+            return completedExtractionHandle();
+          }),
+        );
+        const error = yield* extractManagedWindowsNodeArchive(
+          archive,
+          archivePath,
+          cacheDir,
+          false,
+        ).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, extractor),
+          Effect.scoped,
+          Effect.flip,
+        );
+        assert.equal(error._tag, "BuildScriptError");
+        assert.match(error.message, /did not extract node.exe\/npm.cmd/);
+        assert.equal(yield* fs.exists(privateRoot!), false);
+        assert.equal(yield* fs.exists(archivePath), true);
+      }),
+  );
 
   it("falls back to the default mock update port when the configured port is blank", () => {
     assert.equal(resolveMockUpdateServerUrl(undefined), "http://localhost:3000");

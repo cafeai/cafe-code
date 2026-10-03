@@ -17,7 +17,8 @@ stabilizes. The freshest path is a source checkout from GitHub.
 
 Mostly tested on macOS. Windows seems to work. Linux may need some tweaking.
 
-Install Node.js 24.13.1 and Corepack, then run:
+Install the exact Node.js LTS version recorded in the repository's `.node-version`
+and Corepack (not the non-LTS Current release), then run:
 
 ```bash
 git clone https://github.com/cafeai/cafe-code.git
@@ -31,7 +32,7 @@ yarn workspace @cafecode/desktop start
 If you want Codex or Claude to install it for you, paste this:
 
 ```text
-Install Cafe Code from source. Clone https://github.com/cafeai/cafe-code.git, install Node.js 24.13.1 and Corepack, run corepack enable, run yarn install --immutable, run yarn build:desktop, then start it with yarn workspace @cafecode/desktop start. Also verify Codex CLI is installed and logged in with codex login, and Claude Code is installed and logged in with claude auth login if I want Claude support.
+Install Cafe Code from source. Clone https://github.com/cafeai/cafe-code.git, install the exact Node.js LTS version recorded in .node-version and Corepack (not the non-LTS Current release), run corepack enable, run yarn install --immutable, run yarn build:desktop, then start it with yarn workspace @cafecode/desktop start. Also verify Codex CLI is installed and logged in with codex login, and Claude Code is installed and logged in with claude auth login if I want Claude support.
 ```
 
 ## npm Path

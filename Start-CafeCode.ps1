@@ -47,6 +47,37 @@ function Resolve-FirstApplicationPath {
   return $null
 }
 
+function Get-RepositoryNodeVersion {
+  param(
+    [string]$RepoRoot = $script:StartCafeCodeRepoRoot
+  )
+
+  # Read only the checked-in canonical toolchain pin, never a user-supplied
+  # command or a floating version alias. CI and packaging consume this same pin.
+  $pinPath = Join-Path $RepoRoot ".node-version"
+  $pinText = Get-Content -LiteralPath $pinPath -Raw
+  if ($pinText.Length -gt 64 -or $pinText -notmatch '\A(?<version>(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))(\r?\n)?\z') {
+    throw "Cafe Code's repository Node pin must be one exact stable version."
+  }
+  return [Version]$Matches['version']
+}
+
+function Test-SupportedNodeVersion {
+  param(
+    [AllowNull()]
+    [string]$VersionText,
+    [Version]$RequiredVersion
+  )
+
+  # A numerically newer Current major is deliberately not an acceptable runtime.
+  # Reject prerelease/malformed probe output rather than coercing it to a release.
+  if ($VersionText -notmatch '\Av?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\z') {
+    return $false
+  }
+  $version = [Version]$VersionText.TrimStart("v")
+  return $version.Major -eq $RequiredVersion.Major -and $version -ge $RequiredVersion
+}
+
 function Invoke-StartCafeCode {
   param(
     [switch]$Wait,
@@ -61,15 +92,15 @@ function Invoke-StartCafeCode {
 
   New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
+  $requiredNodeVersion = Get-RepositoryNodeVersion -RepoRoot $repo
   $nodePath = Resolve-FirstApplicationPath -Names @("node.exe", "node")
   if ([string]::IsNullOrWhiteSpace($nodePath)) {
-    throw "Node.js 24.13.1 or newer in the Node 24 release line was not found on PATH."
+    throw "Node.js $requiredNodeVersion or newer in the Node $($requiredNodeVersion.Major) LTS release line was not found on PATH."
   }
 
-  $nodeVersionText = (& $nodePath --version).Trim().TrimStart("v")
-  $nodeVersion = [Version]$nodeVersionText
-  if ($nodeVersion.Major -ne 24 -or $nodeVersion -lt [Version]"24.13.1") {
-    throw "Cafe Code requires Node.js ^24.13.1; found $nodeVersionText at $nodePath."
+  $nodeVersionText = (& $nodePath --version).Trim()
+  if ($LASTEXITCODE -ne 0 -or -not (Test-SupportedNodeVersion -VersionText $nodeVersionText -RequiredVersion $requiredNodeVersion)) {
+    throw "Cafe Code requires Node.js ^$requiredNodeVersion; the selected Node executable is not compatible."
   }
 
   # The current dev build defaults local HTTPS on. Source installs on Windows do

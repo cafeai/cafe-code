@@ -39,7 +39,7 @@ depends=(
 makedepends=(
   'corepack>=0.34.6'
   'git'
-  'nodejs>=24.13.1'
+  'nodejs-lts-krypton>=24.21.0'
 )
 provides=('cafe-code')
 conflicts=(

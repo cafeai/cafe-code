@@ -30,7 +30,7 @@ Unit cases cover Unix and drive/UNC-shaped paths, relative and absolute links, s
 
 CI's Ubuntu, Windows and macOS quality matrix runs unit/typecheck/build checks. Linux runs the complete browser suite; Windows and macOS additionally run the file-action/settings browser subset. Windows explicitly opts into a native spawn fixture built from a copied Node executable and synthetic CLI script, not an installed application or provider. The current dev compiler heap/serialization and exact dictation executable-fixture admission fixes are retained. Symlink-dependent assertions skip only when Windows itself reports the exact privilege `EPERM`; other errors fail and non-symlink identity tests still run.
 
-The CI toolchain is the repository-pinned Node 24.13.1/Corepack Yarn 4.17.1 and immutable lockfile. Hosted OS images and existing package-installation services remain external inputs, so passing CI is platform compatibility evidence, not a claim of bit-for-bit artifact reproduction. Fresh locked installation must replay without dependency resolution changes.
+The CI toolchain is the exact repository-pinned Node LTS from `.node-version`, Corepack Yarn 4.17.1 and the immutable lockfile. Hosted OS images and existing package-installation services remain external inputs, so passing CI is platform compatibility evidence, not a claim of bit-for-bit artifact reproduction. Fresh locked installation must replay without dependency resolution changes.
 
 Replay with pinned Node and Corepack Yarn from the repository manifests:
 

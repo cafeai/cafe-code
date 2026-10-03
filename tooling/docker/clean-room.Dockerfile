@@ -1,4 +1,4 @@
-FROM node:24.13.1-bookworm@sha256:00e9195ebd49985a6da8921f419978d85dfe354589755192dc090425ce4da2f7 AS toolchain
+FROM node:24.21.0-bookworm@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4 AS toolchain
 
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 ENV CI=1
@@ -30,6 +30,9 @@ RUN ! command -v "${ABSENT_EXECUTABLE}"
 
 WORKDIR /workspace
 COPY . .
+# The immutable image and repository pin must move together. A digest update is
+# not permission to build using Current Node or a different LTS patch.
+RUN test "$(node --version)" = "v$(tr -d '\r\n' < .node-version)"
 RUN corepack yarn install --immutable --inline-builds
 
 FROM toolchain AS quality
@@ -38,7 +41,7 @@ RUN corepack yarn audit:repository \
   && corepack yarn lint \
   && corepack yarn typecheck \
   && corepack yarn test \
-  && corepack yarn build:desktop \
+  && corepack yarn build:desktop --force \
   && corepack yarn release:smoke
 
 FROM quality AS browser

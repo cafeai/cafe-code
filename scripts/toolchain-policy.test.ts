@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
 
+import { REPOSITORY_NODE_VERSION } from "./lib/node-version.ts";
+
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(import.meta.url);
 
@@ -29,7 +31,13 @@ describe("repository toolchain policy", () => {
     const rootPackage = readJson("package.json");
 
     expect(rootPackage.packageManager).toBe("yarn@4.17.1");
-    expect(rootPackage.engines).toEqual({ node: "^24.13.1" });
+    expect(rootPackage.engines).toEqual({ node: `^${REPOSITORY_NODE_VERSION}` });
+    expect(readJson("apps/server/package.json").engines).toEqual({
+      node: `^${REPOSITORY_NODE_VERSION}`,
+    });
+    expect(readFileSync(resolve(repoRoot, ".mise.toml"), "utf8")).toMatch(
+      new RegExp(`^node = "${REPOSITORY_NODE_VERSION.replaceAll(".", "\\.")}"$`, "m"),
+    );
     expect(rootPackage.workspaces).toEqual([
       "apps/*",
       "oxlint-plugin-cafecode",
@@ -40,6 +48,58 @@ describe("repository toolchain policy", () => {
 
     const rootLockfiles = readdirSync(repoRoot).filter((entry) => entry.endsWith(".lock"));
     expect(rootLockfiles).toEqual(["yarn.lock"]);
+  });
+
+  it("keeps Node declarations on the standalone runtime major, not Current", () => {
+    const yarnConfig = parse(readFileSync(resolve(repoRoot, ".yarnrc.yml"), "utf8")) as {
+      catalog: Readonly<Record<string, string>>;
+    };
+    const typeVersion = yarnConfig.catalog["@types/node"]!;
+    expect(typeVersion).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(typeVersion.split(".")[0]).toBe(REPOSITORY_NODE_VERSION.split(".")[0]);
+  });
+
+  it("keeps developer and clean-room setup on the canonical standalone version", () => {
+    const devcontainer = readJson(".devcontainer/devcontainer.json") as {
+      features: Readonly<Record<string, { version?: string }>>;
+    };
+    expect(devcontainer.features["ghcr.io/devcontainers/features/node:1"]?.version).toBe(
+      REPOSITORY_NODE_VERSION,
+    );
+    const dockerfile = readFileSync(
+      resolve(repoRoot, "tooling/docker/clean-room.Dockerfile"),
+      "utf8",
+    );
+    expect(dockerfile).toMatch(
+      new RegExp(
+        `^FROM node:${REPOSITORY_NODE_VERSION.replaceAll(".", "\\.")}-bookworm@sha256:[a-f0-9]{64} AS toolchain$`,
+        "m",
+      ),
+    );
+    // The image tag names the intended release, but only executing its binary
+    // against the canonical file rejects a mismatched newly reviewed digest.
+    expect(dockerfile).toContain(
+      'RUN test "$(node --version)" = "v$(tr -d \'\\r\\n\' < .node-version)"',
+    );
+  });
+
+  it("selects the reviewed LTS-only Arch build package rather than generic Current Node", () => {
+    // Arch's generic nodejs package follows Current. The release codename is a
+    // separate reviewed distro identity and must be updated with a new LTS
+    // major, never guessed from a moving generic package or an even number.
+    const ltsPackageByMajor: Readonly<Record<string, string>> = { "24": "nodejs-lts-krypton" };
+    const ltsPackage = ltsPackageByMajor[REPOSITORY_NODE_VERSION.split(".")[0]!];
+    expect(ltsPackage).toBeDefined();
+    const expectedDependency = `${ltsPackage}>=${REPOSITORY_NODE_VERSION}`;
+    const packageBuild = readFileSync(
+      resolve(repoRoot, "packaging/aur/cafe-code/PKGBUILD"),
+      "utf8",
+    );
+    const sourceInfo = readFileSync(resolve(repoRoot, "packaging/aur/cafe-code/.SRCINFO"), "utf8");
+    expect(packageBuild).toContain(`'${expectedDependency}'`);
+    expect(sourceInfo).toContain(`makedepends = ${expectedDependency}`);
+    expect(packageBuild).not.toMatch(/['"]nodejs(?:[<>=]|['"])/);
+    expect(sourceInfo).not.toMatch(/makedepends = nodejs(?:[<>=]|$)/m);
   });
 
   it("uses a conventional node_modules install with explicit script trust", () => {

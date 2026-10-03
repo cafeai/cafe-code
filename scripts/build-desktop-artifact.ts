@@ -7,6 +7,7 @@ import desktopRuntimePackageJson from "../packaging/desktop-runtime/package.json
 import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
 import { getDefaultBuildArch } from "./lib/build-target-arch.ts";
 import { readYarnCatalog, resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
+import { parseRepositoryNodeVersion, REPOSITORY_NODE_VERSION } from "./lib/node-version.ts";
 
 import { createHash } from "node:crypto";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
@@ -32,12 +33,21 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
 const BuildArch = Schema.Literals(["arm64", "x64", "universal"]);
 
-export const MANAGED_WINDOWS_NODE_VERSION = "24.13.1";
+export const MANAGED_WINDOWS_NODE_VERSION = REPOSITORY_NODE_VERSION;
 
-const MANAGED_WINDOWS_NODE_ARCHIVE_HASHES = {
-  x64: "fba577c4bb87df04d54dd87bbdaa5a2272f1f99a2acbf9152e1a91b8b5f0b279",
-  arm64: "0cd29eeb64f3c649db2c4c868779ca277f5a4c49e26c69e5928d01fe0ae06da8",
-} as const;
+// Hashes are reviewed against Node's official versioned SHASUMS256.txt:
+// https://nodejs.org/dist/v24.21.0/SHASUMS256.txt
+// The explicit version key binds the canonical pin to a reviewed tuple; SHA256
+// cryptographically verifies those exact archive bytes. A pin-only update must
+// fail rather than silently reuse a previous release's hashes.
+export const MANAGED_WINDOWS_NODE_ARCHIVE_HASHES: Readonly<
+  Record<string, Readonly<Record<"x64" | "arm64", string>>>
+> = {
+  "24.21.0": {
+    x64: "158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541",
+    arm64: "8779b1bde1d39f8d420e3b57aa657b39891af434d3de44a919044cec06785921",
+  },
+};
 
 interface ManagedWindowsNodeArchive {
   readonly arch: "x64" | "arm64";
@@ -431,19 +441,26 @@ export function desktopArtifactListSatisfiesTarget(
 
 export function resolveManagedWindowsNodeArchive(
   arch: typeof BuildArch.Type,
+  version = MANAGED_WINDOWS_NODE_VERSION,
 ): ManagedWindowsNodeArchive | null {
   if (arch !== "x64" && arch !== "arm64") {
     return null;
   }
 
-  const sourceDirectoryName = `node-v${MANAGED_WINDOWS_NODE_VERSION}-win-${arch}`;
+  const exactVersion = parseRepositoryNodeVersion(version);
+  const hashes = MANAGED_WINDOWS_NODE_ARCHIVE_HASHES[exactVersion];
+  if (hashes === undefined) {
+    throw new Error("The canonical Node pin has no reviewed Windows archive hashes.");
+  }
+
+  const sourceDirectoryName = `node-v${exactVersion}-win-${arch}`;
   const fileName = `${sourceDirectoryName}.zip`;
   return {
     arch,
     fileName,
     sourceDirectoryName,
-    sha256: MANAGED_WINDOWS_NODE_ARCHIVE_HASHES[arch],
-    url: `https://nodejs.org/dist/v${MANAGED_WINDOWS_NODE_VERSION}/${fileName}`,
+    sha256: hashes[arch],
+    url: `https://nodejs.org/dist/v${exactVersion}/${fileName}`,
   };
 }
 
@@ -630,68 +647,86 @@ const ensureManagedWindowsNodeArchive = Effect.fn("ensureManagedWindowsNodeArchi
   return archivePath;
 });
 
-const extractManagedWindowsNodeArchive = Effect.fn("extractManagedWindowsNodeArchive")(function* (
-  archive: ManagedWindowsNodeArchive,
-  archivePath: string,
-  cacheDir: string,
-  verbose: boolean,
-) {
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const extractedRoot = path.join(cacheDir, archive.sourceDirectoryName);
-  const nodeExecutablePath = path.join(extractedRoot, "node.exe");
-  const npmCommandPath = path.join(extractedRoot, "npm.cmd");
-  if ((yield* fs.exists(nodeExecutablePath)) && (yield* fs.exists(npmCommandPath))) {
-    return extractedRoot;
-  }
+export const extractManagedWindowsNodeArchive = Effect.fn("extractManagedWindowsNodeArchive")(
+  function* (
+    archive: ManagedWindowsNodeArchive,
+    archivePath: string,
+    cacheDir: string,
+    verbose: boolean,
+  ) {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    // A verified ZIP does not authenticate an older extracted directory: a
+    // modified node.exe/npm.cmd (or another runtime file) must never enter the
+    // installer merely because its path exists. Verify the bytes again at this
+    // boundary, then extract a private snapshot into a fresh scope-owned root.
+    // The extractor never reopens the shared cache ZIP, closing the replacement
+    // interval between hash verification and native extraction. Existing cache
+    // directories are left untouched; only our freshly minted root is retired.
+    const archiveBytes = yield* fs.readFile(archivePath);
+    if (sha256Hex(archiveBytes) !== archive.sha256) {
+      return yield* new BuildScriptError({
+        message: `Managed Node archive hash mismatch before extraction for ${archive.fileName}.`,
+      });
+    }
 
-  yield* fs.remove(extractedRoot, { recursive: true, force: true }).pipe(Effect.ignore);
-  yield* fs.makeDirectory(cacheDir, { recursive: true });
-
-  yield* Effect.log(`[desktop-artifact] Extracting managed Node runtime ${archive.fileName}...`);
-  if (process.platform === "win32") {
-    const expandArchiveCommand = [
-      "Expand-Archive",
-      "-LiteralPath",
-      quotePowerShellString(archivePath),
-      "-DestinationPath",
-      quotePowerShellString(cacheDir),
-      "-Force",
-    ].join(" ");
-    yield* runCommand(
-      ChildProcess.make(
-        "powershell.exe",
-        ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", expandArchiveCommand],
-        {
-          ...commandOutputOptions(verbose),
-        },
-      ),
-    );
-  } else {
-    yield* runCommand(
-      ChildProcess.make("unzip", ["-q", archivePath, "-d", cacheDir], {
-        ...commandOutputOptions(verbose),
-      }),
-    ).pipe(
-      Effect.mapError(
-        (cause) =>
-          new BuildScriptError({
-            message:
-              "Failed to extract managed Node archive. Install `unzip` or build the Windows NSIS artifact on Windows.",
-            cause,
-          }),
-      ),
-    );
-  }
-
-  if (!(yield* fs.exists(nodeExecutablePath)) || !(yield* fs.exists(npmCommandPath))) {
-    return yield* new BuildScriptError({
-      message: `Managed Node archive did not extract node.exe/npm.cmd at ${extractedRoot}`,
+    yield* fs.makeDirectory(cacheDir, { recursive: true });
+    const extractionRoot = yield* fs.makeTempDirectoryScoped({
+      directory: cacheDir,
+      prefix: "verified-extract-",
     });
-  }
+    const privateArchivePath = path.join(extractionRoot, archive.fileName);
+    yield* fs.writeFile(privateArchivePath, archiveBytes, { flag: "wx", mode: 0o600 });
 
-  return extractedRoot;
-});
+    const extractedRoot = path.join(extractionRoot, archive.sourceDirectoryName);
+    const nodeExecutablePath = path.join(extractedRoot, "node.exe");
+    const npmCommandPath = path.join(extractedRoot, "npm.cmd");
+
+    yield* Effect.log(`[desktop-artifact] Extracting managed Node runtime ${archive.fileName}...`);
+    if (process.platform === "win32") {
+      const expandArchiveCommand = [
+        "Expand-Archive",
+        "-LiteralPath",
+        quotePowerShellString(privateArchivePath),
+        "-DestinationPath",
+        quotePowerShellString(extractionRoot),
+        "-Force",
+      ].join(" ");
+      yield* runCommand(
+        ChildProcess.make(
+          "powershell.exe",
+          ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", expandArchiveCommand],
+          {
+            ...commandOutputOptions(verbose),
+          },
+        ),
+      );
+    } else {
+      yield* runCommand(
+        ChildProcess.make("unzip", ["-q", privateArchivePath, "-d", extractionRoot], {
+          ...commandOutputOptions(verbose),
+        }),
+      ).pipe(
+        Effect.mapError(
+          (cause) =>
+            new BuildScriptError({
+              message:
+                "Failed to extract managed Node archive. Install `unzip` or build the Windows NSIS artifact on Windows.",
+              cause,
+            }),
+        ),
+      );
+    }
+
+    if (!(yield* fs.exists(nodeExecutablePath)) || !(yield* fs.exists(npmCommandPath))) {
+      return yield* new BuildScriptError({
+        message: `Managed Node archive did not extract node.exe/npm.cmd at ${extractedRoot}`,
+      });
+    }
+
+    return extractedRoot;
+  },
+);
 
 const stageWindowsManagedRuntime = Effect.fn("stageWindowsManagedRuntime")(function* (
   options: ResolvedBuildOptions,
@@ -1132,7 +1167,9 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     );
   }
 
-  yield* stageWindowsManagedRuntime(options, repoRoot, stageResourcesDir);
+  // Extraction resources only live until the verified runtime is copied into
+  // the stage; failures and cancellation retire the same narrow temporary root.
+  yield* stageWindowsManagedRuntime(options, repoRoot, stageResourcesDir).pipe(Effect.scoped);
 
   const yarnCatalog = yield* Effect.try({
     try: () => readYarnCatalog(repoRoot),

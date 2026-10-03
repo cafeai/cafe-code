@@ -84,8 +84,9 @@ itself.
 Mostly tested on macOS. Windows seems to work. Linux may need a little tweaking;
 I have not had enough time on it yet.
 
-Install Node.js 24.13.1 and Corepack, then run Cafe Code from a checkout. The
-repository pins the exact Yarn release through Corepack:
+Install the exact Node.js LTS version in [`.node-version`](.node-version) and
+Corepack, then run Cafe Code from a checkout. Cafe tracks the newest LTS line,
+not the non-LTS Current release, and pins the exact Yarn release through Corepack:
 
 ```bash
 git clone https://github.com/cafeai/cafe-code.git
@@ -181,7 +182,7 @@ message to each of them after the runtime has restarted.
 If you want Codex, Claude, or Grok Build to do it for you, paste this into the CLI:
 
 ```text
-Install Cafe Code from source. Clone https://github.com/cafeai/cafe-code.git, install Node.js 24.13.1 and Corepack, run corepack enable, run yarn install --immutable, run yarn build:desktop, then start it with yarn workspace @cafecode/desktop start. Also verify Codex CLI is installed and logged in with codex login, Claude Code is installed and logged in with claude auth login if I want Claude support, and Grok Build 1.0.4 or newer is installed and logged in with grok login if I want the Early Access Grok provider.
+Install Cafe Code from source. Clone https://github.com/cafeai/cafe-code.git, install the exact Node.js LTS version recorded in .node-version and Corepack (not the non-LTS Current release), run corepack enable, run yarn install --immutable, run yarn build:desktop, then start it with yarn workspace @cafecode/desktop start. Also verify Codex CLI is installed and logged in with codex login, Claude Code is installed and logged in with claude auth login if I want Claude support, and Grok Build 1.0.4 or newer is installed and logged in with grok login if I want the Early Access Grok provider.
 ```
 
 The old npm path is still here for later, but it may lag behind current work:
@@ -331,8 +332,9 @@ Cafe Code は、チャットする。
 npm のパッケージもあるけど、今はそれを信じすぎないでね。
 Cafe Code がもう少し落ち着くまでは、npm はたぶん少し古くなる。
 
-Node.js 24.13.1 と Corepack を先に入れてね。Yarn のバージョンは
-リポジトリ側で固定してあるよ。
+[`.node-version`](.node-version) に書かれた Node.js LTS と Corepack を先に入れてね。
+最新の LTS 系列を使う方針で、非 LTS の Current は使わないよ。
+Node の具体的なバージョンと Yarn はリポジトリ側で固定してあるよ。
 
 ```bash
 git clone https://github.com/cafeai/cafe-code.git
@@ -381,7 +383,7 @@ Linux はまだあまり見れてないから、ちょっと調整がいるか�
 Codex とか Claude に丸投げするなら、これを投げてもいいよ。
 
 ```text
-Cafe Code をソースから入れてください。https://github.com/cafeai/cafe-code.git を clone して、Node.js 24.13.1 と Corepack を入れ、corepack enable、yarn install --immutable、yarn build:desktop、yarn workspace @cafecode/desktop start まで実行してください。Codex を使うなら codex login、Claude を使うなら claude auth login も確認してください。
+Cafe Code をソースから入れてください。https://github.com/cafeai/cafe-code.git を clone して、.node-version に書かれた Node.js LTS と Corepack を入れ（非 LTS の Current は使わない）、corepack enable、yarn install --immutable、yarn build:desktop、yarn workspace @cafecode/desktop start まで実行してください。Codex を使うなら codex login、Claude を使うなら claude auth login も確認してください。
 ```
 
 npm 版は残しておくけど、今は古いかもしれない。

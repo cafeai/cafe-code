@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 
 import { runNativeDesktopRuntimeSmoke } from "./native-desktop-runtime-smoke.ts";
 import { readJsonFile } from "./json-file.ts";
+import { REPOSITORY_NODE_VERSION } from "./lib/node-version.ts";
 
 const PROCESS_TIMEOUT_MS = 15 * 60_000;
 const WINDOWS_CLEANUP_RETRY_DELAY_MS = 250;
@@ -251,7 +252,7 @@ async function assertManagedProviderRuntime(managedRoot: string): Promise<void> 
   }
   const nodeVersion = await runProcess(nodePath, ["--version"], { timeoutMs: 30_000 });
   assertSuccessful(nodeVersion, "Managed Node version probe");
-  if (nodeVersion.stdout.trim() !== "v24.13.1") {
+  if (nodeVersion.stdout.trim() !== `v${REPOSITORY_NODE_VERSION}`) {
     throw new Error("Managed Node version does not match the packaged policy.");
   }
 
