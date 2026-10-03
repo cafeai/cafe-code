@@ -2423,11 +2423,11 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             latest.sequence,
             latest.created_at,
             latest.activity_id
-          FROM projection_subagent_lifecycle_latest AS latest
+          FROM subagent_hydration
+          CROSS JOIN projection_subagent_lifecycle_latest AS latest
             INDEXED BY idx_projection_subagent_latest_thread_order
-          CROSS JOIN subagent_hydration
-          WHERE latest.thread_id = ${threadId}
-            AND subagent_hydration.complete = 1
+          WHERE subagent_hydration.complete = 1
+            AND latest.thread_id = ${threadId}
           ORDER BY
             latest.sequence_known DESC,
             latest.sequence DESC,
@@ -2461,16 +2461,20 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         ),
         global_subagent_lifecycle_activity_ids AS (
           SELECT DISTINCT latest.activity_id
-          FROM projection_subagent_lifecycle_latest AS latest
-          INNER JOIN retained_global_subagent_identities AS identity
-            ON identity.turn_id = latest.turn_id
-            AND identity.child_id = latest.child_id
+          FROM retained_global_subagent_identities AS identity
+          CROSS JOIN projection_subagent_lifecycle_latest AS latest
           WHERE latest.thread_id = ${threadId}
+            AND latest.turn_id = identity.turn_id
+            AND latest.child_id = identity.child_id
         ),
-        current_turn_lifecycle_rows AS (
+        current_turn_lifecycle_rows AS MATERIALIZED (
           -- This legacy lane remains authoritative only while exact-thread
           -- hydration is incomplete. CASE guards every JSON function so old
-          -- malformed payload text cannot abort a thread detail snapshot.
+          -- malformed payload text cannot abort a thread detail snapshot. The
+          -- explicit materialization and forced turn index are intentional:
+          -- both renderer identities below consume this rowset, and inlining
+          -- it makes a mature turn synchronously read and decode every task
+          -- lifecycle row twice on node:sqlite's main thread.
           SELECT
             activities.activity_id,
             activities.turn_id,
@@ -2491,9 +2495,11 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 ELSE NULL
               END
             ELSE NULL END AS ambient_task_id
-          FROM projection_thread_activities AS activities
-          CROSS JOIN subagent_hydration
-          WHERE activities.thread_id = ${threadId}
+          FROM subagent_hydration
+          CROSS JOIN projection_thread_activities AS activities
+            INDEXED BY idx_projection_thread_activities_thread_turn_kind_created_id
+          WHERE subagent_hydration.complete = 0
+            AND activities.thread_id = ${threadId}
             AND activities.turn_id = (
               SELECT latest_turn_id
               FROM projection_threads
@@ -2501,44 +2507,50 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               LIMIT 1
             )
             AND activities.kind IN ('task.started', 'task.progress', 'task.completed')
-            AND subagent_hydration.complete = 0
         ),
-        raw_current_turn_subagent_identity_edges AS (
+        raw_current_turn_subagent_identity_edges AS MATERIALIZED (
           SELECT
             activity_id, turn_id, kind, sequence, created_at,
             presentation_child_id AS child_id
           FROM current_turn_lifecycle_rows
-          UNION
+          WHERE presentation_child_id IS NOT NULL
+          UNION ALL
           SELECT
             activity_id, turn_id, kind, sequence, created_at,
             ambient_task_id AS child_id
           FROM current_turn_lifecycle_rows
+          WHERE ambient_task_id IS NOT NULL
+            -- One activity can deliberately name both the presentation child
+            -- and an ambient task deletion target. Preserve both exact keys,
+            -- but do not make two identical ranking edges for the same key.
+            AND ambient_task_id IS NOT presentation_child_id
         ),
-        current_turn_subagent_identity_edges AS (
+        current_turn_subagent_identity_edges AS MATERIALIZED (
           SELECT *
           FROM raw_current_turn_subagent_identity_edges
-          WHERE CASE
-            WHEN length(child_id) NOT BETWEEN 1 AND 512 THEN 0
-            WHEN length(CAST(child_id AS BLOB)) = length(child_id) THEN 1
-            ELSE (
-              WITH RECURSIVE utf16_length(character_offset, code_units) AS (
-                SELECT 0, 0
-                UNION ALL
-                SELECT
-                  character_offset + 1,
-                  code_units + CASE
-                    WHEN unicode(substr(child_id, character_offset + 1, 1)) > 65535
-                    THEN 2 ELSE 1
-                  END
+          WHERE child_id IS NOT NULL
+            AND CASE
+              WHEN length(child_id) NOT BETWEEN 1 AND 512 THEN 0
+              WHEN length(CAST(child_id AS BLOB)) = length(child_id) THEN 1
+              ELSE (
+                WITH RECURSIVE utf16_length(character_offset, code_units) AS (
+                  SELECT 0, 0
+                  UNION ALL
+                  SELECT
+                    character_offset + 1,
+                    code_units + CASE
+                      WHEN unicode(substr(child_id, character_offset + 1, 1)) > 65535
+                      THEN 2 ELSE 1
+                    END
+                  FROM utf16_length
+                  WHERE character_offset < length(child_id)
+                )
+                SELECT CASE WHEN code_units <= 512 THEN 1 ELSE 0 END
                 FROM utf16_length
-                WHERE character_offset < length(child_id)
+                WHERE character_offset = length(child_id)
+                LIMIT 1
               )
-              SELECT CASE WHEN code_units <= 512 THEN 1 ELSE 0 END
-              FROM utf16_length
-              WHERE character_offset = length(child_id)
-              LIMIT 1
-            )
-          END = 1
+            END = 1
             AND instr(CAST(child_id AS BLOB), X'00') = 0
             AND child_id NOT GLOB ('*[' || char(1) || '-' || char(31) || char(127) || char(128) || '-' || char(159) || ']*')
             AND instr(child_id, char(1564)) = 0
@@ -2553,6 +2565,39 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             AND instr(child_id, char(8295)) = 0
             AND instr(child_id, char(8296)) = 0
             AND instr(child_id, char(8297)) = 0
+        ),
+        latest_current_turn_subagent_edges AS MATERIALIZED (
+          -- Rank the full legacy rowset only once. Identity recency can then be
+          -- derived from these at-most-three kind heads because the newest edge
+          -- for an identity is necessarily the newest edge of one of its kinds.
+          SELECT
+            activity_id,
+            turn_id,
+            child_id,
+            kind,
+            sequence_known,
+            sequence,
+            created_at
+          FROM (
+            SELECT
+              edges.activity_id,
+              edges.turn_id,
+              edges.child_id,
+              edges.kind,
+              CASE WHEN edges.sequence IS NULL THEN 0 ELSE 1 END AS sequence_known,
+              edges.sequence,
+              edges.created_at,
+              ROW_NUMBER() OVER (
+                PARTITION BY edges.turn_id, edges.child_id, edges.kind
+                ORDER BY
+                  CASE WHEN edges.sequence IS NULL THEN 0 ELSE 1 END DESC,
+                  edges.sequence DESC,
+                  edges.created_at DESC,
+                  edges.activity_id DESC
+              ) AS lifecycle_rank
+            FROM current_turn_subagent_identity_edges AS edges
+          )
+          WHERE lifecycle_rank = 1
         ),
         current_turn_subagent_identities AS (
           SELECT turn_id, child_id, sequence_known, sequence, created_at, activity_id
@@ -2572,7 +2617,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   edges.created_at DESC,
                   edges.activity_id DESC
               ) AS identity_rank
-            FROM current_turn_subagent_identity_edges AS edges
+            FROM latest_current_turn_subagent_edges AS edges
           )
           WHERE identity_rank = 1
           ORDER BY sequence_known DESC, sequence DESC, created_at DESC, activity_id DESC
@@ -2584,24 +2629,11 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           LIMIT ${MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN}
         ),
         latest_current_turn_subagent_lifecycle_activity_ids AS (
-          SELECT activity_id
-          FROM (
-            SELECT
-              edges.activity_id,
-              ROW_NUMBER() OVER (
-                PARTITION BY edges.turn_id, edges.child_id, edges.kind
-                ORDER BY
-                  CASE WHEN edges.sequence IS NULL THEN 0 ELSE 1 END DESC,
-                  edges.sequence DESC,
-                  edges.created_at DESC,
-                  edges.activity_id DESC
-              ) AS lifecycle_rank
-            FROM current_turn_subagent_identity_edges AS edges
-            INNER JOIN retained_current_turn_subagent_identities AS identity
-              ON identity.turn_id = edges.turn_id
-              AND identity.child_id = edges.child_id
-          )
-          WHERE lifecycle_rank = 1
+          SELECT edges.activity_id
+          FROM retained_current_turn_subagent_identities AS identity
+          CROSS JOIN latest_current_turn_subagent_edges AS edges
+          WHERE edges.turn_id = identity.turn_id
+            AND edges.child_id = identity.child_id
         ),
         retained_activity_ids AS (
           SELECT activity_id
@@ -2650,10 +2682,14 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               ) > ${MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN} THEN 1 ELSE 0 END
             END AS "subagentRetentionTruncated",
             subagent_hydration.complete AS "subagentRetentionHydrated"
-          FROM projection_thread_activities activities
-          INNER JOIN retained_activity_ids retained
-            ON retained.activity_id = activities.activity_id
+          -- Keep the bounded retained-id set outermost. Mature sqlite_stat1
+          -- estimates can otherwise reorder this join into a synchronous scan
+          -- of the entire activity primary-key index before probing retained.
+          FROM retained_activity_ids AS retained
+          CROSS JOIN projection_thread_activities AS activities
+            INDEXED BY sqlite_autoindex_projection_thread_activities_1
           CROSS JOIN subagent_hydration
+          WHERE activities.activity_id = retained.activity_id
         ) AS retained_activities
         ORDER BY
           CASE WHEN sequence IS NULL THEN 0 ELSE 1 END ASC,

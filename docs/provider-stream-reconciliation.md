@@ -1,6 +1,6 @@
 # Provider stream reconciliation
 
-Last updated: 2026-10-04 00:42:33 JST (UTC+0900)
+Last updated: 2026-10-04 01:25:23 JST (UTC+0900)
 
 ## Ownership and exact text
 
@@ -65,6 +65,17 @@ Stream commitments retain fixed-size hash state, not another copy of every strea
 The compatibility review compared installed/runtime protocol behavior and current official releases. At the stream-fix audit timestamp, [Codex's changelog](https://learn.chatgpt.com/docs/changelog) targeted CLI/app-server 0.153.4; the subsequent [0.154 capability update](codex-154-compatibility.md) records the newer audit without changing these stream-integrity requirements. The initial Claude stream correction retained SDK 0.3.260 while the newest releases were quarantined. The subsequent [0.3.266 compatibility update](claude-266-compatibility.md) moves all three pins after the package-age audit and adds correlation regressions; it does not replace the local query transport. A newer explicitly configured system CLI remains authoritative; matching wrapper and CLI version numbers is not itself a compatibility requirement.
 
 ## Diagnostics and historical data
+
+When a restored client repeatedly reconnects, distinguish the responsive
+desktop debug endpoint from backend liveness. The compact connection history
+records socket attempts and closes; desktop trace spans show watchdog restarts.
+A main-thread sample inside synchronous SQLite, combined with an unfinished
+detail load, warrants inspecting the exact query plan rather than extending
+timeouts. The opt-in `CAFE_CODE_SQL_STATEMENT_DIAGNOSTICS=1` diagnostic records
+statement-start fingerprints, operation classes, parameter counts, and slow
+completion times before/after native execution. It does not log SQL text,
+parameter values, or transcript content. Enable it only for a diagnostic launch
+and disable it afterward; a successful build alone does not restart the client.
 
 Each newly accepted user turn also retains a bounded [configuration sanity check](decisions/turn-configuration-work-log.md) in authenticated work-log activity. Its model, effort/Fast settings and configured account label are frozen at submission, rather than read from the current composer when history renders. Missing native overrides remain provider-default/unknown; the record is not independent backend-model or billing telemetry. The display adds no provider queries, inference or lifecycle authority, and old turns are not retrospectively guessed or rewritten.
 

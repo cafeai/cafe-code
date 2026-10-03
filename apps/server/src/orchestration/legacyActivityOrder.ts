@@ -122,9 +122,14 @@ export function enrichLegacyActivityOrder<Row extends LegacyActivityOrderRow>(
           HAVING COUNT(*) = 1
         )
         SELECT selected.row_index AS "rowIndex", event.sequence
-        FROM selected
-        JOIN unique_event ON unique_event.row_index = selected.row_index
-        JOIN orchestration_events AS event ON event.sequence = unique_event.sequence
+        -- Keep the bounded qualified witness outermost. A one-row selected
+        -- VALUES relation otherwise lets mature stream statistics reorder the
+        -- final event join into a complete thread-stream walk before testing
+        -- unique_event.sequence. CROSS JOIN is SQLite's explicit loop-order
+        -- fence, not a Cartesian product: both exact predicates remain bound.
+        FROM unique_event
+        CROSS JOIN selected ON selected.row_index = unique_event.row_index
+        CROSS JOIN orchestration_events AS event ON event.sequence = unique_event.sequence
         WHERE event.aggregate_kind = 'thread'
           AND event.stream_id = selected.thread_id
           AND event.event_type = 'thread.activity-appended'

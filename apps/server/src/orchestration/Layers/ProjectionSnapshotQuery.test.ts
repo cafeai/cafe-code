@@ -13,6 +13,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import type * as Statement from "effect/unstable/sql/Statement";
 
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { RepositoryIdentityResolver } from "../../project/Services/RepositoryIdentityResolver.ts";
@@ -33,6 +34,23 @@ const asMessageId = (value: string): MessageId => MessageId.make(value);
 const asEventId = (value: string): EventId => EventId.make(value);
 const asCheckpointRef = (value: string): CheckpointRef => CheckpointRef.make(value);
 const codexClientCorrelationId = `cafe-steer-v1:${"a".repeat(64)}`;
+
+function captureThreadActivityStatements(sql: SqlClient.SqlClient) {
+  const statements: Array<readonly [string, ReadonlyArray<unknown>]> = [];
+  const observed = new Proxy(sql, {
+    apply(target, thisArg, argumentsList) {
+      const statement = Reflect.apply(
+        target,
+        thisArg,
+        argumentsList,
+      ) as Statement.Statement<unknown>;
+      const compiled = statement.compile();
+      if (/WITH recent_activity_ids AS/u.test(compiled[0])) statements.push(compiled);
+      return statement;
+    },
+  });
+  return { sql: observed, statements };
+}
 
 const projectionSnapshotLayer = it.layer(
   OrchestrationProjectionSnapshotQueryLive.pipe(
@@ -5174,6 +5192,205 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           [asEventId("older-turn-child-start"), asEventId("older-turn-child-completed")],
         );
       }
+    }),
+  );
+
+  it.effect("materializes one indexed legacy lifecycle probe under mature statistics", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const repositoryIdentityResolver = yield* RepositoryIdentityResolver;
+      const threadId = ThreadId.make("thread-legacy-lifecycle-plan");
+
+      yield* sql`
+        INSERT INTO projection_projects(
+          project_id, title, workspace_root, default_model_selection_json,
+          scripts_json, created_at, updated_at, deleted_at
+        ) VALUES (
+          'project-legacy-lifecycle-plan', 'Legacy lifecycle plan', ${process.cwd()},
+          NULL, '[]', '2026-10-04T00:00:00.000Z', '2026-10-04T00:00:00.000Z', NULL
+        )
+      `;
+      yield* sql`
+        INSERT INTO projection_threads(
+          thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode,
+          branch, worktree_path, latest_turn_id, latest_user_message_at,
+          pending_approval_count, pending_user_input_count, has_actionable_proposed_plan,
+          created_at, updated_at, deleted_at
+        ) VALUES (
+          ${threadId}, 'project-legacy-lifecycle-plan', 'Legacy lifecycle plan',
+          '{"provider":"codex","model":"gpt-5-codex"}',
+          'full-access', 'default', NULL, NULL, 'turn-current-plan', NULL,
+          0, 0, 0, '2026-10-04T00:00:00.000Z', '2026-10-04T00:00:00.000Z', NULL
+        )
+      `;
+      // Populate an older-turn lifecycle range before ANALYZE. The production
+      // query must retain its exact current-turn plan even when mature database
+      // statistics make the thread+kind index look attractive.
+      yield* sql`
+        WITH RECURSIVE historical(index_value) AS (
+          SELECT 1
+          UNION ALL
+          SELECT index_value + 1 FROM historical WHERE index_value < 512
+        )
+        INSERT INTO projection_thread_activities(
+          activity_id, thread_id, turn_id, tone, kind, summary,
+          payload_json, sequence, created_at
+        )
+        SELECT
+          printf('legacy-plan-historical-%04d', index_value),
+          ${threadId},
+          'turn-historical-plan',
+          'info',
+          'task.progress',
+          'Historical child progress',
+          '{"subagent":{"threadId":"historical-child"}}',
+          index_value,
+          printf('2026-08-01T00:%02d:%02d.000Z', (index_value / 60) % 60, index_value % 60)
+        FROM historical
+      `;
+      yield* sql`
+        INSERT INTO projection_thread_activities(
+          activity_id, thread_id, turn_id, tone, kind, summary,
+          payload_json, sequence, created_at
+        ) VALUES
+          (
+            'legacy-plan-current-start', ${threadId}, 'turn-current-plan', 'info',
+            'task.started', 'Current child started',
+            '{"subagent":{"threadId":"current-child"}}',
+            1000, '2026-10-04T00:00:01.000Z'
+          ),
+          (
+            'legacy-plan-current-progress', ${threadId}, 'turn-current-plan', 'info',
+            'task.progress', 'Current child progressed',
+            '{"visibility":"ambient","taskId":"ambient-child","subagent":{"threadId":"current-child"}}',
+            1001, '2026-10-04T00:00:02.000Z'
+          ),
+          (
+            'legacy-plan-current-completed', ${threadId}, 'turn-current-plan', 'info',
+            'task.completed', 'Current child completed',
+            '{"subagent":{"threadId":"current-child"}}',
+            1002, '2026-10-04T00:00:03.000Z'
+          )
+      `;
+      // Keep the selected detail tail small for the exact-order repair helper;
+      // this fixture is measuring the lifecycle CTE plan, not journal lookup.
+      yield* sql`
+        WITH RECURSIVE tail(index_value) AS (
+          SELECT 1
+          UNION ALL
+          SELECT index_value + 1 FROM tail WHERE index_value < ${THREAD_DETAIL_ACTIVITY_LIMIT}
+        )
+        INSERT INTO projection_thread_activities(
+          activity_id, thread_id, turn_id, tone, kind, summary,
+          payload_json, sequence, created_at
+        )
+        SELECT
+          printf('legacy-plan-tail-%04d', index_value),
+          ${threadId},
+          'turn-current-plan',
+          'tool',
+          'tool.completed',
+          'Current turn tail',
+          '{}',
+          index_value + 2000,
+          '2026-10-04T01:00:00.000Z'
+        FROM tail
+      `;
+      yield* sql`
+        DELETE FROM projection_subagent_lifecycle_hydration
+        WHERE thread_id = ${threadId}
+      `;
+      yield* sql`
+        INSERT INTO projection_subagent_lifecycle_hydration(
+          thread_id, kind, cutoff_created_at, cutoff_activity_id,
+          cursor_created_at, cursor_activity_id, completed
+        ) VALUES
+          (
+            ${threadId}, 'task.started', '2026-10-04T00:00:03.000Z',
+            'legacy-plan-current-completed', NULL, NULL, 0
+          ),
+          (
+            ${threadId}, 'task.progress', '2026-10-04T00:00:03.000Z',
+            'legacy-plan-current-completed', NULL, NULL, 0
+          ),
+          (
+            ${threadId}, 'task.completed', '2026-10-04T00:00:03.000Z',
+            'legacy-plan-current-completed', NULL, NULL, 0
+          )
+      `;
+      yield* sql`ANALYZE projection_thread_activities`;
+
+      const observed = captureThreadActivityStatements(sql);
+      const capturedSnapshotLayer = Layer.fresh(OrchestrationProjectionSnapshotQueryLive).pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.succeed(SqlClient.SqlClient, observed.sql),
+            Layer.succeed(RepositoryIdentityResolver, repositoryIdentityResolver),
+          ),
+        ),
+      );
+      const detail = yield* Effect.gen(function* () {
+        const capturedSnapshotQuery = yield* ProjectionSnapshotQuery;
+        return yield* capturedSnapshotQuery.getThreadDetailById(threadId);
+      }).pipe(Effect.provide(capturedSnapshotLayer));
+      assert.equal(detail._tag, "Some");
+      assert.equal(observed.statements.length, 1);
+      const [activityQuery, activityParameters] = observed.statements[0]!;
+      const queryPlan = yield* sql.unsafe<{ readonly detail: string }>(
+        `EXPLAIN QUERY PLAN ${activityQuery}`,
+        activityParameters,
+      );
+      const planText = queryPlan.map((row) => row.detail).join("\n");
+      const currentTurnRangeSearches = queryPlan.filter((row) =>
+        row.detail.includes(
+          "SEARCH activities USING INDEX idx_projection_thread_activities_thread_turn_kind_created_id",
+        ),
+      );
+      assert.lengthOf(
+        currentTurnRangeSearches,
+        1,
+        `legacy lifecycle plan repeated its current-turn range scan:\n${planText}`,
+      );
+      assert.include(planText, "MATERIALIZE current_turn_lifecycle_rows");
+      assert.include(planText, "MATERIALIZE current_turn_subagent_identity_edges");
+      assert.include(planText, "UNION ALL");
+      assert.lengthOf(
+        queryPlan.filter((row) => row.detail === "SCAN raw_current_turn_subagent_identity_edges"),
+        1,
+        `legacy identity validation was repeated:\n${planText}`,
+      );
+      assert.isTrue(
+        queryPlan.some((row) =>
+          /SEARCH latest USING COVERING INDEX idx_projection_subagent_latest_thread_order \(thread_id=\?\)/u.test(
+            row.detail,
+          ),
+        ),
+        `global lifecycle prefix did not use its bounded thread/order range:\n${planText}`,
+      );
+      assert.isTrue(
+        queryPlan.some((row) =>
+          /SEARCH latest USING PRIMARY KEY \(thread_id=\? AND turn_id=\? AND child_id=\?\)/u.test(
+            row.detail,
+          ),
+        ),
+        `retained global identities did not use exact lifecycle-pointer probes:\n${planText}`,
+      );
+      assert.isFalse(
+        queryPlan.some((row) => /^SCAN latest(?:\s|$)/u.test(row.detail)),
+        `global lifecycle joins escaped into a full pointer-table scan:\n${planText}`,
+      );
+      assert.isTrue(
+        queryPlan.some((row) =>
+          /SEARCH activities USING INDEX sqlite_autoindex_projection_thread_activities_1 \(activity_id=\?\)/u.test(
+            row.detail,
+          ),
+        ),
+        `retained activity rows did not use exact primary-key probes:\n${planText}`,
+      );
+      assert.isFalse(
+        queryPlan.some((row) => row.detail.startsWith("SCAN activities USING")),
+        `retained activity join scanned the full activity index:\n${planText}`,
+      );
     }),
   );
 

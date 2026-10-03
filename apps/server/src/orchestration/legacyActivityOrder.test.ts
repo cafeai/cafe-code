@@ -308,6 +308,139 @@ it.layer(memoryJournal)("Selected legacy activity order", (it) => {
           plan.some((entry) => /SCAN (?:candidate|orchestration_events)/u.test(entry.detail)),
           false,
         );
+        assert.equal(
+          plan.some((entry) => /SEARCH event USING.*idx_orch_events_stream/u.test(entry.detail)),
+          false,
+        );
+      }),
+  );
+
+  it.effect(
+    "keeps one, partial and full batches on exact event keys under mature stream statistics",
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const fixture = rowFixture();
+        // A populated stream and ANALYZE represent the planner environment that
+        // a tiny pristine journal did not exercise. No private/live DB or native
+        // provider is used. Every unrelated command remains absent from lookup.
+        yield* sql`
+        WITH RECURSIVE stream_events(index_value) AS (
+          SELECT 1 UNION ALL SELECT index_value + 1 FROM stream_events WHERE index_value < 10000
+        )
+        INSERT INTO orchestration_events(
+          event_id, aggregate_kind, stream_id, stream_version, event_type,
+          occurred_at, command_id, causation_event_id, correlation_id,
+          actor_kind, payload_json, metadata_json
+        )
+        SELECT
+          ${fixture.activityId} || '-stream-event-' || index_value,
+          'thread', ${fixture.threadId}, index_value + 1000000,
+          'thread.activity-appended', '2026-10-04T00:00:00.000Z',
+          ${fixture.activityId} || '-unrelated-command-' || index_value,
+          NULL, NULL, 'provider', '{}', '{}'
+        FROM stream_events
+      `;
+        // Many small neighboring streams keep the average stream selectivity
+        // low even though this selected stream is long. That is the mature,
+        // skewed catalog shape in which the unfenced one-row join chose a range
+        // walk rather than consulting its already-bounded unique witness first.
+        yield* sql`
+        WITH RECURSIVE sparse_streams(index_value) AS (
+          SELECT 1 UNION ALL SELECT index_value + 1 FROM sparse_streams WHERE index_value < 1000
+        )
+        INSERT INTO orchestration_events(
+          event_id, aggregate_kind, stream_id, stream_version, event_type,
+          occurred_at, command_id, causation_event_id, correlation_id,
+          actor_kind, payload_json, metadata_json
+        )
+        SELECT
+          ${fixture.activityId} || '-sparse-event-' || index_value,
+          'thread', ${fixture.threadId} || '-sparse-stream-' || index_value, 1,
+          'thread.activity-appended', '2026-10-04T00:00:00.000Z',
+          ${fixture.activityId} || '-sparse-command-' || index_value,
+          NULL, NULL, 'provider', '{}', '{}'
+        FROM sparse_streams
+      `;
+        const rows = Array.from({ length: LEGACY_ACTIVITY_ORDER_BATCH_SIZE }, () =>
+          rowFixture({ threadId: fixture.threadId }),
+        );
+        const expected: number[] = [];
+        for (const row of rows) expected.push(yield* insertEvent(sql, row));
+        const absent = rowFixture({ threadId: fixture.threadId, sequence: 777 });
+        yield* sql`ANALYZE orchestration_events`;
+        const statistics = yield* sql<{ readonly idx: string; readonly stat: string }>`
+        SELECT idx, stat FROM sqlite_stat1
+        WHERE tbl = 'orchestration_events' AND idx = 'idx_orch_events_stream_sequence'
+      `;
+        assert.equal(statistics.length, 1);
+        assert.equal(Number(statistics[0]!.stat.split(" ")[0]) >= 10000, true);
+        for (const count of [1, 39, LEGACY_ACTIVITY_ORDER_BATCH_SIZE]) {
+          for (const batch of [rows.slice(0, count), [absent, ...rows.slice(0, count - 1)]]) {
+            const observed = captureEnrichmentStatements(sql);
+            const result = yield* enrichLegacyActivityOrder(observed.sql, batch);
+            assert.equal(observed.statements.length, 1);
+            if (batch[0] === absent) assert.equal(result[0], absent);
+            else
+              assert.deepEqual(
+                result.map((row) => row.sequence),
+                expected.slice(0, count),
+              );
+            const [query, parameters] = observed.statements[0]!;
+            const plan = yield* sql.unsafe<{ readonly detail: string }>(
+              `EXPLAIN QUERY PLAN ${query}`,
+              parameters,
+            );
+            const eventLookups = plan.filter((entry) =>
+              /(?:SCAN|SEARCH) event\b/u.test(entry.detail),
+            );
+            // Both the two-row witness probe join and final qualification must
+            // use rowid/INTEGER PRIMARY KEY, never a complete thread stream range.
+            assert.equal(eventLookups.length, 2);
+            assert.equal(
+              eventLookups.every((entry) =>
+                /SEARCH event USING INTEGER PRIMARY KEY \(rowid=\?\)/u.test(entry.detail),
+              ),
+              true,
+            );
+            assert.equal(
+              plan.some((entry) =>
+                /SCAN (?:candidate|orchestration_events)|SEARCH event USING.*idx_orch_events_stream/u.test(
+                  entry.detail,
+                ),
+              ),
+              false,
+            );
+            assert.equal(
+              plan.some((entry) =>
+                /SEARCH candidate USING.*idx_orch_events_command_id/u.test(entry.detail),
+              ),
+              true,
+            );
+            if (count === 1 && batch[0] === absent) {
+              // Prove this statistics-backed fixture is red for the historical
+              // join shape without changing production or touching a live DB.
+              // An absent witness must not cause a 10,000-row stream walk.
+              const historicalQuery = query.replace(
+                /FROM unique_event\s+CROSS JOIN selected ON selected.row_index = unique_event.row_index\s+CROSS JOIN orchestration_events AS event ON event.sequence = unique_event.sequence/u,
+                "FROM selected JOIN unique_event ON unique_event.row_index = selected.row_index JOIN orchestration_events AS event ON event.sequence = unique_event.sequence",
+              );
+              assert.notEqual(historicalQuery, query);
+              const historicalPlan = yield* sql.unsafe<{ readonly detail: string }>(
+                `EXPLAIN QUERY PLAN ${historicalQuery}`,
+                parameters,
+              );
+              assert.equal(
+                historicalPlan.some((entry) =>
+                  /SEARCH event USING INDEX idx_orch_events_stream_sequence \(aggregate_kind=\? AND stream_id=\?\)/u.test(
+                    entry.detail,
+                  ),
+                ),
+                true,
+              );
+            }
+          }
+        }
       }),
   );
 

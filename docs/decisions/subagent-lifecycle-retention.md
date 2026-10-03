@@ -3,7 +3,7 @@
 Decision status: Accepted within the authorized subagent tracking repair
 Implementation status: Implemented; release qualification follows the gate below
 Created: 2026-10-04 00:28:48 JST (UTC+0900)
-Last updated: 2026-10-04 00:50:49 JST (UTC+0900)
+Last updated: 2026-10-04 01:25:23 JST (UTC+0900)
 Decision authority: implementation choice within the user's request to fix new, reused, and closed subagent tracking.
 Supersedes: the latest-turn-only activity retention rule; preserves the ownership and admission rules in [native root liveness](codex-native-root-liveness.md).
 
@@ -29,6 +29,16 @@ rows can recover that sequence only from a uniquely qualified exact indexed
 provider command witness. Verify the event's actor, thread, activity, turn and
 kind before using its sequence; never infer order from a model name, label,
 timestamp proximity or current composer selection.
+
+The qualification join must start from the bounded unique witnesses and fetch
+each event by its sequence primary key. An indexed command probe alone does not
+make the complete statement bounded: mature SQLite statistics can reorder a
+later join into a walk of the entire thread stream. Explicit loop-order fences
+and query-plan regressions protect both small and full witness batches without
+relaxing actor, identity, timestamp, ambiguity, or payload checks.
+The final detail activity lookup likewise starts from the retained identity set
+and fetches base activities by primary key; a planner-selected activity-table
+scan is not an acceptable alternative merely because its result is capped.
 
 Keep the newest start, progress and completion edge separately for each exact
 `(visible turn, child identity)`, across turns. The global compact-detail identity
@@ -96,6 +106,14 @@ replay, explicit reuse, exact identity separation, bounded candidate selection,
 legacy hydration cutoffs, and update/delete/tombstone behavior. Native routing
 tests cover reused children and stale terminal events. Browser tests verify both
 Tasks and the docked rail.
+
+Query-plan coverage must include analyzed, long-thread fixtures and partial
+batches, not only empty in-memory schemas. A synchronous SQLite history scan
+prevents heartbeat handling; the desktop watchdog can then restart the backend,
+which repeats the same load and leaves the renderer reconnecting. Increasing
+heartbeat or watchdog deadlines does not correct that failure. Keep legacy
+fallback extraction/identity validation materialized once per indexed current-
+turn candidate set rather than duplicating scans through flattened CTEs.
 
 Use the pinned Node/Yarn toolchain, run the repository checks and full tests, then
 the forced desktop build as the final local gate. Native Windows/macOS/Linux CI
