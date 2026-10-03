@@ -40,6 +40,7 @@ import {
 import { useTaskAtriumStore } from "./taskAtriumStore";
 import { ProviderDriverKind } from "@cafecode/contracts";
 import { subagentToWorkLogEntry } from "../../session-logic";
+import { presentTurnConfiguration } from "../../turnConfiguration";
 import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
 
 // Reuse the bounded, authorization-checked transcript reader. The potentially
@@ -339,7 +340,12 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
 }: TaskAtriumCardViewProps) {
   const accent = stateColor(card.state, tint);
   const elapsed = formatAtriumCardElapsed(card, now);
+  const configuration = useMemo(
+    () => (card.turnConfiguration ? presentTurnConfiguration(card.turnConfiguration) : null),
+    [card.turnConfiguration],
+  );
   const titleId = useId();
+  const configurationId = useId();
   const subagentListId = useId();
   const [showAllCompletedSubagents, setShowAllCompletedSubagents] = useState(false);
   const completedSubagents = useMemo(
@@ -408,6 +414,8 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
         type="button"
         onClick={() => onOpen(card)}
         aria-label={`Open ${card.title}`}
+        aria-describedby={configurationId}
+        title={configuration?.sourceDescription}
         className="absolute inset-0 z-10 rounded-2xl outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--cafe-atrium-accent)]"
       />
       <span
@@ -431,6 +439,29 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
         >
           {STATE_LABEL[card.state]}
         </span>
+      </div>
+
+      {/* This is the same accepted-turn sanity check as the work log, not an
+          independent assertion of native execution or billing. Long labels
+          wrap as inert text; no account identifiers or raw options are read. */}
+      <div
+        id={configurationId}
+        data-cafe-atrium-turn-configuration="true"
+        className="mt-1.5 min-w-0 text-[11px] leading-4 [overflow-wrap:anywhere]"
+        title={configuration?.sourceDescription}
+      >
+        {configuration ? (
+          <>
+            <div className="font-medium text-[#4a4248] dark:text-white/75">
+              {configuration.settings}
+            </div>
+            <div className="mt-0.5 text-[10px] text-[#8a8189] dark:text-white/50">
+              {configuration.account} · {configuration.modes}
+            </div>
+          </>
+        ) : (
+          <div className="text-[#8a8189] dark:text-white/50">Turn settings unavailable</div>
+        )}
       </div>
 
       <div
@@ -574,6 +605,7 @@ function areAtriumCardPropsEqual(
     previous.card.key === next.card.key &&
     previous.card.title === next.card.title &&
     previous.card.provider === next.card.provider &&
+    previous.card.turnConfiguration === next.card.turnConfiguration &&
     previous.card.projectName === next.card.projectName &&
     previous.card.state === next.card.state &&
     previous.card.activityLabel === next.card.activityLabel &&

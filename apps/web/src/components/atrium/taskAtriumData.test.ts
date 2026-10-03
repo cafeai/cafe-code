@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type {
   EnvironmentId,
+  EventId,
   OrchestrationThreadActivity,
   ProjectId,
+  ProviderTurnConfiguration,
   TaskAtriumErrorDismissal,
   ThreadId,
   TurnId,
@@ -20,6 +22,36 @@ const ENV = "env-1" as EnvironmentId;
 const THREAD = "thread-1" as ThreadId;
 const PROJECT = "project-1" as ProjectId;
 const NOW = Date.UTC(2026, 0, 1, 12, 0, 0);
+
+const TURN_CONFIGURATION: ProviderTurnConfiguration = {
+  version: 1,
+  provider: "codex" as ProviderTurnConfiguration["provider"],
+  providerInstanceId: "codex_personal" as ProviderTurnConfiguration["providerInstanceId"],
+  providerDisplayName: "Codex Personal",
+  model: "gpt-6.1-sol",
+  modelDisplayName: "GPT-6.1 Sol",
+  effort: "ultra",
+  fastMode: true,
+  runtimeMode: "full-access",
+  interactionMode: "default",
+  settingsSource: "submitted",
+};
+
+function configurationActivity(
+  configuration: unknown = TURN_CONFIGURATION,
+  turnId: TurnId | null = "turn-1" as TurnId,
+  id = "turn-configuration",
+): OrchestrationThreadActivity {
+  return {
+    id: id as EventId,
+    kind: "provider.turn.configuration",
+    tone: "info",
+    summary: "Turn accepted",
+    payload: { turnConfiguration: configuration },
+    turnId,
+    createdAt: new Date(NOW - 40_000).toISOString(),
+  };
+}
 
 function activity(
   id: string,
@@ -115,6 +147,127 @@ function buildState(options: {
 }
 
 describe("selectAtriumSnapshot", () => {
+  it("projects the accepted turn's frozen settings without consulting current selections", () => {
+    const state = buildState({ provider: "codex", activities: [configurationActivity()] });
+    const environment = state.environmentStateById[ENV]!;
+    // The shell describes the next request and can change while a turn runs.
+    // It must never become the source of the running card's sanity check.
+    Object.assign(environment.threadShellById, {
+      [THREAD]: {
+        modelSelection: { provider: "codex_personal", model: "gpt-6-astra" },
+        runtimeMode: "approval-required",
+        interactionMode: "plan",
+      },
+    });
+    const first = selectAtriumSnapshot(state, NOW).cards[0]!;
+    expect(first.turnConfiguration).toEqual(TURN_CONFIGURATION);
+    const later = selectAtriumSnapshot(state, NOW + 1_000).cards[0]!;
+    // Avoid schema decoding/new objects on each one-second Atrium clock tick.
+    expect(later.turnConfiguration).toBe(first.turnConfiguration);
+    expect(later.activityLabel).toBe("Turn accepted");
+  });
+
+  it("updates only after the exact latest turn changes, never from a newer unrelated record", () => {
+    const future = configurationActivity(
+      { ...TURN_CONFIGURATION, modelDisplayName: "GPT-6 Astra", effort: "max", fastMode: false },
+      "turn-2" as TurnId,
+      "future-configuration",
+    );
+    const state = buildState({
+      provider: "codex",
+      activities: [configurationActivity(), future],
+    });
+    const first = selectAtriumSnapshot(state, NOW).cards[0]!;
+    expect(first.turnConfiguration?.modelDisplayName).toBe("GPT-6.1 Sol");
+    const environment = state.environmentStateById[ENV]!;
+    const summary = environment.sidebarThreadSummaryById[THREAD]!;
+    summary.latestTurn = { ...summary.latestTurn!, turnId: "turn-2" as TurnId };
+    summary.session = { ...summary.session!, activeTurnId: "turn-2" as TurnId };
+    const next = selectAtriumSnapshot(state, NOW + 1_000).cards[0]!;
+    expect(next.turnConfiguration?.modelDisplayName).toBe("GPT-6 Astra");
+    expect(next.turnConfiguration).not.toBe(first.turnConfiguration);
+  });
+
+  it("accepts late immutable metadata while preserving completed parent timing", () => {
+    const state = buildState({ status: "ready", latestTurnState: "completed" });
+    const first = selectAtriumSnapshot(state, NOW).cards[0]!;
+    expect(first.turnConfiguration).toBeNull();
+    const environment = state.environmentStateById[ENV]!;
+    const entry = configurationActivity({
+      ...TURN_CONFIGURATION,
+      provider: "claudeAgent",
+      providerInstanceId: "claude_work",
+      modelDisplayName: "Claude Opus 5.5",
+      effort: "max",
+      fastMode: false,
+    });
+    environment.activityIdsByThreadId[THREAD] = [entry.id];
+    environment.activityByThreadId[THREAD] = { [entry.id]: entry };
+    const later = selectAtriumSnapshot(state, NOW + 1_000).cards[0]!;
+    expect(later.turnConfiguration?.modelDisplayName).toBe("Claude Opus 5.5");
+    expect(later.turnConfiguration?.fastMode).toBe(false);
+    expect(later.completedAt).toBe(first.completedAt);
+  });
+
+  it.each(["different-turn", null])("never borrows settings from turn %s", (turnId) => {
+    const state = buildState({
+      provider: "codex",
+      activities: [configurationActivity(TURN_CONFIGURATION, turnId as TurnId | null)],
+    });
+    expect(selectAtriumSnapshot(state, NOW).cards[0]!.turnConfiguration).toBeNull();
+  });
+
+  it("does not show predecessor settings while a new active session turn is pending", () => {
+    const state = buildState({ provider: "codex", activities: [configurationActivity()] });
+    state.environmentStateById[ENV]!.sidebarThreadSummaryById[THREAD]!.session!.activeTurnId =
+      "replacement-turn" as TurnId;
+    expect(selectAtriumSnapshot(state, NOW).cards[0]!.turnConfiguration).toBeNull();
+  });
+
+  it("rejects snapshots from a different driver or known account instance", () => {
+    const wrongDriver = buildState({ activities: [configurationActivity()] });
+    expect(selectAtriumSnapshot(wrongDriver, NOW).cards[0]!.turnConfiguration).toBeNull();
+    const wrongAccount = buildState({ provider: "codex", activities: [configurationActivity()] });
+    wrongAccount.environmentStateById[ENV]!.sidebarThreadSummaryById[
+      THREAD
+    ]!.session!.providerInstanceId =
+      "codex_other" as ProviderTurnConfiguration["providerInstanceId"];
+    expect(selectAtriumSnapshot(wrongAccount, NOW).cards[0]!.turnConfiguration).toBeNull();
+  });
+
+  it.each([
+    { ...TURN_CONFIGURATION, modelDisplayName: "forged\u202Elabel" },
+    { ...TURN_CONFIGURATION, version: 2 },
+    { ...TURN_CONFIGURATION, fastMode: "false" },
+  ])("fails closed for malformed turn settings %j", (configuration) => {
+    const state = buildState({
+      provider: "codex",
+      activities: [configurationActivity(configuration)],
+    });
+    expect(selectAtriumSnapshot(state, NOW).cards[0]!.turnConfiguration).toBeNull();
+  });
+
+  it("exposes only validated public metadata, not arbitrary credential-like payload fields", () => {
+    const state = buildState({
+      provider: "codex",
+      activities: [
+        configurationActivity({
+          ...TURN_CONFIGURATION,
+          authEmail: "private@example.invalid",
+          apiKey: "synthetic-secret",
+          options: { authToken: "synthetic-token" },
+        }),
+      ],
+    });
+    expect(selectAtriumSnapshot(state, NOW).cards[0]!.turnConfiguration).toEqual(
+      TURN_CONFIGURATION,
+    );
+  });
+
+  it("keeps missing legacy settings unknown rather than guessing defaults", () => {
+    expect(selectAtriumSnapshot(buildState({}), NOW).cards[0]!.turnConfiguration).toBeNull();
+  });
+
   it.each(["completed", "error"] as const)(
     "freezes the %s parent duration across late worker/title updates",
     (latestTurnState) => {

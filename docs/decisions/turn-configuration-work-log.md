@@ -2,7 +2,7 @@
 
 Decision status: Accepted
 Created: 2026-10-03 12:47:48 JST (UTC+0900)
-Last updated: 2026-10-03 13:08:39 JST (UTC+0900)
+Last updated: 2026-10-03 22:14:03 JST (UTC+0900)
 Decision authority: implementation choice within the user's explicit request to show the model, settings and account at each turn start.
 Implementation status: Implemented with acceptance, lifecycle-isolation, retention and rendering regression tests; qualification procedure and limits are listed below.
 Supersedes: None. Supplements existing provider-switch work-log notices without changing provider execution authority.
@@ -33,6 +33,12 @@ The existing generic activity persistence stores the additive versioned payload;
 The snapshot is the configuration Cafe submitted or knew for the active session. It is not proof that an upstream routing service executed a particular backend model, or that omitted native settings resolved to any specific value. Those unknowns stay explicit. Additional model requests, auth probes or paid work solely for a display check were rejected.
 
 The record remains bound to the exact accepted result's turn ID. Existing ingestion may later adopt a different concrete ID from an authoritative provider start; this feature does not speculate about rebinding the earlier acceptance snapshot to that ID. Old or unconfirmed settings are not backfilled from today's composer. Provider adapters may also normalize a requested option; the summary identifies the submitted selection rather than claiming independently verified native execution settings.
+
+## Atrium card projection
+
+Atrium cards reuse this accepted-turn record beneath their provider header: model, effort and Fast on the first line, then configured account label and interaction/runtime modes. They use the same schema decoder and presentation helper as the work log. Selection is limited to the exact latest turn and rejects a differing active session turn or known provider/account binding; neither a future record nor the predecessor of a replacement session may describe the current card. Missing, legacy and not-yet-hydrated metadata display **Turn settings unavailable** rather than guessing current selections. The existing bounded detail hydration and retained current-turn activity supply the data without extra subscriptions or provider calls.
+
+Immutable activity objects key a weak decoding cache, and card memo equality includes the validated configuration reference. This preserves inexpensive clock-only polls while allowing late accepted-turn metadata to repaint a running or terminal card. Long labels wrap as escaped plain text inside the card. These portable presentation changes do not alter provider execution, lifecycle or native platform behavior. Unit and Atrium browser regressions cover exact-turn/account binding, freshness, late metadata, honest absence, malformed/private fields and narrow-card layout.
 
 ## Verification
 

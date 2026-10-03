@@ -1,8 +1,46 @@
 import "../../index.css";
 
+import {
+  ProviderDriverKind,
+  ProviderInstanceId,
+  type ProviderTurnConfiguration,
+} from "@cafecode/contracts";
 import { page } from "vitest/browser";
 import { describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
+
+const CODEX_TURN_CONFIGURATION: ProviderTurnConfiguration = {
+  version: 1,
+  provider: ProviderDriverKind.make("codex"),
+  providerInstanceId: ProviderInstanceId.make("codex_personal"),
+  providerDisplayName: "Codex Personal",
+  model: "gpt-6.1-sol",
+  modelDisplayName: "GPT-6.1 Sol",
+  effort: "ultra",
+  fastMode: true,
+  runtimeMode: "full-access",
+  interactionMode: "default",
+  settingsSource: "submitted",
+};
+
+const CLAUDE_TURN_CONFIGURATION: ProviderTurnConfiguration = {
+  version: 1,
+  provider: ProviderDriverKind.make("claudeAgent"),
+  providerInstanceId: ProviderInstanceId.make("claude_work"),
+  providerDisplayName: "Claude Work",
+  model: "claude-opus-5-5",
+  modelDisplayName: "Opus 5.5",
+  effort: "max",
+  fastMode: false,
+  runtimeMode: "auto-accept-edits",
+  interactionMode: "plan",
+  settingsSource: "session",
+};
+
+const SUBMITTED_SETTINGS_DESCRIPTION =
+  "Settings Cafe submitted for this accepted turn. Provider defaults may be inherited; this is not independent execution or billing confirmation.";
+const SESSION_SETTINGS_DESCRIPTION =
+  "Settings of the existing session that accepted this input. Provider defaults may be inherited; this is not independent execution or billing confirmation.";
 
 const atriumHarness = vi.hoisted(() => {
   const now = Date.now();
@@ -401,6 +439,131 @@ function installStructuredSubagents(
   };
 }
 
+type TurnConfigurationFixture = {
+  activityId: string;
+  threadId: string;
+  turnId: string;
+  configuration: ProviderTurnConfiguration;
+};
+
+type TurnConfigurationHarnessActivity = {
+  id: string;
+  tone: string;
+  kind: string;
+  summary: string;
+  payload: Record<string, unknown>;
+  turnId: string | null;
+  createdAt: string;
+};
+
+/**
+ * Install the same durable activity shape the server projects for an accepted
+ * turn. Keeping the activity on the exact provider turn is important: the
+ * Atrium must never borrow a newer or older card's model/account settings just
+ * because that activity happens to be latest in the thread's retained log.
+ */
+function installTurnConfigurationActivities(
+  fixtures: readonly TurnConfigurationFixture[],
+): () => void {
+  const environment = atriumHarness.useStore.getState().environmentStateById["env-1"]!;
+  const activityIdsByThreadId = environment.activityIdsByThreadId as Record<string, string[]>;
+  const activityByThreadId = environment.activityByThreadId as unknown as Record<
+    string,
+    Record<string, TurnConfigurationHarnessActivity>
+  >;
+  const previousByThread = new Map<
+    string,
+    {
+      ids: string[] | undefined;
+      activities: Record<string, TurnConfigurationHarnessActivity> | undefined;
+    }
+  >();
+
+  for (const [index, fixture] of fixtures.entries()) {
+    if (!previousByThread.has(fixture.threadId)) {
+      previousByThread.set(fixture.threadId, {
+        ids: activityIdsByThreadId[fixture.threadId],
+        activities: activityByThreadId[fixture.threadId],
+      });
+    }
+    const createdAt = new Date(Date.now() + index).toISOString();
+    activityIdsByThreadId[fixture.threadId] = [
+      ...(activityIdsByThreadId[fixture.threadId] ?? []).filter(
+        (activityId) => activityId !== fixture.activityId,
+      ),
+      fixture.activityId,
+    ];
+    activityByThreadId[fixture.threadId] = {
+      ...(activityByThreadId[fixture.threadId] ?? {}),
+      [fixture.activityId]: {
+        id: fixture.activityId,
+        tone: "info",
+        kind: "provider.turn.configuration",
+        summary: "Turn settings",
+        payload: { turnConfiguration: fixture.configuration },
+        turnId: fixture.turnId,
+        createdAt,
+      },
+    };
+  }
+
+  return () => {
+    for (const [threadId, previous] of previousByThread) {
+      if (previous.ids) activityIdsByThreadId[threadId] = previous.ids;
+      else delete activityIdsByThreadId[threadId];
+      if (previous.activities) activityByThreadId[threadId] = previous.activities;
+      else delete activityByThreadId[threadId];
+    }
+  };
+}
+
+/**
+ * Replace only one immutable configuration activity while retaining the
+ * surrounding activity collections. This models a projection correcting the
+ * decoded metadata for an existing activity and deliberately keeps every
+ * other card prop stable, including the memoized empty subagent rows.
+ */
+function replaceTurnConfigurationActivity(fixture: TurnConfigurationFixture): () => void {
+  const environment = atriumHarness.useStore.getState().environmentStateById["env-1"]!;
+  const activityIds = (environment.activityIdsByThreadId as Record<string, string[]>)[
+    fixture.threadId
+  ];
+  const activityById = (
+    environment.activityByThreadId as unknown as Record<
+      string,
+      Record<string, TurnConfigurationHarnessActivity>
+    >
+  )[fixture.threadId];
+  const previous = activityById?.[fixture.activityId];
+  if (
+    !activityIds?.includes(fixture.activityId) ||
+    !previous ||
+    previous.kind !== "provider.turn.configuration" ||
+    previous.summary !== "Turn settings" ||
+    previous.turnId !== fixture.turnId
+  ) {
+    throw new Error(`Turn configuration activity cannot be replaced: ${fixture.activityId}`);
+  }
+
+  const replacement: TurnConfigurationHarnessActivity = {
+    ...previous,
+    payload: { turnConfiguration: fixture.configuration },
+  };
+  activityById[fixture.activityId] = replacement;
+  return () => {
+    activityById[fixture.activityId] = previous;
+  };
+}
+
+function taskCard(host: HTMLElement, title: string): HTMLElement {
+  const openButton = host.querySelector<HTMLButtonElement>(
+    `button[aria-label=${JSON.stringify(`Open ${title}`)}]`,
+  );
+  const card = openButton?.closest<HTMLElement>('[data-cafe-atrium-task-card="true"]');
+  if (!card) throw new Error(`Atrium card did not mount: ${title}`);
+  return card;
+}
+
 describe("TaskAtriumBoard", () => {
   for (const theme of ["dark", "light"] as const) {
     it(`renders running work, its subagents and legible text in ${theme} mode`, async () => {
@@ -435,6 +598,280 @@ describe("TaskAtriumBoard", () => {
       }
     });
   }
+
+  it("shows each card's frozen accepted-turn model, account, modes, and source", async () => {
+    const restoreConfigurations = installTurnConfigurationActivities([
+      {
+        activityId: "turn-settings-claude",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        configuration: CLAUDE_TURN_CONFIGURATION,
+      },
+      {
+        activityId: "turn-settings-codex",
+        threadId: "thread-2",
+        turnId: "t2",
+        configuration: CODEX_TURN_CONFIGURATION,
+      },
+    ]);
+    const { host, screen } = await renderInTheme("dark");
+    try {
+      await vi.waitFor(() => {
+        expect(host.textContent).toContain("GPT-6.1 Sol · Effort: Ultra · Fast on");
+        expect(host.textContent).toContain("Opus 5.5 · Effort: Max · Fast off");
+      });
+
+      const codexCard = taskCard(host, "Fix flaky provider reconnect test");
+      const codexConfiguration = codexCard.querySelector<HTMLElement>(
+        '[data-cafe-atrium-turn-configuration="true"]',
+      );
+      expect(codexConfiguration?.textContent).toContain("GPT-6.1 Sol · Effort: Ultra · Fast on");
+      expect(codexConfiguration?.textContent).toContain(
+        "Account: Codex Personal · Build · Full access",
+      );
+      expect(codexConfiguration?.title).toBe(SUBMITTED_SETTINGS_DESCRIPTION);
+
+      const claudeCard = taskCard(host, "Port the ambiance engine to WebGL");
+      const claudeConfiguration = claudeCard.querySelector<HTMLElement>(
+        '[data-cafe-atrium-turn-configuration="true"]',
+      );
+      expect(claudeConfiguration?.textContent).toContain("Opus 5.5 · Effort: Max · Fast off");
+      expect(claudeConfiguration?.textContent).toContain(
+        "Account: Claude Work · Plan · Auto-accept edits",
+      );
+      expect(claudeConfiguration?.title).toBe(SESSION_SETTINGS_DESCRIPTION);
+
+      // A cold detail projection or a thread persisted before configuration
+      // snapshots existed must be explicit instead of borrowing today's
+      // composer defaults from either provider card above.
+      const legacyCard = taskCard(host, "Recover failed provider session");
+      expect(
+        legacyCard.querySelector<HTMLElement>('[data-cafe-atrium-turn-configuration="true"]')
+          ?.textContent,
+      ).toContain("Turn settings unavailable");
+    } finally {
+      restoreConfigurations();
+      await screen.unmount();
+      host.remove();
+      document.documentElement.classList.remove("dark");
+    }
+  });
+
+  it("repaints corrected accepted-turn metadata on a terminal card", async () => {
+    const correctedConfiguration: ProviderTurnConfiguration = {
+      ...CLAUDE_TURN_CONFIGURATION,
+      model: "claude-sonnet-5-5",
+      modelDisplayName: "Sonnet 5.5",
+      effort: "high",
+    };
+    const restoreInitial = installTurnConfigurationActivities([
+      {
+        activityId: "turn-settings-error",
+        threadId: "thread-error",
+        turnId: "turn-error",
+        configuration: CLAUDE_TURN_CONFIGURATION,
+      },
+    ]);
+    let restoreCorrection: () => void = () => undefined;
+    const { host, screen } = await renderInTheme("dark");
+    try {
+      await vi.waitFor(() => {
+        expect(host.textContent).toContain("Opus 5.5 · Effort: Max · Fast off");
+      });
+
+      const terminalCard = taskCard(host, "Recover failed provider session");
+      const configuration = terminalCard.querySelector<HTMLElement>(
+        '[data-cafe-atrium-turn-configuration="true"]',
+      );
+      const openButton = terminalCard.querySelector<HTMLButtonElement>(
+        'button[aria-label="Open Recover failed provider session"]',
+      );
+      expect(terminalCard.querySelector('[data-cafe-atrium-subagent-row="true"]')).toBeNull();
+      expect(terminalCard.textContent).toContain("Turn settings");
+      expect(configuration?.id).not.toBe("");
+      expect(openButton?.getAttribute("aria-describedby")).toBe(configuration?.id);
+      expect(openButton?.title).toBe(SESSION_SETTINGS_DESCRIPTION);
+
+      // Keep this terminal card's frozen clock, activity label, empty child
+      // rows and every other prop stable. Only a new immutable activity object
+      // at the same durable id carries the corrected accepted-turn metadata.
+      restoreCorrection = replaceTurnConfigurationActivity({
+        activityId: "turn-settings-error",
+        threadId: "thread-error",
+        turnId: "turn-error",
+        configuration: correctedConfiguration,
+      });
+      await vi.waitFor(
+        () => {
+          const correctedCard = taskCard(host, "Recover failed provider session");
+          expect(correctedCard.textContent).toContain("Sonnet 5.5 · Effort: High · Fast off");
+          expect(correctedCard.textContent).not.toContain("Opus 5.5 · Effort: Max");
+        },
+        { timeout: 3_000 },
+      );
+    } finally {
+      restoreCorrection();
+      restoreInitial();
+      await screen.unmount();
+      host.remove();
+      document.documentElement.classList.remove("dark");
+    }
+  });
+
+  it("keeps a frozen turn snapshot across rerenders and switches only with the exact next turn", async () => {
+    const environment = atriumHarness.useStore.getState().environmentStateById["env-1"]!;
+    const summary = environment.sidebarThreadSummaryById["thread-2"]!;
+    const previousTitle = summary.title;
+    const previousLatestTurn = summary.latestTurn;
+    const nextConfiguration: ProviderTurnConfiguration = {
+      ...CODEX_TURN_CONFIGURATION,
+      providerDisplayName: "Codex Review",
+      model: "gpt-6-astra",
+      modelDisplayName: "GPT-6 Astra",
+      effort: "max",
+      fastMode: false,
+      runtimeMode: "approval-required",
+      interactionMode: "plan",
+      settingsSource: "session",
+    };
+    const restoreCurrent = installTurnConfigurationActivities([
+      {
+        activityId: "turn-settings-current",
+        threadId: "thread-2",
+        turnId: "t2",
+        configuration: CODEX_TURN_CONFIGURATION,
+      },
+    ]);
+    let restoreNext: () => void = () => undefined;
+    const { host, screen } = await renderInTheme("dark");
+    try {
+      await vi.waitFor(() => {
+        expect(host.textContent).toContain("GPT-6.1 Sol · Effort: Ultra · Fast on");
+      });
+
+      // A normal React rerender does not re-read mutable provider inventory or
+      // rewrite the accepted turn using today's account/model labels.
+      await screen.rerender(<TaskAtriumBoard />);
+      expect(taskCard(host, previousTitle).textContent).toContain(
+        "Account: Codex Personal · Build · Full access",
+      );
+
+      restoreNext = installTurnConfigurationActivities([
+        {
+          activityId: "turn-settings-next",
+          threadId: "thread-2",
+          turnId: "t3",
+          configuration: nextConfiguration,
+        },
+      ]);
+      summary.title = "Fix flaky provider reconnect test (refreshed)";
+
+      // The title change proves the one-second Atrium projection poll observed
+      // the new activity. Its mismatched turn still cannot replace t2's frozen
+      // configuration.
+      await vi.waitFor(
+        () => {
+          const currentCard = taskCard(host, summary.title);
+          expect(currentCard.textContent).toContain("GPT-6.1 Sol · Effort: Ultra · Fast on");
+          expect(currentCard.textContent).not.toContain("GPT-6 Astra");
+        },
+        { timeout: 3_000 },
+      );
+
+      const nextStartedAt = new Date().toISOString();
+      summary.latestTurn = {
+        ...previousLatestTurn!,
+        turnId: "t3",
+        requestedAt: nextStartedAt,
+        startedAt: nextStartedAt,
+      };
+      await vi.waitFor(
+        () => {
+          const nextCard = taskCard(host, summary.title);
+          expect(nextCard.textContent).toContain("GPT-6 Astra · Effort: Max · Fast off");
+          expect(nextCard.textContent).toContain(
+            "Account: Codex Review · Plan · Approval required",
+          );
+          expect(nextCard.textContent).not.toContain("GPT-6.1 Sol");
+        },
+        { timeout: 3_000 },
+      );
+    } finally {
+      summary.title = previousTitle;
+      summary.latestTurn = previousLatestTurn;
+      restoreNext();
+      restoreCurrent();
+      await screen.unmount();
+      host.remove();
+      document.documentElement.classList.remove("dark");
+    }
+  });
+
+  it("wraps long accepted-turn labels without widening a narrow Atrium card", async () => {
+    const originalViewport = { height: window.innerHeight, width: window.innerWidth };
+    const longModel =
+      "Codex investigation model with a deliberately long frozen display label for narrow task cards";
+    const longAccount =
+      "Codex account with a deliberately long safe display label that must remain inside the task card";
+    const primaryText = `${longModel} · Effort: Ultra · Fast on`;
+    const secondaryText = `Account: ${longAccount} · Build · Full access`;
+    const restoreConfiguration = installTurnConfigurationActivities([
+      {
+        activityId: "turn-settings-long",
+        threadId: "thread-2",
+        turnId: "t2",
+        configuration: {
+          ...CODEX_TURN_CONFIGURATION,
+          providerDisplayName: longAccount,
+          modelDisplayName: longModel,
+        },
+      },
+    ]);
+    await page.viewport(320, 640);
+    const { host, screen } = await renderInTheme("dark");
+    try {
+      await vi.waitFor(() => expect(host.textContent).toContain(primaryText));
+      const card = taskCard(host, "Fix flaky provider reconnect test");
+      const configuration = card.querySelector<HTMLElement>(
+        '[data-cafe-atrium-turn-configuration="true"]',
+      );
+      const primary = Array.from(configuration?.children ?? []).find(
+        (element) => element.textContent === primaryText,
+      ) as HTMLElement | undefined;
+      const secondary = Array.from(configuration?.children ?? []).find(
+        (element) => element.textContent === secondaryText,
+      ) as HTMLElement | undefined;
+      const pane = host.querySelector<HTMLElement>('[data-cafe-atrium-pane-scroll="true"]');
+      expect(configuration).not.toBeNull();
+      expect(primary).not.toBeUndefined();
+      expect(secondary).not.toBeUndefined();
+      expect(pane).not.toBeNull();
+      if (!configuration || !primary || !secondary || !pane) {
+        throw new Error("Responsive accepted-turn settings surface did not mount");
+      }
+
+      const primaryStyle = getComputedStyle(primary);
+      const secondaryStyle = getComputedStyle(secondary);
+      expect(primary.getBoundingClientRect().height).toBeGreaterThan(
+        Number.parseFloat(primaryStyle.fontSize) * 1.5,
+      );
+      expect(secondary.getBoundingClientRect().height).toBeGreaterThan(
+        Number.parseFloat(secondaryStyle.fontSize) * 1.5,
+      );
+      for (const element of [primary, secondary, configuration, card, pane]) {
+        expect(element.scrollWidth).toBeLessThanOrEqual(element.clientWidth + 1);
+      }
+      expect(card.getBoundingClientRect().right).toBeLessThanOrEqual(
+        host.getBoundingClientRect().right + 1,
+      );
+    } finally {
+      restoreConfiguration();
+      await page.viewport(originalViewport.width, originalViewport.height);
+      await screen.unmount();
+      host.remove();
+      document.documentElement.classList.remove("dark");
+    }
+  });
 
   it("keeps card details browseable beside a separate full-card navigation button", async () => {
     const { host, screen } = await renderInTheme("dark");

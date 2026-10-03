@@ -4,12 +4,15 @@ import {
   type OrchestrationLatestTurn,
   type OrchestrationSessionStatus,
   type OrchestrationThreadActivity,
+  type ProviderTurnConfiguration,
   type TaskAtriumErrorDismissal,
   type ThreadId,
   type TurnId,
 } from "@cafecode/contracts";
 
 import type { AppState } from "../../store";
+import type { ThreadSession } from "../../types";
+import { readTurnConfiguration } from "../../turnConfiguration";
 import {
   deriveSubagentActivities,
   type DerivedSubagentActivity,
@@ -65,6 +68,8 @@ export type AtriumCard = {
   threadId: ThreadId;
   title: string;
   provider: string;
+  /** Frozen accepted-turn metadata, never today's composer/account defaults. */
+  turnConfiguration: ProviderTurnConfiguration | null;
   projectName: string;
   state: AtriumCardState;
   /** Provider-vocabulary label for what the thread is doing right now. */
@@ -129,6 +134,48 @@ type CachedSubagentRows = {
  * projection after the store releases it.
  */
 const SUBAGENT_ROWS_BY_ACTIVITY_IDS = new WeakMap<readonly string[], CachedSubagentRows>();
+
+/** Immutable activity objects let clock-only polls reuse schema-validated metadata. */
+const TURN_CONFIGURATION_BY_ACTIVITY = new WeakMap<
+  OrchestrationThreadActivity,
+  ProviderTurnConfiguration | null
+>();
+
+function collectTurnConfiguration(
+  activityIds: readonly string[] | undefined,
+  activityById: Record<string, OrchestrationThreadActivity> | undefined,
+  latestTurnId: TurnId | null,
+  session: ThreadSession | null,
+): ProviderTurnConfiguration | null {
+  if (!activityIds || !activityById || latestTurnId === null) return null;
+  // A starting replacement can have a newer session binding before the turn
+  // projection catches up. Its predecessor's settings must not describe it.
+  if (session?.activeTurnId !== undefined && session.activeTurnId !== latestTurnId) return null;
+
+  // The store retains one exact-current-turn configuration beyond its bounded
+  // activity tail. Never request old transcripts, inspect credentials, or use
+  // a mutable composer selection just to fill in this read-only card.
+  for (let index = activityIds.length - 1; index >= 0; index -= 1) {
+    const activity = activityById[activityIds[index]!];
+    if (activity?.kind !== "provider.turn.configuration" || activity.turnId !== latestTurnId) {
+      continue;
+    }
+    let configuration = TURN_CONFIGURATION_BY_ACTIVITY.get(activity);
+    if (configuration === undefined) {
+      configuration = readTurnConfiguration(activity.payload) ?? null;
+      TURN_CONFIGURATION_BY_ACTIVITY.set(activity, configuration);
+    }
+    if (
+      configuration !== null &&
+      (session === null || configuration.provider === session.provider) &&
+      (session?.providerInstanceId === undefined ||
+        configuration.providerInstanceId === session.providerInstanceId)
+    ) {
+      return configuration;
+    }
+  }
+  return null;
+}
 
 function isSubagentActivity(activity: OrchestrationThreadActivity): boolean {
   const payload = activity.payload;
@@ -402,6 +449,12 @@ export function selectAtriumSnapshot(
         activityIds && activityIds.length > 0
           ? activityById?.[activityIds[activityIds.length - 1]!]
           : undefined;
+      const turnConfiguration = collectTurnConfiguration(
+        activityIds,
+        activityById,
+        latestTurn?.turnId ?? null,
+        session,
+      );
 
       const rows = collectSubagents(
         activityIds,
@@ -424,7 +477,8 @@ export function selectAtriumSnapshot(
         environmentId,
         threadId,
         title: summary.title.trim().length > 0 ? summary.title : "Untitled thread",
-        provider: session?.provider ?? "",
+        provider: session?.provider ?? turnConfiguration?.provider ?? "",
+        turnConfiguration,
         projectName: project?.name ?? "",
         state: cardState,
         activityLabel: lastActivity ? cleanActivityLabel(lastActivity.summary) : "",
