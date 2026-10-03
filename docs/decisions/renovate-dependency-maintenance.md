@@ -2,10 +2,11 @@
 
 Decision status: Accepted
 Created: 2026-10-03 01:30:40 JST (UTC+0900)
-Last updated: 2026-10-03 02:00:17 JST (UTC+0900)
+Last updated: 2026-10-03 21:09:34 JST (UTC+0900)
 Decision authority: user's explicit request to implement the recommended Renovate setup.
 Implementation: Repository configuration, policy tests and operating instructions. The maintainer reports selected-repository App installation and Interactive/Require config file settings. Default-branch publication and a processed hosted run must be verified separately through repository history, the dashboard and hosted job logs; those external conditions are not implied by this record.
 Supersedes: None; existing toolchain, native qualification and provider package audits remain authoritative.
+Superseded in part: [Latest Node LTS toolchain](latest-node-lts-toolchain.md) replaces only the manual-only Node/runtime-declaration exclusion and related native-manager scope. The original acceptance and rationale below remain historical; all other safety boundaries are retained.
 
 ## Context and alternatives
 

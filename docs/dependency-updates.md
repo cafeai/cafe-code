@@ -1,15 +1,17 @@
 # Dependency maintenance with Renovate
 
 Created: 2026-10-03 01:30:40 JST (UTC+0900)
-Last updated: 2026-10-03 02:00:17 JST (UTC+0900)
+Last updated: 2026-10-03 20:56:23 JST (UTC+0900)
 
 Cafe is configured to use the Mend-hosted [Renovate GitHub App](https://github.com/apps/renovate)
 to propose dependency updates once activated. The checked-in repository policy is
 [`.github/renovate.json`](../.github/renovate.json). This is repository maintenance,
 not a Cafe runtime feature: it does not update installed Codex/Claude executables,
 call providers, read Cafe profiles, or replace provider compatibility/token audits.
-The [decision record](decisions/renovate-dependency-maintenance.md) explains the
-trust boundary and why Yarn catalogs require this approach.
+The [initial decision](decisions/renovate-dependency-maintenance.md) explains the
+trust boundary and why Yarn catalogs require this approach. The
+[LTS successor decision](decisions/latest-node-lts-toolchain.md) replaces its
+manual-only Node exclusion without changing the other safety boundaries.
 
 ## Activation
 
@@ -63,7 +65,7 @@ Official behavior: [hosted onboarding](https://docs.renovatebot.com/getting-star
 
 ## Update policy
 
-- Routine branches are created on Mondays between midnight and 07:00 Japan time.
+- Routine library/action branches are created on Mondays between midnight and 07:00 Japan time.
   npm releases must have a publication timestamp and settle for seven days first.
   At most three routine branches/PRs and one new PR per hour are admitted.
 - Group only related React, Vite, Vitest, Ox, Tailwind, Lexical, TanStack, and DnD
@@ -72,8 +74,15 @@ Official behavior: [hosted onboarding](https://docs.renovatebot.com/getting-star
   That approval does not merge the PR or waive CI/review.
 - GitHub Actions use a separate group and immutable commit pins. The npm
   publication-age rule does not apply to action digest pinning.
+- Node runtime proposals can appear at any time and follow the newest officially
+  promoted LTS line and its latest release, never Current or prereleases. They
+  use the official Node release datasource and Renovate's LTS-aware `node`
+  versioning; no frozen major or even-number assumption controls promotion.
+  Node declarations use the same LTS-aware versioning and review group, but
+  retain the seven-day npm publication-age hold. Majors still require dashboard
+  approval and every merge still requires human review and applicable CI.
 - Effect and `@effect/*`, provider SDK families, Electron/native/packaging/browser
-  runtimes, Node/Yarn and root `resolutions` are disabled in Renovate. They require
+  runtimes, Yarn and root `resolutions` are disabled in Renovate. They require
   manual coordinated updates and the existing audits in `AGENTS.md`. In particular,
   the Effect patch must be rebased; Claude's complete package set requires age,
   integrity/signature and protocol review; staged native pins must match source.
@@ -86,6 +95,58 @@ Official behavior: [hosted onboarding](https://docs.renovatebot.com/getting-star
   managers, arbitrary post-upgrade commands, credential configuration or automatic
   permission changes are enabled. Yarn catalogs and Corepack are supported by
   Renovate's ordinary npm manager; no second package manager is introduced.
+
+## Node LTS synchronization
+
+The exact standalone Node pin on `dev` is `.node-version`, not a floating `node`,
+`latest` or `lts/*` alias. CI reads that file through `node-version-file`; the
+native nodenv and mise managers plus npm engine extraction can propose updates.
+Mise is enabled only for Node, not arbitrary new toolchains. The Docker image
+retains an exact version and immutable digest, and verifies its own Node version
+against the pin during its build. Development containers and package engines
+must match it too. These guards make a partial pin update fail rather than
+silently building different runtimes on different platforms.
+
+Renovate proposes updates; it does **not** finish or auto-merge native toolchain
+qualification. Before merging a `Node.js LTS` proposal:
+
+1. Confirm the newest LTS in the [official release index](https://nodejs.org/dist/index.json).
+   A higher Current release is ineligible. Keep `.node-version`, `.mise.toml`,
+   root/server engine ranges and development-container versions synchronized.
+2. Keep the catalog's `@types/node` on that LTS **major**, not necessarily the
+   same patch number. Use the latest publication-age-qualified declarations and
+   review the corresponding Yarn lock diff; do not enable a second package
+   manager or weaken the age gate to obtain a newer declaration patch.
+3. Complete the reviewed archive, immutable container and distribution package
+   identities in the same PR. Windows-specific archive/cache/launcher requirements
+   are defined in the **Windows-Specific Notes** section of `AGENTS.md`.
+   The Docker image must preserve its qualified OS variant and have its exact
+   registry digest verified. Arch build dependencies must name the selected
+   `nodejs-lts-<codename>` package, not generic `nodejs` (which follows Current).
+   Reviewed version-keyed archive/distro mappings deliberately require an explicit
+   new-major review; never guess hashes or codenames from the version number.
+4. Run a locked install and focused toolchain/policy/build tests, all required
+   repository checks, applicable native platform smoke, then the forced desktop
+   build. The Node-only PR may be completed manually; bot package scripts and
+   arbitrary post-upgrade commands stay disabled. Coordinate major proposals
+   with the declaration group and keep pending/incomplete updates unmerged.
+
+As of 2026-10-03, the standalone development pin is Node **24.21.0** (Krypton);
+Node 26.10.0 is still Current. Future LTS promotions remain eligible without
+editing a fixed major constraint. This is an update policy and review gate, not
+a guarantee that every release is installed instantly or that the bot has
+processed a hosted job. Both default-branch config and dev changes must be
+published; changing only dev's config does not activate the rule.
+
+Electron's embedded Node is not the standalone distribution and cannot be
+replaced independently. Keep its reviewed Electron/Node/native-ABI qualification
+separate; newer declarations do not authorize APIs unavailable in that embedded
+runtime. Provider executables and user-selected system Node installations are
+not silently upgraded by this repository policy.
+
+Official references: [Node LTS-aware versioning](https://docs.renovatebot.com/modules/versioning/node/),
+[supported Node pin files](https://docs.renovatebot.com/node/),
+[Node declaration workaround](https://docs.renovatebot.com/presets-workarounds/#workaroundstypesnodeversioning).
 
 ## Security fixes and main/dev coverage
 
@@ -134,7 +195,7 @@ not an application dependency. Preserve the existing package-age gate and keep
 third-party installation scripts off:
 
 ```sh
-YARN_ENABLE_SCRIPTS=false corepack yarn dlx --package renovate@44.121.4 renovate-config-validator --strict --no-global .github/renovate.json
+YARN_ENABLE_SCRIPTS=false corepack yarn dlx --package renovate@44.115.10 renovate-config-validator --strict --no-global .github/renovate.json
 ```
 
 The environment-variable prefix is a POSIX shell example; use the equivalent
@@ -159,6 +220,35 @@ Protect `dev` with required review and current CI checks before considering futu
 automatic merging. This setup deliberately leaves automerge off and does not
 silently change branch protections or rulesets. A bot configuration cannot prevent
 a repository administrator from manually bypassing failed checks.
+
+## Manually reviewed batches and dashboard refresh
+
+A dashboard entry is a proposal, not evidence that an upgrade is compatible. A
+maintainer can update an audited subset directly on `dev`, preserving the same
+age, integrity, test and review requirements. Check actual locked versions as
+well as manifest ranges: some proposals only bring an old minimum up to a version
+already installed. Record concrete reasons for deferred proposals rather than
+checking every approval or schedule-override box. See the
+[October 3 reviewed batch](dependency-updates-2026-10-03.md) for an example.
+The separately authorized [major migration follow-up](dependency-majors-2026-10-03.md)
+records coordinated compatibility fixes and measured deferrals; historical holds
+in the earlier batch are not claims that those later migrations remain impossible.
+
+After the reviewed commit is pushed, use the dashboard's **run Renovate again**
+checkbox at the bottom (the `manual job` control). This requests another hosted
+scan; it does not approve all upgrades or bypass their schedule. When updating it
+through the API, first fetch the current issue body, change only that checkbox,
+and preserve the bot's remaining content. Do not manually remove completed rows
+or select the approve-all, unpend-all or unschedule-all controls. A short comment
+can explain the commit, checks and deferrals, but a comment alone is not a rerun.
+
+Distinguish a submitted rerun request from a completed scan. Confirm the bot's
+subsequent dashboard update or the Mend job result; proposals still waiting for
+their schedule or release-age hold are expected. The bot remains responsible for
+reconciling the dashboard against the new `dev` lockfile.
+
+Official references: [Dependency Dashboard](https://docs.renovatebot.com/key-concepts/dashboard/)
+and [Mend job processing](https://docs.mend.io/wsk/renovate-ee-job-processing-in-renovate).
 
 ## Rollback
 
