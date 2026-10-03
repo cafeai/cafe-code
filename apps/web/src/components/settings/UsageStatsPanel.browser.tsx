@@ -13,7 +13,10 @@ import {
 import { rollUpCost } from "@cafecode/shared/modelPricing";
 
 import { applyInterfaceScalePercent } from "../../interfaceScale";
-import { resetUsageStatsDetailResourceForTests } from "../stats/usageStatsDetailResource";
+import {
+  getUsageStatsDetailDiagnostics,
+  resetUsageStatsDetailResourceForTests,
+} from "../stats/usageStatsDetailResource";
 import { UsageCostContent } from "./UsageCostSection";
 import { UsageStatsPanel } from "./UsageStatsPanel";
 import {
@@ -807,6 +810,7 @@ describe("UsageStatsPanel", () => {
   let originalViewport = { height: window.innerHeight, width: window.innerWidth };
   let originalRootFontSize = "";
   let originalRootFontPriority = "";
+  let detailPollCallbacks = new Map<number, () => void>();
 
   beforeEach(() => {
     originalViewport = { height: window.innerHeight, width: window.innerWidth };
@@ -814,6 +818,32 @@ describe("UsageStatsPanel", () => {
     originalRootFontPriority = document.documentElement.style.getPropertyPriority("font-size");
     resetUsageStatsDetailResourceForTests();
     usageHarness.reset(createUsageDetail(), snapshot);
+    detailPollCallbacks = new Map();
+    let nextPollId = -1;
+    const setInterval = window.setInterval.bind(window);
+    const clearInterval = window.clearInterval.bind(window);
+    // Own only the detail resource's five-second polling boundary. A full CI
+    // browser run can take longer than five seconds to inspect all calendar
+    // ranges; that legitimate refresh must not be mistaken for a range-triggered
+    // request. The 250ms live projection interval, RAF odometer, tooltip timers,
+    // browser layout, and reconnect-triggered requests remain real.
+    vi.spyOn(window, "setInterval").mockImplementation((handler, delay, ...args) => {
+      if (delay !== 5_000) {
+        return setInterval(handler, delay, ...args) as unknown as ReturnType<
+          typeof window.setInterval
+        >;
+      }
+      if (typeof handler !== "function") throw new Error("Expected a usage polling callback");
+      // Browser-owned timer handles are positive; these private negative ids
+      // cannot alias the real timers delegated above or escape this fixture.
+      const id = nextPollId--;
+      detailPollCallbacks.set(id, () => handler(...args));
+      return id as unknown as ReturnType<typeof window.setInterval>;
+    });
+    vi.spyOn(window, "clearInterval").mockImplementation((id) => {
+      if (typeof id === "number" && detailPollCallbacks.delete(id)) return;
+      clearInterval(id);
+    });
   });
 
   afterEach(async () => {
@@ -838,6 +868,9 @@ describe("UsageStatsPanel", () => {
     ) {
       await page.viewport(originalViewport.width, originalViewport.height);
     }
+    // The real resource still owns subscription cleanup. Holding its polling
+    // clock must not hide a leaked subscription or interval after unmount.
+    expect(detailPollCallbacks.size).toBe(0);
   });
 
   it("selects per-model generating time for 7/30/90/All independently of token attribution", async () => {
@@ -1196,6 +1229,26 @@ describe("UsageStatsPanel", () => {
       expect((await hoverActivityCell("2026-07-21")).textContent).toContain("1m generating");
     }
 
+    // Range selection must reuse one detail response regardless of how long
+    // browser interactions take. Separately advance the actual polling callback
+    // and prove its single refresh preserves the selected range and calendar.
+    expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(1);
+    expect(detailPollCallbacks.size).toBe(1);
+    const poll = detailPollCallbacks.values().next().value;
+    if (!poll) throw new Error("Usage detail polling was not scheduled");
+    poll();
+    await vi.waitFor(() => {
+      expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(2);
+      expect(getUsageStatsDetailDiagnostics().successCount).toBe(2);
+    });
+    expectCostRange("30 days");
+    expect(page.getByRole("button", { name: "30 days", exact: true }).element().ariaPressed).toBe(
+      "true",
+    );
+    expect(scroller.scrollLeft).toBe(scrollLeft);
+    expect(requiredElement('[data-activity-day="2026-07-21"]')).toBe(currentCell);
+    expect(currentCell.style.backgroundColor).toBe(currentColor);
+
     scroller.scrollLeft = 0;
     await vi.waitFor(() =>
       expect(
@@ -1206,7 +1259,7 @@ describe("UsageStatsPanel", () => {
       oldColor,
     );
     expect((await hoverActivityCell("2022-01-01")).textContent).toContain("1m generating");
-    expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(1);
+    expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(2);
   });
 
   it("gives standalone cost content the same default and complete range filtering", async () => {
