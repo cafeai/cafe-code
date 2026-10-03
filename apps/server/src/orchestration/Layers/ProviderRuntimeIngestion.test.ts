@@ -571,6 +571,467 @@ describe("ProviderRuntimeIngestion", () => {
     };
   }
 
+  it("retains exact runtime evidence across SQL snapshots, ordinary updates and explicit legacy replacement", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const runtimeId = "00000000-0000-4000-8000-000000000001";
+    const session = {
+      threadId,
+      status: "ready" as const,
+      providerName: "codex",
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      runtimeMode: "approval-required" as const,
+      activeTurnId: null,
+      lastError: null,
+      updatedAt: "2026-01-01T00:00:01.000Z",
+    };
+    for (const [index, runtimeField] of [
+      { subagentRuntimeId: runtimeId },
+      {},
+      { subagentRuntimeId: null },
+    ].entries()) {
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`runtime-generation-${index}`),
+          threadId,
+          session: { ...session, ...runtimeField },
+          createdAt: session.updatedAt,
+        }),
+      );
+      const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId)!;
+      expect(thread.session?.subagentRuntimeId ?? null).toBe(index === 2 ? null : runtimeId);
+    }
+  });
+
+  it.each(["task.progress", "session.exited", "turn.started", "session.state.changed"] as const)(
+    "keeps stale %s history without replacing current runtime generation or parent liveness",
+    async (type) => {
+      const harness = await createHarness();
+      const threadId = asThreadId("thread-1");
+      const currentId = "00000000-0000-4000-8000-000000000002";
+      const oldId = "00000000-0000-4000-8000-000000000001";
+      const at = "2026-01-01T00:00:01.000Z";
+      const session = {
+        threadId,
+        status: "ready" as const,
+        providerName: "codex",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        subagentRuntimeId: currentId,
+        runtimeMode: "approval-required" as const,
+        activeTurnId: null,
+        lastError: null,
+        updatedAt: at,
+      };
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("current-native-runtime"),
+          threadId,
+          session,
+          createdAt: at,
+        }),
+      );
+      harness.setProviderSession({
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: session.providerInstanceId,
+        threadId,
+        subagentRuntimeId: currentId,
+        status: "ready",
+        runtimeMode: "approval-required",
+        createdAt: at,
+        updatedAt: at,
+      });
+      const base = {
+        type,
+        eventId: asEventId(`stale-runtime-${type}`),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: session.providerInstanceId,
+        threadId,
+        turnId: asTurnId("old-turn"),
+        subagentRuntimeId: oldId,
+        createdAt: "2026-01-01T00:00:02.000Z",
+      };
+      harness.emit({
+        ...base,
+        payload:
+          type === "task.progress"
+            ? {
+                taskId: RuntimeTaskId.make("child-task"),
+                summary: "Working",
+                subagent: { threadId: "child", runtimeId: oldId, status: "active" },
+              }
+            : type === "session.state.changed"
+              ? { state: "ready" }
+              : {},
+      } as ProviderRuntimeEvent);
+      harness.emit({
+        type: "runtime.warning",
+        eventId: asEventId("generation-barrier"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        createdAt: at,
+        payload: { message: "Generation test barrier" },
+      });
+      await waitForThread(harness.readModel, (thread) =>
+        thread.activities.some((activity) => activity.id === "generation-barrier"),
+      );
+      const thread = (await harness.readModel()).threads[0]!;
+      expect(thread.session).toMatchObject({
+        subagentRuntimeId: currentId,
+        status: "ready",
+        activeTurnId: null,
+      });
+      if (type === "task.progress")
+        expect(thread.activities.some((activity) => activity.id === `stale-runtime-${type}`)).toBe(
+          false,
+        );
+    },
+  );
+
+  it("does not let obsolete replay displace current child progress or completion in a persisted snapshot", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const currentId = "00000000-0000-4000-8000-000000000002";
+    const oldId = "00000000-0000-4000-8000-000000000001";
+    const at = "2026-01-01T00:00:01.000Z";
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("snapshot-current-context"),
+        threadId,
+        session: {
+          threadId,
+          status: "ready",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          subagentRuntimeId: currentId,
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: at,
+        },
+        createdAt: at,
+      }),
+    );
+    for (const [label, generation] of [
+      ["current", currentId],
+      ["obsolete", oldId],
+      ["legacy", undefined],
+    ] as const) {
+      for (const type of ["task.progress", "task.completed"] as const)
+        harness.emit({
+          type,
+          eventId: asEventId(`${label}-${type}`),
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          threadId,
+          turnId: asTurnId("same-owner-turn"),
+          ...(generation === undefined ? {} : { subagentRuntimeId: generation }),
+          createdAt: at,
+          payload: {
+            taskId: RuntimeTaskId.make("same-child-task"),
+            summary: "Observed child state",
+            status: "completed",
+            subagent: {
+              threadId: "same-child",
+              ...(generation === undefined ? {} : { runtimeId: generation }),
+              status: type === "task.completed" ? "completed" : "active",
+            },
+          },
+        });
+    }
+    harness.emit({
+      type: "runtime.warning",
+      eventId: asEventId("snapshot-generation-barrier"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      createdAt: at,
+      payload: { message: "Snapshot test barrier" },
+    });
+    await waitForThread(harness.readModel, (thread) =>
+      thread.activities.some((activity) => activity.id === "snapshot-generation-barrier"),
+    );
+    for (let replay = 0; replay < 2; replay += 1) {
+      const activities = (await harness.readModel()).threads[0]!.activities.filter(
+        (activity) => activity.kind === "task.progress" || activity.kind === "task.completed",
+      );
+      expect(activities.map((activity) => activity.id)).toEqual([
+        "current-task.progress",
+        "current-task.completed",
+      ]);
+      expect(
+        activities.every(
+          (activity) =>
+            (activity.payload as { subagent: { runtimeId: string } }).subagent.runtimeId ===
+            currentId,
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it("fences a task activity queued before a native runtime replacement", async () => {
+    const gateStarted = Effect.runSync(Deferred.make<void>());
+    const release = Effect.runSync(Deferred.make<void>());
+    let gated = false;
+    const harness = await createHarness({
+      dispatchGate: (command, dispatch) => {
+        if (
+          gated ||
+          command.type !== "thread.activity.append" ||
+          command.activity.kind !== "task.progress"
+        )
+          return dispatch(command);
+        gated = true;
+        return Deferred.succeed(gateStarted, undefined).pipe(
+          Effect.andThen(Deferred.await(release)),
+          Effect.andThen(dispatch(command)),
+        );
+      },
+    });
+    const threadId = asThreadId("thread-1");
+    const oldId = "00000000-0000-4000-8000-000000000001";
+    const newId = "00000000-0000-4000-8000-000000000002";
+    const at = "2026-01-01T00:00:01.000Z";
+    const session = {
+      threadId,
+      status: "ready" as const,
+      providerName: "codex",
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      runtimeMode: "approval-required" as const,
+      activeTurnId: null,
+      lastError: null,
+      updatedAt: at,
+    };
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("before-activity-race"),
+        threadId,
+        session: { ...session, subagentRuntimeId: oldId },
+        createdAt: at,
+      }),
+    );
+    harness.emit({
+      type: "task.progress",
+      eventId: asEventId("racing-old-task"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: session.providerInstanceId,
+      threadId,
+      turnId: asTurnId("old-parent"),
+      subagentRuntimeId: oldId,
+      createdAt: at,
+      payload: {
+        taskId: RuntimeTaskId.make("child-task"),
+        summary: "Working",
+        subagent: { threadId: "child", runtimeId: oldId, status: "active" },
+      },
+    });
+    await Effect.runPromise(Deferred.await(gateStarted));
+    try {
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("replacement-during-task-admission"),
+          threadId,
+          session: { ...session, subagentRuntimeId: newId },
+          createdAt: at,
+        }),
+      );
+    } finally {
+      await Effect.runPromise(Deferred.succeed(release, undefined));
+    }
+    harness.emit({
+      type: "runtime.warning",
+      eventId: asEventId("task-race-barrier"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      createdAt: at,
+      payload: { message: "Task race barrier" },
+    });
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.id === "task-race-barrier"),
+    );
+    expect(thread.activities.some((activity) => activity.id === "racing-old-task")).toBe(false);
+    expect(thread.session?.subagentRuntimeId).toBe(newId);
+  });
+
+  it("reconfirms a disconnected child's progress from current inventory without a new turn", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const runtimeId = "00000000-0000-4000-8000-000000000001";
+    const at = "2026-01-01T00:00:01.000Z";
+    const instanceId = ProviderInstanceId.make("codex");
+    const turnId = asTurnId("surviving-root");
+    harness.setProviderSession({
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: instanceId,
+      threadId,
+      subagentRuntimeId: runtimeId,
+      status: "running",
+      runtimeMode: "approval-required",
+      activeTurnId: turnId,
+      createdAt: at,
+      updatedAt: at,
+    });
+    harness.emit({
+      type: "task.progress",
+      eventId: asEventId("reconfirmed-child"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: instanceId,
+      threadId,
+      turnId,
+      subagentRuntimeId: runtimeId,
+      createdAt: at,
+      payload: {
+        taskId: RuntimeTaskId.make("child-task"),
+        summary: "Working",
+        subagent: { threadId: "child", runtimeId, status: "active" },
+      },
+    });
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) =>
+        entry.session?.subagentRuntimeId === runtimeId &&
+        entry.activities.some((activity) => activity.id === "reconfirmed-child"),
+    );
+    expect(thread.session).toMatchObject({
+      status: "ready",
+      activeTurnId: null,
+      subagentRuntimeId: runtimeId,
+    });
+  });
+
+  it.each([
+    { knownContext: false, childProof: undefined },
+    { knownContext: true, childProof: undefined },
+    { knownContext: false, childProof: "00000000-0000-4000-8000-000000000002" },
+    { knownContext: true, childProof: "00000000-0000-4000-8000-000000000002" },
+  ])(
+    "retains passive child metadata without parent liveness or context adoption ($knownContext, $childProof)",
+    async ({ knownContext, childProof }) => {
+      const harness = await createHarness();
+      const threadId = asThreadId("thread-1");
+      const runtimeId = "00000000-0000-4000-8000-000000000001";
+      const at = "2026-01-01T00:00:01.000Z";
+      const instanceId = ProviderInstanceId.make("codex");
+      const turnId = asTurnId("passive-metadata-parent");
+      const status = knownContext ? ("running" as const) : ("ready" as const);
+      const activeTurnId = knownContext ? turnId : null;
+      const lastError = knownContext ? "Waiting for provider confirmation" : null;
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("passive-child-parent"),
+          threadId,
+          session: {
+            threadId,
+            status,
+            providerName: "codex",
+            providerInstanceId: instanceId,
+            subagentRuntimeId: knownContext ? runtimeId : null,
+            runtimeMode: "approval-required",
+            activeTurnId,
+            lastError,
+            updatedAt: at,
+          },
+          createdAt: at,
+        }),
+      );
+      // Even a matching registered parent does not promote an idle child's saved
+      // metadata into independently observed active work. The known case has a
+      // pending observation error so an accidental live-work refresh would clear
+      // it; the unknown case must not adopt the registered native generation.
+      harness.setProviderSession({
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: instanceId,
+        threadId,
+        subagentRuntimeId: runtimeId,
+        status: "running",
+        runtimeMode: "approval-required",
+        activeTurnId: turnId,
+        createdAt: at,
+        updatedAt: at,
+      });
+      harness.emit({
+        type: "task.progress",
+        eventId: asEventId("passive-child-metadata"),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: instanceId,
+        threadId,
+        turnId,
+        subagentRuntimeId: runtimeId,
+        createdAt: at,
+        payload: {
+          taskId: RuntimeTaskId.make("child-task"),
+          summary: "Child renamed",
+          subagent: {
+            threadId: "child",
+            label: "Updated child name",
+            ...(childProof === undefined ? {} : { runtimeId: childProof }),
+            status: "active",
+          },
+        },
+      });
+      const thread = await waitForThread(harness.readModel, (entry) =>
+        entry.activities.some((activity) => activity.id === "passive-child-metadata"),
+      );
+      expect(thread.session).toMatchObject({ status, activeTurnId, lastError });
+      expect(thread.session?.subagentRuntimeId ?? null).toBe(knownContext ? runtimeId : null);
+      const metadata = thread.activities.find(
+        (activity) => activity.id === "passive-child-metadata",
+      )!;
+      expect(metadata.payload).toMatchObject({ subagent: { label: "Updated child name" } });
+    },
+  );
+
+  it("adopts runtime readiness only after exact current native registration", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const runtimeId = "00000000-0000-4000-8000-000000000001";
+    const instanceId = ProviderInstanceId.make("codex");
+    const at = "2026-01-01T00:00:01.000Z";
+    const emitReady = (id: string) =>
+      harness.emit({
+        type: "session.state.changed",
+        eventId: asEventId(id),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: instanceId,
+        threadId,
+        subagentRuntimeId: runtimeId,
+        createdAt: at,
+        payload: { state: "ready" },
+      });
+    emitReady("not-yet-registered");
+    harness.emit({
+      type: "runtime.warning",
+      eventId: asEventId("readiness-barrier"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      createdAt: at,
+      payload: { message: "Readiness test barrier" },
+    });
+    await waitForThread(harness.readModel, (thread) =>
+      thread.activities.some((activity) => activity.id === "readiness-barrier"),
+    );
+    expect((await harness.readModel()).threads[0]?.session?.subagentRuntimeId).toBeUndefined();
+    harness.setProviderSession({
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: instanceId,
+      threadId,
+      subagentRuntimeId: runtimeId,
+      status: "ready",
+      runtimeMode: "approval-required",
+      createdAt: at,
+      updatedAt: at,
+    });
+    emitReady("now-registered");
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.subagentRuntimeId === runtimeId,
+    );
+  });
+
   it("drops an event queued behind in-flight work when hard-delete retirement fences ingestion", async () => {
     const firstDispatchStarted = Effect.runSync(Deferred.make<void>());
     const releaseFirstDispatch = Effect.runSync(Deferred.make<void>());

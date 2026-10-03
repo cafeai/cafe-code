@@ -2113,27 +2113,42 @@ export default function ChatView(props: ChatViewProps) {
   const isProviderConnecting = phase === "connecting";
   const isComposerConnecting = isConnecting || isProviderConnecting;
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
+  // Native runtime identity survives renderer reconnects but changes when the
+  // provider process is replaced. Do not use connection banners or parent-turn
+  // completion as evidence that independently running children have ended.
+  const subagentRuntimeId = activeThread?.session?.subagentRuntimeId;
+  const subagentSessionStatus = activeThread?.session?.orchestrationStatus;
+  const subagentRuntimeSession = useMemo(
+    () =>
+      subagentSessionStatus
+        ? {
+            subagentRuntimeId,
+            orchestrationStatus: subagentSessionStatus,
+          }
+        : null,
+    [subagentRuntimeId, subagentSessionStatus],
+  );
   const workLogEntries = useMemo(() => {
     const turnId = activeLatestTurn?.turnId;
     return deriveWorkLogEntries(threadActivities, turnId, { includeUnscopedCompaction: true });
   }, [activeLatestTurn?.turnId, threadActivities]);
   const subagentEntries = useMemo(() => {
     const turnId = activeLatestTurn?.turnId;
-    return deriveSubagentWorkEntries(
-      threadActivities,
-      turnId,
-      turnId && activeLatestTurn?.state !== "running"
+    return deriveSubagentWorkEntries(threadActivities, turnId, {
+      runtimeSession: subagentRuntimeSession,
+      ...(turnId && activeLatestTurn?.state !== "running"
         ? { terminalTurnIds: new Set([turnId]) }
-        : undefined,
-    );
-  }, [activeLatestTurn?.state, activeLatestTurn?.turnId, threadActivities]);
+        : {}),
+    });
+  }, [activeLatestTurn?.state, activeLatestTurn?.turnId, threadActivities, subagentRuntimeSession]);
   const activeSubagentEntries = useMemo(
     () =>
       deriveActiveSubagentWorkEntries(
         threadActivities,
         activeLatestTurn?.state === "running" ? activeLatestTurn.turnId : null,
+        { runtimeSession: subagentRuntimeSession },
       ),
-    [activeLatestTurn?.state, activeLatestTurn?.turnId, threadActivities],
+    [activeLatestTurn?.state, activeLatestTurn?.turnId, threadActivities, subagentRuntimeSession],
   );
   const latestTurnHasToolActivity = useMemo(
     () => hasToolActivityForTurn(threadActivities, activeLatestTurn?.turnId),
@@ -2490,8 +2505,9 @@ export default function ChatView(props: ChatViewProps) {
         messages: timelineMessages,
         activities: threadActivities,
         latestTurnId: activeLatestTurn?.turnId ?? null,
+        runtimeSession: subagentRuntimeSession,
       }),
-    [activeLatestTurn?.turnId, threadActivities, timelineMessages],
+    [activeLatestTurn?.turnId, threadActivities, timelineMessages, subagentRuntimeSession],
   );
   const timelineEntries = useMemo(
     () =>
@@ -7007,6 +7023,7 @@ export default function ChatView(props: ChatViewProps) {
               isRevertingCheckpoint={isRevertingCheckpoint}
               onImageExpand={onExpandTimelineImage}
               activeProvider={activeThread.session?.provider ?? null}
+              subagentRuntimeSession={subagentRuntimeSession}
               markdownCwd={gitCwd ?? undefined}
               additionalWorkspaceRoots={activeProject?.additionalWorkspaceRoots ?? []}
               timestampFormat={timestampFormat}

@@ -76,6 +76,8 @@ function statusLabel(status: SubagentWorkEntry["subagent"]["status"]): string {
       return "Failed";
     case "stopped":
       return "Stopped";
+    case "unknown":
+      return "Status unavailable";
   }
 }
 
@@ -328,7 +330,10 @@ function BoundSubagentDetailView({
     setNewUpdateCount(0);
   }, [environmentId, selection.turnId, subagent.id, threadId]);
 
-  const elapsed = formatElapsed(subagent.startedAt, live ? now : subagent.completedAt);
+  const elapsed =
+    subagent.status === "unknown"
+      ? null
+      : formatElapsed(subagent.startedAt, live ? now : subagent.completedAt);
   const primaryDescription =
     subagent.description ?? subagent.objective ?? statusLabel(subagent.status);
   const messages =

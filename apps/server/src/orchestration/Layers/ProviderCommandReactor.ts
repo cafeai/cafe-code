@@ -49,6 +49,7 @@ import { increment, orchestrationEventsProcessedTotal } from "../../observabilit
 import { ProviderAdapterProcessError, ProviderAdapterRequestError } from "../../provider/Errors.ts";
 import type { ProviderServiceError } from "../../provider/Errors.ts";
 import { hasLiveProviderRuntimeOwner } from "../../provider/providerRuntimeOwnerEvidence.ts";
+import { sessionLifecycleSnapshot, isSupersededSessionLifecycle } from "../sessionLifecycle.ts";
 import { getCodexRootTurnCompletion } from "../../provider/codexRootTurnCompletion.ts";
 import { makeProviderSessionTitle } from "../../provider/providerSessionTitle.ts";
 import {
@@ -927,6 +928,11 @@ const make = Effect.gen(function* () {
   const setThreadSession = (input: {
     readonly threadId: ThreadId;
     readonly session: OrchestrationSession;
+    readonly expectedSubagentRuntimeId?: string | null;
+    readonly expectedSessionLifecycle?: Extract<
+      OrchestrationCommand,
+      { type: "thread.session.set" }
+    >["expectedSessionLifecycle"];
     readonly terminalTurnRecovery?: "live-provider-continuation";
     readonly codexRootReplacement?: Extract<
       OrchestrationCommand,
@@ -939,6 +945,12 @@ const make = Effect.gen(function* () {
       commandId: serverCommandId("provider-session-set"),
       threadId: input.threadId,
       session: input.session,
+      ...(input.expectedSubagentRuntimeId !== undefined
+        ? { expectedSubagentRuntimeId: input.expectedSubagentRuntimeId }
+        : {}),
+      ...(input.expectedSessionLifecycle !== undefined
+        ? { expectedSessionLifecycle: input.expectedSessionLifecycle }
+        : {}),
       ...(input.terminalTurnRecovery !== undefined
         ? { terminalTurnRecovery: input.terminalTurnRecovery }
         : {}),
@@ -1160,9 +1172,123 @@ const make = Effect.gen(function* () {
     // the full orchestration snapshot here: large long-running workspaces can
     // contain millions of persisted message/activity rows, and hydrating all
     // of them during backend boot can push Electron's Node runtime into OOM.
-    const shellSnapshot = yield* projectionSnapshotQuery.getShellSnapshot();
-    const activeProviderSessions = yield* providerService.listSessions();
+    let shellSnapshot = yield* projectionSnapshotQuery.getShellSnapshot();
+    const observedProviderSessions = yield* providerService.listSessions().pipe(
+      Effect.map((sessions) => ({ available: true as const, sessions })),
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.failCause(cause)
+          : Effect.logWarning("provider startup native inventory unavailable").pipe(
+              Effect.as({
+                available: false as const,
+                sessions: [] as ReadonlyArray<ProviderSession>,
+              }),
+            ),
+      ),
+    );
+    const activeProviderSessions = observedProviderSessions.sessions;
     const durableProviderBindings = yield* providerSessionDirectory.listBindings();
+    const observedRuntimeAt = Date.now();
+    const generationThreads = new Map(shellSnapshot.threads.map((thread) => [thread.id, thread]));
+    const bindingsByThread = new Map(
+      durableProviderBindings.map((binding) => [binding.threadId, binding]),
+    );
+    const sessionsByThread = new Map<ThreadId, ProviderSession[]>();
+    for (const session of activeProviderSessions) {
+      const siblings = sessionsByThread.get(session.threadId);
+      if (siblings === undefined) sessionsByThread.set(session.threadId, [session]);
+      else siblings.push(session);
+    }
+    let generationWrites = 0;
+    const yieldGenerationWrites = Effect.callback<void>((resume) => {
+      const handle = setImmediate(() => resume(Effect.void));
+      return Effect.sync(() => clearImmediate(handle));
+    });
+    // A parent may have become idle before a provider crash while its saved
+    // children still claim Working. Parent-turn orphan recovery intentionally
+    // ignores that shape, so separately retire only the unproven observation
+    // generation. This neither completes children nor stops native work.
+    for (const thread of shellSnapshot.threads) {
+      const session = thread.session;
+      if (session?.subagentRuntimeId == null) continue;
+      const sameAccountSessions =
+        sessionsByThread
+          .get(thread.id)
+          ?.filter(
+            (candidate) =>
+              candidate.provider === session.providerName &&
+              candidate.providerInstanceId === session.providerInstanceId,
+          ) ?? [];
+      const liveSession = sameAccountSessions.some(
+        (candidate) =>
+          candidate.subagentRuntimeId === session.subagentRuntimeId &&
+          candidate.status !== "closed",
+      );
+      const binding = bindingsByThread.get(thread.id);
+      const payload = readRecord(binding?.runtimePayload);
+      const detachedOwner =
+        sameAccountSessions.length === 0 &&
+        binding?.provider === session.providerName &&
+        binding.providerInstanceId === session.providerInstanceId &&
+        (binding.status === "running" || binding.status === "starting") &&
+        payload?.subagentRuntimeId === session.subagentRuntimeId &&
+        hasLiveProviderRuntimeOwner(payload, observedRuntimeAt);
+      if (liveSession || detachedOwner) continue;
+      const cleared = yield* setThreadSession({
+        threadId: thread.id,
+        expectedSessionLifecycle: sessionLifecycleSnapshot(session),
+        expectedSubagentRuntimeId: session.subagentRuntimeId,
+        session: { ...session, subagentRuntimeId: null },
+        createdAt: session.updatedAt,
+      }).pipe(
+        Effect.map(() => true),
+        Effect.catchIf(isSupersededSessionLifecycle, () => Effect.succeed(false)),
+      );
+      if (cleared)
+        generationThreads.set(thread.id, {
+          ...thread,
+          session: { ...session, subagentRuntimeId: null },
+        });
+      if (++generationWrites % 32 === 0) yield* yieldGenerationWrites;
+    }
+    // Backend reconnection may adopt the same detached native context. Carry
+    // its exact generation into legacy projections without recreating provider
+    // work or pretending a stale durable runtime row proves current ownership.
+    for (const session of activeProviderSessions) {
+      if (session.subagentRuntimeId === undefined || session.status === "closed") continue;
+      const thread = generationThreads.get(session.threadId);
+      if (
+        thread?.session == null ||
+        thread.session.providerName !== session.provider ||
+        thread.session.providerInstanceId !== session.providerInstanceId ||
+        thread.session.subagentRuntimeId === session.subagentRuntimeId
+      )
+        continue;
+      const adopted = yield* setThreadSession({
+        threadId: thread.id,
+        expectedSubagentRuntimeId: thread.session.subagentRuntimeId ?? null,
+        expectedSessionLifecycle: sessionLifecycleSnapshot(thread.session),
+        session: { ...thread.session, subagentRuntimeId: session.subagentRuntimeId },
+        createdAt: session.updatedAt,
+      }).pipe(
+        Effect.map(() => true),
+        Effect.catchIf(isSupersededSessionLifecycle, () => Effect.succeed(false)),
+      );
+      if (adopted)
+        generationThreads.set(thread.id, {
+          ...thread,
+          session: {
+            ...thread.session,
+            subagentRuntimeId: session.subagentRuntimeId,
+          },
+        });
+      if (++generationWrites % 32 === 0) yield* yieldGenerationWrites;
+    }
+    shellSnapshot = { ...shellSnapshot, threads: Array.from(generationThreads.values()) };
+    // Failure is not an authoritative empty inventory. The generation-only
+    // pass above may make old observations unknown, but must never interrupt
+    // parent work, retry input or authorize replacement from that uncertainty.
+    if (!observedProviderSessions.available) return;
     // ProviderService can be process-local (for example, a web/dev backend),
     // while a detached desktop daemon owns the real turn. Upstream Codex treats
     // an active buffered turn as positive liveness evidence; merge the durable
@@ -1657,6 +1783,7 @@ const make = Effect.gen(function* () {
             providerName: session.provider,
             providerInstanceId: session.providerInstanceId,
             runtimeMode: desiredRuntimeMode,
+            subagentRuntimeId: session.subagentRuntimeId ?? null,
             ...(session.maxConcurrentSubagents !== undefined
               ? { maxConcurrentSubagents: session.maxConcurrentSubagents }
               : {}),
@@ -2910,6 +3037,9 @@ const make = Effect.gen(function* () {
               status: "ready",
               providerName: runtimeActiveSession.provider,
               providerInstanceId: runtimeActiveSession.providerInstanceId,
+              ...(runtimeActiveSession.subagentRuntimeId !== undefined
+                ? { subagentRuntimeId: runtimeActiveSession.subagentRuntimeId }
+                : {}),
               runtimeMode: runtimeActiveSession.runtimeMode ?? thread.runtimeMode,
               activeTurnId: null,
               lastError: null,
@@ -4075,6 +4205,9 @@ const make = Effect.gen(function* () {
               status: "running" as const,
               providerName: runtimeActiveSession.provider,
               providerInstanceId: runtimeActiveSession.providerInstanceId,
+              ...(runtimeActiveSession.subagentRuntimeId !== undefined
+                ? { subagentRuntimeId: runtimeActiveSession.subagentRuntimeId }
+                : {}),
               runtimeMode: runtimeActiveSession.runtimeMode ?? thread.runtimeMode,
               activeTurnId: runtimeActiveSession.activeTurnId,
               lastError: null,

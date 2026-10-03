@@ -32,9 +32,11 @@ import {
   deriveTimelineEntries,
   deriveSubagentWorkEntries,
   deriveWorkLogEntries,
+  reconcileSubagentWorkEntryRuntime,
   formatElapsed,
   type WorkLogEntry,
 } from "../../session-logic";
+import type { SubagentRuntimeContext } from "../../subagent-activity";
 import ChatMarkdown from "../ChatMarkdown";
 import {
   BotIcon,
@@ -128,6 +130,7 @@ export {
 // ---------------------------------------------------------------------------
 
 interface TimelineRowSharedState {
+  subagentRuntimeSession: SubagentRuntimeContext | null;
   timestampFormat: TimestampFormat;
   activeProvider: ProviderDriverKind | null;
   markdownCwd: string | undefined;
@@ -182,6 +185,8 @@ const TIMELINE_REVIEW_VISIBLE_CONTENT_POSITION = {
 // ---------------------------------------------------------------------------
 
 interface MessagesTimelineProps {
+  /** Missing session evidence is explicitly unknown, never implicitly live. */
+  subagentRuntimeSession?: SubagentRuntimeContext | null;
   /** True until the detail stream has delivered its first complete snapshot. */
   isThreadHistoryHydrating?: boolean;
   isWorking: boolean;
@@ -241,6 +246,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onImageExpand,
   activeThreadEnvironmentId,
   activeProvider,
+  subagentRuntimeSession = null,
   markdownCwd,
   additionalWorkspaceRoots = [],
   timestampFormat,
@@ -371,16 +377,26 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         const [reconciled] = mergeHistoricalSubagentEntries(
           [selectedSubagent.workEntry],
           [current],
+          subagentRuntimeSession,
         );
         return {
           ...selectedSubagent,
           rowId: reconciled?.id ?? current.id,
-          workEntry: reconciled ?? { ...current, subagent: current.subagent },
+          workEntry: reconcileSubagentWorkEntryRuntime(
+            reconciled ?? { ...current, subagent: current.subagent },
+            subagentRuntimeSession,
+          ),
         };
       }
     }
-    return selectedSubagent;
-  }, [activeThreadEnvironmentId, activeThreadId, rows, selectedSubagent]);
+    return {
+      ...selectedSubagent,
+      workEntry: reconcileSubagentWorkEntryRuntime(
+        selectedSubagent.workEntry,
+        subagentRuntimeSession,
+      ),
+    };
+  }, [activeThreadEnvironmentId, activeThreadId, rows, selectedSubagent, subagentRuntimeSession]);
   const isSubagentDetailOpen = resolvedSelectedSubagent !== null;
   const stickToEndDeadlineMsRef = useRef(0);
   const submitStickScrollEventRepinFrameRef = useRef<number | null>(null);
@@ -918,6 +934,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       activeThreadEnvironmentId,
       onHistoricalWorkLogPresenceResolved: recordHistoricalWorkLogPresence,
       activeProvider,
+      subagentRuntimeSession,
       onRevertUserMessage,
       onImageExpand,
       onOpenSubagentDetail: openSubagentDetail,
@@ -932,6 +949,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       activeThreadEnvironmentId,
       recordHistoricalWorkLogPresence,
       activeProvider,
+      subagentRuntimeSession,
       onRevertUserMessage,
       onImageExpand,
       openSubagentDetail,
@@ -1711,9 +1729,14 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
   const subagentEntries = useMemo(() => {
     const hydratedEntries = deriveSubagentWorkEntries(activityRows, row.turnId, {
       terminalTurnIds: new Set([row.turnId]),
+      runtimeSession: ctx.subagentRuntimeSession,
     });
-    return mergeHistoricalSubagentEntries(row.summary.subagentEntries ?? [], hydratedEntries);
-  }, [activityRows, row.summary.subagentEntries, row.turnId]);
+    return mergeHistoricalSubagentEntries(
+      row.summary.subagentEntries ?? [],
+      hydratedEntries,
+      ctx.subagentRuntimeSession,
+    ).map((entry) => reconcileSubagentWorkEntryRuntime(entry, ctx.subagentRuntimeSession));
+  }, [activityRows, row.summary.subagentEntries, row.turnId, ctx.subagentRuntimeSession]);
   const historicalWorkLogDisplayState = deriveHistoricalWorkLogDisplayState({
     snapshotEntryCount: row.summary.snapshotEntryCount,
     previewEntryCount: row.summary.previewEntries.length,

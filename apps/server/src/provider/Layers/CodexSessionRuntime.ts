@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   desktopMcpOverride,
   type DesktopMcpLaunch,
@@ -853,6 +854,19 @@ export interface CodexChildLivenessSnapshot {
   readonly threadName?: string | undefined;
 }
 
+/**
+ * One process-local liveness identity. Keeping the stamp function in the same
+ * immutable closure makes old asynchronous publishers retain their origin
+ * after a replacement runtime resumes the very same provider conversation.
+ */
+export function makeCodexSubagentRuntimeGeneration() {
+  const subagentRuntimeId = randomUUID();
+  return {
+    subagentRuntimeId,
+    stampEvent: (event: ProviderEvent): ProviderEvent => ({ ...event, subagentRuntimeId }),
+  };
+}
+
 export const CODEX_RESUME_CHILD_RECONCILIATION_LIMIT = 128;
 // Match the adapter's complete-item receiver ceiling. Splitting one legacy
 // collaboration envelope by immutable parent ownership must not multiply that
@@ -996,7 +1010,9 @@ export function reconcileCodexResumedChildSnapshot(input: {
 /**
  * A bounded read is authoritative only for the unchanged child sampled before
  * I/O. A concurrently restarted/rebound child must not inherit its old read.
- * Return only freshly applied terminal facts for canonical task publication.
+ * Return newly confirmed activity as well as terminal facts. Historical spawn
+ * snapshots never confirm activity; only this exact live-runtime read can do
+ * so for a child discovered while resuming.
  */
 export function reconcileCodexChildLivenessSnapshots(input: {
   readonly turnId: TurnId;
@@ -1008,9 +1024,11 @@ export function reconcileCodexChildLivenessSnapshots(input: {
 }): {
   readonly liveness: Map<string, CodexChildConversationLiveness>;
   readonly terminals: ReadonlyArray<CodexChildLivenessSnapshot>;
+  readonly activeConfirmations: ReadonlyArray<CodexChildLivenessSnapshot>;
 } {
   const liveness = new Map(input.current);
   const terminals: CodexChildLivenessSnapshot[] = [];
+  const activeConfirmations: CodexChildLivenessSnapshot[] = [];
   for (const result of input.results) {
     if (
       result.state === undefined ||
@@ -1026,8 +1044,16 @@ export function reconcileCodexChildLivenessSnapshots(input: {
       method: "thread/read",
     });
     if (result.state === "inactive" && result.terminalStatus !== undefined) terminals.push(result);
+    if (
+      result.state === "active" &&
+      input.current.get(result.providerThreadId)?.state === "unknown"
+    ) {
+      // The first conclusive observation is enough. Repeated aggregate polls
+      // must not manufacture endless progress for an otherwise quiet worker.
+      activeConfirmations.push(result);
+    }
   }
-  return { liveness, terminals };
+  return { liveness, terminals, activeConfirmations };
 }
 
 /** Pure proof used only while the runtime's aggregate lifecycle permit is held. */
@@ -5172,8 +5198,14 @@ export const makeCodexSessionRuntime = (
       );
 
     const sessionCreatedAt = yield* nowIso;
+    // This identity belongs to this app-server process, not its resumable
+    // transcript or Cafe thread. A replacement process must never attest the
+    // liveness of historical children just because it resumes the same root.
+    const runtimeGeneration = makeCodexSubagentRuntimeGeneration();
+    const { subagentRuntimeId } = runtimeGeneration;
     const initialSession = {
       provider: PROVIDER,
+      subagentRuntimeId,
       ...(options.providerInstanceId ? { providerInstanceId: options.providerInstanceId } : {}),
       status: "connecting",
       runtimeMode: options.runtimeMode,
@@ -5192,10 +5224,11 @@ export const makeCodexSessionRuntime = (
     const reasoningEffortSnapshotRef = yield* Ref.make<CodexReasoningEffortSnapshot | undefined>(
       undefined,
     );
-    const offerEvent = (event: ProviderEvent) => Queue.offer(events, event).pipe(Effect.asVoid);
+    const offerEvent = (event: ProviderEvent) =>
+      Queue.offer(events, runtimeGeneration.stampEvent(event)).pipe(Effect.asVoid);
 
     const emitEvent = (
-      event: Omit<ProviderEvent, "id" | "provider" | "createdAt">,
+      event: Omit<ProviderEvent, "id" | "provider" | "createdAt" | "subagentRuntimeId">,
       providerCreatedAt?: string,
     ) =>
       Effect.gen(function* () {
@@ -5691,6 +5724,10 @@ export const makeCodexSessionRuntime = (
           eventCount: unseenEvents.length,
         });
         for (const event of unseenEvents) {
+          // The strict builder allowlist permits only root lifecycle and
+          // assistant/plan text, never historical child collaboration. Root
+          // metadata reconciliation still needs this originating generation;
+          // child liveness comes solely from separate exact live reads/events.
           const notification = { method: event.method, params: event.payload };
           const state = readNotificationTurnStatus(notification);
           if (event.method === "turn/completed" && event.turnId && state && state !== "completed") {
@@ -5708,7 +5745,7 @@ export const makeCodexSessionRuntime = (
               turnStatus: state,
               errorMessage: readNotificationErrorMessage(notification),
               observedAt: event.createdAt,
-              publish: Queue.offer(events, event).pipe(Effect.asVoid),
+              publish: offerEvent(event),
             });
           } else if (event.method === "turn/completed" && state === "completed") {
             // Recheck atomically at publication, not only in the earlier
@@ -5725,11 +5762,11 @@ export const makeCodexSessionRuntime = (
                   })
                 )
                   return;
-                yield* Queue.offer(events, event);
+                yield* offerEvent(event);
               }),
             );
           } else {
-            yield* Queue.offer(events, event);
+            yield* offerEvent(event);
           }
         }
       });
@@ -6290,6 +6327,7 @@ export const makeCodexSessionRuntime = (
 
         yield* aggregateLifecycleSemaphore.withPermits(1)(
           Effect.gen(function* () {
+            if (yield* Ref.get(closedRef)) return;
             const currentRoutes = yield* Ref.get(collabReceiverTurnsRef);
             const reconciled = reconcileCodexChildLivenessSnapshots({
               turnId,
@@ -6301,34 +6339,45 @@ export const makeCodexSessionRuntime = (
             });
             yield* Ref.set(childConversationLivenessRef, reconciled.liveness);
             // Native snapshot reconciliation must publish the same canonical
-            // child terminal edge as a live notification. Private aggregate
-            // liveness alone leaves Atrium's task row stuck at its last output.
-            for (const terminal of reconciled.terminals) {
+            // child edge as a live notification. Resume discoveries remain
+            // unverified in the renderer until this exact current-runtime
+            // read establishes active or terminal state for the same binding.
+            for (const confirmation of [
+              ...reconciled.terminals,
+              ...reconciled.activeConfirmations,
+            ]) {
               yield* emitEvent({
                 kind: "notification",
                 threadId: options.threadId,
                 turnId,
                 method:
-                  terminal.terminalStatus === "stopped"
+                  confirmation.terminalStatus === "stopped"
                     ? "codex.subagent/threadStopped"
                     : "codex.subagent/threadStatusChanged",
                 payload: {
-                  threadId: terminal.providerThreadId,
-                  ...(terminal.terminalStatus === "stopped"
+                  threadId: confirmation.providerThreadId,
+                  ...(confirmation.terminalStatus === "stopped"
                     ? {}
-                    : { status: { type: terminal.terminalStatus } }),
+                    : {
+                        status:
+                          confirmation.state === "active"
+                            ? { type: "active", activeFlags: [] }
+                            : { type: confirmation.terminalStatus },
+                      }),
                 },
               });
-              if (terminal.threadName !== undefined) {
-                // Emit the bounded native name after terminal authority. The
-                // adapter's monotonic cache then refreshes a completed label
-                // without replaying a historical start or reopening the row.
+              if (confirmation.threadName !== undefined) {
+                // Refresh the bounded name only after status authority, never
+                // by replaying a historical spawn or reopening a terminal row.
                 yield* emitEvent({
                   kind: "notification",
                   threadId: options.threadId,
                   turnId,
                   method: "codex.subagent/threadNameUpdated",
-                  payload: { threadId: terminal.providerThreadId, threadName: terminal.threadName },
+                  payload: {
+                    threadId: confirmation.providerThreadId,
+                    threadName: confirmation.threadName,
+                  },
                 });
               }
             }

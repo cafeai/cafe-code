@@ -4,7 +4,7 @@ import { derivePhase, isLatestTurnSettled } from "../../session-logic";
 import { type ChatMessage, type Thread, type TurnDiffSummary } from "../../types";
 
 /** Pure bounded diagnostic projections, isolated from composer and transport state. */
-export const DEBUG_SNAPSHOT_VERSION = 13;
+export const DEBUG_SNAPSHOT_VERSION = 14;
 const DEBUG_TEXT_PREVIEW_LIMIT = 120;
 const DEBUG_JSON_PREVIEW_LIMIT = 600;
 export const DEBUG_RECENT_MESSAGE_LIMIT = 6;
@@ -341,7 +341,9 @@ export function summarizeDebugActivity(activity: OrchestrationThreadActivity) {
     summaryPreview:
       activity.kind === "provider.async-questions"
         ? "Optional Codex questions"
-        : truncateDebugText(activity.summary),
+        : isStructuredSubagentActivity(activity)
+          ? "Subagent lifecycle update"
+          : truncateDebugText(activity.summary),
     turnId: activity.turnId,
     sequence: activity.sequence ?? null,
     createdAt: activity.createdAt,
@@ -358,6 +360,25 @@ export function summarizeDebugActivity(activity: OrchestrationThreadActivity) {
  * or an unknown payload key into a raw renderer debug snapshot.
  */
 function activityPayloadForDebug(activity: OrchestrationThreadActivity): unknown {
+  if (isStructuredSubagentActivity(activity)) {
+    const subagent = readDebugRecord(readDebugRecord(activity.payload)?.subagent);
+    // Runtime keys correlate authenticated lifecycle records, not diagnostics.
+    // Summarize evidence without leaking any child identity, private label,
+    // objective or unrecognized provider fields through the generic preview.
+    const status = subagent?.status;
+    return {
+      status:
+        status === "active" ||
+        status === "waiting" ||
+        status === "completed" ||
+        status === "failed" ||
+        status === "stopped"
+          ? status
+          : "unreported",
+      hasRuntimeEvidence: typeof subagent?.runtimeId === "string" && subagent.runtimeId.length > 0,
+      hasHistoryBinding: typeof subagent?.historyId === "string" && subagent.historyId.length > 0,
+    };
+  }
   if (activity.kind !== "provider.async-questions") return activity.payload;
   const value = readDebugRecord(activity.payload)?.questions;
   const questions = Array.isArray(value) ? value.slice(0, 16) : [];
@@ -368,6 +389,15 @@ function activityPayloadForDebug(activity: OrchestrationThreadActivity): unknown
       return count + (Array.isArray(options) ? Math.min(options.length, 32) : 0);
     }, 0),
   };
+}
+
+function isStructuredSubagentActivity(activity: OrchestrationThreadActivity): boolean {
+  return (
+    (activity.kind === "task.started" ||
+      activity.kind === "task.progress" ||
+      activity.kind === "task.completed") &&
+    readDebugRecord(readDebugRecord(activity.payload)?.subagent) !== null
+  );
 }
 
 function compareDebugIso(left: string, right: string): number {
@@ -514,7 +544,11 @@ function summarizeDebugContinuationActivity(
     kind: activity.kind,
     tone: activity.tone,
     summary:
-      activity.kind === "provider.async-questions" ? "Optional Codex questions" : activity.summary,
+      activity.kind === "provider.async-questions"
+        ? "Optional Codex questions"
+        : isStructuredSubagentActivity(activity)
+          ? "Subagent lifecycle update"
+          : activity.summary,
     payloadKeys: payloadKeys(payload),
     payloadPreview: stringifyDebugPreview(payload, 500),
     tokenUsage,
@@ -815,7 +849,7 @@ function summarizeDebugLatestTurn(latestTurn: Thread["latestTurn"]) {
   };
 }
 
-function summarizeDebugSession(session: Thread["session"]) {
+export function summarizeDebugSession(session: Thread["session"]) {
   if (!session) {
     return null;
   }
@@ -824,6 +858,7 @@ function summarizeDebugSession(session: Thread["session"]) {
     providerInstanceId: session.providerInstanceId ?? null,
     status: session.status,
     orchestrationStatus: session.orchestrationStatus,
+    hasSubagentRuntimeEvidence: typeof session.subagentRuntimeId === "string",
     activeTurnId: session.activeTurnId ?? null,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,

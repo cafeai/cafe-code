@@ -14,6 +14,7 @@ import {
   ProviderInstanceId,
   ThreadId,
   TurnId,
+  SubagentRuntimeId,
 } from "@cafecode/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -29,6 +30,7 @@ export const ProjectionThreadSession = Schema.Struct({
   providerName: Schema.NullOr(Schema.String),
   providerInstanceId: Schema.NullOr(ProviderInstanceId),
   runtimeMode: RuntimeMode,
+  subagentRuntimeId: Schema.optional(Schema.NullOr(SubagentRuntimeId)),
   maxConcurrentSubagents: Schema.optional(Schema.NullOr(MaxConcurrentSubagents)),
   activeTurnId: Schema.NullOr(TurnId),
   lastError: Schema.NullOr(Schema.String),
@@ -43,6 +45,7 @@ export type ProjectionThreadSession = typeof ProjectionThreadSession.Type;
  */
 const ProjectionThreadSessionSqlFields = Schema.Struct({
   ...ProjectionThreadSession.fields,
+  subagentRuntimeId: Schema.NullOr(SubagentRuntimeId),
   maxConcurrentSubagents: Schema.NullOr(MaxConcurrentSubagents),
   maxConcurrentSubagentsKnown: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 1 })),
 });
@@ -53,10 +56,19 @@ export const ProjectionThreadSessionSqlRow = ProjectionThreadSessionSqlFields.pi
       ProjectionThreadSession,
       typeof ProjectionThreadSessionSqlFields.Type
     >({
-      decode: ({ maxConcurrentSubagents, maxConcurrentSubagentsKnown, ...row }) =>
-        maxConcurrentSubagentsKnown === 1 ? { ...row, maxConcurrentSubagents } : row,
+      decode: ({
+        maxConcurrentSubagents,
+        maxConcurrentSubagentsKnown,
+        subagentRuntimeId,
+        ...row
+      }) => ({
+        ...row,
+        ...(subagentRuntimeId === null ? {} : { subagentRuntimeId }),
+        ...(maxConcurrentSubagentsKnown === 1 ? { maxConcurrentSubagents } : {}),
+      }),
       encode: (row) => ({
         ...row,
+        subagentRuntimeId: row.subagentRuntimeId ?? null,
         maxConcurrentSubagents: row.maxConcurrentSubagents ?? null,
         maxConcurrentSubagentsKnown: row.maxConcurrentSubagents === undefined ? 0 : 1,
       }),

@@ -66,6 +66,14 @@ and [Claude concurrency documentation](https://code.claude.com/docs/en/sub-agent
 ## Activity surfaces
 
 Tasks and the pinned session rail show only active/waiting workers across turns.
+That claim requires matching current native-runtime evidence. Saved nonterminal
+rows from an older runtime, legacy rows without evidence, and stopped/error
+sessions instead show **Status unavailable** in history/Atrium, without a running
+clock. They are not labelled completed and remain available for authorized detail
+inspection. A fresh native observation can confirm a worker again. Reconnecting
+to the same surviving daemon preserves its confirmed workers; a new native
+runtime cannot inherit the previous runtime's Working claims. See
+[runtime-bound observation](decisions/subagent-runtime-observation.md).
 Closed, completed, failed, and stopped workers leave those active rosters.
 Atrium retains finished work, supports expanded history, and opens a worker's
 authorized public transcript and latest durable summary. Names can update after
@@ -87,7 +95,8 @@ model calls are used to produce these displays.
 On Codex resume, one bounded latest-turn metadata read discovers referenced
 children and refreshes their exact native status. It repairs those rows without
 replaying old starts, scanning all history, or interpreting elapsed time as
-completion. Older unreferenced rows remain unchanged rather than being guessed
-closed. Pending, unavailable, or superseded-generation discovery keeps limit
+completion. Older unreferenced rows retain their historical outcome rather than
+being guessed closed, but without current-runtime confirmation they no longer
+appear as actively working. Pending, unavailable, or superseded-generation discovery keeps limit
 replacement fenced; a fresh explicit resume/restart is required to establish
 new evidence after an inconclusive discovery.

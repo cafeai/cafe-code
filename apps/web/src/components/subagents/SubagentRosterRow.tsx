@@ -23,6 +23,8 @@ export function subagentStatusLabel(status: SubagentRosterEntry["subagent"]["sta
       return "Failed";
     case "stopped":
       return "Stopped";
+    case "unknown":
+      return "Status unavailable";
     default:
       return "Done";
   }
@@ -113,9 +115,10 @@ export const SubagentRosterRow = memo(function SubagentRosterRow(props: {
   const { subagent } = props.entry;
   const status = subagentStatusLabel(subagent.status);
   const live = isLiveSubagentStatus(subagent.status);
-  const terminalElapsed = subagent.completedAt
-    ? formatElapsed(subagent.startedAt, subagent.completedAt)
-    : null;
+  const terminalElapsed =
+    subagent.status !== "unknown" && subagent.completedAt
+      ? formatElapsed(subagent.startedAt, subagent.completedAt)
+      : null;
   const primaryDescription =
     subagent.description ?? subagent.objective ?? subagentStatusLabel(subagent.status);
   const objectiveDescription =

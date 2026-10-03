@@ -6,6 +6,7 @@ import {
   IsoDateTime,
   MessageId,
   ProviderItemId,
+  SubagentRuntimeId,
   ThreadId,
   TurnId,
 } from "./baseSchemas.ts";
@@ -35,6 +36,9 @@ const ProviderSessionStatus = Schema.Literals([
 
 export const ProviderSession = Schema.Struct({
   provider: ProviderDriverKind,
+  // Minted by the actual native context. Omission is legacy unknown, never a
+  // claim that saved task progress belongs to the currently connected runtime.
+  subagentRuntimeId: Schema.optional(SubagentRuntimeId),
   // Optional during the driver/instance migration. Once every producer
   // populates it (post-slice-4), routing flips to instance-id-only and the
   // legacy `provider` field is removed.
@@ -261,6 +265,7 @@ const ProviderEventKind = Schema.Literals(["session", "notification", "request",
 
 export const ProviderEvent = Schema.Struct({
   id: EventId,
+  subagentRuntimeId: Schema.optional(SubagentRuntimeId),
   kind: ProviderEventKind,
   provider: ProviderDriverKind,
   // See ProviderSession for the migration story.

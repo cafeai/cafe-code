@@ -1884,6 +1884,161 @@ describe("ProviderCommandReactor", () => {
     expect(harness.interruptTurn).not.toHaveBeenCalled();
   });
 
+  it.each([false, true])(
+    "treats unavailable provider inventory as unknown, not stopped (detached proof=%s)",
+    async (live) => {
+      const harness = await createHarness({ startReactor: false });
+      const threadId = ThreadId.make("thread-1");
+      const turnId = asTurnId("unavailable-native-root");
+      const at = "2026-01-01T00:00:01.000Z";
+      const runtimeId = "00000000-0000-4000-8000-000000000001";
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("unavailable-saved-generation"),
+          threadId,
+          session: {
+            threadId,
+            status: "running",
+            providerName: "codex",
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            subagentRuntimeId: runtimeId,
+            runtimeMode: "approval-required",
+            activeTurnId: turnId,
+            lastError: null,
+            updatedAt: at,
+          },
+          createdAt: at,
+        }),
+      );
+      if (live)
+        harness.durableProviderBindings.push({
+          threadId,
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          status: "running",
+          runtimeMode: "approval-required",
+          resumeCursor: {},
+          lastSeenAt: at,
+          runtimePayload: {
+            subagentRuntimeId: runtimeId,
+            activeTurnId: turnId,
+            ...liveDurableRuntimeOwnerPayload(),
+          },
+        });
+      harness.listSessions.mockImplementation(() =>
+        // The service inventory has no declared typed error channel. Exercise
+        // an unavailable transport as a defect, matching its public contract.
+        Effect.die(
+          new ProviderAdapterRequestError({
+            provider: "codex",
+            method: "listSessions",
+            detail: "Inventory unavailable",
+          }),
+        ),
+      );
+      await harness.startReactor();
+      const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+      expect(thread?.session).toMatchObject({ status: "running", activeTurnId: turnId });
+      expect(thread?.session?.subagentRuntimeId ?? null).toBe(live ? runtimeId : null);
+      expect(harness.startSession).not.toHaveBeenCalled();
+      expect(harness.interruptTurn).not.toHaveBeenCalled();
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([false, true])(
+    "reconciles idle saved context against detached-owner evidence (live=%s)",
+    async (live) => {
+      const harness = await createHarness({ startReactor: false });
+      const threadId = ThreadId.make("thread-1");
+      const at = "2026-01-01T00:00:01.000Z";
+      const runtimeId = "00000000-0000-4000-8000-000000000001";
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("idle-saved-generation"),
+          threadId,
+          session: {
+            threadId,
+            status: "ready",
+            providerName: "codex",
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            subagentRuntimeId: runtimeId,
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: at,
+          },
+          createdAt: at,
+        }),
+      );
+      if (live)
+        harness.durableProviderBindings.push({
+          threadId,
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          status: "running",
+          runtimeMode: "approval-required",
+          resumeCursor: {},
+          lastSeenAt: at,
+          runtimePayload: { subagentRuntimeId: runtimeId, ...liveDurableRuntimeOwnerPayload() },
+        });
+      await harness.startReactor();
+      const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+      expect(thread?.session?.status).toBe("ready");
+      expect(thread?.session?.subagentRuntimeId ?? null).toBe(live ? runtimeId : null);
+      expect(harness.startSession).not.toHaveBeenCalled();
+      expect(harness.interruptTurn).not.toHaveBeenCalled();
+    },
+  );
+
+  it("adopts a surviving native context on backend restart without starting provider work", async () => {
+    const harness = await createHarness({ startReactor: false });
+    const threadId = ThreadId.make("thread-1");
+    const turnId = asTurnId("surviving-native-root");
+    const at = "2026-01-01T00:00:01.000Z";
+    const runtimeId = "00000000-0000-4000-8000-000000000001";
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("seed-legacy-native-context"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: turnId,
+          lastError: null,
+          updatedAt: at,
+        },
+        createdAt: at,
+      }),
+    );
+    harness.runtimeSessions.push({
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      threadId,
+      subagentRuntimeId: runtimeId,
+      status: "running",
+      runtimeMode: "approval-required",
+      activeTurnId: turnId,
+      createdAt: at,
+      updatedAt: at,
+    });
+    await harness.startReactor();
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    expect(thread?.session).toMatchObject({
+      status: "running",
+      activeTurnId: turnId,
+      subagentRuntimeId: runtimeId,
+    });
+    expect(harness.startSession).not.toHaveBeenCalled();
+    expect(harness.interruptTurn).not.toHaveBeenCalled();
+  });
+
   it("preserves a running turn owned by a detached provider's durable binding", async () => {
     const harness = await createHarness({ startReactor: false });
     const threadId = ThreadId.make("thread-1");

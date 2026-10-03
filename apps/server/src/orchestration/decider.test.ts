@@ -227,12 +227,39 @@ describe("Provider observation lifecycle admission", () => {
     expect(event).toMatchObject({ payload: { session: { status: "ready", activeTurnId: null } } });
   });
 
+  it("fences positive native admission separately from ordinary turn ACK races", async () => {
+    const original = makeThread();
+    const runtimeId = "00000000-0000-4000-8000-000000000001";
+    const command = {
+      ...completionCommand(),
+      expectedSessionLifecycle: undefined,
+      expectedSubagentRuntimeId: null,
+    };
+    const result = await Effect.runPromise(
+      Effect.exit(
+        decide(
+          {
+            ...original,
+            session: {
+              ...original.session!,
+              subagentRuntimeId: runtimeId,
+            },
+          },
+          command,
+        ),
+      ),
+    );
+    expect(result).toMatchObject({ _tag: "Failure" });
+    expect(JSON.stringify(result)).toContain(SESSION_LIFECYCLE_SUPERSEDED);
+  });
+
   it.each([
     ["accepted newer turn", { activeTurnId: newRoot }],
     ["Stop", { status: "interrupted" as const, activeTurnId: null }],
     ["new start intent", { status: "starting" as const, activeTurnId: null }],
     ["changed runtime", { providerInstanceId: ProviderInstanceId.make("another-instance") }],
     ["changed driver", { providerName: "claude" }],
+    ["changed native context", { subagentRuntimeId: "00000000-0000-4000-8000-000000000001" }],
   ])("rejects an observation superseded by %s", async (_label, change) => {
     const original = makeThread();
     const result = await Effect.runPromise(

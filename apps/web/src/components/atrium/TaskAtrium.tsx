@@ -522,13 +522,17 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
                             ? "Failed"
                             : subagent.status === "stopped"
                               ? "Stopped"
-                              : "Done"}
+                              : subagent.status === "unknown"
+                                ? "Status unavailable"
+                                : "Done"}
                     </span>
-                    {subagent.startedAt !== null ? (
+                    {subagent.status !== "unknown" &&
+                    subagent.startedAt !== null &&
+                    (subagent.running || subagent.completedAt !== null) ? (
                       <span className="mt-0.5 block font-mono text-[10px] tabular-nums text-[#8a8189] dark:text-white/45">
                         {formatElapsed(
                           subagent.startedAt,
-                          subagent.running ? now : (subagent.completedAt ?? now),
+                          subagent.running ? now : subagent.completedAt!,
                         )}
                       </span>
                     ) : null}

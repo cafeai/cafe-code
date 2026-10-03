@@ -12,6 +12,67 @@ import {
 } from "./MessagesTimeline.logic";
 
 describe("mergeHistoricalSubagentEntries", () => {
+  it("preserves current native confirmation against separately paged older-runtime completion", () => {
+    const current = {
+      id: "child-row",
+      createdAt: "2026-01-01T00:00:01Z",
+      label: "Worker",
+      tone: "info" as const,
+      subagent: {
+        id: "child",
+        label: "Worker",
+        status: "active" as const,
+        runtimeId: "runtime-new",
+        startedAt: "2026-01-01T00:00:01Z",
+        lifecycleRevision: "sequence:1:9:child-row",
+      },
+    };
+    const old = {
+      ...current,
+      subagent: {
+        ...current.subagent,
+        status: "completed" as const,
+        runtimeId: "runtime-old",
+        completedAt: "2026-01-01T00:00:02Z",
+        lifecycleRevision: "sequence:2:9:child-row",
+      },
+    };
+    const runtime = { subagentRuntimeId: "runtime-new", orchestrationStatus: "ready" as const };
+    for (const entries of [
+      mergeHistoricalSubagentEntries([current], [old], runtime),
+      mergeHistoricalSubagentEntries([old], [current], runtime),
+    ]) {
+      expect(entries[0]?.subagent.status).toBe("active");
+      expect(entries[0]?.subagent.completedAt).toBeUndefined();
+    }
+  });
+
+  it("refreshes the same lifecycle edge when current runtime evidence changes", () => {
+    const entry = {
+      id: "same-row",
+      createdAt: "2026-01-01T00:00:00Z",
+      label: "Worker",
+      tone: "info" as const,
+      subagent: {
+        id: "exact-child",
+        label: "Worker",
+        status: "active" as const,
+        startedAt: "2026-01-01T00:00:00Z",
+        lifecycleRevision: "sequence:1:8:same-row",
+      },
+    };
+    const unknown = {
+      ...entry,
+      subagent: {
+        ...entry.subagent,
+        status: "unknown" as const,
+        lifecycleRevision: `${entry.subagent.lifecycleRevision}:unverified`,
+      },
+    };
+    expect(mergeHistoricalSubagentEntries([entry], [unknown])[0]?.subagent.status).toBe("unknown");
+    expect(mergeHistoricalSubagentEntries([unknown], [entry])[0]?.subagent.status).toBe("active");
+  });
+
   it("keeps the complete snapshot roster while merging only newer paged lifecycle fields", () => {
     const turnId = "turn-history" as never;
     const makeEntry = (input: {

@@ -194,6 +194,10 @@ function buildProps() {
     onImageExpand: vi.fn(),
     activeThreadEnvironmentId: EnvironmentId.make("environment-local"),
     activeProvider: ProviderDriverKind.make("codex"),
+    subagentRuntimeSession: {
+      subagentRuntimeId: "native-runtime-a",
+      orchestrationStatus: "ready" as const,
+    },
     markdownCwd: undefined,
     timestampFormat: "24-hour" as const,
     workspaceRoot: undefined,
@@ -260,6 +264,7 @@ function buildLiveSubagentWorkEntry(id: string, label: string) {
       itemType: "collab_agent_tool_call" as const,
       subagent: {
         id: `provider-${id}`,
+        runtimeId: "native-runtime-a",
         label,
         description: `${label} progress`,
         status: "active" as const,
@@ -304,6 +309,7 @@ function buildSubagentWorkEntry(input: {
       itemType: "collab_agent_tool_call" as const,
       subagent: {
         id: input.subagentId,
+        runtimeId: "native-runtime-a",
         label: input.label,
         objective,
         description: input.description ?? `${input.label} progress`,

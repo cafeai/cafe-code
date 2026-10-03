@@ -8,6 +8,7 @@ import {
   MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN,
   ProjectId,
   ProviderInstanceId,
+  ProviderDriverKind,
   ThreadId,
   TurnId,
   type OrchestrationEvent,
@@ -373,6 +374,108 @@ describe("thread concurrency projection", () => {
     );
     expect(threadsOf(state)[0]?.subagentLimits).toEqual({});
   });
+
+  it("refreshes native runtime evidence and preserves omissions only inside the same account", () => {
+    const thread = makeThread();
+    let state = makeState(thread);
+    const runtimeA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const runtimeB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const setSession = (
+      sequence: number,
+      runtimeId: string | null | undefined,
+      account = "codex",
+    ) => {
+      state = applyOrchestrationEvent(
+        state,
+        makeEvent(
+          "thread.session-set",
+          {
+            threadId: thread.id,
+            session: {
+              threadId: thread.id,
+              providerName: "codex",
+              providerInstanceId: ProviderInstanceId.make(account),
+              status: "ready",
+              runtimeMode: "approval-required",
+              activeTurnId: null,
+              lastError: null,
+              // Hold the timestamp fixed: a generation-only update still must
+              // invalidate the immutable renderer session/summary cache.
+              updatedAt: "2026-10-04T00:00:00.000Z",
+              ...(runtimeId !== undefined ? { subagentRuntimeId: runtimeId } : {}),
+            },
+          },
+          { sequence },
+        ),
+        localEnvironmentId,
+      );
+    };
+    setSession(1, runtimeA);
+    expect(threadsOf(state)[0]?.session?.subagentRuntimeId).toBe(runtimeA);
+    setSession(2, runtimeB);
+    expect(threadsOf(state)[0]?.session?.subagentRuntimeId).toBe(runtimeB);
+    setSession(3, undefined);
+    expect(threadsOf(state)[0]?.session?.subagentRuntimeId).toBe(runtimeB);
+    setSession(4, null);
+    expect(threadsOf(state)[0]?.session?.subagentRuntimeId).toBeNull();
+    setSession(5, runtimeA);
+    setSession(6, undefined, "codex-other");
+    expect(threadsOf(state)[0]?.session?.subagentRuntimeId).toBeUndefined();
+  });
+
+  it.each([null, undefined])(
+    "clears old runtime evidence from an authoritative %s snapshot",
+    (runtimeId) => {
+      const thread = makeThread({
+        session: {
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          status: "ready",
+          orchestrationStatus: "ready",
+          createdAt: "2026-10-04T00:00:00.000Z",
+          updatedAt: "2026-10-04T00:00:00.000Z",
+          subagentRuntimeId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        },
+      });
+      const state = syncServerThreadDetail(
+        makeState(thread),
+        {
+          id: thread.id,
+          projectId: thread.projectId,
+          title: thread.title,
+          modelSelection: thread.modelSelection,
+          runtimeMode: thread.runtimeMode,
+          interactionMode: thread.interactionMode,
+          branch: thread.branch,
+          worktreePath: thread.worktreePath,
+          latestTurn: null,
+          createdAt: thread.createdAt,
+          updatedAt: "2026-10-04T00:00:00.000Z",
+          archivedAt: null,
+          deletedAt: null,
+          messages: [],
+          proposedPlans: [],
+          activities: [],
+          checkpoints: [],
+          goal: null,
+          session: {
+            threadId: thread.id,
+            providerName: "codex",
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            status: "ready",
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: "2026-10-04T00:00:00.000Z",
+            ...(runtimeId !== undefined ? { subagentRuntimeId: runtimeId } : {}),
+          },
+        },
+        localEnvironmentId,
+        10,
+      );
+      expect(threadsOf(state)[0]?.session?.subagentRuntimeId).toBe(runtimeId);
+    },
+  );
 });
 
 describe("bootstrap selectors", () => {

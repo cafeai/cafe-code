@@ -22,9 +22,11 @@ import { readTurnConfiguration, presentTurnConfiguration } from "./turnConfigura
 
 import {
   deriveSubagentActivities,
+  isSubagentRuntimeCurrent,
   type DeriveSubagentActivityOptions,
   type DerivedSubagentActivity,
   type SubagentRunStatus,
+  type SubagentRuntimeContext,
 } from "./subagent-activity";
 
 import type {
@@ -88,6 +90,8 @@ export interface WorkLogEntry {
     lifecycleRevision?: string;
     /** Opaque provider history binding; never render or log this value. */
     historyId?: string;
+    /** Native liveness evidence only, never a transcript authorization key. */
+    runtimeId?: string;
   };
 }
 
@@ -709,6 +713,7 @@ export function deriveSubagentWorkEntries(
 export function deriveActiveSubagentWorkEntries(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
   runningTurnId: TurnId | null | undefined,
+  options: DeriveSubagentActivityOptions = {},
 ): WorkLogEntry[] {
   const terminalTurnIds = new Set<TurnId>();
   for (const activity of activities) {
@@ -716,7 +721,7 @@ export function deriveActiveSubagentWorkEntries(
   }
   if (runningTurnId) terminalTurnIds.delete(runningTurnId);
 
-  return deriveSubagentWorkEntries(activities, undefined, { terminalTurnIds }).filter(
+  return deriveSubagentWorkEntries(activities, undefined, { ...options, terminalTurnIds }).filter(
     (entry) => entry.subagent?.status === "active" || entry.subagent?.status === "waiting",
   );
 }
@@ -744,7 +749,9 @@ export function subagentToWorkLogEntry(subagent: DerivedSubagentActivity): WorkL
           ? "Failed"
           : subagent.status === "stopped"
             ? "Stopped"
-            : "Completed";
+            : subagent.status === "unknown"
+              ? "Status unavailable"
+              : "Completed";
   return {
     id: subagent.rowId,
     turnId: subagent.turnId,
@@ -769,6 +776,31 @@ export function subagentToWorkLogEntry(subagent: DerivedSubagentActivity): WorkL
       lifecycleRevision: subagent.lifecycleRevision,
       ...(subagent.completedAt ? { completedAt: subagent.completedAt } : {}),
       ...(subagent.historyId ? { historyId: subagent.historyId } : {}),
+      ...(subagent.runtimeId ? { runtimeId: subagent.runtimeId } : {}),
+    },
+  };
+}
+
+/** Recheck locally retained/paged detail selections after a native-session change. */
+export function reconcileSubagentWorkEntryRuntime<T extends WorkLogEntry>(
+  entry: T,
+  session: SubagentRuntimeContext | null,
+): T {
+  const child = entry.subagent;
+  if (
+    !child ||
+    (child.status !== "active" && child.status !== "waiting") ||
+    isSubagentRuntimeCurrent(child.runtimeId, session)
+  )
+    return entry;
+  return {
+    ...entry,
+    subagent: {
+      ...child,
+      status: "unknown",
+      ...(child.lifecycleRevision
+        ? { lifecycleRevision: `${child.lifecycleRevision}:unverified` }
+        : {}),
     },
   };
 }
@@ -777,6 +809,7 @@ export function deriveHistoricalWorkLogSummaries(input: {
   messages: ReadonlyArray<ChatMessage>;
   activities: ReadonlyArray<OrchestrationThreadActivity>;
   latestTurnId?: TurnId | null | undefined;
+  runtimeSession?: DeriveSubagentActivityOptions["runtimeSession"];
 }): ReadonlyMap<TurnId, HistoricalWorkLogSummary> {
   const latestTurnId = input.latestTurnId ?? null;
   if (latestTurnId === null) {
@@ -823,6 +856,7 @@ export function deriveHistoricalWorkLogSummaries(input: {
   const subagentsByTurnId = new Map<TurnId, WorkLogEntry[]>();
   for (const entry of deriveSubagentWorkEntries(input.activities, undefined, {
     terminalTurnIds: historicalTurnIds,
+    runtimeSession: input.runtimeSession,
   })) {
     if (
       entry.turnId === null ||

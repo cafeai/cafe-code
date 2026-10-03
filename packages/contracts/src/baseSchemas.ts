@@ -20,6 +20,10 @@ export const PortSchema = Schema.Int.check(Schema.isBetween({ minimum: 1, maximu
 export const IsoDateTime = Schema.String;
 export type IsoDateTime = typeof IsoDateTime.Type;
 
+/** Native provider-context incarnation, not a conversation id or capability. */
+export const SubagentRuntimeId = Schema.String.check(Schema.isUUID());
+export type SubagentRuntimeId = typeof SubagentRuntimeId.Type;
+
 /**
  * Construct a branded identifier. Enforces non-empty trimmed strings
  */

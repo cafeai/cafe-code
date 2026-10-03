@@ -168,4 +168,6 @@ export interface ThreadSession {
   orchestrationStatus: OrchestrationSessionStatus;
   /** Materialized Cafe override only; absence is older/unknown evidence. */
   maxConcurrentSubagents?: number | null | undefined;
+  /** Opaque evidence identifying the currently observed native provider runtime. */
+  subagentRuntimeId?: string | null | undefined;
 }

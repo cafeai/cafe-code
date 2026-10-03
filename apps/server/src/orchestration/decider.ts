@@ -1228,6 +1228,15 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       });
       const expectedLifecycle = command.expectedSessionLifecycle;
       const currentLifecycle = sessionLifecycleSnapshot(thread.session);
+      if (
+        command.expectedSubagentRuntimeId !== undefined &&
+        command.expectedSubagentRuntimeId !== (thread.session?.subagentRuntimeId ?? null)
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: SESSION_LIFECYCLE_SUPERSEDED,
+        });
+      }
       const sameConcreteLifecycle =
         expectedLifecycle != null &&
         currentLifecycle !== null &&
@@ -1235,7 +1244,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         expectedLifecycle.activeTurnId === currentLifecycle.activeTurnId &&
         expectedLifecycle.status === currentLifecycle.status &&
         expectedLifecycle.providerName === currentLifecycle.providerName &&
-        expectedLifecycle.providerInstanceId === currentLifecycle.providerInstanceId;
+        expectedLifecycle.providerInstanceId === currentLifecycle.providerInstanceId &&
+        expectedLifecycle.subagentRuntimeId === currentLifecycle.subagentRuntimeId;
       if (
         expectedLifecycle !== undefined &&
         !sameConcreteLifecycle &&
@@ -1488,11 +1498,20 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.activity.append": {
-      yield* requireThread({
+      const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
+      if (
+        command.expectedSubagentRuntimeId !== undefined &&
+        command.expectedSubagentRuntimeId !== (thread.session?.subagentRuntimeId ?? null)
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: SESSION_LIFECYCLE_SUPERSEDED,
+        });
+      }
       const requestId =
         typeof command.activity.payload === "object" &&
         command.activity.payload !== null &&

@@ -16,6 +16,7 @@ import {
   ProjectId,
   ProviderItemId,
   RuntimeItemId,
+  SubagentRuntimeId,
   ThreadId,
   TrimmedNonEmptyString,
   TurnId,
@@ -313,6 +314,7 @@ export type OrchestrationSessionStatus = typeof OrchestrationSessionStatus.Type;
 
 export const OrchestrationSession = Schema.Struct({
   threadId: ThreadId,
+  subagentRuntimeId: Schema.optional(Schema.NullOr(SubagentRuntimeId)),
   status: OrchestrationSessionStatus,
   providerName: Schema.NullOr(TrimmedNonEmptyString),
   providerInstanceId: Schema.optional(ProviderInstanceId),
@@ -1238,10 +1240,14 @@ const ThreadSessionSetCommand = Schema.Struct({
         activeTurnId: Schema.NullOr(TurnId),
         providerName: Schema.NullOr(TrimmedNonEmptyString),
         providerInstanceId: Schema.NullOr(ProviderInstanceId),
+        subagentRuntimeId: Schema.optional(Schema.NullOr(SubagentRuntimeId)),
         updatedAt: IsoDateTime,
       }),
     ),
   ),
+  // Positive native starts have their own turn-admission semantics, but must
+  // still not replace a newer native context while their observation is queued.
+  expectedSubagentRuntimeId: Schema.optional(Schema.NullOr(SubagentRuntimeId)),
   // Server-only admission proof for a replacement ACK. This is deliberately
   // absent from the persisted event: the engine verifies the durable intent
   // and current projection while serializing this command with user controls.
@@ -1329,6 +1335,7 @@ const ThreadTurnDiffCompleteCommand = Schema.Struct({
 
 const ThreadActivityAppendCommand = Schema.Struct({
   type: Schema.Literal("thread.activity.append"),
+  expectedSubagentRuntimeId: Schema.optional(Schema.NullOr(SubagentRuntimeId)),
   commandId: CommandId,
   threadId: ThreadId,
   activity: OrchestrationThreadActivity,

@@ -600,6 +600,9 @@ export function projectEvent(
                   ? { maxConcurrentSubagents: thread.session.maxConcurrentSubagents }
                   : {}),
                 runtimeMode: payload.runtimeMode,
+                ...(thread.session?.subagentRuntimeId !== undefined
+                  ? { subagentRuntimeId: thread.session.subagentRuntimeId }
+                  : {}),
                 activeTurnId: null,
                 lastError: null,
                 updatedAt: payload.createdAt,

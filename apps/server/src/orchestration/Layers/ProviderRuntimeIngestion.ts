@@ -466,6 +466,16 @@ function runtimeThreadStateAffectsSession(
 }
 
 function runtimeEventCarriesActiveTurnWork(event: ProviderRuntimeEvent): boolean {
+  if (
+    (event.type === "task.started" || event.type === "task.progress") &&
+    event.payload.subagent !== undefined &&
+    !runtimeSubagentHasCurrentContextProof(event)
+  ) {
+    // Loading or renaming a saved child is metadata, even when the transport
+    // itself belongs to the current native context. Only the adapter's exact
+    // child observation may turn that metadata into proof of live work.
+    return false;
+  }
   switch (event.type) {
     case "content.delta":
     case "turn.proposed.delta":
@@ -497,6 +507,14 @@ function runtimeEventCarriesActiveTurnWork(event: ProviderRuntimeEvent): boolean
     default:
       return false;
   }
+}
+
+function runtimeSubagentHasCurrentContextProof(event: ProviderRuntimeEvent): boolean {
+  return (
+    (event.type === "task.started" || event.type === "task.progress") &&
+    event.subagentRuntimeId !== undefined &&
+    event.payload.subagent?.runtimeId === event.subagentRuntimeId
+  );
 }
 
 function requestKindFromCanonicalRequestType(
@@ -2351,6 +2369,45 @@ const make = Effect.gen(function* () {
       const eventTurnId = toTurnId(event.turnId);
       const activeTurnId = thread.session?.activeTurnId ?? null;
 
+      // Durable activity is history, not a lease. Only exact same-context
+      // observations or a current authenticated adapter inventory may establish
+      // parent liveness. Ordinary tokens never poll that inventory; stale child
+      // progress retains its original context in history without reopening the
+      // current session. A failed read is uncertainty, not an empty runtime.
+      const sameRuntimeBinding =
+        thread.session?.providerName === event.provider &&
+        thread.session.providerInstanceId === event.providerInstanceId;
+      const incomingRuntimeId = event.subagentRuntimeId;
+      const currentRuntimeId = thread.session?.subagentRuntimeId;
+      const isRuntimeAdmissionEvent =
+        event.type === "session.started" ||
+        event.type === "thread.started" ||
+        event.type === "turn.started" ||
+        (currentRuntimeId == null && runtimeSubagentHasCurrentContextProof(event)) ||
+        (event.type === "session.state.changed" &&
+          (event.payload.state === "starting" || event.payload.state === "ready"));
+      const runtimeGenerationVerified =
+        incomingRuntimeId === undefined
+          ? currentRuntimeId == null
+          : sameRuntimeBinding && incomingRuntimeId === currentRuntimeId
+            ? true
+            : isRuntimeAdmissionEvent &&
+              (yield* providerService.listSessions().pipe(
+                Effect.map((sessions) =>
+                  sessions.some(
+                    (session) =>
+                      session.threadId === event.threadId &&
+                      session.provider === event.provider &&
+                      session.providerInstanceId === event.providerInstanceId &&
+                      session.subagentRuntimeId === incomingRuntimeId &&
+                      session.status !== "closed",
+                  ),
+                ),
+                Effect.catchCause((cause) =>
+                  Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause) : Effect.succeed(false),
+                ),
+              ));
+
       if (event.type === "thread.goal.updated" || event.type === "thread.goal.cleared") {
         yield* orchestrationEngine.dispatch({
           type: "thread.goal.sync",
@@ -2376,7 +2433,11 @@ const make = Effect.gen(function* () {
         });
         const goalIsActive = effectiveGoal?.status === "active";
         const currentSession = thread.session;
-        if (currentSession !== null && currentSession.activeTurnId === null) {
+        if (
+          runtimeGenerationVerified &&
+          currentSession !== null &&
+          currentSession.activeTurnId === null
+        ) {
           const nextStatus =
             goalIsActive &&
             (currentSession.status === "ready" ||
@@ -2602,6 +2663,7 @@ const make = Effect.gen(function* () {
         event.type === "session.exited" &&
         event.payload.reason === PROVIDER_RUNTIME_OWNERSHIP_LOST_REASON;
       const mayRecoverRuntimeOwnershipLoss =
+        runtimeGenerationVerified &&
         isRuntimeOwnershipLoss &&
         eventTurnId !== undefined &&
         thread.session?.providerInstanceId === event.providerInstanceId &&
@@ -2716,6 +2778,7 @@ const make = Effect.gen(function* () {
         eventCarriesActiveTurnWork &&
         (thread.session?.status !== "running" ||
           (thread.session?.lastError ?? null) !== null ||
+          (incomingRuntimeId !== undefined && incomingRuntimeId !== currentRuntimeId) ||
           providerRuntimeOwnsConflictingTurn);
 
       if (
@@ -2737,15 +2800,16 @@ const make = Effect.gen(function* () {
 
       let appliedSessionLifecycle = false;
       if (
-        event.type === "session.started" ||
-        event.type === "session.state.changed" ||
-        event.type === "session.exited" ||
-        event.type === "thread.started" ||
-        sessionRelevantThreadState !== undefined ||
-        shouldRefreshSessionForActiveTurnWork ||
-        event.type === "turn.started" ||
-        event.type === "turn.aborted" ||
-        event.type === "turn.completed"
+        runtimeGenerationVerified &&
+        (event.type === "session.started" ||
+          event.type === "session.state.changed" ||
+          event.type === "session.exited" ||
+          event.type === "thread.started" ||
+          sessionRelevantThreadState !== undefined ||
+          shouldRefreshSessionForActiveTurnWork ||
+          event.type === "turn.started" ||
+          event.type === "turn.aborted" ||
+          event.type === "turn.completed")
       ) {
         const mayResolveSessionReadyBeforeTurnStart =
           (event.type === "session.state.changed" && event.payload.state === "ready") ||
@@ -2888,6 +2952,7 @@ const make = Effect.gen(function* () {
             type: "thread.session.set",
             commandId: providerCommandId(event, "thread-session-set"),
             threadId: thread.id,
+            expectedSubagentRuntimeId: currentRuntimeId ?? null,
             session: {
               threadId: thread.id,
               status,
@@ -2896,6 +2961,7 @@ const make = Effect.gen(function* () {
                 ? { providerInstanceId: event.providerInstanceId }
                 : {}),
               runtimeMode: thread.session?.runtimeMode ?? "full-access",
+              ...(incomingRuntimeId !== undefined ? { subagentRuntimeId: incomingRuntimeId } : {}),
               // Lifecycle notifications do not independently report process
               // configuration. Preserve exact same-account materialization
               // evidence, never borrow a different account's old limit.
@@ -2914,8 +2980,10 @@ const make = Effect.gen(function* () {
             // Positive native liveness retains the existing exact provider
             // ownership repair path. A concurrent provisional ACK must not
             // suppress the later concrete turn.started identity.
-            yield* orchestrationEngine.dispatch(sessionCommand);
-            appliedSessionLifecycle = true;
+            appliedSessionLifecycle = yield* orchestrationEngine.dispatch(sessionCommand).pipe(
+              Effect.map(() => true),
+              Effect.catchIf(isSupersededSessionLifecycle, () => Effect.succeed(false)),
+            );
           } else {
             appliedSessionLifecycle =
               (yield* dispatchObservedSession(sessionCommand, thread.session)) !== undefined;
@@ -2955,6 +3023,29 @@ const make = Effect.gen(function* () {
             });
           }
         }
+      }
+
+      if (
+        !appliedSessionLifecycle &&
+        runtimeGenerationVerified &&
+        incomingRuntimeId !== undefined &&
+        incomingRuntimeId !== currentRuntimeId &&
+        thread.session !== null
+      ) {
+        // Reconnecting child progress may prove its native context while the
+        // parent's historical turn is deliberately terminal. Adopt only the
+        // generation; do not reopen that parent or invent a new running turn.
+        yield* dispatchObservedSession(
+          {
+            type: "thread.session.set",
+            commandId: providerCommandId(event, "subagent-runtime-observation"),
+            threadId: thread.id,
+            expectedSubagentRuntimeId: currentRuntimeId ?? null,
+            session: { ...thread.session, subagentRuntimeId: incomingRuntimeId },
+            createdAt: now,
+          },
+          thread.session,
+        );
       }
 
       const assistantDelta =
@@ -3222,12 +3313,13 @@ const make = Effect.gen(function* () {
           ? true
           : activeTurnId === null || eventTurnId === undefined || sameId(activeTurnId, eventTurnId);
 
-        if (shouldApplyRuntimeError) {
+        if (runtimeGenerationVerified && shouldApplyRuntimeError) {
           yield* dispatchObservedSession(
             {
               type: "thread.session.set",
               commandId: providerCommandId(event, "runtime-error-session-set"),
               threadId: thread.id,
+              expectedSubagentRuntimeId: currentRuntimeId ?? null,
               session: {
                 threadId: thread.id,
                 status: "error",
@@ -3293,21 +3385,44 @@ const make = Effect.gen(function* () {
         }
       }
 
+      const isSubagentLifecycle =
+        (event.type === "task.started" ||
+          event.type === "task.progress" ||
+          event.type === "task.completed") &&
+        event.payload.subagent !== undefined;
+      // Compact retention keeps one latest edge per child/kind, not a copy for
+      // every historical native process. An obsolete edge must never displace
+      // a confirmed current-context edge, even if replay appends it later. The
+      // bounded provider daemon journal remains the original event evidence.
+      const obsoleteSubagentLifecycle =
+        isSubagentLifecycle &&
+        currentRuntimeId != null &&
+        (!runtimeGenerationVerified || incomingRuntimeId !== currentRuntimeId);
       const enrichedActivities = yield* enrichCodexSteerProcessingActivities(
         event,
-        runtimeEventToActivities(event),
+        obsoleteSubagentLifecycle ? [] : runtimeEventToActivities(event),
       );
       yield* Effect.forEach(enrichedActivities.activities, (activity) =>
-        orchestrationEngine.dispatch({
-          type: "thread.activity.append",
-          commandId:
-            activity.kind === "provider.async-questions"
-              ? CommandId.make(`provider-async-questions:${activity.id}`)
-              : providerCommandId(event, "thread-activity-append", activity.id),
-          threadId: thread.id,
-          activity,
-          createdAt: activity.createdAt,
-        }),
+        orchestrationEngine
+          .dispatch({
+            type: "thread.activity.append",
+            commandId:
+              activity.kind === "provider.async-questions"
+                ? CommandId.make(`provider-async-questions:${activity.id}`)
+                : providerCommandId(event, "thread-activity-append", activity.id),
+            threadId: thread.id,
+            ...(isSubagentLifecycle
+              ? {
+                  expectedSubagentRuntimeId:
+                    runtimeGenerationVerified && incomingRuntimeId !== undefined
+                      ? incomingRuntimeId
+                      : (currentRuntimeId ?? null),
+                }
+              : {}),
+            activity,
+            createdAt: activity.createdAt,
+          })
+          .pipe(Effect.catchIf(isSupersededSessionLifecycle, () => Effect.void)),
       ).pipe(Effect.asVoid);
 
       const settlement = enrichedActivities.settlement;

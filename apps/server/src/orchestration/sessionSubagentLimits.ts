@@ -5,6 +5,7 @@ interface SessionLimitIdentity {
   readonly providerName: string | null;
   readonly providerInstanceId?: ProviderInstanceId | null | undefined;
   readonly maxConcurrentSubagents?: MaxConcurrentSubagents | null | undefined;
+  readonly subagentRuntimeId?: string | null | undefined;
 }
 
 /**
@@ -16,9 +17,28 @@ interface SessionLimitIdentity {
 export function materializedSubagentLimitFields(
   incoming: SessionLimitIdentity,
   previous?: SessionLimitIdentity | null,
-): { readonly maxConcurrentSubagents?: MaxConcurrentSubagents | null } {
+): {
+  readonly maxConcurrentSubagents?: MaxConcurrentSubagents | null;
+  readonly subagentRuntimeId?: string | null;
+} {
+  // Ordinary parent lifecycle updates must retain the exact native context.
+  // Only an incoming provider-owned generation may replace it; never borrow
+  // an old account's context during an account/provider switch.
+  const sameBinding =
+    previous != null &&
+    incoming.threadId === previous.threadId &&
+    incoming.providerName === previous.providerName &&
+    incoming.providerInstanceId != null &&
+    incoming.providerInstanceId === previous.providerInstanceId;
+  const runtimeId =
+    incoming.subagentRuntimeId !== undefined
+      ? incoming.subagentRuntimeId
+      : sameBinding
+        ? previous.subagentRuntimeId
+        : undefined;
+  const runtimeFields = runtimeId === undefined ? {} : { subagentRuntimeId: runtimeId };
   if (incoming.maxConcurrentSubagents !== undefined) {
-    return { maxConcurrentSubagents: incoming.maxConcurrentSubagents };
+    return { ...runtimeFields, maxConcurrentSubagents: incoming.maxConcurrentSubagents };
   }
   if (
     previous !== undefined &&
@@ -29,7 +49,7 @@ export function materializedSubagentLimitFields(
     incoming.providerInstanceId === previous.providerInstanceId &&
     previous.maxConcurrentSubagents !== undefined
   ) {
-    return { maxConcurrentSubagents: previous.maxConcurrentSubagents };
+    return { ...runtimeFields, maxConcurrentSubagents: previous.maxConcurrentSubagents };
   }
-  return {};
+  return runtimeFields;
 }

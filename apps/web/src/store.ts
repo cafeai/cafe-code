@@ -190,6 +190,9 @@ function mapSession(session: OrchestrationSession): ThreadSession {
     activeTurnId: session.activeTurnId ?? undefined,
     createdAt: session.updatedAt,
     updatedAt: session.updatedAt,
+    ...(session.subagentRuntimeId !== undefined
+      ? { subagentRuntimeId: session.subagentRuntimeId }
+      : {}),
     ...(session.maxConcurrentSubagents !== undefined
       ? { maxConcurrentSubagents: session.maxConcurrentSubagents }
       : {}),
@@ -554,12 +557,14 @@ function threadSessionsEqual(
   if (left == null || right == null) return false;
   return (
     left.provider === right.provider &&
+    left.providerInstanceId === right.providerInstanceId &&
     left.status === right.status &&
     left.orchestrationStatus === right.orchestrationStatus &&
     left.activeTurnId === right.activeTurnId &&
     left.createdAt === right.createdAt &&
     left.updatedAt === right.updatedAt &&
     left.lastError === right.lastError &&
+    left.subagentRuntimeId === right.subagentRuntimeId &&
     left.maxConcurrentSubagents === right.maxConcurrentSubagents
   );
 }
@@ -1117,6 +1122,15 @@ function mergeSessionSnapshot(
 
   return {
     ...incomingSession,
+    // Ordinary lifecycle edges may omit generation evidence. Retain it only
+    // within the exact provider/account; explicit null clears it when a legacy
+    // runtime is materialized, and an account switch cannot borrow authority.
+    ...(incomingSession.subagentRuntimeId === undefined &&
+    previousSession.provider === incomingSession.provider &&
+    previousSession.providerInstanceId === incomingSession.providerInstanceId &&
+    previousSession.subagentRuntimeId !== undefined
+      ? { subagentRuntimeId: previousSession.subagentRuntimeId }
+      : {}),
     createdAt: previousSession.createdAt,
     updatedAt: maxIso(previousSession.updatedAt, incomingSession.updatedAt),
   };
@@ -2157,6 +2171,9 @@ function applyEnvironmentOrchestrationEvent(
               : {}),
             pendingSourceProposedPlan: event.payload.sourceProposedPlan,
             session: {
+              ...(previousSession?.subagentRuntimeId !== undefined
+                ? { subagentRuntimeId: previousSession.subagentRuntimeId }
+                : {}),
               ...(previousSession?.maxConcurrentSubagents !== undefined
                 ? { maxConcurrentSubagents: previousSession.maxConcurrentSubagents }
                 : {}),

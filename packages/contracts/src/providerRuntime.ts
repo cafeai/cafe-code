@@ -9,6 +9,7 @@ import {
   RuntimeItemId,
   RuntimeRequestId,
   RuntimeTaskId,
+  SubagentRuntimeId,
   ThreadId,
   TrimmedNonEmptyString,
   TurnId,
@@ -270,6 +271,7 @@ const RuntimeErrorType = Schema.Literal("runtime.error");
 
 const ProviderRuntimeEventBase = Schema.Struct({
   eventId: EventId,
+  subagentRuntimeId: Schema.optional(SubagentRuntimeId),
   provider: ProviderDriverKind,
   // Optional during the driver/instance migration. See providerInstance.ts
   // for the routing-key-vs-driver-id distinction. Once every emitter
@@ -629,6 +631,9 @@ const RuntimeSubagentObjective = TrimmedNonEmptyStringSchema.check(Schema.isMaxL
  */
 export const RuntimeSubagentPresentation = Schema.Struct({
   threadId: RuntimeSubagentThreadId,
+  // Exact origin of this observation. A later runtime may read the same
+  // history, but that cannot make old saved Working rows live again.
+  runtimeId: Schema.optional(SubagentRuntimeId),
   /**
    * Provider-owned history identity for the nested agent transcript.
    *

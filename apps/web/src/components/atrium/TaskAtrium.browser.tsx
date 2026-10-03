@@ -141,7 +141,11 @@ const atriumHarness = vi.hoisted(() => {
             environmentId: env,
             projectId: "project-1",
             title: "Port the ambiance engine to WebGL",
-            session: { provider: "claudeAgent", orchestrationStatus: "running" },
+            session: {
+              provider: "claudeAgent",
+              orchestrationStatus: "running",
+              subagentRuntimeId: "native-runtime-a",
+            },
             createdAt: new Date(now - 120_000).toISOString(),
             archivedAt: null,
             latestTurn: {
@@ -418,6 +422,7 @@ function installStructuredSubagents(
             : `Visible task description ${index + 1}`,
         subagent: {
           threadId: `claude-task-${index + 1}`,
+          runtimeId: "native-runtime-a",
           label: `Claude worker ${index + 1}`,
           objective: `Original task objective ${index + 1}`,
           status,
@@ -1093,7 +1098,12 @@ describe("TaskAtriumBoard", () => {
         payload: {
           taskId: "claude-task-1",
           status: "completed",
-          subagent: { threadId: "claude-task-1", label: "Finished audit", status: "completed" },
+          subagent: {
+            threadId: "claude-task-1",
+            runtimeId: "native-runtime-a",
+            label: "Finished audit",
+            status: "completed",
+          },
         },
       };
       environment.activityByThreadId["thread-1"] = {
@@ -1113,6 +1123,50 @@ describe("TaskAtriumBoard", () => {
       expect(row?.textContent).toContain("Done");
       expect(row?.textContent).not.toContain("Working");
     } finally {
+      restore();
+      await screen.unmount();
+      host.remove();
+    }
+  });
+
+  it("stops old worker clocks after native replacement while keeping exact history inspectable", async () => {
+    const restore = installStructuredSubagents(1);
+    const environment = atriumHarness.useStore.getState().environmentStateById["env-1"]!;
+    const summary = environment.sidebarThreadSummaryById["thread-1"]!;
+    const previousSession = summary.session;
+    atriumHarness.subagentDetailReads.mockClear();
+    const { host, screen } = await renderInTheme("dark");
+    try {
+      const worker = page.getByRole("button", {
+        name: "View Claude worker 1 activity",
+        exact: true,
+      });
+      await expect.element(worker).toBeVisible();
+      await expect.element(worker).toMatchTextContent("Working");
+      summary.session = { ...previousSession, subagentRuntimeId: "native-runtime-replacement" };
+      await expect.element(worker).toMatchTextContent("Status unavailable");
+      const row = host.querySelector('[data-cafe-atrium-subagent-row="true"]');
+      expect(row?.querySelector(".font-mono")).toBeNull();
+      await worker.click();
+      await expect.element(page.getByText("Latest worker report", { exact: true })).toBeVisible();
+      await expect
+        .element(
+          page
+            .getByRole("region", { name: "Subagent detail: Claude worker 1" })
+            .getByText("Status unavailable", { exact: true }),
+        )
+        .toBeVisible();
+      expect(atriumHarness.subagentDetailReads).toHaveBeenCalledWith({
+        threadId: "thread-1",
+        turnId: "turn-1",
+        subagentId: "claude-task-1",
+      });
+      expect(host.querySelector('[data-subagent-live-elapsed="true"]')).toBeNull();
+      await page.getByRole("button", { name: "Back to conversation", exact: true }).click();
+      summary.session = previousSession;
+      await expect.element(worker).toMatchTextContent("Working");
+    } finally {
+      summary.session = previousSession;
       restore();
       await screen.unmount();
       host.remove();
@@ -1242,7 +1296,7 @@ describe("TaskAtriumBoard", () => {
         expect(host.querySelectorAll('[data-cafe-atrium-task-card="true"]')).toHaveLength(3);
       });
       expect(host.textContent).toContain("3 threads,");
-      expect(host.textContent).toContain("1 subagent,");
+      expect(host.textContent).toContain("0 subagents,");
       expect(host.textContent).toContain("all working.");
       expect(host.textContent).toContain(
         "Nothing here asks for you. The garden keeps its own hours.",

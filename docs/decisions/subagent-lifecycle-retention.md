@@ -3,9 +3,10 @@
 Decision status: Accepted within the authorized subagent tracking repair
 Implementation status: Implemented; release qualification follows the gate below
 Created: 2026-10-04 00:28:48 JST (UTC+0900)
-Last updated: 2026-10-04 01:25:23 JST (UTC+0900)
+Last updated: 2026-10-04 03:45:51 JST (UTC+0900)
 Decision authority: implementation choice within the user's request to fix new, reused, and closed subagent tracking.
 Supersedes: the latest-turn-only activity retention rule; preserves the ownership and admission rules in [native root liveness](codex-native-root-liveness.md).
+Superseded in part by: [runtime-bound observation](subagent-runtime-observation.md), which distinguishes retained nonterminal history from confirmed current liveness without changing retention or canonical outcomes.
 
 ## Context
 

@@ -1,6 +1,6 @@
 # Provider stream reconciliation
 
-Last updated: 2026-10-04 01:25:23 JST (UTC+0900)
+Last updated: 2026-10-04 03:45:51 JST (UTC+0900)
 
 ## Ownership and exact text
 
@@ -23,6 +23,16 @@ Already-terminal historical starts/completions cannot consume a newer pending st
 This prevents future stale lifecycle mutations. It does not rewrite an already-damaged session, repair arbitrary historical state, or promise that every current native process is alive. Current live state must be verified independently before any recovery.
 
 ## Subagent ordering and native ownership
+
+Retained lifecycle and current observation are separate. The originating native
+context stamps a random generation identity onto its session and child events;
+orchestration persists current evidence and rejects stale-generation session
+mutation. Same-runtime daemon adoption preserves the identity. Native replacement
+does not. Missing/mismatched generation or a stopped/error session leaves saved
+nonterminal workers **Status unavailable**, preserving history without claiming
+completion or continuing their timers. The renderer's own WebSocket connection
+is not the native runtime boundary. See [runtime-bound observation](decisions/subagent-runtime-observation.md)
+for legacy behavior, authority and verification requirements.
 
 A subagent's restart and a metadata refresh for its previous completed run can
 arrive in the same millisecond. Timestamp plus opaque UUID sorting is not their

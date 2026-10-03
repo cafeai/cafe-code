@@ -13,6 +13,7 @@ import * as TestClock from "effect/testing/TestClock";
 import { describe, it, vi } from "vitest";
 import {
   MessageId,
+  EventId,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderItemId,
@@ -110,6 +111,7 @@ import {
   seedCodexResumedChildConversations,
   makeCodexNotificationRetirementFence,
   makeCodexChildConversationAdmissionFence,
+  makeCodexSubagentRuntimeGeneration,
   updateCodexActiveContextCompactions,
   updateCodexPendingSteerProcessingFromNotification,
   validateCodexSubagentThreadReadMetadata,
@@ -126,6 +128,38 @@ import {
 } from "../codexSteerCorrelation.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
 const decodeMessageId = Schema.decodeUnknownSync(MessageId);
+
+it("binds native event generations to the originating runtime across resume and delayed publication", () => {
+  const original = makeCodexSubagentRuntimeGeneration();
+  const replacement = makeCodexSubagentRuntimeGeneration();
+  assert.match(
+    original.subagentRuntimeId,
+    /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/u,
+  );
+  assert.notEqual(original.subagentRuntimeId, replacement.subagentRuntimeId);
+  const event = {
+    id: EventId.make("generation-event"),
+    kind: "notification" as const,
+    provider: ProviderDriverKind.make("codex"),
+    threadId: ThreadId.make("same-resumed-cafe-thread"),
+    createdAt: "2026-10-04T00:00:00.000Z",
+    method: "codex.subagent/threadStatusChanged",
+    payload: { threadId: "same-native-child", status: { type: "active" } },
+  };
+  assert.equal(original.stampEvent(event).subagentRuntimeId, original.subagentRuntimeId);
+  assert.equal(replacement.stampEvent(event).subagentRuntimeId, replacement.subagentRuntimeId);
+  // A queued old publisher remains bound to the original context even if an
+  // input envelope attempts to supply the replacement identity.
+  assert.equal(
+    original.stampEvent({ ...event, subagentRuntimeId: replacement.subagentRuntimeId })
+      .subagentRuntimeId,
+    original.subagentRuntimeId,
+  );
+  assert.equal(
+    original.stampEvent({ ...event, kind: "session", method: "session/exited" }).subagentRuntimeId,
+    original.subagentRuntimeId,
+  );
+});
 
 effectIt.effect(
   "denies retirement after a child notification is dequeued but before its handler binds work",
@@ -776,6 +810,58 @@ it("publishes snapshot child terminal facts only while the exact sampled binding
       ...input,
       results: [{ providerThreadId: "child", state: undefined }],
     }).terminals,
+    [],
+  );
+});
+
+it("confirms resumed activity once from an unchanged native metadata read, never from stale or failed observations", () => {
+  const turnId = TurnId.make("resume-owner");
+  const child = {
+    parentTurnId: turnId,
+    state: "unknown" as const,
+    observedAt: "2026-10-04T00:00:00.000Z",
+    method: "session-resume-child-discovery",
+  };
+  const sampled = new Map([["child", child]]);
+  const input = {
+    turnId,
+    observedAt: "2026-10-04T00:00:01.000Z",
+    sampled,
+    current: sampled,
+    routes: new Map([["child", turnId]]),
+    results: [
+      { providerThreadId: "child", state: "active" as const, threadName: "Current native worker" },
+    ],
+  };
+  const confirmed = reconcileCodexChildLivenessSnapshots(input);
+  assert.deepEqual(confirmed.activeConfirmations, input.results);
+  assert.deepEqual(confirmed.terminals, []);
+  assert.equal(confirmed.liveness.get("child")?.state, "active");
+  assert.deepEqual(
+    reconcileCodexChildLivenessSnapshots({
+      ...input,
+      sampled: confirmed.liveness,
+      current: confirmed.liveness,
+    }).activeConfirmations,
+    [],
+  );
+  assert.deepEqual(
+    reconcileCodexChildLivenessSnapshots({ ...input, current: new Map([["child", { ...child }]]) })
+      .activeConfirmations,
+    [],
+  );
+  assert.deepEqual(
+    reconcileCodexChildLivenessSnapshots({
+      ...input,
+      routes: new Map([["child", TurnId.make("different-owner")]]),
+    }).activeConfirmations,
+    [],
+  );
+  assert.deepEqual(
+    reconcileCodexChildLivenessSnapshots({
+      ...input,
+      results: [{ providerThreadId: "child", state: undefined }],
+    }).activeConfirmations,
     [],
   );
 });
@@ -5671,6 +5757,31 @@ describe("isRecoverableThreadResumeError", () => {
 });
 
 describe("buildCodexThreadSnapshotBackfillEvents", () => {
+  it("never turns historical child collaboration into current-runtime task evidence", () => {
+    const root = makeCodexResumeChildSnapshot(["historical-child"]);
+    const events = buildCodexThreadSnapshotBackfillEvents({
+      threadId: ThreadId.make("cafe-root"),
+      providerThread: root,
+      reason: "session-resume",
+      createdAt: "2026-10-04T00:00:00.000Z",
+    });
+    assert.ok(root.turns[0]!.items.length > 0);
+    assert.ok(events.length > 0);
+    assert.equal(
+      events.some((event) => event.method.startsWith("codex.subagent/")),
+      false,
+    );
+    assert.equal(
+      events.some((event) => event.method === "item/completed"),
+      false,
+    );
+    const generation = makeCodexSubagentRuntimeGeneration();
+    for (const event of events) {
+      assert.ok(event.method === "turn/started" || event.method === "turn/completed");
+      assert.equal(generation.stampEvent(event).subagentRuntimeId, generation.subagentRuntimeId);
+    }
+  });
+
   it("emits normal lifecycle events for the latest assistant snapshot turn", () => {
     const events = buildCodexThreadSnapshotBackfillEvents({
       threadId: ThreadId.make("thread-1"),

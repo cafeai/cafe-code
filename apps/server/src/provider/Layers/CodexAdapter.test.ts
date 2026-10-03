@@ -1410,6 +1410,232 @@ function startLifecycleRuntime() {
 }
 
 lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
+  it.effect("preserves the originating runtime on child activity and lifecycle envelopes", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const originalId = "42b69839-1c6d-45f5-ab7b-7d7cc374342c";
+      const replacementId = "e9480f5a-911a-44ce-906d-c6011f13aaed";
+      const resultFiber = yield* Stream.take(adapter.streamEvents, 4).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      for (const [index, subagentRuntimeId] of [
+        originalId,
+        replacementId,
+        originalId,
+        undefined,
+      ].entries()) {
+        yield* runtime.emit({
+          id: asEventId(`origin-stamp-${index}`),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("original-owner-turn"),
+          createdAt: "2026-10-04T00:00:00.000Z",
+          subagentRuntimeId,
+          method: index === 1 ? "session/ready" : "codex.subagent/threadStatusChanged",
+          payload: { threadId: "same-child", status: { type: "active", activeFlags: [] } },
+        });
+      }
+      const events = Array.from(yield* Fiber.join(resultFiber));
+      assert.deepEqual(
+        events.map((event) => event.subagentRuntimeId),
+        [originalId, replacementId, originalId, undefined],
+      );
+      for (const event of [events[0], events[2]]) {
+        assert.equal(event?.type, "task.progress");
+        if (event?.type === "task.progress")
+          assert.equal(event.payload.subagent?.runtimeId, originalId);
+      }
+      const historical = events[3];
+      assert.equal(historical?.type, "task.progress");
+      if (historical?.type === "task.progress") {
+        assert.equal(historical.payload.subagent?.runtimeId, undefined);
+        assert.equal(Object.hasOwn(historical.payload.subagent!, "runtimeId"), false);
+      }
+    }),
+  );
+
+  it.effect(
+    "does not treat passive child metadata as new-runtime liveness or let it erase terminal provenance",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const originalId = "42b69839-1c6d-45f5-ab7b-7d7cc374342c";
+        const replacementId = "e9480f5a-911a-44ce-906d-c6011f13aaed";
+        const resultFiber = yield* Stream.take(adapter.streamEvents, 8).pipe(
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        const frames = [
+          [
+            originalId,
+            "codex.subagent/threadStatusChanged",
+            { threadId: "child", status: { type: "active", activeFlags: [] } },
+          ],
+          [
+            originalId,
+            "codex.subagent/threadStatusChanged",
+            { threadId: "child", status: { type: "idle" } },
+          ],
+          [
+            replacementId,
+            "codex.subagent/threadNameUpdated",
+            { threadId: "child", threadName: "Updated name" },
+          ],
+          [
+            replacementId,
+            "item/completed",
+            {
+              completedAtMs: 1_791_072_000_000,
+              threadId: "native-root",
+              turnId: "owner",
+              item: {
+                id: "control",
+                type: "collabAgentToolCall",
+                tool: "resumeAgent",
+                status: "completed",
+                senderThreadId: "native-root",
+                receiverThreadIds: ["child"],
+                prompt: null,
+                model: null,
+                reasoningEffort: null,
+                agentsStates: {},
+              },
+            },
+          ],
+          [
+            replacementId,
+            "codex.subagent/threadStatusChanged",
+            { threadId: "child", status: { type: "active", activeFlags: [] } },
+          ],
+          [
+            replacementId,
+            "codex.subagent/threadStatusChanged",
+            { threadId: "child", status: { type: "idle" } },
+          ],
+          [
+            undefined,
+            "codex.subagent/threadNameUpdated",
+            { threadId: "child", threadName: "Unverified historical name" },
+          ],
+          [
+            replacementId,
+            "codex.subagent/threadStatusChanged",
+            { threadId: "child", status: { type: "active", activeFlags: [] } },
+          ],
+        ] as const;
+        for (const [index, [subagentRuntimeId, method, payload]] of frames.entries()) {
+          yield* runtime.emit({
+            id: asEventId(`passive-stamp-${index}`),
+            kind: "notification",
+            provider: ProviderDriverKind.make("codex"),
+            threadId: asThreadId("thread-1"),
+            turnId: asTurnId("owner"),
+            createdAt: index < 2 ? "2026-09-01T00:00:00.000Z" : "2026-10-04T00:00:00.000Z",
+            subagentRuntimeId,
+            method,
+            payload,
+          });
+        }
+        const events = Array.from(yield* Fiber.join(resultFiber));
+        const presentations = events.map((event) =>
+          event.type === "task.progress" || event.type === "task.completed"
+            ? event.payload.subagent
+            : undefined,
+        );
+        assert.deepEqual(
+          presentations.map((presentation) => presentation?.runtimeId),
+          [
+            originalId,
+            originalId,
+            undefined,
+            undefined,
+            replacementId,
+            replacementId,
+            undefined,
+            replacementId,
+          ],
+        );
+        assert.deepEqual(
+          presentations.map((presentation) => presentation?.status),
+          [
+            "active",
+            "completed",
+            "completed",
+            "completed",
+            "active",
+            "completed",
+            "completed",
+            "completed",
+          ],
+        );
+        assert.equal(presentations[0]?.startedAt, "2026-09-01T00:00:00.000Z");
+        assert.equal(presentations[1]?.startedAt, "2026-09-01T00:00:00.000Z");
+        // Current-runtime proof starts a new observed clock, never inheriting
+        // the old runtime's month-long historical timer. Later same-runtime
+        // terminal/progress edges retain the replacement's clock.
+        assert.equal(presentations[4]?.startedAt, "2026-10-04T00:00:00.000Z");
+        assert.equal(presentations[5]?.startedAt, "2026-10-04T00:00:00.000Z");
+        assert.equal(presentations[7]?.startedAt, "2026-10-04T00:00:00.000Z");
+      }),
+  );
+
+  it.effect(
+    "does not treat loaded idle child snapshots or historical creation times as live work",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const runtimeId = "42b69839-1c6d-45f5-ab7b-7d7cc374342c";
+        const resultFiber = yield* Stream.take(adapter.streamEvents, 3).pipe(
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        for (const type of ["idle", "notLoaded", "active"] as const) {
+          yield* runtime.emit({
+            id: asEventId(`loaded-child-${type}`),
+            kind: "notification",
+            provider: ProviderDriverKind.make("codex"),
+            threadId: asThreadId("thread-1"),
+            turnId: asTurnId("owner"),
+            createdAt: "2026-10-04T00:00:00.000Z",
+            subagentRuntimeId: runtimeId,
+            method: "codex.subagent/threadStarted",
+            payload: {
+              thread: {
+                id: `child-${type}`,
+                cliVersion: "0.160.0",
+                createdAt: Date.parse("2026-09-01T00:00:00.000Z") / 1_000,
+                updatedAt: Date.parse("2026-09-01T00:00:00.000Z") / 1_000,
+                cwd: process.cwd(),
+                ephemeral: false,
+                modelProvider: "openai",
+                preview: "",
+                projectId: null,
+                sessionId: "native-session",
+                source: "appServer",
+                status: type === "active" ? { type, activeFlags: [] } : { type },
+                turns: [],
+              },
+            },
+          });
+        }
+        const events = Array.from(yield* Fiber.join(resultFiber));
+        assert.deepEqual(
+          events.map((event) => event.type),
+          ["task.progress", "task.progress", "task.progress"],
+        );
+        const presentations = events.map((event) =>
+          event.type === "task.progress" ? event.payload.subagent : undefined,
+        );
+        assert.deepEqual(
+          presentations.map((presentation) => presentation?.runtimeId),
+          [undefined, undefined, runtimeId],
+        );
+        assert.equal(presentations[2]?.startedAt, "2026-10-04T00:00:00.000Z");
+      }),
+  );
+
   it.effect(
     "publishes authoritative resumed child terminal and bounded native rename without replaying a start",
     () =>

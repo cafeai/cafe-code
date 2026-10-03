@@ -17,6 +17,7 @@ import {
   deriveSubagentActivities,
   type DerivedSubagentActivity,
   type SubagentRunStatus,
+  type SubagentRuntimeContext,
 } from "../../subagent-activity";
 
 /**
@@ -124,6 +125,8 @@ type CachedSubagentRows = {
   activityById: Record<string, OrchestrationThreadActivity>;
   latestTurnId: TurnId | null;
   cardTerminal: boolean;
+  runtimeId: string | null | undefined;
+  runtimeStatus: OrchestrationSessionStatus | null;
   rows: AtriumSubagent[];
 };
 
@@ -197,13 +200,16 @@ function collectSubagents(
   activityById: Record<string, OrchestrationThreadActivity> | undefined,
   latestTurnId: TurnId | null,
   cardTerminal: boolean,
+  runtimeSession: SubagentRuntimeContext | null,
 ): AtriumSubagent[] {
   if (!activityIds || !activityById) return [];
   const cached = SUBAGENT_ROWS_BY_ACTIVITY_IDS.get(activityIds);
   if (
     cached?.activityById === activityById &&
     cached.latestTurnId === latestTurnId &&
-    cached.cardTerminal === cardTerminal
+    cached.cardTerminal === cardTerminal &&
+    cached.runtimeId === runtimeSession?.subagentRuntimeId &&
+    cached.runtimeStatus === (runtimeSession?.orchestrationStatus ?? null)
   ) {
     return cached.rows;
   }
@@ -226,34 +232,37 @@ function collectSubagents(
     }
   }
 
-  const rows = deriveSubagentActivities(
-    activities,
-    terminalTurnIds.size > 0 ? { terminalTurnIds } : {},
-  ).map((subagent) => ({
-    activity: subagent,
-    rowKey: subagent.rowId,
-    id: subagent.id,
-    label: subagent.label,
-    detail:
-      // Keep the live provider description visible in the card. The original
-      // objective remains the fallback before Codex/Claude reports progress;
-      // it must never be relegated to a hover-only affordance.
-      subagent.description ??
-      subagent.objective ??
-      (subagent.status === "waiting"
-        ? "Waiting"
-        : subagent.status === "active"
-          ? "Working"
-          : "Done"),
-    status: subagent.status,
-    running: subagent.status === "active" || subagent.status === "waiting",
-    startedAt: toEpoch(subagent.startedAt),
-    completedAt: toEpoch(subagent.completedAt),
-  }));
+  const rows = deriveSubagentActivities(activities, { terminalTurnIds, runtimeSession }).map(
+    (subagent) => ({
+      activity: subagent,
+      rowKey: subagent.rowId,
+      id: subagent.id,
+      label: subagent.label,
+      detail:
+        // Keep the live provider description visible in the card. The original
+        // objective remains the fallback before Codex/Claude reports progress;
+        // it must never be relegated to a hover-only affordance.
+        subagent.description ??
+        subagent.objective ??
+        (subagent.status === "waiting"
+          ? "Waiting"
+          : subagent.status === "active"
+            ? "Working"
+            : subagent.status === "unknown"
+              ? "Status unavailable"
+              : "Done"),
+      status: subagent.status,
+      running: subagent.status === "active" || subagent.status === "waiting",
+      startedAt: toEpoch(subagent.startedAt),
+      completedAt: toEpoch(subagent.completedAt),
+    }),
+  );
   SUBAGENT_ROWS_BY_ACTIVITY_IDS.set(activityIds, {
     activityById,
     latestTurnId,
     cardTerminal,
+    runtimeId: runtimeSession?.subagentRuntimeId,
+    runtimeStatus: runtimeSession?.orchestrationStatus ?? null,
     rows,
   });
   return rows;
@@ -461,6 +470,7 @@ export function selectAtriumSnapshot(
         activityById,
         latestTurn?.turnId ?? null,
         cardState === "done" || cardState === "error",
+        session,
       );
       subagentCount += rows.filter((row) => row.running).length;
 

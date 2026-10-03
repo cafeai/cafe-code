@@ -36,7 +36,7 @@ describe("SessionRail", () => {
 
   it("counts only current workers and clears terminal rows without deleting historical input", async () => {
     const history: WorkLogEntry[] = (
-      ["active", "waiting", "completed", "failed", "stopped"] as const
+      ["active", "waiting", "completed", "failed", "stopped", "unknown"] as const
     ).map((status) => ({
       id: `rail-${status}`,
       label: `Rail worker ${status}`,
@@ -64,7 +64,7 @@ describe("SessionRail", () => {
       expect(document.querySelectorAll('[data-composer-subagent-list="true"] button')).toHaveLength(
         2,
       );
-      for (const status of ["completed", "failed", "stopped"])
+      for (const status of ["completed", "failed", "stopped", "unknown"])
         expect(document.body.textContent).not.toContain(`Rail worker ${status}`);
       await screen.rerender(
         <SessionRail
@@ -86,6 +86,7 @@ describe("SessionRail", () => {
         "completed",
         "failed",
         "stopped",
+        "unknown",
       ]);
     } finally {
       await screen.unmount();

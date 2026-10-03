@@ -1732,6 +1732,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             : null,
           runtimeMode: event.payload.runtimeMode,
           ...(Option.isSome(existingSession) &&
+          existingSession.value.subagentRuntimeId !== undefined
+            ? { subagentRuntimeId: existingSession.value.subagentRuntimeId }
+            : {}),
+          ...(Option.isSome(existingSession) &&
           existingSession.value.maxConcurrentSubagents !== undefined
             ? { maxConcurrentSubagents: existingSession.value.maxConcurrentSubagents }
             : {}),

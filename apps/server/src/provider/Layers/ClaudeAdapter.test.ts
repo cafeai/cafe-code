@@ -423,6 +423,90 @@ describe("Claude project directory encoding", () => {
 
 describe("ClaudeAdapterLive", () => {
   it.effect(
+    "binds child and session events to one query generation and replaces it only with a new query",
+    () => {
+      const harness = makeHarness({ newQueryPerSession: true, environment: {} });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const events: ProviderRuntimeEvent[] = [];
+        const firstChildSeen = yield* Deferred.make<void>();
+        const secondChildSeen = yield* Deferred.make<void>();
+        yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.gen(function* () {
+            events.push(event);
+            if (event.type === "task.started") {
+              if (event.payload.subagent?.label === "Original worker")
+                yield* Deferred.succeed(firstChildSeen, undefined);
+              if (event.payload.subagent?.label === "Replacement worker")
+                yield* Deferred.succeed(secondChildSeen, undefined);
+            }
+          }),
+        ).pipe(Effect.forkChild);
+        const original = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "full-access",
+        });
+        assert.match(
+          original.subagentRuntimeId!,
+          /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/u,
+        );
+        yield* adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: "Synthetic prompt",
+          attachments: [],
+        });
+        harness.query.emit({
+          type: "system",
+          subtype: "task_started",
+          task_id: "same-child",
+          tool_use_id: "original-tool",
+          description: "Original worker",
+          task_type: "local_agent",
+          session_id: "same-native-history",
+          uuid: "original-child-start",
+        } as unknown as SDKMessage);
+        yield* Deferred.await(firstChildSeen);
+        assert.equal(
+          (yield* adapter.listSessions())[0]?.subagentRuntimeId,
+          original.subagentRuntimeId,
+        );
+        yield* adapter.stopSession(THREAD_ID);
+        const replacement = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "full-access",
+        });
+        assert.notEqual(replacement.subagentRuntimeId, original.subagentRuntimeId);
+        harness.queries[1]!.emit({
+          type: "system",
+          subtype: "task_started",
+          task_id: "same-child",
+          tool_use_id: "replacement-tool",
+          description: "Replacement worker",
+          task_type: "local_agent",
+          session_id: "same-native-history",
+          uuid: "replacement-child-start",
+        } as unknown as SDKMessage);
+        yield* Deferred.await(secondChildSeen);
+        const childEvents = events.filter((event) => event.type === "task.started");
+        assert.deepEqual(
+          childEvents.map((event) => event.subagentRuntimeId),
+          [original.subagentRuntimeId, replacement.subagentRuntimeId],
+        );
+        for (const event of childEvents)
+          assert.equal(event.payload.subagent?.runtimeId, event.subagentRuntimeId);
+        const exit = events.find((event) => event.type === "session.exited");
+        assert.equal(exit?.subagentRuntimeId, original.subagentRuntimeId);
+        assert.deepEqual(
+          events
+            .filter((event) => event.type === "session.started")
+            .map((event) => event.subagentRuntimeId),
+          [original.subagentRuntimeId, replacement.subagentRuntimeId],
+        );
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect(
     "isolates per-chat Claude concurrency environments and snapshots inherited/reset overrides",
     () => {
       const baseEnvironment = Object.freeze({ CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: "128" });
@@ -4302,6 +4386,8 @@ describe("ClaudeAdapterLive", () => {
 
         const expectedStartedAt = structuredEvents[0]?.payload.subagent?.startedAt;
         assert.ok(expectedStartedAt);
+        const expectedRuntimeId = (yield* adapter.listSessions())[0]?.subagentRuntimeId;
+        assert.ok(expectedRuntimeId);
         const expectedStatuses = ["active", "active", "waiting", "completed"] as const;
         for (const [index, event] of structuredEvents.entries()) {
           assert.deepEqual(event.payload.subagent, {
@@ -4311,6 +4397,7 @@ describe("ClaudeAdapterLive", () => {
             objective: "Inspect every task event mapping and report exact lifecycle gaps.",
             status: expectedStatuses[index],
             startedAt: expectedStartedAt,
+            runtimeId: expectedRuntimeId,
           });
         }
 

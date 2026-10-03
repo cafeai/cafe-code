@@ -1,6 +1,36 @@
-import type { OrchestrationThreadActivity, TurnId } from "@cafecode/contracts";
+import type {
+  OrchestrationSessionStatus,
+  OrchestrationThreadActivity,
+  TurnId,
+} from "@cafecode/contracts";
 
-export type SubagentRunStatus = "waiting" | "active" | "completed" | "failed" | "stopped";
+export type SubagentRunStatus =
+  | "waiting"
+  | "active"
+  | "completed"
+  | "failed"
+  | "stopped"
+  | "unknown";
+
+/** Provider-process evidence, independent of the renderer's WebSocket connection. */
+export interface SubagentRuntimeContext {
+  readonly subagentRuntimeId?: string | null | undefined;
+  readonly orchestrationStatus: OrchestrationSessionStatus;
+}
+
+/** Only exact native-generation evidence establishes current child liveness. */
+export function isSubagentRuntimeCurrent(
+  runtimeId: string | undefined,
+  session: SubagentRuntimeContext | null,
+): boolean {
+  return (
+    session !== null &&
+    session.orchestrationStatus !== "stopped" &&
+    session.orchestrationStatus !== "error" &&
+    typeof session.subagentRuntimeId === "string" &&
+    runtimeId === session.subagentRuntimeId
+  );
+}
 
 export interface DerivedSubagentActivity {
   /** Provider child-thread/task identity; also the deterministic avatar seed. */
@@ -27,6 +57,8 @@ export interface DerivedSubagentActivity {
    * identity: Claude task ids and transcript ids are separate namespaces.
    */
   historyId?: string;
+  /** Opaque native runtime generation; never display it or use it for history routing. */
+  runtimeId?: string;
 }
 
 const DISPLAY_TEXT_LIMIT = 240;
@@ -35,6 +67,12 @@ const ID_TEXT_LIMIT = 512;
 export interface DeriveSubagentActivityOptions {
   /** Legacy prose-only rows on these known-terminal turns cannot receive a new structured edge. */
   readonly terminalTurnIds?: ReadonlySet<TurnId> | undefined;
+  /**
+   * null means no current native runtime has been established. Omission is
+   * reserved for raw lifecycle consumers/tests; user-facing surfaces always
+   * supply the session evidence, including when it is unavailable.
+   */
+  readonly runtimeSession?: SubagentRuntimeContext | null | undefined;
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -156,10 +194,29 @@ function upsertStructuredSubagent(
   byId: Map<string, DerivedSubagentActivity>,
   activity: OrchestrationThreadActivity,
   payload: Record<string, unknown>,
+  options: DeriveSubagentActivityOptions,
 ): boolean {
   const presentation = record(payload.subagent);
   const presentationId = exactOpaqueIdentity(presentation?.threadId);
   const taskId = exactOpaqueIdentity(payload.taskId);
+  // Every native observation owns its own generation. An unstamped legacy
+  // update cannot borrow an earlier generation and assert current liveness.
+  const runtimeId = exactOpaqueIdentity(presentation?.runtimeId);
+  const currentRuntimeId = options.runtimeSession?.subagentRuntimeId;
+  const superseded = (id: string): boolean => {
+    const previous = byId.get(subagentMapKey(activity, id));
+    return (
+      typeof currentRuntimeId === "string" &&
+      previous?.runtimeId === currentRuntimeId &&
+      runtimeId !== currentRuntimeId
+    );
+  };
+
+  // Restored history can interleave delayed observations from replaced native
+  // processes. Once this exact child has current-generation evidence, foreign
+  // or unstamped progress/terminal/visibility rows cannot overwrite it. Runtime
+  // identity remains observation evidence, not a new transcript routing key.
+  if ((presentationId && superseded(presentationId)) || (taskId && superseded(taskId))) return true;
 
   if (payload.visibility === "ambient") {
     // Visibility is an authoritative lifecycle dimension, not a synthetic
@@ -192,10 +249,22 @@ function upsertStructuredSubagent(
     previous?.status === "completed" ||
     previous?.status === "failed" ||
     previous?.status === "stopped";
-  const isRestart = activity.kind === "task.started" && previousTerminal;
+  const freshCurrentRuntime =
+    typeof currentRuntimeId === "string" &&
+    runtimeId === currentRuntimeId &&
+    previous !== undefined &&
+    previous.runtimeId !== currentRuntimeId;
+  const currentRuntimeReconfirmation =
+    freshCurrentRuntime &&
+    (activity.kind === "task.progress" || activity.kind === "task.started") &&
+    (presentation.status === "active" || presentation.status === "waiting");
+  const isRestart =
+    (previousTerminal && activity.kind === "task.started") || currentRuntimeReconfirmation;
   // Durable provider order is authoritative. A delayed/replayed progress edge
   // after completion must not resurrect a child or restart its clock. Only an
-  // explicit new task.started edge can reopen the same provider identity.
+  // explicit new task.started edge can reopen the same native generation.
+  // Exact active metadata from a replacement runtime is distinct fresh
+  // provider evidence, not delayed progress from the terminal old process.
   if (previousTerminal && !isRestart) {
     // A native thread rename can arrive after completion. Keep presentation
     // metadata fresh without reopening work, moving its terminal clock, or
@@ -249,6 +318,7 @@ function upsertStructuredSubagent(
     updatedAt: activity.createdAt,
     lifecycleRevision: lifecycleRevision(activity),
     ...(historyId ? { historyId } : {}),
+    ...(runtimeId ? { runtimeId } : {}),
     ...(terminal
       ? { completedAt: activity.createdAt }
       : previous?.completedAt && !isRestart
@@ -309,6 +379,11 @@ function upsertLegacySubagent(
   const key = subagentMapKey(activity, id);
   const previous = byId.get(key);
   const split = splitLegacyDetail(detail);
+  if (
+    typeof options.runtimeSession?.subagentRuntimeId === "string" &&
+    previous?.runtimeId === options.runtimeSession.subagentRuntimeId
+  )
+    return;
   const status = legacySubagentStatus(activity, detail, options.terminalTurnIds);
   const terminal = status === "completed" || status === "failed" || status === "stopped";
   const priorMeaningfulDescription = isGenericWorkingDescription(previous?.description)
@@ -358,10 +433,36 @@ export function deriveSubagentActivities(
   for (const activity of ordered) {
     const payload = record(activity.payload);
     if (!payload) continue;
-    if (upsertStructuredSubagent(byId, activity, payload)) continue;
+    if (upsertStructuredSubagent(byId, activity, payload, options)) continue;
     upsertLegacySubagent(byId, activity, payload, options);
   }
-  return [...byId.values()].toSorted((left, right) => {
+  // Reconcile all canonical lifecycle edges before applying this presentation
+  // overlay. Unknown is not provider completion and must not participate in
+  // terminal-monotonic coalescing, persist a made-up end time, or hide history.
+  // A matching surviving daemon keeps its clock across renderer reconnects;
+  // a replacement/stopped runtime cannot inherit historical Working claims.
+  const rows: DerivedSubagentActivity[] = [];
+  for (const subagent of byId.values()) {
+    if (
+      options.runtimeSession === undefined ||
+      (subagent.status !== "active" && subagent.status !== "waiting")
+    ) {
+      rows.push(subagent);
+      continue;
+    }
+    if (isSubagentRuntimeCurrent(subagent.runtimeId, options.runtimeSession)) {
+      rows.push(subagent);
+      continue;
+    }
+    const { description, ...retained } = subagent;
+    rows.push({
+      ...retained,
+      ...(description && !isGenericWorkingDescription(description) ? { description } : {}),
+      status: "unknown",
+      lifecycleRevision: `${subagent.lifecycleRevision}:unverified`,
+    });
+  }
+  return rows.toSorted((left, right) => {
     const leftLive = left.status === "active" || left.status === "waiting";
     const rightLive = right.status === "active" || right.status === "waiting";
     if (leftLive !== rightLive) return Number(rightLive) - Number(leftLive);

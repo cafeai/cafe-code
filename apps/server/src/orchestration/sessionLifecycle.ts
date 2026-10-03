@@ -12,6 +12,9 @@ export function sessionLifecycleSnapshot(session: OrchestrationSession | null) {
         activeTurnId: session.activeTurnId,
         providerName: session.providerName,
         providerInstanceId: session.providerInstanceId ?? null,
+        ...(session.subagentRuntimeId !== undefined
+          ? { subagentRuntimeId: session.subagentRuntimeId }
+          : {}),
         updatedAt: session.updatedAt,
       };
 }
@@ -30,7 +33,10 @@ export function isSupersededSessionLifecycle(error: {
       error.detail === SESSION_LIFECYCLE_SUPERSEDED) ||
     (error._tag === "OrchestrationCommandPreviouslyRejectedError" &&
       error.detail ===
-        `Orchestration command invariant failed (thread.session.set): ${SESSION_LIFECYCLE_SUPERSEDED}`)
+        `Orchestration command invariant failed (thread.session.set): ${SESSION_LIFECYCLE_SUPERSEDED}`) ||
+    (error._tag === "OrchestrationCommandPreviouslyRejectedError" &&
+      error.detail ===
+        `Orchestration command invariant failed (thread.activity.append): ${SESSION_LIFECYCLE_SUPERSEDED}`)
   );
 }
 

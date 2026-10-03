@@ -370,6 +370,9 @@ function toRuntimePayloadFromSession(
     additionalDirectories: session.additionalDirectories ?? [],
     model: session.model ?? null,
     activeTurnId: session.activeTurnId ?? null,
+    // Explicit null clears old evidence if a legacy/unqualified adapter is
+    // materialized. Directory payload upserts otherwise merge partial fields.
+    subagentRuntimeId: session.subagentRuntimeId ?? null,
     lastError: session.lastError ?? null,
     // Null is a materialized inherited policy, not a missing field. Retain it
     // explicitly so a later reset cannot resurrect a former numeric override
@@ -863,6 +866,26 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         ? (event.payload as { readonly resumeCursor?: unknown }).resumeCursor
         : undefined;
     return Effect.gen(function* () {
+      const previous = Option.getOrUndefined(yield* directory.getBinding(event.threadId));
+      const recordedRuntimeId = isRecord(previous?.runtimePayload)
+        ? previous.runtimePayload.subagentRuntimeId
+        : undefined;
+      if (typeof recordedRuntimeId === "string" && event.subagentRuntimeId !== recordedRuntimeId) {
+        // A late old-context terminal/start remains valid history but cannot
+        // overwrite a replacement's durable lifecycle. Replacement admission
+        // is owned by the adapter's current-session snapshot, not event age.
+        const adapter = yield* registry.getByInstance(providerInstanceId);
+        const currentSessions = yield* adapter.listSessions();
+        if (
+          !currentSessions.some(
+            (session) =>
+              session.threadId === event.threadId &&
+              session.subagentRuntimeId !== undefined &&
+              session.subagentRuntimeId === event.subagentRuntimeId,
+          )
+        )
+          return;
+      }
       const runtimeOwnerHeartbeatAt = yield* nowIso;
       yield* directory.upsert({
         threadId: event.threadId,
@@ -875,6 +898,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           ...(lastError !== undefined ? { lastError } : {}),
           lastRuntimeEvent: event.type,
           lastRuntimeEventAt: event.createdAt,
+          ...(event.subagentRuntimeId !== undefined
+            ? { subagentRuntimeId: event.subagentRuntimeId }
+            : {}),
           ...makeProviderRuntimeOwnerPayload(runtimeOwner, runtimeOwnerHeartbeatAt),
         },
       });
@@ -1146,6 +1172,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
                   provider: latest.provider,
                   providerInstanceId: instanceId,
                   threadId: latest.threadId,
+                  ...(isRecord(latest.runtimePayload) &&
+                  typeof latest.runtimePayload.subagentRuntimeId === "string"
+                    ? { subagentRuntimeId: latest.runtimePayload.subagentRuntimeId }
+                    : {}),
                   ...(isTurnId(activeTurnId) ? { turnId: activeTurnId } : {}),
                   createdAt,
                   payload: {

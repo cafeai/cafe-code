@@ -162,7 +162,7 @@ describe("ComposerTaskProgress", () => {
     ];
     // Historical workers remain available to Atrium, but must not contribute
     // either rows or the current-work trigger count on this Tasks surface.
-    for (const status of ["completed", "failed", "stopped"] as const) {
+    for (const status of ["completed", "failed", "stopped", "unknown"] as const) {
       subagents.push({
         id: `historical-${status}`,
         label: `Historical ${status}`,

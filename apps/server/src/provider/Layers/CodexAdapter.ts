@@ -1341,6 +1341,7 @@ function replaceSensitiveNativeEventPayload(
     ...(event.providerInstanceId ? { providerInstanceId: event.providerInstanceId } : {}),
     threadId: event.threadId,
     createdAt: event.createdAt,
+    ...(event.subagentRuntimeId ? { subagentRuntimeId: event.subagentRuntimeId } : {}),
     method: event.method,
     ...(event.turnId ? { turnId: event.turnId } : {}),
     ...(event.itemId ? { itemId: event.itemId } : {}),
@@ -1848,6 +1849,7 @@ function runtimeEventBase(
     provider: event.provider,
     threadId: canonicalThreadId,
     createdAt: event.createdAt,
+    ...(event.subagentRuntimeId ? { subagentRuntimeId: event.subagentRuntimeId } : {}),
     ...(event.turnId ? { turnId: event.turnId } : {}),
     ...(event.itemId ? { itemId: asRuntimeItemId(event.itemId) } : {}),
     ...(event.requestId ? { requestId: asRuntimeRequestId(event.requestId) } : {}),
@@ -2018,24 +2020,65 @@ function enrichCodexSubagentPresentations(
       previous?.status === "completed" ||
       previous?.status === "failed" ||
       previous?.status === "stopped";
+    const rawPayload = readRecordValue(event.raw?.payload);
+    const metadataOnly =
+      rawPayload?.source === "codex.child.threadNameUpdated" ||
+      (rawPayload?.source === "codex.child.threadStarted" &&
+        (rawPayload.status === "idle" || rawPayload.status === "notLoaded")) ||
+      (event.type === "task.progress" &&
+        rawPayload?.source === "codex.collabAgentToolCall" &&
+        rawPayload.agentStatus == null);
+    // A rename or completed control RPC is not proof the child is working.
+    // Preserve a previously established proof only for this exact runtime.
+    const runtimeId = metadataOnly
+      ? previous?.runtimeId === event.subagentRuntimeId
+        ? previous?.runtimeId
+        : undefined
+      : event.subagentRuntimeId;
+    // An exact child status read in a replacement runtime can establish new
+    // work even if the old process ended that child. Within the same runtime,
+    // passive status/progress still cannot reopen a completed native turn.
+    const freshActiveConfirmation =
+      event.type === "task.progress" &&
+      incoming.status === "active" &&
+      (rawPayload?.source === "codex.child.threadStatusChanged" ||
+        rawPayload?.source === "codex.child.threadStarted") &&
+      runtimeId !== undefined &&
+      previous?.runtimeId !== runtimeId;
+    const terminalIsAuthoritative = previousTerminal && !freshActiveConfirmation;
     // thread/started can be a loaded idle snapshot, not a new child turn. It
     // must not reopen an already terminal task. A concrete active start still
     // reopens it, and metadata-only progress continues updating its name.
     const passiveSnapshot =
-      event.type === "task.started" && previousTerminal && incoming.status === "waiting";
+      event.type === "task.started" && terminalIsAuthoritative && incoming.status === "waiting";
     const restarting = event.type === "task.started" && previousTerminal && !passiveSnapshot;
+    const newRuntimeWork =
+      runtimeId !== undefined &&
+      runtimeId !== previous?.runtimeId &&
+      (incoming.status === "active" || incoming.status === "waiting") &&
+      (!terminalIsAuthoritative || restarting);
+    const { runtimeId: _previousRuntimeId, ...previousPresentation } = previous ?? {};
+    const { runtimeId: _incomingRuntimeId, ...incomingPresentation } = incoming;
     const merged: RuntimeSubagentPresentation = {
-      ...previous,
-      ...incoming,
+      ...previousPresentation,
+      ...incomingPresentation,
       threadId: incoming.threadId,
-      ...(previousTerminal && (event.type === "task.progress" || passiveSnapshot)
+      // Native presentation fields are not generation authority. Only the
+      // producing app-server's Cafe-authored envelope can attest this edge.
+      // Unstamped legacy child history has no runtime evidence. Do not let
+      // the presentation cache lend it a live generation from an earlier
+      // event; missing evidence must remain explicitly unverified.
+      ...(runtimeId ? { runtimeId } : {}),
+      ...(terminalIsAuthoritative && (event.type === "task.progress" || passiveSnapshot)
         ? { status: previous.status }
         : {}),
       // Child item/status notifications often omit display metadata. Repeat
       // the last complete descriptor on every canonical edge so bounded
       // projection snapshots remain self-describing after the spawn activity
       // ages out. A resumed terminal child receives a fresh per-turn clock.
-      ...(restarting
+      // Reconfirmation after replacement establishes work from this point,
+      // not continuous execution since a departed process's historical start.
+      ...(restarting || newRuntimeWork
         ? { startedAt: incoming.startedAt ?? event.createdAt }
         : previous?.startedAt
           ? { startedAt: previous.startedAt }
@@ -2043,8 +2086,13 @@ function enrichCodexSubagentPresentations(
             ? { startedAt: incoming.startedAt }
             : {}),
     };
-    presentationByThreadId.delete(incoming.threadId);
-    presentationByThreadId.set(incoming.threadId, merged);
+    // Unverified history/passive metadata must not erase the cache's existing
+    // generation fence. Otherwise a subsequent same-runtime late progress
+    // could look like a fresh confirmation and reopen a terminal worker.
+    if (runtimeId !== undefined || previous?.runtimeId === undefined) {
+      presentationByThreadId.delete(incoming.threadId);
+      presentationByThreadId.set(incoming.threadId, merged);
+    }
     while (presentationByThreadId.size > CODEX_SUBAGENT_PRESENTATION_LIMIT) {
       const oldest = presentationByThreadId.keys().next().value;
       if (typeof oldest !== "string") break;
@@ -2425,7 +2473,9 @@ function mapCodexSubagentProjection(
       nickname: thread.agentNickname ?? readStringValue(threadSpawn?.agent_nickname),
       role,
       status,
-      startedAt: isoFromUnixTimestamp(thread.createdAt, "seconds") ?? event.createdAt,
+      // This is a loaded-thread observation, not necessarily a new turn.
+      // Native history creation may be months old and cannot start a live timer.
+      startedAt: event.createdAt,
     });
     if (!presentation) {
       return [];
@@ -2449,11 +2499,11 @@ function mapCodexSubagentProjection(
           }),
         ]
       : [
-          subagentStartedEvent({
+          subagentProgressEvent({
             event,
             canonicalThreadId,
             presentation,
-            description: "Working",
+            description: status === "active" ? "Working" : "Child metadata refreshed",
             lifecycle: "child-thread-started",
             rawPayload,
           }),
@@ -4538,6 +4588,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               }),
           ),
         );
+        // Keep lifecycle authority inside the exact native runtime's bridge.
+        // A replacement allocates a separate cache; delayed old-runtime events
+        // must never mutate the replacement's terminal or timer evidence.
         const subagentPresentationsByThreadId = new Map<string, RuntimeSubagentPresentation>();
         // Auth recovery can fail by terminalizing its owning turn without an
         // upstream authRecoveryCompleted notification. Retain only opaque task

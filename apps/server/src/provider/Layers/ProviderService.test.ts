@@ -428,6 +428,17 @@ function makeReloadableProviderServiceFixture() {
 for (const change of ["replacement", "removal", "missed-exit"] as const) {
   it.effect(`ProviderService reconciles owned orphan sessions after ${change}`, () => {
     const fixture = makeReloadableProviderServiceFixture();
+    const runtimeId = "00000000-0000-4000-8000-000000000009";
+    const originalStart = fixture.codex.startSession.getMockImplementation()!;
+    fixture.codex.startSession.mockImplementation((input) =>
+      originalStart(input).pipe(
+        Effect.map((session) => {
+          const qualified = { ...session, subagentRuntimeId: runtimeId };
+          fixture.codex.updateSession(input.threadId, () => qualified);
+          return qualified;
+        }),
+      ),
+    );
     return Effect.gen(function* () {
       const provider = yield* ProviderService;
       const directory = yield* ProviderSessionDirectory;
@@ -441,6 +452,7 @@ for (const change of ["replacement", "removal", "missed-exit"] as const) {
       yield* fixture.start(threadId);
       yield* fixture.start(siblingId, claudeAgentInstanceId);
       const before = Option.getOrThrow(yield* directory.getBinding(threadId));
+      assert.equal((before.runtimePayload as Record<string, unknown>).subagentRuntimeId, runtimeId);
 
       // Simulate scope finalization dropping every live session and losing
       // its final stream notification. The service must supply that boundary.
@@ -463,6 +475,7 @@ for (const change of ["replacement", "removal", "missed-exit"] as const) {
       assert.equal(exits.length, 1);
       assert.equal(exits[0]?.threadId, threadId);
       assert.equal(exits[0]?.turnId, `turn-${threadId}`);
+      assert.equal(exits[0]?.subagentRuntimeId, runtimeId);
       assert.equal(fixture.replacement.startSession.mock.calls.length, 0);
       yield* advanceTestClock(60_000);
       assert.equal(events.filter((event) => event.type === "session.exited").length, 1);

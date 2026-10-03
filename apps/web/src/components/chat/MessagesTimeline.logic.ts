@@ -6,6 +6,7 @@ import {
 } from "../../session-logic";
 import { type ChatMessage, type ProposedPlan } from "../../types";
 import { type MessageId, type TurnId } from "@cafecode/contracts";
+import type { SubagentRuntimeContext } from "../../subagent-activity";
 
 export const MAX_VISIBLE_WORK_LOG_ENTRIES = 6;
 
@@ -83,7 +84,17 @@ function subagentRevisionSequence(entry: SubagentWorkEntry): number | null {
 function mergeOneSubagentWorkEntry(
   snapshot: SubagentWorkEntry,
   hydrated: SubagentWorkEntry,
+  runtimeSession: SubagentRuntimeContext | null | undefined,
 ): SubagentWorkEntry {
+  const runtimeId = runtimeSession?.subagentRuntimeId;
+  if (typeof runtimeId === "string") {
+    const snapshotCurrent = snapshot.subagent.runtimeId === runtimeId;
+    const hydratedCurrent = hydrated.subagent.runtimeId === runtimeId;
+    // A bounded page may contain only an old process's delayed completion.
+    // Do not let it defeat a current-generation observation in the complete
+    // snapshot, or let the reverse merge suppress fresh native confirmation.
+    if (snapshotCurrent !== hydratedCurrent) return snapshotCurrent ? snapshot : hydrated;
+  }
   const snapshotSequence = subagentRevisionSequence(snapshot);
   const hydratedSequence = subagentRevisionSequence(hydrated);
   const snapshotUpdatedAt = snapshot.subagent.updatedAt ?? snapshot.createdAt;
@@ -92,6 +103,19 @@ function mergeOneSubagentWorkEntry(
     snapshotSequence !== null && hydratedSequence !== null && snapshotSequence !== hydratedSequence
       ? hydratedSequence > snapshotSequence
       : hydratedUpdatedAt.localeCompare(snapshotUpdatedAt) > 0;
+  // Session evidence can change without another lifecycle event. For the same
+  // exact edge, prefer the freshly derived liveness overlay rather than a
+  // retained detail selection's old Working/unknown presentation. This never
+  // promotes stale progress over a terminal lifecycle edge.
+  const snapshotRevision = snapshot.subagent.lifecycleRevision?.replace(/:unverified$/u, "");
+  const hydratedRevision = hydrated.subagent.lifecycleRevision?.replace(/:unverified$/u, "");
+  if (
+    snapshotRevision !== undefined &&
+    snapshotRevision === hydratedRevision &&
+    (snapshot.subagent.status === "unknown" || hydrated.subagent.status === "unknown")
+  ) {
+    hydratedIsNewer = true;
+  }
   const snapshotTerminal =
     snapshot.subagent.status === "completed" ||
     snapshot.subagent.status === "failed" ||
@@ -108,6 +132,13 @@ function mergeOneSubagentWorkEntry(
   }
   const older = hydratedIsNewer ? snapshot : hydrated;
   const newer = hydratedIsNewer ? hydrated : snapshot;
+  // Lifecycle authority is never a fill-in field. A reopened/current row may
+  // intentionally lack the former completion time or legacy runtime evidence.
+  const {
+    completedAt: _oldCompletedAt,
+    runtimeId: _oldRuntimeId,
+    ...olderPresentation
+  } = older.subagent;
 
   // A bounded historical page can begin at progress/completion and therefore
   // omit the richer spawn descriptor. Merge optional fields from the older
@@ -116,7 +147,7 @@ function mergeOneSubagentWorkEntry(
     ...older,
     ...newer,
     subagent: {
-      ...older.subagent,
+      ...olderPresentation,
       ...newer.subagent,
     },
   };
@@ -130,6 +161,7 @@ function mergeOneSubagentWorkEntry(
 export function mergeHistoricalSubagentEntries(
   snapshotEntries: ReadonlyArray<WorkLogEntry>,
   hydratedEntries: ReadonlyArray<WorkLogEntry>,
+  runtimeSession?: SubagentRuntimeContext | null,
 ): SubagentWorkEntry[] {
   const orderedKeys: string[] = [];
   const byKey = new Map<string, SubagentWorkEntry>();
@@ -138,7 +170,7 @@ export function mergeHistoricalSubagentEntries(
     const key = subagentWorkEntryKey(entry);
     const current = byKey.get(key);
     if (!current) orderedKeys.push(key);
-    byKey.set(key, current ? mergeOneSubagentWorkEntry(current, entry) : entry);
+    byKey.set(key, current ? mergeOneSubagentWorkEntry(current, entry, runtimeSession) : entry);
   };
 
   for (const entry of snapshotEntries) add(entry);

@@ -64,7 +64,12 @@ function activity(
     tone: "tool",
     kind,
     summary,
-    payload,
+    // Ordinary structured fixtures represent positively observed current work.
+    // Explicit runtimeId: undefined below models persisted pre-generation rows.
+    payload:
+      payload.subagent && typeof payload.subagent === "object"
+        ? { ...payload, subagent: { runtimeId: "native-runtime-a", ...payload.subagent } }
+        : payload,
     turnId: null,
     createdAt: new Date(NOW - 1000).toISOString(),
   } as OrchestrationThreadActivity;
@@ -114,6 +119,7 @@ function buildState(options: {
             session: {
               provider: options.provider ?? "claudeAgent",
               orchestrationStatus: options.status ?? "running",
+              subagentRuntimeId: "native-runtime-a",
               status: options.status === "error" ? "error" : "running",
               activeTurnId: turnId,
               createdAt: new Date(NOW - 60_000).toISOString(),
@@ -395,10 +401,10 @@ describe("selectAtriumSnapshot", () => {
       id: "task-1",
       label: "explore",
       detail: "mapping canvas call sites",
-      status: "active",
-      running: true,
+      status: "unknown",
+      running: false,
     });
-    expect(snapshot.subagentCount).toBe(1);
+    expect(snapshot.subagentCount).toBe(0);
   });
 
   it("extracts Codex subagents from agent-path detail", () => {
@@ -419,9 +425,9 @@ describe("selectAtriumSnapshot", () => {
       rowKey: "a1",
       id: "sub-1",
       label: "Tests",
-      detail: "Working",
-      status: "active",
-      running: true,
+      detail: "Status unavailable",
+      status: "unknown",
+      running: false,
       startedAt: NOW - 1_000,
       completedAt: null,
     });
@@ -499,6 +505,7 @@ describe("selectAtriumSnapshot", () => {
       ...activity("ambient-hide", "task.progress", "Subagent visibility changed", {
         taskId: presentation.threadId,
         visibility: "ambient",
+        subagent: presentation,
       }),
       turnId,
       createdAt: new Date(NOW - 2_000).toISOString(),
@@ -663,6 +670,35 @@ describe("selectAtriumSnapshot", () => {
 
     expect(first.cards[0]?.subagents).toHaveLength(1);
     expect(clockOnly.cards[0]?.subagents).toBe(first.cards[0]?.subagents);
+  });
+
+  it("invalidates cached liveness on runtime replacement without deleting worker history", () => {
+    const state = buildState({
+      activities: [
+        activity("worker", "task.started", "Subagent started", {
+          taskId: "worker",
+          subagent: { threadId: "worker", label: "Quiet worker", status: "active" },
+        }),
+      ],
+    });
+    const first = selectAtriumSnapshot(state, NOW);
+    expect(first.subagentCount).toBe(1);
+    const summary = state.environmentStateById[ENV]!.sidebarThreadSummaryById[THREAD]!;
+    summary.session = { ...summary.session!, subagentRuntimeId: "native-runtime-b" };
+    const replaced = selectAtriumSnapshot(state, NOW + 1_000);
+    expect(replaced.cards[0]?.subagents).not.toBe(first.cards[0]?.subagents);
+    expect(replaced.subagentCount).toBe(0);
+    expect(replaced.cards[0]?.subagents[0]).toMatchObject({
+      id: "worker",
+      label: "Quiet worker",
+      status: "unknown",
+      running: false,
+      completedAt: null,
+    });
+    summary.session = { ...summary.session!, subagentRuntimeId: "native-runtime-a" };
+    expect(selectAtriumSnapshot(state, NOW + 2_000).subagentCount).toBe(1);
+    summary.session = { ...summary.session!, orchestrationStatus: "stopped" };
+    expect(selectAtriumSnapshot(state, NOW + 3_000).subagentCount).toBe(0);
   });
 
   it("ignores non-subagent tool activity", () => {
