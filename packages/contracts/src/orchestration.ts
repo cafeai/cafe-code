@@ -385,7 +385,9 @@ export type OrchestrationLatestTurn = typeof OrchestrationLatestTurn.Type;
 
 export const OrchestrationThread = Schema.Struct({
   id: ThreadId,
-  projectId: ProjectId,
+  // A project is optional execution context, not the owner of a conversation.
+  // Keep null explicit so omission cannot accidentally inherit another project.
+  projectId: Schema.NullOr(ProjectId),
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
@@ -436,7 +438,7 @@ export type OrchestrationProjectShell = typeof OrchestrationProjectShell.Type;
 
 export const OrchestrationThreadShell = Schema.Struct({
   id: ThreadId,
-  projectId: ProjectId,
+  projectId: Schema.NullOr(ProjectId),
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
@@ -501,6 +503,7 @@ export type OrchestrationShellStreamItem = typeof OrchestrationShellStreamItem.T
 
 export const OrchestrationSubscribeThreadInput = Schema.Struct({
   threadId: ThreadId,
+  includeStandaloneChats: Schema.optionalKey(Schema.Boolean),
 });
 export type OrchestrationSubscribeThreadInput = typeof OrchestrationSubscribeThreadInput.Type;
 
@@ -846,7 +849,7 @@ const ThreadCreateCommand = Schema.Struct({
   type: Schema.Literal("thread.create"),
   commandId: CommandId,
   threadId: ThreadId,
-  projectId: ProjectId,
+  projectId: Schema.NullOr(ProjectId),
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
@@ -904,7 +907,8 @@ const ThreadMetaUpdateCommand = Schema.Struct({
   type: Schema.Literal("thread.meta.update"),
   commandId: CommandId,
   threadId: ThreadId,
-  projectId: Schema.optional(ProjectId),
+  // Omitted means unchanged; null explicitly removes the project association.
+  projectId: Schema.optional(Schema.NullOr(ProjectId)),
   title: Schema.optional(TrimmedNonEmptyString),
   modelSelection: Schema.optional(ModelSelection),
   branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
@@ -928,7 +932,7 @@ const ThreadInteractionModeSetCommand = Schema.Struct({
 });
 
 const ThreadTurnStartBootstrapCreateThread = Schema.Struct({
-  projectId: ProjectId,
+  projectId: Schema.NullOr(ProjectId),
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
@@ -1419,7 +1423,7 @@ export const ProjectDeletedPayload = Schema.Struct({
 
 export const ThreadCreatedPayload = Schema.Struct({
   threadId: ThreadId,
-  projectId: ProjectId,
+  projectId: Schema.NullOr(ProjectId),
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
@@ -1467,7 +1471,7 @@ export const ThreadUnarchivedPayload = Schema.Struct({
 
 export const ThreadMetaUpdatedPayload = Schema.Struct({
   threadId: ThreadId,
-  projectId: Schema.optional(ProjectId),
+  projectId: Schema.optional(Schema.NullOr(ProjectId)),
   title: Schema.optional(TrimmedNonEmptyString),
   modelSelection: Schema.optional(ModelSelection),
   branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
@@ -1891,6 +1895,7 @@ export type DispatchResult = typeof DispatchResult.Type;
 
 export const OrchestrationReplayEventsInput = Schema.Struct({
   fromSequenceExclusive: NonNegativeInt,
+  includeStandaloneChats: Schema.optionalKey(Schema.Boolean),
 });
 export type OrchestrationReplayEventsInput = typeof OrchestrationReplayEventsInput.Type;
 
@@ -1975,6 +1980,13 @@ export const ProviderThreadAssistantMessagesRepairResult = Schema.Struct({
 export type ProviderThreadAssistantMessagesRepairResult =
   typeof ProviderThreadAssistantMessagesRepairResult.Type;
 
+// Explicit wire opt-in lets existing clients keep decoding their project-only
+// catalog. New clients advertise support for null associations on each read;
+// backend capability admission independently gates creation on older servers.
+const OrchestrationCatalogInput = Schema.Struct({
+  includeStandaloneChats: Schema.optionalKey(Schema.Boolean),
+});
+
 export const OrchestrationRpcSchemas = {
   dispatchCommand: {
     input: ClientOrchestrationCommand,
@@ -1985,11 +1997,11 @@ export const OrchestrationRpcSchemas = {
     output: OrchestrationReplayEventsResult,
   },
   getArchivedShellSnapshot: {
-    input: Schema.Struct({}),
+    input: OrchestrationCatalogInput,
     output: OrchestrationShellSnapshot,
   },
   getDeletedShellSnapshot: {
-    input: Schema.Struct({}),
+    input: OrchestrationCatalogInput,
     output: OrchestrationShellSnapshot,
   },
   hardDeleteThread: {
@@ -2021,7 +2033,7 @@ export const OrchestrationRpcSchemas = {
     output: OrchestrationThreadStreamItem,
   },
   subscribeShell: {
-    input: Schema.Struct({}),
+    input: OrchestrationCatalogInput,
     output: OrchestrationShellStreamItem,
   },
 } as const;

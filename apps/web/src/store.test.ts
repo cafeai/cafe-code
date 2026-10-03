@@ -27,6 +27,7 @@ import {
   selectThreadDetailHydratedByRef,
   selectThreadExistsByRef,
   setThreadBranch,
+  setError,
   selectThreadsAcrossEnvironments,
   syncServerThreadDetail,
   type AppState,
@@ -141,9 +142,12 @@ function makeState(thread: Thread): AppState {
     updatedAt: "2026-02-13T00:00:00.000Z",
     scripts: [],
   };
-  const threadIdsByProjectId: EnvironmentState["threadIdsByProjectId"] = {
-    [thread.projectId]: [thread.id],
-  };
+  const threadIdsByProjectId: EnvironmentState["threadIdsByProjectId"] =
+    thread.projectId === null
+      ? {}
+      : {
+          [thread.projectId]: [thread.id],
+        };
   const environmentState = {
     projectIds: [projectId],
     projectById: {
@@ -345,6 +349,58 @@ describe("environment state removal", () => {
 });
 
 describe("thread selection memoization", () => {
+  it("keeps standalone shells in the environment catalog without a synthetic project index", () => {
+    const thread = makeThread({
+      projectId: null,
+      branch: "stale-main",
+      worktreePath: "/stale-project",
+    });
+    const state = makeState(thread);
+    const event: OrchestrationShellStreamEvent = {
+      kind: "thread-upserted",
+      sequence: 1,
+      thread: {
+        id: thread.id,
+        projectId: null,
+        title: thread.title,
+        modelSelection: thread.modelSelection,
+        runtimeMode: "approval-required",
+        interactionMode: thread.interactionMode,
+        branch: thread.branch,
+        worktreePath: thread.worktreePath,
+        latestTurn: null,
+        createdAt: thread.createdAt,
+        updatedAt: thread.createdAt,
+        archivedAt: null,
+        deletedAt: null,
+        session: null,
+        latestUserMessageAt: null,
+        hasPendingApprovals: false,
+        hasPendingUserInput: false,
+        hasActionableProposedPlan: false,
+      },
+    };
+    const next = applyShellEvent(state, event, localEnvironmentId);
+    expect(localEnvironmentStateOf(next).threadIds).toContain(thread.id);
+    expect(localEnvironmentStateOf(next).threadIdsByProjectId).toEqual({});
+    expect(selectThreadByRef(next, scopeThreadRef(localEnvironmentId, thread.id))).toMatchObject({
+      projectId: null,
+      branch: null,
+      worktreePath: null,
+    });
+    expect(
+      setThreadBranch(next, scopeThreadRef(localEnvironmentId, thread.id), "new", "/other"),
+    ).toBe(next);
+  });
+  it("projects provider errors for standalone chats and allows clearing them", () => {
+    const thread = makeThread({ projectId: null, branch: null, worktreePath: null });
+    const state = makeState(thread);
+    const ref = scopeThreadRef(localEnvironmentId, thread.id);
+    const failed = setError(state, ref, "Provider rejected the message.");
+    expect(selectThreadByRef(failed, ref)?.error).toBe("Provider rejected the message.");
+    expect(selectThreadByRef(setError(failed, ref, null), ref)?.error).toBeNull();
+  });
+
   it("does not rewrite shell state for structurally equal model selections", () => {
     const thread = makeThread();
     const state = makeState(thread);
@@ -603,7 +659,7 @@ describe("incremental orchestration updates", () => {
     });
     const initialState = makeState(thread);
     const initialEnvironment = localEnvironmentStateOf(initialState);
-    const sourceProject = initialEnvironment.projectById[thread.projectId]!;
+    const sourceProject = initialEnvironment.projectById[ProjectId.make("project-1")]!;
     const state = withActiveEnvironmentState({
       ...initialEnvironment,
       projectIds: [...initialEnvironment.projectIds, targetProjectId],
@@ -649,7 +705,7 @@ describe("incremental orchestration updates", () => {
     );
 
     const nextEnvironment = localEnvironmentStateOf(next);
-    expect(nextEnvironment.threadIdsByProjectId[thread.projectId]).toBeUndefined();
+    expect(nextEnvironment.threadIdsByProjectId[ProjectId.make("project-1")]).toBeUndefined();
     expect(nextEnvironment.threadIdsByProjectId[targetProjectId]).toEqual([thread.id]);
     expect(nextEnvironment.sidebarThreadSummaryById[thread.id]?.projectId).toBe(targetProjectId);
     expect(
@@ -886,7 +942,7 @@ describe("incremental orchestration updates", () => {
         ...baseEnvironmentState.sidebarThreadSummaryById,
       },
       threadIdsByProjectId: {
-        [thread1.projectId]: [thread1.id, thread2.id],
+        [ProjectId.make("project-1")]: [thread1.id, thread2.id],
       },
     });
 

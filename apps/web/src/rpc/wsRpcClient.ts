@@ -365,10 +365,16 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
         ),
       getArchivedShellSnapshot: () =>
         transport.request((client) =>
-          client[ORCHESTRATION_WS_METHODS.getArchivedShellSnapshot]({}),
+          client[ORCHESTRATION_WS_METHODS.getArchivedShellSnapshot]({
+            includeStandaloneChats: true,
+          }),
         ),
       getDeletedShellSnapshot: () =>
-        transport.request((client) => client[ORCHESTRATION_WS_METHODS.getDeletedShellSnapshot]({})),
+        transport.request((client) =>
+          client[ORCHESTRATION_WS_METHODS.getDeletedShellSnapshot]({
+            includeStandaloneChats: true,
+          }),
+        ),
       getThreadTurnActivityPage: (input) =>
         transport.request((client) =>
           client[ORCHESTRATION_WS_METHODS.getThreadTurnActivityPage](input),
@@ -393,13 +399,20 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
         ),
       subscribeShell: (listener, options) =>
         transport.subscribe(
-          (client) => client[ORCHESTRATION_WS_METHODS.subscribeShell]({}),
+          // Null associations are a wire capability, not a fake project. This
+          // opt-in leaves old clients on the server's project-only view.
+          (client) =>
+            client[ORCHESTRATION_WS_METHODS.subscribeShell]({ includeStandaloneChats: true }),
           listener,
           { ...options, tag: ORCHESTRATION_WS_METHODS.subscribeShell },
         ),
       subscribeThread: (input, listener, options) =>
         transport.subscribe(
-          (client) => client[ORCHESTRATION_WS_METHODS.subscribeThread](input),
+          (client) =>
+            client[ORCHESTRATION_WS_METHODS.subscribeThread]({
+              ...input,
+              includeStandaloneChats: true,
+            }),
           listener,
           { ...options, tag: ORCHESTRATION_WS_METHODS.subscribeThread },
         ),

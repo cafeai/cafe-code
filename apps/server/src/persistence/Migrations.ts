@@ -94,6 +94,7 @@ import Migration0076 from "./Migrations/076_DesktopObservations.ts";
 import Migration0077 from "./Migrations/077_RuntimeRecoveryControls.ts";
 import Migration0078 from "./Migrations/078_RepairUsageStatsTokenDetail.ts";
 import Migration0079 from "./Migrations/079_UsageStatsModelGeneratingTime.ts";
+import Migration0080 from "./Migrations/080_StandaloneThreads.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -189,6 +190,7 @@ export const migrationEntries = [
   [77, "RuntimeRecoveryControls", Migration0077],
   [78, "RepairUsageStatsTokenDetail", Migration0078],
   [79, "UsageStatsModelGeneratingTime", Migration0079],
+  [80, "StandaloneThreads", Migration0080],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

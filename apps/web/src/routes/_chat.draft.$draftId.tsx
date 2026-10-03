@@ -2,7 +2,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo } from "react";
 import { threadHasStarted } from "../components/ChatView.logic";
 import { useComposerDraftStore, DraftId } from "../composerDraftStore";
-import { createThreadSelectorAcrossEnvironments } from "../storeSelectors";
+import { createThreadSelectorByRef } from "../storeSelectors";
 import { useStore } from "../store";
 import { buildThreadRouteParams } from "../threadRoutes";
 
@@ -11,18 +11,29 @@ function DraftChatThreadRouteView() {
   const { draftId: rawDraftId } = Route.useParams();
   const draftId = DraftId.make(rawDraftId);
   const draftSession = useComposerDraftStore((store) => store.getDraftSession(draftId));
+  const draftEnvironmentId = draftSession?.environmentId ?? null;
+  const draftThreadId = draftSession?.threadId ?? null;
+  const promotedTo = draftSession?.promotedTo ?? null;
   const serverThread = useStore(
     useMemo(
-      () => createThreadSelectorAcrossEnvironments(draftSession?.threadId ?? null),
-      [draftSession?.threadId],
+      () =>
+        createThreadSelectorByRef(
+          draftEnvironmentId && draftThreadId
+            ? {
+                environmentId: draftEnvironmentId,
+                threadId: draftThreadId,
+              }
+            : null,
+        ),
+      [draftEnvironmentId, draftThreadId],
     ),
   );
   const serverThreadStarted = threadHasStarted(serverThread);
   const canonicalThreadRef = useMemo(
     () =>
-      draftSession?.promotedTo
+      promotedTo
         ? serverThreadStarted
-          ? draftSession.promotedTo
+          ? promotedTo
           : null
         : serverThread
           ? {
@@ -30,7 +41,7 @@ function DraftChatThreadRouteView() {
               threadId: serverThread.id,
             }
           : null,
-    [draftSession?.promotedTo, serverThread, serverThreadStarted],
+    [promotedTo, serverThread, serverThreadStarted],
   );
 
   useEffect(() => {

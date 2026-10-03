@@ -13,7 +13,7 @@ export function getOrphanedWorktreePathForThread(
   threadId: Thread["id"],
 ): string | null {
   const targetThread = threads.find((thread) => thread.id === threadId);
-  if (!targetThread) {
+  if (!targetThread || targetThread.projectId === null) {
     return null;
   }
 

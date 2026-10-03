@@ -286,10 +286,15 @@ function isSafeCheckpointRefForUpdateRefStdin(ref: string): boolean {
   }
 
   // `git update-ref --stdin` is a command language. Cafe checkpoint refs are
-  // generated as refs/<namespace>/checkpoints/<base64url-thread-id>/turn/<n>;
+  // generated as refs/<namespace>/checkpoints/<base64url-thread-id>/turn/<n>,
+  // with an optional /association/<positive-event-sequence> provenance path;
   // reject everything outside that grammar before writing stdin so a corrupted
   // persisted ref cannot inject extra update-ref commands.
-  if (!/^refs\/(?:cafe|t3)\/checkpoints\/[A-Za-z0-9_-]+\/turn\/(?:0|[1-9][0-9]*)$/.test(ref)) {
+  if (
+    !/^refs\/(?:cafe|t3)\/checkpoints\/[A-Za-z0-9_-]+\/(?:association\/[1-9][0-9]*\/)?turn\/(?:0|[1-9][0-9]*)$/.test(
+      ref,
+    )
+  ) {
     return false;
   }
   if (

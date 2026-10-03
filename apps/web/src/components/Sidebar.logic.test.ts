@@ -211,6 +211,21 @@ describe("resolveSidebarNewThreadEnvMode", () => {
 });
 
 describe("resolveSidebarNewThreadSeedContext", () => {
+  it("does not inherit standalone chat branch/worktree state for an explicit project chat", () => {
+    expect(
+      resolveSidebarNewThreadSeedContext({
+        projectId: "project-1",
+        defaultEnvMode: "local",
+        activeThread: { projectId: null, branch: "foreign", worktreePath: "/foreign" },
+        activeDraftThread: {
+          projectId: null,
+          branch: "foreign-draft",
+          worktreePath: "/foreign-draft",
+          envMode: "local",
+        },
+      }),
+    ).toEqual({ envMode: "local" });
+  });
   it("prefers the default worktree mode over active thread context", () => {
     expect(
       resolveSidebarNewThreadSeedContext({
@@ -901,6 +916,16 @@ describe("isProjectDeleteRequiresForceError", () => {
   });
 });
 describe("sortProjectsForSidebar", () => {
+  it("never attributes standalone chat activity to a real project", () => {
+    const projects = [
+      makeProject({ id: ProjectId.make("one"), name: "One", updatedAt: "2026-10-01T00:00:00Z" }),
+      makeProject({ id: ProjectId.make("two"), name: "Two", updatedAt: "2026-10-02T00:00:00Z" }),
+    ];
+    const standalone = makeThread({ projectId: null, updatedAt: "2026-10-03T00:00:00Z" });
+    expect(
+      sortProjectsForSidebar(projects, [standalone], "updated_at").map((project) => project.id),
+    ).toEqual(["two", "one"]);
+  });
   it("sorts projects by the most recent user message across their threads", () => {
     const projects = [
       makeProject({ id: ProjectId.make("project-1"), name: "Older project" }),

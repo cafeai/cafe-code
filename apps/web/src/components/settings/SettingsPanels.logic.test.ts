@@ -108,6 +108,21 @@ describe("buildProviderInstanceUpdatePatch", () => {
 });
 
 describe("collectRecentlyDeletedThreadRefs", () => {
+  it("binds projectless bulk deletion to its explicit environment and skips missing authority", () => {
+    const local = EnvironmentId.make("local");
+    const remote = EnvironmentId.make("remote");
+    const id = ThreadId.make("same-id");
+    expect(
+      collectRecentlyDeletedThreadRefs([
+        { project: null, environmentId: local, threads: [{ id }] },
+        { project: null, environmentId: local, threads: [{ id, environmentId: remote }] },
+        { project: null, threads: [{ id: ThreadId.make("unscoped") }] },
+      ]),
+    ).toEqual([
+      { environmentId: local, threadId: id },
+      { environmentId: remote, threadId: id },
+    ]);
+  });
   it("flattens deleted thread groups into scoped thread refs", () => {
     const environmentOne = EnvironmentId.make("env-one");
     const environmentTwo = EnvironmentId.make("env-two");

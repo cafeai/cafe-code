@@ -1,10 +1,14 @@
 # Desk and chat tabs
 
-Use **Projects** to browse the existing project/chat catalog. Use **Desk** to
+Use **Projects** to browse the saved project/chat catalog, including the separate
+**Chats** section for conversations without a project. Use **Desk** to
 show only your open chats, grouped the way you are working. Atrium, Settings,
 project actions and the chat composer stay in their usual places.
 
 - Open a chat from Projects or search to add/select its tab in the current group.
+- Use **New chat** above the Desk/Projects switch or Desk's **Open chats** plus
+  to create a standalone conversation in the active group without a folder.
+  Existing per-project New chat actions still create project-associated chats.
 - Drag tabs to reorder, into another group to move, or to a chat pane edge to
   split. Hover the left or right half of a tab to see an insertion line before
   or after it; empty tab-strip space appends. Tab-strip targets never show a
@@ -47,5 +51,6 @@ move projects, copy chats, or synchronize a layout to another computer.
 
 Up to four panes can be visible; each can contain many tabs. Smaller windows
 show one group at a time with group-switching controls while retaining the saved
-split layout. Creating a chat still uses the existing project flow; this feature
-does not add projectless conversations.
+split layout. Standalone creation and its durable catalog are documented in
+[Chats without projects](standalone-chats.md); the original tab-group navigation
+and provider-neutral close behavior remain unchanged.

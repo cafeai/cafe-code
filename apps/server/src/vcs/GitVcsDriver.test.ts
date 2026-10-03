@@ -7,7 +7,8 @@ import * as PlatformError from "effect/PlatformError";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import { assert, it } from "@effect/vitest";
 
-import { CheckpointRef, GitCommandError } from "@cafecode/contracts";
+import { CheckpointRef, GitCommandError, ThreadId } from "@cafecode/contracts";
+import { checkpointRefForThreadTurn, legacyCheckpointRefAlias } from "../checkpointing/Utils.ts";
 import { ServerConfig } from "../config.ts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
 import * as VcsProcess from "./VcsProcess.ts";
@@ -269,6 +270,99 @@ it.effect("GitVcsDriver rejects unsafe checkpoint refs before update-ref stdin",
       .pipe(Effect.flip);
 
     assert.match(error.message, /unsafe checkpoint ref/u);
+    assert.strictEqual(observedProcessRuns, 0);
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        NodeServices.layer,
+        Layer.mock(VcsProcess.VcsProcess)({
+          run: () =>
+            Effect.sync(() => {
+              observedProcessRuns += 1;
+              return {
+                exitCode: ChildProcessSpawner.ExitCode(0),
+                stdout: "",
+                stderr: "",
+                stdoutTruncated: false,
+                stderrTruncated: false,
+              };
+            }),
+        }),
+      ),
+    ),
+  );
+});
+
+it.effect(
+  "GitVcsDriver admits association refs and their exact aliases as inert stdin commands",
+  () => {
+    const observedInputs: VcsProcess.VcsProcessInput[] = [];
+    const ref = checkpointRefForThreadTurn(ThreadId.make("thread/opaque:association:42"), 1, 42);
+    const alias = legacyCheckpointRefAlias(ref);
+    if (alias === null) throw new Error("Expected a generated legacy alias");
+
+    return Effect.gen(function* () {
+      const driver = yield* GitVcsDriver.makeVcsDriverShape();
+      if (!driver.checkpoints)
+        throw new Error("Git VCS driver did not expose checkpoint operations.");
+      yield* driver.checkpoints.deleteCheckpointRefs({ cwd: "/repo", checkpointRefs: [ref] });
+      assert.strictEqual(observedInputs.length, 1);
+      assert.deepStrictEqual(observedInputs[0]?.args, ["-C", "/repo", "update-ref", "--stdin"]);
+      assert.strictEqual(observedInputs[0]?.stdin, `delete ${ref}\ndelete ${alias}\n`);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          NodeServices.layer,
+          Layer.mock(VcsProcess.VcsProcess)({
+            run: (input) =>
+              Effect.sync(() => {
+                observedInputs.push(input);
+                return {
+                  exitCode: ChildProcessSpawner.ExitCode(0),
+                  stdout: "",
+                  stderr: "",
+                  stdoutTruncated: false,
+                  stderrTruncated: false,
+                };
+              }),
+          }),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect("GitVcsDriver rejects malformed association grammar before any subprocess", () => {
+  let observedProcessRuns = 0;
+  // Exercise the final driver boundary, not just the utility predicate: one
+  // unsafe entry invalidates the complete batch before its first subprocess.
+  const unsafeRefs = [
+    "refs/cafe/checkpoints/thread/association/0/turn/1",
+    "refs/cafe/checkpoints/thread/association/01/turn/1",
+    "refs/cafe/checkpoints/thread/association/-1/turn/1",
+    "refs/cafe/checkpoints/thread/association/42/turn/01",
+    "refs/cafe/checkpoints/thread/association/42/../turn/1",
+    "refs/cafe/checkpoints/thread/association/42/turn/1\n delete refs/heads/main",
+    "refs/cafe/checkpoints/thread/association/42/turn/1\rdelete refs/heads/main",
+    "refs/cafe/checkpoints/thread/association/42/turn/1\0",
+    "refs/cafe/checkpoints/thread/association/42/turn/1 lock",
+  ];
+  return Effect.gen(function* () {
+    const driver = yield* GitVcsDriver.makeVcsDriverShape();
+    if (!driver.checkpoints)
+      throw new Error("Git VCS driver did not expose checkpoint operations.");
+    for (const unsafeRef of unsafeRefs) {
+      const error = yield* driver.checkpoints
+        .deleteCheckpointRefs({
+          cwd: "/repo",
+          checkpointRefs: [
+            checkpointRefForThreadTurn(ThreadId.make("valid"), 1, 42),
+            CheckpointRef.make(unsafeRef),
+          ],
+        })
+        .pipe(Effect.flip);
+      assert.match(error.message, /unsafe checkpoint ref/u);
+    }
     assert.strictEqual(observedProcessRuns, 0);
   }).pipe(
     Effect.provide(

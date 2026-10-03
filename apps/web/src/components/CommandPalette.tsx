@@ -423,8 +423,13 @@ function OpenCommandPaletteDialog() {
   const queryClient = useQueryClient();
   const [highlightedItemValue, setHighlightedItemValue] = useState<string | null>(null);
   const settings = useSettings();
-  const { activeDraftThread, activeThread, defaultProjectRef, handleNewThread } =
-    useHandleNewThread();
+  const {
+    activeDraftThread,
+    activeThread,
+    defaultProjectRef,
+    handleNewThread,
+    handleNewStandaloneChat,
+  } = useHandleNewThread();
   const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
   const threads = useStore(useShallow(selectSidebarThreadsAcrossEnvironments));
   const keybindings = useServerKeybindings();
@@ -919,6 +924,18 @@ function OpenCommandPaletteDialog() {
 
   const actionItems: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> = [];
 
+  // Global creation must also work with an empty project catalog. Explicit
+  // project actions below retain their existing workspace/branch policy.
+  actionItems.push({
+    kind: "action",
+    value: "action:new-thread",
+    searchTerms: ["new chat", "new thread", "standalone", "no project", "create", "draft"],
+    title: "New chat",
+    icon: <SquarePenIcon className={ITEM_ICON_CLASS} />,
+    shortcutCommand: "chat.new",
+    run: handleNewStandaloneChat,
+  });
+
   if (projects.length > 0) {
     const activeProjectTitle = currentProjectId
       ? (projectTitleById.get(currentProjectId) ?? null)
@@ -927,7 +944,7 @@ function OpenCommandPaletteDialog() {
     if (activeProjectTitle) {
       actionItems.push({
         kind: "action",
-        value: "action:new-thread",
+        value: "action:new-thread-in-current",
         searchTerms: ["new thread", "chat", "create", "draft"],
         title: (
           <>
@@ -935,7 +952,6 @@ function OpenCommandPaletteDialog() {
           </>
         ),
         icon: <SquarePenIcon className={ITEM_ICON_CLASS} />,
-        shortcutCommand: "chat.new",
         run: async () => {
           await startNewThreadFromContext({
             activeDraftThread,

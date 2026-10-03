@@ -355,10 +355,10 @@ const DeskSidebarGroupHeading = memo(function DeskSidebarGroupHeading({
  */
 export function DeskSidebar({
   onNavigate,
-  onBrowseProjects,
+  onNewChat,
 }: {
   onNavigate: (target: ThreadRouteTarget) => void;
-  onBrowseProjects: () => void;
+  onNewChat: () => void;
 }) {
   const desk = useDeskStore((state) => state.desk);
   const dispatch = useDeskStore((state) => state.dispatch);
@@ -370,10 +370,10 @@ export function DeskSidebar({
         </span>
         <button
           type="button"
-          aria-label="Browse projects to open a chat"
-          title="Open a chat from Projects"
+          aria-label="New chat in active tab group"
+          title="New chat"
           className="inline-flex size-5 items-center justify-center rounded-md text-muted-foreground/60 hover:bg-accent hover:text-foreground"
-          onClick={onBrowseProjects}
+          onClick={onNewChat}
         >
           <PlusIcon className="size-3.5" />
         </button>
@@ -425,7 +425,7 @@ export function DeskSidebar({
             </SidebarMenuSub>
             {group.tabs.length === 0 ? (
               <p className="px-2 py-2 text-xs text-muted-foreground/60">
-                Open a chat from Projects.
+                Start a new chat or open one from Projects.
               </p>
             ) : null}
           </section>

@@ -51,11 +51,9 @@ async function setup() {
   useDeskStore.getState().dispatch({ type: "open", target: chat });
   useDeskStore.getState().dispatch({ type: "open", target: draft });
   const onNavigate = vi.fn();
-  const onBrowseProjects = vi.fn();
-  const screen = await render(
-    <DeskSidebar onNavigate={onNavigate} onBrowseProjects={onBrowseProjects} />,
-  );
-  return { screen, onNavigate, onBrowseProjects };
+  const onNewChat = vi.fn();
+  const screen = await render(<DeskSidebar onNavigate={onNavigate} onNewChat={onNewChat} />);
+  return { screen, onNavigate, onNewChat };
 }
 
 describe("Desk sidebar", () => {
@@ -64,7 +62,7 @@ describe("Desk sidebar", () => {
     try {
       const heading = screen.getByRole("button", { name: "Activate group Main" });
       const pencil = screen.getByRole("button", { name: "Rename group Main" });
-      const outside = screen.getByRole("button", { name: "Browse projects to open a chat" });
+      const outside = screen.getByRole("button", { name: "New chat in active tab group" });
       const count = heading.element().querySelector("[data-desk-group-count]")!;
       const name = heading.element().querySelector("[data-desk-group-name]")!;
       await outside.hover();
@@ -154,7 +152,7 @@ describe("Desk sidebar", () => {
         await expect.element(input).toHaveValue("開発");
         expect(useDeskStore.getState().desk.groups.g1?.name).toBe("Main");
       }
-      const outside = screen.getByRole("button", { name: "Browse projects to open a chat" });
+      const outside = screen.getByRole("button", { name: "New chat in active tab group" });
       await outside.click();
       await expect.element(input).not.toBeInTheDocument();
       expect(useDeskStore.getState().desk.groups.g1?.name).toBe("開発");
@@ -175,7 +173,7 @@ describe("Desk sidebar", () => {
       await input.fill("Discard this name");
       await userEvent.keyboard("{Escape}");
       await expect.element(input).not.toBeInTheDocument();
-      await screen.getByRole("button", { name: "Browse projects to open a chat" }).click();
+      await screen.getByRole("button", { name: "New chat in active tab group" }).click();
       expect(useDeskStore.getState().desk.groups.g1?.name).toBe("Main");
       await screen.getByRole("button", { name: "Activate group Main" }).hover();
       await screen.getByRole("button", { name: "Rename group Main" }).click();
@@ -217,15 +215,15 @@ describe("Desk sidebar", () => {
   });
 
   it("opens existing server and draft views using their exact targets", async () => {
-    const { screen, onNavigate, onBrowseProjects } = await setup();
+    const { screen, onNavigate, onNewChat } = await setup();
     try {
       await screen.getByRole("button", { name: "Chat fixture", exact: true }).click();
       expect(onNavigate).toHaveBeenLastCalledWith(chat);
       expect(useDeskStore.getState().desk.groups.g1?.activeTabKey).toBe(deskTabKey(chat));
       await screen.getByRole("button", { name: "New chat", exact: true }).click();
       expect(onNavigate).toHaveBeenLastCalledWith(draft);
-      await screen.getByRole("button", { name: "Browse projects to open a chat" }).click();
-      expect(onBrowseProjects).toHaveBeenCalledOnce();
+      await screen.getByRole("button", { name: "New chat in active tab group" }).click();
+      expect(onNewChat).toHaveBeenCalledOnce();
     } finally {
       await screen.unmount();
     }
@@ -302,7 +300,7 @@ describe("Desk sidebar", () => {
     const { screen } = await setup();
     try {
       const title = screen.getByRole("button", { name: "Chat fixture", exact: true });
-      const outside = screen.getByRole("button", { name: "Browse projects to open a chat" });
+      const outside = screen.getByRole("button", { name: "New chat in active tab group" });
       const actions = title.element().closest("li")!.querySelector("[data-desk-row-actions]")!;
       const timestamp = title.element().querySelector("[data-desk-row-meta]")!;
       const titleText = title.element().querySelector("[data-desk-row-title]")!;
@@ -349,7 +347,7 @@ describe("Desk sidebar", () => {
         new KeyboardEvent("keydown", { key: "Enter", isComposing: true, bubbles: true }),
       );
       expect(mocks.rename).not.toHaveBeenCalled();
-      await screen.getByRole("button", { name: "Browse projects to open a chat" }).click();
+      await screen.getByRole("button", { name: "New chat in active tab group" }).click();
       await expect.element(input).not.toBeInTheDocument();
       expect(mocks.rename).toHaveBeenCalledExactlyOnceWith(
         chat.threadRef,
@@ -379,7 +377,7 @@ describe("Desk sidebar", () => {
       await userEvent.keyboard("{Enter}");
       expect(mocks.rename).toHaveBeenCalledOnce();
       await expect.element(input).toHaveAttribute("readonly");
-      const outside = screen.getByRole("button", { name: "Browse projects to open a chat" });
+      const outside = screen.getByRole("button", { name: "New chat in active tab group" });
       await outside.click();
       expect(mocks.rename).toHaveBeenCalledOnce();
       resolve();

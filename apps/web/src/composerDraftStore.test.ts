@@ -67,6 +67,7 @@ import {
   markPromotedDraftThreads,
   markPromotedDraftThreadsByRef,
   removeComposerDraftsForNonPrimaryEnvironment,
+  selectStandaloneDraftSessions,
   type ComposerImageAttachment,
   useComposerDraftStore,
   DraftId,
@@ -561,6 +562,148 @@ describe("composerDraftStore project draft thread mapping", () => {
 
   beforeEach(() => {
     resetComposerDraftStore();
+  });
+
+  it("keeps independent standalone drafts outside project mappings and fences exact promotion", () => {
+    const store = useComposerDraftStore.getState();
+    store.setProjectDraftThreadId(projectRef, draftId, { threadId });
+    store.setPrompt(draftId, "project work");
+    const first = DraftId.make("standalone-first");
+    const second = DraftId.make("standalone-second");
+    store.createStandaloneDraftSession(first, TEST_ENVIRONMENT_ID, ThreadId.make("first"));
+    store.createStandaloneDraftSession(second, TEST_ENVIRONMENT_ID, ThreadId.make("second"));
+    store.setPrompt(first, "first chat");
+    store.setPrompt(second, "second chat");
+    const catalogBeforeRead = selectStandaloneDraftSessions(
+      useComposerDraftStore.getState(),
+      TEST_ENVIRONMENT_ID,
+    );
+    const catalogAfterRead = selectStandaloneDraftSessions(
+      useComposerDraftStore.getState(),
+      TEST_ENVIRONMENT_ID,
+    );
+    expect(catalogAfterRead[0]).toBe(catalogBeforeRead[0]);
+    expect(catalogAfterRead[1]).toBe(catalogBeforeRead[1]);
+    expect(
+      selectStandaloneDraftSessions(useComposerDraftStore.getState(), TEST_ENVIRONMENT_ID).map(
+        (draft) => draft.draftId,
+      ),
+    ).toEqual([first, second]);
+    expect(store.getDraftSession(first)).toMatchObject({
+      projectId: null,
+      logicalProjectKey: null,
+      runtimeMode: "approval-required",
+      branch: null,
+      worktreePath: null,
+      envMode: "local",
+    });
+    expect(store.getDraftSessionByProjectRef(projectRef)?.draftId).toBe(draftId);
+    store.createStandaloneDraftSession(
+      first,
+      OTHER_TEST_ENVIRONMENT_ID,
+      ThreadId.make("collision"),
+    );
+    expect(store.getDraftSession(first)?.environmentId).toBe(TEST_ENVIRONMENT_ID);
+    store.markDraftThreadPromoting(
+      first,
+      scopeThreadRef(OTHER_TEST_ENVIRONMENT_ID, ThreadId.make("first")),
+    );
+    expect(store.getDraftSession(first)?.promotedTo).toBeNull();
+    store.markDraftThreadPromoting(
+      first,
+      scopeThreadRef(TEST_ENVIRONMENT_ID, ThreadId.make("first")),
+    );
+    expect(
+      selectStandaloneDraftSessions(useComposerDraftStore.getState()).map((draft) => draft.draftId),
+    ).toEqual([second]);
+    store.finalizePromotedDraftThread(first);
+    expect(store.getDraftSession(first)).toBeNull();
+    expect(store.getComposerDraft(second)?.prompt).toBe("second chat");
+    expect(store.getComposerDraft(draftId)?.prompt).toBe("project work");
+  });
+
+  it("ignores project-only branch and worktree mutations for standalone drafts", () => {
+    const store = useComposerDraftStore.getState();
+    store.createStandaloneDraftSession(draftId, TEST_ENVIRONMENT_ID, threadId);
+    store.setDraftThreadContext(draftId, {
+      branch: "main",
+      worktreePath: "/unrelated",
+      envMode: "worktree",
+    });
+    store.setDraftThreadContext(draftId, { projectRef: otherProjectRef });
+    expect(store.getDraftSession(draftId)).toMatchObject({
+      projectId: null,
+      logicalProjectKey: null,
+      branch: null,
+      worktreePath: null,
+      envMode: "local",
+    });
+    expect(
+      selectStandaloneDraftSessions(useComposerDraftStore.getState(), OTHER_TEST_ENVIRONMENT_ID),
+    ).toEqual([]);
+  });
+
+  it("round-trips standalone catalog identities, unsent content, and account choices", () => {
+    const store = useComposerDraftStore.getState();
+    store.createStandaloneDraftSession(draftId, TEST_ENVIRONMENT_ID, threadId);
+    store.createStandaloneDraftSession(otherDraftId, TEST_ENVIRONMENT_ID, otherThreadId);
+    store.setPrompt(draftId, "kept across reload");
+    store.setModelSelection(
+      draftId,
+      createModelSelection(CODEX_ZKM_INSTANCE, "gpt-private-choice"),
+    );
+    const persistence = useComposerDraftStore.persist.getOptions();
+    const persisted = JSON.parse(
+      JSON.stringify(persistence.partialize!(useComposerDraftStore.getState())),
+    );
+    resetComposerDraftStore();
+    useComposerDraftStore.setState(persistence.merge!(persisted, useComposerDraftStore.getState()));
+    expect(
+      selectStandaloneDraftSessions(useComposerDraftStore.getState()).map((draft) => draft.draftId),
+    ).toEqual([draftId, otherDraftId]);
+    expect(store.getDraftSession(draftId)).toMatchObject({
+      environmentId: TEST_ENVIRONMENT_ID,
+      projectId: null,
+      logicalProjectKey: null,
+    });
+    expect(store.getComposerDraft(draftId)).toMatchObject({
+      prompt: "kept across reload",
+      activeProvider: CODEX_ZKM_INSTANCE,
+    });
+    expect(
+      useComposerDraftStore.getState().logicalProjectDraftThreadKeyByLogicalProjectKey,
+    ).toEqual({});
+  });
+
+  it("does not hydrate stale project workspace authority into a standalone draft", () => {
+    const store = useComposerDraftStore.getState();
+    store.createStandaloneDraftSession(draftId, TEST_ENVIRONMENT_ID, threadId);
+    const persistence = useComposerDraftStore.persist.getOptions();
+    const persisted = JSON.parse(
+      JSON.stringify(persistence.partialize!(useComposerDraftStore.getState())),
+    );
+    persisted.draftThreadsByThreadKey[draftId].branch = "stale-main";
+    persisted.draftThreadsByThreadKey[draftId].worktreePath = "/unrelated-project";
+    persisted.draftThreadsByThreadKey[draftId].envMode = "worktree";
+    persisted.draftThreadsByThreadKey[draftId].promotedTo = scopeThreadRef(
+      OTHER_TEST_ENVIRONMENT_ID,
+      threadId,
+    );
+    persisted.logicalProjectDraftThreadKeyByLogicalProjectKey[scopedProjectKey(projectRef)] =
+      draftId;
+    useComposerDraftStore.setState(persistence.merge!(persisted, useComposerDraftStore.getState()));
+    expect(store.getDraftSession(draftId)).toMatchObject({
+      projectId: null,
+      logicalProjectKey: null,
+      branch: null,
+      worktreePath: null,
+      envMode: "local",
+      promotedTo: null,
+    });
+    expect(store.getDraftSessionByProjectRef(projectRef)).toBeNull();
+    expect(
+      useComposerDraftStore.getState().logicalProjectDraftThreadKeyByLogicalProjectKey,
+    ).toEqual({});
   });
 
   it("stores and reads project draft thread ids via actions", () => {

@@ -45,6 +45,7 @@ import {
 import { useNavigate } from "@tanstack/react-router";
 import { useShallow } from "zustand/react/shallow";
 import { useGitStatus } from "~/lib/gitStatusState";
+import { supportsStandaloneChats } from "../lib/standaloneChats";
 import { useDesktopDebugEnabled } from "~/lib/desktopDebugState";
 import { readPrimaryEnvironmentDescriptor, usePrimaryEnvironmentId } from "../environments/primary";
 import { readEnvironmentApi } from "../environmentApi";
@@ -1330,7 +1331,7 @@ export default function ChatView(props: ChatViewProps) {
   const desktopDebugEnabledRef = useRef(desktopDebugEnabled);
   desktopDebugEnabledRef.current = desktopDebugEnabled;
 
-  const fallbackDraftProjectRef = draftThread
+  const fallbackDraftProjectRef = draftThread?.projectId
     ? scopeProjectRef(draftThread.environmentId, draftThread.projectId)
     : null;
   const fallbackDraftProject = useStore(
@@ -1361,7 +1362,7 @@ export default function ChatView(props: ChatViewProps) {
   const interactionMode =
     composerInteractionMode ?? activeThread?.interactionMode ?? DEFAULT_INTERACTION_MODE;
   const isLocalDraftThread = !isServerThread && localDraftThread !== undefined;
-  const canCheckoutPullRequestIntoThread = isLocalDraftThread;
+  const canCheckoutPullRequestIntoThread = isLocalDraftThread && activeThread?.projectId != null;
   // Compute the list of environments this logical project spans, used to
   // drive the environment picker in BranchToolbar.
   const allProjects = useStore(useShallow(selectProjectsAcrossEnvironments));
@@ -1801,7 +1802,7 @@ export default function ChatView(props: ChatViewProps) {
     }, [activeLatestTurn?.sourceProposedPlan?.threadId, activeThread?.id]),
   );
   const latestTurnSettled = isLatestTurnSettled(activeLatestTurn, activeThread?.session ?? null);
-  const activeProjectRef = activeThread
+  const activeProjectRef = activeThread?.projectId
     ? scopeProjectRef(activeThread.environmentId, activeThread.projectId)
     : null;
   const activeProject = useStore(
@@ -2459,6 +2460,9 @@ export default function ChatView(props: ChatViewProps) {
   }, [turnDiffSummaries]);
   const revertTurnCountByUserMessageId = useMemo(() => {
     const byUserMessageId = new Map<MessageId, number>();
+    // Detached transcripts keep historical checkpoint summaries for reading,
+    // not authority to restore files. Never surface their repository action.
+    if (activeThread?.projectId == null) return byUserMessageId;
     for (let index = 0; index < timelineEntries.length; index += 1) {
       const entry = timelineEntries[index];
       if (!entry || entry.kind !== "message" || entry.message.role !== "user") {
@@ -2488,7 +2492,12 @@ export default function ChatView(props: ChatViewProps) {
     }
 
     return byUserMessageId;
-  }, [inferredCheckpointTurnCountByTurnId, timelineEntries, turnDiffSummaryByAssistantMessageId]);
+  }, [
+    activeThread?.projectId,
+    inferredCheckpointTurnCountByTurnId,
+    timelineEntries,
+    turnDiffSummaryByAssistantMessageId,
+  ]);
 
   const completionSummary = useMemo(() => {
     if (!latestTurnSettled) return null;
@@ -2509,7 +2518,10 @@ export default function ChatView(props: ChatViewProps) {
     if (!completionSummary) return null;
     return deriveCompletionDividerAfterEntryId(timelineEntries, activeLatestTurn);
   }, [activeLatestTurn, completionSummary, latestTurnSettled, timelineEntries]);
-  const gitCwd = activeThread?.worktreePath ?? activeProject?.cwd ?? null;
+  const gitCwd =
+    activeThread?.projectId === null
+      ? null
+      : (activeThread?.worktreePath ?? activeProject?.cwd ?? null);
   const gitStatusQuery = useGitStatus({ environmentId, cwd: gitCwd });
   const keybindings = useServerKeybindings();
   const availableEditors = useServerAvailableEditors();
@@ -2624,10 +2636,12 @@ export default function ChatView(props: ChatViewProps) {
   }, []);
   const resolveProjectForThread = useCallback(
     (thread: Thread) =>
-      selectProjectByRef(
-        useStore.getState(),
-        scopeProjectRef(thread.environmentId, thread.projectId),
-      ),
+      thread.projectId === null
+        ? undefined
+        : selectProjectByRef(
+            useStore.getState(),
+            scopeProjectRef(thread.environmentId, thread.projectId),
+          ),
     [],
   );
   const isThreadEnvironmentUnavailable = useCallback((_thread: Thread): boolean => false, []);
@@ -3544,10 +3558,11 @@ export default function ChatView(props: ChatViewProps) {
     sendInFlightRef,
   ]);
   const activeProjectCwd = activeProject?.cwd ?? null;
-  const activeThreadWorktreePath = activeThread?.worktreePath ?? null;
+  const activeThreadWorktreePath =
+    activeThread?.projectId === null ? null : (activeThread?.worktreePath ?? null);
   const activeWorkspaceRoot = activeThreadWorktreePath ?? activeProjectCwd ?? undefined;
   // Default true while loading to avoid toolbar flicker.
-  const isGitRepo = gitStatusQuery.data?.isRepo ?? true;
+  const isGitRepo = activeThread?.projectId != null && (gitStatusQuery.data?.isRepo ?? true);
   const envLocked = Boolean(
     activeThread &&
     (activeThread.messages.length > 0 ||
@@ -4078,6 +4093,7 @@ export default function ChatView(props: ChatViewProps) {
   const canOverrideServerThreadEnvMode = Boolean(
     isServerThread &&
     activeThread &&
+    activeThread.projectId !== null &&
     activeThread.messages.length === 0 &&
     activeThread.worktreePath === null &&
     !envLocked,
@@ -4086,9 +4102,11 @@ export default function ChatView(props: ChatViewProps) {
     ? (pendingServerThreadEnvMode ?? draftThread?.envMode ?? derivedEnvMode)
     : derivedEnvMode;
   const activeThreadBranch =
-    canOverrideServerThreadEnvMode && pendingServerThreadBranch !== undefined
-      ? pendingServerThreadBranch
-      : (activeThread?.branch ?? null);
+    activeThread?.projectId === null
+      ? null
+      : canOverrideServerThreadEnvMode && pendingServerThreadBranch !== undefined
+        ? pendingServerThreadBranch
+        : (activeThread?.branch ?? null);
   const sendEnvMode = resolveSendEnvMode({
     requestedEnvMode: envMode,
     isGitRepo,
@@ -4137,7 +4155,14 @@ export default function ChatView(props: ChatViewProps) {
     async (turnCount: number) => {
       const api = readEnvironmentApi(environmentId);
       const localApi = readLocalApi();
-      if (!api || !localApi || !activeThread || isRevertingCheckpoint) return;
+      if (
+        !api ||
+        !localApi ||
+        !activeThread ||
+        activeThread.projectId === null ||
+        isRevertingCheckpoint
+      )
+        return;
 
       if (activeEnvironmentUnavailable && activeEnvironmentUnavailableLabel) {
         setThreadError(
@@ -4489,7 +4514,15 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     const queuedProject = resolveProjectForThread(queuedThread);
-    if (!queuedProject) {
+    if (queuedThread.projectId === null && !supportsStandaloneChats(queuedThread.environmentId)) {
+      blockFollowUpQueueItem(
+        item.threadId,
+        item.id,
+        "Update the server to send messages in standalone chats.",
+      );
+      return;
+    }
+    if (queuedThread.projectId !== null && !queuedProject) {
       blockFollowUpQueueItem(item.threadId, item.id, "Project metadata is not loaded yet.");
       return;
     }
@@ -5211,7 +5244,11 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     if (!hasSendableContent) return;
-    if (!activeProject) return;
+    if (activeThread.projectId !== null && !activeProject) return;
+    if (activeThread.projectId === null && !supportsStandaloneChats(activeThread.environmentId)) {
+      setThreadError(activeThread.id, "Update the server to send messages in standalone chats.");
+      return;
+    }
     const threadIdForSend = activeThread.id;
     // Everything below may settle after a route transition. Capture the exact
     // environment/thread and composer target that owned this attempt instead
@@ -5221,14 +5258,20 @@ export default function ChatView(props: ChatViewProps) {
     const sendAttemptComposerDraftTarget = composerDraftTarget;
     const isFirstMessage = !isServerThread || activeThread.messages.length === 0;
     const baseBranchForWorktree =
-      isFirstMessage && sendEnvMode === "worktree" && !activeThread.worktreePath
+      activeThread.projectId !== null &&
+      isFirstMessage &&
+      sendEnvMode === "worktree" &&
+      !activeThread.worktreePath
         ? activeThreadBranch
         : null;
 
     // In worktree mode, require an explicit base branch so we don't silently
     // fall back to local execution when branch selection is missing.
     const shouldCreateWorktree =
-      isFirstMessage && sendEnvMode === "worktree" && !activeThread.worktreePath;
+      activeThread.projectId !== null &&
+      isFirstMessage &&
+      sendEnvMode === "worktree" &&
+      !activeThread.worktreePath;
     if (shouldCreateWorktree && !activeThreadBranch) {
       setThreadError(threadIdForSend, "Select a base branch before sending in New worktree mode.");
       return;
@@ -5304,7 +5347,7 @@ export default function ChatView(props: ChatViewProps) {
       const title = truncate(titleSeed);
       const threadCreateModelSelection = createModelSelection(
         ctxSelectedModelSelection.instanceId,
-        ctxSelectedModel || activeProject.defaultModelSelection?.model || DEFAULT_MODEL,
+        ctxSelectedModel || activeProject?.defaultModelSelection?.model || DEFAULT_MODEL,
         ctxSelectedModelSelection.options,
       );
 
@@ -5336,18 +5379,19 @@ export default function ChatView(props: ChatViewProps) {
               ...(isLocalDraftThread
                 ? {
                     createThread: {
-                      projectId: activeProject.id,
+                      projectId: activeThread.projectId,
                       title,
                       modelSelection: threadCreateModelSelection,
                       runtimeMode,
                       interactionMode,
-                      branch: activeThreadBranch,
-                      worktreePath: activeThread.worktreePath,
+                      branch: activeThread.projectId === null ? null : activeThreadBranch,
+                      worktreePath:
+                        activeThread.projectId === null ? null : activeThread.worktreePath,
                       createdAt: activeThread.createdAt,
                     },
                   }
                 : {}),
-              ...(baseBranchForWorktree
+              ...(baseBranchForWorktree && activeProject
                 ? {
                     prepareWorktree: {
                       projectCwd: activeProject.cwd,
@@ -6460,7 +6504,8 @@ export default function ChatView(props: ChatViewProps) {
     if (
       !api ||
       !activeThread ||
-      !activeProject ||
+      (activeThread.projectId !== null && !activeProject) ||
+      (activeThread.projectId === null && !supportsStandaloneChats(activeThread.environmentId)) ||
       !activeProposedPlan ||
       !isServerThread ||
       isSendBusy ||
@@ -6496,6 +6541,8 @@ export default function ChatView(props: ChatViewProps) {
     });
     const nextThreadTitle = truncate(buildPlanImplementationThreadTitle(planMarkdown));
     const nextThreadModelSelection: ModelSelection = ctxSelectedModelSelection;
+    const nextRuntimeMode: RuntimeMode =
+      activeThread.projectId === null ? "approval-required" : runtimeMode;
 
     setSendInFlight(true);
     beginLocalDispatch({ preparingWorktree: false });
@@ -6509,13 +6556,13 @@ export default function ChatView(props: ChatViewProps) {
         type: "thread.create",
         commandId: newCommandId(),
         threadId: nextThreadId,
-        projectId: activeProject.id,
+        projectId: activeThread.projectId,
         title: nextThreadTitle,
         modelSelection: nextThreadModelSelection,
-        runtimeMode,
+        runtimeMode: nextRuntimeMode,
         interactionMode: "default",
-        branch: activeThreadBranch,
-        worktreePath: activeThread.worktreePath,
+        branch: activeThread.projectId === null ? null : activeThreadBranch,
+        worktreePath: activeThread.projectId === null ? null : activeThread.worktreePath,
         createdAt,
       })
       .then(() => {
@@ -6531,7 +6578,7 @@ export default function ChatView(props: ChatViewProps) {
           },
           modelSelection: ctxSelectedModelSelection,
           titleSeed: nextThreadTitle,
-          runtimeMode,
+          runtimeMode: nextRuntimeMode,
           interactionMode: "default",
           sourceProposedPlan: {
             threadId: activeThread.id,

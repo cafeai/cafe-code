@@ -21,6 +21,43 @@ import { createThreadSelectorByRef } from "../storeSelectors";
 import { resolveThreadRouteTarget } from "../threadRoutes";
 import { useUiStateStore } from "../uiStateStore";
 import { useSettings } from "./useSettings";
+import { readPrimaryEnvironmentDescriptor } from "../environments/primary";
+import { useDeskStore } from "../deskStore";
+import { toastManager } from "../components/ui/toast";
+
+/**
+ * Global creation captures its environment and Desk destination synchronously.
+ * No active project or route can confer a workspace/defaults on this draft.
+ */
+function useNewStandaloneChatHandler() {
+  const router = useRouter();
+  const newChatDefaults = useSettings(deriveNewChatComposerDefaults);
+  return useCallback(async () => {
+    const descriptor = readPrimaryEnvironmentDescriptor();
+    if (!descriptor?.capabilities.standaloneChats) {
+      toastManager.add({
+        type: "error",
+        title: "Update the server to create a standalone chat",
+        description: "This server does not support standalone chats yet.",
+      });
+      return;
+    }
+    const environmentId = descriptor.environmentId;
+    const deskStore = useDeskStore.getState();
+    deskStore.bindEnvironment(environmentId);
+    const groupId = useDeskStore.getState().desk.activeGroupId;
+    const draftId = newDraftId();
+    const drafts = useComposerDraftStore.getState();
+    drafts.createStandaloneDraftSession(draftId, environmentId, newThreadId());
+    drafts.applyStickyState(draftId, newChatDefaults);
+    // Explicit creation requests Desk even if the project catalog was open.
+    // Layout changes precede navigation, preserving the captured group through
+    // asynchronous route commits and the later exact draft promotion.
+    deskStore.dispatch({ type: "open", target: { kind: "draft", draftId }, groupId });
+    deskStore.dispatch({ type: "sidebarMode", mode: "desk" });
+    await router.navigate({ to: "/draft/$draftId", params: { draftId } });
+  }, [newChatDefaults, router]);
+}
 
 function useNewThreadState() {
   const projects = useStore(useShallow((store) => selectProjectsAcrossEnvironments(store)));
@@ -143,9 +180,11 @@ function useNewThreadState() {
 
 export function useNewThreadHandler() {
   const handleNewThread = useNewThreadState();
+  const handleNewStandaloneChat = useNewStandaloneChatHandler();
 
   return {
     handleNewThread,
+    handleNewStandaloneChat,
   };
 }
 
@@ -176,6 +215,7 @@ export function useHandleNewThread() {
     });
   }, [projectOrder, projects]);
   const handleNewThread = useNewThreadState();
+  const handleNewStandaloneChat = useNewStandaloneChatHandler();
 
   return {
     activeDraftThread,
@@ -184,6 +224,7 @@ export function useHandleNewThread() {
       ? scopeProjectRef(orderedProjects[0].environmentId, orderedProjects[0].id)
       : null,
     handleNewThread,
+    handleNewStandaloneChat,
     routeThreadRef,
   };
 }

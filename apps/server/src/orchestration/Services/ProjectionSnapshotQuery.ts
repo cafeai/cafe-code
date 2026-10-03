@@ -47,6 +47,14 @@ export interface ProjectionThreadCheckpointContext {
   readonly workspaceRoot: string;
   readonly worktreePath: string | null;
   readonly checkpoints: ReadonlyArray<OrchestrationCheckpointSummary>;
+  /** Private, durable provenance boundary; historical summaries stay readable. */
+  readonly workspaceFence?: {
+    readonly invalidThroughTurnCount: number;
+    readonly associationSequence: number;
+    readonly changedAt: string;
+    readonly retiredTurn?: boolean;
+    readonly eligibleTurn?: boolean;
+  };
 }
 
 /**
@@ -262,6 +270,7 @@ export interface ProjectionSnapshotQueryShape {
    */
   readonly getThreadCheckpointContext: (
     threadId: ThreadId,
+    checkpointTurnId?: TurnId,
   ) => Effect.Effect<Option.Option<ProjectionThreadCheckpointContext>, ProjectionRepositoryError>;
 
   /**

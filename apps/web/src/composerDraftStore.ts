@@ -53,7 +53,7 @@ const isProviderDriverKind = Schema.is(ProviderDriverKind);
 
 export const COMPOSER_DRAFT_STORAGE_KEY = "cafe-code:composer-drafts:v1";
 export const LEGACY_COMPOSER_DRAFT_STORAGE_KEY = "cafecode:composer-drafts:v1";
-const COMPOSER_DRAFT_STORAGE_VERSION = 6;
+const COMPOSER_DRAFT_STORAGE_VERSION = 7;
 const DraftThreadEnvModeSchema = Schema.Literals(["local", "worktree"]);
 export type DraftThreadEnvMode = typeof DraftThreadEnvModeSchema.Type;
 
@@ -182,8 +182,8 @@ type LegacyPersistedComposerDraftStoreState = PersistedComposerDraftStoreState &
 const PersistedDraftThreadState = Schema.Struct({
   threadId: ThreadId,
   environmentId: Schema.String,
-  projectId: ProjectId,
-  logicalProjectKey: Schema.optionalKey(Schema.String),
+  projectId: Schema.NullOr(ProjectId),
+  logicalProjectKey: Schema.optionalKey(Schema.NullOr(Schema.String)),
   createdAt: Schema.String,
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
@@ -252,8 +252,8 @@ export interface ComposerThreadDraftState {
 export interface DraftSessionState {
   threadId: ThreadId;
   environmentId: EnvironmentId;
-  projectId: ProjectId;
-  logicalProjectKey: string;
+  projectId: ProjectId | null;
+  logicalProjectKey: string | null;
   createdAt: string;
   runtimeMode: RuntimeMode;
   interactionMode: ProviderInteractionMode;
@@ -270,6 +270,42 @@ export type DraftThreadState = DraftSessionState;
  */
 interface ProjectDraftSession extends DraftSessionState {
   draftId: DraftId;
+}
+
+// Zustand's shallow selectors compare row references. Cache only immutable
+// metadata objects so repeated catalog reads remain referentially stable;
+// WeakMap retirement follows the underlying store entry rather than keeping
+// every draft ever opened in a separate long-lived catalog cache.
+const standaloneDraftCatalogRows = new WeakMap<
+  DraftSessionState,
+  Map<string, ProjectDraftSession>
+>();
+
+function standaloneDraftCatalogRow(draftId: string, draft: DraftSessionState): ProjectDraftSession {
+  let rows = standaloneDraftCatalogRows.get(draft);
+  if (!rows) {
+    rows = new Map();
+    standaloneDraftCatalogRows.set(draft, rows);
+  }
+  const existing = rows.get(draftId);
+  if (existing) return existing;
+  const row = { ...draft, draftId: DraftId.make(draftId) };
+  rows.set(draftId, row);
+  return row;
+}
+
+/** Catalog metadata only; selecting a row never loads a provider or thread detail. */
+export function selectStandaloneDraftSessions(
+  state: Pick<ComposerDraftStoreState, "draftThreadsByThreadKey">,
+  environmentId?: EnvironmentId | null,
+): Array<DraftSessionState & { draftId: DraftId }> {
+  return Object.entries(state.draftThreadsByThreadKey).flatMap(([draftId, draft]) =>
+    draft.projectId === null &&
+    draft.promotedTo == null &&
+    (environmentId == null || draft.environmentId === environmentId)
+      ? [standaloneDraftCatalogRow(draftId, draft)]
+      : [],
+  );
 }
 
 /**
@@ -310,6 +346,13 @@ interface ComposerDraftStoreState {
   getDraftThread: (threadRef: ComposerThreadTarget) => DraftThreadState | null;
   listDraftThreadKeys: () => string[];
   hasDraftThreadsInEnvironment: (environmentId: EnvironmentId) => boolean;
+  /** Standalone drafts have independent identities and never occupy a project draft slot. */
+  createStandaloneDraftSession: (
+    draftId: DraftId,
+    environmentId: EnvironmentId,
+    threadId: ThreadId,
+    createdAt?: string,
+  ) => void;
   /** Creates or updates the draft session tracked for a logical project. */
   setLogicalProjectDraftThreadId: (
     logicalProjectKey: string,
@@ -1387,44 +1430,56 @@ function normalizePersistedDraftThreads(
         promotedToRecord &&
         typeof promotedToRecord.environmentId === "string" &&
         promotedToRecord.environmentId.length > 0 &&
+        promotedToRecord.environmentId === environmentId &&
         typeof promotedToRecord.threadId === "string" &&
-        promotedToRecord.threadId.length > 0
+        promotedToRecord.threadId.length > 0 &&
+        promotedToRecord.threadId === threadId
           ? scopeThreadRef(
               promotedToRecord.environmentId as EnvironmentId,
               promotedToRecord.threadId as ThreadId,
             )
           : null;
-      if (typeof projectId !== "string" || projectId.length === 0 || environmentId === undefined) {
+      if (
+        (projectId !== null && (typeof projectId !== "string" || projectId.length === 0)) ||
+        environmentId === undefined
+      ) {
         continue;
       }
       const normalizedEnvironmentId = environmentId as EnvironmentId;
       draftThreadsByThreadKey[threadKey] = {
         threadId,
         environmentId: normalizedEnvironmentId,
-        projectId: projectId as ProjectId,
+        projectId: projectId as ProjectId | null,
         logicalProjectKey:
-          typeof candidateDraftThread.logicalProjectKey === "string" &&
-          candidateDraftThread.logicalProjectKey.length > 0
-            ? candidateDraftThread.logicalProjectKey
-            : parsedThreadRef
-              ? projectDraftKey(scopeProjectRef(normalizedEnvironmentId, projectId as ProjectId))
-              : threadKeyOrId,
+          projectId === null
+            ? null
+            : typeof candidateDraftThread.logicalProjectKey === "string" &&
+                candidateDraftThread.logicalProjectKey.length > 0
+              ? candidateDraftThread.logicalProjectKey
+              : parsedThreadRef
+                ? projectDraftKey(scopeProjectRef(normalizedEnvironmentId, projectId as ProjectId))
+                : threadKeyOrId,
         createdAt:
           typeof createdAt === "string" && createdAt.length > 0
             ? createdAt
             : new Date().toISOString(),
         runtimeMode: isRuntimeMode(candidateDraftThread.runtimeMode)
           ? candidateDraftThread.runtimeMode
-          : DEFAULT_RUNTIME_MODE,
+          : projectId === null
+            ? "approval-required"
+            : DEFAULT_RUNTIME_MODE,
         interactionMode:
           candidateDraftThread.interactionMode === "plan" ||
           candidateDraftThread.interactionMode === "auto" ||
           candidateDraftThread.interactionMode === "default"
             ? candidateDraftThread.interactionMode
             : DEFAULT_INTERACTION_MODE,
-        branch: typeof branch === "string" ? branch : null,
-        worktreePath: normalizedWorktreePath,
-        envMode: normalizeDraftThreadEnvMode(candidateDraftThread.envMode, normalizedWorktreePath),
+        branch: projectId !== null && typeof branch === "string" ? branch : null,
+        worktreePath: projectId === null ? null : normalizedWorktreePath,
+        envMode:
+          projectId === null
+            ? "local"
+            : normalizeDraftThreadEnvMode(candidateDraftThread.envMode, normalizedWorktreePath),
         promotedTo,
       };
     }
@@ -1444,6 +1499,9 @@ function normalizePersistedDraftThreads(
       const projectRef = parseScopedProjectKey(logicalProjectKey);
       const parsedThreadRef = parseScopedThreadKey(threadKeyOrId);
       const threadKey = normalizeLegacyComposerStorageKey(threadKeyOrId);
+      // A stale or forged project map must not grant an independent standalone
+      // draft a workspace association while restoring local persistence.
+      if (draftThreadsByThreadKey[threadKey]?.projectId === null) continue;
       logicalProjectDraftThreadKeyByLogicalProjectKey[logicalProjectKey] = threadKey;
       if (parsedThreadRef) {
         environmentIdByThreadId.set(parsedThreadRef.threadId, parsedThreadRef.environmentId);
@@ -1966,13 +2024,15 @@ function toHydratedDraftThreadState(
     environmentId: persistedDraftThread.environmentId as EnvironmentId,
     projectId: persistedDraftThread.projectId,
     logicalProjectKey:
-      persistedDraftThread.logicalProjectKey ??
-      projectDraftKey(
-        scopeProjectRef(
-          persistedDraftThread.environmentId as EnvironmentId,
-          persistedDraftThread.projectId,
-        ),
-      ),
+      persistedDraftThread.projectId === null
+        ? null
+        : (persistedDraftThread.logicalProjectKey ??
+          projectDraftKey(
+            scopeProjectRef(
+              persistedDraftThread.environmentId as EnvironmentId,
+              persistedDraftThread.projectId,
+            ),
+          )),
     createdAt: persistedDraftThread.createdAt,
     runtimeMode: persistedDraftThread.runtimeMode,
     interactionMode: persistedDraftThread.interactionMode,
@@ -2065,6 +2125,31 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
           Object.values(get().draftThreadsByThreadKey).some(
             (draftThread) => draftThread.environmentId === environmentId,
           ),
+        createStandaloneDraftSession: (draftId, environmentId, threadId, createdAt) => {
+          if (!draftId || !environmentId || !threadId) return;
+          set((state) => {
+            // A collision must never overwrite a different unsent conversation.
+            if (state.draftThreadsByThreadKey[draftId]) return state;
+            return {
+              draftThreadsByThreadKey: {
+                ...state.draftThreadsByThreadKey,
+                [draftId]: {
+                  threadId,
+                  environmentId,
+                  projectId: null,
+                  logicalProjectKey: null,
+                  createdAt: createdAt ?? new Date().toISOString(),
+                  runtimeMode: "approval-required",
+                  interactionMode: DEFAULT_INTERACTION_MODE,
+                  branch: null,
+                  worktreePath: null,
+                  envMode: "local",
+                  promotedTo: null,
+                },
+              },
+            };
+          });
+        },
         setLogicalProjectDraftThreadId: (logicalProjectKey, projectRef, draftId, options) => {
           const normalizedLogicalProjectKey = logicalProjectDraftKey(logicalProjectKey);
           if (normalizedLogicalProjectKey.length === 0 || draftId.length === 0) {
@@ -2072,6 +2157,9 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
           }
           set((state) => {
             const existingThread = state.draftThreadsByThreadKey[draftId];
+            // Project draft reuse cannot claim an already-created standalone
+            // identity; association changes require a separate explicit flow.
+            if (existingThread?.projectId === null) return state;
             const previousThreadKeyForLogicalProject =
               state.logicalProjectDraftThreadKeyByLogicalProjectKey[normalizedLogicalProjectKey];
             const nextDraftThread = createDraftThreadState(
@@ -2139,12 +2227,14 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             if (!existing) {
               return state;
             }
-            const nextProjectRef = options.projectRef ?? {
+            const nextProjectRef = (existing.projectId === null
+              ? undefined
+              : options.projectRef) ?? {
               environmentId: existing.environmentId,
               projectId: existing.projectId,
             };
             if (
-              nextProjectRef.projectId.length === 0 ||
+              nextProjectRef.projectId?.length === 0 ||
               nextProjectRef.environmentId.length === 0
             ) {
               return state;
@@ -2153,17 +2243,21 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               nextProjectRef.environmentId !== existing.environmentId ||
               nextProjectRef.projectId !== existing.projectId;
             const nextWorktreePath =
-              options.worktreePath === undefined
-                ? projectChanged
-                  ? null
-                  : existing.worktreePath
-                : (options.worktreePath ?? null);
+              nextProjectRef.projectId === null
+                ? null
+                : options.worktreePath === undefined
+                  ? projectChanged
+                    ? null
+                    : existing.worktreePath
+                  : (options.worktreePath ?? null);
             const nextBranch =
-              options.branch === undefined
-                ? projectChanged
-                  ? null
-                  : existing.branch
-                : (options.branch ?? null);
+              nextProjectRef.projectId === null
+                ? null
+                : options.branch === undefined
+                  ? projectChanged
+                    ? null
+                    : existing.branch
+                  : (options.branch ?? null);
             const nextDraftThread: DraftThreadState = {
               threadId: existing.threadId,
               environmentId: nextProjectRef.environmentId,
@@ -2178,12 +2272,14 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               branch: nextBranch,
               worktreePath: nextWorktreePath,
               envMode:
-                options.envMode ??
-                (nextWorktreePath
-                  ? "worktree"
-                  : projectChanged
-                    ? "local"
-                    : (existing.envMode ?? "local")),
+                nextProjectRef.projectId === null
+                  ? "local"
+                  : (options.envMode ??
+                    (nextWorktreePath
+                      ? "worktree"
+                      : projectChanged
+                        ? "local"
+                        : (existing.envMode ?? "local"))),
               promotedTo: existing.promotedTo ?? null,
             };
             const isUnchanged =
@@ -2250,6 +2346,13 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             }
             const nextPromotedTo =
               promotedTo ?? scopeThreadRef(existing.environmentId, existing.threadId);
+            // Promotion confirms the preallocated server identity; a sibling
+            // environment or unrelated thread cannot consume this draft.
+            if (
+              nextPromotedTo.environmentId !== existing.environmentId ||
+              nextPromotedTo.threadId !== existing.threadId
+            )
+              return state;
             if (scopedThreadRefsEqual(existing.promotedTo, nextPromotedTo)) {
               return state;
             }

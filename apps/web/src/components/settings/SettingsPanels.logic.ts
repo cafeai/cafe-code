@@ -94,9 +94,10 @@ export function buildProviderInstanceUpdatePatch(input: {
 }
 
 export type RecentlyDeletedThreadGroupForBulkAction = {
+  readonly environmentId?: EnvironmentId | undefined;
   readonly project: {
     readonly environmentId: EnvironmentId;
-  };
+  } | null;
   readonly threads: ReadonlyArray<{
     readonly id: ThreadId;
     readonly environmentId?: EnvironmentId | undefined;
@@ -107,10 +108,13 @@ export function collectRecentlyDeletedThreadRefs(
   groups: ReadonlyArray<RecentlyDeletedThreadGroupForBulkAction>,
 ): ReadonlyArray<ScopedThreadRef> {
   return groups.flatMap((group) =>
-    group.threads.map((thread) => ({
-      environmentId: thread.environmentId ?? group.project.environmentId,
-      threadId: thread.id,
-    })),
+    group.threads.flatMap((thread) => {
+      const environmentId =
+        thread.environmentId ?? group.environmentId ?? group.project?.environmentId;
+      // A projectless group must carry its real environment, never inherit an
+      // arbitrary currently connected server for destructive bulk actions.
+      return environmentId ? [{ environmentId, threadId: thread.id }] : [];
+    }),
   );
 }
 

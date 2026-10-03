@@ -13,6 +13,7 @@ import { dispatchProviderNativeThreadFork } from "./threadFork.ts";
 import { OrchestrationEngineService } from "./Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
 import { ProviderService } from "../provider/Services/ProviderService.ts";
+import { makeStandaloneWorkspaceStore } from "./standaloneWorkspace.ts";
 
 const respondToOrchestrationHttpError = (
   error: OrchestrationDispatchCommandError | OrchestrationGetSnapshotError,
@@ -73,6 +74,7 @@ export const orchestrationDispatchRouteLayer = HttpRouter.add(
     const orchestrationEngine = yield* OrchestrationEngineService;
     const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
     const providerService = yield* ProviderService;
+    const standaloneWorkspaces = yield* makeStandaloneWorkspaceStore;
     const command = yield* HttpServerRequest.schemaBodyJson(ClientOrchestrationCommand).pipe(
       Effect.mapError(
         (cause) =>
@@ -90,6 +92,7 @@ export const orchestrationDispatchRouteLayer = HttpRouter.add(
             orchestrationEngine,
             projectionSnapshotQuery,
             providerService,
+            standaloneWorkspaces,
           })
         : orchestrationEngine.dispatch(normalizedCommand);
     const result = yield* dispatch.pipe(

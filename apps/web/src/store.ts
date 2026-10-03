@@ -280,8 +280,8 @@ function mapThread(thread: OrchestrationThread, environmentId: EnvironmentId): T
     updatedAt: thread.updatedAt,
     latestTurn: thread.latestTurn,
     pendingSourceProposedPlan: thread.latestTurn?.sourceProposedPlan,
-    branch: thread.branch,
-    worktreePath: thread.worktreePath,
+    branch: thread.projectId === null ? null : thread.branch,
+    worktreePath: thread.projectId === null ? null : thread.worktreePath,
     turnDiffSummaries: thread.checkpoints.map(mapTurnDiffSummary),
     activities: thread.activities.map((activity) => ({ ...activity })),
     goal: thread.goal ?? null,
@@ -310,8 +310,8 @@ function mapThreadShell(
     createdAt: thread.createdAt,
     archivedAt: thread.archivedAt,
     updatedAt: thread.updatedAt,
-    branch: thread.branch,
-    worktreePath: thread.worktreePath,
+    branch: thread.projectId === null ? null : thread.branch,
+    worktreePath: thread.projectId === null ? null : thread.worktreePath,
   };
   const session = thread.session ? mapSession(thread.session) : null;
   const turnState: ThreadTurnState = {
@@ -329,8 +329,8 @@ function mapThreadShell(
     archivedAt: thread.archivedAt,
     updatedAt: thread.updatedAt,
     latestTurn: thread.latestTurn,
-    branch: thread.branch,
-    worktreePath: thread.worktreePath,
+    branch: thread.projectId === null ? null : thread.branch,
+    worktreePath: thread.projectId === null ? null : thread.worktreePath,
     latestUserMessageAt: thread.latestUserMessageAt,
     hasPendingApprovals: thread.hasPendingApprovals,
     hasPendingUserInput: thread.hasPendingUserInput,
@@ -358,8 +358,8 @@ function toThreadShell(thread: Thread): ThreadShell {
     createdAt: thread.createdAt,
     archivedAt: thread.archivedAt,
     updatedAt: thread.updatedAt,
-    branch: thread.branch,
-    worktreePath: thread.worktreePath,
+    branch: thread.projectId === null ? null : thread.branch,
+    worktreePath: thread.projectId === null ? null : thread.worktreePath,
   };
 }
 
@@ -679,8 +679,8 @@ function getThreads(state: EnvironmentState): Thread[] {
 function ensureThreadRegistered(
   state: EnvironmentState,
   threadId: ThreadId,
-  nextProjectId: ProjectId,
-  previousProjectId: ProjectId | undefined,
+  nextProjectId: ProjectId | null,
+  previousProjectId: ProjectId | null | undefined,
 ): EnvironmentState {
   let nextState = state;
 
@@ -706,13 +706,17 @@ function ensureThreadRegistered(
         };
       }
     }
-    const projectThreadIds = threadIdsByProjectId[nextProjectId] ?? EMPTY_THREAD_IDS;
-    const nextProjectThreadIds = appendId(projectThreadIds, threadId);
-    if (!arraysEqual(projectThreadIds, nextProjectThreadIds)) {
-      threadIdsByProjectId = {
-        ...threadIdsByProjectId,
-        [nextProjectId]: nextProjectThreadIds,
-      };
+    // Standalone shells live in the environment catalog without fabricating a
+    // project index key. Project rows and project-scoped actions remain exact.
+    if (nextProjectId !== null) {
+      const projectThreadIds = threadIdsByProjectId[nextProjectId] ?? EMPTY_THREAD_IDS;
+      const nextProjectThreadIds = appendId(projectThreadIds, threadId);
+      if (!arraysEqual(projectThreadIds, nextProjectThreadIds)) {
+        threadIdsByProjectId = {
+          ...threadIdsByProjectId,
+          [nextProjectId]: nextProjectThreadIds,
+        };
+      }
     }
     if (threadIdsByProjectId !== nextState.threadIdsByProjectId) {
       nextState = {
@@ -944,18 +948,23 @@ function removeThreadState(state: EnvironmentState, threadId: ThreadId): Environ
   }
 
   const nextThreadIds = removeId(state.threadIds, threadId);
-  const currentProjectThreadIds = state.threadIdsByProjectId[shell.projectId] ?? EMPTY_THREAD_IDS;
+  const currentProjectThreadIds =
+    shell.projectId === null
+      ? EMPTY_THREAD_IDS
+      : (state.threadIdsByProjectId[shell.projectId] ?? EMPTY_THREAD_IDS);
   const nextProjectThreadIds = removeId(currentProjectThreadIds, threadId);
   const nextThreadIdsByProjectId =
-    nextProjectThreadIds.length === 0
-      ? (() => {
-          const { [shell.projectId]: _removed, ...rest } = state.threadIdsByProjectId;
-          return rest as Record<ProjectId, ThreadId[]>;
-        })()
-      : {
-          ...state.threadIdsByProjectId,
-          [shell.projectId]: nextProjectThreadIds,
-        };
+    shell.projectId === null
+      ? state.threadIdsByProjectId
+      : nextProjectThreadIds.length === 0
+        ? (() => {
+            const { [shell.projectId]: _removed, ...rest } = state.threadIdsByProjectId;
+            return rest as Record<ProjectId, ThreadId[]>;
+          })()
+        : {
+            ...state.threadIdsByProjectId,
+            [shell.projectId]: nextProjectThreadIds,
+          };
 
   const { [threadId]: _removedShell, ...threadShellById } = state.threadShellById;
   const { [threadId]: _removedSession, ...threadSessionById } = state.threadSessionById;
@@ -2667,6 +2676,7 @@ export function setThreadBranch(
     getStoredEnvironmentState(state, threadRef.environmentId),
     threadRef.threadId,
     (thread) => {
+      if (thread.projectId === null) return thread;
       if (thread.branch === branch && thread.worktreePath === worktreePath) return thread;
       const cwdChanged = thread.worktreePath !== worktreePath;
       return {

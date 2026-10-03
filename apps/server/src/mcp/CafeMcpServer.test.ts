@@ -14,7 +14,7 @@ import {
 } from "@cafecode/contracts";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { describe, expect, it } from "@effect/vitest";
+import { describe, expect, it, vi } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 
@@ -264,6 +264,49 @@ describe("Cafe Code MCP server", () => {
       threadId,
       message: { role: "user", text: "Continue the implementation.", attachments: [] },
     });
+  });
+
+  it("creates and detaches standalone chats with no project lookup or permissive default", async () => {
+    const dispatched: Array<Parameters<CafeMcpDependencies["orchestrationEngine"]["dispatch"]>[0]> =
+      [];
+    const dependencies = makeDependencies({ dispatched });
+    const projectLookup = vi.fn(dependencies.projectionSnapshotQuery.getProjectShellById);
+    await withClient(
+      {
+        ...dependencies,
+        projectionSnapshotQuery: {
+          ...dependencies.projectionSnapshotQuery,
+          getProjectShellById: projectLookup,
+        },
+      },
+      async (client) => {
+        expect(
+          (
+            await client.callTool({
+              name: "create_thread",
+              arguments: { title: "Standalone", runtimeMode: "full-access" },
+            })
+          ).isError,
+        ).not.toBe(true);
+        expect(
+          (
+            await client.callTool({
+              name: "update_thread",
+              arguments: { threadId, projectId: null },
+            })
+          ).isError,
+        ).not.toBe(true);
+      },
+    );
+    expect(projectLookup).not.toHaveBeenCalled();
+    expect(dispatched[0]).toMatchObject({
+      type: "thread.create",
+      projectId: null,
+      runtimeMode: "approval-required",
+      branch: null,
+      worktreePath: null,
+    });
+    expect(dispatched[1]).toMatchObject({ type: "thread.meta.update", projectId: null });
   });
 
   it("redacts provider secrets from tool results", async () => {

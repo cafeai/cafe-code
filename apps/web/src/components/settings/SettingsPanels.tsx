@@ -4,6 +4,7 @@ import {
   CopyIcon,
   FileTextIcon,
   LoaderIcon,
+  MessageSquareIcon,
   PlusIcon,
   RefreshCwIcon,
   Trash2Icon,
@@ -70,6 +71,12 @@ import { ensureLocalApi, readLocalApi } from "../../localApi";
 import { getLocalShellCapabilities } from "../../localCapabilities";
 import { useShallow } from "zustand/react/shallow";
 import { selectProjectsAcrossEnvironments, useStore } from "../../store";
+import { usePrimaryEnvironmentId } from "../../environments/primary";
+import {
+  useSavedEnvironmentRegistryStore,
+  useSavedEnvironmentRuntimeStore,
+} from "../../environments/runtime/catalog";
+import { groupThreadHistory, historyEnvironmentIds } from "../sidebar/standaloneNavigation.logic";
 import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
 import { useDeletedThreadSnapshots } from "../../lib/deletedThreadsState";
 import { formatRelativeTime, formatRelativeTimeLabel } from "../../timestampFormat";
@@ -2107,13 +2114,38 @@ export function ProviderSettingsPanel() {
   );
 }
 
-export function ArchivedThreadsPanel() {
+/**
+ * History remains reachable when a connected saved environment contains only
+ * standalone chats. Project membership is not a proxy for server availability.
+ * Only already-known connected catalog entries join the existing primary and
+ * project scope: reading Settings never connects arbitrary hosts or providers.
+ */
+function useThreadHistoryEnvironmentIds() {
   const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
-  const { unarchiveThread, confirmAndDeleteThread } = useThreadActions();
-  const environmentIds = useMemo(
-    () => [...new Set(projects.map((project) => project.environmentId))],
-    [projects],
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const savedEnvironmentIds = useSavedEnvironmentRegistryStore(
+    useShallow((state) => Object.values(state.byId).map((record) => record.environmentId)),
   );
+  const connectedSavedEnvironmentIds = useSavedEnvironmentRuntimeStore(
+    useShallow((state) =>
+      savedEnvironmentIds.filter(
+        (environmentId) => state.byId[environmentId]?.connectionState === "connected",
+      ),
+    ),
+  );
+  return useMemo(
+    () =>
+      historyEnvironmentIds(primaryEnvironmentId, [
+        ...projects,
+        ...connectedSavedEnvironmentIds.map((environmentId) => ({ environmentId })),
+      ]),
+    [connectedSavedEnvironmentIds, primaryEnvironmentId, projects],
+  );
+}
+
+export function ArchivedThreadsPanel() {
+  const environmentIds = useThreadHistoryEnvironmentIds();
+  const { unarchiveThread, confirmAndDeleteThread } = useThreadActions();
   const {
     snapshots: archivedSnapshots,
     error: archiveError,
@@ -2121,46 +2153,10 @@ export function ArchivedThreadsPanel() {
     refresh: refreshArchivedThreads,
   } = useArchivedThreadSnapshots(environmentIds);
 
-  const archivedGroups = useMemo(() => {
-    const projectsByEnvironmentAndId = new Map(
-      archivedSnapshots.flatMap(({ environmentId, snapshot }) =>
-        snapshot.projects.map(
-          (project) =>
-            [
-              `${environmentId}:${project.id}`,
-              {
-                id: project.id,
-                environmentId,
-                name: project.title,
-                cwd: project.workspaceRoot,
-              },
-            ] as const,
-        ),
-      ),
-    );
-    const threads = archivedSnapshots.flatMap(({ environmentId, snapshot }) =>
-      snapshot.threads.map((thread) => ({
-        ...thread,
-        environmentId,
-      })),
-    );
-
-    return [...projectsByEnvironmentAndId.values()]
-      .map((project) => ({
-        project,
-        threads: threads
-          .filter(
-            (thread) =>
-              thread.projectId === project.id && thread.environmentId === project.environmentId,
-          )
-          .toSorted((left, right) => {
-            const leftKey = left.archivedAt ?? left.createdAt;
-            const rightKey = right.archivedAt ?? right.createdAt;
-            return rightKey.localeCompare(leftKey) || right.id.localeCompare(left.id);
-          }),
-      }))
-      .filter((group) => group.threads.length > 0);
-  }, [archivedSnapshots]);
+  const archivedGroups = useMemo(
+    () => groupThreadHistory(archivedSnapshots, "archived"),
+    [archivedSnapshots],
+  );
 
   const handleArchivedThreadContextMenu = useCallback(
     async (threadRef: ScopedThreadRef, position: { x: number; y: number }) => {
@@ -2225,11 +2221,17 @@ export function ArchivedThreadsPanel() {
           />
         </SettingsSection>
       ) : (
-        archivedGroups.map(({ project, threads: projectThreads }) => (
+        archivedGroups.map(({ groupKey, project, threads: projectThreads }) => (
           <SettingsSection
-            key={project.id}
-            title={project.name}
-            icon={<ProjectFavicon environmentId={project.environmentId} cwd={project.cwd} />}
+            key={groupKey}
+            title={project?.name ?? "Chats"}
+            icon={
+              project ? (
+                <ProjectFavicon environmentId={project.environmentId} cwd={project.cwd} />
+              ) : (
+                <MessageSquareIcon className="size-3.5" />
+              )
+            }
           >
             {projectThreads.map((thread) => (
               <SettingsRow
@@ -2287,13 +2289,9 @@ export function ArchivedThreadsPanel() {
 }
 
 export function RecentlyDeletedThreadsPanel() {
-  const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
+  const environmentIds = useThreadHistoryEnvironmentIds();
   const { restoreThread, hardDeleteThread } = useThreadActions();
   const [isEmptyingRecycleBin, setIsEmptyingRecycleBin] = useState(false);
-  const environmentIds = useMemo(
-    () => [...new Set(projects.map((project) => project.environmentId))],
-    [projects],
-  );
   const {
     snapshots: deletedSnapshots,
     error: deletedError,
@@ -2301,46 +2299,10 @@ export function RecentlyDeletedThreadsPanel() {
     refresh: refreshDeletedThreads,
   } = useDeletedThreadSnapshots(environmentIds);
 
-  const deletedGroups = useMemo(() => {
-    const projectsByEnvironmentAndId = new Map(
-      deletedSnapshots.flatMap(({ environmentId, snapshot }) =>
-        snapshot.projects.map(
-          (project) =>
-            [
-              `${environmentId}:${project.id}`,
-              {
-                id: project.id,
-                environmentId,
-                name: project.title,
-                cwd: project.workspaceRoot,
-              },
-            ] as const,
-        ),
-      ),
-    );
-    const threads = deletedSnapshots.flatMap(({ environmentId, snapshot }) =>
-      snapshot.threads.map((thread) => ({
-        ...thread,
-        environmentId,
-      })),
-    );
-
-    return [...projectsByEnvironmentAndId.values()]
-      .map((project) => ({
-        project,
-        threads: threads
-          .filter(
-            (thread) =>
-              thread.projectId === project.id && thread.environmentId === project.environmentId,
-          )
-          .toSorted((left, right) => {
-            const leftKey = left.deletedAt ?? left.updatedAt;
-            const rightKey = right.deletedAt ?? right.updatedAt;
-            return rightKey.localeCompare(leftKey) || right.id.localeCompare(left.id);
-          }),
-      }))
-      .filter((group) => group.threads.length > 0);
-  }, [deletedSnapshots]);
+  const deletedGroups = useMemo(
+    () => groupThreadHistory(deletedSnapshots, "deleted"),
+    [deletedSnapshots],
+  );
   const deletedThreadRefs = useMemo(
     () => collectRecentlyDeletedThreadRefs(deletedGroups),
     [deletedGroups],
@@ -2489,11 +2451,17 @@ export function RecentlyDeletedThreadsPanel() {
           />
         </SettingsSection>
       ) : (
-        deletedGroups.map(({ project, threads: projectThreads }, index) => (
+        deletedGroups.map(({ groupKey, project, threads: projectThreads }, index) => (
           <SettingsSection
-            key={project.id}
-            title={project.name}
-            icon={<ProjectFavicon environmentId={project.environmentId} cwd={project.cwd} />}
+            key={groupKey}
+            title={project?.name ?? "Chats"}
+            icon={
+              project ? (
+                <ProjectFavicon environmentId={project.environmentId} cwd={project.cwd} />
+              ) : (
+                <MessageSquareIcon className="size-3.5" />
+              )
+            }
             headerAction={index === 0 ? emptyRecycleBinAction : null}
           >
             {projectThreads.map((thread) => (

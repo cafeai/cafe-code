@@ -537,8 +537,211 @@ describe("CheckpointReactor", () => {
       cwd,
       drain,
       checkpointStore,
+      snapshotQuery,
     };
   }
+
+  it("keeps historical checkpoints fenced after detach/reattach and captures a fresh baseline", async () => {
+    const harness = await createHarness();
+    const threadId = ThreadId.make("thread-1");
+    const originalRef = checkpointRefForThreadTurn(threadId, 1);
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.diff.complete",
+        commandId: CommandId.make("fence-old-diff"),
+        threadId,
+        turnId: asTurnId("old-turn"),
+        checkpointTurnCount: 1,
+        checkpointRef: originalRef,
+        status: "ready",
+        files: [],
+        createdAt: "2026-01-01T00:00:00.000Z",
+        completedAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    await harness.drain();
+    for (const [projectId, createdAt] of [
+      [null, "2026-01-01T00:01:00.000Z"],
+      [asProjectId("project-1"), "2026-01-01T00:02:00.000Z"],
+    ] as const) {
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make(`fence-move-${createdAt}`),
+          threadId,
+          projectId,
+        }),
+      );
+      await harness.drain();
+    }
+    const context = await Effect.runPromise(
+      harness.snapshotQuery.getThreadCheckpointContext(threadId),
+    );
+    if (context._tag !== "Some" || !context.value.workspaceFence)
+      throw new Error("Missing durable association fence");
+    const fence = context.value.workspaceFence;
+    // Deliberately behind the server's association clock: native timestamps
+    // are display data, not proof of destination workspace authority.
+    const afterMove = "2026-01-01T00:04:00.000Z";
+    expect(fence.invalidThroughTurnCount).toBe(1);
+    expect(context.value.checkpoints).toHaveLength(1);
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.checkpoint.revert",
+        commandId: CommandId.make("fence-revert-old"),
+        threadId,
+        turnCount: 1,
+        createdAt: "2026-01-01T00:03:00.000Z",
+      }),
+    );
+    await waitForThread(harness.readModel, (thread) =>
+      thread.activities.some((activity) => activity.kind === "checkpoint.revert.failed"),
+    );
+    expect(harness.provider.rollbackConversation).not.toHaveBeenCalled();
+    expect(fs.readFileSync(path.join(harness.cwd, "README.md"), "utf8")).toBe("v3\n");
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("fence-new-request"),
+        threadId,
+        message: {
+          messageId: MessageId.make("fence-new-user"),
+          role: "user",
+          text: "New explicit request",
+          attachments: [],
+        },
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        createdAt: afterMove,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("fence-bind-request"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: asTurnId("new-turn"),
+          lastError: null,
+          updatedAt: afterMove,
+        },
+        createdAt: afterMove,
+      }),
+    );
+    harness.provider.emit({
+      type: "turn.started",
+      eventId: EventId.make("fence-new-turn"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      turnId: asTurnId("new-turn"),
+      createdAt: afterMove,
+    });
+    const baselineRef = checkpointRefForThreadTurn(threadId, 1, fence.associationSequence);
+    await waitForGitRefExists(harness.cwd, baselineRef);
+    expect(gitShowFileAtRef(harness.cwd, baselineRef, "README.md")).toBe("v3\n");
+    expect(gitShowFileAtRef(harness.cwd, originalRef, "README.md")).toBe("v2\n");
+    fs.writeFileSync(path.join(harness.cwd, "README.md"), "v4\n");
+    harness.provider.emit({
+      type: "turn.completed",
+      eventId: EventId.make("fence-new-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      turnId: asTurnId("new-turn"),
+      createdAt: new Date(Date.parse(afterMove) + 1_000).toISOString(),
+      payload: { state: "completed" },
+    });
+    await waitForGitRefExists(
+      harness.cwd,
+      checkpointRefForThreadTurn(threadId, 2, fence.associationSequence),
+    );
+    expect(gitShowFileAtRef(harness.cwd, originalRef, "README.md")).toBe("v2\n");
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("fence-ready"),
+        threadId,
+        session: {
+          threadId,
+          status: "ready",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: afterMove,
+        },
+        createdAt: afterMove,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.checkpoint.revert",
+        commandId: CommandId.make("fence-revert-fresh-baseline"),
+        threadId,
+        turnCount: 1,
+        createdAt: afterMove,
+      }),
+    );
+    await waitForEvent(harness.engine, (event) => event.type === "thread.reverted");
+    expect(fs.readFileSync(path.join(harness.cwd, "README.md"), "utf8")).toBe("v3\n");
+    expect(harness.provider.rollbackConversation).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not capture newly discovered native history after association change without a Cafe request", async () => {
+    const harness = await createHarness({ seedFilesystemCheckpoints: false });
+    const threadId = ThreadId.make("thread-1");
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("unknown-detach"),
+        threadId,
+        projectId: null,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("unknown-attach"),
+        threadId,
+        projectId: asProjectId("project-1"),
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.diff.complete",
+        commandId: CommandId.make("unknown-historical-placeholder"),
+        threadId,
+        turnId: asTurnId("newly-discovered-old-turn"),
+        checkpointTurnCount: 1,
+        checkpointRef: CheckpointRef.make("provider-diff:old-history"),
+        status: "missing",
+        files: [],
+        createdAt: "2099-01-01T00:00:00.000Z",
+        completedAt: "2099-01-01T00:00:00.000Z",
+      }),
+    );
+    await harness.drain();
+    const context = await Effect.runPromise(
+      harness.snapshotQuery.getThreadCheckpointContext(
+        threadId,
+        asTurnId("newly-discovered-old-turn"),
+      ),
+    );
+    if (context._tag !== "Some" || !context.value.workspaceFence)
+      throw new Error("Missing association fence");
+    expect(context.value.workspaceFence.eligibleTurn).toBe(false);
+    expect(
+      gitRefExists(
+        harness.cwd,
+        checkpointRefForThreadTurn(threadId, 1, context.value.workspaceFence.associationSequence),
+      ),
+    ).toBe(false);
+    expect(context.value.checkpoints[0]?.status).toBe("missing");
+    expect(fs.readFileSync(path.join(harness.cwd, "README.md"), "utf8")).toBe("v1\n");
+  });
 
   it("captures pre-turn baseline on turn.started and post-turn checkpoint on turn.completed", async () => {
     const harness = await createHarness({ seedFilesystemCheckpoints: false });

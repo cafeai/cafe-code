@@ -109,8 +109,10 @@ export function ThreadRowLeadingStatus({ thread }: { thread: SidebarThreadSummar
   const threadProjectCwd = useStore(
     useMemo(
       () => (state: AppState) =>
-        selectProjectByRef(state, scopeProjectRef(thread.environmentId, thread.projectId))?.cwd ??
-        null,
+        thread.projectId === null
+          ? null
+          : (selectProjectByRef(state, scopeProjectRef(thread.environmentId, thread.projectId))
+              ?.cwd ?? null),
       [thread.environmentId, thread.projectId],
     ),
   );

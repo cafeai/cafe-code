@@ -66,6 +66,8 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
 
       expect(first.environmentId).toBe(second.environmentId);
       expect(second.capabilities.repositoryIdentity).toBe(true);
+      expect(first.capabilities.standaloneChats).toBe(true);
+      expect(second.capabilities.standaloneChats).toBe(true);
     }),
   );
 

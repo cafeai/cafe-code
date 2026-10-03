@@ -68,6 +68,7 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 import { ServerConfig } from "../../config.ts";
+import { makeStandaloneWorkspaceStore } from "../standaloneWorkspace.ts";
 import {
   composeSystemPromptProviderInput,
   readSystemPromptFileForInjection,
@@ -578,6 +579,7 @@ const make = Effect.gen(function* () {
   const readRuntimeRecoveryBarrier = yield* makeRuntimeRecoveryBarrierReader;
   const sql = yield* SqlClient.SqlClient;
   const serverConfig = yield* ServerConfig;
+  const standaloneWorkspaces = yield* makeStandaloneWorkspaceStore;
   const gitWorkflow = yield* GitWorkflowService;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
   const textGeneration = yield* TextGeneration;
@@ -967,7 +969,8 @@ const make = Effect.gen(function* () {
     });
   });
 
-  const resolveProject = Effect.fnUntraced(function* (projectId: ProjectId) {
+  const resolveProject = Effect.fnUntraced(function* (projectId: ProjectId | null) {
+    if (projectId === null) return undefined;
     return yield* projectionSnapshotQuery
       .getProjectShellById(projectId)
       .pipe(Effect.map(Option.getOrUndefined));
@@ -1521,7 +1524,19 @@ const make = Effect.gen(function* () {
       thread,
       projects: project ? [project] : [],
     });
-    const effectiveCwd = workspaceDirectories.cwd;
+    const effectiveCwd =
+      thread.projectId === null
+        ? yield* standaloneWorkspaces.resolve(thread.id).pipe(
+            Effect.mapError(
+              () =>
+                new ProviderAdapterRequestError({
+                  provider: providerErrorLabel(preferredProvider),
+                  method: "thread.turn.start",
+                  detail: "Standalone chat directory is unavailable.",
+                }),
+            ),
+          )
+        : workspaceDirectories.cwd;
     const effectiveAdditionalDirectories = workspaceDirectories.additionalDirectories;
 
     const startProviderSession = (input?: {
@@ -1536,9 +1551,9 @@ const make = Effect.gen(function* () {
           ? { title: makeProviderSessionTitle(thread.title) }
           : {}),
         ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
-        ...(effectiveAdditionalDirectories.length > 0
-          ? { additionalDirectories: effectiveAdditionalDirectories }
-          : {}),
+        // Empty is an explicit revocation, not omission: ProviderService may
+        // otherwise restore persisted former-project roots after a move.
+        additionalDirectories: effectiveAdditionalDirectories,
         modelSelection: desiredModelSelection,
         ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
         interactionMode: desiredInteractionMode,
@@ -2501,10 +2516,12 @@ const make = Effect.gen(function* () {
       thread.messages.filter((entry) => entry.role === "user").length === 1;
     if (isFirstUserMessageTurn) {
       const generationCwd =
-        resolveThreadWorkspaceCwd({
-          thread,
-          projects: project ? [project] : [],
-        }) ?? process.cwd();
+        thread.projectId === null
+          ? yield* standaloneWorkspaces.resolve(thread.id)
+          : (resolveThreadWorkspaceCwd({
+              thread,
+              projects: project ? [project] : [],
+            }) ?? process.cwd());
       const generationInput = {
         messageText: message.text,
         ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),

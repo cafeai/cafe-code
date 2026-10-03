@@ -49,7 +49,9 @@ type DecideOrchestrationCommandResult =
   | PlannedOrchestrationEvent
   | ReadonlyArray<PlannedOrchestrationEvent>;
 
-function threadHasUnsettledTurnStart(thread: OrchestrationReadModel["threads"][number]): boolean {
+export function threadHasUnsettledTurnStart(
+  thread: OrchestrationReadModel["threads"][number],
+): boolean {
   if (thread.session?.status === "starting" || thread.session?.status === "running") {
     return true;
   }
@@ -232,11 +234,14 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.create": {
-      yield* requireProject({
-        readModel,
-        command,
-        projectId: command.projectId,
-      });
+      if (command.projectId !== null) {
+        yield* requireProject({ readModel, command, projectId: command.projectId });
+      } else if (command.branch !== null || command.worktreePath !== null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Standalone chats cannot select a branch or worktree.",
+        });
+      }
       yield* requireThreadAbsent({
         readModel,
         command,
@@ -255,7 +260,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           projectId: command.projectId,
           title: command.title,
           modelSelection: command.modelSelection,
-          runtimeMode: command.runtimeMode,
+          // Standalone admission is approval-required even when a legacy or
+          // malicious client supplies the project's more permissive default.
+          // Subsequent explicit runtime-mode changes retain their normal policy.
+          runtimeMode: command.projectId === null ? "approval-required" : command.runtimeMode,
           interactionMode: command.interactionMode,
           branch: command.branch,
           worktreePath: command.worktreePath,
@@ -521,8 +529,30 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
-      let clearWorktreePathForProjectMove = false;
-      if (command.projectId !== undefined) {
+      const associationChanged =
+        command.projectId !== undefined && existingThread.projectId !== command.projectId;
+      if (
+        associationChanged &&
+        (threadHasUnsettledTurnStart(existingThread) ||
+          existingThread.latestTurn?.state === "running")
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "A chat must be idle before its project association can change.",
+        });
+      }
+      const destinationProjectId =
+        command.projectId === undefined ? existingThread.projectId : command.projectId;
+      if (
+        destinationProjectId === null &&
+        (command.branch != null || command.worktreePath != null)
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Standalone chats cannot select a branch or worktree.",
+        });
+      }
+      if (command.projectId !== undefined && command.projectId !== null) {
         const targetProject = yield* requireProject({
           readModel,
           command,
@@ -534,8 +564,6 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             detail: `Project '${command.projectId}' has been deleted and cannot receive moved threads.`,
           });
         }
-        clearWorktreePathForProjectMove =
-          existingThread.projectId !== command.projectId && command.worktreePath === undefined;
       }
       const occurredAt = yield* nowIso;
       return {
@@ -553,11 +581,15 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(command.modelSelection !== undefined
             ? { modelSelection: command.modelSelection }
             : {}),
-          ...(command.branch !== undefined ? { branch: command.branch } : {}),
-          ...(command.worktreePath !== undefined
-            ? { worktreePath: command.worktreePath }
-            : clearWorktreePathForProjectMove
-              ? { worktreePath: null }
+          ...(associationChanged
+            ? { branch: null }
+            : command.branch !== undefined
+              ? { branch: command.branch }
+              : {}),
+          ...(associationChanged
+            ? { worktreePath: null }
+            : command.worktreePath !== undefined
+              ? { worktreePath: command.worktreePath }
               : {}),
           updatedAt: occurredAt,
         },
@@ -730,7 +762,11 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           detail: `Proposed plan '${sourceProposedPlan.planId}' does not exist on thread '${sourceProposedPlan.threadId}'.`,
         });
       }
-      if (sourceThread && sourceThread.projectId !== targetThread.projectId) {
+      if (
+        sourceThread &&
+        (sourceThread.projectId !== targetThread.projectId ||
+          (targetThread.projectId === null && sourceThread.id !== targetThread.id))
+      ) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
           detail: `Proposed plan '${sourceProposedPlan?.planId}' belongs to thread '${sourceThread.id}' in a different project.`,
@@ -966,11 +1002,17 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.checkpoint.revert": {
-      yield* requireThread({
+      const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
+      if (thread.projectId === null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Standalone chats do not have project filesystem checkpoints.",
+        });
+      }
       return {
         ...withEventBase({
           aggregateKind: "thread",

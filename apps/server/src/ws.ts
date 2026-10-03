@@ -95,6 +95,12 @@ import * as VcsDriverRegistry from "./vcs/VcsDriverRegistry.ts";
 import * as VcsProjectConfig from "./vcs/VcsProjectConfig.ts";
 import * as VcsProcess from "./vcs/VcsProcess.ts";
 import { hardDeleteThreadLocalData } from "./orchestration/threadHardDelete.ts";
+import { makeStandaloneWorkspaceStore } from "./orchestration/standaloneWorkspace.ts";
+import {
+  compatibleStandaloneShellSnapshot,
+  compatibleStandaloneShellEvent,
+  compatibleStandaloneReplayEvents,
+} from "./orchestration/standaloneWireCompatibility.ts";
 import {
   BootstrapCredentialService,
   type BootstrapCredentialChange,
@@ -209,6 +215,7 @@ const makeWsRpcLayer = (
       const providerRegistry = yield* ProviderRegistry;
       const providerService = yield* ProviderService;
       const config = yield* ServerConfig;
+      const standaloneWorkspaces = yield* makeStandaloneWorkspaceStore;
       const normalizationContext =
         yield* Effect.context<Effect.Services<ReturnType<typeof normalizeDispatchCommand>>>();
       const normalizeCommand = (command: ClientOrchestrationCommand) =>
@@ -534,6 +541,41 @@ const makeWsRpcLayer = (
             });
 
           const bootstrapProgram = Effect.gen(function* () {
+            const existingTarget = bootstrap?.createThread
+              ? undefined
+              : Option.getOrUndefined(
+                  yield* projectionSnapshotQuery.getThreadShellById(command.threadId),
+                );
+            if (!bootstrap?.createThread && !existingTarget) {
+              return yield* new OrchestrationDispatchCommandError({
+                message: "The target chat does not exist.",
+              });
+            }
+            const targetAssociation =
+              bootstrap?.createThread?.projectId !== undefined
+                ? bootstrap.createThread.projectId
+                : existingTarget?.projectId;
+            if (
+              targetAssociation !== null &&
+              targetAssociation !== undefined &&
+              (bootstrap?.prepareWorktree || bootstrap?.runSetupScript)
+            ) {
+              const targetProject = Option.getOrUndefined(
+                yield* projectionSnapshotQuery.getProjectShellById(targetAssociation),
+              );
+              if (!targetProject)
+                return yield* new OrchestrationDispatchCommandError({
+                  message: "The target project is unavailable.",
+                });
+            }
+            if (
+              targetAssociation === null &&
+              (bootstrap?.prepareWorktree !== undefined || bootstrap?.runSetupScript)
+            ) {
+              return yield* new OrchestrationDispatchCommandError({
+                message: "Standalone chats cannot prepare worktrees or run project setup scripts.",
+              });
+            }
             if (bootstrap?.createThread) {
               yield* orchestrationEngine.dispatch({
                 type: "thread.create",
@@ -602,6 +644,7 @@ const makeWsRpcLayer = (
                 orchestrationEngine,
                 projectionSnapshotQuery,
                 providerService,
+                standaloneWorkspaces,
               })
             : orchestrationEngine
                 .dispatch(normalizedCommand)
@@ -733,6 +776,17 @@ const makeWsRpcLayer = (
             ).pipe(
               Effect.map((events) => Array.from(events)),
               Effect.flatMap(enrichOrchestrationEvents),
+              Effect.flatMap((events) =>
+                input.includeStandaloneChats === true
+                  ? Effect.succeed(events)
+                  : projectionSnapshotQuery
+                      .getShellSnapshot()
+                      .pipe(
+                        Effect.map((snapshot) =>
+                          compatibleStandaloneReplayEvents(events, false, snapshot.threads),
+                        ),
+                      ),
+              ),
               Effect.mapError(
                 (cause) =>
                   new OrchestrationReplayEventsError({
@@ -743,7 +797,7 @@ const makeWsRpcLayer = (
             ),
             { "rpc.aggregate": "orchestration" },
           ),
-        [ORCHESTRATION_WS_METHODS.subscribeShell]: (_input) =>
+        [ORCHESTRATION_WS_METHODS.subscribeShell]: (input) =>
           observeRpcStreamEffect(
             ORCHESTRATION_WS_METHODS.subscribeShell,
             Effect.gen(function* () {
@@ -767,6 +821,11 @@ const makeWsRpcLayer = (
                 })
                 .pipe(
                   Stream.mapEffect(toShellStreamEvent),
+                  Stream.map((event) =>
+                    Option.map(event, (value) =>
+                      compatibleStandaloneShellEvent(value, input.includeStandaloneChats),
+                    ),
+                  ),
                   Stream.flatMap((event) =>
                     Option.isSome(event) ? Stream.succeed(event.value) : Stream.empty,
                   ),
@@ -776,7 +835,10 @@ const makeWsRpcLayer = (
                 Stream.concat(
                   Stream.make({
                     kind: "snapshot" as const,
-                    snapshot,
+                    snapshot: compatibleStandaloneShellSnapshot(
+                      snapshot,
+                      input.includeStandaloneChats,
+                    ),
                   }),
                   liveStream,
                 ),
@@ -784,10 +846,13 @@ const makeWsRpcLayer = (
             }),
             { "rpc.aggregate": "orchestration" },
           ),
-        [ORCHESTRATION_WS_METHODS.getArchivedShellSnapshot]: (_input) =>
+        [ORCHESTRATION_WS_METHODS.getArchivedShellSnapshot]: (input) =>
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.getArchivedShellSnapshot,
             projectionSnapshotQuery.getArchivedShellSnapshot().pipe(
+              Effect.map((snapshot) =>
+                compatibleStandaloneShellSnapshot(snapshot, input.includeStandaloneChats),
+              ),
               Effect.tapError((cause) =>
                 Effect.logError("orchestration archived shell snapshot load failed", { cause }),
               ),
@@ -801,10 +866,13 @@ const makeWsRpcLayer = (
             ),
             { "rpc.aggregate": "orchestration" },
           ),
-        [ORCHESTRATION_WS_METHODS.getDeletedShellSnapshot]: (_input) =>
+        [ORCHESTRATION_WS_METHODS.getDeletedShellSnapshot]: (input) =>
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.getDeletedShellSnapshot,
             projectionSnapshotQuery.getDeletedShellSnapshot().pipe(
+              Effect.map((snapshot) =>
+                compatibleStandaloneShellSnapshot(snapshot, input.includeStandaloneChats),
+              ),
               Effect.tapError((cause) =>
                 Effect.logError("orchestration deleted shell snapshot load failed", { cause }),
               ),
@@ -1000,6 +1068,14 @@ const makeWsRpcLayer = (
                   cause: input.threadId,
                 });
               }
+              if (
+                !input.includeStandaloneChats &&
+                threadDetailSnapshot.value.thread.projectId === null
+              ) {
+                return yield* new OrchestrationGetSnapshotError({
+                  message: "Update Cafe Code to open standalone chats.",
+                });
+              }
 
               yield* threadDetailSubscriptionRegistry.retain(input.threadId);
               yield* Effect.addFinalizer(() =>
@@ -1021,10 +1097,20 @@ const makeWsRpcLayer = (
                   route: { kind: "thread", threadId: input.threadId },
                 })
                 .pipe(
-                  Stream.map((event) => ({
-                    kind: "event" as const,
-                    event,
-                  })),
+                  Stream.mapEffect((event) => {
+                    if (
+                      !input.includeStandaloneChats &&
+                      event.type === "thread.meta-updated" &&
+                      event.payload.projectId === null
+                    ) {
+                      return Effect.fail(
+                        new OrchestrationGetSnapshotError({
+                          message: "Update Cafe Code to open standalone chats.",
+                        }),
+                      );
+                    }
+                    return Effect.succeed({ kind: "event" as const, event });
+                  }),
                 );
 
               return connectionFlowControl.wrapBulkStream(

@@ -239,12 +239,12 @@ export function resolveSidebarNewThreadSeedContext(input: {
   projectId: string;
   defaultEnvMode: SidebarNewThreadEnvMode;
   activeThread?: {
-    projectId: string;
+    projectId: string | null;
     branch: string | null;
     worktreePath: string | null;
   } | null;
   activeDraftThread?: {
-    projectId: string;
+    projectId: string | null;
     branch: string | null;
     worktreePath: string | null;
     envMode: SidebarNewThreadEnvMode;
@@ -578,6 +578,8 @@ export function sortProjectsForSidebar<
 
   const threadsByProjectId = new Map<string, TThread[]>();
   for (const thread of threads) {
+    // Standalone chats are catalog entries, never synthetic project members.
+    if (thread.projectId === null) continue;
     const existing = threadsByProjectId.get(thread.projectId) ?? [];
     existing.push(thread);
     threadsByProjectId.set(thread.projectId, existing);

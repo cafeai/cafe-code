@@ -1,4 +1,4 @@
-import { CheckpointRef, ProjectId, ThreadId } from "@cafecode/contracts";
+import { ProjectId, ThreadId } from "@cafecode/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -13,6 +13,7 @@ import {
   CheckpointStore,
   type DeleteCheckpointRefsInput,
 } from "../checkpointing/Services/CheckpointStore.ts";
+import { checkpointRefForThreadTurn } from "../checkpointing/Utils.ts";
 import { ServerConfig } from "../config.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { RepositoryIdentityResolver } from "../project/Services/RepositoryIdentityResolver.ts";
@@ -100,6 +101,8 @@ it.layer(Layer.fresh(testLayer))("hardDeleteThreadLocalData", (it) => {
 
       const targetThreadId = ThreadId.make("hard-delete-thread");
       const survivorThreadId = ThreadId.make("survivor-thread");
+      const targetCheckpointRef = checkpointRefForThreadTurn(targetThreadId, 1);
+      const survivorCheckpointRef = checkpointRefForThreadTurn(survivorThreadId, 1);
       const projectId = ProjectId.make("project-hard-delete");
       const now = "2026-05-22T00:00:00.000Z";
       const deletedAt = "2026-05-22T00:01:00.000Z";
@@ -185,7 +188,7 @@ it.layer(Layer.fresh(testLayer))("hardDeleteThreadLocalData", (it) => {
             'full-access',
             'default',
             NULL,
-            NULL,
+            '/tmp/project-hard-delete/worktree',
             'turn-survivor',
             ${now},
             0,
@@ -547,7 +550,7 @@ it.layer(Layer.fresh(testLayer))("hardDeleteThreadLocalData", (it) => {
             ${now},
             ${now},
             1,
-            'checkpoint-hard-delete',
+            ${targetCheckpointRef},
             'ready',
             '[{"path":"README.md","kind":"modified","additions":1,"deletions":0}]'
           ),
@@ -563,11 +566,30 @@ it.layer(Layer.fresh(testLayer))("hardDeleteThreadLocalData", (it) => {
             ${now},
             ${now},
             1,
-            'checkpoint-survivor',
+            ${survivorCheckpointRef},
+            'ready',
+            '[]'
+          ),
+          (
+            ${targetThreadId},
+            'turn-copied-source-history',
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            'completed',
+            ${now},
+            ${now},
+            ${now},
+            2,
+            ${survivorCheckpointRef},
             'ready',
             '[]'
           )
       `;
+      // Native forks/duplicates retain readable checkpoint history, even when
+      // both chats use this same repository/worktree. Its canonical source ref
+      // must never gain target-thread deletion authority through that copy.
 
       yield* sql`
         INSERT INTO checkpoint_diff_blobs (
@@ -925,9 +947,47 @@ it.layer(Layer.fresh(testLayer))("hardDeleteThreadLocalData", (it) => {
       assert.deepEqual(checkpointDeleteCalls, [
         {
           cwd: "/tmp/project-hard-delete/worktree",
-          checkpointRefs: [CheckpointRef.make("checkpoint-hard-delete")],
+          checkpointRefs: [targetCheckpointRef],
         },
       ]);
+    }),
+  );
+  it.effect("cleans only current-association refs above the durable history fence", () =>
+    Effect.gen(function* () {
+      checkpointDeleteCalls.length = 0;
+      const sql = yield* SqlClient.SqlClient;
+      const targetThreadId = ThreadId.make("fenced-hard-delete-thread");
+      const sourceThreadId = ThreadId.make("fenced-source-thread");
+      const projectId = ProjectId.make("fenced-hard-delete-project");
+      const now = "2026-05-22T00:00:00.000Z";
+      const associationSequence = 42;
+      const currentRef = checkpointRefForThreadTurn(targetThreadId, 3, associationSequence);
+      yield* sql`INSERT INTO projection_projects (project_id, title, workspace_root, scripts_json, created_at, updated_at)
+        VALUES (${projectId}, 'Current project', '/current-project', '[]', ${now}, ${now})`;
+      yield* sql`INSERT INTO projection_threads (thread_id, project_id, title, created_at, updated_at)
+        VALUES (${targetThreadId}, ${projectId}, 'Moved chat', ${now}, ${now})`;
+      yield* sql`INSERT INTO thread_checkpoint_workspace_fences VALUES (${targetThreadId}, 1, ${associationSequence}, ${now})`;
+      const refs = [
+        checkpointRefForThreadTurn(targetThreadId, 1, associationSequence),
+        checkpointRefForThreadTurn(targetThreadId, 2, 40),
+        currentRef,
+        checkpointRefForThreadTurn(sourceThreadId, 4, associationSequence),
+      ];
+      for (const [index, ref] of refs.entries()) {
+        yield* sql`INSERT INTO projection_turns (thread_id, turn_id, state, requested_at, checkpoint_turn_count, checkpoint_ref, checkpoint_status, checkpoint_files_json)
+          VALUES (${targetThreadId}, ${`fenced-turn-${index + 1}`}, 'completed', ${now}, ${index + 1}, ${ref}, 'ready', '[]')`;
+      }
+      yield* hardDeleteThreadLocalData({ threadId: targetThreadId });
+      assert.deepEqual(checkpointDeleteCalls, [
+        {
+          cwd: "/current-project",
+          checkpointRefs: [currentRef],
+        },
+      ]);
+      assert.deepEqual(
+        yield* sql`SELECT * FROM thread_checkpoint_workspace_fences WHERE thread_id = ${targetThreadId}`,
+        [],
+      );
     }),
   );
 });

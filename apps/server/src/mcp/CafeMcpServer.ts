@@ -88,7 +88,7 @@ const latestTurnSummary = z
   .nullable();
 const threadSummary = z.object({
   id: entityId,
-  projectId: entityId,
+  projectId: entityId.nullable(),
   title: nonEmptyString,
   modelSelection,
   runtimeMode,
@@ -452,7 +452,7 @@ function registerDiscoveryTools(server: McpServer, dependencies: CafeMcpDependen
       title: "List Cafe Code threads",
       description: "List threads, optionally scoped to one project and lifecycle state.",
       inputSchema: {
-        projectId: entityId.optional(),
+        projectId: entityId.nullable().optional(),
         state: z.enum(["active", "archived", "deleted", "all"]).default("active"),
       },
       outputSchema: z.object({ threads: z.array(threadSummary) }),
@@ -772,9 +772,9 @@ function registerThreadTools(server: McpServer, dependencies: CafeMcpDependencie
     {
       title: "Create a Cafe Code thread",
       description:
-        "Create a thread in a project. Provider/model defaults resolve from the project and Cafe settings when omitted.",
+        "Create a standalone chat or a thread in a project. Provider/model defaults resolve from Cafe settings and the selected project when omitted.",
       inputSchema: {
-        projectId: entityId,
+        projectId: entityId.nullable().default(null),
         title: nonEmptyString.default("New thread"),
         providerInstanceId: providerInstanceId.optional(),
         model: nonEmptyString.optional(),
@@ -798,13 +798,16 @@ function registerThreadTools(server: McpServer, dependencies: CafeMcpDependencie
       branch,
       worktreePath,
     }) => {
-      const projectOption = await runEffect(
-        dependencies.projectionSnapshotQuery.getProjectShellById(ProjectId.make(projectId)),
-        "Failed to load the target project.",
-      );
-      if (Option.isNone(projectOption))
+      const projectOption =
+        projectId === null
+          ? Option.none()
+          : await runEffect(
+              dependencies.projectionSnapshotQuery.getProjectShellById(ProjectId.make(projectId)),
+              "Failed to load the target project.",
+            );
+      if (projectId !== null && Option.isNone(projectOption))
         throw new Error(`Active project '${projectId}' does not exist.`);
-      const project = projectOption.value;
+      const project = Option.getOrUndefined(projectOption);
       const selection = await runEffect(
         resolveModelSelection(
           dependencies,
@@ -813,7 +816,7 @@ function registerThreadTools(server: McpServer, dependencies: CafeMcpDependencie
             ...(model ? { model } : {}),
             ...(providerOptions ? { options: providerOptions } : {}),
           },
-          project.defaultModelSelection,
+          project?.defaultModelSelection,
         ),
         "Failed to resolve a provider and model for the thread.",
       );
@@ -823,10 +826,10 @@ function registerThreadTools(server: McpServer, dependencies: CafeMcpDependencie
           type: "thread.create",
           commandId: commandId(),
           threadId,
-          projectId: project.id,
+          projectId: project?.id ?? null,
           title,
           modelSelection: selection,
-          runtimeMode: selectedRuntimeMode,
+          runtimeMode: projectId === null ? "approval-required" : selectedRuntimeMode,
           interactionMode: selectedInteractionMode,
           branch,
           worktreePath,
@@ -846,7 +849,7 @@ function registerThreadTools(server: McpServer, dependencies: CafeMcpDependencie
         "Rename or move a thread, or set its provider, model, provider options, runtime mode, and interaction mode.",
       inputSchema: {
         threadId: entityId,
-        projectId: entityId.optional(),
+        projectId: entityId.nullable().optional(),
         title: nonEmptyString.optional(),
         providerInstanceId: providerInstanceId.optional(),
         model: nonEmptyString.optional(),
@@ -878,7 +881,7 @@ function registerThreadTools(server: McpServer, dependencies: CafeMcpDependencie
       if (Option.isNone(threadOption))
         throw new Error(`Active thread '${threadId}' does not exist.`);
       const thread = threadOption.value;
-      if (projectId !== undefined) {
+      if (projectId !== undefined && projectId !== null) {
         const projectOption = await runEffect(
           dependencies.projectionSnapshotQuery.getProjectShellById(ProjectId.make(projectId)),
           "Failed to load the destination project.",
@@ -919,7 +922,9 @@ function registerThreadTools(server: McpServer, dependencies: CafeMcpDependencie
             type: "thread.meta.update",
             commandId: commandId(),
             threadId: thread.id,
-            ...(projectId !== undefined ? { projectId: ProjectId.make(projectId) } : {}),
+            ...(projectId !== undefined
+              ? { projectId: projectId === null ? null : ProjectId.make(projectId) }
+              : {}),
             ...(title !== undefined ? { title } : {}),
             ...(selection !== undefined ? { modelSelection: selection } : {}),
             ...(branch !== undefined ? { branch } : {}),

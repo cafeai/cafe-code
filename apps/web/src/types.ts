@@ -92,7 +92,7 @@ export interface Thread {
   id: ThreadId;
   environmentId: EnvironmentId;
   codexThreadId: string | null;
-  projectId: ProjectId;
+  projectId: ProjectId | null;
   title: string;
   modelSelection: ModelSelection;
   runtimeMode: RuntimeMode;
@@ -117,7 +117,7 @@ export interface ThreadShell {
   id: ThreadId;
   environmentId: EnvironmentId;
   codexThreadId: string | null;
-  projectId: ProjectId;
+  projectId: ProjectId | null;
   title: string;
   modelSelection: ModelSelection;
   runtimeMode: RuntimeMode;
@@ -138,7 +138,7 @@ export interface ThreadTurnState {
 export interface SidebarThreadSummary {
   id: ThreadId;
   environmentId: EnvironmentId;
-  projectId: ProjectId;
+  projectId: ProjectId | null;
   title: string;
   interactionMode: ProviderInteractionMode;
   session: ThreadSession | null;

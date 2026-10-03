@@ -402,7 +402,10 @@ export function selectAtriumSnapshot(
       );
       subagentCount += rows.filter((row) => row.running).length;
 
-      const project = environment.projectById[summary.projectId];
+      // Projectless chats still have normal task/session state. Null is not a
+      // lookup key or permission to attach the task to another project.
+      const project =
+        summary.projectId === null ? undefined : environment.projectById[summary.projectId];
 
       cards.push({
         // Environment/thread ids can be imported from another server. Tuple

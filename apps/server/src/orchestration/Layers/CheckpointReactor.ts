@@ -22,7 +22,7 @@ import { makeDrainableWorker } from "@cafecode/shared/DrainableWorker";
 import { parseTurnDiffFilesFromUnifiedDiff } from "../../checkpointing/Diffs.ts";
 import {
   checkpointRefForThreadTurn,
-  isGeneratedHiddenCheckpointRef,
+  isThreadOwnedHiddenCheckpointRef,
   resolveThreadWorkspaceCwd,
 } from "../../checkpointing/Utils.ts";
 import { CheckpointStore } from "../../checkpointing/Services/CheckpointStore.ts";
@@ -56,19 +56,23 @@ export function computeCheckpointRefPrunePlan(input: {
     readonly checkpointTurnCount: number;
     readonly checkpointRef: CheckpointRef;
   }>;
+  readonly baseline?: {
+    readonly checkpointTurnCount: number;
+    readonly checkpointRef: CheckpointRef;
+  };
 }): {
   readonly retainedTurnCounts: ReadonlyArray<number>;
   readonly checkpointRefsToDelete: ReadonlyArray<CheckpointRef>;
   readonly skippedNonHiddenCheckpointRefs: number;
 } {
   const skippedNonHiddenCheckpointRefs = input.checkpoints.filter(
-    (checkpoint) => !isGeneratedHiddenCheckpointRef(checkpoint.checkpointRef),
+    (checkpoint) => !isThreadOwnedHiddenCheckpointRef(input.threadId, checkpoint.checkpointRef),
   ).length;
   const checkpointCandidates = [
     ...input.checkpoints.filter((checkpoint) =>
-      isGeneratedHiddenCheckpointRef(checkpoint.checkpointRef),
+      isThreadOwnedHiddenCheckpointRef(input.threadId, checkpoint.checkpointRef),
     ),
-    {
+    input.baseline ?? {
       checkpointTurnCount: 0,
       checkpointRef: checkpointRefForThreadTurn(input.threadId, 0),
     },
@@ -144,6 +148,10 @@ const make = Effect.gen(function* () {
   const receiptBus = yield* RuntimeReceiptBus;
   const workspaceEntries = yield* WorkspaceEntries;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
+  const resolveWorkspaceFence = (threadId: ThreadId, checkpointTurnId?: TurnId) =>
+    projectionSnapshotQuery
+      .getThreadCheckpointContext(threadId, checkpointTurnId)
+      .pipe(Effect.map((context) => Option.getOrUndefined(context)?.workspaceFence));
   const cleanupScope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
     Scope.close(scope, Exit.void),
   );
@@ -214,8 +222,9 @@ const make = Effect.gen(function* () {
   });
 
   const resolveThreadProjects = Effect.fn("resolveThreadProjects")(function* (
-    projectId: ProjectId,
+    projectId: ProjectId | null,
   ) {
+    if (projectId === null) return [];
     const project = yield* projectionSnapshotQuery
       .getProjectShellById(projectId)
       .pipe(Effect.map(Option.getOrUndefined));
@@ -230,10 +239,13 @@ const make = Effect.gen(function* () {
   // a git repository.
   const resolveCheckpointCwd = Effect.fn("resolveCheckpointCwd")(function* (input: {
     readonly threadId: ThreadId;
-    readonly thread: { readonly projectId: ProjectId; readonly worktreePath: string | null };
+    readonly thread: { readonly projectId: ProjectId | null; readonly worktreePath: string | null };
     readonly projects: ReadonlyArray<{ readonly id: ProjectId; readonly workspaceRoot: string }>;
     readonly preferSessionRuntime: boolean;
   }): Effect.fn.Return<string | undefined> {
+    // Provider cwd is an execution detail, not project authority. In
+    // particular a moved chat may still have a dormant former-project binding.
+    if (input.thread.projectId === null) return undefined;
     const fromSession = yield* resolveSessionRuntimeForThread(input.threadId);
     const fromThread = resolveThreadWorkspaceCwd({
       thread: input.thread,
@@ -272,6 +284,10 @@ const make = Effect.gen(function* () {
         readonly checkpointTurnCount: number;
         readonly checkpointRef: CheckpointRef;
       }>;
+      readonly baseline?: {
+        readonly checkpointTurnCount: number;
+        readonly checkpointRef: CheckpointRef;
+      };
     }) {
       const prunePlan = computeCheckpointRefPrunePlan(input);
       const { checkpointRefsToDelete, retainedTurnCounts, skippedNonHiddenCheckpointRefs } =
@@ -320,6 +336,8 @@ const make = Effect.gen(function* () {
     readonly threadId: ThreadId;
     readonly turnId: TurnId;
     readonly thread: {
+      readonly projectId: ProjectId | null;
+      readonly worktreePath: string | null;
       readonly messages: ReadonlyArray<{
         readonly id: MessageId;
         readonly role: string;
@@ -336,9 +354,40 @@ const make = Effect.gen(function* () {
     readonly assistantMessageId: MessageId | undefined;
     readonly createdAt: string;
   }) {
+    const context = yield* projectionSnapshotQuery.getThreadCheckpointContext(
+      input.threadId,
+      input.turnId,
+    );
+    if (Option.isNone(context)) return;
+    // The cwd was resolved before entering this function. Bind its canonical
+    // association metadata to this read as well; a move between resolution
+    // and admission must not relabel old-cwd capture with a new ref epoch.
+    if (
+      context.value.projectId !== input.thread.projectId ||
+      context.value.worktreePath !== input.thread.worktreePath
+    )
+      return;
+    const workspaceFence = context.value.workspaceFence;
+    // Delayed placeholder/backfill events retain transcript history but may
+    // never capture today's destination files as yesterday's checkpoint.
+    if (
+      workspaceFence &&
+      (input.turnCount <= workspaceFence.invalidThroughTurnCount ||
+        workspaceFence.retiredTurn === true ||
+        workspaceFence.eligibleTurn === false)
+    )
+      return;
     const fromTurnCount = Math.max(0, input.turnCount - 1);
-    const fromCheckpointRef = checkpointRefForThreadTurn(input.threadId, fromTurnCount);
-    const targetCheckpointRef = checkpointRefForThreadTurn(input.threadId, input.turnCount);
+    const fromCheckpointRef = checkpointRefForThreadTurn(
+      input.threadId,
+      fromTurnCount,
+      workspaceFence?.associationSequence,
+    );
+    const targetCheckpointRef = checkpointRefForThreadTurn(
+      input.threadId,
+      input.turnCount,
+      workspaceFence?.associationSequence,
+    );
 
     const fromCheckpointExists = yield* checkpointStore.hasCheckpointRef({
       cwd: input.cwd,
@@ -403,6 +452,24 @@ const make = Effect.gen(function* () {
         .find((entry) => entry.role === "assistant" && entry.turnId === input.turnId)?.id ??
       MessageId.make(`assistant:${input.turnId}`);
 
+    // Git I/O is outside SQLite. A project move can commit while capture or
+    // diff runs; retain the old ref in its original cwd but never publish it
+    // as a destination checkpoint. Epoch equality, not clocks, fences replay.
+    const latestContext = yield* projectionSnapshotQuery.getThreadCheckpointContext(
+      input.threadId,
+      input.turnId,
+    );
+    if (
+      Option.isNone(latestContext) ||
+      latestContext.value.projectId !== context.value.projectId ||
+      latestContext.value.workspaceRoot !== context.value.workspaceRoot ||
+      latestContext.value.worktreePath !== context.value.worktreePath ||
+      latestContext.value.workspaceFence?.associationSequence !==
+        workspaceFence?.associationSequence ||
+      latestContext.value.workspaceFence?.retiredTurn === true ||
+      latestContext.value.workspaceFence?.eligibleTurn === false
+    )
+      return;
     yield* orchestrationEngine.dispatch({
       type: "thread.turn.diff.complete",
       commandId: serverCommandId("checkpoint-turn-diff-complete"),
@@ -461,7 +528,30 @@ const make = Effect.gen(function* () {
       threadId: input.threadId,
       cwd: input.cwd,
       currentTurnCount: input.turnCount,
-      checkpoints: input.thread.checkpoints,
+      checkpoints: workspaceFence
+        ? input.thread.checkpoints.filter(
+            (checkpoint) =>
+              checkpoint.checkpointTurnCount > workspaceFence.invalidThroughTurnCount &&
+              checkpoint.checkpointRef ===
+                checkpointRefForThreadTurn(
+                  input.threadId,
+                  checkpoint.checkpointTurnCount,
+                  workspaceFence.associationSequence,
+                ),
+          )
+        : input.thread.checkpoints,
+      ...(workspaceFence
+        ? {
+            baseline: {
+              checkpointTurnCount: workspaceFence.invalidThroughTurnCount,
+              checkpointRef: checkpointRefForThreadTurn(
+                input.threadId,
+                workspaceFence.invalidThroughTurnCount,
+                workspaceFence.associationSequence,
+              ),
+            },
+          }
+        : {}),
     }).pipe(Effect.ignoreCause({ log: true }), Effect.forkIn(cleanupScope), Effect.asVoid);
   });
 
@@ -682,7 +772,12 @@ const make = Effect.gen(function* () {
         (maxTurnCount, checkpoint) => Math.max(maxTurnCount, checkpoint.checkpointTurnCount),
         0,
       );
-      const baselineCheckpointRef = checkpointRefForThreadTurn(thread.id, currentTurnCount);
+      const workspaceFence = yield* resolveWorkspaceFence(thread.id);
+      const baselineCheckpointRef = checkpointRefForThreadTurn(
+        thread.id,
+        currentTurnCount,
+        workspaceFence?.associationSequence,
+      );
       const baselineExists = yield* checkpointStore.hasCheckpointRef({
         cwd: checkpointCwd,
         checkpointRef: baselineCheckpointRef,
@@ -793,7 +888,12 @@ const make = Effect.gen(function* () {
       (maxTurnCount, checkpoint) => Math.max(maxTurnCount, checkpoint.checkpointTurnCount),
       0,
     );
-    const baselineCheckpointRef = checkpointRefForThreadTurn(threadId, currentTurnCount);
+    const workspaceFence = yield* resolveWorkspaceFence(threadId);
+    const baselineCheckpointRef = checkpointRefForThreadTurn(
+      threadId,
+      currentTurnCount,
+      workspaceFence?.associationSequence,
+    );
     const baselineExists = yield* checkpointStore.hasCheckpointRef({
       cwd: checkpointCwd,
       checkpointRef: baselineCheckpointRef,
@@ -826,6 +926,21 @@ const make = Effect.gen(function* () {
         threadId: event.payload.threadId,
         turnCount: event.payload.turnCount,
         detail: "Thread was not found in read model.",
+        createdAt: now,
+      }).pipe(Effect.catch(() => Effect.void));
+      return;
+    }
+
+    const workspaceFence = yield* resolveWorkspaceFence(thread.id);
+    if (
+      thread.projectId === null ||
+      (workspaceFence && event.payload.turnCount < workspaceFence.invalidThroughTurnCount)
+    ) {
+      yield* appendRevertFailureActivity({
+        threadId: thread.id,
+        turnCount: event.payload.turnCount,
+        detail:
+          "This checkpoint belongs to an earlier project association or a standalone chat and cannot be restored into the current workspace.",
         createdAt: now,
       }).pipe(Effect.catch(() => Effect.void));
       return;
@@ -867,11 +982,17 @@ const make = Effect.gen(function* () {
     }
 
     const targetCheckpointRef =
-      event.payload.turnCount === 0
-        ? checkpointRefForThreadTurn(event.payload.threadId, 0)
-        : thread.checkpoints.find(
-            (checkpoint) => checkpoint.checkpointTurnCount === event.payload.turnCount,
-          )?.checkpointRef;
+      workspaceFence && event.payload.turnCount === workspaceFence.invalidThroughTurnCount
+        ? checkpointRefForThreadTurn(
+            thread.id,
+            workspaceFence.invalidThroughTurnCount,
+            workspaceFence.associationSequence,
+          )
+        : event.payload.turnCount === 0
+          ? checkpointRefForThreadTurn(event.payload.threadId, 0)
+          : thread.checkpoints.find(
+              (checkpoint) => checkpoint.checkpointTurnCount === event.payload.turnCount,
+            )?.checkpointRef;
 
     if (!targetCheckpointRef) {
       yield* appendRevertFailureActivity({
@@ -879,6 +1000,23 @@ const make = Effect.gen(function* () {
         turnCount: event.payload.turnCount,
         detail: `Checkpoint ref for turn ${event.payload.turnCount} is unavailable in read model.`,
         createdAt: now,
+      }).pipe(Effect.catch(() => Effect.void));
+      return;
+    }
+    if (
+      workspaceFence &&
+      targetCheckpointRef !==
+        checkpointRefForThreadTurn(
+          thread.id,
+          event.payload.turnCount,
+          workspaceFence.associationSequence,
+        )
+    ) {
+      yield* appendRevertFailureActivity({
+        threadId: thread.id,
+        turnCount: event.payload.turnCount,
+        createdAt: now,
+        detail: "This checkpoint is not bound to the current project association.",
       }).pipe(Effect.catch(() => Effect.void));
       return;
     }
@@ -892,6 +1030,7 @@ const make = Effect.gen(function* () {
     const recoveryCheckpointRef = checkpointRefForThreadTurn(
       event.payload.threadId,
       CHECKPOINT_REVERT_RECOVERY_TURN,
+      workspaceFence?.associationSequence,
     );
     // This exact ref can survive an inconclusive native mutation or a process
     // crash. It may contain edits absent from every ordinary turn checkpoint.
@@ -996,9 +1135,19 @@ const make = Effect.gen(function* () {
       .pipe(Effect.ignore);
 
     const staleCheckpointRefs = thread.checkpoints
-      .filter((checkpoint) => checkpoint.checkpointTurnCount > event.payload.turnCount)
-      .map((checkpoint) => checkpoint.checkpointRef)
-      .filter((checkpointRef) => isGeneratedHiddenCheckpointRef(checkpointRef));
+      .filter(
+        (checkpoint) =>
+          checkpoint.checkpointTurnCount > event.payload.turnCount &&
+          isThreadOwnedHiddenCheckpointRef(thread.id, checkpoint.checkpointRef) &&
+          (!workspaceFence ||
+            checkpoint.checkpointRef ===
+              checkpointRefForThreadTurn(
+                thread.id,
+                checkpoint.checkpointTurnCount,
+                workspaceFence.associationSequence,
+              )),
+      )
+      .map((checkpoint) => checkpoint.checkpointRef);
 
     if (staleCheckpointRefs.length > 0) {
       yield* checkpointStore.deleteCheckpointRefs({

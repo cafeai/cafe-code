@@ -32,13 +32,15 @@ export function useThreadActions() {
     (store) => store.clearProjectDraftThreadById,
   );
   const router = useRouter();
-  const { handleNewThread } = useNewThreadHandler();
+  const { handleNewThread, handleNewStandaloneChat } = useNewThreadHandler();
   // Keep a ref so archiveThread can call handleNewThread without appearing in
   // its dependency array — handleNewThread is inherently unstable (depends on
   // the projects list) and would otherwise cascade new references into every
   // sidebar row via archiveThread → attemptArchiveThread.
   const handleNewThreadRef = useRef(handleNewThread);
   handleNewThreadRef.current = handleNewThread;
+  const handleNewStandaloneChatRef = useRef(handleNewStandaloneChat);
+  handleNewStandaloneChatRef.current = handleNewStandaloneChat;
   const queryClient = useQueryClient();
 
   const resolveThreadTarget = useCallback((target: ScopedThreadRef) => {
@@ -79,7 +81,11 @@ export function useThreadActions() {
       });
 
       if (shouldNavigateToDraft) {
-        await handleNewThreadRef.current(scopeProjectRef(thread.environmentId, thread.projectId));
+        if (thread.projectId === null) {
+          await handleNewStandaloneChatRef.current();
+        } else {
+          await handleNewThreadRef.current(scopeProjectRef(thread.environmentId, thread.projectId));
+        }
       }
 
       await archiveCommand;
@@ -161,10 +167,13 @@ export function useThreadActions() {
       const { thread, threadRef } = resolved;
       const state = useStore.getState();
       const threads = selectThreadsForEnvironment(state, threadRef.environmentId);
-      const threadProject = selectProjectByRef(state, {
-        environmentId: threadRef.environmentId,
-        projectId: thread.projectId,
-      });
+      const threadProject =
+        thread.projectId === null
+          ? undefined
+          : selectProjectByRef(state, {
+              environmentId: threadRef.environmentId,
+              projectId: thread.projectId,
+            });
       const deletedIds =
         opts.deletedThreadKeys && opts.deletedThreadKeys.size > 0
           ? new Set<ThreadId>(
@@ -229,10 +238,11 @@ export function useThreadActions() {
       refreshArchivedThreadsForEnvironment(threadRef.environmentId);
       refreshDeletedThreadsForEnvironment(threadRef.environmentId);
       clearComposerDraftForThread(threadRef);
-      clearProjectDraftThreadById(
-        scopeProjectRef(threadRef.environmentId, thread.projectId),
-        threadRef,
-      );
+      if (thread.projectId !== null)
+        clearProjectDraftThreadById(
+          scopeProjectRef(threadRef.environmentId, thread.projectId),
+          threadRef,
+        );
 
       if (shouldNavigateToFallback) {
         if (fallbackThreadId) {

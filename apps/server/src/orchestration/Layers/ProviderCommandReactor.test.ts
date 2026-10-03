@@ -207,6 +207,7 @@ describe("ProviderCommandReactor", () => {
     readonly beforeTurnConfigurationDispatch?: Effect.Effect<void>;
     readonly providerDisplayNames?: ReadonlyMap<string, string>;
     readonly testClock?: TestClock.TestClock;
+    readonly standalone?: boolean;
   }) {
     const now = "2026-01-01T00:00:00.000Z";
     const baseDir = input?.baseDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "t3code-reactor-"));
@@ -665,23 +666,24 @@ describe("ProviderCommandReactor", () => {
       }
     };
 
-    await Effect.runPromise(
-      engine.dispatch({
-        type: "project.create",
-        commandId: CommandId.make("cmd-project-create"),
-        projectId: asProjectId("project-1"),
-        title: "Provider Project",
-        workspaceRoot: "/tmp/provider-project",
-        defaultModelSelection: modelSelection,
-        createdAt: now,
-      }),
-    );
+    if (!input?.standalone)
+      await Effect.runPromise(
+        engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("cmd-project-create"),
+          projectId: asProjectId("project-1"),
+          title: "Provider Project",
+          workspaceRoot: "/tmp/provider-project",
+          defaultModelSelection: modelSelection,
+          createdAt: now,
+        }),
+      );
     await Effect.runPromise(
       engine.dispatch({
         type: "thread.create",
         commandId: CommandId.make("cmd-thread-create"),
         threadId: ThreadId.make("thread-1"),
-        projectId: asProjectId("project-1"),
+        projectId: input?.standalone ? null : asProjectId("project-1"),
         title: "Thread",
         modelSelection: modelSelection,
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
@@ -729,6 +731,134 @@ describe("ProviderCommandReactor", () => {
       setRunningCodexTurn,
     };
   }
+
+  it("starts a standalone turn without any project using stable private cwd and explicit empty roots", async () => {
+    const harness = await createHarness({ standalone: true });
+    const threadId = ThreadId.make("thread-1");
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("standalone-first-send"),
+        threadId,
+        message: {
+          messageId: asMessageId("standalone-message"),
+          role: "user",
+          text: "Hello",
+          attachments: [],
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        createdAt: "2026-01-01T00:00:01.000Z",
+      }),
+    );
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.drain();
+    const request = harness.startSession.mock.calls[0]?.[1] as {
+      cwd: string;
+      additionalDirectories: string[];
+      runtimeMode: string;
+    };
+    expect(request.runtimeMode).toBe("approval-required");
+    expect(request.additionalDirectories).toEqual([]);
+    expect(path.dirname(request.cwd)).toBe(
+      path.join(path.dirname(harness.stateDir), "standalone-workspaces"),
+    );
+    expect(fs.statSync(request.cwd).isDirectory()).toBe(true);
+    expect((await harness.readModel()).projects).toEqual([]);
+    expect((await harness.readThreadDetail(threadId))?.projectId).toBeNull();
+    expect(harness.renameBranch).not.toHaveBeenCalled();
+    expect(harness.generateBranchName).not.toHaveBeenCalled();
+  });
+
+  it.each(["detach", "revoke-roots"] as const)(
+    "rebinds %s only on the next explicit turn and explicitly revokes stale roots",
+    async (change) => {
+      const harness = await createHarness();
+      const threadId = ThreadId.make("thread-1");
+      const instance = ProviderInstanceId.make("codex");
+      const resumeCursor = { opaque: "existing-native-conversation" };
+      harness.runtimeSessions.push({
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: instance,
+        status: "ready",
+        runtimeMode: "approval-required",
+        threadId,
+        cwd: "/tmp/provider-project",
+        additionalDirectories: ["/former-additional-root"],
+        resumeCursor,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      });
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`seed-idle-${change}`),
+          threadId,
+          session: {
+            threadId,
+            status: "ready",
+            providerName: "codex",
+            providerInstanceId: instance,
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          },
+          createdAt: "2026-01-01T00:00:00.000Z",
+        }),
+      );
+      await Effect.runPromise(
+        harness.engine.dispatch(
+          change === "detach"
+            ? {
+                type: "thread.meta.update",
+                commandId: CommandId.make("detach-idle-chat"),
+                threadId,
+                projectId: null,
+              }
+            : {
+                type: "project.meta.update",
+                commandId: CommandId.make("revoke-project-roots"),
+                projectId: asProjectId("project-1"),
+                additionalWorkspaceRoots: [],
+              },
+        ),
+      );
+      await harness.drain();
+      expect(harness.startSession).not.toHaveBeenCalled();
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make(`explicit-next-${change}`),
+          threadId,
+          message: {
+            messageId: asMessageId(`explicit-message-${change}`),
+            role: "user",
+            text: "Continue",
+            attachments: [],
+          },
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          createdAt: "2026-01-01T00:00:01.000Z",
+        }),
+      );
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await harness.drain();
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      const request = harness.startSession.mock.calls[0]?.[1] as {
+        cwd: string;
+        additionalDirectories: string[];
+        resumeCursor: unknown;
+      };
+      expect(request.additionalDirectories).toEqual([]);
+      expect(request.resumeCursor).toEqual(resumeCursor);
+      if (change === "detach")
+        expect(path.dirname(request.cwd)).toBe(
+          path.join(path.dirname(harness.stateDir), "standalone-workspaces"),
+        );
+      else expect(request.cwd).toBe("/tmp/provider-project");
+    },
+  );
 
   describe("verified runtime ownership-loss recovery", () => {
     const threadId = ThreadId.make("thread-1");

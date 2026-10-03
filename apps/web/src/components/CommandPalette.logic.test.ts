@@ -37,6 +37,23 @@ function makeThread(overrides: Partial<Thread> = {}): Thread {
 }
 
 describe("buildThreadActionItems", () => {
+  it("labels standalone saved chats without a project lookup and routes their exact environment", async () => {
+    const runThread = vi.fn(async () => undefined);
+    const projectTitleById = new Map([[PROJECT_ID, "Unrelated project"]]);
+    const items = buildThreadActionItems({
+      threads: [makeThread({ projectId: null, title: "Standalone" })],
+      projectTitleById,
+      sortOrder: "updated_at",
+      icon: null,
+      runThread,
+    });
+    expect(items[0]?.description).toBe("Chats");
+    expect(items[0]?.searchTerms).toContain("Chats");
+    await items[0]?.run();
+    expect(runThread).toHaveBeenCalledWith(
+      expect.objectContaining({ environmentId: LOCAL_ENVIRONMENT_ID, projectId: null }),
+    );
+  });
   it("orders threads by most recent activity and formats timestamps from updatedAt", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-25T12:00:00.000Z"));

@@ -303,6 +303,11 @@ const ProjectionThreadCheckpointContextThreadRowSchema = Schema.Struct({
   projectId: ProjectId,
   workspaceRoot: Schema.String,
   worktreePath: Schema.NullOr(Schema.String),
+  invalidThroughTurnCount: Schema.NullOr(NonNegativeInt),
+  associationSequence: Schema.NullOr(NonNegativeInt),
+  associationChangedAt: Schema.NullOr(Schema.String),
+  retiredTurn: NonNegativeInt,
+  eligibleTurn: NonNegativeInt,
 });
 const REQUIRED_SNAPSHOT_PROJECTORS = [
   ORCHESTRATION_PROJECTOR_NAMES.projects,
@@ -1160,18 +1165,32 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   });
 
   const getThreadCheckpointContextThreadRow = SqlSchema.findOneOption({
-    Request: ThreadIdLookupInput,
+    Request: Schema.Struct({ threadId: ThreadId, checkpointTurnId: Schema.optionalKey(TurnId) }),
     Result: ProjectionThreadCheckpointContextThreadRowSchema,
-    execute: ({ threadId }) =>
+    execute: ({ threadId, checkpointTurnId }) =>
       sql`
         SELECT
           threads.thread_id AS "threadId",
           threads.project_id AS "projectId",
           projects.workspace_root AS "workspaceRoot",
-          threads.worktree_path AS "worktreePath"
+          threads.worktree_path AS "worktreePath",
+          fence.invalid_through_turn_count AS "invalidThroughTurnCount",
+          fence.association_sequence AS "associationSequence",
+          fence.changed_at AS "associationChangedAt",
+          EXISTS(SELECT 1 FROM thread_checkpoint_retired_turns AS retired
+            WHERE retired.thread_id = threads.thread_id AND retired.turn_id = ${checkpointTurnId ?? null}
+          ) AS "retiredTurn",
+          EXISTS(SELECT 1 FROM projection_turns AS turn
+            INNER JOIN thread_checkpoint_request_epochs AS request
+              ON request.thread_id = turn.thread_id AND request.message_id = turn.pending_message_id
+            WHERE turn.thread_id = threads.thread_id AND turn.turn_id = ${checkpointTurnId ?? null}
+              AND request.association_sequence = fence.association_sequence
+          ) AS "eligibleTurn"
         FROM projection_threads AS threads
         INNER JOIN projection_projects AS projects
           ON projects.project_id = threads.project_id
+        LEFT JOIN thread_checkpoint_workspace_fences AS fence
+          ON fence.thread_id = threads.thread_id
         WHERE threads.thread_id = ${threadId}
           AND threads.deleted_at IS NULL
         LIMIT 1
@@ -3635,9 +3654,13 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
 
   const getThreadCheckpointContext: ProjectionSnapshotQueryShape["getThreadCheckpointContext"] = (
     threadId,
+    checkpointTurnId,
   ) =>
     Effect.gen(function* () {
-      const threadRow = yield* getThreadCheckpointContextThreadRow({ threadId }).pipe(
+      const threadRow = yield* getThreadCheckpointContextThreadRow({
+        threadId,
+        ...(checkpointTurnId !== undefined ? { checkpointTurnId } : {}),
+      }).pipe(
         Effect.mapError(
           toPersistenceSqlOrDecodeError(
             "ProjectionSnapshotQuery.getThreadCheckpointContext:getThread:query",
@@ -3663,6 +3686,23 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         projectId: threadRow.value.projectId,
         workspaceRoot: threadRow.value.workspaceRoot,
         worktreePath: threadRow.value.worktreePath,
+        ...(threadRow.value.invalidThroughTurnCount !== null &&
+        threadRow.value.associationSequence !== null &&
+        threadRow.value.associationChangedAt !== null
+          ? {
+              workspaceFence: {
+                invalidThroughTurnCount: threadRow.value.invalidThroughTurnCount,
+                associationSequence: threadRow.value.associationSequence,
+                changedAt: threadRow.value.associationChangedAt,
+                ...(checkpointTurnId !== undefined
+                  ? {
+                      retiredTurn: threadRow.value.retiredTurn === 1,
+                      eligibleTurn: threadRow.value.eligibleTurn === 1,
+                    }
+                  : {}),
+              },
+            }
+          : {}),
         checkpoints: checkpointRows.map((row): OrchestrationCheckpointSummary => ({
           turnId: row.turnId,
           checkpointTurnCount: row.checkpointTurnCount,

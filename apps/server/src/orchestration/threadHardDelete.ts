@@ -13,6 +13,11 @@ import { CheckpointStore } from "../checkpointing/Services/CheckpointStore.ts";
 import { ServerConfig } from "../config.ts";
 import { purgeProviderDaemonThreadPersistence } from "../providerDaemon/ProviderDaemonThreadPurge.ts";
 import { OrchestrationEngineService } from "./Services/OrchestrationEngine.ts";
+import { makeStandaloneWorkspaceStore } from "./standaloneWorkspace.ts";
+import {
+  checkpointRefForThreadTurn,
+  isThreadOwnedHiddenCheckpointRef,
+} from "../checkpointing/Utils.ts";
 
 export const deleteThreadAttachments = Effect.fn("deleteThreadAttachments")(function* (
   threadId: ThreadId,
@@ -74,16 +79,35 @@ const loadThreadHardDeleteMetadata = Effect.fn("loadThreadHardDeleteMetadata")(f
     LIMIT 1
   `;
 
-  const checkpointRows = yield* sql<{ readonly checkpointRef: string }>`
-    SELECT DISTINCT checkpoint_ref AS "checkpointRef"
-    FROM projection_turns
-    WHERE thread_id = ${threadId}
-      AND checkpoint_ref IS NOT NULL
+  const checkpointRows = yield* sql<{
+    readonly checkpointRef: string;
+    readonly turnCount: number;
+    readonly associationSequence: number | null;
+  }>`
+    SELECT DISTINCT turn.checkpoint_ref AS "checkpointRef",
+      turn.checkpoint_turn_count AS "turnCount", fence.association_sequence AS "associationSequence"
+    FROM projection_turns AS turn
+    LEFT JOIN thread_checkpoint_workspace_fences AS fence ON fence.thread_id = turn.thread_id
+    WHERE turn.thread_id = ${threadId}
+      AND turn.checkpoint_ref IS NOT NULL
+      -- Historical associations retain transcript metadata, not filesystem
+      -- authority in the current repository. Never clean their refs through a
+      -- destination cwd after a detach/move/reattach.
+      AND turn.checkpoint_turn_count > COALESCE(fence.invalid_through_turn_count, -1)
   `;
 
   return {
-    cwd: threadRow?.worktreePath ?? threadRow?.workspaceRoot ?? null,
-    checkpointRefs: checkpointRows.map((row) => CheckpointRef.make(row.checkpointRef)),
+    // A worktree is meaningful only while its canonical project exists.
+    cwd: threadRow?.workspaceRoot ? (threadRow.worktreePath ?? threadRow.workspaceRoot) : null,
+    checkpointRefs: checkpointRows
+      .filter(
+        (row) =>
+          isThreadOwnedHiddenCheckpointRef(threadId, row.checkpointRef) &&
+          (row.associationSequence === null ||
+            row.checkpointRef ===
+              checkpointRefForThreadTurn(threadId, row.turnCount, row.associationSequence)),
+      )
+      .map((row) => CheckpointRef.make(row.checkpointRef)),
   };
 });
 
@@ -235,6 +259,15 @@ export const purgeHardDeletedThreadPersistence = Effect.fn("purgeHardDeletedThre
           AND stream_id = ${input.threadId}
       `;
         yield* sql`
+        DELETE FROM thread_checkpoint_retired_turns WHERE thread_id = ${input.threadId}
+      `;
+        yield* sql`
+        DELETE FROM thread_checkpoint_request_epochs WHERE thread_id = ${input.threadId}
+      `;
+        yield* sql`
+        DELETE FROM thread_checkpoint_workspace_fences WHERE thread_id = ${input.threadId}
+      `;
+        yield* sql`
         DELETE FROM projection_threads
         WHERE thread_id = ${input.threadId}
       `;
@@ -262,5 +295,7 @@ export const hardDeleteThreadLocalData = Effect.fn("hardDeleteThreadLocalData")(
   yield* orchestrationEngine.retireThreadForHardDelete(input);
   yield* deleteThreadCheckpointRefs(input.threadId);
   yield* deleteThreadAttachments(input.threadId);
+  const standaloneWorkspaces = yield* makeStandaloneWorkspaceStore;
+  yield* standaloneWorkspaces.remove(input.threadId);
   return yield* orchestrationEngine.purgeHardDeletedThread(input);
 });

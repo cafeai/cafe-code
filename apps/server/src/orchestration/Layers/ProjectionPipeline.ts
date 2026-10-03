@@ -573,6 +573,30 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     }) {
       const copyPrefix = `copy:${input.targetThreadId}:`;
 
+      // A copied transcript keeps the same historical repository boundary.
+      // Without this fence, a fork/duplicate could restore the parent's old
+      // project checkpoint into its current project after an association move.
+      yield* sql`
+        INSERT INTO thread_checkpoint_workspace_fences (
+          thread_id, invalid_through_turn_count, association_sequence, changed_at
+        )
+        SELECT ${input.targetThreadId}, invalid_through_turn_count, association_sequence, changed_at
+        FROM thread_checkpoint_workspace_fences WHERE thread_id = ${input.sourceThreadId}
+        ON CONFLICT(thread_id) DO NOTHING
+      `;
+      yield* sql`
+        INSERT INTO thread_checkpoint_retired_turns (thread_id, turn_id)
+        SELECT ${input.targetThreadId}, ${copyPrefix} || turn_id
+        FROM thread_checkpoint_retired_turns WHERE thread_id = ${input.sourceThreadId}
+        ON CONFLICT(thread_id, turn_id) DO NOTHING
+      `;
+      yield* sql`
+        INSERT INTO thread_checkpoint_request_epochs (thread_id, message_id, association_sequence)
+        SELECT ${input.targetThreadId}, ${copyPrefix} || message_id, association_sequence
+        FROM thread_checkpoint_request_epochs WHERE thread_id = ${input.sourceThreadId}
+        ON CONFLICT(thread_id, message_id) DO NOTHING
+      `;
+
       // Both projection duplicates and native provider forks copy historical
       // message/turn/plan/work-log context in bulk. Never copy live sessions,
       // pending approvals, or pending user-input accounting; native forks bind
@@ -959,6 +983,40 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           });
           if (Option.isNone(existingRow)) {
             return;
+          }
+          if (
+            event.payload.projectId !== undefined &&
+            event.payload.projectId !== existingRow.value.projectId
+          ) {
+            // Keep old summaries for the transcript and monotonic turn count,
+            // but revoke their filesystem authority atomically with the move.
+            // Do not reset counts or rewrite native provider history here.
+            yield* sql`
+              INSERT INTO thread_checkpoint_retired_turns (thread_id, turn_id)
+              SELECT ${event.payload.threadId}, turn_id FROM projection_turns
+              WHERE thread_id = ${event.payload.threadId} AND turn_id IS NOT NULL
+              ON CONFLICT(thread_id, turn_id) DO NOTHING
+            `.pipe(
+              Effect.mapError(
+                toPersistenceSqlError("ProjectionPipeline.checkpointRetiredTurns:query"),
+              ),
+            );
+            yield* sql`
+              INSERT INTO thread_checkpoint_workspace_fences (
+                thread_id, invalid_through_turn_count, association_sequence, changed_at
+              )
+              SELECT ${event.payload.threadId}, COALESCE(MAX(checkpoint_turn_count), 0),
+                ${event.sequence}, ${event.payload.updatedAt}
+              FROM projection_turns WHERE thread_id = ${event.payload.threadId}
+              ON CONFLICT(thread_id) DO UPDATE SET
+                invalid_through_turn_count = MAX(invalid_through_turn_count, excluded.invalid_through_turn_count),
+                association_sequence = excluded.association_sequence,
+                changed_at = excluded.changed_at
+            `.pipe(
+              Effect.mapError(
+                toPersistenceSqlError("ProjectionPipeline.checkpointWorkspaceFence:query"),
+              ),
+            );
           }
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
@@ -1944,6 +2002,19 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     )(function* (event, _attachmentSideEffects) {
       switch (event.type) {
         case "thread.turn-start-requested": {
+          // Bind a real Cafe user request to its current association before
+          // provider I/O. Native history/replay alone must not mint destination
+          // filesystem authority for previously unseen historical turns.
+          yield* sql`
+            INSERT INTO thread_checkpoint_request_epochs (thread_id, message_id, association_sequence)
+            SELECT ${event.payload.threadId}, ${event.payload.messageId}, association_sequence
+            FROM thread_checkpoint_workspace_fences WHERE thread_id = ${event.payload.threadId}
+            ON CONFLICT(thread_id, message_id) DO NOTHING
+          `.pipe(
+            Effect.mapError(
+              toPersistenceSqlError("ProjectionPipeline.checkpointRequestEpoch:query"),
+            ),
+          );
           yield* projectionTurnRepository.replacePendingTurnStart({
             threadId: event.payload.threadId,
             messageId: event.payload.messageId,

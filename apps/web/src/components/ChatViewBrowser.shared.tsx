@@ -4,6 +4,7 @@ import "../index.css";
 import {
   EventId,
   CommandId,
+  CheckpointRef,
   type DesktopBridge,
   ORCHESTRATION_WS_METHODS,
   EnvironmentId,
@@ -172,7 +173,7 @@ function createBaseServerConfig(): ServerConfig {
       label: "Local environment",
       platform: { os: "darwin" as const, arch: "arm64" as const },
       serverVersion: "0.0.0-test",
-      capabilities: { repositoryIdentity: true },
+      capabilities: { repositoryIdentity: true, standaloneChats: true },
     },
     auth: {
       policy: "loopback-browser",
@@ -362,7 +363,7 @@ function buildFixture(snapshot: OrchestrationReadModel): TestFixture {
         label: "Local environment",
         platform: { os: "darwin" as const, arch: "arm64" as const },
         serverVersion: "0.0.0-test",
-        capabilities: { repositoryIdentity: true },
+        capabilities: { repositoryIdentity: true, standaloneChats: true },
       },
       cwd: "/repo/project",
       projectName: "Project",
@@ -1941,7 +1942,7 @@ async function mountChatView(options: {
   };
 }
 
-type ChatViewBrowserPart = "composer" | "navigation" | "layout" | "desk";
+type ChatViewBrowserPart = "composer" | "navigation" | "layout" | "desk" | "standalone";
 
 const chatViewBrowserPart = (
   globalThis as typeof globalThis & {
@@ -6324,6 +6325,482 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
     });
   }
 
+  if (chatViewBrowserPart === "standalone") {
+    const waitForStandaloneComposerText = async (text: string) => {
+      await vi.waitFor(
+        () =>
+          expect(
+            document.querySelector('.desk-pane[data-active="true"] [data-testid="composer-editor"]')
+              ?.textContent,
+          ).toBe(text),
+        { timeout: 8_000, interval: 16 },
+      );
+    };
+    const newChatShortcut = () =>
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "n",
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    const configureStandaloneShortcut = (next: TestFixture) => {
+      next.serverConfig = {
+        ...next.serverConfig,
+        keybindings: [
+          {
+            command: "chat.new",
+            shortcut: {
+              key: "n",
+              modKey: false,
+              ctrlKey: true,
+              metaKey: false,
+              altKey: false,
+              shiftKey: false,
+            },
+          },
+        ],
+      };
+    };
+
+    it("hides historical checkpoint restore controls after detach while preserving linked controls", async () => {
+      const userMessageId = MessageId.make("checkpoint-history-user");
+      const assistantMessageId = MessageId.make("msg-assistant-3");
+      const turnId = "checkpoint-history-turn" as TurnId;
+      const base = createSnapshotForTargetUser({
+        targetMessageId: userMessageId,
+        targetText: "Historical linked work",
+      });
+      const thread = base.threads[0]!;
+      const snapshot: OrchestrationReadModel = {
+        ...base,
+        threads: [
+          {
+            ...thread,
+            messages: thread.messages
+              .filter(
+                (message) => message.id === userMessageId || message.id === assistantMessageId,
+              )
+              .map((message) => ({ ...message, turnId })),
+            checkpoints: [
+              {
+                turnId,
+                checkpointTurnCount: 1,
+                checkpointRef: CheckpointRef.make("refs/cafe/checkpoints/historical/turn/1"),
+                status: "ready",
+                files: [],
+                assistantMessageId,
+                completedAt: NOW_ISO,
+              },
+            ],
+          },
+        ],
+      };
+      const mounted = await mountChatView({ viewport: DEFAULT_VIEWPORT, snapshot });
+      const restoreControl = () =>
+        document.querySelector<HTMLButtonElement>('button[title="Revert to this message"]');
+      const publishAssociation = (projectId: ProjectId | null) => {
+        const snapshotSequence = fixture.snapshot.snapshotSequence + 1;
+        const nextThread = {
+          ...fixture.snapshot.threads[0]!,
+          projectId,
+          branch: null,
+          worktreePath: null,
+        };
+        fixture.snapshot = { ...fixture.snapshot, snapshotSequence, threads: [nextThread] };
+        rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+          kind: "snapshot",
+          snapshot: { snapshotSequence, thread: nextThread },
+        });
+      };
+      try {
+        await vi.waitFor(() => expect(restoreControl()).not.toBeNull());
+        publishAssociation(null);
+        await vi.waitFor(() => {
+          const detached = selectThreadByRef(useStore.getState(), THREAD_REF);
+          expect(detached?.projectId).toBeNull();
+          expect(detached?.turnDiffSummaries).toHaveLength(1);
+          expect(restoreControl()).toBeNull();
+        });
+        expect(
+          wsRequests.some(
+            (body) =>
+              body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+              body.type === "thread.checkpoint.revert",
+          ),
+        ).toBe(false);
+        publishAssociation(PROJECT_ID);
+        await vi.waitFor(() => expect(restoreControl()).not.toBeNull());
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("uses global account and model defaults while an unrelated project is active", async () => {
+      const account = ProviderInstanceId.make("codex_standalone_default");
+      const base = createSnapshotForTargetUser({
+        targetMessageId: MessageId.make("standalone-defaults"),
+        targetText: "Unrelated project",
+      });
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: {
+          ...base,
+          projects: base.projects.map((project) => ({
+            ...project,
+            defaultModelSelection: createModelSelection(
+              ProviderInstanceId.make("codex"),
+              "gpt-project-specific",
+            ),
+          })),
+        },
+        configureFixture: (next) => {
+          configureStandaloneShortcut(next);
+          next.serverConfig = {
+            ...next.serverConfig,
+            providers: [
+              ...next.serverConfig.providers,
+              {
+                ...next.serverConfig.providers[0]!,
+                instanceId: account,
+                displayName: "Global chat account",
+              },
+            ],
+            settings: {
+              ...next.serverConfig.settings,
+              defaultProviderInstanceId: account,
+              providerInstances: {
+                ...next.serverConfig.settings.providerInstances,
+                [account]: {
+                  driver: ProviderDriverKind.make("codex"),
+                  displayName: "Global chat account",
+                  defaultModel: "gpt-5",
+                },
+              },
+            },
+          };
+        },
+      });
+      try {
+        newChatShortcut();
+        await vi.waitFor(() =>
+          expect(mounted.router.state.location.pathname).toMatch(UUID_ROUTE_RE),
+        );
+        const draftId = draftIdFromPath(mounted.router.state.location.pathname);
+        expect(useComposerDraftStore.getState().getDraftSession(draftId)?.projectId).toBeNull();
+        expect(useComposerDraftStore.getState().getComposerDraft(draftId)).toMatchObject({
+          activeProvider: account,
+          modelSelectionByProvider: { [account]: { instanceId: account, model: "gpt-5" } },
+        });
+        expect(
+          useComposerDraftStore.getState().logicalProjectDraftThreadKeyByLogicalProjectKey,
+        ).toEqual({});
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("creates multiple standalone drafts with zero projects, reopens unsent content, and sends without workspace bootstrap", async () => {
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createProjectlessSnapshot(),
+        initialPath: "/",
+        configureFixture: configureStandaloneShortcut,
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
+      });
+      try {
+        await page.getByRole("button", { name: "New chat", exact: true }).click();
+        await vi.waitFor(() =>
+          expect(mounted.router.state.location.pathname).toMatch(UUID_ROUTE_RE),
+        );
+        const first = draftIdFromPath(mounted.router.state.location.pathname);
+        const firstThreadId = draftThreadIdFor(first);
+        useComposerDraftStore.getState().setPrompt(first, "First independent conversation");
+        await waitForStandaloneComposerText("First independent conversation");
+        await page
+          .getByRole("button", { name: "New chat in active tab group", exact: true })
+          .click();
+        await vi.waitFor(() =>
+          expect(mounted.router.state.location.pathname).not.toBe(`/draft/${first}`),
+        );
+        const second = draftIdFromPath(mounted.router.state.location.pathname);
+        expect(second).not.toBe(first);
+        expect(useComposerDraftStore.getState().getDraftSession(second)).toMatchObject({
+          projectId: null,
+          logicalProjectKey: null,
+          runtimeMode: "approval-required",
+          worktreePath: null,
+          branch: null,
+        });
+        useComposerDraftStore.getState().setPrompt(second, "Second draft stays here");
+        await waitForStandaloneComposerText("Second draft stays here");
+        useDeskStore
+          .getState()
+          .dispatch({ type: "close", tabKey: deskTabKey({ kind: "draft", draftId: second }) });
+        await waitForStandaloneComposerText("First independent conversation");
+        useDeskStore.getState().dispatch({ type: "reopen" });
+        await waitForStandaloneComposerText("Second draft stays here");
+        useDeskStore
+          .getState()
+          .dispatch({ type: "select", tabKey: deskTabKey({ kind: "draft", draftId: first }) });
+        await waitForStandaloneComposerText("First independent conversation");
+        expect(document.querySelector('[aria-label="Open in"]')).toBeNull();
+        expect(document.body.textContent).not.toContain("Current checkout");
+        (await waitForSendButton()).click();
+        await vi.waitFor(() => {
+          const request = wsRequests.find(
+            (body) =>
+              body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+              body.type === "thread.turn.start",
+          );
+          expect(request).toMatchObject({
+            threadId: firstThreadId,
+            runtimeMode: "approval-required",
+            bootstrap: { createThread: { projectId: null, branch: null, worktreePath: null } },
+          });
+          const bootstrap = (request as { bootstrap?: Record<string, unknown> } | undefined)
+            ?.bootstrap;
+          expect(bootstrap?.prepareWorktree).toBeUndefined();
+          expect(bootstrap?.runSetupScript).toBeUndefined();
+        });
+        expect(useComposerDraftStore.getState().getComposerDraft(second)?.prompt).toBe(
+          "Second draft stays here",
+        );
+        expect(
+          useComposerDraftStore.getState().logicalProjectDraftThreadKeyByLogicalProjectKey,
+        ).toEqual({});
+        expect(wsRequests.some((body) => body._tag === WS_METHODS.vcsListRefs)).toBe(false);
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("creates in the active Desk group and promotes a background standalone draft without stealing the newer composer", async () => {
+      let release!: (value: { sequence: number }) => void;
+      const pending = new Promise<{ sequence: number }>((resolve) => {
+        release = resolve;
+      });
+      const mounted = await mountChatView({
+        viewport: { ...DEFAULT_VIEWPORT, width: 1800, height: 1000 },
+        snapshot: createProjectlessSnapshot(),
+        initialPath: "/",
+        configureFixture: configureStandaloneShortcut,
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+          body.type === "thread.turn.start"
+            ? pending
+            : undefined,
+      });
+      try {
+        newChatShortcut();
+        await vi.waitFor(() =>
+          expect(mounted.router.state.location.pathname).toMatch(UUID_ROUTE_RE),
+        );
+        const first = draftIdFromPath(mounted.router.state.location.pathname);
+        const firstThreadId = draftThreadIdFor(first);
+        newChatShortcut();
+        await vi.waitFor(() =>
+          expect(mounted.router.state.location.pathname).not.toBe(`/draft/${first}`),
+        );
+        const second = draftIdFromPath(mounted.router.state.location.pathname);
+        const secondKey = deskTabKey({ kind: "draft", draftId: second });
+        useDeskStore
+          .getState()
+          .dispatch({ type: "split", tabKey: secondKey, targetGroupId: "g1", edge: "right" });
+        const capturedGroup = useDeskStore.getState().desk.activeGroupId;
+        newChatShortcut();
+        await vi.waitFor(() =>
+          expect(mounted.router.state.location.pathname).not.toBe(`/draft/${second}`),
+        );
+        const third = draftIdFromPath(mounted.router.state.location.pathname);
+        expect(useDeskStore.getState().desk.groups[capturedGroup]?.tabs).toContain(
+          deskTabKey({ kind: "draft", draftId: third }),
+        );
+        await waitForLayout();
+        const firstTab = await waitForElement(
+          () =>
+            Array.from(document.querySelectorAll<HTMLButtonElement>("[data-desk-tab-key]")).find(
+              (tab) => tab.dataset.deskTabKey === deskTabKey({ kind: "draft", draftId: first }),
+            ) ?? null,
+          "First standalone tab missing",
+        );
+        await userEvent.click(firstTab);
+        await vi.waitFor(() =>
+          expect(mounted.router.state.location.pathname).toBe(`/draft/${first}`),
+        );
+        useComposerDraftStore.getState().setPrompt(first, "Send the first chat");
+        await waitForStandaloneComposerText("Send the first chat");
+        const firstPane = await waitForElement(
+          () => document.querySelector<HTMLElement>('.desk-pane[data-active="true"]'),
+          "First Desk pane missing",
+        );
+        firstPane.querySelector<HTMLButtonElement>('button[aria-label="Send message"]')!.click();
+        await vi.waitFor(() =>
+          expect(
+            wsRequests.some(
+              (body) =>
+                body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+                body.type === "thread.turn.start",
+            ),
+          ).toBe(true),
+        );
+        useDeskStore
+          .getState()
+          .dispatch({ type: "select", tabKey: deskTabKey({ kind: "draft", draftId: third }) });
+        useComposerDraftStore.getState().setPrompt(third, "Newer composer survives");
+        release({ sequence: 2 });
+        fixture.snapshot = addThreadToSnapshot(fixture.snapshot, firstThreadId);
+        fixture.snapshot = {
+          ...fixture.snapshot,
+          threads: fixture.snapshot.threads.map((thread) =>
+            thread.id === firstThreadId
+              ? {
+                  ...thread,
+                  projectId: null,
+                  runtimeMode: "approval-required",
+                  branch: null,
+                  worktreePath: null,
+                }
+              : thread,
+          ),
+        };
+        await startPromotedServerThreadViaDomainEvent(firstThreadId);
+        await vi.waitFor(() => {
+          expect(useDeskStore.getState().desk.groups.g1?.tabs).toContain(
+            deskTabKey({ kind: "server", threadRef: threadRefFor(firstThreadId) }),
+          );
+          expect(useDeskStore.getState().desk.activeGroupId).toBe(capturedGroup);
+          expect(useComposerDraftStore.getState().getComposerDraft(third)?.prompt).toBe(
+            "Newer composer survives",
+          );
+        });
+      } finally {
+        release({ sequence: 2 });
+        await mounted.cleanup();
+      }
+    });
+
+    it("dispatches a persisted standalone follow-up with no project metadata", async () => {
+      const base = createSnapshotForTargetUser({
+        targetMessageId: MessageId.make("standalone-queue"),
+        targetText: "Standalone history",
+      });
+      const snapshot = {
+        ...base,
+        projects: [],
+        threads: base.threads.map((thread) => ({
+          ...thread,
+          projectId: null,
+          runtimeMode: "approval-required" as const,
+          branch: null,
+          worktreePath: null,
+        })),
+      };
+      const persistence = createFollowUpQueuePersistence();
+      expect(
+        (
+          await persistence.save(LOCAL_ENVIRONMENT_ID, [
+            {
+              id: "standalone-persisted-followup",
+              environmentId: LOCAL_ENVIRONMENT_ID,
+              threadId: THREAD_ID,
+              promptText: "Continue standalone history",
+              images: [],
+              files: [],
+              provider: ProviderDriverKind.make("codex"),
+              model: "gpt-5",
+              promptEffort: null,
+              modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5"),
+              runtimeMode: "approval-required",
+              interactionMode: "default",
+              queuedAt: isoAt(1000),
+              blockedReason: null,
+            },
+          ])
+        ).ok,
+      ).toBe(true);
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot,
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
+      });
+      try {
+        await vi.waitFor(
+          () =>
+            expect(
+              wsRequests.find(
+                (body) =>
+                  body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+                  body.type === "thread.turn.start",
+              ),
+            ).toMatchObject({
+              threadId: THREAD_ID,
+              message: { text: "Continue standalone history" },
+            }),
+          { timeout: 8_000, interval: 16 },
+        );
+        expect(document.body.textContent).not.toContain("Project metadata is not loaded yet");
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("retains standalone content when an older owner server omits the capability", async () => {
+      const draftId = DraftId.make("unsupported-server-draft");
+      useComposerDraftStore
+        .getState()
+        .createStandaloneDraftSession(draftId, LOCAL_ENVIRONMENT_ID, THREAD_ID);
+      useComposerDraftStore.getState().setPrompt(draftId, "Preserve until server update");
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createProjectlessSnapshot(),
+        initialPath: `/draft/${draftId}`,
+        configureFixture: (next) => {
+          configureStandaloneShortcut(next);
+          next.serverConfig = {
+            ...next.serverConfig,
+            environment: {
+              ...next.serverConfig.environment,
+              capabilities: { repositoryIdentity: true },
+            },
+          };
+          next.welcome = {
+            ...next.welcome,
+            environment: {
+              ...next.welcome.environment,
+              capabilities: { repositoryIdentity: true },
+            },
+          };
+        },
+      });
+      try {
+        await waitForStandaloneComposerText("Preserve until server update");
+        (await waitForSendButton()).click();
+        await vi.waitFor(() =>
+          expect(document.body.textContent).toContain(
+            "Update the server to send messages in standalone chats",
+          ),
+        );
+        expect(useComposerDraftStore.getState().getComposerDraft(draftId)?.prompt).toBe(
+          "Preserve until server update",
+        );
+        expect(
+          wsRequests.some((body) => body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand),
+        ).toBe(false);
+        newChatShortcut();
+        await waitForLayout();
+        expect(Object.keys(useComposerDraftStore.getState().draftThreadsByThreadKey)).toEqual([
+          draftId,
+        ]);
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+  }
+
   if (chatViewBrowserPart === "desk") {
     const secondId = "thread-desk-secondary" as ThreadId;
     const secondRef = scopeThreadRef(LOCAL_ENVIRONMENT_ID, secondId);
@@ -7615,7 +8092,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       }
     });
 
-    it("does not consume chat.new when there is no project context", async () => {
+    it("creates a standalone chat from chat.new without project context", async () => {
       const mounted = await mountChatView({
         viewport: DEFAULT_VIEWPORT,
         snapshot: createProjectlessSnapshot(),
@@ -7646,11 +8123,16 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       try {
         await waitForServerConfigToApply();
         dispatchChatNewShortcut();
-        await waitForLayout();
-
-        expect(mounted.router.state.location.pathname).toBe(serverThreadPath(THREAD_ID));
+        await vi.waitFor(() =>
+          expect(mounted.router.state.location.pathname).toMatch(UUID_ROUTE_RE),
+        );
+        const draftId = draftIdFromPath(mounted.router.state.location.pathname);
+        expect(useComposerDraftStore.getState().getDraftSession(draftId)).toMatchObject({
+          projectId: null,
+          runtimeMode: "approval-required",
+        });
         expect(Object.keys(useComposerDraftStore.getState().draftThreadsByThreadKey)).toHaveLength(
-          0,
+          1,
         );
       } finally {
         await mounted.cleanup();

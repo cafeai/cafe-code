@@ -3,8 +3,9 @@ import type {
   VcsStatusRemoteResult,
   VcsStatusStreamEvent,
 } from "@cafecode/contracts";
-import { ORCHESTRATION_WS_METHODS, WS_METHODS } from "@cafecode/contracts";
+import { ORCHESTRATION_WS_METHODS, ThreadId, WS_METHODS } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
+import * as Stream from "effect/Stream";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("./wsTransport", () => ({
@@ -38,6 +39,56 @@ const baseRemoteStatus: VcsStatusRemoteResult = {
 };
 
 describe("wsRpcClient", () => {
+  it("opts nullable-aware clients into every chat catalog and detail read", async () => {
+    const emptyCatalog = {
+      snapshotSequence: 0,
+      projects: [],
+      threads: [],
+      updatedAt: "2026-10-03T04:00:00.000Z",
+    };
+    const archived = vi.fn(() => Effect.succeed(emptyCatalog));
+    const deleted = vi.fn(() => Effect.succeed(emptyCatalog));
+    const shell = vi.fn(() => Stream.empty);
+    const thread = vi.fn(() => Stream.empty);
+    const protocol = {
+      [ORCHESTRATION_WS_METHODS.getArchivedShellSnapshot]: archived,
+      [ORCHESTRATION_WS_METHODS.getDeletedShellSnapshot]: deleted,
+      [ORCHESTRATION_WS_METHODS.subscribeShell]: shell,
+      [ORCHESTRATION_WS_METHODS.subscribeThread]: thread,
+    } as unknown as WsRpcProtocolClient;
+    const transport = {
+      dispose: vi.fn(async () => undefined),
+      reconnect: vi.fn(async () => undefined),
+      request: vi.fn(
+        async (execute: (client: WsRpcProtocolClient) => Effect.Effect<unknown, Error>) =>
+          Effect.runPromise(execute(protocol)),
+      ) as unknown as WsTransport["request"],
+      requestStream: vi.fn(),
+      subscribe: vi.fn((execute: (client: WsRpcProtocolClient) => unknown) => {
+        execute(protocol);
+        return () => undefined;
+      }) as unknown as WsTransport["subscribe"],
+    } satisfies Pick<
+      WsTransport,
+      "dispose" | "reconnect" | "request" | "requestStream" | "subscribe"
+    >;
+    const client = createWsRpcClient(transport as unknown as WsTransport);
+    await client.orchestration.getArchivedShellSnapshot();
+    await client.orchestration.getDeletedShellSnapshot();
+    client.orchestration.subscribeShell(() => undefined);
+    client.orchestration.subscribeThread(
+      { threadId: ThreadId.make("standalone-chat") },
+      () => undefined,
+    );
+    expect(archived).toHaveBeenCalledWith({ includeStandaloneChats: true });
+    expect(deleted).toHaveBeenCalledWith({ includeStandaloneChats: true });
+    expect(shell).toHaveBeenCalledWith({ includeStandaloneChats: true });
+    expect(thread).toHaveBeenCalledWith({
+      threadId: "standalone-chat",
+      includeStandaloneChats: true,
+    });
+  });
+
   it("routes dictation credentials through their dedicated untraced RPC methods", async () => {
     const getStatus = vi.fn(() => Effect.succeed({ configured: true, canManage: true }));
     const setApiKey = vi.fn(() => Effect.succeed({ configured: true, canManage: true }));

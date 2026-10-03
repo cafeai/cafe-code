@@ -944,7 +944,20 @@ const buildAppUnderTest = (options?: {
               updatedAt: "1970-01-01T00:00:00.000Z",
             }),
           getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 0 }),
-          getProjectShellById: () => Effect.succeed(Option.none()),
+          getProjectShellById: (projectId) => {
+            const project = makeDefaultOrchestrationReadModel().projects.find(
+              (project) => project.id === projectId,
+            );
+            return Effect.succeed(
+              project
+                ? Option.some({
+                    ...project,
+                    additionalWorkspaceRoots: [],
+                    repositoryIdentity: null,
+                  })
+                : Option.none(),
+            );
+          },
           getThreadShellById: () => Effect.succeed(Option.none()),
           getPostTerminalStaleSteerCandidates: () => Effect.succeed([]),
           getPostTerminalStaleSteerCandidateThreadIds: () => Effect.succeed([]),
@@ -5680,113 +5693,188 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
-  for (const attachmentType of ["image", "file"] as const) {
-    it.effect(`secures a first-send ${attachmentType} only after creating its owning thread`, () =>
+  for (const target of ["standalone", "missing"] as const) {
+    it.effect(`rejects ${target} bootstrap worktree/setup before every side effect`, () =>
       Effect.gen(function* () {
-        const sql = yield* SqlClient.SqlClient;
-        const threadId = ThreadId.make(`thread-bootstrap-${attachmentType}`);
-        const createdAt = "2026-09-09T00:00:00.000Z";
-        const bytes = Buffer.from("private first-send attachment bytes");
-        const commands: Array<OrchestrationCommand> = [];
-        yield* sql`
-          INSERT INTO projection_projects (
-            project_id, title, workspace_root, scripts_json, created_at, updated_at
-          ) VALUES (${defaultProjectId}, 'Attachments', '/tmp/project', '[]', ${createdAt}, ${createdAt})
-        `;
-        const config = yield* buildAppUnderTest({
+        const dispatch = vi.fn((_command: OrchestrationCommand) => Effect.succeed({ sequence: 1 }));
+        const createWorktree = vi.fn(
+          (_input: Parameters<GitVcsDriver.GitVcsDriverShape["createWorktree"]>[0]) =>
+            Effect.succeed({ worktree: { refName: "feature", path: "/unused-worktree" } }),
+        );
+        const runForThread = vi.fn(
+          (_input: Parameters<ProjectSetupScriptRunnerShape["runForThread"]>[0]) =>
+            Effect.succeed({ status: "no-script" as const }),
+        );
+        yield* buildAppUnderTest({
           layers: {
-            sqlClient: sql,
-            orchestrationEngine: {
-              dispatch: (command) =>
-                Effect.gen(function* () {
-                  commands.push(command);
-                  if (command.type === "thread.create") {
-                    // Exercise the real FK boundary: normalizing an attachment
-                    // before this durable projection exists must fail.
-                    yield* sql`
-                      INSERT INTO projection_threads (
-                        thread_id, project_id, title, created_at, updated_at
-                      ) VALUES (${threadId}, ${defaultProjectId}, 'Attachments', ${createdAt}, ${createdAt})
-                    `;
-                  } else if (command.type === "thread.turn.start") {
-                    const attachment = command.message.attachments[0];
-                    assert.isDefined(attachment);
-                    assert.notProperty(attachment, "dataUrl");
-                    assert.notProperty(attachment, "contentSha256");
-                    assert.deepEqual(
-                      yield* sql`SELECT thread_id, content_sha256, size_bytes
-                        FROM attachment_content_commitments WHERE attachment_id = ${attachment!.id}`,
-                      [
-                        {
-                          thread_id: threadId,
-                          content_sha256: computeAttachmentContentSha256(bytes),
-                          size_bytes: bytes.byteLength,
-                        },
-                      ],
-                    );
-                  }
-                  return { sequence: commands.length };
-                }).pipe(Effect.orDie),
-            },
+            orchestrationEngine: { dispatch },
+            gitVcsDriver: { createWorktree },
+            projectSetupScriptRunner: { runForThread },
           },
         });
-        const attachment =
-          attachmentType === "image"
-            ? {
-                type: "image" as const,
-                name: "screenshot.png",
-                mimeType: "image/png",
-                sizeBytes: bytes.byteLength,
-                dataUrl: `data:image/png;base64,${bytes.toString("base64")}`,
-              }
-            : yield* Effect.promise(() =>
-                storeFileAttachment({
-                  attachmentsDir: config.attachmentsDir,
-                  threadId,
-                  name: "notes.txt",
-                  mimeType: "text/plain",
-                  bytes,
-                }),
-              );
-        const wsUrl = yield* getWsServerUrl("/ws");
+        const createdAt = "2026-10-03T00:00:00.000Z";
         const result = yield* Effect.scoped(
-          withWsRpcClient(wsUrl, (client) =>
+          withWsRpcClient(yield* getWsServerUrl("/ws"), (client) =>
             client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
               type: "thread.turn.start",
-              commandId: CommandId.make(`cmd-bootstrap-${attachmentType}`),
-              threadId,
+              commandId: CommandId.make(`unsafe-bootstrap-${target}`),
+              threadId: ThreadId.make(`unsafe-bootstrap-${target}`),
               message: {
-                messageId: MessageId.make(`message-bootstrap-${attachmentType}`),
+                messageId: MessageId.make(`unsafe-bootstrap-message-${target}`),
                 role: "user",
-                text: "Read this attachment",
-                attachments: [attachment],
+                text: "Hello",
+                attachments: [],
               },
-              modelSelection: defaultModelSelection,
               runtimeMode: "full-access",
               interactionMode: "default",
               bootstrap: {
-                createThread: {
-                  projectId: defaultProjectId,
-                  title: "Attachments",
-                  modelSelection: defaultModelSelection,
-                  runtimeMode: "full-access",
-                  interactionMode: "default",
-                  branch: null,
-                  worktreePath: null,
-                  createdAt,
+                ...(target === "standalone"
+                  ? {
+                      createThread: {
+                        projectId: null,
+                        title: "Standalone",
+                        modelSelection: defaultModelSelection,
+                        runtimeMode: "full-access" as const,
+                        interactionMode: "default" as const,
+                        branch: null,
+                        worktreePath: null,
+                        createdAt,
+                      },
+                    }
+                  : {}),
+                prepareWorktree: {
+                  projectCwd: "/arbitrary-unowned-cwd",
+                  baseBranch: "main",
+                  branch: "feature",
                 },
+                runSetupScript: true,
               },
               createdAt,
             }),
           ),
-        );
-        assert.equal(result.sequence, 2);
-        assert.deepEqual(
-          commands.map((command) => command.type),
-          ["thread.create", "thread.turn.start"],
-        );
-      }).pipe(Effect.provide(SqlitePersistenceMemory), Effect.provide(NodeHttpServer.layerTest)),
+        ).pipe(Effect.result);
+        assert.equal(result._tag, "Failure");
+        assert.equal(dispatch.mock.calls.length, 0);
+        assert.equal(createWorktree.mock.calls.length, 0);
+        assert.equal(runForThread.mock.calls.length, 0);
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
     );
+  }
+
+  for (const association of ["project", "standalone"] as const) {
+    for (const attachmentType of ["image", "file"] as const) {
+      it.effect(
+        `secures a ${association} first-send ${attachmentType} only after creating its owning thread`,
+        () =>
+          Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient;
+            const threadId = ThreadId.make(`thread-bootstrap-${association}-${attachmentType}`);
+            const createdAt = "2026-09-09T00:00:00.000Z";
+            const bytes = Buffer.from("private first-send attachment bytes");
+            const commands: Array<OrchestrationCommand> = [];
+            yield* sql`
+          INSERT INTO projection_projects (
+            project_id, title, workspace_root, scripts_json, created_at, updated_at
+          ) VALUES (${defaultProjectId}, 'Attachments', '/tmp/project', '[]', ${createdAt}, ${createdAt})
+        `;
+            const config = yield* buildAppUnderTest({
+              layers: {
+                sqlClient: sql,
+                orchestrationEngine: {
+                  dispatch: (command) =>
+                    Effect.gen(function* () {
+                      commands.push(command);
+                      if (command.type === "thread.create") {
+                        // Exercise the real FK boundary: normalizing an attachment
+                        // before this durable projection exists must fail.
+                        yield* sql`
+                      INSERT INTO projection_threads (
+                        thread_id, project_id, title, created_at, updated_at
+                      ) VALUES (${threadId}, ${command.projectId}, 'Attachments', ${createdAt}, ${createdAt})
+                    `;
+                      } else if (command.type === "thread.turn.start") {
+                        const attachment = command.message.attachments[0];
+                        assert.isDefined(attachment);
+                        assert.notProperty(attachment, "dataUrl");
+                        assert.notProperty(attachment, "contentSha256");
+                        assert.deepEqual(
+                          yield* sql`SELECT thread_id, content_sha256, size_bytes
+                        FROM attachment_content_commitments WHERE attachment_id = ${attachment!.id}`,
+                          [
+                            {
+                              thread_id: threadId,
+                              content_sha256: computeAttachmentContentSha256(bytes),
+                              size_bytes: bytes.byteLength,
+                            },
+                          ],
+                        );
+                      }
+                      return { sequence: commands.length };
+                    }).pipe(Effect.orDie),
+                },
+              },
+            });
+            const attachment =
+              attachmentType === "image"
+                ? {
+                    type: "image" as const,
+                    name: "screenshot.png",
+                    mimeType: "image/png",
+                    sizeBytes: bytes.byteLength,
+                    dataUrl: `data:image/png;base64,${bytes.toString("base64")}`,
+                  }
+                : yield* Effect.promise(() =>
+                    storeFileAttachment({
+                      attachmentsDir: config.attachmentsDir,
+                      threadId,
+                      name: "notes.txt",
+                      mimeType: "text/plain",
+                      bytes,
+                    }),
+                  );
+            const wsUrl = yield* getWsServerUrl("/ws");
+            const result = yield* Effect.scoped(
+              withWsRpcClient(wsUrl, (client) =>
+                client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+                  type: "thread.turn.start",
+                  commandId: CommandId.make(`cmd-bootstrap-${attachmentType}`),
+                  threadId,
+                  message: {
+                    messageId: MessageId.make(`message-bootstrap-${attachmentType}`),
+                    role: "user",
+                    text: "Read this attachment",
+                    attachments: [attachment],
+                  },
+                  modelSelection: defaultModelSelection,
+                  runtimeMode: "full-access",
+                  interactionMode: "default",
+                  bootstrap: {
+                    createThread: {
+                      projectId: association === "standalone" ? null : defaultProjectId,
+                      title: "Attachments",
+                      modelSelection: defaultModelSelection,
+                      runtimeMode: "full-access",
+                      interactionMode: "default",
+                      branch: null,
+                      worktreePath: null,
+                      createdAt,
+                    },
+                  },
+                  createdAt,
+                }),
+              ),
+            );
+            assert.equal(result.sequence, 2);
+            assert.deepEqual(
+              commands.map((command) => command.type),
+              ["thread.create", "thread.turn.start"],
+            );
+          }).pipe(
+            Effect.provide(SqlitePersistenceMemory),
+            Effect.provide(NodeHttpServer.layerTest),
+          ),
+      );
+    }
   }
 
   it.effect("records setup-script failures without aborting bootstrap turn start", () =>

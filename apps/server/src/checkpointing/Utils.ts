@@ -14,9 +14,19 @@ export function legacyCheckpointRefAlias(checkpointRef: string): CheckpointRef |
   );
 }
 
-export function checkpointRefForThreadTurn(threadId: ThreadId, turnCount: number): CheckpointRef {
+/** A durable association event creates a fresh, replay-stable Git ref namespace. */
+export function checkpointRefForThreadTurn(
+  threadId: ThreadId,
+  turnCount: number,
+  associationSequence?: number,
+): CheckpointRef {
+  // A distinct path production, not a delimiter inside an arbitrary ThreadId:
+  // a hostile legacy id such as "victim:association:42" must not collide with
+  // another conversation's association epoch after base64 encoding.
+  const association =
+    associationSequence === undefined ? "" : `association/${associationSequence}/`;
   return CheckpointRef.make(
-    `${CHECKPOINT_REFS_PREFIX}/${Encoding.encodeBase64Url(threadId)}/turn/${turnCount}`,
+    `${CHECKPOINT_REFS_PREFIX}/${Encoding.encodeBase64Url(threadId)}/${association}turn/${turnCount}`,
   );
 }
 
@@ -36,12 +46,27 @@ export function isGeneratedHiddenCheckpointRef(checkpointRef: string): boolean {
   // `git update-ref --stdin`, because that command parses stdin as a command
   // language and the VCS layer deliberately rejects anything outside this
   // generated grammar.
-  return /^refs\/(?:cafe|t3)\/checkpoints\/[A-Za-z0-9_-]+\/turn\/(?:0|[1-9][0-9]*)$/.test(value);
+  return /^refs\/(?:cafe|t3)\/checkpoints\/[A-Za-z0-9_-]+\/(?:association\/[1-9][0-9]*\/)?turn\/(?:0|[1-9][0-9]*)$/.test(
+    value,
+  );
+}
+
+/** Copied readable checkpoint history never grants cleanup rights over its source. */
+export function isThreadOwnedHiddenCheckpointRef(
+  threadId: ThreadId,
+  checkpointRef: string,
+): boolean {
+  if (!isGeneratedHiddenCheckpointRef(checkpointRef)) return false;
+  const segment = `${Encoding.encodeBase64Url(threadId)}/`;
+  return (
+    checkpointRef.startsWith(`${CHECKPOINT_REFS_PREFIX}/${segment}`) ||
+    checkpointRef.startsWith(`${LEGACY_CHECKPOINT_REFS_PREFIX}/${segment}`)
+  );
 }
 
 export function resolveThreadWorkspaceCwd(input: {
   readonly thread: {
-    readonly projectId: ProjectId;
+    readonly projectId: ProjectId | null;
     readonly worktreePath: string | null;
   };
   readonly projects: ReadonlyArray<{
@@ -49,6 +74,9 @@ export function resolveThreadWorkspaceCwd(input: {
     readonly workspaceRoot: string;
   }>;
 }): string | undefined {
+  // A detached chat must never inherit its former project's worktree even if
+  // a legacy/corrupted projection still carries that metadata.
+  if (input.thread.projectId === null) return undefined;
   const worktreeCwd = input.thread.worktreePath ?? undefined;
   if (worktreeCwd) {
     return worktreeCwd;
@@ -67,7 +95,7 @@ function isSamePath(left: string, right: string): boolean {
 
 export function resolveThreadWorkspaceDirectories(input: {
   readonly thread: {
-    readonly projectId: ProjectId;
+    readonly projectId: ProjectId | null;
     readonly worktreePath: string | null;
   };
   readonly projects: ReadonlyArray<{

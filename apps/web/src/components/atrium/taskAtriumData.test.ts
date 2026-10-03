@@ -114,6 +114,22 @@ function buildState(options: {
 }
 
 describe("selectAtriumSnapshot", () => {
+  it("surfaces a standalone running chat without a project or an eager detail lookup", () => {
+    const state = buildState({});
+    const environment = state.environmentStateById[ENV]!;
+    environment.projectIds = [];
+    environment.projectById = {};
+    environment.sidebarThreadSummaryById[THREAD]!.projectId = null;
+    const snapshot = selectAtriumSnapshot(state, NOW);
+    expect(snapshot.cards).toHaveLength(1);
+    expect(snapshot.cards[0]).toMatchObject({
+      environmentId: ENV,
+      threadId: THREAD,
+      projectName: "",
+      state: "running",
+    });
+    expect(snapshot.runningCount).toBe(1);
+  });
   it("surfaces a running thread with its project and elapsed start", () => {
     const snapshot = selectAtriumSnapshot(buildState({}), NOW);
     expect(snapshot.cards).toHaveLength(1);
