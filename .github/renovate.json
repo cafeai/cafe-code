@@ -1,10 +1,10 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "baseBranchPatterns": ["dev"],
-  "enabledManagers": ["npm", "github-actions"],
+  "enabledManagers": ["npm", "github-actions", "nodenv", "mise"],
   "dependencyDashboard": true,
   "dependencyDashboardTitle": "Dependency maintenance",
-  "dependencyDashboardHeader": "Routine updates target dev and require review plus full cross-platform CI. Effect, provider SDKs, native packaging, toolchains and security resolutions stay on the manual audited path. Check GitHub Dependabot alerts separately for excluded dependencies and main; an empty dashboard is not security clearance. See docs/dependency-updates.md.",
+  "dependencyDashboardHeader": "Routine updates target dev and require review plus full cross-platform CI. Node tracks the newest officially promoted LTS line, never Current, and its synchronized runtime/archive pins require qualification before merge. Yarn, Effect, provider SDKs, native packaging and security resolutions stay on the manual audited path. Check GitHub Dependabot alerts separately for excluded dependencies and main; an empty dashboard is not security clearance. See docs/dependency-updates.md.",
   "timezone": "Asia/Tokyo",
   "schedule": ["* 0-6 * * 1"],
   "prConcurrentLimit": 3,
@@ -32,10 +32,38 @@
   ],
   "prBodyNotes": [
     "Human review and all applicable Linux/macOS/Windows quality and native artifact checks are required; do not merge a failed or incomplete update.",
-    "Provider, patched Effect, native-runtime, toolchain and security-resolution upgrades require the manual audits documented in AGENTS.md and docs/dependency-updates.md."
+    "Provider, patched Effect, native-runtime, toolchain and security-resolution upgrades require the manual audits documented in AGENTS.md and docs/dependency-updates.md.",
+    "Node.js LTS proposals must keep .node-version, mise, package engines, declarations and reviewed Windows archive hashes synchronized. Never substitute Current, guess LTS from an even major, or merge an unqualified runtime."
   ],
   "vulnerabilityAlerts": { "enabled": false },
   "packageRules": [
+    {
+      "description": "Follow the newest officially promoted Node LTS using Renovate's release-schedule-aware Node versioning, not the npm Current tag or a frozen major.",
+      "matchDatasources": ["node-version"],
+      "matchPackageNames": ["node"],
+      "versioning": "node",
+      "ignoreUnstable": true,
+      "groupName": "Node.js LTS",
+      "groupSlug": "node-lts",
+      "schedule": ["at any time"],
+      "minimumReleaseAge": null
+    },
+    {
+      "description": "Keep declarations on an officially promoted Node LTS major too, while retaining the normal npm package-age gate and human review.",
+      "matchManagers": ["npm"],
+      "matchPackageNames": ["@types/node"],
+      "versioning": "node",
+      "ignoreUnstable": true,
+      "groupName": "Node.js LTS",
+      "groupSlug": "node-lts",
+      "schedule": ["at any time"]
+    },
+    {
+      "description": "The mise manager is admitted only to synchronize Node; future non-Node tools remain manual rather than expanding the runtime/toolchain surface.",
+      "matchManagers": ["mise"],
+      "matchPackageNames": ["!node"],
+      "enabled": false
+    },
     {
       "description": "Keep matching React runtime and type packages together without combining unrelated upgrades.",
       "matchManagers": ["npm"],
@@ -134,8 +162,8 @@
       "enabled": false
     },
     {
-      "description": "Node and Yarn are exact repository-wide policies, including workflow/code/archive checks that a manifest-only update cannot synchronize.",
-      "matchDepNames": ["node", "yarn"],
+      "description": "Yarn remains an exact, manually qualified repository-wide policy; Node has its separate synchronized latest-LTS proposal rule.",
+      "matchDepNames": ["yarn"],
       "enabled": false
     }
   ]
