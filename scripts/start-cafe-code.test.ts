@@ -6,6 +6,14 @@ import { describe, it } from "vitest";
 
 const startCafeCodeScript = fileURLToPath(new URL("../Start-CafeCode.ps1", import.meta.url));
 
+// A cold PowerShell process exceeded Vitest's five-second default on Linux
+// under the full parallel CI task graph. Budget only these external-process
+// fixtures, with additional Windows headroom; in-memory tests keep the default.
+// Bound the child itself too: a synchronous native process cannot be cancelled
+// reliably by Vitest's timer while it blocks the worker's JavaScript thread.
+const powerShellProcessTimeoutMs = process.platform === "win32" ? 30_000 : 20_000;
+const powerShellTestOptions = { timeout: powerShellProcessTimeoutMs + 5_000 };
+
 function toPowerShellLiteralPath(path: string): string {
   return path.replaceAll("'", "''");
 }
@@ -16,14 +24,23 @@ function hasPowerShell(): boolean {
     ["-NoLogo", "-NoProfile", "-Command", "$PSVersionTable.PSVersion"],
     {
       encoding: "utf8",
+      timeout: powerShellProcessTimeoutMs,
+      killSignal: "SIGKILL",
     },
   );
-  return result.error === undefined && result.status === 0;
+  if (result.error && "code" in result.error && result.error.code === "ENOENT") return false;
+  // Missing optional PowerShell is a conditional skip; a present but broken or
+  // hung executable must fail qualification instead of silently skipping it.
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0);
+  return true;
 }
 
 function runPowerShell(script: string): string {
   return execFileSync("pwsh", ["-NoLogo", "-NoProfile", "-Command", script], {
     encoding: "utf8",
+    timeout: powerShellProcessTimeoutMs,
+    killSignal: "SIGKILL",
   }).trim();
 }
 
@@ -32,6 +49,7 @@ const powerShellIt = hasPowerShell() ? it : it.skip;
 describe("Start-CafeCode PowerShell helpers", () => {
   powerShellIt(
     "selects the first Node executable when Get-Command returns multiple matches",
+    powerShellTestOptions,
     () => {
       const selectedPath = runPowerShell(`
 . '${toPowerShellLiteralPath(startCafeCodeScript)}'
@@ -56,8 +74,11 @@ $resolved = Resolve-FirstApplicationPath -Names @("node.exe", "node")
     },
   );
 
-  powerShellIt("falls back to the next candidate name when the first one is absent", () => {
-    const selectedPath = runPowerShell(`
+  powerShellIt(
+    "falls back to the next candidate name when the first one is absent",
+    powerShellTestOptions,
+    () => {
+      const selectedPath = runPowerShell(`
 . '${toPowerShellLiteralPath(startCafeCodeScript)}'
 function Get-Command {
   param([string]$Name, [string]$CommandType, [object]$ErrorAction)
@@ -73,11 +94,13 @@ $resolved = Resolve-FirstApplicationPath -Names @("node.exe", "node")
 [Console]::Out.Write($resolved)
 `);
 
-    assert.equal(selectedPath, "C:\\Program Files\\nodejs\\node.exe");
-  });
+      assert.equal(selectedPath, "C:\\Program Files\\nodejs\\node.exe");
+    },
+  );
 
   powerShellIt(
     "admits the canonical LTS line, not a newer Current major or malformed probe",
+    powerShellTestOptions,
     () => {
       const result = JSON.parse(
         runPowerShell(`

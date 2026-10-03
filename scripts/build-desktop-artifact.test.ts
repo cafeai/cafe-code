@@ -33,9 +33,12 @@ import { REPOSITORY_NODE_VERSION } from "./lib/node-version.ts";
 // The extractor is replaced at the process service boundary. These fixtures
 // exercise the production byte verification, private snapshot, resource scope
 // and staging reads without downloading an archive or launching any process.
-function extractionPaths(command: ChildProcess.Command) {
+function extractionPaths(
+  command: ChildProcess.Command,
+  platform: NodeJS.Platform = process.platform,
+) {
   if (!ChildProcess.isStandardCommand(command)) throw new Error("Expected one extraction command.");
-  if (process.platform !== "win32") {
+  if (platform !== "win32") {
     assert.equal(command.command, "unzip");
     assert.equal(command.args[0], "-q");
     assert.equal(command.args[2], "-d");
@@ -48,10 +51,18 @@ function extractionPaths(command: ChildProcess.Command) {
     "Bypass",
     "-Command",
   ]);
+  assert.lengthOf(command.args, 5);
   const invocation = command.args[4]!;
+  // This fixture admits precisely the production invocation, not PowerShell
+  // syntax in general. A word boundary before '-LiteralPath' is impossible
+  // after the preceding space: both the space and '-' are non-word characters.
+  // An anchored command prefix validates it directly and stays fail-closed.
   const literals =
-    /\b-LiteralPath '((?:[^']|'')*)' -DestinationPath '((?:[^']|'')*)' -Force$/u.exec(invocation);
+    /^Expand-Archive -LiteralPath '((?:[^']|'')*)' -DestinationPath '((?:[^']|'')*)' -Force$/u.exec(
+      invocation,
+    );
   assert.isNotNull(literals);
+  assert.equal(literals![0], invocation);
   return {
     archivePath: literals![1]!.replaceAll("''", "'"),
     destination: literals![2]!.replaceAll("''", "'"),
@@ -75,6 +86,41 @@ function completedExtractionHandle() {
 }
 
 it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+  it("parses the Windows extraction fixture on every host with exact structured arguments and literal quoted paths", () => {
+    const archivePath = "C:\\cache with spaces and ' quotes\\verified-extract-123\\node.zip";
+    const destination = "C:\\cache with spaces and ' quotes\\verified-extract-123";
+    const invocation = `Expand-Archive -LiteralPath '${archivePath.replaceAll("'", "''")}' -DestinationPath '${destination.replaceAll("'", "''")}' -Force`;
+    const args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", invocation];
+    assert.deepEqual(extractionPaths(ChildProcess.make("powershell.exe", args), "win32"), {
+      archivePath,
+      destination,
+    });
+    // These assertions run on macOS/Linux too; no native command or platform
+    // mutation is needed to catch regressions in the Windows fixture branch.
+    assert.throws(() => extractionPaths(ChildProcess.make("other.exe", args), "win32"));
+    assert.throws(() =>
+      extractionPaths(ChildProcess.make("powershell.exe", args.slice(1)), "win32"),
+    );
+    assert.throws(() =>
+      extractionPaths(ChildProcess.make("powershell.exe", [...args, "extra"]), "win32"),
+    );
+    for (const invalidInvocation of [
+      invocation.replace("Expand-Archive ", ""),
+      `${invocation}; unexpected-command`,
+      `${invocation}\n`,
+      invocation.replace("-LiteralPath '", "-LiteralPath "),
+      invocation.replace("-DestinationPath", "-OtherOption"),
+      invocation.replace(" -Force", ""),
+    ]) {
+      assert.throws(() =>
+        extractionPaths(
+          ChildProcess.make("powershell.exe", [...args.slice(0, 4), invalidInvocation]),
+          "win32",
+        ),
+      );
+    }
+  });
+
   it("always emits deterministic official updater metadata", () => {
     assert.deepStrictEqual(resolveGitHubPublishConfig("latest"), {
       provider: "github",
