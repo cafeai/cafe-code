@@ -1,3 +1,5 @@
+import { rm } from "node:fs/promises";
+import { setTimeout as delay } from "node:timers/promises";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Exit from "effect/Exit";
@@ -198,11 +200,209 @@ const commandPolicies = [
   { command: "/tmp/native executable & fixture.exe", windowsShell: false },
 ] as const;
 
+interface NativeFixtureRemoval {
+  readonly remove: (root: string, options: { readonly recursive: true }) => Promise<void>;
+  readonly wait: (milliseconds: number) => Promise<void>;
+}
+
+const removeWindowsNativePeerFixture = async (
+  root: string,
+  operations: NativeFixtureRemoval = { remove: rm, wait: delay },
+) => {
+  // Effect observes the child's Node `exit` event. Its inner scope already
+  // retires the process, but Windows may still hold the copied executable's
+  // image handle when the outer fixture scope starts removing its directory.
+  // Retry only this owned directory, never the test or the child launch. The
+  // five linear waits total 1.5 seconds; exhaustion retains the actual error.
+  for (let retry = 0; ; retry += 1) {
+    try {
+      await operations.remove(root, { recursive: true });
+      return;
+    } catch (error) {
+      const code =
+        typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+      if (retry === 5 || (code !== "EBUSY" && code !== "EPERM" && code !== "ENOTEMPTY")) {
+        throw error;
+      }
+      await operations.wait((retry + 1) * 100);
+    }
+  }
+};
+
+const makeNativePeerTemporaryRoot = (
+  fs: FileSystem.FileSystem,
+  platform: NodeJS.Platform = process.platform,
+  remove: (root: string) => Promise<void> = removeWindowsNativePeerFixture,
+) =>
+  platform === "win32"
+    ? Effect.acquireRelease(
+        fs.makeTempDirectory({ prefix: "cafe-codex-launch-" }),
+        // The release closure captures only the directory minted by this
+        // acquisition, not an environment path or a caller-selected parent.
+        // A rejected cleanup remains a finalizer defect and fails the test.
+        (root) => Effect.promise(() => remove(root)),
+      )
+    : fs.makeTempDirectoryScoped({ prefix: "cafe-codex-launch-" });
+
+it.each(["EBUSY", "EPERM", "ENOTEMPTY"])(
+  "removes the exact Windows native fixture root after transient %s handle release",
+  async (code) => {
+    const root = "filesystem-minted-fixture-root";
+    const targets: Array<{ root: string; options: { readonly recursive: true } }> = [];
+    const waits: Array<number> = [];
+    await removeWindowsNativePeerFixture(root, {
+      remove: async (target, options) => {
+        targets.push({ root: target, options });
+        if (targets.length < 3) throw Object.assign(new Error("Synthetic image lock"), { code });
+      },
+      wait: async (milliseconds) => {
+        waits.push(milliseconds);
+      },
+    });
+    assert.deepEqual(
+      targets,
+      Array.from({ length: 3 }, () => ({ root, options: { recursive: true } })),
+    );
+    assert.deepEqual(waits, [100, 200]);
+  },
+);
+
+it.each(["EACCES", "ENOENT", "EIO", "EMFILE", "ENFILE", undefined])(
+  "does not retry unrelated Windows native fixture cleanup error %s",
+  async (code) => {
+    const failure = Object.assign(new Error("Synthetic non-transient cleanup failure"), { code });
+    let attempts = 0;
+    let waits = 0;
+    let caught: unknown;
+    try {
+      await removeWindowsNativePeerFixture("filesystem-minted-fixture-root", {
+        remove: async () => {
+          attempts += 1;
+          throw failure;
+        },
+        wait: async () => {
+          waits += 1;
+        },
+      });
+    } catch (error) {
+      caught = error;
+    }
+    assert.strictEqual(caught, failure);
+    assert.equal(attempts, 1);
+    assert.equal(waits, 0);
+  },
+);
+
+it("fails Windows native fixture cleanup after its bounded handle-release budget", async () => {
+  const failure = Object.assign(new Error("Synthetic persistent image lock"), { code: "EBUSY" });
+  let attempts = 0;
+  const waits: Array<number> = [];
+  let caught: unknown;
+  try {
+    await removeWindowsNativePeerFixture("filesystem-minted-fixture-root", {
+      remove: async () => {
+        attempts += 1;
+        throw failure;
+      },
+      wait: async (milliseconds) => {
+        waits.push(milliseconds);
+      },
+    });
+  } catch (error) {
+    caught = error;
+  }
+  assert.strictEqual(caught, failure);
+  assert.equal(attempts, 6);
+  assert.deepEqual(waits, [100, 200, 300, 400, 500]);
+});
+
+it.effect("retires the inner native process scope before Windows fixture-root cleanup", () =>
+  Effect.gen(function* () {
+    const events: Array<string> = [];
+    const root = "filesystem-minted-fixture-root";
+    const fs = FileSystem.makeNoop({
+      makeTempDirectory: (options) =>
+        Effect.sync(() => {
+          assert.deepEqual(options, { prefix: "cafe-codex-launch-" });
+          events.push("directory acquired");
+          return root;
+        }),
+    });
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        assert.equal(
+          yield* makeNativePeerTemporaryRoot(fs, "win32", (target) =>
+            removeWindowsNativePeerFixture(target, {
+              remove: async (removedRoot, options) => {
+                assert.equal(removedRoot, root);
+                assert.deepEqual(options, { recursive: true });
+                assert.deepEqual(events, ["directory acquired", "child retired"]);
+                events.push("directory removed");
+              },
+              wait: async () => assert.fail("Successful cleanup must not wait"),
+            }),
+          ),
+          root,
+        );
+        yield* Effect.scoped(
+          Effect.addFinalizer(() => Effect.sync(() => events.push("child retired"))),
+        );
+        assert.deepEqual(events, ["directory acquired", "child retired"]);
+      }),
+    );
+    assert.deepEqual(events, ["directory acquired", "child retired", "directory removed"]);
+  }),
+);
+
+it.effect("keeps rejected Windows fixture-root cleanup visible as a finalizer failure", () =>
+  Effect.gen(function* () {
+    const failure = Object.assign(new Error("Synthetic persistent image lock"), { code: "EBUSY" });
+    const fs = FileSystem.makeNoop({
+      makeTempDirectory: () => Effect.succeed("filesystem-minted-fixture-root"),
+    });
+    const result = yield* Effect.scoped(
+      makeNativePeerTemporaryRoot(fs, "win32", async () => {
+        throw failure;
+      }),
+    ).pipe(Effect.exit);
+    assert.equal(Exit.isFailure(result), true);
+    if (Exit.isFailure(result)) assert.strictEqual(Cause.squash(result.cause), failure);
+  }),
+);
+
+it.effect.each(["darwin", "linux"] as const)(
+  "preserves single-pass scoped native fixture cleanup on %s",
+  (platform) =>
+    Effect.gen(function* () {
+      const root = "filesystem-minted-fixture-root";
+      let removed = false;
+      const fs = FileSystem.makeNoop({
+        makeTempDirectoryScoped: (options) => {
+          assert.deepEqual(options, { prefix: "cafe-codex-launch-" });
+          return Effect.acquireRelease(Effect.succeed(root), () =>
+            Effect.sync(() => {
+              removed = true;
+            }),
+          );
+        },
+      });
+      assert.equal(
+        yield* Effect.scoped(
+          makeNativePeerTemporaryRoot(fs, platform, async () =>
+            assert.fail("POSIX must retain the FileSystem scoped finalizer"),
+          ),
+        ),
+        root,
+      );
+      assert.equal(removed, true);
+    }),
+);
+
 const makeNativePeerFixture = () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const temporaryRoot = yield* fs.makeTempDirectoryScoped({ prefix: "cafe-codex-launch-" });
+    const temporaryRoot = yield* makeNativePeerTemporaryRoot(fs);
     // macOS resolves /var temporary paths through /private/var in cwd;
     // use one canonical usable spelling for all fixture paths and homes.
     const fixtureRoot = yield* fs.realPath(temporaryRoot);
