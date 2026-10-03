@@ -1529,7 +1529,14 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             createdAt: event.payload.activity.createdAt,
           });
 
-          if (event.payload.activity.turnId !== null) {
+          // This fact describes settings captured before submission; its
+          // asynchronous persistence is not provider execution. In particular
+          // a delayed metadata write cannot extend an already completed turn's
+          // generation duration or its terminal recovery watermark.
+          if (
+            event.payload.activity.turnId !== null &&
+            event.payload.activity.kind !== "provider.turn.configuration"
+          ) {
             const existingTurn = yield* projectionTurnRepository.getByTurnId({
               threadId: event.payload.threadId,
               turnId: event.payload.activity.turnId,

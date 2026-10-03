@@ -183,6 +183,11 @@ export type ProviderSteerTurnInput = typeof ProviderSteerTurnInput.Type;
 export const ProviderTurnStartResult = Schema.Struct({
   threadId: ThreadId,
   turnId: TurnId,
+  // Content-free routing evidence from ProviderService, not from an upstream
+  // adapter. A start request can race an already-active session and be
+  // accepted through native steering even when no correlation token exists.
+  // Optional decoding preserves compatibility with older daemon envelopes.
+  deliveryKind: Schema.optional(Schema.Literals(["start", "steer"])),
   // Present only when ProviderService reconciled sendTurn through a provider's
   // native steer path. Keeping it in the shared result envelope lets the
   // orchestration boundary durably correlate that accepted message without

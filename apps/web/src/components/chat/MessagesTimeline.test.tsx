@@ -1,4 +1,10 @@
-import { EnvironmentId, MessageId, ProviderDriverKind } from "@cafecode/contracts";
+import {
+  EnvironmentId,
+  MessageId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  type ProviderTurnConfiguration,
+} from "@cafecode/contracts";
 import { createRef, type ReactNode, type Ref } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeAll, describe, expect, it, vi } from "vitest";
@@ -147,6 +153,49 @@ function buildAssistantTimelineEntry(text: string, options?: { streaming?: boole
 }
 
 describe("MessagesTimeline file open helpers", () => {
+  it("renders frozen accepted-turn settings inline rather than in a truncated tooltip", () => {
+    const { MessagesTimeline } = readMessagesTimelineModule();
+    const turnConfiguration: ProviderTurnConfiguration = {
+      version: 1,
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex_personal"),
+      providerDisplayName: "Original account <label>",
+      model: "gpt-6.1-sol",
+      modelDisplayName: "GPT-6.1 Sol",
+      effort: "ultra",
+      fastMode: true,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      settingsSource: "submitted",
+    };
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            id: "accepted-settings",
+            kind: "work",
+            createdAt: MESSAGE_CREATED_AT,
+            entry: {
+              id: "accepted-settings",
+              createdAt: MESSAGE_CREATED_AT,
+              label: "Turn started",
+              tone: "info",
+              turnConfiguration,
+            },
+          },
+        ]}
+      />,
+    );
+    expect(markup).toContain('data-turn-configuration-row="true"');
+    expect(markup).toContain('data-turn-configuration-settings="true"');
+    expect(markup).toContain("GPT-6.1 Sol · Effort: Ultra · Fast on");
+    expect(markup).toContain("Account: Original account &lt;label&gt;");
+    expect(markup).toContain("Build · Full access");
+    expect(markup).not.toContain("codex_personal");
+    expect(markup).not.toContain("Original account <label>");
+  });
+
   it(
     "uses only a small layout-jitter tolerance when resolving the timeline tail",
     async () => {

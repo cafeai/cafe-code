@@ -6,6 +6,7 @@ import {
   isToolLifecycleItemType,
   type OrchestrationLatestTurn,
   type OrchestrationThreadActivity,
+  type ProviderTurnConfiguration,
   type OrchestrationProposedPlanId,
   ProviderDriverKind,
   ProviderInteraction,
@@ -17,6 +18,7 @@ import {
 } from "@cafecode/contracts";
 import { summarizeToolArguments } from "@cafecode/shared/toolActivity";
 import { readDesktopObservationItem } from "@cafecode/shared/desktopObservation";
+import { readTurnConfiguration, presentTurnConfiguration } from "./turnConfiguration";
 
 import {
   deriveSubagentActivities,
@@ -69,6 +71,8 @@ export interface WorkLogEntry {
   itemType?: ToolLifecycleItemType;
   requestKind?: PendingApproval["requestKind"];
   desktopObservation?: NonNullable<ReturnType<typeof readDesktopObservationItem>>;
+  /** Frozen accepted-turn settings; never reconstructed from today's catalog. */
+  turnConfiguration?: ProviderTurnConfiguration;
   subagent?: {
     /** Stable provider child identity and deterministic avatar seed. */
     id: string;
@@ -581,7 +585,18 @@ export function deriveWorkLogEntries(
           activity.kind === "provider.compaction.failed")),
   );
   const latestTaskVisibility = new Map<string, "visible" | "ambient">();
+  const configuredCodexTurns = new Set<TurnId>();
+  const configurationByActivityId = new Map<string, ProviderTurnConfiguration>();
   for (const activity of ordered) {
+    if (activity.kind === "provider.turn.configuration") {
+      const configuration = readTurnConfiguration(activity.payload);
+      if (configuration) {
+        configurationByActivityId.set(activity.id, configuration);
+        if (activity.turnId && configuration.provider === "codex") {
+          configuredCodexTurns.add(activity.turnId);
+        }
+      }
+    }
     const identity = taskActivityIdentityKey(activity);
     if (!identity) continue;
     const visibility = taskActivityVisibility(activity);
@@ -608,7 +623,21 @@ export function deriveWorkLogEntries(
     .filter((activity) => activity.summary !== "Checkpoint captured")
     .filter((activity) => !isPlanBoundaryToolActivity(activity))
     .filter((activity) => !isRetryableSteerDeliveryActivity(activity))
-    .map(toDerivedWorkLogEntry);
+    // The native ACK is retained in durable history for diagnosis, but a valid
+    // configuration row already communicates this same accepted start. Match
+    // the exact turn/task identity, never a generic task label or today's turn.
+    // Legacy ACKs (or malformed/missing configuration) remain visible unchanged.
+    .filter((activity) => {
+      if (
+        activity.kind !== "task.progress" ||
+        !activity.turnId ||
+        !configuredCodexTurns.has(activity.turnId)
+      )
+        return true;
+      const payload = asRecord(activity.payload);
+      return payload?.taskId !== `codex-turn-start:${activity.turnId}`;
+    })
+    .map((activity) => toDerivedWorkLogEntry(activity, configurationByActivityId.get(activity.id)));
   const collapsed = collapseDerivedWorkLogEntries(entries).map(
     ({ activityKind: _activityKind, collapseKey: _collapseKey, ...entry }) => entry,
   );
@@ -864,7 +893,10 @@ function isUserVisibleTaskStartedActivity(activity: OrchestrationThreadActivity)
   );
 }
 
-function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWorkLogEntry {
+function toDerivedWorkLogEntry(
+  activity: OrchestrationThreadActivity,
+  turnConfiguration?: ProviderTurnConfiguration,
+): DerivedWorkLogEntry {
   const payload =
     activity.payload && typeof activity.payload === "object"
       ? (activity.payload as Record<string, unknown>)
@@ -916,11 +948,19 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
           : activity.tone,
     activityKind: activity.kind,
   };
+  if (turnConfiguration) {
+    const presentation = presentTurnConfiguration(turnConfiguration);
+    // The plain label remains useful for transcript copy/search consumers; the
+    // row renderer uses the same frozen object to show the two compact lines.
+    entry.label = `Turn accepted · ${presentation.settings}`;
+    entry.detail = `${presentation.account} · ${presentation.modes} · ${presentation.source}`;
+    entry.turnConfiguration = turnConfiguration;
+  }
   const itemType = extractWorkLogItemType(payload);
   const requestKind = extractWorkLogRequestKind(payload);
   const observation = readDesktopObservationItem(asRecord(payload?.data)?.item);
   if (observation) entry.desktopObservation = observation;
-  if (detail) {
+  if (detail && !turnConfiguration) {
     entry.detail = detail;
   }
   if (commandPreview.command) {

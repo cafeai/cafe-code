@@ -2289,6 +2289,31 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             activity_id DESC
           LIMIT 1
         ),
+        latest_turn_configuration_activity_id AS (
+          -- A single start snapshot remains useful throughout a multi-hour
+          -- turn, even after ordinary tool activity fills the bounded tail.
+          -- Probe only the exact latest-turn/kind range. The forced index
+          -- prevents a missing snapshot on an old thread from cold-scanning
+          -- all history, and LIMIT 1 bounds extra payload hydration even when
+          -- malformed or duplicate presentation rows are present.
+          SELECT activity_id
+          FROM projection_thread_activities
+            INDEXED BY idx_projection_thread_activities_thread_turn_kind_created_id
+          WHERE thread_id = ${threadId}
+            AND turn_id = (
+              SELECT latest_turn_id
+              FROM projection_threads
+              WHERE thread_id = ${threadId}
+              LIMIT 1
+            )
+            AND kind = 'provider.turn.configuration'
+          ORDER BY
+            CASE WHEN sequence IS NULL THEN 0 ELSE 1 END DESC,
+            sequence DESC,
+            created_at DESC,
+            activity_id DESC
+          LIMIT 1
+        ),
         current_turn_subagent_identities AS (
           -- Keep the most recently active identities plus one sentinel row so
           -- the caller can emit a metadata-only truncation diagnostic. The
@@ -2374,6 +2399,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           UNION
           SELECT activity_id
           FROM latest_task_plan_activity_id
+          UNION
+          SELECT activity_id
+          FROM latest_turn_configuration_activity_id
           UNION
           SELECT activity_id
           FROM latest_subagent_lifecycle_activity_ids

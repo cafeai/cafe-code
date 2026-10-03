@@ -2042,11 +2042,12 @@ routing.layer("ProviderServiceLive routing", (it) => {
       const sessions = yield* provider.listSessions();
       assert.equal(sessions.length, 1);
 
-      yield* provider.sendTurn({
+      const startedTurn = yield* provider.sendTurn({
         threadId: session.threadId,
         input: "hello",
         attachments: [],
       });
+      assert.equal(startedTurn.deliveryKind, "start");
       assert.equal(routing.codex.sendTurn.mock.calls.length, 1);
 
       yield* provider.interruptTurn({ threadId: session.threadId });
@@ -2153,6 +2154,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
 
         assert.equal(turn.turnId, asTurnId("turn-active"));
         assert.equal(turn.clientCorrelationId, clientCorrelationId);
+        assert.equal(turn.deliveryKind, "steer");
         assert.equal(routing.codex.sendTurn.mock.calls.length, 0);
         assert.equal(routing.codex.steerTurn.mock.calls.length, 1);
         assert.deepEqual(routing.codex.steerTurn.mock.calls[0]?.[0], {
@@ -2353,6 +2355,10 @@ routing.layer("ProviderServiceLive routing", (it) => {
         });
 
         assert.equal(turn.turnId, asTurnId("turn-claude-active"));
+        // Unlike Codex, Claude does not return a steer correlation token. The
+        // service result must still identify this as existing-turn delivery.
+        assert.equal(turn.clientCorrelationId, undefined);
+        assert.equal(turn.deliveryKind, "steer");
         assert.equal(routing.claude.sendTurn.mock.calls.length, 0);
         assert.equal(routing.claude.steerTurn.mock.calls.length, 1);
         assert.deepEqual(routing.claude.steerTurn.mock.calls[0]?.[0], {

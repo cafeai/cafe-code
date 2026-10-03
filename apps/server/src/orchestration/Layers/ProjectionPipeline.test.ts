@@ -918,6 +918,54 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-interrupt-clear
             messageUpdatedAt: "2026-05-24T15:00:03.000Z",
           },
         ]);
+
+        // Settings can be persisted after a provider ACK and after Stop has
+        // already completed. This presentation-only event must not inflate
+        // the elapsed generation time or move the terminal watermark.
+        yield* appendAndProject({
+          type: "thread.activity-appended",
+          eventId: EventId.make("evt-late-turn-configuration"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-05-24T15:00:10.000Z",
+          commandId: CommandId.make("cmd-late-turn-configuration"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-late-turn-configuration"),
+          metadata: {},
+          payload: {
+            threadId,
+            activity: {
+              id: EventId.make("activity-late-turn-configuration"),
+              tone: "info",
+              kind: "provider.turn.configuration",
+              summary: "Turn settings",
+              payload: {
+                turnConfiguration: {
+                  version: 1,
+                  provider: "codex",
+                  providerInstanceId: "codex",
+                  providerDisplayName: "Codex Personal",
+                  model: "gpt-6.1-sol",
+                  runtimeMode: "full-access",
+                  settingsSource: "submitted",
+                },
+              },
+              turnId,
+              createdAt: "2026-05-24T15:00:10.000Z",
+            },
+          },
+        });
+        const lateMetadataTurn = yield* sql<{ readonly completedAt: string | null }>`
+          SELECT completed_at AS "completedAt"
+          FROM projection_turns
+          WHERE thread_id = ${threadId} AND turn_id = ${turnId}
+        `;
+        assert.equal(lateMetadataTurn[0]?.completedAt, "2026-05-24T15:00:03.000Z");
+        const persistedMetadata = yield* sql<{ readonly count: number }>`
+          SELECT COUNT(*) AS "count" FROM projection_thread_activities
+          WHERE thread_id = ${threadId} AND kind = 'provider.turn.configuration'
+        `;
+        assert.equal(persistedMetadata[0]?.count, 1);
       }),
     );
   },

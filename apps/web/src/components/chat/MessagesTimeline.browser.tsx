@@ -5,6 +5,7 @@ import {
   EventId,
   MessageId,
   ProviderDriverKind,
+  ProviderInstanceId,
   ThreadId,
   TurnId,
   type EnvironmentApi,
@@ -105,6 +106,49 @@ import { MessagesTimeline } from "./MessagesTimeline";
 import type { SubagentDetailSelection } from "./SubagentDetailView";
 
 const MESSAGE_CREATED_AT = "2026-04-13T12:00:00.000Z";
+
+it("shows historical turn settings even when the current provider is different", async () => {
+  const turnConfiguration = {
+    version: 1 as const,
+    provider: ProviderDriverKind.make("codex"),
+    providerInstanceId: ProviderInstanceId.make("codex_original"),
+    providerDisplayName: "Original Codex account",
+    model: "gpt-6.1-sol",
+    modelDisplayName: "GPT-6.1 Sol",
+    effort: "ultra",
+    fastMode: false,
+    runtimeMode: "approval-required" as const,
+    interactionMode: "plan" as const,
+    settingsSource: "session" as const,
+  };
+  const entry = {
+    id: "old-settings",
+    createdAt: MESSAGE_CREATED_AT,
+    label: "Turn accepted",
+    tone: "info" as const,
+    turnConfiguration,
+  };
+  const view = await render(
+    <div style={{ width: 300 }}>
+      <MessagesTimeline
+        {...buildProps()}
+        activeProvider={ProviderDriverKind.make("claudeAgent")}
+        timelineEntries={[{ id: entry.id, kind: "work", createdAt: MESSAGE_CREATED_AT, entry }]}
+      />
+    </div>,
+  );
+  try {
+    await expect.element(page.getByText("GPT-6.1 Sol · Effort: Ultra · Fast off")).toBeVisible();
+    await expect.element(page.getByText("Account: Original Codex account")).toBeVisible();
+    await expect.element(page.getByText("Existing session settings")).toBeVisible();
+    const row = document.querySelector<HTMLElement>("[data-turn-configuration-row]")!;
+    expect(row.textContent).toContain("Plan · Approval required");
+    expect(row.textContent).not.toContain("Claude");
+    expect(row.textContent).not.toContain("codex_original");
+  } finally {
+    await view.unmount();
+  }
+});
 
 it("opens an observation directly from its completed timeline tool call", async () => {
   const entry = {

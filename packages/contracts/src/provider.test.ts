@@ -6,6 +6,7 @@ import {
   ProviderSendTurnInput,
   ProviderSession,
   ProviderSessionStartInput,
+  ProviderTurnStartResult,
   PROVIDER_SESSION_TITLE_MAX_CHARS,
 } from "./provider.ts";
 
@@ -13,6 +14,17 @@ const decodeProviderSessionStartInput = Schema.decodeUnknownSync(ProviderSession
 const decodeProviderSendTurnInput = Schema.decodeUnknownSync(ProviderSendTurnInput);
 const decodeProviderSession = Schema.decodeUnknownSync(ProviderSession);
 const decodeProviderEvent = Schema.decodeUnknownSync(ProviderEvent);
+
+describe("ProviderTurnStartResult", () => {
+  it("keeps legacy envelopes and admits only content-free known delivery kinds", () => {
+    const decode = Schema.decodeUnknownSync(ProviderTurnStartResult);
+    const legacy = { threadId: "thread-1", turnId: "turn-1" };
+    expect(decode(legacy)).toEqual(legacy);
+    expect(decode({ ...legacy, deliveryKind: "start" }).deliveryKind).toBe("start");
+    expect(decode({ ...legacy, deliveryKind: "steer" }).deliveryKind).toBe("steer");
+    expect(() => decode({ ...legacy, deliveryKind: "other" })).toThrow();
+  });
+});
 
 function getOptionValue(
   options: ReadonlyArray<{ id: string; value: unknown }> | undefined,

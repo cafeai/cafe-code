@@ -1,6 +1,6 @@
 # Provider stream reconciliation
 
-Last updated: 2026-09-24 21:09:55 JST (UTC+0900)
+Last updated: 2026-10-03 13:05:03 JST (UTC+0900)
 
 ## Ownership and exact text
 
@@ -33,6 +33,8 @@ Stream commitments retain fixed-size hash state, not another copy of every strea
 The compatibility review compared installed/runtime protocol behavior and current official releases. At the stream-fix audit timestamp, [Codex's changelog](https://learn.chatgpt.com/docs/changelog) targeted CLI/app-server 0.153.4; the subsequent [0.154 capability update](codex-154-compatibility.md) records the newer audit without changing these stream-integrity requirements. The initial Claude stream correction retained SDK 0.3.260 while the newest releases were quarantined. The subsequent [0.3.266 compatibility update](claude-266-compatibility.md) moves all three pins after the package-age audit and adds correlation regressions; it does not replace the local query transport. A newer explicitly configured system CLI remains authoritative; matching wrapper and CLI version numbers is not itself a compatibility requirement.
 
 ## Diagnostics and historical data
+
+Each newly accepted user turn also retains a bounded [configuration sanity check](decisions/turn-configuration-work-log.md) in authenticated work-log activity. Its model, effort/Fast settings and configured account label are frozen at submission, rather than read from the current composer when history renders. Missing native overrides remain provider-default/unknown; the record is not independent backend-model or billing telemetry. The display adds no provider queries, inference or lifecycle authority, and old turns are not retrospectively guessed or rewritten.
 
 A rejected nonempty completed item emits `provider.assistantCompletion/textMismatch` at completion, not per token. Fields are restricted to provider kind, the fixed reason `completion-shorter-than-stream` or `completion-prefix-mismatch`, and `streamedCodeUnits`/`completionCodeUnits`. Consuming the stream commitment and normal canonical event deduplication prevent repeated warnings from the same completion. No prompt, output, digest, account, conversation identity, credential or filesystem path is logged by this diagnostic.
 

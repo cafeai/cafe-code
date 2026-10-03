@@ -2453,6 +2453,175 @@ describe("deriveWorkLogEntries context window handling", () => {
     });
   });
 
+  it("folds only the exact same-turn Codex start ACK into accepted settings", () => {
+    const configuration = {
+      version: 1,
+      provider: "codex",
+      providerInstanceId: "codex_personal",
+      providerDisplayName: "Codex Personal",
+      model: "gpt-6.1-sol",
+      modelDisplayName: "GPT-6.1 Sol",
+      effort: "ultra",
+      fastMode: true,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      settingsSource: "submitted",
+    };
+    const activities = [
+      makeActivity({
+        id: "accepted-ack",
+        sequence: 1,
+        turnId: "turn-settings",
+        kind: "task.progress",
+        payload: {
+          taskId: "codex-turn-start:turn-settings",
+          detail: "Codex app-server accepted turn/start.",
+        },
+      }),
+      makeActivity({
+        id: "accepted-settings",
+        sequence: 2,
+        turnId: "turn-settings",
+        kind: "provider.turn.configuration",
+        tone: "info",
+        summary: "Turn started",
+        payload: { turnConfiguration: configuration },
+      }),
+      makeActivity({
+        id: "other-task",
+        sequence: 3,
+        turnId: "turn-settings",
+        kind: "task.progress",
+        payload: { taskId: "different-task", detail: "Still working" },
+      }),
+      makeActivity({
+        id: "other-turn-ack",
+        sequence: 4,
+        turnId: "turn-other",
+        kind: "task.progress",
+        payload: {
+          taskId: "codex-turn-start:turn-other",
+          detail: "Codex app-server accepted turn/start.",
+        },
+      }),
+      makeActivity({
+        id: "switched",
+        sequence: 5,
+        turnId: "turn-settings",
+        kind: "provider.switched",
+        tone: "info",
+        summary: "Switched from Claude Work to Codex Personal",
+      }),
+    ];
+    const entries = deriveWorkLogEntries(activities, undefined);
+    expect(entries.map((entry) => entry.id)).toEqual([
+      "accepted-settings",
+      "other-task",
+      "other-turn-ack",
+      "switched",
+    ]);
+    expect(entries[0]).toMatchObject({
+      label: "Turn accepted · GPT-6.1 Sol · Effort: Ultra · Fast on",
+      detail: "Account: Codex Personal · Build · Full access · Submitted settings",
+      turnConfiguration: configuration,
+      tone: "info",
+    });
+    expect(deriveWorkLogEntries(activities, TurnId.make("turn-settings"))).toHaveLength(3);
+  });
+
+  it("preserves legacy ACK text when settings are absent or malformed", () => {
+    const ack = makeActivity({
+      id: "legacy-accepted",
+      turnId: "legacy-turn",
+      kind: "task.progress",
+      summary: "Reasoning update",
+      payload: {
+        taskId: "codex-turn-start:legacy-turn",
+        detail: "Codex app-server accepted turn/start.",
+      },
+    });
+    const malformed = makeActivity({
+      id: "malformed-settings",
+      turnId: "legacy-turn",
+      kind: "provider.turn.configuration",
+      tone: "info",
+      summary: "Turn started",
+      payload: {
+        turnConfiguration: {
+          version: 1,
+          provider: "codex",
+          providerDisplayName: "Missing required identity and mode",
+        },
+      },
+    });
+    expect(deriveWorkLogEntries([ack], undefined)).toEqual([
+      expect.objectContaining({
+        id: "legacy-accepted",
+        label: "Codex app-server accepted turn/start.",
+      }),
+    ]);
+    const entries = deriveWorkLogEntries([ack, malformed], undefined);
+    expect(entries.find((entry) => entry.id === "legacy-accepted")?.label).toBe(
+      "Codex app-server accepted turn/start.",
+    );
+    expect(entries.every((entry) => entry.turnConfiguration === undefined)).toBe(true);
+  });
+
+  it("preserves each historical turn's model, account label, and explicit Fast state", () => {
+    const base = {
+      version: 1,
+      provider: "codex",
+      providerInstanceId: "codex_personal",
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      settingsSource: "submitted",
+    };
+    const activities = [
+      makeActivity({
+        id: "old-configuration",
+        turnId: "old-turn",
+        kind: "provider.turn.configuration",
+        tone: "info",
+        payload: {
+          turnConfiguration: {
+            ...base,
+            providerDisplayName: "Original account label",
+            model: "gpt-6.1-sol",
+            modelDisplayName: "GPT-6.1 Sol",
+            effort: "ultra",
+            fastMode: true,
+          },
+        },
+      }),
+      makeActivity({
+        id: "new-configuration",
+        turnId: "new-turn",
+        kind: "provider.turn.configuration",
+        tone: "info",
+        payload: {
+          turnConfiguration: {
+            ...base,
+            providerDisplayName: "Renamed same account",
+            model: "gpt-6-astra",
+            modelDisplayName: "GPT-6 Astra",
+            effort: "max",
+            fastMode: false,
+          },
+        },
+      }),
+    ];
+    const oldEntries = deriveWorkLogEntries(activities, TurnId.make("old-turn"));
+    expect(oldEntries[0]?.label).toBe("Turn accepted · GPT-6.1 Sol · Effort: Ultra · Fast on");
+    expect(oldEntries[0]?.detail).toBe(
+      "Account: Original account label · Build · Full access · Submitted settings",
+    );
+    const newEntries = deriveWorkLogEntries(activities, TurnId.make("new-turn"));
+    expect(newEntries[0]?.label).toBe("Turn accepted · GPT-6 Astra · Effort: Max · Fast off");
+    expect(newEntries[0]?.detail).toBe(
+      "Account: Renamed same account · Build · Full access · Submitted settings",
+    );
+  });
+
   it("shows active Codex context compaction items and collapses them when completed", () => {
     const entries = deriveWorkLogEntries(
       [

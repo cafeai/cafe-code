@@ -16,6 +16,7 @@ import {
   type ProviderInteractionMode,
   type ProviderSendTurnInput,
   type ProviderTurnStartResult,
+  type ProviderTurnConfiguration,
   ThreadId,
   type ProviderSession,
   type RuntimeMode,
@@ -52,6 +53,7 @@ import { getCodexRootTurnCompletion } from "../../provider/codexRootTurnCompleti
 import { makeProviderSessionTitle } from "../../provider/providerSessionTitle.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import { ProviderAdapterRegistry } from "../../provider/Services/ProviderAdapterRegistry.ts";
 import {
   ProviderSessionDirectory,
   type ProviderRuntimeBinding,
@@ -85,6 +87,10 @@ import {
   type CodexSteerNextTurnReason,
   decideCodexSteerRecovery,
 } from "../codexSteerRecovery.ts";
+import {
+  providerTurnConfigurationCommand,
+  snapshotProviderTurnConfiguration,
+} from "../providerTurnConfiguration.ts";
 const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
 const isProviderAdapterProcessError = Schema.is(ProviderAdapterProcessError);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
@@ -116,6 +122,11 @@ type RuntimeRecoveryRetry = {
   readonly attempt: number;
 };
 type ReactorWork = ProviderIntentEvent | RuntimeLossEvent | RuntimeRecoveryRetry;
+interface PreparedProviderTurn {
+  readonly request: ProviderSendTurnInput;
+  readonly configuration: ProviderTurnConfiguration | undefined;
+  readonly activeTurnId: TurnId | undefined;
+}
 const isRuntimeLossEvent = (event: OrchestrationEvent): event is RuntimeLossEvent =>
   event.type === "thread.activity-appended" &&
   event.payload.activity.kind === "runtime.warning" &&
@@ -555,9 +566,13 @@ function buildGeneratedWorktreeBranchName(raw: string): string {
 }
 
 const make = Effect.gen(function* () {
+  const reactorScope = yield* Effect.scope;
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
+  // Inventory presentation is optional in synthetic/older service graphs.
+  // Read only an already-cached catalog; never refresh/probe to decorate a turn.
+  const providerAdapterRegistry = yield* Effect.serviceOption(ProviderAdapterRegistry);
   const providerSessionDirectory = yield* ProviderSessionDirectory;
   const readProviderTurnRecoveryEvidence = yield* makeProviderTurnRecoveryEvidenceReader;
   const readRuntimeRecoveryBarrier = yield* makeRuntimeRecoveryBarrierReader;
@@ -1807,15 +1822,16 @@ const make = Effect.gen(function* () {
             )
           : normalizedInput;
     const normalizedAttachments = input.attachments ?? [];
-    const sessionModelSwitch =
-      ensuredSession.providerInstanceId === undefined
-        ? yield* new ProviderAdapterRequestError({
-            provider: providerErrorLabel(ensuredSession.provider),
-            method: "thread.turn.start",
-            detail: `Active provider session '${ensuredSession.threadId}' is missing a provider instance id.`,
-          })
-        : (yield* providerService.getCapabilities(ensuredSession.providerInstanceId))
-            .sessionModelSwitch;
+    const instanceId = ensuredSession.providerInstanceId;
+    if (instanceId === undefined) {
+      return yield* new ProviderAdapterRequestError({
+        provider: providerErrorLabel(ensuredSession.provider),
+        method: "thread.turn.start",
+        detail: `Active provider session '${ensuredSession.threadId}' is missing a provider instance id.`,
+      });
+    }
+    const sessionModelSwitch = (yield* providerService.getCapabilities(instanceId))
+      .sessionModelSwitch;
     const modelForTurn =
       sessionModelSwitch === "unsupported" && input.modelSelection === undefined
         ? ensuredSession.model !== undefined
@@ -1826,7 +1842,7 @@ const make = Effect.gen(function* () {
           : requestedModelSelection
         : input.modelSelection;
 
-    return {
+    const request: ProviderSendTurnInput = {
       threadId: input.threadId,
       ...(input.messageId !== undefined ? { messageId: input.messageId } : {}),
       ...(input.allowActiveTurnSteerFallback !== undefined
@@ -1837,6 +1853,75 @@ const make = Effect.gen(function* () {
       ...(modelForTurn !== undefined ? { modelSelection: modelForTurn } : {}),
       ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
     };
+    // This cached routing read supplies only the user's configured account
+    // label. It cannot launch a CLI probe, discover auth metadata or incur a
+    // model request. Capture it before the send: a late ACK must not use a
+    // renamed account/model from the renderer's current state.
+    const info = yield* providerService.getInstanceInfo(instanceId).pipe(Effect.option);
+    const providerDisplayName = Option.isSome(info) ? info.value.displayName : undefined;
+    const models = Option.isSome(providerAdapterRegistry)
+      ? yield* providerAdapterRegistry.value
+          .getModels(instanceId)
+          .pipe(Effect.catchCause(() => Effect.succeed([])))
+      : undefined;
+    return {
+      request,
+      configuration: snapshotProviderTurnConfiguration({
+        session: ensuredSession,
+        request,
+        instanceId,
+        providerDisplayName,
+        models,
+        settingsSource: "submitted",
+      }),
+      activeTurnId: ensuredSession.status === "running" ? ensuredSession.activeTurnId : undefined,
+    } satisfies PreparedProviderTurn;
+  });
+
+  const sendPreparedProviderTurn = (prepared: PreparedProviderTurn) =>
+    providerService.sendTurn(prepared.request);
+
+  const recordAcceptedTurnConfiguration = Effect.fn("recordAcceptedTurnConfiguration")(function* (
+    prepared: PreparedProviderTurn,
+    turn: ProviderTurnStartResult,
+  ) {
+    const steeredExistingTurn =
+      turn.deliveryKind === "steer" ||
+      turn.clientCorrelationId !== undefined ||
+      turn.turnId === prepared.activeTurnId;
+    // The original accepted start owns this turn's immutable snapshot. A
+    // routed steer must not race its pending write, rewrite a renamed account,
+    // or backfill pre-upgrade history with the current composer's settings.
+    const configuration = steeredExistingTurn ? undefined : prepared.configuration;
+    if (configuration !== undefined) {
+      const acceptedAt = DateTime.formatIso(yield* DateTime.now);
+      yield* orchestrationEngine
+        .dispatch(
+          providerTurnConfigurationCommand({
+            threadId: prepared.request.threadId,
+            turnId: turn.turnId,
+            configuration,
+            createdAt: acceptedAt,
+          }),
+        )
+        .pipe(
+          // Acceptance has already crossed the provider boundary. A failed
+          // presentation write cannot convert it into a submission failure,
+          // refresh a session, or authorize a second inference request.
+          Effect.catchCause(() =>
+            Effect.logWarning("accepted provider turn settings could not be recorded"),
+          ),
+          // Callers enqueue this only AFTER their existing accepted-turn
+          // running/receipt writes. A fork by itself is not enough: the engine
+          // uses one FIFO, so enqueueing metadata before those critical writes
+          // could still hold their bookkeeping behind a busy SQLite writer.
+          // The detached presentation write does not consume provider timeouts
+          // or turn an accepted submission into a reason to retry inference.
+          // The reactor scope survives the short delivery fiber but retires
+          // this work when the server itself closes.
+          Effect.forkIn(reactorScope),
+        );
+    }
   });
 
   const markThreadRunningFromSendTurnResult = Effect.fn("markThreadRunningFromSendTurnResult")(
@@ -2749,14 +2834,17 @@ const make = Effect.gen(function* () {
             ...(project !== undefined ? { project } : {}),
           });
 
-          yield* providerService.sendTurn(sendTurnRequest).pipe(
+          yield* sendPreparedProviderTurn(sendTurnRequest).pipe(
             Effect.tap((turn) =>
-              reconcileAcceptedSendTurnResult({
-                threadId: event.payload.threadId,
-                messageId: event.payload.messageId,
-                intentSequence: event.sequence,
-                turn,
-                intentCreatedAt: event.payload.createdAt,
+              Effect.gen(function* () {
+                yield* reconcileAcceptedSendTurnResult({
+                  threadId: event.payload.threadId,
+                  messageId: event.payload.messageId,
+                  intentSequence: event.sequence,
+                  turn,
+                  intentCreatedAt: event.payload.createdAt,
+                });
+                yield* recordAcceptedTurnConfiguration(sendTurnRequest, turn);
               }),
             ),
           );
@@ -3063,7 +3151,7 @@ const make = Effect.gen(function* () {
       }
     }
 
-    yield* providerService.sendTurn(sendTurnRequest.value).pipe(
+    yield* sendPreparedProviderTurn(sendTurnRequest.value).pipe(
       Effect.matchCauseEffect({
         onFailure: (cause) => {
           const activeTurnId = detectCodexActiveTurnRunningStartFailure(cause);
@@ -3097,6 +3185,7 @@ const make = Effect.gen(function* () {
               intentCreatedAt: event.payload.createdAt,
             });
             if (!mayContinue) {
+              yield* recordAcceptedTurnConfiguration(sendTurnRequest.value, turn);
               return;
             }
             if (
@@ -3110,6 +3199,7 @@ const make = Effect.gen(function* () {
               });
             }
             yield* appendProviderSwitchActivity(turn.turnId);
+            yield* recordAcceptedTurnConfiguration(sendTurnRequest.value, turn);
           }).pipe(
             Effect.catchCause((cause) =>
               Effect.logError(
@@ -3460,7 +3550,7 @@ const make = Effect.gen(function* () {
      */
     const deliverPersistedSteerAsNextTurn = Effect.fn("deliverPersistedSteerAsNextTurn")(
       function* (input: {
-        readonly request: ProviderSendTurnInput;
+        readonly request: PreparedProviderTurn;
         readonly staleTurnId: TurnId | null;
         readonly reason: CodexSteerNextTurnReason;
         readonly providerHint?: string;
@@ -3512,80 +3602,82 @@ const make = Effect.gen(function* () {
           validation.recoveryLiveness?._tag === "active"
             ? getCodexRootTurnCompletion(validation.recoveryLiveness.localSession)
             : undefined;
-        yield* providerService
-          .sendTurn({
-            ...input.request,
+        yield* sendPreparedProviderTurn({
+          ...input.request,
+          request: {
+            ...input.request.request,
             ...(isCodex ? { allowActiveTurnSteerFallback: false } : {}),
             ...(completedRoot !== undefined && expectedTurnId !== null
               ? {
                   expectedCompletedRootTurnId: expectedTurnId,
                 }
               : {}),
-          })
-          .pipe(
-            Effect.matchCauseEffect({
-              onFailure: (cause) =>
-                isCodex
-                  ? orchestrationEngine
-                      .dispatch(
-                        buildCodexSteerNextTurnQueuedCommand({
-                          threadId: event.payload.threadId,
-                          messageId: event.payload.messageId,
-                          intentSequence: event.sequence,
-                          staleTurnId: input.staleTurnId,
-                          reason: input.reason,
-                          createdAt: input.createdAt,
-                        }),
-                      )
-                      .pipe(Effect.retry({ times: 2 }))
-                  : appendProviderFailureActivity({
-                      threadId: event.payload.threadId,
-                      kind: "provider.turn.steer.failed",
-                      summary: "Provider steer queued",
-                      detail: `Automatic steer delivery failed: ${formatFailureDetail(cause)}`,
-                      turnId: input.staleTurnId,
-                      createdAt: input.createdAt,
-                      messageId: event.payload.messageId,
-                      intentSequence: event.sequence,
-                      retryableFollowUp: true,
-                    }),
-              onSuccess: (turn) =>
-                Effect.gen(function* () {
-                  // Materialize the provider-accepted turn before attaching the
-                  // receipt to it. The pre-I/O attempt marker already closes the
-                  // crash window, so this ordering avoids an invalid activity
-                  // reference without permitting startup redelivery.
-                  yield* reconcileAcceptedSendTurnResult({
+          },
+        }).pipe(
+          Effect.matchCauseEffect({
+            onFailure: (cause) =>
+              isCodex
+                ? orchestrationEngine
+                    .dispatch(
+                      buildCodexSteerNextTurnQueuedCommand({
+                        threadId: event.payload.threadId,
+                        messageId: event.payload.messageId,
+                        intentSequence: event.sequence,
+                        staleTurnId: input.staleTurnId,
+                        reason: input.reason,
+                        createdAt: input.createdAt,
+                      }),
+                    )
+                    .pipe(Effect.retry({ times: 2 }))
+                : appendProviderFailureActivity({
                     threadId: event.payload.threadId,
+                    kind: "provider.turn.steer.failed",
+                    summary: "Provider steer queued",
+                    detail: `Automatic steer delivery failed: ${formatFailureDetail(cause)}`,
+                    turnId: input.staleTurnId,
+                    createdAt: input.createdAt,
                     messageId: event.payload.messageId,
                     intentSequence: event.sequence,
-                    turn,
-                    intentCreatedAt: event.payload.createdAt,
-                    ...(completedRoot !== undefined && expectedTurnId !== null
-                      ? { supersededCompletedRootTurnId: expectedTurnId }
-                      : {}),
-                  });
-                  if (isCodex && turn.clientCorrelationId === undefined) {
-                    // This activity is the durable commit point for the external
-                    // provider side effect. Retry the stable command locally so a
-                    // transient SQLite contention does not reopen the intent on
-                    // the next backend start.
-                    yield* orchestrationEngine
-                      .dispatch(
-                        buildCodexSteerDeliveredActivityCommand({
-                          threadId: event.payload.threadId,
-                          messageId: event.payload.messageId,
-                          intentSequence: event.sequence,
-                          deliveredTurnId: turn.turnId,
-                          reason: input.reason,
-                          createdAt: input.createdAt,
-                        }),
-                      )
-                      .pipe(Effect.retry({ times: 2 }));
-                  }
-                }),
-            }),
-          );
+                    retryableFollowUp: true,
+                  }),
+            onSuccess: (turn) =>
+              Effect.gen(function* () {
+                // Materialize the provider-accepted turn before attaching the
+                // receipt to it. The pre-I/O attempt marker already closes the
+                // crash window, so this ordering avoids an invalid activity
+                // reference without permitting startup redelivery.
+                yield* reconcileAcceptedSendTurnResult({
+                  threadId: event.payload.threadId,
+                  messageId: event.payload.messageId,
+                  intentSequence: event.sequence,
+                  turn,
+                  intentCreatedAt: event.payload.createdAt,
+                  ...(completedRoot !== undefined && expectedTurnId !== null
+                    ? { supersededCompletedRootTurnId: expectedTurnId }
+                    : {}),
+                });
+                if (isCodex && turn.clientCorrelationId === undefined) {
+                  // This activity is the durable commit point for the external
+                  // provider side effect. Retry the stable command locally so a
+                  // transient SQLite contention does not reopen the intent on
+                  // the next backend start.
+                  yield* orchestrationEngine
+                    .dispatch(
+                      buildCodexSteerDeliveredActivityCommand({
+                        threadId: event.payload.threadId,
+                        messageId: event.payload.messageId,
+                        intentSequence: event.sequence,
+                        deliveredTurnId: turn.turnId,
+                        reason: input.reason,
+                        createdAt: input.createdAt,
+                      }),
+                    )
+                    .pipe(Effect.retry({ times: 2 }));
+                }
+                yield* recordAcceptedTurnConfiguration(input.request, turn);
+              }),
+          }),
+        );
       },
     );
 
@@ -3789,7 +3881,7 @@ const make = Effect.gen(function* () {
         if (postAttemptValidation === undefined) {
           return;
         }
-        yield* providerService.sendTurn(sendTurnRequest).pipe(
+        yield* sendPreparedProviderTurn(sendTurnRequest).pipe(
           Effect.matchCauseEffect({
             onFailure: (cause) => {
               const newerTurnId = detectCodexActiveTurnRunningStartFailure(cause);
@@ -3830,6 +3922,7 @@ const make = Effect.gen(function* () {
                     createdAt: deliveredAt,
                   });
                 }
+                yield* recordAcceptedTurnConfiguration(sendTurnRequest, turn);
               }).pipe(
                 Effect.catchCause((cause) =>
                   Effect.logError(
@@ -4802,11 +4895,14 @@ const make = Effect.gen(function* () {
     // immediately, blocks the late running projection below, and its queued
     // interrupt executes after this submission settles. The daemon's own
     // lifecycle lock retains ordering if the network outcome is uncertain.
-    yield* providerService.sendTurn(prepared.request).pipe(
+    yield* sendPreparedProviderTurn(prepared.request).pipe(
       Effect.timeout("30 seconds"),
       Effect.flatMap((turn) =>
         Effect.gen(function* () {
-          if (!(yield* permitted())) return;
+          if (!(yield* permitted())) {
+            yield* recordAcceptedTurnConfiguration(prepared.request, turn);
+            return;
+          }
           yield* reconcileAcceptedSendTurnResult({
             threadId,
             messageId: message.id,
@@ -4814,6 +4910,7 @@ const make = Effect.gen(function* () {
             turn,
             intentCreatedAt: event.payload.createdAt,
           });
+          yield* recordAcceptedTurnConfiguration(prepared.request, turn);
         }),
       ),
       Effect.catchCause(() =>

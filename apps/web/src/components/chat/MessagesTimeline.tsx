@@ -1,4 +1,5 @@
 import { FileAttachmentPill } from "./FileAttachmentPill";
+import { TurnConfigurationWorkEntry } from "./TurnConfigurationWorkEntry";
 import {
   type EnvironmentId,
   type EditorId,
@@ -2356,6 +2357,8 @@ const OrdinaryWorkEntryRow = memo(function OrdinaryWorkEntryRow(props: {
   workspaceRoot: string | undefined;
 }) {
   const { activeThreadEnvironmentId, activeThreadId, timestampFormat } = use(TimelineRowCtx);
+  if (props.workEntry.turnConfiguration)
+    return <TurnConfigurationWorkEntry configuration={props.workEntry.turnConfiguration} />;
   if (props.workEntry.desktopObservation && activeThreadId)
     return (
       <DesktopObservation

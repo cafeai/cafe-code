@@ -28,6 +28,7 @@ import {
   selectThreadExistsByRef,
   setThreadBranch,
   selectThreadsAcrossEnvironments,
+  syncServerThreadDetail,
   type AppState,
   type EnvironmentState,
 } from "./store";
@@ -89,6 +90,39 @@ function makeThread(overrides: Partial<Thread> = {}): Thread {
     branch: null,
     worktreePath: null,
     ...overrides,
+  };
+}
+
+function makeTurnConfigurationActivity(input: {
+  readonly id: string;
+  readonly turnId: TurnId;
+  readonly sequence?: number;
+  readonly createdAt?: string;
+  readonly providerDisplayName?: string;
+}): Thread["activities"][number] {
+  return {
+    id: EventId.make(input.id),
+    tone: "info",
+    kind: "provider.turn.configuration",
+    summary: "Turn accepted",
+    turnId: input.turnId,
+    sequence: input.sequence ?? 1,
+    createdAt: input.createdAt ?? "2026-02-27T00:00:01.000Z",
+    payload: {
+      turnConfiguration: {
+        version: 1,
+        provider: "codex",
+        providerInstanceId: "codex_personal",
+        providerDisplayName: input.providerDisplayName ?? "Codex Personal",
+        model: "gpt-6.1-sol",
+        modelDisplayName: "GPT-6.1 Sol",
+        effort: "ultra",
+        fastMode: true,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        settingsSource: "submitted",
+      },
+    },
   };
 }
 
@@ -1499,6 +1533,153 @@ describe("incremental orchestration updates", () => {
     });
     expect(threadsOf(next)[0]?.latestTurn?.sourceProposedPlan).toBeUndefined();
   });
+
+  it("does not extend a completed turn when accepted settings arrive after completion", () => {
+    const turnId = TurnId.make("fast-completed-turn");
+    const completedAt = "2026-02-27T00:00:10.000Z";
+    const thread = makeThread({
+      latestTurn: {
+        turnId,
+        state: "completed",
+        requestedAt: "2026-02-27T00:00:00.000Z",
+        startedAt: "2026-02-27T00:00:01.000Z",
+        completedAt,
+        assistantMessageId: MessageId.make("fast-completed-assistant"),
+      },
+    });
+    const state = makeState(thread);
+    const activity = makeTurnConfigurationActivity({
+      id: "late-accepted-settings",
+      turnId,
+      createdAt: "2026-02-27T00:00:30.000Z",
+    });
+    const next = applyOrchestrationEvent(
+      state,
+      makeEvent("thread.activity-appended", { threadId: thread.id, activity }),
+      localEnvironmentId,
+    );
+    expect(threadsOf(next)[0]?.latestTurn).toEqual(thread.latestTurn);
+    expect(threadsOf(next)[0]?.activities).toContainEqual(activity);
+    // The exception is exact to presentation metadata. Existing late native
+    // work still advances the terminal completion edge as it did before.
+    const withLateTool = applyOrchestrationEvent(
+      state,
+      makeEvent("thread.activity-appended", {
+        threadId: thread.id,
+        activity: {
+          ...activity,
+          id: EventId.make("late-real-work"),
+          kind: "tool.completed",
+          payload: {},
+        },
+      }),
+      localEnvironmentId,
+    );
+    expect(threadsOf(withLateTool)[0]?.latestTurn?.completedAt).toBe(activity.createdAt);
+  });
+
+  it.each(["running", "completed"] as const)(
+    "retains only one valid exact-current configuration beyond 500 rows while %s and after snapshot reload",
+    (state) => {
+      const turnId = TurnId.make("long-settings-turn");
+      const configurations = [
+        makeTurnConfigurationActivity({ id: "settings-obsolete", turnId, sequence: 1 }),
+        makeTurnConfigurationActivity({
+          id: "settings-other-turn",
+          turnId: TurnId.make("historical-settings-turn"),
+          sequence: 2,
+        }),
+        makeTurnConfigurationActivity({ id: "settings-latest", turnId, sequence: 3 }),
+        makeTurnConfigurationActivity({
+          id: "settings-malformed",
+          turnId,
+          sequence: 4,
+          providerDisplayName: "x".repeat(201),
+        }),
+      ];
+      const ordinaryTail: Thread["activities"] = Array.from({ length: 500 }, (_, index) => ({
+        id: EventId.make(`settings-tail-${index}`),
+        tone: "tool" as const,
+        kind: "tool.completed",
+        summary: "Ordinary activity",
+        payload: {},
+        turnId,
+        sequence: index + 5,
+        createdAt: "2026-02-27T00:01:00.000Z",
+      }));
+      const thread = makeThread({
+        latestTurn: {
+          turnId,
+          state,
+          requestedAt: "2026-02-27T00:00:00.000Z",
+          startedAt: "2026-02-27T00:00:01.000Z",
+          completedAt: state === "completed" ? "2026-02-27T00:02:00.000Z" : null,
+          assistantMessageId: null,
+        },
+        activities: [...configurations, ...ordinaryTail],
+      });
+      const newestActivity = {
+        ...ordinaryTail[0]!,
+        id: EventId.make("settings-tail-newest"),
+        sequence: 505,
+        createdAt: "2026-02-27T00:02:00.000Z",
+      };
+      const next = applyOrchestrationEvent(
+        makeState(thread),
+        makeEvent("thread.activity-appended", { threadId: thread.id, activity: newestActivity }),
+        localEnvironmentId,
+      );
+      const retained = threadsOf(next)[0]!.activities;
+      expect(retained).toHaveLength(501);
+      expect(
+        retained.filter((activity) => activity.kind === "provider.turn.configuration"),
+      ).toEqual([configurations[2]]);
+      expect(retained.some((activity) => activity.id === "settings-tail-0")).toBe(false);
+
+      // The server's compact snapshot carries this same one-row exception.
+      // Reloading it and receiving further live events must not drop the row
+      // merely because it remains chronologically older than the tool tail.
+      const snapshot = syncServerThreadDetail(
+        makeEmptyState(),
+        {
+          id: thread.id,
+          projectId: thread.projectId,
+          title: thread.title,
+          modelSelection: thread.modelSelection,
+          runtimeMode: thread.runtimeMode,
+          interactionMode: thread.interactionMode,
+          branch: thread.branch,
+          worktreePath: thread.worktreePath,
+          latestTurn: threadsOf(next)[0]!.latestTurn,
+          createdAt: thread.createdAt,
+          updatedAt: "2026-02-27T00:02:00.000Z",
+          archivedAt: null,
+          deletedAt: null,
+          messages: [],
+          proposedPlans: [],
+          activities: retained,
+          checkpoints: [],
+          session: null,
+          goal: null,
+        },
+        localEnvironmentId,
+      );
+      expect(threadsOf(snapshot)[0]?.activities).toHaveLength(501);
+      const afterReload = applyOrchestrationEvent(
+        snapshot,
+        makeEvent("thread.activity-appended", {
+          threadId: thread.id,
+          activity: { ...newestActivity, id: EventId.make("settings-after-reload"), sequence: 506 },
+        }),
+        localEnvironmentId,
+      );
+      const afterReloadActivities = threadsOf(afterReload)[0]!.activities;
+      expect(afterReloadActivities).toHaveLength(501);
+      expect(
+        afterReloadActivities.filter((activity) => activity.kind === "provider.turn.configuration"),
+      ).toEqual([configurations[2]]);
+    },
+  );
 
   it("retains compact current-turn subagent lifecycle state beyond the live activity tail", () => {
     const turnId = TurnId.make("turn-long-subagents");

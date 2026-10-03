@@ -4532,6 +4532,120 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 
+  it.effect(
+    "retains only one indexed latest-turn configuration beyond the activity tail on reconnect",
+    () =>
+      Effect.gen(function* () {
+        const snapshotQuery = yield* ProjectionSnapshotQuery;
+        const sql = yield* SqlClient.SqlClient;
+        const threadId = ThreadId.make("thread-configuration-cap");
+        const configuration = JSON.stringify({
+          turnConfiguration: {
+            version: 1,
+            provider: "codex",
+            providerInstanceId: "codex",
+            providerDisplayName: "Codex Personal",
+            model: "gpt-6.1-sol",
+            effort: "ultra",
+            fastMode: true,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            settingsSource: "submitted",
+          },
+        });
+        yield* sql`
+        INSERT INTO projection_projects (
+          project_id, title, workspace_root, default_model_selection_json,
+          scripts_json, created_at, updated_at, deleted_at
+        ) VALUES (
+          'project-configuration-cap', 'Configuration fixture', '/tmp/metadata-fixture',
+          NULL, '[]', '2026-10-03T00:00:00.000Z', '2026-10-03T00:00:00.000Z', NULL
+        )
+      `;
+        yield* sql`
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode,
+          branch, worktree_path, latest_turn_id, latest_user_message_at,
+          pending_approval_count, pending_user_input_count, has_actionable_proposed_plan,
+          created_at, updated_at, deleted_at
+        ) VALUES (
+          ${threadId}, 'project-configuration-cap', 'Long running turn',
+          '{"instanceId":"codex","model":"gpt-6.1-sol"}', 'full-access', 'default',
+          NULL, NULL, 'current-configuration-turn', NULL, 0, 0, 0,
+          '2026-10-03T00:00:00.000Z', '2026-10-03T16:00:00.000Z', NULL
+        )
+      `;
+        yield* sql`
+        INSERT INTO projection_thread_activities (
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+        ) VALUES
+          ('configuration-old-turn', ${threadId}, 'previous-configuration-turn', 'info',
+           'provider.turn.configuration', 'Turn settings', ${configuration}, 1, '2026-10-02T00:00:00.000Z'),
+          ('configuration-obsolete-duplicate', ${threadId}, 'current-configuration-turn', 'info',
+           'provider.turn.configuration', 'Turn settings', ${configuration}, 2, '2026-10-03T00:00:01.000Z'),
+          ('configuration-current', ${threadId}, 'current-configuration-turn', 'info',
+           'provider.turn.configuration', 'Turn settings', ${configuration}, 3, '2026-10-03T00:00:02.000Z'),
+          ('configuration-similar-kind', ${threadId}, 'current-configuration-turn', 'info',
+           'provider.turn.configuration.forged', 'Turn settings', '{}', 4, '2026-10-03T00:00:03.000Z')
+      `;
+        yield* sql`
+        WITH RECURSIVE numbers(index_value) AS (
+          SELECT 1 UNION ALL SELECT index_value + 1 FROM numbers
+          WHERE index_value < ${THREAD_DETAIL_ACTIVITY_LIMIT + 100}
+        )
+        INSERT INTO projection_thread_activities (
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+        )
+        SELECT printf('configuration-tail-%04d', index_value), ${threadId},
+          'current-configuration-turn', 'tool', 'tool.completed', 'Tool activity', '{}',
+          index_value + 4, '2026-10-03T16:00:00.000Z'
+        FROM numbers
+      `;
+        const queryPlan = yield* sql<{ readonly detail: string }>`
+        EXPLAIN QUERY PLAN
+        SELECT activity_id FROM projection_thread_activities
+          INDEXED BY idx_projection_thread_activities_thread_turn_kind_created_id
+        WHERE thread_id = ${threadId} AND turn_id = 'current-configuration-turn'
+          AND kind = 'provider.turn.configuration'
+        ORDER BY CASE WHEN sequence IS NULL THEN 0 ELSE 1 END DESC,
+          sequence DESC, created_at DESC, activity_id DESC LIMIT 1
+      `;
+        assert.match(
+          queryPlan.map((row) => row.detail).join("\n"),
+          /idx_projection_thread_activities_thread_turn_kind_created_id/,
+        );
+        // Repeated subscriptions/reconnects rehydrate the same bounded fact;
+        // neither account names nor settings come from the current composer.
+        for (let read = 0; read < 2; read += 1) {
+          const detail = yield* snapshotQuery.getThreadDetailById(threadId);
+          assert.equal(detail._tag, "Some");
+          if (detail._tag === "Some") {
+            assert.equal(detail.value.activities.length, THREAD_DETAIL_ACTIVITY_LIMIT + 1);
+            const retained = detail.value.activities.filter(
+              (activity) => activity.kind === "provider.turn.configuration",
+            );
+            assert.equal(retained.length, 1);
+            assert.equal(retained[0]?.id, EventId.make("configuration-current"));
+            assert.deepEqual(retained[0]?.payload, JSON.parse(configuration));
+          }
+        }
+        // A new turn with no snapshot cannot pull an old turn's settings into
+        // its compact detail or grow the retained activity window.
+        yield* sql`UPDATE projection_threads SET latest_turn_id = 'new-turn-without-configuration' WHERE thread_id = ${threadId}`;
+        const noConfiguration = yield* snapshotQuery.getThreadDetailById(threadId);
+        assert.equal(noConfiguration._tag, "Some");
+        if (noConfiguration._tag === "Some") {
+          assert.equal(noConfiguration.value.activities.length, THREAD_DETAIL_ACTIVITY_LIMIT);
+          assert.equal(
+            noConfiguration.value.activities.some(
+              (activity) => activity.kind === "provider.turn.configuration",
+            ),
+            false,
+          );
+        }
+      }),
+  );
+
   it.effect("retains task-plan and current-turn subagent state beyond the activity tail cap", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;

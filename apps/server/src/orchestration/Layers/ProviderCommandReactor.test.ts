@@ -42,6 +42,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { deriveServerPaths, ServerConfig } from "../../config.ts";
 import { TextGenerationError } from "@cafecode/contracts";
 import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
+import { buildCodexSteerClientCorrelationId } from "../../provider/codexSteerCorrelation.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
@@ -203,6 +204,8 @@ describe("ProviderCommandReactor", () => {
     readonly beforeCodexSteerDeliveryAttemptDispatch?: Effect.Effect<void>;
     readonly beforeCodexRootReplacementDispatch?: Effect.Effect<void>;
     readonly beforeRuntimeRecoveryAttemptDispatch?: Effect.Effect<void>;
+    readonly beforeTurnConfigurationDispatch?: Effect.Effect<void>;
+    readonly providerDisplayNames?: ReadonlyMap<string, string>;
     readonly testClock?: TestClock.TestClock;
   }) {
     const now = "2026-01-01T00:00:00.000Z";
@@ -460,7 +463,7 @@ describe("ProviderCommandReactor", () => {
         return Effect.succeed({
           instanceId,
           driverKind,
-          displayName: undefined,
+          displayName: input?.providerDisplayNames?.get(raw),
           enabled: true,
           continuationIdentity: {
             driverKind,
@@ -492,7 +495,8 @@ describe("ProviderCommandReactor", () => {
     const providerCommandEngineLayer =
       input?.beforeCodexSteerDeliveryAttemptDispatch === undefined &&
       input?.beforeCodexRootReplacementDispatch === undefined &&
-      input?.beforeRuntimeRecoveryAttemptDispatch === undefined
+      input?.beforeRuntimeRecoveryAttemptDispatch === undefined &&
+      input?.beforeTurnConfigurationDispatch === undefined
         ? orchestrationLayer
         : Layer.effect(
             OrchestrationEngineService,
@@ -500,26 +504,32 @@ describe("ProviderCommandReactor", () => {
               ...engine,
               dispatch: (command: Parameters<typeof engine.dispatch>[0]) =>
                 command.type === "thread.activity.append" &&
-                command.activity.kind === "provider.turn.steer.delivery-attempted" &&
-                input.beforeCodexSteerDeliveryAttemptDispatch !== undefined
-                  ? input.beforeCodexSteerDeliveryAttemptDispatch!.pipe(
+                command.activity.kind === "provider.turn.configuration" &&
+                input.beforeTurnConfigurationDispatch !== undefined
+                  ? input.beforeTurnConfigurationDispatch.pipe(
                       Effect.andThen(engine.dispatch(command)),
                     )
                   : command.type === "thread.activity.append" &&
-                      command.activity.kind === "runtime.warning" &&
-                      (command.activity.payload as Readonly<Record<string, unknown>> | undefined)
-                        ?.recovery === "provider-runtime-continuation-attempted" &&
-                      input.beforeRuntimeRecoveryAttemptDispatch !== undefined
-                    ? input.beforeRuntimeRecoveryAttemptDispatch.pipe(
+                      command.activity.kind === "provider.turn.steer.delivery-attempted" &&
+                      input.beforeCodexSteerDeliveryAttemptDispatch !== undefined
+                    ? input.beforeCodexSteerDeliveryAttemptDispatch!.pipe(
                         Effect.andThen(engine.dispatch(command)),
                       )
-                    : command.type === "thread.session.set" &&
-                        command.codexRootReplacement !== undefined &&
-                        input.beforeCodexRootReplacementDispatch !== undefined
-                      ? input.beforeCodexRootReplacementDispatch.pipe(
+                    : command.type === "thread.activity.append" &&
+                        command.activity.kind === "runtime.warning" &&
+                        (command.activity.payload as Readonly<Record<string, unknown>> | undefined)
+                          ?.recovery === "provider-runtime-continuation-attempted" &&
+                        input.beforeRuntimeRecoveryAttemptDispatch !== undefined
+                      ? input.beforeRuntimeRecoveryAttemptDispatch.pipe(
                           Effect.andThen(engine.dispatch(command)),
                         )
-                      : engine.dispatch(command),
+                      : command.type === "thread.session.set" &&
+                          command.codexRootReplacement !== undefined &&
+                          input.beforeCodexRootReplacementDispatch !== undefined
+                        ? input.beforeCodexRootReplacementDispatch.pipe(
+                            Effect.andThen(engine.dispatch(command)),
+                          )
+                        : engine.dispatch(command),
             })),
           ).pipe(Layer.provide(orchestrationLayer));
     const baseProjectionSnapshotLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
@@ -2115,6 +2125,269 @@ describe("ProviderCommandReactor", () => {
     });
 
     expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+  });
+
+  describe("accepted turn configuration", () => {
+    async function startTurn(
+      harness: Awaited<ReturnType<typeof createHarness>>,
+      suffix: string,
+      selection?: ModelSelection,
+    ) {
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make(`config-start-${suffix}`),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId(`config-message-${suffix}`),
+            role: "user",
+            text: "private configuration fixture prompt",
+            attachments: [],
+          },
+          ...(selection !== undefined ? { modelSelection: selection } : {}),
+          interactionMode: "default",
+          runtimeMode: "approval-required",
+          createdAt: "2026-01-01T00:00:01.000Z",
+        }),
+      );
+    }
+
+    const configurations = async (harness: Awaited<ReturnType<typeof createHarness>>) =>
+      (await harness.readModel()).threads
+        .find((thread) => thread.id === "thread-1")
+        ?.activities.filter((entry) => entry.kind === "provider.turn.configuration") ?? [];
+
+    it("records every accepted same-account turn with its frozen name/settings", async () => {
+      const names = new Map([["codex", "Codex Personal"]]);
+      const harness = await createHarness({ providerDisplayNames: names });
+      let counter = 0;
+      harness.sendTurn.mockImplementation((input) =>
+        Effect.succeed({
+          threadId: input.threadId,
+          turnId: asTurnId(`configuration-turn-${++counter}`),
+        }),
+      );
+      const selection = createModelSelection(ProviderInstanceId.make("codex"), "gpt-6.1-sol", [
+        { id: "reasoningEffort", value: "ultra" },
+        { id: "fastMode", value: true },
+      ]);
+      await startTurn(harness, "first", selection);
+      await waitFor(async () => (await configurations(harness)).length === 1);
+      await harness.markThreadReady();
+      names.set("codex", "Renamed Personal");
+      await startTurn(
+        harness,
+        "second",
+        createModelSelection(selection.instanceId, selection.model, [
+          { id: "reasoningEffort", value: "high" },
+          { id: "fastMode", value: false },
+        ]),
+      );
+      await waitFor(async () => (await configurations(harness)).length === 2);
+      const rows = await configurations(harness);
+      expect(rows[0]).toMatchObject({
+        turnId: "configuration-turn-1",
+        payload: {
+          turnConfiguration: {
+            providerDisplayName: "Codex Personal",
+            model: "gpt-6.1-sol",
+            effort: "ultra",
+            fastMode: true,
+            settingsSource: "submitted",
+            runtimeMode: "approval-required",
+            interactionMode: "default",
+          },
+        },
+      });
+      expect(rows[1]).toMatchObject({
+        turnId: "configuration-turn-2",
+        payload: {
+          turnConfiguration: {
+            providerDisplayName: "Renamed Personal",
+            effort: "high",
+            fastMode: false,
+          },
+        },
+      });
+      expect(JSON.stringify(rows)).not.toContain("private configuration fixture prompt");
+      expect(harness.sendTurn).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not publish configuration for a rejected submission", async () => {
+      const harness = await createHarness();
+      harness.sendTurn.mockReturnValue(
+        Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: "codex",
+            method: "turn/start",
+            detail: "Fixture rejected turn",
+          }),
+        ),
+      );
+      await startTurn(harness, "rejected");
+      await waitFor(
+        async () =>
+          (await harness.readModel()).threads[0]?.activities.some(
+            (entry) => entry.kind === "provider.turn.start.failed",
+          ) ?? false,
+      );
+      expect(await configurations(harness)).toEqual([]);
+      expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not let a pending configuration write hold accepted running/Stop bookkeeping", async () => {
+      const reached = Effect.runSync(Deferred.make<void>());
+      const release = Effect.runSync(Deferred.make<void>());
+      let readRunningBeforeMetadata = async () => false;
+      let acceptedBeforeMetadata = false;
+      const harness = await createHarness({
+        beforeTurnConfigurationDispatch: Effect.promise(() => readRunningBeforeMetadata()).pipe(
+          Effect.tap((running) =>
+            Effect.sync(() => {
+              acceptedBeforeMetadata = running;
+            }),
+          ),
+          Effect.andThen(Deferred.succeed(reached, undefined)),
+          Effect.andThen(Deferred.await(release)),
+        ),
+      });
+      readRunningBeforeMetadata = async () =>
+        (await harness.readModel()).threads[0]?.session?.status === "running";
+      await startTurn(harness, "pending-metadata");
+      await Effect.runPromise(Deferred.await(reached).pipe(Effect.timeout("2 seconds")));
+      expect(acceptedBeforeMetadata).toBe(true);
+      await waitFor(
+        async () => (await harness.readModel()).threads[0]?.session?.status === "running",
+      );
+      expect(await configurations(harness)).toEqual([]);
+      expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.interrupt",
+          commandId: CommandId.make("config-stop-pending-metadata"),
+          threadId: ThreadId.make("thread-1"),
+          turnId: asTurnId("turn-1"),
+          createdAt: "2026-01-01T00:00:02.000Z",
+        }),
+      );
+      await waitFor(() => harness.interruptTurn.mock.calls.length === 1);
+      await waitFor(
+        async () => (await harness.readModel()).threads[0]?.latestTurn?.state === "interrupted",
+      );
+      await harness.drain();
+      const terminalBeforeMetadata = (await harness.readModel()).threads[0]?.latestTurn;
+      await Effect.runPromise(Deferred.succeed(release, undefined));
+      await waitFor(async () => (await configurations(harness)).length === 1);
+      expect((await harness.readModel()).threads[0]?.latestTurn).toEqual(terminalBeforeMetadata);
+      expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+      expect(harness.interruptTurn).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      { deliveryKind: "steer" as const },
+      {
+        clientCorrelationId: buildCodexSteerClientCorrelationId("config-message-steer-correlation"),
+      },
+    ])(
+      "does not backfill settings when an idle-prepared request is routed to existing steering (%j)",
+      async (evidence) => {
+        const harness = await createHarness();
+        harness.sendTurn.mockImplementation((input) =>
+          Effect.sync(() => {
+            // Simulate the provider becoming active after idle preparation. Its
+            // strict correlation receipt still needs matching native liveness;
+            // the discriminator covers providers without that correlation API.
+            if ("clientCorrelationId" in evidence) {
+              const index = harness.runtimeSessions.findIndex(
+                (session) => session.threadId === input.threadId,
+              );
+              const previous = harness.runtimeSessions[index]!;
+              harness.runtimeSessions.splice(index, 1, {
+                ...previous,
+                status: "running",
+                activeTurnId: asTurnId("existing-pre-upgrade-turn"),
+              });
+            }
+            return {
+              threadId: input.threadId,
+              turnId: asTurnId("existing-pre-upgrade-turn"),
+              ...evidence,
+            };
+          }),
+        );
+        await startTurn(harness, `steer-${"deliveryKind" in evidence ? "kind" : "correlation"}`);
+        await waitFor(
+          async () =>
+            (await harness.readModel()).threads[0]?.session?.activeTurnId ===
+            "existing-pre-upgrade-turn",
+        );
+        await harness.drain();
+        expect(await configurations(harness)).toEqual([]);
+        expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it("keeps the original start snapshot when its pending write races a renamed-account steer", async () => {
+      const reached = Effect.runSync(Deferred.make<void>());
+      const release = Effect.runSync(Deferred.make<void>());
+      const names = new Map([["codex", "Original Personal"]]);
+      const harness = await createHarness({
+        providerDisplayNames: names,
+        beforeTurnConfigurationDispatch: Deferred.succeed(reached, undefined).pipe(
+          Effect.andThen(Deferred.await(release)),
+        ),
+      });
+      harness.sendTurn.mockImplementationOnce((input) =>
+        Effect.succeed({
+          threadId: input.threadId,
+          turnId: asTurnId("frozen-start-turn"),
+          deliveryKind: "start",
+        }),
+      );
+      await startTurn(
+        harness,
+        "before-racing-steer",
+        createModelSelection(ProviderInstanceId.make("codex"), "gpt-6.1-sol", [
+          { id: "reasoningEffort", value: "ultra" },
+        ]),
+      );
+      await Effect.runPromise(Deferred.await(reached).pipe(Effect.timeout("2 seconds")));
+      await waitFor(
+        async () => (await harness.readModel()).threads[0]?.session?.status === "running",
+      );
+      await harness.markThreadReady();
+      names.set("codex", "Renamed Personal");
+      harness.sendTurn.mockImplementationOnce((input) =>
+        Effect.succeed({
+          threadId: input.threadId,
+          turnId: asTurnId("frozen-start-turn"),
+          deliveryKind: "steer",
+        }),
+      );
+      await startTurn(
+        harness,
+        "racing-steer",
+        createModelSelection(ProviderInstanceId.make("codex"), "gpt-6-astra", [
+          { id: "reasoningEffort", value: "low" },
+        ]),
+      );
+      await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+      await harness.drain();
+      expect(await configurations(harness)).toEqual([]);
+      await Effect.runPromise(Deferred.succeed(release, undefined));
+      await waitFor(async () => (await configurations(harness)).length === 1);
+      expect((await configurations(harness))[0]).toMatchObject({
+        turnId: "frozen-start-turn",
+        payload: {
+          turnConfiguration: {
+            providerDisplayName: "Original Personal",
+            model: "gpt-6.1-sol",
+            effort: "ultra",
+          },
+        },
+      });
+      expect(harness.sendTurn).toHaveBeenCalledTimes(2);
+    });
   });
 
   it("generates a thread title on the first turn", async () => {

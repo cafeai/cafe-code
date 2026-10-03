@@ -43,6 +43,7 @@ import {
 import { resolveEnvironmentHttpUrl } from "./environments/runtime";
 import { sanitizeThreadErrorMessage } from "./rpc/transportError";
 import { getThreadFromEnvironmentState } from "./threadDerivation";
+import { readTurnConfiguration } from "./turnConfiguration";
 const isProviderDriverKindValue = Schema.is(ProviderDriverKind);
 
 export interface EnvironmentState {
@@ -1134,7 +1135,9 @@ function structuredSubagentLifecycleKeys(
  * terminal edge per current-turn identity reconstructs restarts and rejects a
  * delayed post-terminal progress replay without making the full activity
  * history unbounded. The latest plan snapshot follows the same established
- * compact-retention rule.
+ * compact-retention rule. One validated configuration for the exact current
+ * turn also survives the tail, so a 16-hour run keeps its account/model sanity
+ * check without retaining settings for every historical turn.
  */
 function retainThreadActivityWindow(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
@@ -1147,6 +1150,15 @@ function retainThreadActivityWindow(
 
   const latestPlan = ordered.findLast((activity) => activity.kind === "turn.plan.updated");
   if (latestPlan) retainedIds.add(latestPlan.id);
+  const latestTurnConfiguration = currentTurnId
+    ? ordered.findLast(
+        (activity) =>
+          activity.turnId === currentTurnId &&
+          activity.kind === "provider.turn.configuration" &&
+          readTurnConfiguration(activity.payload) !== undefined,
+      )
+    : undefined;
+  if (latestTurnConfiguration) retainedIds.add(latestTurnConfiguration.id);
 
   const retainedSubagentIdentities = new Set<string>();
   const latestSubagentLifecycleByKey = new Map<string, OrchestrationThreadActivity>();
@@ -2270,6 +2282,10 @@ function applyEnvironmentOrchestrationEvent(
           thread.latestTurn?.turnId ?? event.payload.activity.turnId,
         );
         const latestTurn =
+          // Accepted settings are presentation metadata, not a model execution
+          // edge. Their late durable append must not inflate generation time,
+          // completion labels or terminal lifecycle state after a fast turn.
+          event.payload.activity.kind !== "provider.turn.configuration" &&
           event.payload.activity.turnId !== null &&
           thread.latestTurn?.turnId === event.payload.activity.turnId &&
           latestTurnStateIsTerminal(thread.latestTurn.state)

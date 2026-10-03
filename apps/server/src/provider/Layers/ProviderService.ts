@@ -2074,7 +2074,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             ...(turn.resumeCursor !== undefined ? { resumeCursor: turn.resumeCursor } : {}),
             lastRuntimeEvent: "provider.steerTurn",
           });
-          return turn;
+          // The live inventory can discover an active turn after the caller
+          // prepared a new-turn request. Report the actual delivery boundary
+          // rather than making consumers guess from an optional Codex token;
+          // Claude queued input deliberately has no such correlation token.
+          return { ...turn, deliveryKind: "steer" as const };
         }
       }
       if (hasImages)
@@ -2113,7 +2117,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
         lastRuntimeEvent: "provider.sendTurn",
       });
-      return turn;
+      // This service-owned discriminator is additive daemon metadata, not a
+      // native provider request setting or independent execution confirmation.
+      return { ...turn, deliveryKind: "start" as const };
     }).pipe(
       withMetrics({
         counter: providerTurnsTotal,
