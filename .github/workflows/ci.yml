@@ -34,15 +34,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-2025, macos-15]
+        os: [ubuntu-26.04, windows-2025, macos-15]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24.13.1
 
@@ -53,14 +53,16 @@ jobs:
           corepack yarn --version
 
       - name: Cache Yarn and Turbo
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        # Native build outputs must never cross Ubuntu release/ABI boundaries.
+        # Keep restore prefixes image-specific as well as the exact cache key.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.yarn/berry
             .turbo
-          key: ${{ runner.os }}-${{ runner.arch }}-yarn-${{ hashFiles('yarn.lock') }}-${{ hashFiles('turbo.json') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ matrix.os }}-yarn-${{ hashFiles('yarn.lock') }}-${{ hashFiles('turbo.json') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-yarn-${{ hashFiles('yarn.lock') }}-
+            ${{ runner.os }}-${{ runner.arch }}-${{ matrix.os }}-yarn-${{ hashFiles('yarn.lock') }}-
 
       - name: Install Linux desktop build dependencies
         if: runner.os == 'Linux'
@@ -70,6 +72,23 @@ jobs:
 
       - name: Install dependencies
         run: corepack yarn install --immutable
+
+      - name: Qualify installed Electron security runtime
+        # Execute only the installed runtime's Node mode in an isolated profile.
+        # No Cafe window, provider, credentials or GPU participates in this check.
+        run: node scripts/qualify-electron-runtime.ts
+
+      - name: Install Ubuntu 26.04 native qualification runtime
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y sway xwayland dbus-daemon
+          # Service-runner sessions need not have a logind-created runtime dir.
+          # Create only the disposable runner user's missing private directory;
+          # existing paths still pass the fixture's owner/type/mode admission.
+          qualification_runtime_dir="/run/user/$(id -u)"
+          if [[ ! -e "${qualification_runtime_dir}" && ! -L "${qualification_runtime_dir}" ]]; then
+            sudo install -d -m 0700 -o "$(id -u)" -g "$(id -g)" -- "${qualification_runtime_dir}"
+          fi
 
       - name: Audit repository toolchain
         if: runner.os == 'Linux'
@@ -94,6 +113,12 @@ jobs:
       - name: Test
         run: corepack yarn test
 
+      - name: Isolated Effect test cancellation qualification
+        # The child runner intentionally times out one synthetic case, then
+        # proves scoped finalizers finish before the next case can start.
+        # This invokes no provider, profile, credential or detached runtime.
+        run: corepack yarn workspace @cafeai/cafe-code exec vitest run --config vitest.e2e.config.ts integration/EffectVitestCompatibility.e2e.test.ts
+
       - name: Isolated Codex command and fixture qualification
         # Repeat the focused boundary uncached on each native host. Copied Node
         # and synthetic peers only: no installed providers, profiles or auth.
@@ -112,6 +137,20 @@ jobs:
 
       - name: Build desktop pipeline
         run: corepack yarn build:desktop
+
+      - name: Ubuntu 26.04 native helper and private pixman qualification
+        # Execute the real Linux helper, not a foreign-platform policy mock.
+        # The existing opt-in fixture uses a private headless compositor and
+        # verifies capture, resize, restrictive permissions and owned-PID exit.
+        # It uses no provider, credentials, host application or hardware GPU.
+        if: runner.os == 'Linux'
+        timeout-minutes: 5
+        env:
+          CAFE_CODE_VIRTUAL_DESKTOP_E2E: "1"
+          DBUS_SESSION_BUS_ADDRESS: ""
+        run: |
+          timeout 10s apps/server/dist/cafe-desktop-native --version
+          corepack yarn workspace @cafeai/cafe-code exec vitest run --config vitest.e2e.config.ts integration/VirtualDesktopFallback.e2e.test.ts
 
       - name: Install browser test runtime
         if: runner.os == 'Linux'
@@ -163,10 +202,10 @@ jobs:
     timeout-minutes: 120
     steps:
       - name: Checkout
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24.13.1
 
@@ -176,12 +215,12 @@ jobs:
           corepack prepare yarn@4.17.1 --activate
 
       - name: Cache Yarn and Turbo
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.yarn/berry
             .turbo
-          key: ${{ runner.os }}-${{ runner.arch }}-yarn-${{ hashFiles('yarn.lock') }}-${{ hashFiles('turbo.json') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ matrix.os }}-yarn-${{ hashFiles('yarn.lock') }}-${{ hashFiles('turbo.json') }}
 
       - name: Install Linux desktop build dependencies
         if: runner.os == 'Linux'
@@ -196,23 +235,23 @@ jobs:
         run: corepack yarn ${{ matrix.command }}
 
       - name: Upload native artifact
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: cafe-code-${{ matrix.name }}
           path: release/
           if-no-files-found: error
 
   linux-artifact:
-    name: Linux AppImage
+    name: Linux AppImage (Ubuntu 26.04 qualification)
     needs: quality
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     steps:
       - name: Checkout
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24.13.1
 
@@ -222,12 +261,12 @@ jobs:
           corepack prepare yarn@4.17.1 --activate
 
       - name: Cache Yarn and Turbo
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.yarn/berry
             .turbo
-          key: ${{ runner.os }}-${{ runner.arch }}-yarn-${{ hashFiles('yarn.lock') }}-${{ hashFiles('turbo.json') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-ubuntu-26.04-yarn-${{ hashFiles('yarn.lock') }}-${{ hashFiles('turbo.json') }}
 
       - name: Install Linux desktop build dependencies
         if: runner.os == 'Linux'
@@ -242,7 +281,7 @@ jobs:
         run: corepack yarn dist:desktop:linux
 
       - name: Upload AppImage
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: cafe-code-linux-x64
           path: release/

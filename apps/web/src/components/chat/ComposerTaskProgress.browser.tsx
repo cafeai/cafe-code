@@ -92,7 +92,7 @@ describe("ComposerTaskProgress", () => {
       const trigger = page.getByRole("button", {
         name: "Task progress: step 2 of 3. Show task list",
       });
-      await expect.element(trigger).toHaveTextContent("Step 2 / 3");
+      await expect.element(trigger).toMatchTextContent("Step 2 / 3");
 
       const ring = document.querySelector<SVGCircleElement>('[data-task-progress-ring="true"]');
       expect(ring?.dataset.completed).toBe("1");
@@ -166,7 +166,7 @@ describe("ComposerTaskProgress", () => {
       const trigger = page.getByRole("button", {
         name: "2 active subagents. Show task list",
       });
-      await expect.element(trigger).toHaveTextContent("2 agents");
+      await expect.element(trigger).toMatchTextContent("2 agents");
       expect(document.querySelector('[data-task-progress-ring="true"]')).toBeNull();
 
       await trigger.click();
@@ -206,7 +206,7 @@ describe("ComposerTaskProgress", () => {
     try {
       await expect
         .element(page.getByRole("button", { name: /1 active subagent/ }))
-        .toHaveTextContent("Step 1 / 1 · 1 agent");
+        .toMatchTextContent("Step 1 / 1 · 1 agent");
     } finally {
       await mounted.cleanup();
     }

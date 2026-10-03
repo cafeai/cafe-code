@@ -88,6 +88,56 @@ describe("MCP user configuration", () => {
     ).not.toThrow("private-secret");
   });
 
+  it("preserves full-range TOML integers and local dates while editing only Cafe's block", () => {
+    const client = mcpClientConfigurations("/test-user", {})[0]!;
+    const contents =
+      "# Unrelated user configuration must survive byte-for-byte.\n" +
+      "largest = 9223372036854775807\nsmallest = -9223372036854775808\n" +
+      "hex = 0x7fff_ffff_ffff_ffff\noctal = 0o755\nbinary = 0b1101\n" +
+      "safe = 3\nfloat = 1.25\ndate = 1979-05-27\n" +
+      '[mcp_servers.other]\ncommand = "other"\n';
+    const original: unknown = Toml.parse(contents, { bigint: true });
+    expect(original).toMatchObject({
+      largest: 9223372036854775807n,
+      smallest: -9223372036854775808n,
+      hex: 9223372036854775807n,
+      octal: 493n,
+      binary: 13n,
+      safe: 3n,
+      float: 1.25,
+      date: "1979-05-27",
+    });
+    const installed = editMcpClientConfiguration(client, contents, launch, "install");
+    expect(installed.startsWith(contents)).toBe(true);
+    expect(Toml.parse(installed, { bigint: true })).toMatchObject(original as object);
+    expect(readMcpClientEntry(client, installed)).toBeDefined();
+    expect(editMcpClientConfiguration(client, installed, launch, "install")).toBe(installed);
+    expect(editMcpClientConfiguration(client, installed, launch, "remove")).toBe(contents);
+  });
+
+  it.each(["9223372036854775808", "-9223372036854775809"])(
+    "rejects out-of-range TOML integer %s without echoing private document content",
+    (integer) => {
+      const client = mcpClientConfigurations("/test-user", {})[0]!;
+      const contents = `private_secret = "do-not-disclose"\nid = ${integer}\n`;
+      expect(() => editMcpClientConfiguration(client, contents, launch, "install")).toThrow(
+        "configuration is invalid",
+      );
+      expect(() => editMcpClientConfiguration(client, contents, launch, "install")).not.toThrow(
+        "do-not-disclose",
+      );
+    },
+  );
+
+  it("retains bounded TOML nesting and rejects ambiguous duplicate keys", () => {
+    const client = mcpClientConfigurations("/test-user", {})[0]!;
+    for (const contents of [`nested = ${"[".repeat(81)}0${"]".repeat(81)}\n`, "id = 1\nid = 2\n"]) {
+      expect(() => editMcpClientConfiguration(client, contents, launch, "install")).toThrow(
+        "configuration is invalid",
+      );
+    }
+  });
+
   it("refuses duplicate JSON keys instead of updating an ambiguous server map", () => {
     const client = mcpClientConfigurations("/test-user", {})[1]!;
     expect(() =>

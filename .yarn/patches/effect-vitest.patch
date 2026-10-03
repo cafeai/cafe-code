@@ -1,0 +1,63 @@
+diff --git a/package.json b/package.json
+--- a/package.json
++++ b/package.json
+@@ -39,6 +39,6 @@
+   },
+   "peerDependencies": {
+-    "vitest": "^3.0.0 || ^4.0.0",
++    "vitest": "^3.0.0 || ^4.0.0 || 5.0.2",
+     "effect": "^4.0.0-beta.59"
+   },
+   "devDependencies": {
+diff --git a/dist/internal/internal.js b/dist/internal/internal.js
+--- a/dist/internal/internal.js
++++ b/dist/internal/internal.js
+@@ -30,7 +30,21 @@
+   signal: ctx?.signal
+ }));
+ /** @internal */
+-const runTest = ctx => effect => runPromise(effect, ctx);
++const runTest = ctx => effect => {
++  const promise = runPromise(effect, ctx);
++  if (ctx) {
++    // Vitest 5 stops awaiting an aborted test before Effect's scoped finalizers finish.
++    // This narrow backport from @effect/vitest rc.113 waits only on cancellation;
++    // ordinary tests keep their original teardown and failure propagation.
++    const onAbort = () => ctx.onTestFinished(() => promise.then(() => {}, () => {}));
++    ctx.signal.addEventListener("abort", onAbort, { once: true });
++    const cleanup = () => ctx.signal.removeEventListener("abort", onAbort);
++    promise.then(cleanup, cleanup);
++    // A retry can reuse an already-aborted signal, which will not emit again.
++    if (ctx.signal.aborted) onAbort();
++  }
++  return promise;
++};
+ const TestEnv = /*#__PURE__*/Layer.mergeAll(TestConsole.layer, /*#__PURE__*/TestClock.layer());
+ /** @internal */
+ export const addEqualityTesters = () => {
+diff --git a/src/internal/internal.ts b/src/internal/internal.ts
+--- a/src/internal/internal.ts
++++ b/src/internal/internal.ts
+@@ -33,7 +33,21 @@
+ }, (effect, _, ctx) => Effect.runPromise(effect, { signal: ctx?.signal }))
+ 
+ /** @internal */
+-const runTest = (ctx?: Vitest.TestContext) => <E, A>(effect: Effect.Effect<A, E>) => runPromise(effect, ctx)
++const runTest = (ctx?: Vitest.TestContext) => <E, A>(effect: Effect.Effect<A, E>) => {
++  const promise = runPromise(effect, ctx)
++  if (ctx) {
++    // Vitest 5 stops awaiting an aborted test before Effect's scoped finalizers finish.
++    // Backport rc.113's cancellation-only wait without changing the pinned Effect
++    // runtime or the ordinary test's teardown and failure propagation.
++    const onAbort = () => ctx.onTestFinished(() => promise.then(() => {}, () => {}))
++    ctx.signal.addEventListener("abort", onAbort, { once: true })
++    const cleanup = () => ctx.signal.removeEventListener("abort", onAbort)
++    promise.then(cleanup, cleanup)
++    // A retry can reuse an already-aborted signal, which will not emit again.
++    if (ctx.signal.aborted) onAbort()
++  }
++  return promise
++}
+ 
+ /** @internal */
+ export type TestContext = TestConsole.TestConsole | TestClock.TestClock

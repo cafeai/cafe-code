@@ -169,6 +169,9 @@ well as manifest ranges: some proposals only bring an old minimum up to a versio
 already installed. Record concrete reasons for deferred proposals rather than
 checking every approval or schedule-override box. See the
 [October 3 reviewed batch](dependency-updates-2026-10-03.md) for an example.
+The separately authorized [major migration follow-up](dependency-majors-2026-10-03.md)
+records coordinated compatibility fixes and measured deferrals; historical holds
+in the earlier batch are not claims that those later migrations remain impossible.
 
 After the reviewed commit is pushed, use the dashboard's **run Renovate again**
 checkbox at the bottom (the `manual job` control). This requests another hosted

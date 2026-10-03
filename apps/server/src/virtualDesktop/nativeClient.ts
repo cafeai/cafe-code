@@ -140,7 +140,10 @@ export function swayRequest(
       header.writeUInt32LE(type, 10);
       socket.write(Buffer.concat([header, body]));
     });
-    socket.on("data", (chunk) => {
+    // This connection never calls setEncoding: the native IPC framing is
+    // binary and Node delivers Buffer chunks. Keep that contract explicit now
+    // that Node 26 types also describe the optional string-decoding mode.
+    socket.on("data", (chunk: Buffer) => {
       size += chunk.length;
       if (size > 2 * 1024 * 1024) {
         socket.destroy(new Error("oversized"));

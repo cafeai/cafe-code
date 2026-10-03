@@ -20,13 +20,13 @@
     "node-pty": "^1.1.0",
     "pdfjs-dist": "6.3.289",
     "saxes": "6.0.0",
-    "toml": "4.3.0",
+    "toml": "5.0.0",
     "web-push": "^3.6.7",
     "yauzl": "3.4.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {
-    "electron": "42.5.1",
+    "electron": "42.10.0",
     "electron-builder": "26.15.3"
   }
 }

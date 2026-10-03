@@ -104,7 +104,7 @@ describe("inert file attachment pills", () => {
       );
       try {
         await page.getByRole("button", { name: "source.html", exact: true }).click();
-        await expect.element(page.getByRole("status")).toHaveTextContent(message);
+        await expect.element(page.getByRole("status")).toMatchTextContent(message);
         await expect.element(page.getByLabelText("Download source.html")).toBeEnabled();
 
         await page.getByRole("button", { name: "source.html", exact: true }).click();
@@ -130,12 +130,12 @@ describe("inert file attachment pills", () => {
       await page.getByRole("button", { name: "source.html", exact: true }).click();
       await expect
         .element(page.getByRole("status"))
-        .toHaveTextContent("This file could not be previewed. You can still download it.");
+        .toMatchTextContent("This file could not be previewed. You can still download it.");
       await expect.element(page.getByLabelText("Download source.html")).toBeEnabled();
       await page.getByLabelText("Download source.html").click();
       await expect
         .element(page.getByRole("status"))
-        .toHaveTextContent("This file could not be downloaded. Please try again.");
+        .toMatchTextContent("This file could not be downloaded. Please try again.");
       const pill = document.querySelector("[data-file-attachment]");
       expect(pill?.textContent).not.toMatch(/private-token|credentials|Reconnect|onerror/);
       expect(pill?.querySelector("img, script, iframe")).toBeNull();

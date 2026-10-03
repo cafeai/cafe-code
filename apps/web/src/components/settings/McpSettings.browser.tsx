@@ -180,7 +180,7 @@ describe("MCP settings", () => {
     await page.getByRole("switch", { name: "Enable Cafe Code MCP" }).click();
     await expect
       .element(page.getByRole("alert"))
-      .toHaveTextContent("Could not change Cafe Code MCP access");
+      .toMatchTextContent("Could not change Cafe Code MCP access");
     expect(harness.applySettings).not.toHaveBeenCalled();
     await expect.element(page.getByRole("switch", { name: "Enable Cafe Code MCP" })).toBeChecked();
   });

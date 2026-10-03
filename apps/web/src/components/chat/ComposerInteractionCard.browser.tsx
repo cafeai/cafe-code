@@ -32,7 +32,7 @@ describe("private provider interaction cards", () => {
       expect(respond).not.toHaveBeenCalled();
       await expect
         .element(page.getByRole("alert"))
-        .toHaveTextContent("Complete the required fields");
+        .toMatchTextContent("Complete the required fields");
       await page.getByRole("spinbutton", { name: "Count (required)" }).fill("2");
       await page.getByRole("button", { name: "Submit response" }).click();
       expect(respond).toHaveBeenCalledWith(requestId, { action: "accept", content: { count: 2 } });
@@ -64,7 +64,7 @@ describe("private provider interaction cards", () => {
       await page.getByRole("button", { name: "Get authorization link" }).click();
       await expect
         .element(page.getByRole("alert"))
-        .toHaveTextContent("authorization link is unavailable");
+        .toMatchTextContent("authorization link is unavailable");
       expect(document.querySelector('a[href*="token="]')).toBeNull();
       resolve.mockResolvedValue("https://example.com/authorize?token=private");
       await page.getByRole("button", { name: "Get authorization link" }).click();

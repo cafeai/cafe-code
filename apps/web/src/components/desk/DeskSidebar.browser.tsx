@@ -111,6 +111,10 @@ describe("Desk sidebar", () => {
       .getState()
       .dispatch({ type: "renameGroup", groupId: otherGroupId, name: "PixelVM" });
     try {
+      // These controls intentionally admit pointer events only while their
+      // parent row is hovered. Exercise that real user path before clicking,
+      // rather than relying on the runner to reveal a hidden action for us.
+      await screen.getByRole("button", { name: "Activate group Main" }).hover();
       await screen.getByRole("button", { name: "Rename group Main" }).click();
       const input = screen.getByRole("textbox", { name: "Group name" });
       const element = input.element() as HTMLInputElement;
@@ -165,6 +169,7 @@ describe("Desk sidebar", () => {
   it("cancels group edits on Escape or an empty name without a blur commit", async () => {
     const { screen, onNavigate } = await setup();
     try {
+      await screen.getByRole("button", { name: "Activate group Main" }).hover();
       await screen.getByRole("button", { name: "Rename group Main" }).click();
       const input = screen.getByRole("textbox", { name: "Group name" });
       await input.fill("Discard this name");
@@ -172,6 +177,7 @@ describe("Desk sidebar", () => {
       await expect.element(input).not.toBeInTheDocument();
       await screen.getByRole("button", { name: "Browse projects to open a chat" }).click();
       expect(useDeskStore.getState().desk.groups.g1?.name).toBe("Main");
+      await screen.getByRole("button", { name: "Activate group Main" }).hover();
       await screen.getByRole("button", { name: "Rename group Main" }).click();
       await input.fill("   ");
       await userEvent.keyboard("{Enter}");
@@ -188,6 +194,7 @@ describe("Desk sidebar", () => {
     const { screen } = await setup();
     const otherEnvironmentId = EnvironmentId.make("other-group-fixture");
     try {
+      await screen.getByRole("button", { name: "Activate group Main" }).hover();
       await screen.getByRole("button", { name: "Rename group Main" }).click();
       const input = screen.getByRole("textbox", { name: "Group name" });
       await input.fill("Old environment name");
@@ -227,6 +234,7 @@ describe("Desk sidebar", () => {
   it("closes only the layout entry without renaming, archiving or navigating", async () => {
     const { screen, onNavigate } = await setup();
     try {
+      await screen.getByRole("button", { name: "Chat fixture", exact: true }).hover();
       await screen.getByRole("button", { name: "Close tab Chat fixture" }).click();
       expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual([deskTabKey(draft)]);
       expect(useDeskStore.getState().desk.closed[0]?.tabKey).toBe(deskTabKey(chat));
@@ -241,11 +249,12 @@ describe("Desk sidebar", () => {
     const { screen, onNavigate } = await setup();
     try {
       mocks.rename.mockRejectedValueOnce(new Error("Reconnect to this environment."));
+      await screen.getByRole("button", { name: "Chat fixture", exact: true }).hover();
       await screen.getByRole("button", { name: "Rename Chat fixture" }).click();
       await expect.element(screen.getByRole("dialog")).not.toBeInTheDocument();
       await screen.getByRole("textbox", { name: "Chat title" }).fill("A useful title");
       await userEvent.keyboard("{Enter}");
-      await expect.element(screen.getByRole("alert")).toHaveTextContent("Could not rename");
+      await expect.element(screen.getByRole("alert")).toMatchTextContent("Could not rename");
       expect(screen.getByRole("alert").element().textContent).not.toContain(
         "Reconnect to this environment.",
       );
@@ -329,6 +338,7 @@ describe("Desk sidebar", () => {
   it("saves on blur and does not interpret IME confirmation as submission", async () => {
     const { screen, onNavigate } = await setup();
     try {
+      await screen.getByRole("button", { name: "Chat fixture", exact: true }).hover();
       await screen.getByRole("button", { name: "Rename Chat fixture" }).click();
       const input = screen.getByRole("textbox", { name: "Chat title" });
       const element = input.element() as HTMLInputElement;
@@ -362,6 +372,7 @@ describe("Desk sidebar", () => {
         }),
     );
     try {
+      await screen.getByRole("button", { name: "Chat fixture", exact: true }).hover();
       await screen.getByRole("button", { name: "Rename Chat fixture" }).click();
       const input = screen.getByRole("textbox", { name: "Chat title" });
       await input.fill("Delayed rename");

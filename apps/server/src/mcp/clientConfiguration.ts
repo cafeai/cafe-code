@@ -137,7 +137,11 @@ function parseConfiguration(
       validateJsonTree(parseTree(contents || "{}", errors, { allowTrailingComma: true }));
     const value: unknown =
       client.format === "toml"
-        ? plainTables(Toml.parse(contents, { maxDepth: 80 }))
+        ? // TOML5 rejects unsafe JS numbers by default. These are user-owned
+          // documents: validate all signed int64 values losslessly even though
+          // Cafe's own entry only contains strings, booleans and string arrays.
+          // Never stringify the parsed tree; edits preserve unrelated bytes.
+          plainTables(Toml.parse(contents, { maxDepth: 80, bigint: true }))
         : parse(contents || "{}", errors, { allowTrailingComma: true });
     const root = record(value);
     if (!root || errors.length) throw new Error();

@@ -9,7 +9,7 @@
     "build": "vite build && node scripts/compress-static-assets.mjs",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --passWithNoTests",
+    "test": "vitest run --config vitest.config.ts --passWithNoTests",
     "test:browser": "vitest run --config vitest.browser.config.ts",
     "test:browser:install": "playwright install --with-deps chromium"
   },
@@ -39,7 +39,7 @@
     "effect": "catalog:",
     "katex": "^0.17.0",
     "lexical": "^0.41.0",
-    "lucide-react": "^0.577.0",
+    "lucide-react": "^1.48.0",
     "micromark-util-decode-string": "^2.0.1",
     "react": "19.3.0",
     "react-dom": "19.3.0",
@@ -54,16 +54,15 @@
     "zustand": "^5.0.15"
   },
   "devDependencies": {
-    "@babel/core": "^7.29.7",
+    "@babel/core": "^8.0.6",
     "@effect/language-service": "catalog:",
     "@rolldown/plugin-babel": "^0.2.4",
     "@tailwindcss/vite": "^4.3.3",
     "@tanstack/router-plugin": "^1.168.40",
-    "@types/babel__core": "^7.20.5",
     "@types/react": "~19.3.0",
     "@types/react-dom": "~19.3.0",
     "@vitejs/plugin-react": "^6.1.1",
-    "@vitest/browser-playwright": "^4.1.11",
+    "@vitest/browser-playwright": "5.0.2",
     "babel-plugin-react-compiler": "1.0.0",
     "micromark-util-types": "^2.0.2",
     "msw": "2.15.0",
@@ -71,7 +70,7 @@
     "rolldown": "1.2.11",
     "tailwindcss": "^4.3.3",
     "typescript": "catalog:",
-    "vite": "^8.3.1",
+    "vite": "catalog:",
     "vitest": "catalog:",
     "vitest-browser-react": "^2.3.0"
   }

@@ -38,7 +38,7 @@ describe("ComposerDictationButton", () => {
     expect(
       document.querySelector('[data-composer-dictation="true"] svg.fill-current'),
     ).not.toBeNull();
-    await expect.element(page.getByRole("status")).toHaveTextContent("Listening");
+    await expect.element(page.getByRole("status")).toMatchTextContent("Listening");
 
     await mounted.rerender(
       <ComposerDictationButton
@@ -51,6 +51,6 @@ describe("ComposerDictationButton", () => {
     expect(
       document.querySelector('[data-composer-dictation="true"] svg.animate-spin'),
     ).not.toBeNull();
-    await expect.element(page.getByRole("status")).toHaveTextContent("Finishing dictation");
+    await expect.element(page.getByRole("status")).toMatchTextContent("Finishing dictation");
   });
 });

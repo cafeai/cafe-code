@@ -2,6 +2,11 @@
 
 Created: 2026-10-03 07:33:39 JST (UTC+0900)
 
+This is the historical first batch. The subsequent explicitly authorized
+[major migration follow-up](dependency-majors-2026-10-03.md) supersedes several
+deferrals below with measured compatibility fixes; retain this earlier evidence
+as the record of what was qualified at the time.
+
 This batch reviews the proposals in [Renovate dashboard #113](https://github.com/cafeai/cafe-code/issues/113).
 It does not approve every dashboard proposal, change Renovate's policy, install
 provider executables, call paid providers or modify Cafe profiles. Updates target

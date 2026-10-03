@@ -399,7 +399,7 @@ describe("virtual desktops", () => {
     );
     await page.getByRole("button", { name: "Desktop", exact: true }).click();
     await page.getByRole("menuitemradio", { name: "Research Ready" }).click();
-    await expect.element(page.getByRole("alert")).toHaveTextContent(message);
+    await expect.element(page.getByRole("alert")).toMatchTextContent(message);
     await expect.element(page.getByRole("alert")).toBeVisible();
     await expect
       .element(page.getByRole("menuitemradio", { name: "Research Busy in another chat" }))
@@ -498,7 +498,7 @@ describe("virtual desktops", () => {
     await page.getByRole("menuitem", { name: /End desktop/ }).click();
     await expect
       .element(page.getByRole("alert"))
-      .toHaveTextContent("The desktop operation did not complete.");
+      .toMatchTextContent("The desktop operation did not complete.");
     await expect.element(page.getByText("Research", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Actions for Research" }).click();
     await expect.element(page.getByRole("menuitem", { name: /End desktop/ })).toBeEnabled();
@@ -578,7 +578,7 @@ describe("virtual desktops", () => {
     await page.getByRole("switch", { name: "Enable desktop control" }).click();
     await expect
       .element(page.getByRole("alert"))
-      .toHaveTextContent("Could not save desktop settings");
+      .toMatchTextContent("Could not save desktop settings");
     await expect
       .element(page.getByRole("switch", { name: "Enable desktop control" }))
       .not.toBeChecked();
@@ -676,7 +676,7 @@ describe("virtual desktops", () => {
     await page.getByRole("button", { name: "Check again" }).click();
     await expect
       .element(page.getByRole("alert"))
-      .toHaveTextContent("The desktop operation did not complete.");
+      .toMatchTextContent("The desktop operation did not complete.");
     await expect.element(page.getByRole("button", { name: "Check again" })).toBeEnabled();
     expect(page.getByText("Sway", { exact: true }).element().closest("li")?.textContent).toContain(
       "Missing",
@@ -767,7 +767,7 @@ describe("virtual desktops", () => {
     await page.getByRole("button", { name: "Create desktop", exact: true }).click();
     await expect
       .element(page.getByRole("alert"))
-      .toHaveTextContent("The desktop operation did not complete.");
+      .toMatchTextContent("The desktop operation did not complete.");
     await expect
       .element(page.getByRole("textbox", { name: "Name", exact: true }))
       .toHaveValue("Failure retry");

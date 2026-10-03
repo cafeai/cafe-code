@@ -65,7 +65,9 @@ describe("inline async questions", () => {
       expect(onAnswer).not.toHaveBeenCalled();
       await page.getByLabelText("Your answer").fill("/do-not-run-as-a-command");
       await page.getByRole("button", { name: "Queue answer" }).click();
-      await expect.element(page.getByRole("alert")).toHaveTextContent("The answer was not queued.");
+      await expect
+        .element(page.getByRole("alert"))
+        .toMatchTextContent("The answer was not queued.");
       await expect
         .element(page.getByLabelText("Your answer"))
         .toHaveValue("/do-not-run-as-a-command");
@@ -314,7 +316,7 @@ describe("inline async questions", () => {
         }
         await expect
           .element(page.getByRole("status"))
-          .toHaveTextContent("Handled in another view.");
+          .toMatchTextContent("Handled in another view.");
         await expect
           .element(page.getByLabelText("Your answer"))
           .toHaveValue("Keep this alternative answer");

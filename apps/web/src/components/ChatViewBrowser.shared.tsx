@@ -1708,11 +1708,27 @@ async function openCommandPaletteFromTrigger(): Promise<void> {
 async function waitForNewThreadShortcutLabel(): Promise<void> {
   const newThreadButton = page.getByTestId("new-thread-button");
   await expect.element(newThreadButton).toBeInTheDocument();
+  await revealProjectThreadAction();
   await newThreadButton.hover();
   const shortcutLabel = isMacPlatform(navigator.platform)
     ? "New thread (⇧⌘O)"
     : "New thread (Ctrl+Shift+O)";
   await expect.element(page.getByText(shortcutLabel)).toBeInTheDocument();
+}
+
+async function revealProjectThreadAction(): Promise<void> {
+  const button = page.getByTestId("new-thread-button");
+  await expect.element(button).toBeInTheDocument();
+  // The desktop action deliberately disables pointer events while its project
+  // header is idle. Hover the owning header first, just as a user must; Vitest
+  // 5's Playwright actionability check must not be bypassed by a forced click.
+  const header = button
+    .element()
+    .closest('[class~="group/project-header"]')
+    ?.querySelector('[data-sidebar="menu-button"]');
+  expect(header).not.toBeNull();
+  expect(header).not.toBeUndefined();
+  await page.elementLocator(header!).hover();
 }
 
 async function waitForCommandPaletteShortcutLabel(): Promise<void> {
@@ -7122,6 +7138,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         const newThreadButton = page.getByTestId("new-thread-button");
         await expect.element(newThreadButton).toBeInTheDocument();
 
+        await revealProjectThreadAction();
         await newThreadButton.click();
 
         // The route should change to a new draft thread ID.
@@ -7182,6 +7199,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         const newThreadButton = page.getByTestId("new-thread-button");
         await expect.element(newThreadButton).toBeInTheDocument();
 
+        await revealProjectThreadAction();
         await newThreadButton.click();
 
         const newThreadPath = await waitForURL(
@@ -7246,6 +7264,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         const newThreadButton = page.getByTestId("new-thread-button");
         await expect.element(newThreadButton).toBeInTheDocument();
 
+        await revealProjectThreadAction();
         await newThreadButton.click();
 
         const newThreadPath = await waitForURL(
@@ -7277,6 +7296,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         const newThreadButton = page.getByTestId("new-thread-button");
         await expect.element(newThreadButton).toBeInTheDocument();
 
+        await revealProjectThreadAction();
         await newThreadButton.click();
 
         const firstDraftPath = await waitForURL(
@@ -7290,6 +7310,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         await materializePromotedDraftThreadViaDomainEvent(firstThreadId);
         expect(mounted.router.state.location.pathname).toBe(firstDraftPath);
 
+        await revealProjectThreadAction();
         await newThreadButton.click();
 
         const secondDraftPath = await waitForURL(
@@ -7330,6 +7351,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         const newThreadButton = page.getByTestId("new-thread-button");
         await expect.element(newThreadButton).toBeInTheDocument();
 
+        await revealProjectThreadAction();
         await newThreadButton.click();
 
         const newThreadPath = await waitForURL(
@@ -7385,6 +7407,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         const newThreadButton = page.getByTestId("new-thread-button");
         await expect.element(newThreadButton).toBeInTheDocument();
 
+        await revealProjectThreadAction();
         await newThreadButton.click();
 
         const newThreadPath = await waitForURL(
@@ -7425,6 +7448,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         const newThreadButton = page.getByTestId("new-thread-button");
         await expect.element(newThreadButton).toBeInTheDocument();
 
+        await revealProjectThreadAction();
         await newThreadButton.click();
 
         const newThreadPath = await waitForURL(
@@ -7467,6 +7491,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         const newThreadButton = page.getByTestId("new-thread-button");
         await expect.element(newThreadButton).toBeInTheDocument();
 
+        await revealProjectThreadAction();
         await newThreadButton.click();
 
         const threadPath = await waitForURL(
@@ -7498,6 +7523,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           ]),
         );
 
+        await revealProjectThreadAction();
         await newThreadButton.click();
 
         await waitForURL(
@@ -8867,6 +8893,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         const newThreadButton = page.getByTestId("new-thread-button");
         await expect.element(newThreadButton).toBeInTheDocument();
         await waitForServerConfigToApply();
+        await revealProjectThreadAction();
         await newThreadButton.click();
 
         const promotedThreadPath = await waitForURL(
