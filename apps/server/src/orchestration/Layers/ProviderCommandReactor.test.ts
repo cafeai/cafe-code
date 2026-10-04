@@ -32,6 +32,7 @@ import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
@@ -234,6 +235,7 @@ describe("ProviderCommandReactor", () => {
     readonly getCodexSteerAcceptanceEvidence?: ProjectionSnapshotQueryShape["getCodexSteerAcceptanceEvidence"];
     readonly beforeProjectRead?: Effect.Effect<void, Error>;
     readonly beforeTurnStartFailureDispatch?: Effect.Effect<void>;
+    readonly logMessages?: unknown[];
     readonly beforeCodexSteerDeliveryAttemptDispatch?: Effect.Effect<void>;
     readonly beforeCodexRootReplacementDispatch?: Effect.Effect<void>;
     readonly beforeRuntimeRecoveryAttemptDispatch?: Effect.Effect<void>;
@@ -648,10 +650,25 @@ describe("ProviderCommandReactor", () => {
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
       Layer.provideMerge(NodeServices.layer),
     );
-    runtime = ManagedRuntime.make(
+    const clockLayer =
       input?.testClock === undefined
         ? layer
-        : layer.pipe(Layer.provideMerge(Layer.succeed(Clock.Clock, input.testClock))),
+        : layer.pipe(Layer.provideMerge(Layer.succeed(Clock.Clock, input.testClock)));
+    runtime = ManagedRuntime.make(
+      input?.logMessages === undefined
+        ? clockLayer
+        : clockLayer.pipe(
+            Layer.provide(
+              Logger.layer(
+                [
+                  Logger.make(({ message }) => {
+                    input.logMessages!.push(...(Array.isArray(message) ? message : [message]));
+                  }),
+                ],
+                { mergeWithExisting: false },
+              ),
+            ),
+          ),
     );
 
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
@@ -3340,6 +3357,12 @@ describe("ProviderCommandReactor", () => {
       });
       expect(harness.generateBranchName.mock.calls[0]?.[0].modelSelection).toEqual(expected);
       expect(harness.refreshStatus.mock.calls[0]?.[0]).toBe("/tmp/provider-project-worktree");
+      // The branch write proves this detached metadata lane ran. Preserve a
+      // custom title without assuming that a separate main-turn send proves
+      // the title-eligibility guard has already been evaluated.
+      expect((await harness.readModel()).threads[0]?.title).toBe("Keep this custom title");
+      expect(harness.generateThreadTitle).not.toHaveBeenCalled();
+      expect(harness.generateThreadMetadata).not.toHaveBeenCalled();
     },
   );
 
@@ -3380,6 +3403,9 @@ describe("ProviderCommandReactor", () => {
       await waitFor(
         async () => (await harness.readModel()).threads[0]?.title === "Safer reconnect backoff",
       );
+      // Metadata and main-turn delivery are independent fibers. Observing the
+      // label writes does not establish that the main provider send ran yet.
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
       expect(harness.generateThreadMetadata).toHaveBeenCalledTimes(1);
       expect(harness.generateThreadMetadata.mock.calls[0]?.[0]).toMatchObject({
         cwd: "/tmp/provider-project-worktree",
@@ -3463,7 +3489,24 @@ describe("ProviderCommandReactor", () => {
   );
 
   it("keeps the main turn running when combined metadata generation fails without paid retries", async () => {
-    const harness = await createHarness();
+    const logMessages: unknown[] = [];
+    const harness = await createHarness({ logMessages });
+    const metadataFailureLog = "provider command reactor failed to generate first-turn metadata";
+    const releaseMetadata = Effect.runSync(Deferred.make<void>());
+    const metadataSettled = Effect.runSync(Deferred.make<void>());
+    harness.generateThreadMetadata.mockReturnValue(
+      Deferred.await(releaseMetadata).pipe(
+        Effect.andThen(
+          Effect.fail(
+            new TextGenerationError({
+              operation: "generateThreadMetadata",
+              detail: "controlled metadata failure",
+            }),
+          ),
+        ),
+        Effect.ensuring(Deferred.succeed(metadataSettled, undefined)),
+      ),
+    );
     await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.meta.update",
@@ -3490,12 +3533,31 @@ describe("ProviderCommandReactor", () => {
         createdAt: "2026-01-01T00:00:00.000Z",
       }),
     );
-    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    // Wait for each independent lane explicitly. A main-turn ACK must not be
+    // used as evidence that the detached metadata fiber has even started.
+    await waitFor(() => harness.generateThreadMetadata.mock.calls.length === 1);
+    await waitFor(async () => {
+      const thread = (await harness.readModel()).threads[0];
+      return harness.sendTurn.mock.calls.length === 1 && thread?.session?.status === "running";
+    });
+    expect(await Effect.runPromise(Deferred.isDone(metadataSettled))).toBe(false);
+    expect(harness.renameBranch).not.toHaveBeenCalled();
+
+    // The main turn has already reached Running while metadata is deliberately
+    // blocked. Release one known failure, then assert it neither retries paid
+    // helper work nor demotes that live turn before testing the next user send.
+    await Effect.runPromise(Deferred.succeed(releaseMetadata, undefined));
+    await Effect.runPromise(Deferred.await(metadataSettled));
+    // The helper effect's finalizer alone runs before its caller handles the
+    // failure. Observe that caller's fixed failure log too, so the assertions
+    // cannot race a not-yet-executed catch/fallback branch in the detached lane.
+    await waitFor(() => logMessages.includes(metadataFailureLog));
     expect(harness.generateThreadMetadata).toHaveBeenCalledTimes(1);
     expect(harness.generateBranchName).not.toHaveBeenCalled();
     expect(harness.generateThreadTitle).not.toHaveBeenCalled();
     expect(harness.renameBranch).not.toHaveBeenCalled();
     const thread = (await harness.readModel()).threads[0];
+    expect(thread?.session?.status).toBe("running");
     expect(thread?.title).toBe("New thread");
     expect(thread?.branch).toBe("t3code/1234abcd");
 
@@ -3520,6 +3582,7 @@ describe("ProviderCommandReactor", () => {
     );
     await waitFor(() => harness.sendTurn.mock.calls.length === 2);
     expect(harness.generateThreadMetadata).toHaveBeenCalledTimes(1);
+    expect(logMessages.filter((message) => message === metadataFailureLog)).toHaveLength(1);
     expect(harness.generateBranchName).not.toHaveBeenCalled();
     expect(harness.generateThreadTitle).not.toHaveBeenCalled();
   });
