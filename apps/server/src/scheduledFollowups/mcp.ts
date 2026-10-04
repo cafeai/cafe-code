@@ -4,6 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { z } from "zod";
 import type { ScheduledFollowupsShape } from "./service.ts";
+import type { SchedulingSessionAuthority } from "./sessionRuntime.ts";
 
 const id = z.string().min(1).max(200);
 const timezone = z.string().min(1).max(100);
@@ -46,6 +47,87 @@ const run = async <A>(effect: Effect.Effect<A, unknown>) => {
     throw new Error("Scheduled follow-up request failed. Review the schedule in Tasks.");
   }
 };
+
+/** The internal bridge carries its target as an authenticated capability, never
+ * model-authored arguments. Strict objects deliberately reject identity and
+ * activation overrides instead of silently stripping a misleading request. */
+export function registerSessionSchedulingTools(
+  server: McpServer,
+  service: ScheduledFollowupsShape,
+  authority: SchedulingSessionAuthority,
+) {
+  server.registerTool(
+    "request_scheduled_followup",
+    {
+      title: "Propose a follow-up in this chat",
+      description:
+        "Use when the user asks to schedule, monitor or check back later in this Cafe chat. Scheduling is built in; no MCP installation or chat ID is needed. Creates a proposal only: tell the user to review the executing account and choose Approve & enable in Tasks. Never claim it is active before approval. Editing pauses future runs pending review.",
+      inputSchema: z
+        .object({
+          id: z.uuid().optional(),
+          expectedRevision: z.number().int().positive().optional(),
+          name: z.string().min(1).max(120),
+          prompt: z.string().min(1).max(16000),
+          recurrence,
+          notificationPolicy: z
+            .enum(["changes-and-errors", "all-runs", "errors-only"])
+            .default("changes-and-errors"),
+          endAt: z.string().max(24).nullable().default(null),
+          maxRuns: z.number().int().min(1).max(10000).nullable().default(null),
+          allowAutoFinish: z.boolean().default(false),
+        })
+        .strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async (input) =>
+      result(
+        await run(
+          Schema.decodeUnknownEffect(ScheduledFollowupSaveInput)({
+            ...input,
+            threadId: authority.threadId,
+            modelSelection: null,
+          }).pipe(Effect.flatMap((value) => service.save(value, "agent", authority))),
+        ),
+      ),
+  );
+  server.registerTool(
+    "list_scheduled_followups",
+    {
+      title: "List this chat's follow-ups",
+      description:
+        "Read this Cafe chat's schedules, proposals awaiting owner approval and recent run outcomes. This connection cannot read another chat or account.",
+      inputSchema: z.object({}).strict(),
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async () => result(await run(service.list({ threadId: authority.threadId }, authority))),
+  );
+  server.registerTool(
+    "pause_scheduled_followup",
+    {
+      title: "Pause a follow-up in this chat",
+      description:
+        "Pause future runs without interrupting an already running turn. Resuming or changing the executing account requires owner review in Tasks.",
+      inputSchema: z
+        .object({ id: z.uuid(), expectedRevision: z.number().int().positive() })
+        .strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async (input) =>
+      result(
+        await run(
+          service.setStatus(
+            {
+              threadId: authority.threadId,
+              id: ScheduledFollowupId.make(input.id),
+              expectedRevision: input.expectedRevision,
+              state: "paused",
+            },
+            authority,
+          ),
+        ),
+      ),
+  );
+}
 
 /**
  * The existing MCP bridge authenticates an owner, NOT a particular conversation

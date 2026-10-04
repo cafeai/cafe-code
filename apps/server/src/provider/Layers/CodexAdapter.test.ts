@@ -70,7 +70,13 @@ import {
   canonicalizeCodexSubagentDetail,
   makeCodexAdapter,
   redactDesktopToolEvent,
+  type CodexAdapterLiveOptions,
 } from "./CodexAdapter.ts";
+import {
+  installSchedulingSessionBroker,
+  type SchedulingSessionBinding,
+  type SchedulingSessionBroker,
+} from "../../scheduledFollowups/sessionRuntime.ts";
 import {
   installDesktopSessionBroker,
   type DesktopSessionBinding,
@@ -481,7 +487,7 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
     this.options = options;
   }
 
-  start() {
+  start(): Effect.Effect<ProviderSession, CodexSessionRuntimeError> {
     return Effect.promise(() => this.startImpl()).pipe(
       Effect.tap((session) =>
         Effect.sync(() => {
@@ -6557,6 +6563,291 @@ it.effect("flushes managed native logs when the adapter layer shuts down", () =>
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
   }),
+);
+
+type SchedulingBindingFixture = SchedulingSessionBinding & {
+  readonly identity: Parameters<SchedulingSessionBroker["bind"]>[0];
+  active: boolean;
+  disposed: boolean;
+};
+
+function schedulingCase(
+  run: (fixture: {
+    bindings: SchedulingBindingFixture[];
+    bind: ReturnType<typeof vi.fn<SchedulingSessionBroker["bind"]>>;
+    createAdapter: (
+      instanceId: ProviderInstanceId,
+      makeRuntime: NonNullable<CodexAdapterLiveOptions["makeRuntime"]>,
+    ) => ReturnType<typeof makeCodexAdapter>;
+  }) => Effect.Effect<void, unknown, Effect.Services<ReturnType<typeof makeCodexAdapter>>>,
+) {
+  const bindings: SchedulingBindingFixture[] = [];
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const bind = vi.fn<SchedulingSessionBroker["bind"]>(async (identity) => {
+        const binding: SchedulingBindingFixture = {
+          identity,
+          name: `cafe-scheduling_fixture_${bindings.length}`,
+          launch: {
+            command: process.execPath,
+            args: ["/synthetic/bridge.mjs", `/synthetic/connection-${bindings.length}.json`],
+            env: { ELECTRON_RUN_AS_NODE: "1" },
+          },
+          active: false,
+          disposed: false,
+          activate: vi.fn(async () => {
+            assert.equal(binding.disposed, false);
+            binding.active = true;
+          }),
+          dispose: vi.fn(async () => {
+            binding.active = false;
+            binding.disposed = true;
+          }),
+        };
+        bindings.push(binding);
+        return binding;
+      });
+      const uninstall = installSchedulingSessionBroker({ bind });
+      yield* Effect.addFinalizer(() => Effect.sync(uninstall));
+      yield* run({
+        bindings,
+        bind,
+        createAdapter: (instanceId, makeRuntime) =>
+          makeCodexAdapter(decodeCodexSettings({}), { instanceId, makeRuntime }),
+      });
+    }),
+  ).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        ServerConfig.layerTest(process.cwd(), process.cwd()),
+        ServerSettingsService.layerTest(),
+        providerSessionDirectoryTestLayer,
+      ).pipe(Layer.provideMerge(NodeServices.layer)),
+    ),
+    // Adapter-scope retirement must revoke even bindings which were never
+    // explicitly stopped by the test body. No filesystem/provider is involved.
+    Effect.tap(() =>
+      Effect.sync(() =>
+        assert.equal(
+          bindings.every((binding) => binding.disposed),
+          true,
+        ),
+      ),
+    ),
+  );
+}
+
+it.effect(
+  "isolates scheduling by Codex chat, account and runtime generation while preserving resume",
+  () =>
+    schedulingCase(({ bindings, bind, createAdapter }) =>
+      Effect.gen(function* () {
+        const accountA = ProviderInstanceId.make("codex-account-a");
+        const accountB = ProviderInstanceId.make("codex-account-b");
+        const factoryA = makeRuntimeFactory();
+        const factoryB = makeRuntimeFactory();
+        const adapterA = yield* createAdapter(accountA, factoryA.factory);
+        const adapterB = yield* createAdapter(accountB, factoryB.factory);
+        const first = yield* adapterA.startSession({
+          threadId: asThreadId("schedule-one"),
+          runtimeMode: "approval-required",
+        });
+        yield* adapterA.startSession({
+          threadId: asThreadId("schedule-two"),
+          runtimeMode: "full-access",
+        });
+        yield* adapterB.startSession({
+          threadId: asThreadId("schedule-three"),
+          runtimeMode: "approval-required",
+        });
+        assert.deepEqual(
+          bind.mock.calls.map(([identity]) => identity),
+          [
+            { threadId: "schedule-one", providerInstanceId: accountA, provider: "codex" },
+            { threadId: "schedule-two", providerInstanceId: accountA, provider: "codex" },
+            { threadId: "schedule-three", providerInstanceId: accountB, provider: "codex" },
+          ],
+        );
+        const runtimes = [...factoryA.runtimes, ...factoryB.runtimes];
+        for (const [index, runtime] of runtimes.entries()) {
+          const binding = bindings[index]!;
+          assert.deepEqual(runtime.options.schedulingMcp, {
+            name: binding.name,
+            launch: binding.launch,
+          });
+          assert.equal(binding.active, true);
+          assert.equal(vi.mocked(binding.activate).mock.calls.length, 1);
+        }
+        assert.deepEqual(
+          runtimes.map((runtime) => runtime.options.runtimeMode),
+          ["approval-required", "full-access", "approval-required"],
+        );
+        assert.equal(new Set(bindings.map((binding) => binding.name)).size, 3);
+        assert.equal(new Set(bindings.map((binding) => binding.launch.args[1])).size, 3);
+        factoryA.runtimes[0]!.closeImpl.mockImplementation(async () => {
+          // Revocation happens before the native provider can finish stopping.
+          assert.equal(bindings[0]!.disposed, true);
+        });
+        yield* adapterA.stopSession(first.threadId);
+        assert.equal(bindings[0]!.disposed, true);
+        assert.equal(bindings[1]!.disposed, false);
+        assert.equal(bindings[2]!.disposed, false);
+        const nativeCursor = { threadId: "exact-native-scheduling-resume" };
+        yield* adapterA.startSession({
+          threadId: first.threadId,
+          runtimeMode: "approval-required",
+          resumeCursor: nativeCursor,
+        });
+        assert.deepEqual(factoryA.lastRuntime!.options.resumeCursor, nativeCursor);
+        assert.notEqual(bindings[3]!.name, bindings[0]!.name);
+        assert.equal(bindings[3]!.active, true);
+        // Repeated old-generation cleanup cannot revoke the replacement or any
+        // sibling account; the broker owns exact generation fencing as well.
+        yield* Effect.promise(() => bindings[0]!.dispose());
+        assert.equal(bindings[3]!.active, true);
+        assert.equal(factoryA.runtimes[1]!.closeImpl.mock.calls.length, 0);
+        assert.equal(factoryB.lastRuntime!.closeImpl.mock.calls.length, 0);
+      }),
+    ),
+);
+
+for (const phase of ["bind", "construction", "handshake", "activation"] as const) {
+  it.effect(`revokes only the failed Codex scheduling generation after ${phase} failure`, () =>
+    schedulingCase(({ bindings, bind, createAdapter }) =>
+      Effect.gen(function* () {
+        const failedId = asThreadId(`scheduling-failure-${phase}`);
+        const factory = makeRuntimeFactory();
+        const adapter = yield* createAdapter(
+          ProviderInstanceId.make("codex-scheduling-failure"),
+          (options) => {
+            if (options.threadId !== failedId) return factory.factory(options);
+            assert.equal(bindings[1]!.active, false);
+            if (phase === "construction")
+              return Effect.fail(
+                new CodexErrors.CodexAppServerSpawnError({
+                  command: "synthetic codex",
+                  cause: new Error("synthetic construction failure"),
+                }),
+              );
+            const runtime = new FakeCodexRuntime(options);
+            factory.runtimes.push(runtime);
+            if (phase === "handshake")
+              runtime.start = () =>
+                Effect.fail(
+                  CodexErrors.CodexAppServerRequestError.internalError(
+                    "synthetic handshake failure",
+                  ),
+                );
+            if (phase === "activation")
+              vi.mocked(bindings[1]!.activate).mockRejectedValueOnce(
+                new Error("private capability must not leak"),
+              );
+            return Effect.succeed(runtime);
+          },
+        );
+        yield* adapter.startSession({
+          threadId: asThreadId("scheduling-surviving-sibling"),
+          runtimeMode: "full-access",
+        });
+        if (phase === "bind")
+          bind.mockRejectedValueOnce(new Error("private capability must not leak"));
+        const outcome = yield* adapter
+          .startSession({
+            threadId: failedId,
+            runtimeMode: "approval-required",
+            resumeCursor: { threadId: "unchanged-native-cursor" },
+          })
+          .pipe(Effect.result);
+        assert.equal(outcome._tag, "Failure");
+        if (outcome._tag !== "Failure") return;
+        assert.equal(outcome.failure._tag, "ProviderAdapterProcessError");
+        assert.doesNotMatch(JSON.stringify(outcome.failure), /private capability/u);
+        assert.equal(yield* adapter.hasSession(failedId), false);
+        assert.equal(bindings[0]!.active, true);
+        assert.equal(factory.runtimes[0]!.closeImpl.mock.calls.length, 0);
+        if (phase !== "bind") {
+          assert.equal(bindings[1]!.disposed, true);
+          assert.equal(bindings[1]!.active, false);
+          assert.equal(
+            vi.mocked(bindings[1]!.activate).mock.calls.length,
+            phase === "activation" ? 1 : 0,
+          );
+        }
+        if (phase === "handshake" || phase === "activation") {
+          assert.equal(factory.runtimes[1]!.closeImpl.mock.calls.length, 1);
+          assert.deepEqual(factory.runtimes[1]!.options.resumeCursor, {
+            threadId: "unchanged-native-cursor",
+          });
+          assert.equal(factory.runtimes[1]!.sendTurnImpl.mock.calls.length, 0);
+        }
+      }),
+    ),
+  );
+}
+
+it.effect(
+  "revokes a late scheduling binding when Codex startup was interrupted during acquisition",
+  () =>
+    schedulingCase(({ bindings, bind, createAdapter }) =>
+      Effect.gen(function* () {
+        const factory = makeRuntimeFactory();
+        const adapter = yield* createAdapter(
+          ProviderInstanceId.make("codex-cancelled-bind"),
+          factory.factory,
+        );
+        const originalBind = bind.getMockImplementation()!;
+        const gate = Promise.withResolvers<void>();
+        const entered = yield* Deferred.make<void>();
+        bind.mockImplementationOnce(async (identity) => {
+          await Effect.runPromise(Deferred.succeed(entered, undefined));
+          await gate.promise;
+          return originalBind(identity);
+        });
+        const pending = yield* adapter
+          .startSession({
+            threadId: asThreadId("scheduling-cancelled"),
+            runtimeMode: "full-access",
+          })
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(entered);
+        const interrupting = yield* Fiber.interrupt(pending).pipe(Effect.forkChild);
+        yield* Effect.yieldNow;
+        gate.resolve();
+        yield* Fiber.join(interrupting);
+        assert.equal(bindings.length, 1);
+        assert.equal(bindings[0]!.disposed, true);
+        assert.equal(bindings[0]!.active, false);
+        assert.equal(factory.runtimes.length, 0);
+        assert.equal(yield* adapter.hasSession(asThreadId("scheduling-cancelled")), false);
+      }),
+    ),
+);
+
+it.effect("finishes Codex retirement when revoked scheduling files cannot be cleaned", () =>
+  schedulingCase(({ bindings, createAdapter }) =>
+    Effect.gen(function* () {
+      const factory = makeRuntimeFactory();
+      const adapter = yield* createAdapter(
+        ProviderInstanceId.make("codex-cleanup-failure"),
+        factory.factory,
+      );
+      const threadId = asThreadId("scheduling-cleanup-failure");
+      yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
+      const binding = bindings[0]!;
+      vi.mocked(binding.dispose).mockImplementation(async () => {
+        // The real broker revokes authority before fallible persistence/file
+        // cleanup. Model that contract and ensure a private cleanup exception
+        // does not strand the old provider after its session is marked stopped.
+        binding.active = false;
+        binding.disposed = true;
+        throw new Error("private scheduling connection path");
+      });
+      yield* adapter.stopSession(threadId);
+      assert.equal(factory.lastRuntime!.closeImpl.mock.calls.length, 1);
+      assert.equal(yield* adapter.hasSession(threadId), false);
+      assert.equal(binding.active, false);
+    }),
+  ),
 );
 
 function desktopCase(

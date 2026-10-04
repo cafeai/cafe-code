@@ -4,6 +4,13 @@ import { readMcpFile } from "./privateFiles.ts";
 const MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
 const MAX_IN_FLIGHT = 4;
 
+type BridgeTarget = "cafe-code" | "cafe-desktop" | "cafe-scheduling";
+const BRIDGE_PATHS: Record<BridgeTarget, string> = {
+  "cafe-code": "/mcp",
+  "cafe-desktop": "/mcp/desktop",
+  "cafe-scheduling": "/mcp/scheduling",
+};
+
 type RequestId = string | number;
 type RpcMessage = { jsonrpc: "2.0"; id?: RequestId; method: string; params?: unknown };
 
@@ -15,7 +22,7 @@ function object(value: unknown): Record<string, unknown> | undefined {
 
 export async function readBridgeConnection(
   connectionPath: string,
-  target: "cafe-code" | "cafe-desktop" = "cafe-code",
+  target: BridgeTarget = "cafe-code",
 ): Promise<{ url: string; token: string }> {
   const raw = await readMcpFile(connectionPath, { private: true, maxBytes: 16 * 1024 });
   const connection = object(JSON.parse(raw ?? "null"));
@@ -32,8 +39,8 @@ export async function readBridgeConnection(
   if (
     url.protocol !== "http:" ||
     url.hostname !== "127.0.0.1" ||
-    url.pathname !== (target === "cafe-desktop" ? "/mcp/desktop" : "/mcp") ||
-    (target === "cafe-desktop" && connection.audience !== "cafe-desktop") ||
+    url.pathname !== BRIDGE_PATHS[target] ||
+    (target !== "cafe-code" && connection.audience !== target) ||
     url.username ||
     url.password ||
     url.search ||
@@ -74,7 +81,7 @@ async function readResponse(response: Response): Promise<string> {
  */
 export async function runLocalBridge(options: {
   readonly connectionPath: string;
-  readonly target?: "cafe-code" | "cafe-desktop";
+  readonly target?: BridgeTarget;
   readonly input: Readable;
   readonly output: Writable;
   readonly fetch?: typeof fetch;

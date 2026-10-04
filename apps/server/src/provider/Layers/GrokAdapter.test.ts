@@ -13,8 +13,10 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
+import * as EffectAcpErrors from "effect-acp/errors";
 
 import {
   ApprovalRequestId,
@@ -30,6 +32,8 @@ import { AuthSessionId } from "@cafecode/contracts/auth";
 
 import { ServerConfig } from "../../config.ts";
 import { storeFileAttachment } from "../../fileAttachmentStore.ts";
+import { installSchedulingSessionBroker } from "../../scheduledFollowups/sessionRuntime.ts";
+import type { AcpSessionRuntime } from "../acp/AcpSessionRuntime.ts";
 import {
   didGrokContextCompact,
   grokPromptSettlementBelongsToContext,
@@ -38,6 +42,7 @@ import {
   resolveGrokCafeMcpUrl,
   shouldAutoApproveGrokPermission,
   validateGrokImageAttachmentBytes,
+  type GrokAdapterLiveOptions,
 } from "./GrokAdapter.ts";
 import type { GrokAdapterShape } from "../Services/GrokAdapter.ts";
 import {
@@ -209,6 +214,106 @@ const makeTestAdapter = (
     }),
   ).pipe(Effect.orDie);
 
+/** No process, provider credential, HTTP request or database is used here. */
+function makeSchedulingRuntimeFixture(failGeneration?: number, failActivationGeneration?: number) {
+  const lifecycle: string[] = [];
+  const launches: Parameters<NonNullable<GrokAdapterLiveOptions["makeRuntime"]>>[0][] = [];
+  const bindings: { active: boolean; disposed: boolean }[] = [];
+  const identities: Parameters<Parameters<typeof installSchedulingSessionBroker>[0]["bind"]>[0][] =
+    [];
+  const release = installSchedulingSessionBroker({
+    bind: async (identity) => {
+      identities.push(identity);
+      const generation = bindings.length + 1;
+      const binding = { active: false, disposed: false };
+      bindings.push(binding);
+      lifecycle.push(`bind:${generation}`);
+      return {
+        name: "cafe-scheduling",
+        launch: {
+          command: process.execPath,
+          args: [NodePath.join(process.cwd(), "synthetic-scheduling-bridge.mjs")],
+          env: { CAFE_CODE_SCHEDULING_CONNECTION_FILE: `synthetic-private-${generation}` },
+        },
+        activate: async () => {
+          assert.isFalse(binding.disposed);
+          lifecycle.push(`activate:${generation}`);
+          if (generation === failActivationGeneration)
+            throw new Error("private activation diagnostic");
+          binding.active = true;
+        },
+        dispose: async () => {
+          if (!binding.disposed) lifecycle.push(`dispose:${generation}`);
+          binding.active = false;
+          binding.disposed = true;
+        },
+      };
+    },
+  });
+  const makeRuntime: NonNullable<GrokAdapterLiveOptions["makeRuntime"]> = (input) =>
+    Effect.gen(function* () {
+      const generation = launches.length + 1;
+      launches.push(input);
+      lifecycle.push(`launch:${generation}`);
+      assert.isFalse(bindings[generation - 1]!.active);
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          lifecycle.push(`close:${generation}`);
+        }),
+      );
+      // Every unrelated operation fails visibly, so this fake cannot hide an
+      // accidental provider call added to scheduling session initialization.
+      const unexpected = () => Effect.die(new Error("Unexpected synthetic ACP operation."));
+      const runtime: AcpSessionRuntime["Service"] = {
+        handleExtRequest: () => Effect.void,
+        handleRequestPermission: () => Effect.void,
+        handleElicitation: unexpected,
+        handleReadTextFile: unexpected,
+        handleWriteTextFile: unexpected,
+        handleCreateTerminal: unexpected,
+        handleTerminalOutput: unexpected,
+        handleTerminalWaitForExit: unexpected,
+        handleTerminalKill: unexpected,
+        handleTerminalRelease: unexpected,
+        handleSessionUpdate: unexpected,
+        handleElicitationComplete: unexpected,
+        handleUnknownExtRequest: unexpected,
+        handleUnknownExtNotification: unexpected,
+        handleExtNotification: unexpected,
+        start: () =>
+          generation === failGeneration
+            ? Effect.fail(
+                new EffectAcpErrors.AcpTransportError({
+                  detail: "Synthetic startup failure.",
+                  cause: new Error("Synthetic startup failure."),
+                }),
+              )
+            : Effect.succeed({
+                sessionId: "synthetic-native-session",
+                initializeResult: { protocolVersion: 1 },
+                sessionSetupResult: { sessionId: "synthetic-native-session" },
+                modelConfigId: undefined,
+              }),
+        getEvents: () => Stream.never,
+        drainEvents: Effect.void,
+        finishPromptEvents: Effect.void,
+        getModeState: unexpected(),
+        getConfigOptions: unexpected(),
+        getAvailableCommands: unexpected(),
+        prompt: unexpected,
+        cancel: unexpected(),
+        setMode: unexpected,
+        setConfigOption: unexpected,
+        setModel: unexpected,
+        setSessionModel: unexpected,
+        request: unexpected,
+        notify: unexpected,
+      };
+      return runtime;
+    });
+  return { lifecycle, launches, bindings, identities, makeRuntime, release };
+}
+
 it("routes Cafe MCP through the main backend when Grok runs in the provider daemon", () => {
   assert.strictEqual(
     resolveGrokCafeMcpUrl({ port: 1, cafeMcpPort: 3773 }),
@@ -334,6 +439,151 @@ it("auto-approves only edit-like requests in Cafe's auto-accept mode", () => {
 });
 
 it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
+  for (const account of [undefined, ProviderInstanceId.make("grok-work-account")]) {
+    it.effect(
+      `injects scheduling beside management MCP for ${account ?? "the default account"}`,
+      () =>
+        Effect.gen(function* () {
+          const fixture = makeSchedulingRuntimeFixture();
+          yield* Effect.addFinalizer(() => Effect.sync(fixture.release));
+          const adapter = yield* makeGrokAdapter(decodeGrokSettings({}), {
+            makeRuntime: fixture.makeRuntime,
+            sessionCredentials: testSessionCredentials,
+            ...(account ? { instanceId: account } : {}),
+          });
+          const threadId = ThreadId.make("grok-scheduling-thread");
+          yield* adapter.startSession({
+            threadId,
+            cwd: process.cwd(),
+            runtimeMode: "approval-required",
+          });
+          assert.deepEqual(fixture.identities, [
+            {
+              threadId,
+              providerInstanceId: account ?? ProviderInstanceId.make("grok"),
+              provider: "grok",
+            },
+          ]);
+          const launch = fixture.launches[0]!;
+          assert.equal(launch.permissionMode, "default");
+          assert.equal(launch.sandboxProfile, "read-only");
+          assert.deepEqual(
+            launch.mcpServers?.map((server) => server.name),
+            ["cafe-code", "cafe-scheduling"],
+          );
+          assert.deepEqual(launch.mcpServers?.[1], {
+            name: "cafe-scheduling",
+            command: process.execPath,
+            args: [NodePath.join(process.cwd(), "synthetic-scheduling-bridge.mjs")],
+            env: [{ name: "CAFE_CODE_SCHEDULING_CONNECTION_FILE", value: "synthetic-private-1" }],
+          });
+          assert.deepEqual(fixture.lifecycle, ["bind:1", "launch:1", "activate:1"]);
+          yield* adapter.stopSession(threadId);
+          assert.deepEqual(fixture.lifecycle, [
+            "bind:1",
+            "launch:1",
+            "activate:1",
+            "dispose:1",
+            "close:1",
+          ]);
+        }),
+    );
+  }
+
+  it.effect("replaces Grok scheduling only after candidate startup and prior retirement", () =>
+    Effect.gen(function* () {
+      const fixture = makeSchedulingRuntimeFixture();
+      yield* Effect.addFinalizer(() => Effect.sync(fixture.release));
+      const adapter = yield* makeGrokAdapter(decodeGrokSettings({}), {
+        makeRuntime: fixture.makeRuntime,
+        sessionCredentials: testSessionCredentials,
+      });
+      const input = {
+        threadId: ThreadId.make("grok-scheduling-replacement"),
+        cwd: process.cwd(),
+        runtimeMode: "approval-required" as const,
+      };
+      const original = yield* adapter.startSession(input);
+      const replacement = yield* adapter.startSession({
+        ...input,
+        resumeCursor: original.resumeCursor,
+      });
+      assert.deepEqual(replacement.resumeCursor, original.resumeCursor);
+      assert.equal(fixture.launches[1]!.resumeSessionId, "synthetic-native-session");
+      assert.deepEqual(fixture.lifecycle, [
+        "bind:1",
+        "launch:1",
+        "activate:1",
+        "bind:2",
+        "launch:2",
+        "dispose:1",
+        "close:1",
+        "activate:2",
+      ]);
+      yield* adapter.stopAll();
+      assert.isTrue(fixture.bindings.every((binding) => binding.disposed));
+    }),
+  );
+
+  it.effect(
+    "revokes failed Grok scheduling candidates while keeping the prior session active",
+    () =>
+      Effect.gen(function* () {
+        const fixture = makeSchedulingRuntimeFixture(2);
+        yield* Effect.addFinalizer(() => Effect.sync(fixture.release));
+        const adapter = yield* makeGrokAdapter(decodeGrokSettings({}), {
+          makeRuntime: fixture.makeRuntime,
+          sessionCredentials: testSessionCredentials,
+        });
+        const input = {
+          threadId: ThreadId.make("grok-scheduling-failed-candidate"),
+          cwd: process.cwd(),
+          runtimeMode: "approval-required" as const,
+        };
+        const original = yield* adapter.startSession(input);
+        const failed = yield* adapter
+          .startSession({ ...input, resumeCursor: original.resumeCursor })
+          .pipe(Effect.exit);
+        assert.equal(failed._tag, "Failure");
+        assert.isTrue(fixture.bindings[0]!.active);
+        assert.isFalse(fixture.bindings[0]!.disposed);
+        assert.isFalse(fixture.bindings[1]!.active);
+        assert.isTrue(fixture.bindings[1]!.disposed);
+        assert.notInclude(fixture.lifecycle, "activate:2");
+        assert.deepEqual(yield* adapter.listSessions(), [original]);
+        yield* adapter.stopAll();
+        assert.isTrue(fixture.bindings.every((binding) => binding.disposed));
+      }),
+  );
+
+  it.effect("retires the Grok candidate when scheduling activation fails", () =>
+    Effect.gen(function* () {
+      const fixture = makeSchedulingRuntimeFixture(undefined, 1);
+      yield* Effect.addFinalizer(() => Effect.sync(fixture.release));
+      const adapter = yield* makeGrokAdapter(decodeGrokSettings({}), {
+        makeRuntime: fixture.makeRuntime,
+        sessionCredentials: testSessionCredentials,
+      });
+      const failure = yield* adapter
+        .startSession({
+          threadId: ThreadId.make("grok-scheduling-failed-activation"),
+          cwd: process.cwd(),
+          runtimeMode: "approval-required",
+        })
+        .pipe(Effect.flip);
+      assert.equal(failure._tag, "ProviderAdapterProcessError");
+      assert.notInclude(JSON.stringify(failure), "private activation diagnostic");
+      assert.deepEqual(fixture.lifecycle, [
+        "bind:1",
+        "launch:1",
+        "activate:1",
+        "dispose:1",
+        "close:1",
+      ]);
+      assert.deepEqual(yield* adapter.listSessions(), []);
+    }),
+  );
+
   it.effect(
     "delivers generic file manifests through Grok ACP instead of mislabeling them as images",
     () =>

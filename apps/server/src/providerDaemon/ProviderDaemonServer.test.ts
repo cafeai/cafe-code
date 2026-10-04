@@ -53,6 +53,11 @@ import {
 } from "./ProviderDaemonServer.ts";
 import type { ProviderDaemonPersistentEventJournal } from "./EventJournal.ts";
 import { ProviderRuntimeInventoryLocalLive } from "./ProviderRuntimeInventory.ts";
+import {
+  SCHEDULING_SESSION_DAEMON_PATH,
+  installSchedulingSessionRuntime,
+  type SchedulingSessionAuthority,
+} from "../scheduledFollowups/sessionRuntime.ts";
 
 const TEST_TOKEN = "provider-daemon-test-token-000000000000000000000000";
 
@@ -163,6 +168,68 @@ const makeProviderDaemonServerTestLayer = (providerService: ProviderServiceShape
 const providerDaemonServerTestLayer = makeProviderDaemonServerTestLayer(mockProviderService);
 
 describe("ProviderDaemonServer", () => {
+  it.effect(
+    "verifies scheduling capabilities only over authenticated ephemeral RPC without ledger writes",
+    () =>
+      Effect.gen(function* () {
+        const token = "ab".repeat(32);
+        const authority: SchedulingSessionAuthority = {
+          threadId: ThreadId.make("scheduling-daemon-fixture"),
+          providerInstanceId: ProviderInstanceId.make("codex_work"),
+          sessionGeneration: "11111111-1111-4111-8111-111111111111",
+          tokenDigest: "cd".repeat(32),
+        };
+        let calls = 0;
+        const uninstall = installSchedulingSessionRuntime({
+          bind: async () => {
+            throw new Error("Fixture must not start a provider");
+          },
+          close: async () => {},
+          authorize: async (candidate) => {
+            calls++;
+            if (candidate !== token) throw new Error("Fixture denied");
+            return authority;
+          },
+        });
+        yield* Effect.addFinalizer(() => Effect.sync(uninstall));
+        const port = yield* startProviderDaemonServerOnEphemeralPort({
+          host: "127.0.0.1",
+          token: TEST_TOKEN,
+          version: "0.0.0-test",
+          protocolVersion: 1,
+        });
+        const call = (authenticated: boolean, candidate: string) =>
+          Effect.promise(() =>
+            fetch(`http://127.0.0.1:${port}${SCHEDULING_SESSION_DAEMON_PATH}`, {
+              method: "POST",
+              headers: {
+                "content-type": "application/json",
+                ...(authenticated ? { authorization: `Bearer ${TEST_TOKEN}` } : {}),
+              },
+              body: JSON.stringify({ token: candidate }),
+            }),
+          );
+        const unauthenticated = yield* call(false, token);
+        assert.equal(unauthenticated.status, 401);
+        yield* Effect.promise(() => unauthenticated.arrayBuffer());
+        assert.equal(calls, 0);
+        const malformed = yield* call(true, "not-a-token");
+        assert.equal(malformed.status, 403);
+        yield* Effect.promise(() => malformed.arrayBuffer());
+        assert.equal(calls, 0);
+        const rejected = yield* call(true, "ef".repeat(32));
+        assert.equal(rejected.status, 403);
+        yield* Effect.promise(() => rejected.arrayBuffer());
+        const accepted = yield* call(true, token);
+        assert.equal(accepted.status, 200);
+        assert.deepEqual(yield* Effect.promise(() => accepted.json()), authority);
+        const sql = yield* SqlClient.SqlClient;
+        const commands = yield* sql<{
+          count: number;
+        }>`SELECT count(*) AS count FROM provider_daemon_commands`;
+        assert.equal(commands[0]?.count, 0);
+      }).pipe(Effect.scoped, Effect.provide(providerDaemonServerTestLayer)),
+  );
   it.effect("routes authenticated rewind phases with durable exact-once receipts", () => {
     const calls: Array<{ method: string; payload: unknown }> = [];
     const providerService: ProviderServiceShape = {

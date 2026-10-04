@@ -100,6 +100,8 @@ import Migration0081 from "./Migrations/081_ThreadSubagentLimits.ts";
 import Migration0082 from "./Migrations/082_SubagentLifecycleRetention.ts";
 import Migration0083 from "./Migrations/083_SubagentRuntimeGeneration.ts";
 import Migration0085 from "./Migrations/085_ProviderConversationRewinds.ts";
+import Migration0086 from "./Migrations/086_SchedulingSessionCapabilities.ts";
+import Migration0087 from "./Migrations/087_SchedulingAccountReview.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -201,6 +203,8 @@ export const migrationEntries = [
   [83, "SubagentRuntimeGeneration", Migration0083],
   [84, "ScheduledFollowups", Migration0084],
   [85, "ProviderConversationRewinds", Migration0085],
+  [86, "SchedulingSessionCapabilities", Migration0086],
+  [87, "SchedulingAccountReview", Migration0087],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

@@ -55,6 +55,10 @@ import type { SessionCredentialServiceShape } from "../../auth/Services/SessionC
 import { readProviderMcpCredentialIssuer } from "../../auth/ProviderMcpCredentialBroker.ts";
 import { ServerConfig, type ServerConfigShape } from "../../config.ts";
 import {
+  readSchedulingSessionBroker,
+  type SchedulingSessionBinding,
+} from "../../scheduledFollowups/sessionRuntime.ts";
+import {
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
   ProviderAdapterSessionNotFoundError,
@@ -123,6 +127,8 @@ export interface GrokAdapterLiveOptions {
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
   readonly instanceId?: ProviderInstanceId;
+  /** Isolated runtime factory used by process-free adapter qualification. */
+  readonly makeRuntime?: typeof makeGrokAcpRuntime;
   /** Owner-scoped credential issuer used only for the loopback Cafe MCP endpoint. */
   readonly sessionCredentials?: Pick<SessionCredentialServiceShape, "issue" | "revoke">;
 }
@@ -164,6 +170,7 @@ interface GrokSessionContext {
   readonly acp: AcpSessionRuntime.AcpSessionRuntime["Service"];
   readonly sandboxProfile: GrokSandboxProfile;
   readonly mcpAuthSessionId: AuthSessionId | undefined;
+  readonly schedulingBinding: SchedulingSessionBinding | undefined;
   notificationFiber: Fiber.Fiber<void, never> | undefined;
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
@@ -1209,6 +1216,11 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
     ) =>
       Effect.gen(function* () {
         if (ctx.stopped) return;
+        // Retire scheduling authority immediately, including paths that defer
+        // process-scope closure to avoid interrupting their own callback.
+        yield* Effect.promise(() => ctx.schedulingBinding?.dispose() ?? Promise.resolve()).pipe(
+          Effect.catchCause(() => Effect.logWarning("Grok scheduling cleanup remains pending.")),
+        );
         const activeTurnId = ctx.activeTurnId ?? ctx.session.activeTurnId;
         if (activeTurnId !== undefined) {
           // The prompt fiber deliberately skips settlement when its owning
@@ -1229,10 +1241,9 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
         if (ctx.notificationFiber) {
           yield* Fiber.interrupt(ctx.notificationFiber);
         }
-        // A replacement session is fully initialized before ownership moves
-        // to it. Closing the prior process afterward must not delete the new
-        // context or publish a stale `session.exited` event that regresses the
-        // projection back to closed.
+        // A replacement session is fully initialized before the old process
+        // retires. Cleanup must delete only its exact context and must not
+        // publish a stale exit while ownership transfers to that replacement.
         if (sessions.get(ctx.threadId) === ctx) {
           sessions.delete(ctx.threadId);
         }
@@ -1316,8 +1327,13 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
           const pendingUserInputs = new Map<ApprovalRequestId, PendingUserInput>();
           const sessionScope = yield* Scope.make("sequential");
           let sessionScopeTransferred = false;
+          let candidateContext: GrokSessionContext | undefined;
           yield* Effect.addFinalizer(() =>
-            sessionScopeTransferred ? Effect.void : Scope.close(sessionScope, Exit.void),
+            sessionScopeTransferred
+              ? Effect.void
+              : candidateContext
+                ? stopSessionInternal(candidateContext, { suppressExitEvent: true })
+                : Scope.close(sessionScope, Exit.void),
           );
 
           const resumeSessionId = resumeCursor?.sessionId;
@@ -1362,7 +1378,32 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             sessionScope,
             credentialIssuer.revoke(mcpCredential.sessionId).pipe(Effect.ignore),
           );
-          const acp = yield* makeGrokAcpRuntime({
+          const schedulingBroker = readSchedulingSessionBroker();
+          const schedulingBinding = schedulingBroker
+            ? yield* Effect.acquireRelease(
+                Effect.tryPromise({
+                  try: () =>
+                    schedulingBroker.bind({
+                      threadId: input.threadId,
+                      providerInstanceId: boundInstanceId,
+                      provider: "grok",
+                    }),
+                  catch: () =>
+                    new ProviderAdapterProcessError({
+                      provider: PROVIDER,
+                      threadId: input.threadId,
+                      detail: "Failed to prepare this session's scheduling tools.",
+                    }),
+                }),
+                (binding) =>
+                  Effect.promise(() => binding.dispose()).pipe(
+                    Effect.catchCause(() =>
+                      Effect.logWarning("Grok scheduling cleanup remains pending."),
+                    ),
+                  ),
+              ).pipe(Effect.provideService(Scope.Scope, sessionScope))
+            : undefined;
+          const acp = yield* (options?.makeRuntime ?? makeGrokAcpRuntime)({
             grokSettings,
             ...(options?.environment ? { environment: options.environment } : {}),
             childProcessSpawner,
@@ -1387,6 +1428,24 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                   },
                 ],
               },
+              // ACP 0.11.3 supplies stdio servers on both session/new and
+              // session/load. Append the independent scheduling catalog while
+              // preserving the existing management MCP and native permissions.
+              // A staged replacement can discover tools but cannot invoke
+              // them until activation transfers the exact generation below.
+              ...(schedulingBinding
+                ? [
+                    {
+                      name: schedulingBinding.name,
+                      command: schedulingBinding.launch.command,
+                      args: [...schedulingBinding.launch.args],
+                      env: Object.entries(schedulingBinding.launch.env).map(([name, value]) => ({
+                        name,
+                        value,
+                      })),
+                    },
+                  ]
+                : []),
             ],
             ...acpNativeLoggers,
           }).pipe(
@@ -1694,6 +1753,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             acp,
             sandboxProfile,
             mcpAuthSessionId: mcpCredential?.sessionId,
+            schedulingBinding,
             notificationFiber: undefined,
             pendingApprovals,
             pendingUserInputs,
@@ -1712,6 +1772,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             lastContextTokens: resumeCursor?.lastContextTokens,
             stopped: false,
           };
+          candidateContext = ctx;
 
           const nf = yield* Stream.runDrain(
             Stream.mapEffect(acp.getEvents(), (event) =>
@@ -1829,11 +1890,21 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
           );
 
           ctx.notificationFiber = nf;
-          sessions.set(input.threadId, ctx);
-          sessionScopeTransferred = true;
           if (existing && !existing.stopped) {
             yield* stopSessionInternal(existing, { replaced: true });
           }
+          if (schedulingBinding) {
+            yield* Effect.tryPromise({
+              try: () => schedulingBinding.activate(),
+              catch: () =>
+                new ProviderAdapterProcessError({
+                  provider: PROVIDER,
+                  threadId: input.threadId,
+                  detail: "Failed to activate this session's scheduling tools.",
+                }),
+            });
+          }
+          sessions.set(input.threadId, ctx);
 
           yield* offerRuntimeEvent({
             type: "session.started",
@@ -1862,6 +1933,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             payload: { providerThreadId: started.sessionId },
           });
 
+          sessionScopeTransferred = true;
           return session;
         }).pipe(Effect.scoped),
       );

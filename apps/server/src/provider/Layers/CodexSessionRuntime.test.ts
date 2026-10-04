@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import * as Toml from "toml";
 
 import { it as effectIt } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
@@ -2288,6 +2289,64 @@ describe("Codex notification emission timestamps", () => {
 });
 
 describe("buildCodexAppServerArgs", () => {
+  it("attaches a required isolated scheduling catalog without changing permissions or other MCPs", () => {
+    const schedulingMcp = {
+      name: "cafe-fixture_generation",
+      launch: {
+        command: 'C:\\Program Files\\Cafe & Code\\Cafe "fixture".exe',
+        args: ["/fixture/bridge ' spaced.mjs", "C:\\private\\connection %literal%.json"],
+        env: { ELECTRON_RUN_AS_NODE: "1", FIXTURE_LITERAL: 'line\nquote"\tDEL\u007f' },
+      },
+    };
+    const args = buildCodexAppServerArgs({
+      schedulingMcp,
+      desktopMcp: { bridgePath: "/fixture/desktop.mjs", connectionPath: null },
+      maxConcurrentSubagents: 4,
+    });
+    const config = args.find((argument) => argument.startsWith("mcp_servers.cafe-fixture_"));
+    assert.ok(config);
+    assert.equal(args[args.indexOf(config) - 1], "-c");
+    // Parse the emitted TOML independently rather than mirroring its quoting.
+    // Shell metacharacters, spaces and host-native separators must be literal
+    // values inside the single structured CLI argument.
+    assert.deepEqual(JSON.parse(JSON.stringify(Toml.parse(config))), {
+      mcp_servers: {
+        [schedulingMcp.name]: {
+          ...schedulingMcp.launch,
+          enabled: true,
+          required: true,
+          startup_timeout_sec: 15,
+          tool_timeout_sec: 60,
+        },
+      },
+    });
+    assert.equal(args.includes("agents.max_concurrent_threads_per_session=4"), true);
+    assert.equal(
+      args.some((argument) => argument.startsWith("mcp_servers.cafe-desktop=")),
+      true,
+    );
+    assert.doesNotMatch(config, /approval|sandbox|bearer|token|threadId|providerInstanceId/u);
+  });
+
+  it("rejects malformed scheduling names and launch values before process creation", () => {
+    const launch = { command: "/fixture/node", args: ["/fixture/bridge.mjs"], env: {} };
+    for (const name of ["", "cafe.other", 'cafe"={enabled=false}', "a".repeat(129)]) {
+      assert.throws(
+        () => buildCodexAppServerArgs({ schedulingMcp: { name, launch } }),
+        /Invalid scheduling MCP server name/u,
+      );
+    }
+    for (const command of ["private\u0000command", "private\ud800command"]) {
+      assert.throws(
+        () =>
+          buildCodexAppServerArgs({
+            schedulingMcp: { name: "cafe-fixture", launch: { ...launch, command } },
+          }),
+        /^TypeError: Invalid scheduling MCP launch value\.$/u,
+      );
+    }
+  });
+
   it("enables Cafe task plans while preserving Codex concurrency defaults when unset", () => {
     assert.deepStrictEqual(buildCodexAppServerArgs({}), [
       "app-server",

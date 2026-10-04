@@ -1,6 +1,9 @@
 import { desktopConnectRouteLayer } from "./virtualDesktop/connect.ts";
 import { desktopMcpRouteLayer } from "./virtualDesktop/http.ts";
 import { DesktopRuntimeLive } from "./virtualDesktop/runtime.ts";
+import { SchedulingSessionRuntimeLive } from "./scheduledFollowups/sessionRuntime.ts";
+import { schedulingMcpRouteLayer } from "./scheduledFollowups/http.ts";
+import { startSchedulingLoopbackServer } from "./scheduledFollowups/loopbackServer.ts";
 import * as NodeHttp from "node:http";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -288,7 +291,7 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   Layer.provideMerge(GitLayerLive),
   Layer.provideMerge(VcsLayerLive),
   Layer.provideMerge(ProviderRuntimeLayerLive),
-  Layer.provideMerge(DesktopRuntimeLive),
+  Layer.provideMerge(Layer.mergeAll(DesktopRuntimeLive, SchedulingSessionRuntimeLive)),
   Layer.provideMerge(PersistenceLayerLive),
   Layer.provideMerge(KeybindingsLive),
   Layer.provideMerge(ProviderRegistryLive),
@@ -363,7 +366,7 @@ export const makeRoutesLayer = Layer.mergeAll(
   brandingSidebarImageUploadRouteLayer,
   clientDebugLogRouteLayer,
   cafeMcpRouteLayer,
-  desktopMcpRouteLayer,
+  Layer.mergeAll(desktopMcpRouteLayer, schedulingMcpRouteLayer),
   desktopConnectRouteLayer,
   orchestrationDispatchRouteLayer,
   orchestrationSnapshotRouteLayer,
@@ -388,6 +391,10 @@ export const makeServerLayer = Layer.unwrap(
       Effect.gen(function* () {
         yield* HttpServer.HttpServer;
         const startup = yield* ServerRuntimeStartup;
+        // Required session MCP must be reachable before queued turns are
+        // released. A specific-interface bind needs its narrow loopback socket
+        // admitted first, not concurrently with provider startup readiness.
+        yield* startSchedulingLoopbackServer;
         yield* startup.markHttpListening;
       }),
     );

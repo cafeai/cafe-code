@@ -33,6 +33,29 @@ async function fixture() {
 }
 
 describe("local MCP bridge", () => {
+  it("requires the scheduling audience and exact endpoint without admitting owner/desktop credentials", async () => {
+    const f = await fixture();
+    await expect(readBridgeConnection(f.connectionPath, "cafe-scheduling")).rejects.toThrow();
+    for (const audience of [undefined, "cafe-code", "cafe-desktop", "cafe-scheduling"]) {
+      await fs.writeFile(
+        f.connectionPath,
+        JSON.stringify({
+          audience,
+          url: "http://127.0.0.1:12345/mcp/scheduling",
+          token: "a".repeat(64),
+        }),
+      );
+      if (audience === "cafe-scheduling") {
+        await expect(
+          readBridgeConnection(f.connectionPath, "cafe-scheduling"),
+        ).resolves.toHaveProperty("token");
+      } else {
+        await expect(readBridgeConnection(f.connectionPath, "cafe-scheduling")).rejects.toThrow();
+      }
+      await expect(readBridgeConnection(f.connectionPath, "cafe-code")).rejects.toThrow();
+      await expect(readBridgeConnection(f.connectionPath, "cafe-desktop")).rejects.toThrow();
+    }
+  });
   it("keeps desktop and Cafe management targets and credential audiences separate", async () => {
     const f = await fixture();
     await expect(readBridgeConnection(f.connectionPath, "cafe-desktop")).rejects.toThrow();

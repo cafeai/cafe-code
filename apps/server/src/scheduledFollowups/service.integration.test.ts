@@ -41,6 +41,7 @@ import { RepositoryIdentityResolverLive } from "../project/Layers/RepositoryIden
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import { makeScheduledFollowups, ScheduledFollowups, ScheduledFollowupsLive } from "./service.ts";
 import { verifyScheduledFollowUpDispatch } from "./authorization.ts";
+import type { SchedulingSessionAuthority } from "./sessionRuntime.ts";
 
 const INITIAL = "2026-10-04T00:00:00.000Z";
 const FIVE_MINUTES = "2026-10-04T00:05:00.000Z";
@@ -261,6 +262,237 @@ async function harness(persistence?: { readonly dbPath: string; readonly baseDir
       run(projections.getThreadShellById(threadId).pipe(Effect.map(Option.getOrThrow))),
   };
 }
+
+/** Synthetic durable grant only: no credential, provider process or user home. */
+async function grant(h: Awaited<ReturnType<typeof harness>>, threadId: ThreadId) {
+  const authority: SchedulingSessionAuthority = {
+    threadId,
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    sessionGeneration: "157f122c-77a1-4976-ab77-57bf3c6b6408",
+    tokenDigest: "a".repeat(64),
+  };
+  await h.run(
+    h.sql`INSERT INTO scheduling_session_runtime(singleton,generation) VALUES (1,'fixture-runtime')`,
+  );
+  await h.run(h.sql`INSERT INTO scheduling_session_capabilities
+    (thread_id,provider_instance_id,provider,session_generation,runtime_generation,active,token_digest)
+    VALUES (${threadId},${authority.providerInstanceId},'codex',${authority.sessionGeneration},'fixture-runtime',1,${authority.tokenDigest})`);
+  return authority;
+}
+
+describe("session scheduling commit-time authority", () => {
+  it("creates only pending proposals and lists/pauses within its bound chat", async () => {
+    const h = await harness();
+    const threadId = await h.createThread("scoped-proposal");
+    const authority = await grant(h, threadId);
+    const saved = await h.run(h.service.save({ ...draft, threadId }, "agent", authority));
+    expect(saved.state).toBe("pending_confirmation");
+    expect(saved.authorizedInstanceId).toBe(authority.providerInstanceId);
+    expect(saved.nextRunAt).toBeNull();
+    expect((await h.run(h.service.list({ threadId }, authority))).schedules).toHaveLength(1);
+    const paused = await h.run(
+      h.service.setStatus(
+        { threadId, id: saved.id, expectedRevision: saved.revision, state: "paused" },
+        authority,
+      ),
+    );
+    expect(paused.state).toBe("paused");
+    await expect(
+      h.run(
+        h.service.setStatus(
+          { threadId, id: paused.id, expectedRevision: paused.revision, state: "active" },
+          authority,
+        ),
+      ),
+    ).rejects.toThrow();
+    await expect(
+      h.run(h.service.save({ ...draft, threadId }, "owner", authority)),
+    ).rejects.toThrow();
+    h.setTime(FIVE_MINUTES);
+    await h.run(h.service.tick);
+    expect((await h.history(saved)).runs).toEqual([]);
+  });
+  it("rejects cross-chat reads, proposals and schedule IDs", async () => {
+    const h = await harness();
+    const threadId = await h.createThread("scoped-owner");
+    const foreign = await h.createThread("scoped-foreign");
+    const authority = await grant(h, threadId);
+    const saved = await h.run(h.service.save({ ...draft, threadId: foreign }));
+    await expect(h.run(h.service.list({ threadId: foreign }, authority))).rejects.toThrow();
+    await expect(
+      h.run(h.service.save({ ...draft, threadId: foreign }, "agent", authority)),
+    ).rejects.toThrow();
+    await expect(
+      h.run(
+        h.service.setStatus(
+          { threadId, id: saved.id, expectedRevision: saved.revision, state: "paused" },
+          authority,
+        ),
+      ),
+    ).rejects.toThrow();
+    expect((await h.read(foreign)).schedules[0]?.state).toBe("active");
+  });
+  it.each(["revoked", "generation", "runtime", "account", "digest"])(
+    "rejects a previously admitted authority after %s changes before mutation",
+    async (change) => {
+      const h = await harness();
+      const threadId = await h.createThread(`scoped-retirement-${change}`);
+      const authority = await grant(h, threadId);
+      const saved = await h.run(h.service.save({ ...draft, threadId }, "agent", authority));
+      if (change === "revoked")
+        await h.run(h.sql`UPDATE scheduling_session_capabilities SET active = 0`);
+      if (change === "generation")
+        await h.run(
+          h.sql`UPDATE scheduling_session_capabilities SET session_generation = 'other-generation'`,
+        );
+      if (change === "runtime")
+        await h.run(h.sql`UPDATE scheduling_session_runtime SET generation = 'restarted-runtime'`);
+      if (change === "account")
+        await h.run(
+          h.sql`UPDATE projection_threads SET model_selection_json = ${JSON.stringify({ instanceId: "grok", model: "test-model" })} WHERE thread_id = ${threadId}`,
+        );
+      if (change === "digest")
+        await h.run(
+          h.sql`UPDATE scheduling_session_capabilities SET token_digest = ${"b".repeat(64)}`,
+        );
+      await expect(h.run(h.service.list({ threadId }, authority))).rejects.toThrow();
+      await expect(
+        h.run(h.service.save({ ...draft, threadId }, "agent", authority)),
+      ).rejects.toThrow();
+      await expect(
+        h.run(
+          h.service.setStatus(
+            { threadId, id: saved.id, expectedRevision: saved.revision, state: "paused" },
+            authority,
+          ),
+        ),
+      ).rejects.toThrow();
+      expect((await h.read(threadId)).schedules).toHaveLength(1);
+    },
+  );
+  it.each(["active", "paused", "pending_confirmation"] as const)(
+    "keeps %s schedules review-gated after switching accounts away and back without a tick",
+    async (state) => {
+      const h = await harness();
+      const threadId = await h.createThread(`account-roundtrip-${state}`);
+      const authority = await grant(h, threadId);
+      let saved = await h.run(
+        h.service.save(
+          { ...draft, threadId },
+          state === "pending_confirmation" ? "agent" : "owner",
+        ),
+      );
+      if (state === "paused")
+        saved = await h.run(
+          h.service.setStatus({
+            threadId,
+            id: saved.id,
+            expectedRevision: saved.revision,
+            state: "paused",
+          }),
+        );
+      for (const instanceId of ["grok", "codex"])
+        await h.run(
+          h.engine.dispatch({
+            type: "thread.meta.update",
+            commandId: CommandId.make(`switch:${state}:${instanceId}`),
+            threadId,
+            modelSelection: {
+              instanceId: ProviderInstanceId.make(instanceId),
+              model: "test-model",
+            },
+          }),
+        );
+      const changed = (await h.read(threadId)).schedules[0]!;
+      expect(changed.state).toBe("needs_attention");
+      expect(changed.revision).toBe(saved.revision + 2);
+      expect(changed.nextRunAt).toBeNull();
+      await expect(h.run(h.service.list({ threadId }, authority))).rejects.toThrow();
+      await expect(
+        h.run(
+          h.service.setStatus({
+            threadId,
+            id: saved.id,
+            expectedRevision: saved.revision,
+            state: "active",
+          }),
+        ),
+      ).rejects.toThrow();
+      h.setTime(FIVE_MINUTES);
+      await h.run(h.service.tick);
+      expect((await h.history(saved)).runs).toEqual([]);
+      const approved = await h.run(
+        h.service.save({ ...draft, threadId, id: changed.id, expectedRevision: changed.revision }),
+      );
+      expect(approved.state).toBe("active");
+      expect(approved.authorizedInstanceId).toBe("codex");
+    },
+  );
+  it("does not invalidate approval for a model-only change within the same account", async () => {
+    const h = await harness();
+    const threadId = await h.createThread("same-account-model");
+    const saved = await h.run(h.service.save({ ...draft, threadId }));
+    await h.run(
+      h.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("switch:model-only"),
+        threadId,
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "test-override" },
+      }),
+    );
+    expect((await h.read(threadId)).schedules[0]?.revision).toBe(saved.revision);
+    expect((await h.read(threadId)).schedules[0]?.state).toBe("active");
+  });
+  it("rejects a new owner schedule when the reviewed paying account no longer matches", async () => {
+    const h = await harness();
+    const threadId = await h.createThread("reviewed-account");
+    await expect(
+      h.run(
+        h.service.save({ ...draft, threadId, expectedInstanceId: ProviderInstanceId.make("grok") }),
+      ),
+    ).rejects.toThrow();
+    expect((await h.read(threadId)).schedules).toEqual([]);
+    const saved = await h.run(
+      h.service.save({ ...draft, threadId, expectedInstanceId: ProviderInstanceId.make("codex") }),
+    );
+    expect(saved.authorizedInstanceId).toBe("codex");
+    const paused = await h.run(
+      h.service.setStatus({
+        threadId,
+        id: saved.id,
+        expectedRevision: saved.revision,
+        state: "paused",
+      }),
+    );
+    await expect(
+      h.run(
+        h.service.setStatus({
+          threadId,
+          id: saved.id,
+          expectedRevision: paused.revision,
+          state: "active",
+          expectedInstanceId: ProviderInstanceId.make("grok"),
+        }),
+      ),
+    ).rejects.toThrow();
+    expect((await h.read(threadId)).schedules[0]?.state).toBe("paused");
+  });
+  it("requires renewed execution approval after permission changes but keeps proposal tools connected", async () => {
+    const h = await harness();
+    const threadId = await h.createThread("permission-review");
+    const authority = await grant(h, threadId);
+    const saved = await h.run(h.service.save({ ...draft, threadId }));
+    await h.run(
+      h.sql`UPDATE projection_threads SET runtime_mode = 'full-access' WHERE thread_id = ${threadId}`,
+    );
+    const current = (await h.run(h.service.list({ threadId }, authority))).schedules[0]!;
+    expect(current.state).toBe("needs_attention");
+    expect(current.revision).toBe(saved.revision + 1);
+    const proposal = await h.run(h.service.save({ ...draft, threadId }, "agent", authority));
+    expect(proposal.state).toBe("pending_confirmation");
+    expect(proposal.permissionCeiling).toBe("full-access");
+  });
+});
 
 function footer(
   occurrence: ScheduledFollowupRun,

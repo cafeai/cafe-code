@@ -102,6 +102,10 @@ import * as Stream from "effect/Stream";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import {
+  readSchedulingSessionBroker,
+  type SchedulingSessionBinding,
+} from "../../scheduledFollowups/sessionRuntime.ts";
 import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
 import { makeProviderSessionTitle } from "../providerSessionTitle.ts";
 import { awaitClaudeDecision } from "../claudeDecision.ts";
@@ -494,6 +498,8 @@ interface ClaudeSessionContext {
   rewindRetirementUncertain: boolean;
   readonly promptQueue: Queue.Queue<PromptQueueItem>;
   readonly query: ClaudeQueryRuntime;
+  /** Exact query-owned scheduling authority; never shared with a resumed query. */
+  readonly schedulingBinding: SchedulingSessionBinding | undefined;
   readonly runFork: RuntimeFork;
   streamFiber: Fiber.Fiber<void, Error> | undefined;
   readonly startedAt: string;
@@ -7157,6 +7163,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // Keep the ownership fence until that exact query is proven closed.
     context.queryClosureUncertain = options?.queryAlreadyClosed !== true;
 
+    // Revoke before any asynchronous provider teardown. Even an uncertain
+    // native close must not leave a stopped query able to schedule new work.
+    yield* Effect.promise(() => context.schedulingBinding?.dispose() ?? Promise.resolve()).pipe(
+      Effect.catchCause(() => Effect.logWarning("Claude scheduling cleanup remains pending.")),
+    );
+
     for (const [requestId, pending] of context.pendingApprovals) {
       yield* Deferred.succeed(pending.decision, "cancel");
       const stamp = yield* makeEventStamp();
@@ -7283,8 +7295,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     return Effect.succeed(context);
   };
 
-  const startSession: ClaudeAdapterShape["startSession"] = Effect.fn("startSession")(
-    function* (input) {
+  const startSession: ClaudeAdapterShape["startSession"] = Effect.fn("startSession")((input) => {
+    let schedulingBinding: SchedulingSessionBinding | undefined;
+    let startedQuery: ClaudeQueryRuntime | undefined;
+    let startedContext: ClaudeSessionContext | undefined;
+    let sessionTransferred = false;
+    return Effect.gen(function* () {
       if (input.provider !== undefined && input.provider !== PROVIDER) {
         return yield* new ProviderAdapterValidationError({
           provider: PROVIDER,
@@ -7935,12 +7951,56 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           : { status: "unavailable" }
         : undefined;
 
+      const schedulingBroker = readSchedulingSessionBroker();
+      if (schedulingBroker) {
+        // Install cleanup ownership before restoring interruption. The prior
+        // query has already retired above, so this generation may become
+        // active before the SDK starts consuming its streaming prompt queue.
+        yield* Effect.uninterruptible(
+          Effect.tryPromise({
+            try: async () => {
+              schedulingBinding = await schedulingBroker.bind({
+                threadId,
+                providerInstanceId: boundInstanceId,
+                provider: "claudeAgent",
+              });
+              await schedulingBinding.activate();
+            },
+            catch: () =>
+              new ProviderAdapterProcessError({
+                provider: PROVIDER,
+                threadId,
+                detail: "Failed to prepare this session's scheduling tools.",
+              }),
+          }),
+        );
+      }
+
       const queryOptions: ClaudeQueryOptions = {
         ...(input.cwd ? { cwd: input.cwd } : {}),
         ...(apiModelId ? { model: apiModelId } : {}),
         pathToClaudeCodeExecutable: claudeBinaryPath,
         systemPrompt: { type: "preset", preset: "claude_code" },
         settingSources: [...CLAUDE_SETTING_SOURCES],
+        // SDK 0.3.288 supports per-query stdio MCP configuration. Leave
+        // strictMcpConfig and permission allowlists unset: user/project MCP
+        // sources and the existing permission callback remain authoritative.
+        // alwaysLoad makes this small built-in catalog discoverable on the
+        // first turn without granting permission to invoke any of its tools.
+        // https://code.claude.com/docs/en/agent-sdk/mcp
+        ...(schedulingBinding
+          ? {
+              mcpServers: {
+                [schedulingBinding.name]: {
+                  type: "stdio" as const,
+                  command: schedulingBinding.launch.command,
+                  args: [...schedulingBinding.launch.args],
+                  env: { ...schedulingBinding.launch.env },
+                  alwaysLoad: true,
+                },
+              },
+            }
+          : {}),
         // The SDK type can lag the CLI here: current Claude Code exposes
         // `xhigh`, but older published Agent SDK unions may not include it yet.
         ...(effectiveEffort
@@ -8059,11 +8119,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
 
       const queryRuntime = yield* Effect.try({
-        try: () =>
-          createQuery({
+        try: () => {
+          startedQuery = createQuery({
             prompt,
             options: queryOptions,
-          }),
+          });
+          return startedQuery;
+        },
         catch: (cause) =>
           new ProviderAdapterProcessError({
             provider: PROVIDER,
@@ -8114,6 +8176,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         rewindRetirementUncertain: false,
         promptQueue,
         query: queryRuntime,
+        schedulingBinding,
         runFork,
         streamFiber: undefined,
         startedAt,
@@ -8154,6 +8217,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         authFailureSeen: false,
         stopped: false,
       };
+      startedContext = context;
       yield* Ref.set(contextRef, context);
       sessions.set(threadId, context);
 
@@ -8226,11 +8290,34 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         }
       });
 
+      sessionTransferred = true;
       return {
         ...session,
       };
-    },
-  );
+    }).pipe(
+      Effect.onExit(() => {
+        if (sessionTransferred) return Effect.void;
+        // Unlike the ACP adapters, Claude's query is not owned by a child
+        // Effect scope. Cover both synchronous SDK launch failures and
+        // cancellation during publication before ownership is transferred.
+        return Effect.gen(function* () {
+          yield* Effect.promise(() => schedulingBinding?.dispose() ?? Promise.resolve()).pipe(
+            Effect.catchCause(() =>
+              Effect.logWarning("Claude scheduling cleanup remains pending."),
+            ),
+          );
+          if (startedContext) {
+            yield* stopSessionInternal(startedContext, { emitExitEvent: false });
+          } else if (startedQuery) {
+            yield* Effect.try({
+              try: () => startedQuery?.close(),
+              catch: () => new Error("Claude startup cleanup failed."),
+            }).pipe(Effect.ignore);
+          }
+        });
+      }),
+    );
+  });
 
   const forkProviderSession: NonNullable<ClaudeAdapterShape["forkSession"]> = Effect.fn(
     "forkSession",

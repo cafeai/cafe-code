@@ -3,6 +3,10 @@ import {
   type DesktopSessionBinding,
 } from "../../virtualDesktop/sessionBroker.ts";
 import { preflightDesktopMcp } from "../../virtualDesktop/codexConfiguration.ts";
+import {
+  readSchedulingSessionBroker,
+  type SchedulingSessionBinding,
+} from "../../scheduledFollowups/sessionRuntime.ts";
 import { readDesktopObservationItem } from "@cafecode/shared/desktopObservation";
 // @effect-diagnostics nodeBuiltinImport:off
 /**
@@ -149,6 +153,16 @@ const CODEX_AUTH_RECOVERY_TASK_ID_HASH_PREFIX = "codex-auth-recovery-sha256:";
 const CODEX_AUTH_RECOVERY_TASK_ID_HASH_DOMAIN = "cafecode/codex-auth-recovery-task/v1";
 const CODEX_ACTIVE_AUTH_RECOVERY_TASK_LIMIT = 4_096;
 
+function disposeSchedulingSession(binding: SchedulingSessionBinding | undefined) {
+  if (!binding) return Effect.void;
+  // dispose revokes in-memory authority synchronously before private-file/SQL
+  // cleanup. A cleanup failure must still let the exact native runtime retire,
+  // and it must never disclose the broker's connection path or capability.
+  return Effect.tryPromise({ try: () => binding.dispose(), catch: () => null }).pipe(
+    Effect.catch(() => Effect.logWarning("codex.scheduling-session.cleanup-failed")),
+  );
+}
+
 function codexServiceTierOverride(
   modelSelection: ProviderSendTurnInput["modelSelection"],
   instanceId: ProviderInstanceId,
@@ -197,6 +211,7 @@ export interface CodexAdapterLiveOptions {
 interface CodexAdapterSessionContext {
   readonly startInput: Parameters<CodexAdapterShape["startSession"]>[0];
   readonly desktopBinding?: DesktopSessionBinding | undefined;
+  readonly schedulingBinding?: SchedulingSessionBinding | undefined;
   readonly threadId: ThreadId;
   readonly scope: Scope.Closeable;
   readonly runtime: CodexSessionRuntimeShape;
@@ -4611,6 +4626,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     }
 
     session.stopped = true;
+    // Revoke this runtime's exact authority before retiring the native process.
+    // A delayed bridge request must never inherit a replacement's generation.
+    yield* disposeSchedulingSession(session.schedulingBinding);
     sessions.delete(threadId);
     manualCompactions.delete(threadId);
     yield* Effect.logWarning(diagnosticName, {
@@ -4716,6 +4734,39 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                   "Codex Desktop Control configuration could not be verified. Remove any existing cafe-desktop registration and check the CLI.",
               }),
           });
+        let sessionScopeTransferred = false;
+        const sessionScope = yield* Effect.acquireRelease(Scope.make("sequential"), (scope) =>
+          sessionScopeTransferred ? Effect.void : Scope.close(scope, Exit.void),
+        );
+        if (desktopBinding)
+          yield* Scope.addFinalizer(
+            sessionScope,
+            Effect.promise(() => desktopBinding.dispose()),
+          );
+        const schedulingBroker = readSchedulingSessionBroker();
+        // acquireRelease registers revocation atomically with successful bind.
+        // The broker creates private files asynchronously: interrupting an
+        // ordinary tryPromise between publication and finalizer registration
+        // would leave that late capability live after abandoned startup.
+        const schedulingBinding = schedulingBroker
+          ? yield* Effect.acquireRelease(
+              Effect.tryPromise({
+                try: () =>
+                  schedulingBroker.bind({
+                    threadId: input.threadId,
+                    providerInstanceId: boundInstanceId,
+                    provider: "codex",
+                  }),
+                catch: () =>
+                  new ProviderAdapterProcessError({
+                    provider: PROVIDER,
+                    threadId: input.threadId,
+                    detail: "Could not attach scheduling tools to this conversation.",
+                  }),
+              }),
+              disposeSchedulingSession,
+            ).pipe(Effect.provideService(Scope.Scope, sessionScope))
+          : undefined;
         const currentTransportPolicy = toRuntimeTransportPolicy(yield* Ref.get(transportPolicyRef));
         const runtimeInput: CodexSessionRuntimeOptions = {
           ...(desktopBinding
@@ -4725,6 +4776,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                   connectionPath: desktopBinding.connectionPath,
                 },
               }
+            : {}),
+          ...(schedulingBinding
+            ? { schedulingMcp: { name: schedulingBinding.name, launch: schedulingBinding.launch } }
             : {}),
           threadId: input.threadId,
           providerInstanceId: boundInstanceId,
@@ -4756,16 +4810,6 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ? { transportPolicy: currentTransportPolicy }
             : {}),
         };
-        const sessionScope = yield* Scope.make("sequential");
-        if (desktopBinding)
-          yield* Scope.addFinalizer(
-            sessionScope,
-            Effect.promise(() => desktopBinding.dispose()),
-          );
-        let sessionScopeTransferred = false;
-        yield* Effect.addFinalizer(() =>
-          sessionScopeTransferred ? Effect.void : Scope.close(sessionScope, Exit.void),
-        );
         const createRuntime = options?.makeRuntime ?? makeCodexSessionRuntime;
         const { runtime, eventFiber, started, activeAuthRecoveryTasksById } = yield* Effect.gen(
           function* () {
@@ -4999,6 +5043,21 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               ),
             );
 
+            // Initialization may discover the pending catalog, but scheduling
+            // mutations remain denied until the exact native session starts.
+            // Activation failure follows the same owned-runtime cleanup path;
+            // neither it nor binding changes alter the native resume cursor.
+            if (schedulingBinding)
+              yield* Effect.tryPromise({
+                try: () => schedulingBinding.activate(),
+                catch: () =>
+                  new ProviderAdapterProcessError({
+                    provider: PROVIDER,
+                    threadId: input.threadId,
+                    detail: "Could not activate scheduling tools for this conversation.",
+                  }),
+              });
+
             return { runtime, eventFiber, started, activeAuthRecoveryTasksById };
           },
         ).pipe(
@@ -5038,6 +5097,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         sessions.set(input.threadId, {
           startInput: input,
           desktopBinding,
+          schedulingBinding,
           threadId: input.threadId,
           scope: sessionScope,
           runtime,
@@ -5669,6 +5729,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     // projected. Its queue is adapter-owned, so closing the session scope does
     // not discard the resulting canonical task terminals.
     session.stopped = true;
+    yield* disposeSchedulingSession(session.schedulingBinding);
     if (session.desktopBinding) yield* Effect.promise(() => session.desktopBinding!.dispose());
     sessions.delete(session.threadId);
     manualCompactions.delete(session.threadId);

@@ -103,10 +103,24 @@ export function McpSettings() {
         <h1 className="text-lg font-semibold tracking-tight">MCP</h1>
         <p className="text-sm text-muted-foreground">Connect your agents to Cafe Code's tools.</p>
       </div>
+      <SettingsSection title="Chat scheduling · built in" icon={<PlugIcon className="size-3.5" />}>
+        <div className="space-y-2 px-5 py-3.5 text-sm text-muted-foreground">
+          <p>
+            Ask Codex, Claude or Grok to schedule a follow-up in a Cafe chat. Cafe connects the
+            scheduling tools automatically for that chat and account, including separate account
+            profiles. No installation is needed.
+          </p>
+          <p className="text-xs">
+            Review the proposal and the account that will run and pay for it in Tasks, then choose
+            Approve &amp; enable. Changing accounts requires another review. These chat-only tools
+            are separate from the management access below.
+          </p>
+        </div>
+      </SettingsSection>
       <SettingsSection title="Cafe Code MCP" icon={<PlugIcon className="size-3.5" />}>
         <SettingsRow
           title="Enable Cafe Code MCP"
-          description="Let connected agents manage Cafe projects, conversations, providers, and settings. Cafe adds no approval prompts."
+          description="Let connected agents manage Cafe projects, conversations, providers, and settings without additional Cafe approval prompts. Scheduled follow-ups still need approval in Tasks."
           status={
             settings.mcpEnabled
               ? "On · authenticated connections only"
@@ -123,11 +137,12 @@ export function McpSettings() {
         />
         <div className="border-t border-border/60 px-5 py-3 text-xs text-muted-foreground">
           Turning Cafe Code MCP off stops new requests to its management tools, including from
-          providers running inside Cafe. Work already started can finish.
+          providers running inside Cafe. Built-in chat scheduling remains available. Work already
+          started can finish.
         </div>
       </SettingsSection>
       <SettingsSection
-        title="Install Cafe Code MCP for your agents"
+        title="Connect external agents and management tools"
         headerAction={
           <Button
             variant="ghost"
@@ -143,7 +158,8 @@ export function McpSettings() {
         <div className="px-5 py-3.5 text-xs text-muted-foreground">
           Install Cafe's project, conversation, provider, and settings tools for your default user
           profile. Cafe Code must be running to use them. Custom provider homes keep their separate
-          MCP setup. Each agent keeps its own permission settings.
+          MCP setup. Each agent keeps its own permission settings. This installer is not needed for
+          scheduling inside Cafe.
         </div>
         {status.isPending ? (
           <p role="status" className="px-5 pb-4 text-sm text-muted-foreground">

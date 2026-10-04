@@ -203,6 +203,57 @@ describe("scheduled follow-ups Tasks UI", () => {
     }
   });
 
+  it("opens review for a paused schedule under the current account instead of resuming its old account", async () => {
+    const previousAccount = ProviderInstanceId.make("previous-schedule-account");
+    const record = makeSchedule(1, {
+      state: "paused",
+      authorizedInstanceId: previousAccount,
+      modelSelection: { instanceId: previousAccount, model: "gpt-6.1-sol" },
+    });
+    const api = installApi([record]);
+    const screen = await render(<ScheduledFollowups context={context} />);
+    try {
+      await expect
+        .element(page.getByText("Account changed; review before enabling", { exact: false }))
+        .toBeVisible();
+      await expect
+        .element(page.getByRole("button", { name: "Resume", exact: true }))
+        .not.toBeInTheDocument();
+      await page.getByRole("button", { name: "Edit", exact: true }).click();
+      await expect
+        .element(page.getByRole("form", { name: "Scheduled follow-up editor" }))
+        .toBeVisible();
+      expect(api.save).not.toHaveBeenCalled();
+      expect(api.setStatus).not.toHaveBeenCalled();
+      expect(api.runNow).not.toHaveBeenCalled();
+      await page.getByText("Model and run settings", { exact: true }).click();
+      await expect
+        .element(
+          page.getByText(
+            "Account: Personal Codex. This account will execute and pay for these follow-ups. Scheduling never changes accounts or expands permissions; an account change requires reviewing and enabling the schedule again.",
+            { exact: true },
+          ),
+        )
+        .toBeVisible();
+      expect(
+        page.getByRole("form", { name: "Scheduled follow-up editor" }).element().textContent,
+      ).not.toContain(previousAccount);
+      await page.getByRole("button", { name: "Save changes", exact: true }).click();
+      await vi.waitFor(() => expect(api.save).toHaveBeenCalledTimes(1));
+      expect(api.save.mock.calls[0]?.[0]).toMatchObject({
+        threadId,
+        id: record.id,
+        expectedRevision: record.revision,
+        expectedInstanceId: instanceId,
+        modelSelection: { instanceId, model: "gpt-6.1-sol" },
+      });
+      expect(api.setStatus).not.toHaveBeenCalled();
+      expect(api.runNow).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("keeps schedules independent of an empty checklist and uses the existing theme", async () => {
     installApi([makeSchedule()]);
     document.documentElement.style.setProperty("--primary", "#dc2626");
@@ -277,6 +328,7 @@ describe("scheduled follow-ups Tasks UI", () => {
       await vi.waitFor(() => expect(api.save).toHaveBeenCalledTimes(1));
       expect(api.save.mock.calls[0]?.[0]).toMatchObject({
         threadId,
+        expectedInstanceId: instanceId,
         name: "Watch the build",
         recurrence: {
           kind: "calendar",
@@ -368,6 +420,17 @@ describe("scheduled follow-ups Tasks UI", () => {
     const screen = await render(<ScheduledFollowups context={context} />);
     try {
       await expect.element(page.getByText("Needs your approval", { exact: true })).toBeVisible();
+      await expect
+        .element(
+          page.getByText(
+            "Proposed by an agent. Review the instructions and the account that will run and pay for these follow-ups before enabling them.",
+            { exact: true },
+          ),
+        )
+        .toBeVisible();
+      await expect
+        .element(page.getByText("Account: Personal Codex", { exact: true }))
+        .toBeVisible();
       expect(api.save).not.toHaveBeenCalled();
       expect(api.setStatus).not.toHaveBeenCalled();
       await expect
@@ -377,9 +440,26 @@ describe("scheduled follow-ups Tasks UI", () => {
       await expect
         .element(page.getByLabelText("Instructions", { exact: true }))
         .toHaveValue("Check the synthetic build. Report changes only.");
+      await page.getByText("Model and run settings", { exact: true }).click();
+      await expect
+        .element(
+          page.getByText(
+            "Account: Personal Codex. This account will execute and pay for these follow-ups.",
+            { exact: false },
+          ),
+        )
+        .toBeVisible();
+      expect(api.save).not.toHaveBeenCalled();
+      expect(api.setStatus).not.toHaveBeenCalled();
       await page.getByRole("button", { name: "Approve & enable" }).click();
       await vi.waitFor(() => expect(api.save).toHaveBeenCalledTimes(1));
       expect(api.save.mock.calls[0]?.[0].expectedRevision).toBe(3);
+      expect(api.save.mock.calls[0]?.[0]).toMatchObject({
+        threadId,
+        expectedInstanceId: instanceId,
+        modelSelection: null,
+      });
+      expect(api.setStatus).not.toHaveBeenCalled();
     } finally {
       await screen.unmount();
     }
@@ -407,6 +487,7 @@ describe("scheduled follow-ups Tasks UI", () => {
       await vi.waitFor(() =>
         expect(api.setStatus).toHaveBeenCalledExactlyOnceWith({
           threadId,
+          expectedInstanceId: instanceId,
           id: record.id,
           expectedRevision: 3,
           state: "paused",
@@ -421,6 +502,7 @@ describe("scheduled follow-ups Tasks UI", () => {
         .toBeVisible();
       await page.getByRole("button", { name: "Resume", exact: true }).click();
       expect(api.setStatus.mock.calls[1]?.[0]).toMatchObject({
+        expectedInstanceId: instanceId,
         expectedRevision: 4,
         state: "active",
       });
@@ -479,6 +561,7 @@ describe("scheduled follow-ups Tasks UI", () => {
       await vi.waitFor(() =>
         expect(api.setStatus).toHaveBeenCalledExactlyOnceWith({
           threadId,
+          expectedInstanceId: instanceId,
           id: record.id,
           expectedRevision: record.revision,
           state: "deleted",
@@ -680,6 +763,7 @@ describe("scheduled follow-ups Tasks UI", () => {
       await page.getByRole("button", { name: "Create follow-up" }).click();
       await vi.waitFor(() => expect(api.save).toHaveBeenCalledTimes(1));
       expect(api.save.mock.calls[0]?.[0].modelSelection).toEqual({ instanceId: account, model });
+      expect(api.save.mock.calls[0]?.[0].expectedInstanceId).toBe(account);
       expect(api.save.mock.calls[0]?.[0]).not.toHaveProperty("runtimeMode");
     } finally {
       await screen.unmount();

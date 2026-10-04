@@ -18,6 +18,7 @@ import { expect, it } from "vitest";
 it.skipIf(process.env.CAFE_CODE_MCP_BRIDGE_E2E !== "1").each([
   { audience: "cafe-code", endpoint: "/mcp", entry: "mcp-bridge.mjs" },
   { audience: "cafe-desktop", endpoint: "/mcp/desktop", entry: "desktop-mcp-bridge.mjs" },
+  { audience: "cafe-scheduling", endpoint: "/mcp/scheduling", entry: "scheduling-mcp-bridge.mjs" },
 ])(
   "runs the isolated $audience bridge through Cafe's Electron runtime",
   async ({ audience, endpoint, entry }) => {

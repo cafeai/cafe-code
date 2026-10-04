@@ -1,4 +1,5 @@
 import { DesktopRuntimeLive } from "../virtualDesktop/runtime.ts";
+import { SchedulingSessionRuntimeLive } from "../scheduledFollowups/sessionRuntime.ts";
 import { FetchHttpClient } from "effect/unstable/http";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -66,6 +67,7 @@ export const ProviderDaemonRuntimeLive = Layer.unwrap(
       : RemoteSupervisorProviderRuntimeLayerLive;
   }),
 ).pipe(
+  Layer.provideMerge(SchedulingSessionRuntimeLive),
   Layer.provideMerge(DesktopRuntimeLive),
   Layer.provideMerge(PersistenceLayerLive),
   Layer.provideMerge(ServerSettingsLive),

@@ -1748,11 +1748,19 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const manifestResponse = yield* Effect.promise(() =>
         fetch(`${serverUrl}/manifest.webmanifest`),
       );
+      const serviceWorkerBody = yield* Effect.promise(() => serviceWorkerResponse.text());
+      const manifestBody = yield* Effect.promise(() => manifestResponse.text());
 
-      assert.equal(serviceWorkerResponse.status, 200);
+      assert.equal(serviceWorkerResponse.status, 200, serviceWorkerBody);
+      assert.equal(serviceWorkerBody, "self.addEventListener('fetch', () => {});");
       assert.equal(serviceWorkerResponse.headers.get("cache-control"), "no-cache");
       assert.include(serviceWorkerResponse.headers.get("content-type") ?? "", "javascript");
-      assert.equal(manifestResponse.status, 200);
+      assert.equal(manifestResponse.status, 200, manifestBody);
+      assert.deepEqual(JSON.parse(manifestBody), {
+        name: "Cafe Code",
+        start_url: "/",
+        display: "standalone",
+      });
       assert.equal(manifestResponse.headers.get("cache-control"), "no-cache");
       assert.include(manifestResponse.headers.get("content-type") ?? "", "manifest+json");
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),

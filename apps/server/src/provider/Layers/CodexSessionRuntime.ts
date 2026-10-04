@@ -3,6 +3,7 @@ import {
   desktopMcpOverride,
   type DesktopMcpLaunch,
 } from "../../virtualDesktop/codexConfiguration.ts";
+import type { SchedulingSessionBinding } from "../../scheduledFollowups/sessionRuntime.ts";
 import {
   ApprovalRequestId,
   CODEX_MAX_CONCURRENT_SUBAGENTS,
@@ -294,8 +295,44 @@ export interface CodexTransportPolicy {
 
 export interface CodexAppServerLaunchOptions {
   readonly desktopMcp?: DesktopMcpLaunch | undefined;
+  readonly schedulingMcp?: Pick<SchedulingSessionBinding, "name" | "launch"> | undefined;
   readonly maxConcurrentSubagents?: number | undefined;
   readonly transportPolicy?: CodexTransportPolicy | undefined;
+}
+
+function quoteSchedulingMcpToml(value: string): string {
+  // JSON and TOML basic-string escaping agree for the broker's scalar values,
+  // except that TOML also prohibits a literal DEL. Reject malformed Unicode
+  // and NUL before process creation; never include rejected values in errors.
+  if (!value.isWellFormed() || value.includes("\u0000")) {
+    throw new TypeError("Invalid scheduling MCP launch value.");
+  }
+  return JSON.stringify(value).replace(/\u007f/gu, "\\u007f");
+}
+
+/**
+ * Codex's `-c` values are TOML, with recursively merged tables. The broker
+ * allocates an unpredictable name for each session generation so an inherited
+ * user/project HTTP transport cannot merge into this stdio definition. Only
+ * the broker's private connection-file path crosses argv; its capability stays
+ * in that file. Preserve the user's MCP/provider approval policy by omitting
+ * every approval override here.
+ *
+ * `required` waits for this small catalog before the first turn instead of
+ * racing Codex's optional one-second MCP startup grace. This is the documented
+ * process-level MCP configuration, not a thread/start or thread/resume field:
+ * https://learn.chatgpt.com/docs/extend/mcp
+ * https://learn.chatgpt.com/docs/config-file/config-advanced
+ */
+function schedulingMcpOverride(binding: NonNullable<CodexAppServerLaunchOptions["schedulingMcp"]>) {
+  if (!/^[A-Za-z0-9_-]{1,128}$/u.test(binding.name)) {
+    throw new TypeError("Invalid scheduling MCP server name.");
+  }
+  const { command, args, env } = binding.launch;
+  const environment = Object.entries(env)
+    .map(([key, value]) => `${quoteSchedulingMcpToml(key)}=${quoteSchedulingMcpToml(value)}`)
+    .join(",");
+  return `mcp_servers.${binding.name}={command=${quoteSchedulingMcpToml(command)},args=[${args.map(quoteSchedulingMcpToml).join(",")}],env={${environment}},enabled=true,required=true,startup_timeout_sec=15,tool_timeout_sec=60}`;
 }
 
 export function buildCodexAppServerArgs(
@@ -347,6 +384,7 @@ export function buildCodexAppServerArgs(
     CODEX_UPDATE_PLAN_CONFIG_OVERRIDE,
     ...concurrencyArgs,
     ...(options.desktopMcp ? ["-c", desktopMcpOverride(options.desktopMcp)] : []),
+    ...(options.schedulingMcp ? ["-c", schedulingMcpOverride(options.schedulingMcp)] : []),
   ] as const;
 
   if (options.transportPolicy?.responsesWebsockets !== "disabled") {
@@ -377,6 +415,7 @@ export function buildCodexAppServerArgs(
 
 export interface CodexSessionRuntimeOptions {
   readonly desktopMcp?: DesktopMcpLaunch | undefined;
+  readonly schedulingMcp?: Pick<SchedulingSessionBinding, "name" | "launch"> | undefined;
   readonly threadId: ThreadId;
   readonly providerInstanceId?: ProviderInstanceId;
   readonly binaryPath: string;
@@ -5321,6 +5360,7 @@ export const makeCodexSessionRuntime = (
     };
     const appServerArgs = buildCodexAppServerArgs({
       desktopMcp: options.desktopMcp,
+      schedulingMcp: options.schedulingMcp,
       maxConcurrentSubagents: options.maxConcurrentSubagents,
       transportPolicy: options.transportPolicy,
     });

@@ -122,6 +122,62 @@ describe("MCP settings", () => {
     else delete window.desktopBridge;
   });
 
+  it.each(["disabled", "unavailable"] as const)(
+    "keeps automatic chat/account scheduling visible when management MCP is %s",
+    async (managementState) => {
+      harness.settings = { ...DEFAULT_SERVER_SETTINGS, mcpEnabled: false };
+      if (managementState === "unavailable") {
+        harness.getStatus.mockRejectedValue(new Error("private-management-diagnostic"));
+      } else {
+        harness.getStatus.mockResolvedValue({ ...status, enabled: false });
+      }
+      mounted = await mount();
+      await expect
+        .element(page.getByRole("heading", { name: "Chat scheduling · built in", exact: true }))
+        .toBeVisible();
+      await expect
+        .element(
+          page.getByText(
+            "Ask Codex, Claude or Grok to schedule a follow-up in a Cafe chat. Cafe connects the scheduling tools automatically for that chat and account, including separate account profiles. No installation is needed.",
+            { exact: true },
+          ),
+        )
+        .toBeVisible();
+      await expect
+        .element(
+          page.getByText(
+            "Review the proposal and the account that will run and pay for it in Tasks, then choose Approve & enable. Changing accounts requires another review. These chat-only tools are separate from the management access below.",
+            { exact: true },
+          ),
+        )
+        .toBeVisible();
+      await expect
+        .element(page.getByText("Built-in chat scheduling remains available.", { exact: false }))
+        .toBeVisible();
+      await expect
+        .element(
+          page.getByText("This installer is not needed for scheduling inside Cafe.", {
+            exact: false,
+          }),
+        )
+        .toBeVisible();
+      await expect
+        .element(page.getByRole("switch", { name: "Enable Cafe Code MCP" }))
+        .not.toBeChecked();
+      if (managementState === "unavailable") {
+        await expect
+          .element(page.getByRole("alert"))
+          .toHaveTextContent("Could not load MCP status. Try refreshing.");
+        await expect
+          .element(page.getByRole("switch", { name: "Enable Cafe Code MCP" }))
+          .toBeDisabled();
+        expect(document.body.textContent).not.toContain("private-management-diagnostic");
+      }
+      expect(harness.updateClient).not.toHaveBeenCalled();
+      expect(harness.updateSettings).not.toHaveBeenCalled();
+    },
+  );
+
   it("installs, shows backend-confirmed status, and removes a registration", async () => {
     mounted = await mount();
     await page.getByRole("button", { name: "Install Cafe MCP for Codex", exact: true }).click();
@@ -156,6 +212,9 @@ describe("MCP settings", () => {
     await expect
       .element(page.getByRole("button", { name: "Install Cafe MCP for Codex", exact: true }))
       .not.toBeInTheDocument();
+    await expect
+      .element(page.getByRole("heading", { name: "Chat scheduling · built in", exact: true }))
+      .toBeVisible();
     await mounted.unmount();
     window.desktopBridge = {
       getLocalEnvironmentBootstrap: () => ({
@@ -168,6 +227,9 @@ describe("MCP settings", () => {
     await expect
       .element(page.getByRole("button", { name: "Install Cafe MCP for Codex", exact: true }))
       .not.toBeInTheDocument();
+    await expect
+      .element(page.getByRole("heading", { name: "Chat scheduling · built in", exact: true }))
+      .toBeVisible();
     expect(harness.updateClient).not.toHaveBeenCalled();
   });
 

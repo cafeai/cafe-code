@@ -1,6 +1,7 @@
 # Decision: durable, idle-only scheduled follow-ups
 
 Status: Accepted; implemented with isolated regression coverage
+Internal MCP connectivity is partially superseded by [automatic session-scoped scheduling tools](session-scoped-scheduling-tools.md). Durable scheduling and owner-approval decisions below remain authoritative.
 Last updated: 2026-10-04 19:04:35 JST (UTC+0900)
 Decision authority: user-approved same-chat scheduling for Codex, Claude, and Grok, existing visual themes, persistence and thorough verification before publishing to dev.
 

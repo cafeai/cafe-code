@@ -440,8 +440,9 @@ export function ScheduledFollowupEditor(props: {
         <summary className="cursor-pointer text-xs font-medium">Model and run settings</summary>
         <div className="mt-3 min-w-0 space-y-3">
           <p className="break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
-            Account: {scheduleAccountLabel(context.modelSelection, context.provider)}. Scheduling
-            never changes this account or expands permissions.
+            Account: {scheduleAccountLabel(context.modelSelection, context.provider)}. This account
+            will execute and pay for these follow-ups. Scheduling never changes accounts or expands
+            permissions; an account change requires reviewing and enabling the schedule again.
           </p>
           <Field label="Model settings">
             {(id) => (

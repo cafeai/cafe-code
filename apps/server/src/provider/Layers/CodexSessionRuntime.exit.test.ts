@@ -39,6 +39,14 @@ it.effect.each([
           );
         });
         const environment = { CAFE_TEST_ONLY: "literal & | %fixture%", CODEX_HOME: "overridden" };
+        const schedulingMcp = {
+          name: "cafe-scoped_scheduling",
+          launch: {
+            command: process.execPath,
+            args: ["C:\\Cafe & Code\\bridge.mjs", "C:\\private\\connection.json"],
+            env: { ELECTRON_RUN_AS_NODE: "1" },
+          },
+        };
         const result = yield* makeCodexSessionRuntime({
           threadId: ThreadId.make("thread-command-policy"),
           binaryPath,
@@ -48,6 +56,7 @@ it.effect.each([
           environment,
           runtimeMode: "full-access",
           maxConcurrentSubagents: 3,
+          schedulingMcp,
           transportPolicy: { responsesWebsockets: "disabled" },
         }).pipe(
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
@@ -64,6 +73,7 @@ it.effect.each([
           command.args,
           buildCodexAppServerArgs({
             maxConcurrentSubagents: 3,
+            schedulingMcp,
             transportPolicy: { responsesWebsockets: "disabled" },
           }),
         );

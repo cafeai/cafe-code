@@ -237,7 +237,8 @@ function ScheduleCard(props: {
       ) : null}
       {record.state === "pending_confirmation" ? (
         <p className="mt-2 text-xs text-muted-foreground">
-          Proposed by an agent. Review the instructions and settings before enabling automatic runs.
+          Proposed by an agent. Review the instructions and the account that will run and pay for
+          these follow-ups before enabling them.
         </p>
       ) : null}
       {record.state === "needs_attention" ? (
@@ -388,6 +389,7 @@ export const ScheduledFollowups = memo(function ScheduledFollowups({
       () =>
         ensureScheduledFollowupsApi(context.environmentId).save({
           threadId: context.threadId,
+          expectedInstanceId: context.modelSelection.instanceId,
           ...draft,
           ...(record ? { id: record.id, expectedRevision: record.revision } : {}),
         }),
@@ -492,6 +494,7 @@ export const ScheduledFollowups = memo(function ScheduledFollowups({
                     void mutate(
                       () =>
                         ensureScheduledFollowupsApi(context.environmentId).setStatus({
+                          expectedInstanceId: context.modelSelection.instanceId,
                           threadId: context.threadId,
                           id: record.id,
                           expectedRevision: record.revision,

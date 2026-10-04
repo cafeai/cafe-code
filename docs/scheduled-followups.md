@@ -2,6 +2,8 @@
 
 Scheduled follow-ups run instructions in an existing Cafe chat using **Codex, Claude, or Grok**. Open **Tasks → Scheduled → New follow-up**. The Tasks button is available even before the chat has a plan or subagents. Chats without a project are supported too.
 
+You can also ask the model, for example, “Check this build every ten minutes.” Cafe automatically connects scheduling tools to each session, including separate account profiles. **No MCP installation is needed for chats inside Cafe.** Review the proposal in Tasks and the account that will execute and pay for it, then choose **Approve & enable**. Connectivity is automatic; recurring paid execution still needs your approval.
+
 ## Creating and managing a follow-up
 
 Give the follow-up a short name and instructions explaining what to check and what counts as a meaningful change. Choose once, an interval of at least five minutes, daily, weekdays, weekly, or a custom calendar. Calendar rules use the selected IANA timezone; the next three occurrences are previewed before saving. One-time dates and optional end dates are explicitly entered in UTC. Custom weekday, month-day, and month selections are intersections, not alternatives.
@@ -26,7 +28,9 @@ After a crash or missing provider acknowledgement, Cafe reconciles the exact rec
 
 Choose notifications for every run, changes and errors, or errors only. Cafe reads a bounded structured result from the exact scheduled turn's final assistant message. A malformed/missing result cannot be treated as proof of “no changes.” Errors and uncertain completion are not concealed by quiet mode. If you steer a scheduled turn yourself, it is treated as user-directed work for notification purposes. Metadata is hidden from rendered Markdown but the original provider message is retained unchanged.
 
-Agents using Cafe's MCP can **propose**, list, and pause follow-ups. A proposal is not active until you choose **Approve & enable** in Tasks. Changes proposed by an agent also require renewed approval. Cafe's shared MCP credential does not prove which chat or human instruction invoked it, so tool descriptions alone are not sufficient authorization to enable recurring paid execution. There is deliberately no MCP tool to enable/resume, run immediately, or submit another run's result using a public ID.
+Agents using Cafe's MCP can **propose**, list, and pause follow-ups. A proposal is not active until you choose **Approve & enable** in Tasks. Changes proposed by an agent also need renewed approval. Internal connections are limited to the exact chat and account; switching accounts invalidates the old connection and requires reviewing existing schedules, even if you switch back before the next run. Normal session restart/resume connects the new account. Optional external management MCP uses its existing owner credentials and is not needed internally. Neither connection can enable/resume, run immediately, or submit another run's result using a public ID.
+
+After updating Cafe, already-running old sessions may need normal rebuilt-runtime adoption and restart/resume to receive these tools. Cafe does not interrupt work to install them. Native provider tool-approval policies still apply; their permissions are never silently weakened.
 
 ## Operational limits
 

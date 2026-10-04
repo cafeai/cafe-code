@@ -41,16 +41,25 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
+import {
+  requireSchedulingSessionAuthority,
+  type SchedulingSessionAuthority,
+} from "./sessionRuntime.ts";
 
 type Operation<A> = Effect.Effect<A, ScheduledFollowupError>;
 export interface ScheduledFollowupsShape {
-  readonly list: (input: ScheduledFollowupListInput) => Operation<ScheduledFollowupListResult>;
+  readonly list: (
+    input: ScheduledFollowupListInput,
+    authority?: SchedulingSessionAuthority,
+  ) => Operation<ScheduledFollowupListResult>;
   readonly save: (
     input: ScheduledFollowupSaveInput,
     source?: "owner" | "agent",
+    authority?: SchedulingSessionAuthority,
   ) => Operation<ScheduledFollowupRecord>;
   readonly setStatus: (
     input: ScheduledFollowupSetStatusInput,
+    authority?: SchedulingSessionAuthority,
   ) => Operation<ScheduledFollowupRecord>;
   readonly runNow: (input: ScheduledFollowupRunNowInput) => Operation<ScheduledFollowupRun>;
   readonly history: (
@@ -153,6 +162,22 @@ export const makeScheduledFollowups = Effect.gen(function* () {
   const providers = yield* ProviderRegistry;
   const mutex = yield* Semaphore.make(1);
 
+  /** The transport proves session possession; this writer-locked guard proves
+   * that session still owns the exact selected chat/profile at commit time.
+   * Never trust a token admitted before an account switch or session teardown.
+   * This helper must run inside the same SQL transaction as the operation. */
+  const requireSession = (threadId: ThreadId, authority: SchedulingSessionAuthority) =>
+    Effect.gen(function* () {
+      if (authority.threadId !== threadId)
+        return yield* failure("The scheduling connection does not own this chat.");
+      yield* requireSchedulingSessionAuthority(sql, authority);
+      const [current] = yield* sql<{ thread_id: string }>`SELECT thread_id FROM projection_threads
+        WHERE thread_id = ${threadId} AND deleted_at IS NULL AND archived_at IS NULL
+          AND json_extract(model_selection_json,'$.instanceId') = ${authority.providerInstanceId}`;
+      if (!current)
+        return yield* failure("This chat's account changed. Reconnect before scheduling.");
+    });
+
   const getThread = (threadId: ThreadId) =>
     Effect.gen(function* () {
       const value = yield* projections.getThreadShellById(threadId);
@@ -224,24 +249,27 @@ export const makeScheduledFollowups = Effect.gen(function* () {
     SET state = 'skipped', completed_at = ${timestamp}, error_code = 'schedule-changed'
     WHERE schedule_id = ${id} AND state IN ('waiting','dispatching') AND attempt_at IS NULL`;
 
-  const list: ScheduledFollowupsShape["list"] = (input) =>
+  const list: ScheduledFollowupsShape["list"] = (input, authority) =>
     publicBoundary(
-      Effect.gen(function* () {
-        yield* Schema.decodeUnknownEffect(ScheduledFollowupListInput)(input);
-        const rows =
-          yield* sql<ScheduleRow>`SELECT * FROM scheduled_followups WHERE thread_id = ${input.threadId} AND state <> 'deleted' ORDER BY created_at,id LIMIT ${SCHEDULED_FOLLOWUP_MAX_SCHEDULES_PER_THREAD}`;
-        return { schedules: yield* Effect.forEach(rows, record), backendOnline: true as const };
-      }),
+      sql.withTransaction(
+        Effect.gen(function* () {
+          yield* Schema.decodeUnknownEffect(ScheduledFollowupListInput)(input);
+          if (authority) yield* requireSession(input.threadId, authority);
+          const rows =
+            yield* sql<ScheduleRow>`SELECT * FROM scheduled_followups WHERE thread_id = ${input.threadId} AND state <> 'deleted' ORDER BY created_at,id LIMIT ${SCHEDULED_FOLLOWUP_MAX_SCHEDULES_PER_THREAD}`;
+          return { schedules: yield* Effect.forEach(rows, record), backendOnline: true as const };
+        }),
+      ),
     );
 
-  const save: ScheduledFollowupsShape["save"] = (raw, source = "owner") =>
+  const save: ScheduledFollowupsShape["save"] = (raw, source = "owner", authority) =>
     publicBoundary(
       mutex.withPermits(1)(
         Effect.gen(function* () {
           const input = yield* Schema.decodeUnknownEffect(ScheduledFollowupSaveInput)(raw);
-          const { threadId, id, expectedRevision, ...draft } = input;
-          const thread = yield* getThread(threadId);
-          yield* validateProvider(thread, draft);
+          const { threadId, id, expectedRevision, expectedInstanceId, ...draft } = input;
+          if (authority && source !== "agent")
+            return yield* failure("Agent scheduling requires owner approval in Tasks.");
           const timestamp = yield* nowIso;
           const next = yield* nextAt(draft, timestamp);
           if (!next)
@@ -253,6 +281,16 @@ export const makeScheduledFollowups = Effect.gen(function* () {
               // The no-op write takes the database writer before checking bounds and
               // revisions. A second backend cannot bypass either by racing a read.
               yield* sql`UPDATE projection_threads SET thread_id = thread_id WHERE thread_id = ${threadId}`;
+              if (authority) yield* requireSession(threadId, authority);
+              // Read current settings after taking the writer. A proposal or
+              // owner approval must not bind a profile observed before another
+              // connection changed this chat's account or permission mode.
+              const thread = yield* getThread(threadId);
+              if (expectedInstanceId && expectedInstanceId !== thread.modelSelection.instanceId)
+                return yield* failure(
+                  "This chat's account changed. Review the executing account before enabling.",
+                );
+              yield* validateProvider(thread, draft);
               if (id) {
                 if (source === "owner") {
                   // Saving an edit enables the rule, so it must obey Resume's
@@ -293,53 +331,68 @@ export const makeScheduledFollowups = Effect.gen(function* () {
       ),
     );
 
-  const setStatus: ScheduledFollowupsShape["setStatus"] = (raw) =>
+  const setStatus: ScheduledFollowupsShape["setStatus"] = (raw, authority) =>
     publicBoundary(
       mutex.withPermits(1)(
-        Effect.gen(function* () {
-          const input = yield* Schema.decodeUnknownEffect(ScheduledFollowupSetStatusInput)(raw);
-          const row = yield* getRow(input.id, input.threadId);
-          const draft = yield* decodeDraft(row.definition_json);
-          const timestamp = yield* nowIso;
-          let next: string | null = null;
-          let instanceId = row.authorized_instance_id;
-          let ceiling = row.permission_ceiling;
-          if (input.state === "active") {
-            const thread = yield* getThread(input.threadId);
-            yield* validateProvider(thread, draft);
-            instanceId = thread.modelSelection.instanceId;
-            ceiling = thread.runtimeMode;
-            if (draft.maxRuns !== null && row.run_count >= draft.maxRuns)
-              return yield* failure(
-                "This schedule reached its run limit. Edit the limit before resuming.",
-              );
-            const [ambiguous] = yield* sql<{
-              id: string;
-            }>`SELECT id FROM scheduled_followup_runs WHERE schedule_id = ${input.id} AND state = 'unknown' LIMIT 1`;
-            if (ambiguous)
-              return yield* failure(
-                "A previous run has an uncertain outcome. Wait for reconciliation before resuming.",
-              );
-            next = yield* nextAt(draft, timestamp);
-            if (!next)
-              return yield* failure("No future run remains. Edit the schedule before resuming.");
-          }
-          const updated = yield* sql.withTransaction(
-            Effect.gen(function* () {
-              const rows =
-                yield* sql<ScheduleRow>`UPDATE scheduled_followups SET state = ${input.state}, revision = revision + 1,
+        sql.withTransaction(
+          Effect.gen(function* () {
+            const input = yield* Schema.decodeUnknownEffect(ScheduledFollowupSetStatusInput)(raw);
+            yield* sql`UPDATE projection_threads SET thread_id = thread_id WHERE thread_id = ${input.threadId}`;
+            if (authority) {
+              yield* requireSession(input.threadId, authority);
+              if (input.state !== "paused")
+                return yield* failure("Agent scheduling can only pause an existing schedule.");
+            }
+            const row = yield* getRow(input.id, input.threadId);
+            const draft = yield* decodeDraft(row.definition_json);
+            const timestamp = yield* nowIso;
+            let next: string | null = null;
+            let instanceId = row.authorized_instance_id;
+            let ceiling = row.permission_ceiling;
+            if (input.state === "active") {
+              const thread = yield* getThread(input.threadId);
+              if (
+                input.expectedInstanceId &&
+                input.expectedInstanceId !== thread.modelSelection.instanceId
+              )
+                return yield* failure(
+                  "This chat's account changed. Review the executing account before enabling.",
+                );
+              yield* validateProvider(thread, draft);
+              instanceId = thread.modelSelection.instanceId;
+              ceiling = thread.runtimeMode;
+              if (draft.maxRuns !== null && row.run_count >= draft.maxRuns)
+                return yield* failure(
+                  "This schedule reached its run limit. Edit the limit before resuming.",
+                );
+              const [ambiguous] = yield* sql<{
+                id: string;
+              }>`SELECT id FROM scheduled_followup_runs WHERE schedule_id = ${input.id} AND state = 'unknown' LIMIT 1`;
+              if (ambiguous)
+                return yield* failure(
+                  "A previous run has an uncertain outcome. Wait for reconciliation before resuming.",
+                );
+              next = yield* nextAt(draft, timestamp);
+              if (!next)
+                return yield* failure("No future run remains. Edit the schedule before resuming.");
+            }
+            const updated = yield* sql.withTransaction(
+              Effect.gen(function* () {
+                const rows =
+                  yield* sql<ScheduleRow>`UPDATE scheduled_followups SET state = ${input.state}, revision = revision + 1,
         authorized_instance_id = ${instanceId},permission_ceiling = ${ceiling},next_run_at = ${next},updated_at = ${timestamp}
         WHERE id = ${input.id} AND thread_id = ${input.threadId} AND revision = ${input.expectedRevision} AND state <> 'deleted' RETURNING *`;
-              if (!rows[0])
-                return yield* failure(
-                  "This schedule changed elsewhere. Refresh before updating it.",
-                );
-              yield* invalidateUnattempted(input.id, timestamp);
-              return rows[0];
-            }),
-          );
-          return yield* record(updated);
-        }),
+                if (!rows[0])
+                  return yield* failure(
+                    "This schedule changed elsewhere. Refresh before updating it.",
+                  );
+                yield* invalidateUnattempted(input.id, timestamp);
+                return rows[0];
+              }),
+            );
+            return yield* record(updated);
+          }),
+        ),
       ),
     );
 

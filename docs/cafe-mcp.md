@@ -1,10 +1,18 @@
 # Cafe Code MCP
 
+## Built-in chat scheduling
+
+Scheduling inside Cafe does **not** use the installer below. Cafe automatically gives each Codex, Claude and Grok session a private, chat-and-account-bound connection for proposing, listing and pausing follow-ups. Separate account profiles/custom homes are supported without editing saved MCP configuration. Review proposals and the paying account in **Tasks → Scheduled**, then choose **Approve & enable**. Switching accounts requires renewed review; the old session cannot target the replacement account. Normal provider tool permissions remain authoritative.
+
+These narrow tools are independent of the broad management toggle. Already-running old providers need normal rebuilt-runtime adoption and session restart/resume. See [scheduled follow-ups](scheduled-followups.md) and [session authority](decisions/session-scoped-scheduling-tools.md).
+
+## Optional management connection
+
 Open **Settings → MCP → Cafe Code MCP** to enable or disable Cafe's management server, registered as `cafe-code`. The existing authenticated endpoint stays on by default on upgrade. Turning it off rejects new Cafe management MCP requests, including from agents running inside Cafe. Work already started may finish.
 
 In the local desktop app, **Install** registers Cafe MCP for Codex, Claude Code, Grok, or OpenCode. It configures the provider's default user profile; it does not install the provider application. Reload MCP or restart that provider after installation. Keep Cafe Code running while using its tools. **Reinstall** repairs the registration, and **Remove** unregisters it. Custom provider homes have separate configuration. Platform-specific support restrictions are recorded in [AGENTS.md](../AGENTS.md#windows-specific-notes).
 
-Cafe adds no per-tool approval prompts and leaves each provider's permission settings intact. Registration provides Cafe's existing project, conversation, provider, and settings tools.
+Cafe adds no per-tool management approval prompts and leaves each provider's permission settings intact. Registration provides Cafe's existing project, conversation, provider, and settings tools. Scheduled follow-up proposals still require owner approval in Tasks before execution.
 
 ## Separate Desktop Control MCP
 
@@ -52,7 +60,7 @@ CAFE_CODE_MCP_BRIDGE_E2E=1 corepack yarn workspace @cafeai/cafe-code exec vitest
 corepack yarn workspace @cafecode/web test:browser src/components/settings/McpSettings.browser.tsx
 ```
 
-For packaged qualification, set `CAFE_CODE_MCP_BRIDGE_DIR` to a directory containing the two entrypoints extracted from the built app and `CAFE_CODE_MCP_BRIDGE_EXECUTABLE` to its executable or AppImage. Both bridges must remain independent single-file bundles; bundling their entrypoints together can create a shared chunk that providers do not receive.
+For packaged qualification, set `CAFE_CODE_MCP_BRIDGE_DIR` to a directory containing the management, desktop and scheduling entrypoints extracted from the built app and `CAFE_CODE_MCP_BRIDGE_EXECUTABLE` to its executable or AppImage. All bridges must remain independent single-file bundles; bundling their entrypoints together can create a shared chunk that providers do not receive. The same isolated artifact test also qualifies session scheduling's separate audience.
 
 The separate Linux configuration test launches the installed Codex binary, but reads only generated temporary config: no user credentials, MCP tool processes, or model requests. Set `CODEX_BIN` if the intended binary is not on PATH. This does not qualify app-server discovery or actual desktop control:
 

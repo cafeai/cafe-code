@@ -55,6 +55,7 @@ import { attachmentRelativePath } from "../../attachmentStore.ts";
 import { storeFileAttachment } from "../../fileAttachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { installSchedulingSessionBroker } from "../../scheduledFollowups/sessionRuntime.ts";
 import { ProviderAdapterValidationError } from "../Errors.ts";
 import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import {
@@ -241,6 +242,7 @@ function makeHarness(config?: {
   readonly claudeConfig?: Partial<ClaudeSettings>;
   readonly environment?: NodeJS.ProcessEnv;
   readonly instanceId?: ProviderInstanceId;
+  readonly createQueryError?: Error;
   readonly onAuthStatusChanged?: ClaudeAdapterLiveOptions["onAuthStatusChanged"];
   readonly forkNativeSession?: ClaudeAdapterLiveOptions["forkNativeSession"];
   readonly deleteNativeSession?: ClaudeAdapterLiveOptions["deleteNativeSession"];
@@ -267,6 +269,7 @@ function makeHarness(config?: {
     createQuery: (input) => {
       createInput = input;
       createInputs.push(input);
+      if (config?.createQueryError) throw config.createQueryError;
       if (config?.newQueryPerSession && createInputs.length > 1) {
         const next = new FakeClaudeQuery();
         queries.push(next);
@@ -549,6 +552,206 @@ describe("Claude project directory encoding", () => {
 });
 
 describe("ClaudeAdapterLive", () => {
+  for (const configuredInstance of [undefined, ProviderInstanceId.make("claude-work-account")]) {
+    it.effect(
+      `injects same-chat scheduling for ${configuredInstance ?? "the default account"}`,
+      () => {
+        const harness = makeHarness({
+          environment: {},
+          ...(configuredInstance ? { instanceId: configuredInstance } : {}),
+        });
+        return Effect.gen(function* () {
+          const lifecycle: string[] = [];
+          const releaseBroker = installSchedulingSessionBroker({
+            bind: async (binding) => {
+              assert.deepEqual(binding, {
+                threadId: THREAD_ID,
+                providerInstanceId: configuredInstance ?? ProviderInstanceId.make("claudeAgent"),
+                provider: "claudeAgent",
+              });
+              lifecycle.push("bound");
+              let disposed = false;
+              return {
+                name: "cafe-scheduling",
+                launch: {
+                  command: process.execPath,
+                  args: [path.join(process.cwd(), "synthetic-scheduling-bridge.mjs")],
+                  env: { CAFE_CODE_SCHEDULING_CONNECTION_FILE: "synthetic-private-connection" },
+                },
+                activate: async () => {
+                  lifecycle.push("active");
+                },
+                dispose: async () => {
+                  if (!disposed) lifecycle.push("disposed");
+                  disposed = true;
+                },
+              };
+            },
+          });
+          yield* Effect.addFinalizer(() => Effect.sync(releaseBroker));
+          const adapter = yield* ClaudeAdapter;
+          yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+          const queryOptions = harness.createInputs[0]!.options;
+          assert.deepEqual(lifecycle, ["bound", "active"]);
+          assert.deepEqual(queryOptions.mcpServers, {
+            "cafe-scheduling": {
+              type: "stdio",
+              command: process.execPath,
+              args: [path.join(process.cwd(), "synthetic-scheduling-bridge.mjs")],
+              env: { CAFE_CODE_SCHEDULING_CONNECTION_FILE: "synthetic-private-connection" },
+              alwaysLoad: true,
+            },
+          });
+          assert.deepEqual(queryOptions.settingSources, ["user", "project", "local"]);
+          assert.equal(queryOptions.strictMcpConfig, undefined);
+          assert.equal(queryOptions.allowedTools, undefined);
+          assert.equal(queryOptions.permissionMode, "default");
+          assert.equal(queryOptions.allowDangerouslySkipPermissions, undefined);
+          yield* adapter.stopSession(THREAD_ID);
+          yield* adapter.stopAll();
+          assert.deepEqual(lifecycle, ["bound", "active", "disposed"]);
+        }).pipe(Effect.provide(harness.layer));
+      },
+    );
+  }
+
+  it.effect("revokes scheduling when Claude query creation fails", () => {
+    const harness = makeHarness({
+      environment: {},
+      createQueryError: new Error("synthetic failure"),
+    });
+    return Effect.gen(function* () {
+      let disposed = false;
+      const releaseBroker = installSchedulingSessionBroker({
+        bind: async () => ({
+          name: "cafe-scheduling",
+          launch: { command: process.execPath, args: [], env: {} },
+          activate: async () => {},
+          dispose: async () => {
+            disposed = true;
+          },
+        }),
+      });
+      yield* Effect.addFinalizer(() => Effect.sync(releaseBroker));
+      const adapter = yield* ClaudeAdapter;
+      const failed = yield* adapter
+        .startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "approval-required",
+        })
+        .pipe(Effect.exit);
+      assert.equal(failed._tag, "Failure");
+      assert.isTrue(disposed);
+      assert.deepEqual(yield* adapter.listSessions(), []);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("revokes scheduling without launching Claude after activation failure", () => {
+    const harness = makeHarness({ environment: {} });
+    return Effect.gen(function* () {
+      let disposed = false;
+      const releaseBroker = installSchedulingSessionBroker({
+        bind: async () => ({
+          name: "cafe-scheduling",
+          launch: { command: process.execPath, args: [], env: {} },
+          activate: async () => {
+            throw new Error("private activation diagnostic");
+          },
+          dispose: async () => {
+            disposed = true;
+          },
+        }),
+      });
+      yield* Effect.addFinalizer(() => Effect.sync(releaseBroker));
+      const adapter = yield* ClaudeAdapter;
+      const failure = yield* adapter
+        .startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "approval-required",
+        })
+        .pipe(Effect.flip);
+      assert.equal(failure._tag, "ProviderAdapterProcessError");
+      assert.notInclude(JSON.stringify(failure), "private activation diagnostic");
+      assert.equal(harness.createInputs.length, 0);
+      assert.isTrue(disposed);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("still closes Claude if revoked scheduling file cleanup fails", () => {
+    const harness = makeHarness({ environment: {} });
+    return Effect.gen(function* () {
+      let revoked = false;
+      const releaseBroker = installSchedulingSessionBroker({
+        bind: async () => ({
+          name: "cafe-scheduling",
+          launch: { command: process.execPath, args: [], env: {} },
+          activate: async () => {},
+          dispose: async () => {
+            revoked = true;
+            throw new Error("private cleanup diagnostic");
+          },
+        }),
+      });
+      yield* Effect.addFinalizer(() => Effect.sync(releaseBroker));
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+      yield* adapter.stopSession(THREAD_ID);
+      assert.isTrue(revoked);
+      assert.equal(harness.query.closeCalls, 1);
+      assert.deepEqual(yield* adapter.listSessions(), []);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect(
+    "retires each Claude scheduling generation before replacement and on stream exit",
+    () => {
+      const harness = makeHarness({ environment: {}, newQueryPerSession: true });
+      return Effect.gen(function* () {
+        const lifecycle: string[] = [];
+        let generation = 0;
+        const releaseBroker = installSchedulingSessionBroker({
+          bind: async () => {
+            const id = ++generation;
+            lifecycle.push(`bind:${id}`);
+            let disposed = false;
+            return {
+              name: "cafe-scheduling",
+              launch: { command: process.execPath, args: [], env: {} },
+              activate: async () => {
+                lifecycle.push(`activate:${id}`);
+              },
+              dispose: async () => {
+                if (!disposed) lifecycle.push(`dispose:${id}`);
+                disposed = true;
+              },
+            };
+          },
+        });
+        yield* Effect.addFinalizer(() => Effect.sync(releaseBroker));
+        const adapter = yield* ClaudeAdapter;
+        const start = { threadId: THREAD_ID, runtimeMode: "approval-required" as const };
+        yield* adapter.startSession(start);
+        yield* adapter.startSession(start);
+        assert.deepEqual(lifecycle, ["bind:1", "activate:1", "dispose:1", "bind:2", "activate:2"]);
+        const exited = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "session.exited"),
+          Stream.runHead,
+          Effect.forkChild,
+        );
+        harness.queries[1]!.finish();
+        yield* Fiber.join(exited);
+        assert.deepEqual(lifecycle, [
+          "bind:1",
+          "activate:1",
+          "dispose:1",
+          "bind:2",
+          "activate:2",
+          "dispose:2",
+        ]);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
   for (const retainHistory of [false, true]) {
     it.effect(
       `handles a compacted-away checkpoint with ${retainHistory ? "explicit partial-rewind refusal" : "an empty baseline"}`,

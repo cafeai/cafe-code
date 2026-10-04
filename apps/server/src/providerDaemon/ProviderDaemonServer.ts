@@ -4,6 +4,11 @@ import {
   dispatchDesktopRequest,
 } from "../virtualDesktop/service.ts";
 import { VirtualDesktopError } from "@cafecode/contracts";
+import {
+  SCHEDULING_SESSION_DAEMON_PATH,
+  SchedulingSessionAuthorizationRequest,
+  dispatchSchedulingSessionAuthorization,
+} from "../scheduledFollowups/sessionRuntime.ts";
 // @effect-diagnostics nodeBuiltinImport:off
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
@@ -92,6 +97,9 @@ import { ProviderRuntimeInventory } from "./ProviderRuntimeInventory.ts";
 import { purgeProviderDaemonThreadPersistence } from "./ProviderDaemonThreadPurge.ts";
 
 const decodeDesktopInternalRequest = Schema.decodeUnknownSync(DesktopInternalRequest);
+const decodeSchedulingSessionAuthorization = Schema.decodeUnknownSync(
+  SchedulingSessionAuthorizationRequest,
+);
 const decodeWindowsOwnershipId = Schema.decodeUnknownSync(WindowsOwnershipId);
 const decodeWindowsProcessIdentity = Schema.decodeUnknownSync(WindowsProcessIdentity);
 const MAX_RPC_BODY_BYTES = 5 * 1024 * 1024;
@@ -1535,6 +1543,22 @@ export const runProviderDaemonServer = (
       const method = request.method ?? "GET";
       const url = new URL(request.url ?? "/", `http://${host}:${port}`);
       void (async () => {
+        if (url.pathname === SCHEDULING_SESSION_DAEMON_PATH && method === "POST") {
+          // Capability verification is ephemeral control traffic. It must not
+          // enter the command ledger, event journal, or request diagnostics.
+          if (!hasCapability(request, "rpc")) {
+            writeJson(response, 401, { error: "unauthorized" });
+            return;
+          }
+          try {
+            const input = decodeSchedulingSessionAuthorization(await readJsonBody(request));
+            const authority = await dispatchSchedulingSessionAuthorization(input.token);
+            writeJson(response, 200, authority);
+          } catch {
+            writeJson(response, 403, { error: "Scheduling session is unavailable." });
+          }
+          return;
+        }
         if (url.pathname === DESKTOP_DAEMON_PATH && method === "POST") {
           if (!hasCapability(request, "rpc")) {
             writeJson(response, 401, { error: "unauthorized" });

@@ -227,6 +227,9 @@ export type ScheduledFollowupListResult = typeof ScheduledFollowupListResult.Typ
 
 export const ScheduledFollowupSaveInput = Schema.Struct({
   ...threadField,
+  // Owner UI binds the reviewed paying profile; optional for older owner
+  // clients. Session MCP uses its independently authenticated authority.
+  expectedInstanceId: Schema.optionalKey(ProviderInstanceId),
   id: Schema.optionalKey(ScheduledFollowupId),
   expectedRevision: Schema.optionalKey(revision),
   ...draftFields,
@@ -240,6 +243,7 @@ export const ScheduledFollowupSaveInput = Schema.Struct({
 export type ScheduledFollowupSaveInput = typeof ScheduledFollowupSaveInput.Type;
 
 export const ScheduledFollowupSetStatusInput = Schema.Struct({
+  expectedInstanceId: Schema.optionalKey(ProviderInstanceId),
   ...mutationFields,
   state: Schema.Literals(["active", "paused", "deleted"]),
 }).annotate(strict);
