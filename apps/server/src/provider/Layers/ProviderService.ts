@@ -27,6 +27,9 @@ import {
   ProviderSnoozeUserInputInput,
   ProviderSendTurnInput,
   ProviderSessionStartInput,
+  ProviderPrepareConversationRollbackInput,
+  ProviderConversationRewindIdentity,
+  ProviderFinishConversationRollbackInput,
   ProviderThreadGoalClearInput,
   ProviderThreadGoalGetInput,
   ProviderThreadGoalSetInput,
@@ -72,6 +75,10 @@ import {
 } from "../../observability/Metrics.ts";
 import {
   ProviderAdapterProcessError,
+  ProviderAdapterValidationError,
+  ProviderAdapterRewindOutcomeUnknownError,
+  ProviderSessionDirectoryPersistenceError,
+  isProviderRewindOutcomeUnknown,
   type ProviderAdapterError,
   ProviderValidationError,
   makeProviderSubagentDetailReadError,
@@ -92,9 +99,27 @@ import {
 } from "../Services/ProviderSessionDirectory.ts";
 import { type EventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import { ProviderEventLoggers } from "./ProviderEventLoggers.ts";
+import {
+  isPendingConversationRewind,
+  type ConversationRewindError,
+} from "../../persistence/Services/ConversationRewinds.ts";
 const isModelSelection = Schema.is(ModelSelection);
 const isTurnId = Schema.is(TurnId);
 const isProviderAdapterProcessError = Schema.is(ProviderAdapterProcessError);
+const isProviderAdapterValidationError = Schema.is(ProviderAdapterValidationError);
+const rewindPersistenceError = (cause: unknown) =>
+  new ProviderSessionDirectoryPersistenceError({
+    operation: "ProviderService.conversationRewind",
+    detail: "Conversation rewind recovery state could not be read.",
+    cause,
+  });
+const rewindRefused = () =>
+  new ProviderValidationError({
+    operation: "ProviderService.conversationRewind",
+    issue:
+      "The checkpoint or provider generation changed, or safe conversation rewind is unavailable. No successful revert was published.",
+  });
+const rewindUnknown = () => new ProviderAdapterRewindOutcomeUnknownError({});
 const decodePrivateInteractionResponse = Schema.decodeUnknownEffect(
   ProviderRespondToInteractionInput,
 );
@@ -580,6 +605,20 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
   const registry = yield* ProviderAdapterRegistry;
   const directory = yield* ProviderSessionDirectory;
+  const readRewind = (threadId: ThreadId) =>
+    directory.rewinds
+      ? directory.rewinds.read(threadId).pipe(Effect.mapError(rewindPersistenceError))
+      : Effect.succeed(null);
+  const assertNoRewind = (threadId: ThreadId, operation: string) =>
+    Effect.gen(function* () {
+      if (isPendingConversationRewind(yield* readRewind(threadId))) {
+        return yield* new ProviderValidationError({
+          operation,
+          issue:
+            "This conversation has a reserved checkpoint rewind. Its recovery must be resolved before starting more provider work.",
+        });
+      }
+    });
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
   const runtimeOwnerStartedAt = yield* nowIso;
@@ -608,6 +647,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   // The durable database foreign key on provider history roots is the second,
   // cross-process fence if a stale daemon record is replayed after restart.
   const hardDeleteRetiredThreadIds = yield* Ref.make<ReadonlySet<ThreadId>>(new Set());
+  // Restart tears down an entire adapter, including threads created after its
+  // initial inventory. Only rewind preparation needs this additional fence:
+  // ordinary starts retain their existing runtime-restart semantics. A count
+  // keeps overlapping explicit restarts from releasing each other's fence.
+  const runtimeRestartsInProgress = new Map<ProviderInstanceId, number>();
   // Fixed stripes bound memory even if a compromised provider emits events
   // carrying many adversarial thread ids. Hash collisions only serialize two
   // short control-plane operations; they cannot weaken the delete fence.
@@ -632,9 +676,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     threadIds: ReadonlyArray<ThreadId>,
     effect: Effect.Effect<A, E, R>,
   ): Effect.Effect<A, E, R> => {
-    // Fork is the only provider mutation spanning two immutable Cafe thread
+    // Forks and instance restarts span multiple immutable Cafe thread
     // identities. Acquire the fixed lock stripes in one deterministic order
-    // so opposite-direction forks cannot deadlock. Two distinct ids can hash
+    // so overlapping operations cannot deadlock. Two distinct ids can hash
     // to the same stripe; de-duplicating indexes is therefore required rather
     // than an optimization, because a semaphore permit is not re-entrant.
     const stripeIndexes = Array.from(
@@ -805,7 +849,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       readonly provider: ProviderDriverKind;
     },
     event: ProviderRuntimeEvent,
-  ): Effect.Effect<void> =>
+  ): Effect.Effect<void, ConversationRewindError> =>
     Effect.sync(() => correlateRuntimeEventWithInstance(source, event)).pipe(
       Effect.flatMap((canonicalEvent) =>
         withThreadLifecycleLock(
@@ -815,6 +859,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             if (retiredThreadIds.has(canonicalEvent.threadId)) {
               return;
             }
+
+            // An old query may have published into a daemon journal before it
+            // was retired. Its events cannot update a new cursor or resurrect
+            // deleted conversation content, including after process restart.
+            if (directory.rewinds && !(yield* directory.rewinds.acceptsEvent(canonicalEvent)))
+              return;
 
             yield* persistSubagentHistoryBindingEvent(canonicalEvent);
             yield* persistRuntimeLifecycleEvent(canonicalEvent);
@@ -838,7 +888,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     processRuntimeEvent(source, event).pipe(
       Effect.catchCause((cause) => {
         if (Cause.hasInterruptsOnly(cause)) {
-          return Effect.failCause(cause);
+          return Effect.interrupt;
         }
         return Effect.logWarning("provider.runtime.event-fanout-failed", {
           sourceInstanceId: source.instanceId,
@@ -1285,7 +1335,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     readonly operation: string;
     readonly threadId: ThreadId;
     readonly effect: Effect.Effect<A, E, R>;
-  }): Effect.Effect<A, E | ProviderValidationError, R> =>
+  }): Effect.Effect<A, E | ProviderValidationError | ProviderSessionDirectoryPersistenceError, R> =>
     withThreadLifecycleLock(
       input.threadId,
       Effect.gen(function* () {
@@ -1298,6 +1348,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             ),
           );
         }
+        yield* assertNoRewind(input.threadId, input.operation);
         return yield* input.effect;
       }),
     );
@@ -1306,7 +1357,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     readonly operation: string;
     readonly threadIds: ReadonlyArray<ThreadId>;
     readonly effect: Effect.Effect<A, E, R>;
-  }): Effect.Effect<A, E | ProviderValidationError, R> =>
+  }): Effect.Effect<A, E | ProviderValidationError | ProviderSessionDirectoryPersistenceError, R> =>
     withThreadLifecycleLocks(
       input.threadIds,
       Effect.gen(function* () {
@@ -1320,6 +1371,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             ),
           );
         }
+        for (const threadId of input.threadIds) yield* assertNoRewind(threadId, input.operation);
         return yield* input.effect;
       }),
     );
@@ -1462,7 +1514,38 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         }
       }
 
-      if (!hasResumeCursor) {
+      // A deliberately empty, completed rewind is the sole no-cursor recovery
+      // exception. Bind it to the untouched committed candidate, not merely a
+      // historical "finished" row: a later start/restart/settings mutation must
+      // never make an unrelated lost cursor look like permission to discard
+      // history. Only an explicit new user send consumes this baseline.
+      const baselineRewind =
+        !hasResumeCursor &&
+        input.operation === "ProviderService.sendTurn" &&
+        input.binding.provider === "claudeAgent"
+          ? yield* readRewind(input.binding.threadId)
+          : null;
+      const candidate = baselineRewind?.candidate;
+      const payload = isRecord(input.binding.runtimePayload) ? input.binding.runtimePayload : null;
+      const isUntouchedBaseline =
+        baselineRewind?.phase === "finished" &&
+        baselineRewind.retainedTurnCount === 0 &&
+        candidate !== null &&
+        candidate !== undefined &&
+        candidate.status === "closed" &&
+        candidate.threadId === input.binding.threadId &&
+        candidate.provider === input.binding.provider &&
+        candidate.providerInstanceId === bindingInstanceId &&
+        candidate.runtimeMode === input.binding.runtimeMode &&
+        candidate.cwd === readPersistedCwd(input.binding.runtimePayload) &&
+        candidate.resumeCursor === undefined &&
+        candidate.subagentRuntimeId === undefined &&
+        candidate.activeTurnId === undefined &&
+        input.binding.status === "stopped" &&
+        payload?.lastRuntimeEvent === "provider.conversation.rewind" &&
+        payload.subagentRuntimeId == null &&
+        payload.activeTurnId == null;
+      if (!hasResumeCursor && !isUntouchedBaseline) {
         return yield* toValidationError(
           input.operation,
           `Cannot recover thread '${input.binding.threadId}' because no provider resume state is persisted.`,
@@ -2537,82 +2620,133 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       payload: rawInput,
     });
     let metricProvider = "unknown";
-    return yield* Effect.gen(function* () {
-      const instanceInfo = yield* registry.getInstanceInfo(input.instanceId);
-      const adapter = yield* registry.getByInstance(input.instanceId);
-      metricProvider = adapter.provider;
-      const restartedAt = yield* nowIso;
-      const activeSessions = yield* adapter.listSessions();
-      const activeThreadIds = new Set(activeSessions.map((session) => session.threadId));
-
-      yield* Effect.annotateCurrentSpan({
-        "provider.operation": "restart-runtime",
-        "provider.kind": adapter.provider,
-        "provider.instance_id": input.instanceId,
-        "provider.session_count": activeSessions.length,
-      });
-
-      // Persist a stopped boundary before asking the adapter to tear down its
-      // process tree. This matches shutdown semantics: after the restart,
-      // future user input must reopen Codex/Claude through `startSession`
-      // using durable resume state, rather than steering a runtime Cafe no
-      // longer owns.
-      yield* Effect.forEach(activeSessions, (session) =>
-        persistUnlessThreadRetired(
-          session.threadId,
-          directory.upsert({
-            threadId: session.threadId,
-            provider: adapter.provider,
-            providerInstanceId: input.instanceId,
-            runtimeMode: session.runtimeMode,
-            status: "stopped",
-            ...(session.resumeCursor !== undefined ? { resumeCursor: session.resumeCursor } : {}),
-            runtimePayload: {
-              cwd: session.cwd ?? null,
-              additionalDirectories: session.additionalDirectories ?? [],
-              model: session.model ?? null,
-              activeTurnId: null,
-              lastError: session.lastError ?? null,
-              lastRuntimeEvent: "provider.runtime.restart",
-              lastRuntimeEventAt: restartedAt,
-            },
-          }),
-        ),
-      ).pipe(Effect.asVoid);
-
-      const bindings = yield* directory.listBindings().pipe(Effect.orElseSucceed(() => []));
-      yield* Effect.forEach(bindings, (binding) => {
-        const bindingInstanceId = dieOnMissingBindingInstanceId(
-          "ProviderService.restartProviderRuntime",
-          binding,
+    return yield* Effect.acquireUseRelease(
+      Effect.sync(() => {
+        runtimeRestartsInProgress.set(
+          input.instanceId,
+          (runtimeRestartsInProgress.get(input.instanceId) ?? 0) + 1,
         );
-        if (bindingInstanceId !== input.instanceId || activeThreadIds.has(binding.threadId)) {
-          return Effect.void;
-        }
-        return persistUnlessThreadRetired(
-          binding.threadId,
-          directory.upsert({
-            threadId: binding.threadId,
-            provider: binding.provider,
-            providerInstanceId: bindingInstanceId,
-            status: "stopped",
-            runtimePayload: {
-              activeTurnId: null,
-              lastRuntimeEvent: "provider.runtime.restart",
-              lastRuntimeEventAt: restartedAt,
-            },
-          }),
-        );
-      }).pipe(Effect.asVoid);
+      }),
+      () =>
+        Effect.gen(function* () {
+          const instanceInfo = yield* registry.getInstanceInfo(input.instanceId);
+          const adapter = yield* registry.getByInstance(input.instanceId);
+          metricProvider = adapter.provider;
+          const restartedAt = yield* nowIso;
+          const initialSessions = yield* adapter.listSessions();
+          // Closed prepared candidates only exist in the directory. Failure to
+          // enumerate it is not permission to miss their durable rewind fence.
+          const initialBindings = yield* directory.listBindings();
+          const threadIds = new Set([
+            ...initialSessions.map((session) => session.threadId),
+            ...initialBindings
+              .filter(
+                (binding) =>
+                  dieOnMissingBindingInstanceId(
+                    "ProviderService.restartProviderRuntime",
+                    binding,
+                  ) === input.instanceId,
+              )
+              .map((binding) => binding.threadId),
+          ]);
+          return yield* withThreadLifecycleLocks(
+            [...threadIds],
+            Effect.gen(function* () {
+              // Check every known identity before any write or native teardown, then
+              // hold all permits through stopAll. A prepare already in flight wins its
+              // own permit first and is observed here as pending. The instance fence
+              // above prevents a newly created thread from starting a rewind meanwhile.
+              for (const threadId of threadIds)
+                yield* assertNoRewind(threadId, "ProviderService.restartProviderRuntime");
+              // A completed rewind may have changed both cursor and session inventory
+              // while restart waited for a permit. Never republish the stale snapshot.
+              const activeSessions = (yield* adapter.listSessions()).filter((session) =>
+                threadIds.has(session.threadId),
+              );
+              const bindings = (yield* directory.listBindings()).filter((binding) =>
+                threadIds.has(binding.threadId),
+              );
+              const activeThreadIds = new Set(activeSessions.map((session) => session.threadId));
+              const retiredThreadIds = yield* Ref.get(hardDeleteRetiredThreadIds);
 
-      yield* adapter.stopAll();
+              yield* Effect.annotateCurrentSpan({
+                "provider.operation": "restart-runtime",
+                "provider.kind": adapter.provider,
+                "provider.instance_id": input.instanceId,
+                "provider.session_count": activeSessions.length,
+              });
 
-      return {
-        instanceId: input.instanceId,
-        provider: instanceInfo.driverKind,
-        stoppedSessionCount: activeSessions.length,
-      };
-    }).pipe(
+              // Persist a stopped boundary before asking the adapter to tear down its
+              // process tree. This matches shutdown semantics: after the restart,
+              // future user input must reopen Codex/Claude through `startSession`
+              // using durable resume state, rather than steering a runtime Cafe no
+              // longer owns.
+              yield* Effect.forEach(activeSessions, (session) =>
+                retiredThreadIds.has(session.threadId)
+                  ? Effect.void
+                  : directory.upsert({
+                      threadId: session.threadId,
+                      provider: adapter.provider,
+                      providerInstanceId: input.instanceId,
+                      runtimeMode: session.runtimeMode,
+                      status: "stopped",
+                      ...(session.resumeCursor !== undefined
+                        ? { resumeCursor: session.resumeCursor }
+                        : {}),
+                      runtimePayload: {
+                        cwd: session.cwd ?? null,
+                        additionalDirectories: session.additionalDirectories ?? [],
+                        model: session.model ?? null,
+                        activeTurnId: null,
+                        lastError: session.lastError ?? null,
+                        lastRuntimeEvent: "provider.runtime.restart",
+                        lastRuntimeEventAt: restartedAt,
+                      },
+                    }),
+              ).pipe(Effect.asVoid);
+
+              yield* Effect.forEach(bindings, (binding) => {
+                const bindingInstanceId = dieOnMissingBindingInstanceId(
+                  "ProviderService.restartProviderRuntime",
+                  binding,
+                );
+                if (
+                  bindingInstanceId !== input.instanceId ||
+                  activeThreadIds.has(binding.threadId) ||
+                  retiredThreadIds.has(binding.threadId)
+                ) {
+                  return Effect.void;
+                }
+                return directory.upsert({
+                  threadId: binding.threadId,
+                  provider: binding.provider,
+                  providerInstanceId: bindingInstanceId,
+                  status: "stopped",
+                  runtimePayload: {
+                    activeTurnId: null,
+                    lastRuntimeEvent: "provider.runtime.restart",
+                    lastRuntimeEventAt: restartedAt,
+                  },
+                });
+              }).pipe(Effect.asVoid);
+
+              yield* adapter.stopAll();
+
+              return {
+                instanceId: input.instanceId,
+                provider: instanceInfo.driverKind,
+                stoppedSessionCount: activeSessions.length,
+              };
+            }),
+          );
+        }),
+      () =>
+        Effect.sync(() => {
+          const remaining = (runtimeRestartsInProgress.get(input.instanceId) ?? 1) - 1;
+          if (remaining > 0) runtimeRestartsInProgress.set(input.instanceId, remaining);
+          else runtimeRestartsInProgress.delete(input.instanceId);
+        }),
+    ).pipe(
       withMetrics({
         counter: providerSessionsTotal,
         outcomeAttributes: () =>
@@ -3074,6 +3208,146 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     );
   });
 
+  const prepareConversationRollback: NonNullable<
+    ProviderServiceShape["prepareConversationRollback"]
+  > = (rawInput) =>
+    withThreadLifecycleLock(
+      rawInput.threadId,
+      Effect.gen(function* () {
+        const input = yield* decodeInputOrValidationError({
+          operation: "ProviderService.prepareConversationRollback",
+          schema: ProviderPrepareConversationRollbackInput,
+          payload: rawInput,
+        });
+        const store = directory.rewinds;
+        if (!store || (yield* Ref.get(hardDeleteRetiredThreadIds)).has(input.threadId))
+          return yield* rewindRefused();
+        const previous = yield* readRewind(input.threadId);
+        if (isPendingConversationRewind(previous)) {
+          if (
+            previous?.operationId === input.operationId &&
+            previous.firstRemovedTurnId === input.firstRemovedTurnId &&
+            previous.numTurns === input.numTurns &&
+            previous.retainedTurnCount === input.retainedTurnCount &&
+            previous.expectedControlSequence === input.expectedControlSequence &&
+            previous.phase === "prepared"
+          )
+            return;
+          return yield* rewindUnknown();
+        }
+        const routed = yield* resolveRoutableSession({
+          threadId: input.threadId,
+          operation: "ProviderService.prepareConversationRollback",
+          allowRecovery: false,
+        });
+        if (routed.adapter.provider !== "claudeAgent" || !routed.adapter.prepareRollbackThread)
+          return yield* rewindRefused();
+        if (runtimeRestartsInProgress.has(routed.instanceId)) return yield* rewindRefused();
+        const original = (yield* routed.adapter.listSessions()).find(
+          (session) => session.threadId === input.threadId,
+        );
+        if (
+          !original ||
+          original.status !== "ready" ||
+          original.activeTurnId ||
+          !original.subagentRuntimeId
+        )
+          return yield* rewindRefused();
+        // Compare-and-set the exact durable owner/control before touching the
+        // query. All ordinary writers and all later provider operations are now
+        // fenced until the matching transaction finishes or definitively aborts.
+        if (!(yield* store.reserve(input, original).pipe(Effect.mapError(rewindPersistenceError))))
+          return yield* rewindRefused();
+        const candidate = yield* routed.adapter
+          .prepareRollbackThread(input.threadId, input.numTurns, {
+            firstRemovedTurnId: input.firstRemovedTurnId,
+            retainedTurnCount: input.retainedTurnCount,
+          })
+          .pipe(
+            Effect.catch((error) =>
+              Effect.gen(function* () {
+                if (
+                  isProviderRewindOutcomeUnknown(error) ||
+                  !isProviderAdapterValidationError(error)
+                )
+                  return yield* rewindUnknown();
+                if (!(yield* store.refuse(input).pipe(Effect.mapError(rewindUnknown))))
+                  return yield* rewindUnknown();
+                return yield* Effect.fail(error);
+              }),
+            ),
+          );
+        if (
+          candidate.threadId !== original.threadId ||
+          candidate.provider !== original.provider ||
+          candidate.providerInstanceId !== original.providerInstanceId ||
+          candidate.cwd !== original.cwd ||
+          candidate.status !== "closed" ||
+          candidate.activeTurnId !== undefined ||
+          candidate.subagentRuntimeId !== undefined
+        ) {
+          return yield* rewindUnknown();
+        }
+        if (!(yield* store.prepared(input, candidate).pipe(Effect.mapError(rewindUnknown))))
+          return yield* rewindUnknown();
+      }),
+    );
+
+  const commitConversationRollback: NonNullable<
+    ProviderServiceShape["commitConversationRollback"]
+  > = (rawInput) =>
+    withThreadLifecycleLock(
+      rawInput.threadId,
+      Effect.gen(function* () {
+        const input = yield* decodeInputOrValidationError({
+          operation: "ProviderService.commitConversationRollback",
+          schema: ProviderConversationRewindIdentity,
+          payload: rawInput,
+        });
+        const store = directory.rewinds;
+        const state = yield* readRewind(input.threadId);
+        if (!store || !state || state.operationId !== input.operationId)
+          return yield* rewindRefused();
+        if (state.phase === "committed" || state.phase === "finished") return;
+        if (state.phase !== "prepared") return yield* rewindUnknown();
+        if (!(yield* store.commit(input).pipe(Effect.mapError(rewindUnknown)))) {
+          // Another authenticated coordinator may have committed the same
+          // operation through a separate SQLite connection. A failed CAS alone
+          // is not permission to compensate files against an already-switched
+          // native cursor. Re-observe the exact durable operation first.
+          const observed = yield* readRewind(input.threadId).pipe(Effect.mapError(rewindUnknown));
+          if (!observed || observed.operationId !== input.operationId)
+            return yield* rewindUnknown();
+          if (observed.phase === "committed" || observed.phase === "finished") return;
+          // A still-prepared operation lost its monotonic control-sequence
+          // authority and has not changed the durable native cursor. Every
+          // other transition is inconclusive and must preserve recovery.
+          return yield* observed.phase === "prepared" ? rewindRefused() : rewindUnknown();
+        }
+      }),
+    );
+
+  const finishConversationRollback: NonNullable<
+    ProviderServiceShape["finishConversationRollback"]
+  > = (rawInput) =>
+    withThreadLifecycleLock(
+      rawInput.threadId,
+      Effect.gen(function* () {
+        const input = yield* decodeInputOrValidationError({
+          operation: "ProviderService.finishConversationRollback",
+          schema: ProviderFinishConversationRollbackInput,
+          payload: rawInput,
+        });
+        const store = directory.rewinds;
+        const state = yield* readRewind(input.threadId);
+        if (!store || !state || state.operationId !== input.operationId)
+          return yield* rewindUnknown();
+        if (state.phase === (input.outcome === "committed" ? "finished" : "aborted")) return;
+        if (!(yield* store.finish(input).pipe(Effect.mapError(rewindUnknown))))
+          return yield* rewindUnknown();
+      }),
+    );
+
   const runStopAll = Effect.fn("runStopAll")(function* () {
     const currentAdapters = yield* getAdapterEntries;
     const stopAllTimestamp = yield* nowIso;
@@ -3164,6 +3438,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   );
 
   return {
+    prepareConversationRollback,
+    commitConversationRollback,
+    finishConversationRollback,
     startSession: (threadId, input) =>
       whileThreadAcceptsProviderWork({
         operation: "ProviderService.startSession",

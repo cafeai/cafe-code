@@ -100,6 +100,7 @@ import {
   readCodexChildLivenessSnapshotWithClient,
   readCodexExpectedActiveTurnMismatchActualTurnId,
   readCodexSubagentThreadWithInitializedClient,
+  CODEX_SUBAGENT_HISTORY_MAX_ANCESTRY_HOPS,
   readCodexSubagentThreadTransient,
   readCodexNotificationEmittedAtIso,
   readCodexNotificationRouteFields,
@@ -147,6 +148,17 @@ const publicEntry = (
 ): EffectCodexSchema.V2ThreadItemsListResponse__ThreadItemEntry => ({
   turnId,
   item: { type: "agentMessage", id, text, phase: "commentary" },
+});
+
+type AncestryMetadata = Pick<
+  EffectCodexSchema.V2ThreadReadResponse["thread"],
+  "id" | "parentThreadId" | "sessionId" | "source"
+>;
+const childMetadata = (id: string, parentThreadId: string): AncestryMetadata => ({
+  id,
+  parentThreadId,
+  sessionId: id,
+  source: { subAgent: { thread_spawn: { depth: 1, parent_thread_id: parentThreadId } } },
 });
 
 it("binds native event generations to the originating runtime across resume and delayed publication", () => {
@@ -1273,13 +1285,15 @@ describe("Codex subagent thread ownership validation", () => {
   const root = {
     id: "root-provider-thread",
     parentThreadId: null,
-    sessionId: "session-tree-1",
+    // The isolated native app-server returns the persisted thread ID here,
+    // unlike the enriched shared session ID returned for a loaded thread.
+    sessionId: "root-provider-thread",
     source: "appServer" as const,
   };
   const nestedChild = {
     id: "nested-provider-child",
     parentThreadId: "intermediate-provider-child",
-    sessionId: "session-tree-1",
+    sessionId: "nested-provider-child",
     source: {
       subAgent: {
         thread_spawn: {
@@ -1288,6 +1302,45 @@ describe("Codex subagent thread ownership validation", () => {
         },
       },
     } as const,
+  };
+  const intermediateChild = {
+    id: "intermediate-provider-child",
+    parentThreadId: root.id,
+    sessionId: "intermediate-provider-child",
+    source: {
+      subAgent: {
+        thread_spawn: {
+          depth: 1,
+          parent_thread_id: root.id,
+        },
+      },
+    } as const,
+  };
+  const ancestryFixture = (
+    metadataById: ReadonlyMap<string, AncestryMetadata>,
+    subagentThreadId = nestedChild.id,
+  ) => {
+    const calls: Array<{ method: string; payload: unknown }> = [];
+    const request = ((method: string, payload: unknown) => {
+      calls.push({ method, payload });
+      if (method === "initialize") return Effect.succeed({ userAgent: "codex-test" });
+      if (method === "thread/items/list") {
+        return Effect.succeed({ data: [publicEntry("verified-update")], nextCursor: null });
+      }
+      assert.equal(method, "thread/read");
+      const thread = metadataById.get((payload as { threadId: string }).threadId);
+      return thread === undefined
+        ? Effect.fail(CodexErrors.CodexAppServerRequestError.invalidRequest("Missing ancestor"))
+        : Effect.succeed({ thread: { ...thread, turns: [] } });
+    }) as CodexSubagentHistoryReadClient["request"];
+    return {
+      calls,
+      read: readCodexSubagentThreadWithInitializedClient({
+        client: { request, notify: () => Effect.void },
+        rootProviderThreadId: root.id,
+        subagentThreadId,
+      }),
+    };
   };
 
   const readPublicHistoryFixture = (
@@ -1305,9 +1358,12 @@ describe("Codex subagent thread ownership validation", () => {
       }
       if (method === "thread/read") {
         const threadId = (payload as { threadId: string }).threadId;
-        assert.ok(threadId === root.id || threadId === nestedChild.id);
+        const metadata = [root, nestedChild, intermediateChild].find(
+          (thread) => thread.id === threadId,
+        );
+        assert.ok(metadata);
         return Effect.succeed({
-          thread: { ...(threadId === root.id ? root : nestedChild), turns: [] },
+          thread: { ...metadata, turns: [] },
         });
       }
       return Effect.die(new Error(`Unexpected history fixture method: ${method}`));
@@ -1594,19 +1650,20 @@ describe("Codex subagent thread ownership validation", () => {
       }),
   );
 
-  it("accepts a nested child in the recovered root session tree", () => {
+  it("accepts exact nested ancestry with different persisted session IDs", () => {
     assert.equal(
       validateCodexSubagentThreadReadMetadata({
         expectedRootThreadId: "root-provider-thread",
         expectedChildThreadId: "nested-provider-child",
         root,
         child: nestedChild,
+        ancestors: [intermediateChild],
       }),
       undefined,
     );
   });
 
-  it("rejects mismatched ids, provider session trees, and parent metadata", () => {
+  it("rejects mismatched IDs, unproven ancestry, and inconsistent parent metadata", () => {
     assert.equal(
       validateCodexSubagentThreadReadMetadata({
         expectedRootThreadId: "different-root",
@@ -1630,7 +1687,8 @@ describe("Codex subagent thread ownership validation", () => {
         expectedRootThreadId: "root-provider-thread",
         expectedChildThreadId: "nested-provider-child",
         root,
-        child: { ...nestedChild, sessionId: "other-session-tree" },
+        // Shared labels cannot substitute for the missing parent-chain proof.
+        child: { ...nestedChild, sessionId: root.sessionId },
       }),
       "session-tree-mismatch",
     );
@@ -1685,14 +1743,12 @@ describe("Codex subagent thread ownership validation", () => {
             };
           }
           const requestedThreadId = (payload as { threadId: string }).threadId;
+          const metadata = [root, nestedChild, intermediateChild].find(
+            (thread) => thread.id === requestedThreadId,
+          );
+          assert.ok(metadata);
           return {
-            thread:
-              requestedThreadId === root.id
-                ? { ...root, turns: [] }
-                : {
-                    ...nestedChild,
-                    turns: [],
-                  },
+            thread: { ...metadata, turns: [] },
           };
         })) as CodexSubagentHistoryReadClient["request"];
       const notify = ((method: string, payload: unknown) =>
@@ -1709,11 +1765,22 @@ describe("Codex subagent thread ownership validation", () => {
       assert.equal(snapshot.threadId, nestedChild.id);
       assert.deepEqual(
         calls.map((call) => call.method),
-        ["initialize", "initialized", "thread/read", "thread/read", "thread/items/list"],
+        [
+          "initialize",
+          "initialized",
+          "thread/read",
+          "thread/read",
+          "thread/read",
+          "thread/items/list",
+        ],
       );
       assert.deepEqual(calls.slice(2), [
         { method: "thread/read", payload: { threadId: root.id, includeTurns: false } },
         { method: "thread/read", payload: { threadId: nestedChild.id, includeTurns: false } },
+        {
+          method: "thread/read",
+          payload: { threadId: intermediateChild.id, includeTurns: false },
+        },
         {
           method: "thread/items/list",
           payload: {
@@ -1736,39 +1803,163 @@ describe("Codex subagent thread ownership validation", () => {
     }),
   );
 
-  effectIt.effect("rejects invalid child metadata before requesting any child turns", () =>
+  effectIt.effect(
+    "admits direct and nested persisted children only after exact ancestry proof",
+    () =>
+      Effect.gen(function* () {
+        for (const nested of [false, true]) {
+          const fixture = ancestryFixture(
+            new Map<string, AncestryMetadata>([
+              [root.id, root],
+              [nestedChild.id, nested ? nestedChild : childMetadata(nestedChild.id, root.id)],
+              [intermediateChild.id, intermediateChild],
+            ]),
+          );
+          const snapshot = yield* fixture.read;
+          assert.equal(snapshot.publicHistory?.length, 1);
+          assert.deepEqual(
+            fixture.calls
+              .filter((call) => call.method === "thread/read")
+              .map((call) => call.payload),
+            [
+              { threadId: root.id, includeTurns: false },
+              { threadId: nestedChild.id, includeTurns: false },
+              ...(nested ? [{ threadId: intermediateChild.id, includeTurns: false }] : []),
+            ],
+          );
+          assert.equal(fixture.calls.at(-1)?.method, "thread/items/list");
+          assert.ok(
+            fixture.calls.every((call) =>
+              ["initialize", "thread/read", "thread/items/list"].includes(call.method),
+            ),
+          );
+        }
+      }),
+  );
+
+  effectIt.effect("rejects foreign, cyclic, malformed, or unavailable ancestry before items", () =>
     Effect.gen(function* () {
-      const calls: Array<{ method: string; payload: unknown }> = [];
-      const request = ((method: string, payload: unknown) =>
-        Effect.sync(() => {
-          calls.push({ method, payload });
-          if (method === "thread/read") {
-            const requestedThreadId = (payload as { threadId: string }).threadId;
-            return {
-              thread:
-                requestedThreadId === root.id
-                  ? { ...root, turns: [] }
-                  : { ...nestedChild, sessionId: "unrelated-session-tree", turns: [] },
-            };
-          }
-          throw new Error(`Unexpected method: ${method}`);
-        })) as CodexSubagentHistoryReadClient["request"];
-
-      const exit = yield* readCodexSubagentThreadWithInitializedClient({
-        client: {
-          request,
-          notify: ((_method: string, _payload: unknown) =>
-            Effect.void) as CodexInitializedSubagentHistoryReadClient["notify"],
+      const cases: ReadonlyArray<{
+        readonly name: string;
+        readonly child?: AncestryMetadata;
+        readonly ancestor?: AncestryMetadata;
+        readonly selectedId?: string;
+        readonly expectedReason?: string;
+      }> = [
+        {
+          name: "matching session label without descendant relationship",
+          child: { ...nestedChild, sessionId: root.sessionId },
+          ancestor: { ...root, id: intermediateChild.id },
+          expectedReason: "missing-subagent-metadata",
         },
-        rootProviderThreadId: root.id,
-        subagentThreadId: nestedChild.id,
-      }).pipe(Effect.exit);
+        {
+          name: "self-selection",
+          selectedId: root.id,
+          expectedReason: "session-tree-mismatch",
+        },
+        {
+          name: "self-cycle",
+          child: childMetadata(nestedChild.id, nestedChild.id),
+          expectedReason: "session-tree-mismatch",
+        },
+        {
+          name: "multi-hop cycle",
+          ancestor: childMetadata(intermediateChild.id, nestedChild.id),
+          expectedReason: "session-tree-mismatch",
+        },
+        {
+          name: "wrong requested child identity",
+          child: { ...nestedChild, id: "wrong-child" },
+          expectedReason: "child-identity-mismatch",
+        },
+        {
+          name: "wrong requested ancestor identity",
+          ancestor: { ...intermediateChild, id: "wrong-ancestor" },
+          expectedReason: "child-identity-mismatch",
+        },
+        {
+          name: "inconsistent duplicate ancestor parent",
+          ancestor: { ...intermediateChild, parentThreadId: "foreign-root" },
+          expectedReason: "parent-metadata-mismatch",
+        },
+        {
+          name: "inconsistent duplicate child parent",
+          child: { ...nestedChild, parentThreadId: "foreign-root" },
+          expectedReason: "parent-metadata-mismatch",
+        },
+        {
+          name: "non-binding subagent source",
+          ancestor: { ...intermediateChild, source: { subAgent: "review" } },
+          expectedReason: "missing-subagent-metadata",
+        },
+        {
+          name: "oversized parent identity",
+          child: childMetadata(nestedChild.id, "x".repeat(513)),
+          expectedReason: "missing-subagent-metadata",
+        },
+        {
+          name: "empty parent identity",
+          child: childMetadata(nestedChild.id, " "),
+          expectedReason: "missing-subagent-metadata",
+        },
+        { name: "missing ancestor" },
+      ];
+      for (const scenario of cases) {
+        const metadata = new Map<string, AncestryMetadata>([
+          [root.id, root],
+          [nestedChild.id, scenario.child ?? nestedChild],
+        ]);
+        if (scenario.ancestor) metadata.set(intermediateChild.id, scenario.ancestor);
+        const fixture = ancestryFixture(metadata, scenario.selectedId);
+        const failure = yield* fixture.read.pipe(Effect.flip);
+        if (scenario.expectedReason) {
+          assert.equal(
+            failure._tag,
+            "CodexSessionRuntimeInvalidSubagentThreadError",
+            scenario.name,
+          );
+          assert.ok("reason" in failure, scenario.name);
+          assert.equal(failure.reason, scenario.expectedReason, scenario.name);
+        } else {
+          assert.equal(failure._tag, "CodexAppServerRequestError", scenario.name);
+        }
+        assert.equal(
+          fixture.calls.some((call) => call.method === "thread/items/list"),
+          false,
+          scenario.name,
+        );
+        const requested = fixture.calls
+          .filter((call) => call.method === "thread/read")
+          .map((call) => (call.payload as { threadId: string }).threadId);
+        assert.equal(new Set(requested).size, requested.length, scenario.name);
+      }
+    }),
+  );
 
-      assert.equal(exit._tag, "Failure");
-      assert.equal(
-        calls.some((call) => call.method === "thread/items/list"),
-        false,
-      );
+  effectIt.effect("accepts the ancestry budget boundary and fails closed beyond it", () =>
+    Effect.gen(function* () {
+      for (const depth of [
+        CODEX_SUBAGENT_HISTORY_MAX_ANCESTRY_HOPS,
+        CODEX_SUBAGENT_HISTORY_MAX_ANCESTRY_HOPS + 1,
+      ]) {
+        const metadata = new Map<string, AncestryMetadata>([[root.id, root]]);
+        for (let index = 0; index < depth; index += 1) {
+          const id = `child-${index}`;
+          metadata.set(id, childMetadata(id, index + 1 === depth ? root.id : `child-${index + 1}`));
+        }
+        const fixture = ancestryFixture(metadata, "child-0");
+        const exit = yield* fixture.read.pipe(Effect.exit);
+        const permitted = depth === CODEX_SUBAGENT_HISTORY_MAX_ANCESTRY_HOPS;
+        assert.equal(exit._tag, permitted ? "Success" : "Failure");
+        assert.equal(
+          fixture.calls.filter((call) => call.method === "thread/read").length,
+          1 + CODEX_SUBAGENT_HISTORY_MAX_ANCESTRY_HOPS,
+        );
+        assert.equal(
+          fixture.calls.some((call) => call.method === "thread/items/list"),
+          permitted,
+        );
+      }
     }),
   );
 
@@ -1801,6 +1992,24 @@ describe("Codex subagent thread ownership validation", () => {
         "thread/read",
         { threadId: root.id, includeTurns: false },
       ]);
+    }),
+  );
+
+  effectIt.effect("rejects a substituted root before sending the child identity upstream", () =>
+    Effect.gen(function* () {
+      const fixture = ancestryFixture(new Map([[root.id, { ...root, id: "substituted-root" }]]));
+      const failure = yield* fixture.read.pipe(Effect.flip);
+      assert.equal(failure._tag, "CodexSessionRuntimeInvalidSubagentThreadError");
+      assert.ok("reason" in failure);
+      assert.equal(failure.reason, "root-identity-mismatch");
+      assert.deepEqual(
+        fixture.calls.map((call) => call.method),
+        ["initialize", "thread/read"],
+      );
+      assert.deepEqual(fixture.calls[1], {
+        method: "thread/read",
+        payload: { threadId: root.id, includeTurns: false },
+      });
     }),
   );
 });

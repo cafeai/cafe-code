@@ -20,6 +20,7 @@ import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 
 import type { ProviderSessionRuntimeRepositoryError } from "../Errors.ts";
+import type { ConversationRewindStore } from "./ConversationRewinds.ts";
 
 export const ProviderSessionRuntime = Schema.Struct({
   threadId: ThreadId,
@@ -82,6 +83,8 @@ export type DeleteProviderSessionRuntimeInput = typeof DeleteProviderSessionRunt
  * ProviderSessionRuntimeRepositoryShape - Service API for provider runtime records.
  */
 export interface ProviderSessionRuntimeRepositoryShape {
+  /** Present on current persistence; older fixtures cannot authorize rewinds. */
+  readonly rewinds?: ConversationRewindStore;
   /**
    * Insert or replace a provider runtime row.
    *

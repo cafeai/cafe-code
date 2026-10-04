@@ -1188,7 +1188,7 @@ it.live("forwards thread.turn.interrupt to claudeAgent provider sessions", () =>
   ),
 );
 
-it.live("reverts claudeAgent turns and rolls back provider conversation state", () =>
+it.live("commits a prepared Claude rewind and resumes only its retained native history", () =>
   withHarness(
     (harness) =>
       Effect.gen(function* () {
@@ -1309,9 +1309,18 @@ it.live("reverts claudeAgent turns and rolls back provider conversation state", 
           THREAD_ID,
           (entry) =>
             entry.latestTurn?.turnId === "turn-2" &&
+            entry.latestTurn.state === "completed" &&
             entry.checkpoints.length === 2 &&
-            entry.session?.providerName === "claudeAgent",
+            entry.session?.providerName === "claudeAgent" &&
+            entry.session.status === "ready" &&
+            entry.session.activeTurnId === null,
         );
+        yield* harness.checkpointReactor.drain;
+        const adapter = harness.adapterHarness!;
+        const [originalSession] = yield* adapter.adapter.listSessions();
+        assert.isDefined(originalSession?.subagentRuntimeId);
+        assert.equal(adapter.getNativeHistory(originalSession?.resumeCursor)?.turns.length, 2);
+        assert.equal(fs.readFileSync(path.join(harness.workspaceDir, "README.md"), "utf8"), "v3\n");
 
         yield* harness.engine.dispatch({
           type: "thread.checkpoint.revert",
@@ -1326,6 +1335,10 @@ it.live("reverts claudeAgent turns and rolls back provider conversation state", 
           (entry) =>
             entry.checkpoints.length === 1 && entry.checkpoints[0]?.checkpointTurnCount === 1,
         );
+        // Projection acknowledgement precedes native-fence release and ref
+        // pruning. Drain the real worker, rather than racing those side effects
+        // or treating the renderer checkpoint count as proof of full commit.
+        yield* harness.checkpointReactor.drain;
         assert.equal(revertedThread.checkpoints[0]?.checkpointTurnCount, 1);
         assert.equal(
           gitRefExists(harness.workspaceDir, checkpointRefForThreadTurn(THREAD_ID, 1)),
@@ -1335,7 +1348,117 @@ it.live("reverts claudeAgent turns and rolls back provider conversation state", 
           gitRefExists(harness.workspaceDir, checkpointRefForThreadTurn(THREAD_ID, 2)),
           false,
         );
-        assert.deepEqual(harness.adapterHarness!.getRollbackCalls(THREAD_ID), [1]);
+        assert.equal(
+          gitRefExists(
+            harness.workspaceDir,
+            checkpointRefForThreadTurn(THREAD_ID, Number.MAX_SAFE_INTEGER),
+          ),
+          false,
+        );
+        assert.equal(fs.readFileSync(path.join(harness.workspaceDir, "README.md"), "utf8"), "v2\n");
+        assert.deepEqual(adapter.getRollbackCalls(THREAD_ID), []);
+        assert.equal(adapter.getPreparedRollbackCalls().length, 1);
+        const preparation = adapter.getPreparedRollbackCalls()[0]!;
+        assert.deepEqual(preparation.boundary, {
+          firstRemovedTurnId: "turn-2",
+          retainedTurnCount: 1,
+        });
+        assert.equal(preparation.numTurns, 1);
+        assert.equal(preparation.candidate.status, "closed");
+        assert.isUndefined(preparation.candidate.subagentRuntimeId);
+        assert.deepEqual(adapter.listActiveSessionIds(), []);
+        assert.equal(
+          adapter.getStartCount(),
+          1,
+          "preparation must not activate the fork candidate",
+        );
+        assert.notDeepEqual(preparation.candidate.resumeCursor, originalSession?.resumeCursor);
+        assert.equal(
+          adapter.getNativeHistory(originalSession?.resumeCursor)?.turns.length,
+          2,
+          "the source transcript remains intact for recovery",
+        );
+        assert.deepEqual(
+          adapter.getNativeHistory(preparation.candidate.resumeCursor)?.turns,
+          adapter.getNativeHistory(originalSession?.resumeCursor)?.turns.slice(0, 1),
+        );
+
+        // Read through the real on-disk directory/journal. Finishing requires
+        // the accepted engine receipt for this exact checkpoint/control fence;
+        // no mocked transaction helper can make these assertions pass.
+        const rewind = yield* harness.providerSessionDirectory.rewinds!.read(THREAD_ID);
+        assert.equal(rewind?.phase, "finished");
+        assert.equal(rewind?.retainedTurnCount, 1);
+        assert.equal(rewind?.numTurns, 1);
+        assert.equal(rewind?.firstRemovedTurnId, "turn-2");
+        assert.deepEqual(rewind?.candidate, preparation.candidate);
+        const committedBinding = Option.getOrThrow(
+          yield* harness.providerSessionDirectory.getBinding(THREAD_ID),
+        );
+        assert.equal(committedBinding.status, "stopped");
+        assert.deepEqual(committedBinding.resumeCursor, preparation.candidate.resumeCursor);
+
+        yield* adapter.queueTurnResponseForNextSession({
+          events: [
+            {
+              type: "message.delta",
+              ...runtimeBase(
+                "evt-claude-revert-next",
+                "2026-02-24T10:14:02.050Z",
+                CLAUDE_AGENT_PROVIDER,
+              ),
+              threadId: THREAD_ID,
+              turnId: FIXTURE_TURN_ID,
+              delta: "Continued from retained v2 history.\n",
+            },
+          ],
+        });
+        yield* startTurn({
+          harness,
+          commandId: "cmd-turn-start-claude-after-rewind",
+          messageId: "msg-user-claude-after-rewind",
+          text: "Continue from the first Claude edit",
+        });
+        const resumed = yield* harness.waitForThread(
+          THREAD_ID,
+          (entry) =>
+            entry.latestTurn?.turnId === "turn-2" &&
+            entry.latestTurn.state === "completed" &&
+            entry.session?.status === "ready" &&
+            entry.checkpoints.length === 2 &&
+            entry.messages.some(
+              (message) =>
+                message.role === "assistant" &&
+                message.text.includes("Continued from retained v2 history."),
+            ),
+        );
+        yield* harness.checkpointReactor.drain;
+        const calls = adapter.getSendTurnCalls();
+        assert.equal(calls.length, 3);
+        assert.include(calls[2]?.input ?? "", "Continue from the first Claude edit");
+        assert.deepEqual(calls[2]?.session.resumeCursor, preparation.candidate.resumeCursor);
+        assert.deepEqual(calls[2]?.priorTurns, calls[1]?.priorTurns);
+        assert.notEqual(calls[2]?.session.subagentRuntimeId, originalSession?.subagentRuntimeId);
+        assert.equal(adapter.getStartCount(), 2);
+        assert.equal(adapter.getPreparedRollbackCalls().length, 1);
+        assert.equal(adapter.getNativeHistory(originalSession?.resumeCursor)?.turns.length, 2);
+        assert.equal(adapter.getNativeHistory(preparation.candidate.resumeCursor)?.turns.length, 2);
+        assert.equal(resumed.checkpoints[1]?.checkpointTurnCount, 2);
+        assert.equal(
+          gitShowFileAtRef(
+            harness.workspaceDir,
+            checkpointRefForThreadTurn(THREAD_ID, 2),
+            "README.md",
+          ),
+          "v2\n",
+        );
+        assert.equal(
+          gitRefExists(
+            harness.workspaceDir,
+            checkpointRefForThreadTurn(THREAD_ID, Number.MAX_SAFE_INTEGER),
+          ),
+          false,
+        );
       }),
     CLAUDE_AGENT_PROVIDER,
   ),

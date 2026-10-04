@@ -712,6 +712,154 @@ async function createRuntimeRecoveryFixture() {
   return { ...system, dispatch, command, threadId, turnId, runtimeRecovery };
 }
 
+async function createRewindFixture() {
+  const system = await createRuntimeRecoveryFixture();
+  const intent = await system.dispatch({
+    type: "thread.checkpoint.revert",
+    commandId: CommandId.make("rewind-request"),
+    threadId: system.threadId,
+    turnCount: 0,
+    createdAt: now(),
+  });
+  const completion: Extract<OrchestrationCommand, { type: "thread.revert.complete" }> = {
+    type: "thread.revert.complete",
+    commandId: CommandId.make("server:rewind-complete"),
+    threadId: system.threadId,
+    turnCount: 0,
+    expectedControlSequence: intent.sequence,
+    createdAt: now(),
+  };
+  return { ...system, completion };
+}
+
+describe("OrchestrationEngine rewind completion transaction", () => {
+  it("commits only the exact current control and safely replays its accepted receipt", async () => {
+    const system = await createRewindFixture();
+    try {
+      // Presentation-only metadata is deliberately not a newer control.
+      await system.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("server:rewind-title"),
+        threadId: system.threadId,
+        title: "Retitled while preparing",
+      });
+      expect((await system.readModel()).threads[0]?.messages).toHaveLength(1);
+      const receipt = await system.dispatch(system.completion);
+      expect((await system.readModel()).threads[0]?.messages).toHaveLength(0);
+      expect(await system.dispatch(system.completion)).toEqual(receipt);
+      const events = await system.run(system.sql<{ event_type: string }>`
+        SELECT event_type FROM orchestration_events
+        WHERE command_id = ${system.completion.commandId}`);
+      expect(events).toEqual([{ event_type: "thread.reverted" }]);
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it.each(["turn", "settings", "stop", "wrong sequence", "missing authority"] as const)(
+    "refuses %s before truncating any projection or publishing an accepted completion",
+    async (variant) => {
+      const system = await createRewindFixture();
+      try {
+        const base = {
+          commandId: CommandId.make("new-human-control"),
+          threadId: system.threadId,
+          createdAt: now(),
+        };
+        if (variant === "turn") {
+          await system.dispatch({
+            ...system.command,
+            ...base,
+            runtimeRecovery: undefined,
+            message: {
+              ...system.command.message,
+              messageId: asMessageId("new-human-message"),
+              text: "Do not discard this newer request.",
+            },
+          });
+        } else if (variant === "settings") {
+          await system.dispatch({
+            ...base,
+            type: "thread.runtime-mode.set",
+            runtimeMode: "approval-required",
+          });
+        } else if (variant === "stop") {
+          await system.dispatch({ ...base, type: "thread.session.stop" });
+        } else if (variant === "missing authority") {
+          await system.run(system.sql`DELETE FROM orchestration_runtime_recovery_controls
+            WHERE thread_id = ${system.threadId}`);
+        }
+        const before = await system.readModel();
+        const completion = {
+          ...system.completion,
+          expectedControlSequence:
+            variant === "wrong sequence"
+              ? system.completion.expectedControlSequence! - 1
+              : variant === "missing authority"
+                ? 0
+                : system.completion.expectedControlSequence,
+        };
+        await expect(system.dispatch(completion)).rejects.toMatchObject({
+          _tag: "OrchestrationCommandInvariantError",
+          commandType: "thread.revert.complete",
+        });
+        expect(await system.readModel()).toEqual(before);
+        const events = await system.run(system.sql`
+          SELECT sequence FROM orchestration_events WHERE command_id = ${completion.commandId}`);
+        expect(events).toEqual([]);
+        const receipts = await system.run(system.sql<{ status: string }>`
+          SELECT status FROM orchestration_command_receipts WHERE command_id = ${completion.commandId}`);
+        expect(receipts).toEqual([{ status: "rejected" }]);
+        await expect(system.dispatch(completion)).rejects.toMatchObject({
+          _tag: "OrchestrationCommandPreviouslyRejectedError",
+        });
+        expect(await system.readModel()).toEqual(before);
+      } finally {
+        await system.dispose();
+      }
+    },
+  );
+
+  it("fails closed when the SQL writer cannot be acquired before authority verification", async () => {
+    const system = await createRewindFixture();
+    try {
+      const before = await system.readModel();
+      // An injected local SQLite failure proves admission actually acquires
+      // the writer; a read-only preflight would incorrectly complete here.
+      await system.run(system.sql`CREATE TRIGGER fixture_rewind_writer_denied
+        BEFORE UPDATE ON orchestration_runtime_recovery_control_state
+        BEGIN SELECT RAISE(ABORT, 'fixture writer denied'); END`);
+      await expect(system.dispatch(system.completion)).rejects.toMatchObject({
+        _tag: "PersistenceSqlError",
+      });
+      expect(await system.readModel()).toEqual(before);
+      expect(
+        await system.run(system.sql`
+        SELECT command_id FROM orchestration_command_receipts
+        WHERE command_id = ${system.completion.commandId}`),
+      ).toEqual([]);
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it("preserves the legacy completion path when no native-rewind fence is supplied", async () => {
+    const system = await createRewindFixture();
+    try {
+      await system.dispatch({
+        type: "thread.session.stop",
+        commandId: CommandId.make("legacy-stop"),
+        threadId: system.threadId,
+        createdAt: now(),
+      });
+      await system.dispatch({ ...system.completion, expectedControlSequence: undefined });
+      expect((await system.readModel()).threads[0]?.messages).toHaveLength(0);
+    } finally {
+      await system.dispose();
+    }
+  });
+});
+
 describe("OrchestrationEngine runtime recovery barriers", () => {
   it("does not treat a scheduled start as fresh human recovery consent", async () => {
     const system = await createRuntimeRecoveryFixture();

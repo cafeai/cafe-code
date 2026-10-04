@@ -44,11 +44,21 @@ const MUTATING_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
   "clearGoal",
   "compactThread",
   "rollbackConversation",
+  "prepareConversationRollback",
+  "commitConversationRollback",
+  "finishConversationRollback",
+]);
+
+const REWIND_PHASE_METHODS = new Set<string>([
+  "prepareConversationRollback",
+  "commitConversationRollback",
+  "finishConversationRollback",
 ]);
 
 interface CommandRow {
   readonly commandId: string;
   readonly method: string;
+  readonly requestJson: string | null;
   readonly status: "running" | "completed" | "failed";
   readonly responseJson: string | null;
   readonly errorJson: string | null;
@@ -379,6 +389,7 @@ export const makeProviderDaemonCommandLedger = (options?: {
           command_id AS "commandId",
           method,
           status,
+          request_json AS "requestJson",
           response_json AS "responseJson",
           error_json AS "errorJson"
         FROM provider_daemon_commands
@@ -469,6 +480,32 @@ export const makeProviderDaemonCommandLedger = (options?: {
         }
         const existing = existingExit.value;
         if (existing !== null) {
+          // A phase receipt certifies one exact checkpoint transaction, not
+          // merely a caller-chosen id. Bind both directions: a rewind id cannot
+          // borrow another method's receipt, nor can another method replay a
+          // rewind receipt for a different thread or completion proof. Decode
+          // and re-encode to compare schema-canonical bodies, not JSON key order.
+          if (
+            REWIND_PHASE_METHODS.has(request.method) ||
+            REWIND_PHASE_METHODS.has(existing.method)
+          ) {
+            let matches = false;
+            try {
+              matches =
+                existing.method === request.method &&
+                existing.requestJson !== null &&
+                encodeProviderDaemonRpcRequestJson(
+                  decodeProviderDaemonRpcRequestJson(existing.requestJson),
+                ) === encodeProviderDaemonRpcRequestJson(request);
+            } catch {
+              // Missing/corrupt identity cannot certify a cached mutation.
+            }
+            if (!matches)
+              return commandError(
+                "ProviderDaemonCommandIdentityMismatch",
+                "The rewind command receipt does not match this exact request; its outcome is unknown.",
+              );
+          }
           if (existing.status === "completed" && existing.responseJson !== null) {
             return decodeProviderDaemonRpcEnvelopeJson(existing.responseJson);
           }

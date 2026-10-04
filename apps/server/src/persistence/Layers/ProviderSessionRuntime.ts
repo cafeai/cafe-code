@@ -12,6 +12,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Struct from "effect/Struct";
+import { makeConversationRewindStore } from "./ConversationRewinds.ts";
 
 import {
   PersistenceDecodeError,
@@ -574,6 +575,7 @@ const makeProviderSessionRuntimeRepository = Effect.gen(function* () {
       );
 
   return {
+    rewinds: makeConversationRewindStore(sql),
     upsert,
     getByThreadId,
     list,

@@ -18,6 +18,7 @@ import type {
   ProviderSessionDirectoryPersistenceError,
   ProviderValidationError,
 } from "../Errors.ts";
+import type { ConversationRewindStore } from "../../persistence/Services/ConversationRewinds.ts";
 
 export interface ProviderRuntimeBinding {
   readonly threadId: ThreadId;
@@ -46,6 +47,8 @@ export type ProviderSessionDirectoryWriteError =
   | ProviderSessionDirectoryPersistenceError;
 
 export interface ProviderSessionDirectoryShape {
+  /** Private cross-store mutation journal, never exposed in renderer snapshots. */
+  readonly rewinds?: ConversationRewindStore;
   readonly upsert: (
     binding: ProviderRuntimeBinding,
   ) => Effect.Effect<void, ProviderSessionDirectoryWriteError>;

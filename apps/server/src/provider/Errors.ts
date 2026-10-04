@@ -87,7 +87,7 @@ export class ProviderAdapterRewindOutcomeUnknownError extends Schema.TaggedError
   {},
 ) {
   override get message(): string {
-    return "The provider rewind outcome could not be verified. The target workspace and recovery checkpoint were retained; stop this thread and inspect its history before continuing or retrying.";
+    return "The provider rewind outcome could not be verified. Further provider work is blocked. Preserve the target workspace and recovery checkpoint, inspect the history, and resolve recovery before continuing or retrying.";
   }
 }
 

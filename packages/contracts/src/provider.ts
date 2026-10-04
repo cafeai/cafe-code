@@ -78,6 +78,29 @@ export const ProviderSession = Schema.Struct({
 });
 export type ProviderSession = typeof ProviderSession.Type;
 
+/** Internal cross-store rewind transaction identity; never provider-authored. */
+export const ProviderConversationRewindIdentity = Schema.Struct({
+  threadId: ThreadId,
+  operationId: Schema.String.check(Schema.isUUID()),
+});
+export const ProviderPrepareConversationRollbackInput = Schema.Struct({
+  ...ProviderConversationRewindIdentity.fields,
+  numTurns: Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0)),
+  firstRemovedTurnId: TurnId,
+  retainedTurnCount: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  expectedControlSequence: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+});
+export type ProviderPrepareConversationRollbackInput =
+  typeof ProviderPrepareConversationRollbackInput.Type;
+export const ProviderFinishConversationRollbackInput = Schema.Struct({
+  ...ProviderConversationRewindIdentity.fields,
+  outcome: Schema.Literals(["committed", "aborted"]),
+  completionCommandId: Schema.optional(Schema.String.check(Schema.isMaxLength(512))),
+});
+export type ProviderFinishConversationRollbackInput =
+  typeof ProviderFinishConversationRollbackInput.Type;
+export type ProviderConversationRewindIdentity = typeof ProviderConversationRewindIdentity.Type;
+
 /** Native session labels are bounded metadata, never a second prompt channel. */
 export const PROVIDER_SESSION_TITLE_MAX_CHARS = 200;
 

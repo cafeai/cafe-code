@@ -4,6 +4,7 @@ import {
   ProviderInstanceId,
   ThreadId,
   ApprovalRequestId,
+  TurnId,
   type ProviderDaemonRpcRequest as ProviderDaemonRpcRequestValue,
 } from "@cafecode/contracts";
 import * as DateTime from "effect/DateTime";
@@ -29,6 +30,114 @@ const stopRequest = {
 } satisfies ProviderDaemonRpcRequestValue;
 
 describe("ProviderDaemonCommandLedger", () => {
+  it("deduplicates every rewind phase and binds receipts to exact thread, checkpoint and finish proof", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const ledger = yield* makeProviderDaemonCommandLedger();
+        const count = yield* Ref.make(0);
+        const identity = {
+          threadId: ThreadId.make("rewind-thread"),
+          operationId: "2d157a02-7309-45ee-8b1c-4bf5da146a51",
+        };
+        const prepare = {
+          method: "prepareConversationRollback",
+          commandId: "rewind-prepare-command-0001",
+          payload: {
+            ...identity,
+            numTurns: 2,
+            firstRemovedTurnId: TurnId.make("removed-turn"),
+            retainedTurnCount: 1,
+            expectedControlSequence: 7,
+          },
+        } satisfies ProviderDaemonRpcRequestValue;
+        const commit = {
+          method: "commitConversationRollback",
+          commandId: "rewind-commit-command-0001",
+          payload: identity,
+        } satisfies ProviderDaemonRpcRequestValue;
+        const finish = {
+          method: "finishConversationRollback",
+          commandId: "rewind-finish-command-0001",
+          payload: { ...identity, outcome: "committed", completionCommandId: "completion-proof" },
+        } satisfies ProviderDaemonRpcRequestValue;
+        const execute = Ref.update(count, (n) => n + 1).pipe(
+          Effect.as({ ok: true as const, value: null }),
+        );
+        for (const request of [prepare, commit, finish]) {
+          expect(ledger.isMutating(request.method)).toBe(true);
+          expect(yield* ledger.runOnce(request, execute)).toEqual({ ok: true, value: null });
+          expect(yield* ledger.runOnce(request, execute)).toEqual({ ok: true, value: null });
+        }
+        expect(yield* Ref.get(count)).toBe(3);
+        for (const request of [
+          {
+            ...prepare,
+            payload: { ...prepare.payload, threadId: ThreadId.make("different-thread") },
+          },
+          {
+            ...prepare,
+            payload: { ...prepare.payload, firstRemovedTurnId: TurnId.make("different-turn") },
+          },
+          { ...prepare, payload: { ...prepare.payload, expectedControlSequence: 8 } },
+          { ...prepare, payload: { ...prepare.payload, retainedTurnCount: 0 } },
+          { ...finish, payload: { ...finish.payload, outcome: "aborted" as const } },
+          { ...finish, payload: { ...finish.payload, completionCommandId: "different-proof" } },
+          { ...stopRequest, commandId: commit.commandId, payload: { threadId: identity.threadId } },
+        ]) {
+          expect(yield* ledger.runOnce(request, execute)).toMatchObject({
+            ok: false,
+            error: { tag: "ProviderDaemonCommandIdentityMismatch" },
+          });
+        }
+        // The reverse collision cannot borrow an unrelated legacy command's ACK.
+        yield* ledger.runOnce(stopRequest, execute);
+        expect(
+          yield* ledger.runOnce({ ...commit, commandId: stopRequest.commandId }, execute),
+        ).toMatchObject({ ok: false, error: { tag: "ProviderDaemonCommandIdentityMismatch" } });
+        expect(yield* Ref.get(count)).toBe(4);
+        const sql = yield* SqlClient.SqlClient;
+        const bindings =
+          yield* sql`SELECT thread_id FROM provider_daemon_command_threads WHERE thread_id = ${identity.threadId}`;
+        expect(bindings).toHaveLength(3);
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+    );
+  });
+
+  it("cannot certify a rewind receipt with absent or corrupt stored request identity", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const ledger = yield* makeProviderDaemonCommandLedger();
+        const request = {
+          method: "commitConversationRollback",
+          commandId: "rewind-commit-command-0001",
+          payload: {
+            threadId: ThreadId.make("rewind-thread"),
+            operationId: "2d157a02-7309-45ee-8b1c-4bf5da146a51",
+          },
+        } satisfies ProviderDaemonRpcRequestValue;
+        let count = 0;
+        const execute = Effect.sync(() => {
+          count += 1;
+          return { ok: true as const, value: null };
+        });
+        yield* ledger.runOnce(request, execute);
+        const sql = yield* SqlClient.SqlClient;
+        // The SQL column is NOT NULL; exercise absent decoded identity with
+        // an empty object, then a corrupt body, without weakening the schema.
+        for (const requestJson of ["{}", "private-malformed-request"]) {
+          yield* sql`UPDATE provider_daemon_commands SET request_json = ${requestJson}`;
+          const result = yield* ledger.runOnce(request, execute);
+          expect(result).toMatchObject({
+            ok: false,
+            error: { tag: "ProviderDaemonCommandIdentityMismatch" },
+          });
+          expect(JSON.stringify(result)).not.toContain("private-malformed-request");
+        }
+        expect(count).toBe(1);
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+    );
+  });
+
   it("never persists private interaction answers or authorization URLs", async () => {
     await Effect.runPromise(
       Effect.gen(function* () {

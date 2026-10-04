@@ -24,6 +24,7 @@ import type {
   ProviderAdapterShape,
   ProviderThreadSnapshot,
   ProviderThreadTurnSnapshot,
+  ProviderRewindBoundary,
 } from "../src/provider/Services/ProviderAdapter.ts";
 
 export interface TestTurnResponse {
@@ -55,7 +56,21 @@ interface SessionState {
   snapshot: ProviderThreadSnapshot;
   turnCount: number;
   readonly queuedResponses: Array<TestTurnResponse>;
-  readonly rollbackCalls: Array<number>;
+}
+
+export interface TestPreparedRollbackCall {
+  readonly threadId: ThreadId;
+  readonly numTurns: number;
+  readonly boundary: ProviderRewindBoundary;
+  readonly original: ProviderSession;
+  readonly candidate: ProviderSession;
+}
+
+export interface TestSendTurnCall {
+  readonly threadId: ThreadId;
+  readonly input: string | undefined;
+  readonly session: ProviderSession;
+  readonly priorTurns: ReadonlyArray<ProviderThreadTurnSnapshot>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -189,6 +204,9 @@ export interface TestProviderAdapterHarness {
   ) => Effect.Effect<void, never>;
   readonly getStartCount: () => number;
   readonly getRollbackCalls: (threadId: ThreadId) => ReadonlyArray<number>;
+  readonly getPreparedRollbackCalls: () => ReadonlyArray<TestPreparedRollbackCall>;
+  readonly getSendTurnCalls: () => ReadonlyArray<TestSendTurnCall>;
+  readonly getNativeHistory: (cursor: unknown) => ProviderThreadSnapshot | undefined;
   readonly getInterruptCalls: (threadId: ThreadId) => ReadonlyArray<TurnId | undefined>;
   readonly listActiveSessionIds: () => ReadonlyArray<ThreadId>;
   readonly getApprovalResponses: (threadId: ThreadId) => ReadonlyArray<{
@@ -229,6 +247,17 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
     const runtimeEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
     let sessionCount = 0;
     const sessions = new Map<ThreadId, SessionState>();
+    // Unlike a live query, native Claude history survives retirement. A fork
+    // gets a distinct cursor and never mutates the source transcript; starting
+    // another query must resolve the exact cursor supplied by ProviderService.
+    const nativeHistories = new Map<string, ProviderThreadSnapshot>();
+    const preparedRollbackCalls: TestPreparedRollbackCall[] = [];
+    const sendTurnCalls: TestSendTurnCall[] = [];
+    const rollbackCallsBySession = new Map<ThreadId, number[]>();
+    const nativeCursorId = (cursor: unknown): string | undefined =>
+      isRecord(cursor) && typeof cursor.nativeSessionId === "string"
+        ? cursor.nativeSessionId
+        : undefined;
     const queuedResponsesForNextSession: TestTurnResponse[] = [];
     const interruptCallsBySession = new Map<ThreadId, Array<TurnId | undefined>>();
     const approvalResponsesBySession = new Map<
@@ -255,6 +284,26 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
         sessionCount += 1;
         const threadId = input.threadId;
         const createdAt = nowIso();
+        let resumeCursor = input.resumeCursor ?? { threadId: String(threadId), seed: sessionCount };
+        let snapshot: ProviderThreadSnapshot = { threadId, turns: [] };
+        if (provider === "claudeAgent") {
+          if (input.resumeCursor !== undefined) {
+            const nativeId = nativeCursorId(input.resumeCursor);
+            const retained = nativeId === undefined ? undefined : nativeHistories.get(nativeId);
+            if (!retained || retained.threadId !== threadId) {
+              return yield* new ProviderAdapterValidationError({
+                provider,
+                operation: "startSession",
+                issue: "The synthetic Claude cursor has no matching native history.",
+              });
+            }
+            snapshot = retained;
+          } else {
+            const nativeSessionId = yield* Random.nextUUIDv4;
+            resumeCursor = { nativeSessionId };
+            nativeHistories.set(nativeSessionId, snapshot);
+          }
+        }
 
         const session: ProviderSession = {
           provider,
@@ -265,20 +314,17 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
           runtimeMode: input.runtimeMode,
           threadId,
           cwd: input.cwd,
-          resumeCursor: input.resumeCursor ?? { threadId: String(threadId), seed: sessionCount },
+          resumeCursor,
+          ...(provider === "claudeAgent" ? { subagentRuntimeId: yield* Random.nextUUIDv4 } : {}),
           createdAt,
           updatedAt: createdAt,
         };
 
         sessions.set(threadId, {
           session,
-          snapshot: {
-            threadId,
-            turns: [],
-          },
-          turnCount: 0,
+          snapshot,
+          turnCount: snapshot.turns.length,
           queuedResponses: queuedResponsesForNextSession.splice(0),
-          rollbackCalls: [],
         });
 
         return session;
@@ -290,6 +336,13 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
         if (!state) {
           return yield* missingSessionEffect(provider, input.threadId);
         }
+
+        sendTurnCalls.push({
+          threadId: input.threadId,
+          input: input.input,
+          session: state.session,
+          priorTurns: state.snapshot.turns,
+        });
 
         state.turnCount += 1;
         const turnCount = state.turnCount;
@@ -312,6 +365,12 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
             eventId: yield* Random.nextUUIDv4,
             provider,
             sessionId: RuntimeSessionId.make(String(input.threadId)),
+            ...(state.session.subagentRuntimeId !== undefined
+              ? {
+                  subagentRuntimeId: state.session.subagentRuntimeId,
+                  providerInstanceId: state.session.providerInstanceId,
+                }
+              : {}),
           };
           rawEvent.threadId = state.snapshot.threadId;
           if (Object.hasOwn(rawEvent, "turnId")) {
@@ -362,6 +421,8 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
           threadId: state.snapshot.threadId,
           turns: [...state.snapshot.turns, nextTurn],
         };
+        const nativeId = nativeCursorId(state.session.resumeCursor);
+        if (nativeId !== undefined) nativeHistories.set(nativeId, state.snapshot);
 
         if (deferredTurnCompletedEvents.length === 0) {
           yield* emit({
@@ -371,6 +432,12 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
             createdAt: nowIso(),
             threadId: state.snapshot.threadId,
             turnId,
+            ...(state.session.subagentRuntimeId !== undefined
+              ? {
+                  subagentRuntimeId: state.session.subagentRuntimeId,
+                  providerInstanceId: state.session.providerInstanceId,
+                }
+              : {}),
             payload: {
               state: "completed",
             },
@@ -460,7 +527,9 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
       }
 
       return Effect.sync(() => {
-        state.rollbackCalls.push(numTurns);
+        const calls = rollbackCallsBySession.get(threadId) ?? [];
+        calls.push(numTurns);
+        rollbackCallsBySession.set(threadId, calls);
         state.snapshot = {
           threadId: state.snapshot.threadId,
           turns: state.snapshot.turns.slice(0, state.snapshot.turns.length - numTurns),
@@ -469,6 +538,63 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
         return state.snapshot;
       });
     };
+
+    const prepareRollbackThread: NonNullable<
+      ProviderAdapterShape<ProviderAdapterError>["prepareRollbackThread"]
+    > = (threadId, numTurns, boundary) =>
+      Effect.gen(function* () {
+        const state = sessions.get(threadId);
+        if (!state) return yield* missingSessionEffect(provider, threadId);
+        // Model the adapter's exact checkpoint/native-turn admission, not a
+        // positional fallback. This fixture has no background tasks or live
+        // process; ready + no active turn is its complete idle-tree proof.
+        if (
+          provider !== "claudeAgent" ||
+          state.session.status !== "ready" ||
+          state.session.activeTurnId !== undefined ||
+          !Number.isInteger(numTurns) ||
+          numTurns <= 0 ||
+          boundary.retainedTurnCount !== state.snapshot.turns.length - numTurns ||
+          state.snapshot.turns[boundary.retainedTurnCount]?.id !== boundary.firstRemovedTurnId
+        ) {
+          return yield* new ProviderAdapterValidationError({
+            provider,
+            operation: "prepareRollbackThread",
+            issue: "The synthetic Claude rewind boundary is not an exact idle native turn.",
+          });
+        }
+        // Retire the original query before returning the closed candidate. Its
+        // immutable source history remains available for verified recovery.
+        sessions.delete(threadId);
+        let candidateCursor: { readonly nativeSessionId: string } | undefined;
+        if (boundary.retainedTurnCount > 0) {
+          const nativeSessionId = yield* Random.nextUUIDv4;
+          nativeHistories.set(nativeSessionId, {
+            threadId,
+            turns: state.snapshot.turns.slice(0, boundary.retainedTurnCount),
+          });
+          candidateCursor = { nativeSessionId };
+        }
+        const candidate: ProviderSession = {
+          provider,
+          providerInstanceId: state.session.providerInstanceId,
+          threadId,
+          cwd: state.session.cwd,
+          runtimeMode: state.session.runtimeMode,
+          status: "closed",
+          ...(candidateCursor !== undefined ? { resumeCursor: candidateCursor } : {}),
+          createdAt: state.session.createdAt,
+          updatedAt: nowIso(),
+        };
+        preparedRollbackCalls.push({
+          threadId,
+          numTurns,
+          boundary,
+          original: state.session,
+          candidate,
+        });
+        return candidate;
+      });
 
     const stopAll: ProviderAdapterShape<ProviderAdapterError>["stopAll"] = () =>
       Effect.sync(() => {
@@ -501,6 +627,7 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
       hasSession,
       readThread,
       rollbackThread,
+      ...(provider === "claudeAgent" ? { prepareRollbackThread } : {}),
       stopAll,
       streamEvents: Stream.fromQueue(runtimeEvents),
     };
@@ -527,11 +654,7 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
       });
 
     const getRollbackCalls = (threadId: ThreadId): ReadonlyArray<number> => {
-      const state = sessions.get(threadId);
-      if (!state) {
-        return [];
-      }
-      return [...state.rollbackCalls];
+      return [...(rollbackCallsBySession.get(threadId) ?? [])];
     };
 
     const getStartCount = (): number => sessionCount;
@@ -568,6 +691,12 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
       queueTurnResponseForNextSession,
       getStartCount,
       getRollbackCalls,
+      getPreparedRollbackCalls: () => [...preparedRollbackCalls],
+      getSendTurnCalls: () => [...sendTurnCalls],
+      getNativeHistory: (cursor) => {
+        const nativeId = nativeCursorId(cursor);
+        return nativeId === undefined ? undefined : nativeHistories.get(nativeId);
+      },
       getInterruptCalls,
       listActiveSessionIds,
       getApprovalResponses,

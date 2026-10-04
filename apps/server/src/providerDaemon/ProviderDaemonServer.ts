@@ -952,6 +952,33 @@ const executeRpcRequest = (
         : Effect.die("Provider service does not expose goal operations.");
     case "rollbackConversation":
       return providerService.rollbackConversation(request.payload);
+    case "prepareConversationRollback":
+    case "commitConversationRollback":
+    case "finishConversationRollback": {
+      // Older runtime owners must refuse before any checkpoint mutation. Never
+      // emulate transaction phases with the legacy local-only rollback path.
+      if (
+        request.method === "prepareConversationRollback" &&
+        providerService.prepareConversationRollback
+      )
+        return providerService.prepareConversationRollback(request.payload);
+      if (
+        request.method === "commitConversationRollback" &&
+        providerService.commitConversationRollback
+      )
+        return providerService.commitConversationRollback(request.payload);
+      if (
+        request.method === "finishConversationRollback" &&
+        providerService.finishConversationRollback
+      )
+        return providerService.finishConversationRollback(request.payload);
+      return Effect.fail(
+        new ProviderValidationError({
+          operation: request.method,
+          issue: "Transactional conversation rewind is unavailable.",
+        }),
+      );
+    }
     case "readSubagentDetail":
       return providerService
         .readSubagentDetail({

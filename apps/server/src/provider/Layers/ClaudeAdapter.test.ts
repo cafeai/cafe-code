@@ -20,9 +20,11 @@ import type {
   PermissionResult,
   SDKControlInterruptResponse,
   SDKMessage,
+  SDKAssistantMessage,
   SDKResultSuccess,
   SDKUserMessage,
   SessionMessage,
+  SessionStoreEntry,
 } from "@anthropic-ai/claude-agent-sdk";
 import {
   ApprovalRequestId,
@@ -33,6 +35,7 @@ import {
   type RuntimeMode,
   RuntimeTaskId,
   ThreadId,
+  TurnId,
   ProviderInstanceId,
   PROVIDER_SESSION_TITLE_MAX_CHARS,
 } from "@cafecode/contracts";
@@ -85,6 +88,16 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
   public interruptResponse: SDKControlInterruptResponse | undefined;
   public cancelAsyncMessageResult = true;
   public closeCalls = 0;
+  public waitForExitCalls = 0;
+  public exitFailure: unknown = undefined;
+  public beforeExit: (() => void) | undefined;
+
+  readonly waitForExit = async (): Promise<void> => {
+    this.waitForExitCalls += 1;
+    this.beforeExit?.();
+    if (this.exitFailure !== undefined) throw this.exitFailure;
+    if (!this.done) throw new Error("Synthetic query has not exited.");
+  };
 
   emit(message: SDKMessage): void {
     if (this.done) {
@@ -411,6 +424,120 @@ function claudeProjectDirectoryForTest(homePath: string, cwd: string): string {
 const THREAD_ID = ThreadId.make("thread-claude-1");
 const RESUME_THREAD_ID = ThreadId.make("thread-claude-resume");
 
+/** A private native transcript with three Cafe prompts and a nonassistant leaf. */
+function makeRewindHarness(options?: Pick<ClaudeAdapterLiveOptions, "forkNativeSession">) {
+  const homePath = realpathSync(mkdtempSync(path.join(os.tmpdir(), "claude-rewind-home-")));
+  const cwd = path.join(homePath, "workspace");
+  mkdirSync(cwd, { mode: 0o700 });
+  const sessionId = "71000000-0000-4000-8000-000000000001";
+  const first = TurnId.make("71000000-0000-4000-8000-000000000002");
+  const second = TurnId.make("71000000-0000-4000-8000-000000000003");
+  const third = TurnId.make("71000000-0000-4000-8000-000000000004");
+  const answer = "71000000-0000-4000-8000-000000000005";
+  const retainedAttachment = "71000000-0000-4000-8000-000000000006";
+  const toolUse = "71000000-0000-4000-8000-000000000008";
+  const toolResult = "71000000-0000-4000-8000-000000000009";
+  const steer = "71000000-0000-4000-8000-000000000010";
+  const entries: SessionStoreEntry[] = [
+    {
+      type: "user",
+      uuid: first,
+      parentUuid: null,
+      sessionId,
+      isSidechain: false,
+      message: { role: "user", content: "first prompt" },
+    },
+    {
+      type: "assistant",
+      uuid: answer,
+      parentUuid: first,
+      sessionId,
+      isSidechain: false,
+      message: { role: "assistant", content: [{ type: "text", text: "first answer" }] },
+    },
+    {
+      type: "user",
+      uuid: second,
+      parentUuid: answer,
+      sessionId,
+      isSidechain: false,
+      message: { role: "user", content: "second prompt" },
+    },
+    {
+      type: "assistant",
+      uuid: toolUse,
+      parentUuid: second,
+      sessionId,
+      isSidechain: false,
+      message: {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "retained-tool", name: "Read", input: {} }],
+      },
+    },
+    {
+      type: "user",
+      uuid: toolResult,
+      parentUuid: toolUse,
+      sessionId,
+      isSidechain: false,
+      message: {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "retained-tool", content: "kept tool result" },
+        ],
+      },
+    },
+    {
+      type: "user",
+      uuid: steer,
+      parentUuid: toolResult,
+      sessionId,
+      isSidechain: false,
+      message: { role: "user", content: "kept in-turn steer" },
+    },
+    {
+      type: "attachment",
+      uuid: retainedAttachment,
+      parentUuid: steer,
+      sessionId,
+      isSidechain: false,
+      attachment: { type: "structured_output", data: { answer: "kept structure" } },
+    },
+    {
+      type: "user",
+      uuid: third,
+      parentUuid: retainedAttachment,
+      sessionId,
+      isSidechain: false,
+      message: { role: "user", content: "third prompt must disappear" },
+    },
+  ];
+  const projectDirectory = claudeProjectDirectoryForTest(homePath, cwd);
+  mkdirSync(projectDirectory, { recursive: true, mode: 0o700 });
+  const sourcePath = path.join(projectDirectory, `${sessionId}.jsonl`);
+  const contents = `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`;
+  writeFileSync(sourcePath, contents, { mode: 0o600 });
+  const harness = makeHarness({
+    newQueryPerSession: true,
+    environment: {},
+    cwd,
+    claudeConfig: { homePath },
+    ...options,
+  });
+  return {
+    ...harness,
+    homePath,
+    cwd,
+    sessionId,
+    first,
+    second,
+    third,
+    sourcePath,
+    projectDirectory,
+    contents,
+  };
+}
+
 describe("Claude project directory encoding", () => {
   it("matches upstream punctuation replacement and bounded long-path hashing", () => {
     assert.equal(
@@ -422,6 +549,397 @@ describe("Claude project directory encoding", () => {
 });
 
 describe("ClaudeAdapterLive", () => {
+  for (const retainHistory of [false, true]) {
+    it.effect(
+      `handles a compacted-away checkpoint with ${retainHistory ? "explicit partial-rewind refusal" : "an empty baseline"}`,
+      () => {
+        const harness = makeRewindHarness();
+        const compactBoundary = "71000000-0000-4000-8000-000000000011";
+        const contents =
+          [
+            {
+              type: "system",
+              subtype: "compact_boundary",
+              uuid: compactBoundary,
+              parentUuid: null,
+              sessionId: harness.sessionId,
+              isSidechain: false,
+              compactMetadata: { trigger: "auto", preTokens: 100 },
+            },
+            {
+              type: "user",
+              uuid: harness.third,
+              parentUuid: compactBoundary,
+              sessionId: harness.sessionId,
+              isSidechain: false,
+              message: { role: "user", content: "current compacted conversation" },
+            },
+          ]
+            .map((entry) => JSON.stringify(entry))
+            .join("\n") + "\n";
+        writeFileSync(harness.sourcePath, contents);
+        return Effect.gen(function* () {
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => rmSync(harness.homePath, { recursive: true, force: true })),
+          );
+          const adapter = yield* ClaudeAdapter;
+          yield* adapter.startSession({
+            threadId: THREAD_ID,
+            runtimeMode: "approval-required",
+            cwd: harness.cwd,
+            resumeCursor: { resume: harness.sessionId, turnCount: 3 },
+          });
+          if (retainHistory) {
+            const outcome = yield* adapter.prepareRollbackThread!(THREAD_ID, 2, {
+              firstRemovedTurnId: harness.second,
+              retainedTurnCount: 1,
+            }).pipe(Effect.exit);
+            assert.equal(outcome._tag, "Failure");
+            assert.equal(harness.query.closeCalls, 0);
+          } else {
+            const candidate = yield* adapter.prepareRollbackThread!(THREAD_ID, 3, {
+              firstRemovedTurnId: harness.first,
+              retainedTurnCount: 0,
+            });
+            assert.equal(candidate.status, "closed");
+            assert.isUndefined(candidate.resumeCursor);
+          }
+          assert.equal(readFileSync(harness.sourcePath, "utf8"), contents);
+        }).pipe(Effect.provide(harness.layer));
+      },
+    );
+  }
+
+  it.effect(
+    "prepares a closed exact native prefix and uses stable prompt lineage after restart",
+    () => {
+      const harness = makeRewindHarness();
+      return Effect.gen(function* () {
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => rmSync(harness.homePath, { recursive: true, force: true })),
+        );
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "approval-required",
+          cwd: harness.cwd,
+          resumeCursor: { resume: harness.sessionId, turnCount: 3 },
+        });
+        const candidate = yield* adapter.prepareRollbackThread!(THREAD_ID, 1, {
+          firstRemovedTurnId: harness.third,
+          retainedTurnCount: 2,
+        });
+        assert.equal(candidate.status, "closed");
+        assert.equal(
+          harness.createInputs.length,
+          1,
+          "preparation cannot launch a replacement query",
+        );
+        assert.equal(harness.query.waitForExitCalls, 1);
+        assert.equal(readFileSync(harness.sourcePath, "utf8"), harness.contents);
+        const cursor = candidate.resumeCursor as {
+          resume: string;
+          turnCount: number;
+          rewindMessageIds: Record<string, string>;
+        };
+        assert.notEqual(cursor.resume, harness.sessionId);
+        const retained = readFileSync(
+          path.join(harness.projectDirectory, `${cursor.resume}.jsonl`),
+          "utf8",
+        );
+        assert.include(retained, "kept structure");
+        assert.include(retained, "kept in-turn steer");
+        assert.include(retained, "kept tool result");
+        assert.notInclude(retained, "third prompt must disappear");
+        assert.isDefined(cursor.rewindMessageIds[harness.first]);
+        assert.isDefined(cursor.rewindMessageIds[harness.second]);
+        assert.isUndefined(cursor.rewindMessageIds[harness.third]);
+
+        // This new runtime has no in-memory turn array: the committed cursor is
+        // sufficient to bind an older original Cafe UUID through the SDK remap.
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "approval-required",
+          cwd: harness.cwd,
+          resumeCursor: candidate.resumeCursor,
+        });
+        const older = yield* adapter.prepareRollbackThread!(THREAD_ID, 1, {
+          firstRemovedTurnId: harness.second,
+          retainedTurnCount: 1,
+        });
+        const olderCursor = older.resumeCursor as {
+          resume: string;
+          rewindMessageIds: Record<string, string>;
+        };
+        const olderHistory = readFileSync(
+          path.join(harness.projectDirectory, `${olderCursor.resume}.jsonl`),
+          "utf8",
+        );
+        assert.include(olderHistory, "first answer");
+        assert.notInclude(olderHistory, "second prompt");
+        assert.notEqual(
+          olderCursor.rewindMessageIds[harness.first],
+          cursor.rewindMessageIds[harness.first],
+        );
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "approval-required",
+          cwd: harness.cwd,
+          resumeCursor: older.resumeCursor,
+        });
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "next prompt", attachments: [] });
+        const resumed = harness.getLastCreateQueryInput()!;
+        assert.equal(resumed.options.resume, olderCursor.resume);
+        assert.isUndefined(resumed.options.resumeSessionAt);
+        assert.equal(yield* Effect.promise(() => readFirstPromptText(resumed)), "next prompt");
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect(
+    "keeps the retired generation fenced when the SDK refuses before candidate publication",
+    () => {
+      const harness = makeRewindHarness({
+        forkNativeSession: async () => {
+          throw new Error("Synthetic prepublication refusal");
+        },
+      });
+      return Effect.gen(function* () {
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => rmSync(harness.homePath, { recursive: true, force: true })),
+        );
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "approval-required",
+          cwd: harness.cwd,
+          resumeCursor: { resume: harness.sessionId, turnCount: 3 },
+        });
+        const outcome = yield* adapter.prepareRollbackThread!(THREAD_ID, 1, {
+          firstRemovedTurnId: harness.third,
+          retainedTurnCount: 2,
+        }).pipe(Effect.flip);
+        assert.equal(outcome._tag, "ProviderAdapterRewindOutcomeUnknownError");
+        assert.equal(harness.query.waitForExitCalls, 1);
+        assert.equal(harness.createInputs.length, 1);
+        assert.equal(readFileSync(harness.sourcePath, "utf8"), harness.contents);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect(
+    "rejects a path-shaped live session ID before reading or retiring a baseline rewind",
+    () => {
+      const harness = makeRewindHarness();
+      const maliciousSessionId = "../outside-session";
+      // Keep the adversarial target inside this private temporary fixture, but
+      // outside the exact project directory. A missing/invalid file would make
+      // the old vulnerable path refuse for an unrelated reason and hide the
+      // missing live-SDK identity admission check.
+      const outsidePath = path.resolve(harness.projectDirectory, `${maliciousSessionId}.jsonl`);
+      assert.equal(path.dirname(outsidePath), path.dirname(harness.projectDirectory));
+      writeFileSync(outsidePath, harness.contents, { mode: 0o600 });
+      return Effect.gen(function* () {
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => rmSync(harness.homePath, { recursive: true, force: true })),
+        );
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "approval-required",
+          cwd: harness.cwd,
+          resumeCursor: { resume: harness.sessionId, turnCount: 3 },
+        });
+        const observed = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "session.state.changed"),
+          Stream.runHead,
+          Effect.forkChild,
+        );
+        // Persisted cursors are UUID-checked separately. Reproduce the live
+        // SDK path instead: its session_id may replace the in-memory identity.
+        harness.query.emit({
+          type: "system",
+          subtype: "status",
+          status: null,
+          uuid: "71000000-0000-4000-8000-000000000012",
+          session_id: maliciousSessionId,
+        });
+        yield* Fiber.join(observed);
+        const sessions = yield* adapter.listSessions();
+        assert.equal(
+          (sessions[0]?.resumeCursor as { resume?: string } | undefined)?.resume,
+          maliciousSessionId,
+        );
+        const result = yield* adapter.prepareRollbackThread!(THREAD_ID, 3, {
+          firstRemovedTurnId: harness.first,
+          retainedTurnCount: 0,
+        }).pipe(Effect.flip);
+        assert.instanceOf(result, ProviderAdapterValidationError);
+        assert.equal(harness.query.closeCalls, 0);
+        assert.equal(harness.query.waitForExitCalls, 0);
+        assert.equal(harness.createInputs.length, 1);
+        assert.isTrue(yield* adapter.hasSession(THREAD_ID));
+        assert.equal(readFileSync(outsidePath, "utf8"), harness.contents);
+        assert.equal(readFileSync(harness.sourcePath, "utf8"), harness.contents);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect(
+    "prepares an empty baseline without inventing a native session or launching inference",
+    () => {
+      const harness = makeRewindHarness();
+      return Effect.gen(function* () {
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => rmSync(harness.homePath, { recursive: true, force: true })),
+        );
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "approval-required",
+          cwd: harness.cwd,
+          resumeCursor: { resume: harness.sessionId, turnCount: 3 },
+        });
+        const candidate = yield* adapter.prepareRollbackThread!(THREAD_ID, 3, {
+          firstRemovedTurnId: harness.first,
+          retainedTurnCount: 0,
+        });
+        assert.isUndefined(candidate.resumeCursor);
+        assert.equal(candidate.status, "closed");
+        assert.equal(harness.createInputs.length, 1);
+        assert.equal(readFileSync(harness.sourcePath, "utf8"), harness.contents);
+        // Only the next explicit user turn creates a fresh query. Clearing the
+        // committed cursor must not recover the discarded native history or
+        // broaden the user's original approval-required permission mode.
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "approval-required",
+          cwd: harness.cwd,
+          resumeCursor: candidate.resumeCursor,
+        });
+        yield* adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: "fresh baseline input",
+          attachments: [],
+        });
+        const fresh = harness.getLastCreateQueryInput()!;
+        assert.isUndefined(fresh.options.resume);
+        assert.isUndefined(fresh.options.resumeSessionAt);
+        assert.equal(fresh.options.permissionMode, "default");
+        assert.notEqual(fresh.options.allowDangerouslySkipPermissions, true);
+        assert.equal(
+          yield* Effect.promise(() => readFirstPromptText(fresh)),
+          "fresh baseline input",
+        );
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect(
+    "refuses an unverifiable historical checkpoint before retiring the original query",
+    () => {
+      const harness = makeRewindHarness();
+      return Effect.gen(function* () {
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => rmSync(harness.homePath, { recursive: true, force: true })),
+        );
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "approval-required",
+          cwd: harness.cwd,
+          resumeCursor: { resume: harness.sessionId, turnCount: 3 },
+        });
+        const result = yield* adapter.prepareRollbackThread!(THREAD_ID, 1, {
+          firstRemovedTurnId: TurnId.make("legacy-unbound-turn"),
+          retainedTurnCount: 2,
+        }).pipe(Effect.exit);
+        assert.equal(result._tag, "Failure");
+        assert.equal(harness.query.closeCalls, 0);
+        assert.equal(readFileSync(harness.sourcePath, "utf8"), harness.contents);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  for (const scenario of ["unverified exit", "late transcript append"] as const) {
+    it.effect(`retains a fenced original cursor after ${scenario}`, () => {
+      const harness = makeRewindHarness();
+      return Effect.gen(function* () {
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => rmSync(harness.homePath, { recursive: true, force: true })),
+        );
+        const adapter = yield* ClaudeAdapter;
+        const originalCursor = { resume: harness.sessionId, turnCount: 3 };
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "approval-required",
+          cwd: harness.cwd,
+          resumeCursor: originalCursor,
+        });
+        if (scenario === "unverified exit")
+          harness.query.exitFailure = new Error("Synthetic unconfirmed process exit");
+        else
+          harness.query.beforeExit = () =>
+            writeFileSync(
+              harness.sourcePath,
+              `${harness.contents}{"type":"summary","summary":"late task"}\n`,
+            );
+        const result = yield* adapter.prepareRollbackThread!(THREAD_ID, 1, {
+          firstRemovedTurnId: harness.third,
+          retainedTurnCount: 2,
+        }).pipe(Effect.flip);
+        assert.equal(result._tag, "ProviderAdapterRewindOutcomeUnknownError");
+        const restart = yield* adapter
+          .startSession({
+            threadId: THREAD_ID,
+            runtimeMode: "approval-required",
+            cwd: harness.cwd,
+            resumeCursor: originalCursor,
+          })
+          .pipe(Effect.exit);
+        assert.equal(restart._tag, "Failure");
+        assert.equal(harness.createInputs.length, 1);
+      }).pipe(Effect.provide(harness.layer));
+    });
+  }
+
+  it.effect("refuses checkpoint preparation while a background descendant is live", () => {
+    const harness = makeRewindHarness();
+    return Effect.gen(function* () {
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => rmSync(harness.homePath, { recursive: true, force: true })),
+      );
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        runtimeMode: "approval-required",
+        cwd: harness.cwd,
+        resumeCursor: { resume: harness.sessionId, turnCount: 3 },
+      });
+      const observed = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "task.started"),
+        Stream.runHead,
+        Effect.forkChild,
+      );
+      harness.query.emit({
+        type: "system",
+        subtype: "task_started",
+        session_id: harness.sessionId,
+        uuid: "71000000-0000-4000-8000-000000000007",
+        task_id: "background-worker",
+        tool_use_id: "agent-tool",
+        task_type: "local_agent",
+        description: "Background worker",
+      } as SDKMessage);
+      yield* Fiber.join(observed);
+      const result = yield* adapter.prepareRollbackThread!(THREAD_ID, 1, {
+        firstRemovedTurnId: harness.third,
+        retainedTurnCount: 2,
+      }).pipe(Effect.exit);
+      assert.equal(result._tag, "Failure");
+      assert.equal(harness.query.closeCalls, 0);
+    }).pipe(Effect.provide(harness.layer));
+  });
   it.effect(
     "binds child and session events to one query generation and replaces it only with a new query",
     () => {
@@ -10193,7 +10711,7 @@ describe("ClaudeAdapterLive", () => {
   });
 
   it.effect(
-    "supports rollbackThread by trimming in-memory turns and preserving earlier turns",
+    "refuses local-only rollback instead of claiming native conversation history changed",
     () => {
       const harness = makeHarness();
       return Effect.gen(function* () {
@@ -10260,12 +10778,11 @@ describe("ClaudeAdapterLive", () => {
         const threadBeforeRollback = yield* adapter.readThread(session.threadId);
         assert.equal(threadBeforeRollback.turns.length, 2);
 
-        const rolledBack = yield* adapter.rollbackThread(session.threadId, 1);
-        assert.equal(rolledBack.turns.length, 1);
-        assert.equal(rolledBack.turns[0]?.id, firstTurn.turnId);
+        const rolledBack = yield* adapter.rollbackThread(session.threadId, 1).pipe(Effect.exit);
+        assert.equal(rolledBack._tag, "Failure");
 
         const threadAfterRollback = yield* adapter.readThread(session.threadId);
-        assert.equal(threadAfterRollback.turns.length, 1);
+        assert.equal(threadAfterRollback.turns.length, 2);
         assert.equal(threadAfterRollback.turns[0]?.id, firstTurn.turnId);
       }).pipe(
         Effect.provideService(Random.Random, makeDeterministicRandomService()),
@@ -11180,6 +11697,118 @@ describe("ClaudeAdapterLive", () => {
       );
     }).pipe(Effect.provide(harness.layer));
   });
+
+  it.effect(
+    "opens a fresh bounded MCP authorization callback after a prior authorization completes",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+        yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+        const callback = harness.getLastCreateQueryInput()!.options.onElicitation!;
+        let previousRequestId: string | undefined;
+        for (const scope of ["read", "read-write"]) {
+          const url = `https://auth.example.test/authorize?scope=${scope}&token=private`;
+          const pending = callback(
+            { serverName: "mcp", message: "Authorize requested scopes", mode: "url", url },
+            { signal: new AbortController().signal, requestId: `native-${scope}` },
+          );
+          const opened = yield* Stream.runHead(adapter.streamEvents);
+          if (opened._tag !== "Some" || opened.value.type !== "user-input.requested")
+            return assert.fail("Expected authorization callback");
+          const id = ApprovalRequestId.make(String(opened.value.requestId));
+          assert.notEqual(id, previousRequestId);
+          assert.notInclude(JSON.stringify(opened.value), "private");
+          assert.equal(yield* adapter.resolveInteractionUrl!(THREAD_ID, id), url);
+          yield* adapter.respondToUserInput(THREAD_ID, id, {
+            __cafeInteraction: { action: "accept" },
+          });
+          assert.deepEqual(yield* Effect.promise(() => pending), { action: "accept" });
+          yield* Stream.runHead(adapter.streamEvents);
+          assert.equal(
+            (yield* adapter.resolveInteractionUrl!(THREAD_ID, id).pipe(Effect.exit))._tag,
+            "Failure",
+          );
+          previousRequestId = id;
+        }
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect(
+    "settles a truncated Claude stream from the authoritative result without message_stop",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const collected = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil((event) => event.type === "turn.completed"),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "hello", attachments: [] });
+        const assistant: SDKAssistantMessage = {
+          type: "assistant",
+          session_id: "sdk-truncated",
+          uuid: "71000000-0000-4000-8000-000000000020",
+          parent_tool_use_id: null,
+          message: {
+            id: "api-truncated",
+            type: "message",
+            role: "assistant",
+            model: "claude-opus-4-6",
+            container: null,
+            context_management: null,
+            diagnostics: null,
+            stop_details: null,
+            stop_reason: null,
+            stop_sequence: null,
+            usage: makeSuccessfulClaudeResult("sdk-truncated").usage,
+            content: [{ type: "text", text: "Hello world", citations: null }],
+          },
+          aborted: true,
+        };
+        const partialEvents: Array<Extract<SDKMessage, { type: "stream_event" }>["event"]> = [
+          { type: "message_start", message: { ...assistant.message, content: [] } },
+          {
+            type: "content_block_start",
+            index: 0,
+            content_block: { type: "text", text: "", citations: null },
+          },
+          { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Hello" } },
+        ];
+        for (const event of partialEvents)
+          harness.query.emit({
+            type: "stream_event",
+            session_id: "sdk-truncated",
+            uuid: "71000000-0000-4000-8000-000000000021",
+            parent_tool_use_id: null,
+            event,
+          });
+        harness.query.emit(assistant);
+        harness.query.emit(makeSuccessfulClaudeResult("sdk-truncated"));
+        const events = Array.from(yield* Fiber.join(collected));
+        assert.equal(
+          events
+            .filter((event) => event.type === "content.delta")
+            .map((event) => event.payload.delta)
+            .join(""),
+          "Hello world",
+        );
+        assert.equal(
+          events.filter(
+            (event) =>
+              event.type === "item.completed" && event.payload.itemType === "assistant_message",
+          ).length,
+          1,
+        );
+        const completed = events.find((event) => event.type === "turn.completed");
+        assert.equal(completed?.payload.state, "completed");
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
 
   it.effect("writes provider-native observability records when enabled", () => {
     const nativeEvents: Array<{

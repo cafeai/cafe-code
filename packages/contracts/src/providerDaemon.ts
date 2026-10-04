@@ -19,6 +19,9 @@ import {
   orchestrationThreadTurnSubagentDetailBodyIssues,
 } from "./orchestration.ts";
 import {
+  ProviderConversationRewindIdentity,
+  ProviderPrepareConversationRollbackInput,
+  ProviderFinishConversationRollbackInput,
   ProviderInterruptTurnInput,
   ProviderRespondToRequestInput,
   ProviderRespondToUserInputInput,
@@ -631,6 +634,21 @@ export const ProviderDaemonRpcRequest = Schema.Union([
     payload: RollbackConversationPayload,
   }),
   Schema.Struct({
+    method: Schema.Literal("prepareConversationRollback"),
+    commandId: Schema.optional(ProviderDaemonCommandId),
+    payload: ProviderPrepareConversationRollbackInput,
+  }),
+  Schema.Struct({
+    method: Schema.Literal("commitConversationRollback"),
+    commandId: Schema.optional(ProviderDaemonCommandId),
+    payload: ProviderConversationRewindIdentity,
+  }),
+  Schema.Struct({
+    method: Schema.Literal("finishConversationRollback"),
+    commandId: Schema.optional(ProviderDaemonCommandId),
+    payload: ProviderFinishConversationRollbackInput,
+  }),
+  Schema.Struct({
     method: Schema.Literal("readSubagentDetail"),
     payload: ReadSubagentDetailPayload,
   }),
@@ -660,5 +678,8 @@ export const ProviderDaemonRpcResultByMethod = {
   setGoal: ProviderThreadGoal,
   clearGoal: ProviderThreadGoalClearResult,
   rollbackConversation: Schema.Void,
+  prepareConversationRollback: Schema.Void,
+  commitConversationRollback: Schema.Void,
+  finishConversationRollback: Schema.Void,
   readSubagentDetail: ProviderDaemonSubagentDetail,
 } as const;

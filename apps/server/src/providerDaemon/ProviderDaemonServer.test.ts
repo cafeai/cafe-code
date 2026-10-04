@@ -30,7 +30,10 @@ import * as SqlError from "effect/unstable/sql/SqlError";
 import { EventEmitter } from "node:events";
 
 import { ProviderAdapterRegistry } from "../provider/Services/ProviderAdapterRegistry.ts";
-import { ProviderAdapterRequestError } from "../provider/Errors.ts";
+import {
+  ProviderAdapterRequestError,
+  ProviderAdapterRewindOutcomeUnknownError,
+} from "../provider/Errors.ts";
 import { ProviderValidationError } from "../provider/Errors.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import {
@@ -160,6 +163,144 @@ const makeProviderDaemonServerTestLayer = (providerService: ProviderServiceShape
 const providerDaemonServerTestLayer = makeProviderDaemonServerTestLayer(mockProviderService);
 
 describe("ProviderDaemonServer", () => {
+  it.effect("routes authenticated rewind phases with durable exact-once receipts", () => {
+    const calls: Array<{ method: string; payload: unknown }> = [];
+    const providerService: ProviderServiceShape = {
+      ...mockProviderService,
+      prepareConversationRollback: (payload) =>
+        Effect.sync(() => {
+          calls.push({ method: "prepareConversationRollback", payload });
+        }),
+      commitConversationRollback: (payload) =>
+        Effect.sync(() => {
+          calls.push({ method: "commitConversationRollback", payload });
+        }),
+      finishConversationRollback: (payload) =>
+        Effect.sync(() => {
+          calls.push({ method: "finishConversationRollback", payload });
+        }),
+    };
+    return Effect.gen(function* () {
+      const port = yield* startProviderDaemonServerOnEphemeralPort({
+        host: "127.0.0.1",
+        token: TEST_TOKEN,
+        version: "0.0.0-test",
+        protocolVersion: 1,
+      });
+      const identity = {
+        threadId: ThreadId.make("rewind-thread"),
+        operationId: "2d157a02-7309-45ee-8b1c-4bf5da146a51",
+      };
+      const requests = [
+        {
+          method: "prepareConversationRollback",
+          commandId: "rewind-prepare-command-0001",
+          payload: {
+            ...identity,
+            numTurns: 2,
+            firstRemovedTurnId: TurnId.make("removed-turn"),
+            retainedTurnCount: 1,
+            expectedControlSequence: 7,
+          },
+        },
+        {
+          method: "commitConversationRollback",
+          commandId: "rewind-commit-command-0001",
+          payload: identity,
+        },
+        {
+          method: "finishConversationRollback",
+          commandId: "rewind-finish-command-0001",
+          payload: { ...identity, outcome: "committed", completionCommandId: "completion-proof" },
+        },
+      ] as const;
+      for (const request of requests) {
+        const body = encodeProviderDaemonRpcRequestJson(request);
+        const denied = yield* Effect.promise(() =>
+          fetch(`http://127.0.0.1:${port}/api/provider-daemon/rpc`, { method: "POST", body }),
+        );
+        assert.equal(denied.status, 401);
+        for (let repeat = 0; repeat < 2; repeat += 1) {
+          const response = yield* Effect.promise(() =>
+            fetch(`http://127.0.0.1:${port}/api/provider-daemon/rpc`, {
+              method: "POST",
+              headers: {
+                authorization: `Bearer ${TEST_TOKEN}`,
+                "content-type": "application/json",
+              },
+              body,
+            }),
+          );
+          const envelope = decodeProviderDaemonRpcEnvelopeJson(
+            yield* Effect.promise(() => response.text()),
+          );
+          assert.deepEqual(envelope, { ok: true, value: null });
+        }
+      }
+      assert.deepEqual(
+        calls,
+        requests.map(({ method, payload }) => ({ method, payload })),
+      );
+    }).pipe(Effect.scoped, Effect.provide(makeProviderDaemonServerTestLayer(providerService)));
+  });
+
+  it.effect("refuses unavailable rewind phases and preserves explicit uncertain outcomes", () => {
+    const providerService: ProviderServiceShape = {
+      ...mockProviderService,
+      commitConversationRollback: () =>
+        Effect.fail(new ProviderAdapterRewindOutcomeUnknownError({})),
+    };
+    return Effect.gen(function* () {
+      const port = yield* startProviderDaemonServerOnEphemeralPort({
+        host: "127.0.0.1",
+        token: TEST_TOKEN,
+        version: "0.0.0-test",
+        protocolVersion: 1,
+      });
+      const identity = {
+        threadId: ThreadId.make("rewind-thread"),
+        operationId: "2d157a02-7309-45ee-8b1c-4bf5da146a51",
+      };
+      for (const [request, expectedTag] of [
+        [
+          {
+            method: "prepareConversationRollback",
+            commandId: "rewind-prepare-command-0001",
+            payload: {
+              ...identity,
+              numTurns: 2,
+              firstRemovedTurnId: TurnId.make("removed-turn"),
+              retainedTurnCount: 1,
+              expectedControlSequence: 7,
+            },
+          },
+          "ProviderValidationError",
+        ],
+        [
+          {
+            method: "commitConversationRollback",
+            commandId: "rewind-commit-command-0001",
+            payload: identity,
+          },
+          "ProviderAdapterRewindOutcomeUnknownError",
+        ],
+      ] as const) {
+        const response = yield* Effect.promise(() =>
+          fetch(`http://127.0.0.1:${port}/api/provider-daemon/rpc`, {
+            method: "POST",
+            headers: { authorization: `Bearer ${TEST_TOKEN}`, "content-type": "application/json" },
+            body: encodeProviderDaemonRpcRequestJson(request),
+          }),
+        );
+        const envelope = decodeProviderDaemonRpcEnvelopeJson(
+          yield* Effect.promise(() => response.text()),
+        );
+        assert.isFalse(envelope.ok);
+        if (!envelope.ok) assert.equal(envelope.error.tag, expectedTag);
+      }
+    }).pipe(Effect.scoped, Effect.provide(makeProviderDaemonServerTestLayer(providerService)));
+  });
+
   it("fails closed for generation-bound Windows self-capture but preserves legacy/POSIX startup", async () => {
     const windowsOwnershipId = "9a90b48d-868f-4614-ae9c-66d50293d52b";
     const privateError = "private credential or profile content";

@@ -21,6 +21,8 @@ import * as TestClock from "effect/testing/TestClock";
 import {
   attachCommandIdToMutatingProviderDaemonRequest,
   providerDaemonCompactionRequest,
+  providerDaemonConversationRollbackRequest,
+  requestProviderDaemonConversationRollback,
   guardRemoteProviderThreadOperation,
   isRetryableProviderDaemonControlError,
   isVoidProviderDaemonRpcMethod,
@@ -41,8 +43,203 @@ import {
   PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR,
   PROVIDER_SUPERVISOR_RUNTIME_CURSOR_PROJECTOR,
 } from "./ProviderDaemonRuntimeCursor.ts";
+import {
+  ProviderAdapterRequestError,
+  ProviderAdapterRewindOutcomeUnknownError,
+} from "../provider/Errors.ts";
+
+const rewindIdentity = {
+  threadId: ThreadId.make("rewind-thread"),
+  operationId: "2d157a02-7309-45ee-8b1c-4bf5da146a51",
+};
+const rewindRequests = [
+  {
+    method: "prepareConversationRollback",
+    payload: {
+      ...rewindIdentity,
+      numTurns: 2,
+      firstRemovedTurnId: TurnId.make("removed-turn"),
+      retainedTurnCount: 1,
+      expectedControlSequence: 7,
+    },
+  },
+  { method: "commitConversationRollback", payload: rewindIdentity },
+  { method: "finishConversationRollback", payload: { ...rewindIdentity, outcome: "aborted" } },
+  {
+    method: "finishConversationRollback",
+    payload: {
+      ...rewindIdentity,
+      outcome: "committed",
+      completionCommandId: "rewind-completion",
+    },
+  },
+] as const;
+const rewindConfig = { httpBaseUrl: "http://127.0.0.1:3774", token: "synthetic-test-capability" };
+const encodeRpcRequest = Schema.encodeSync(ProviderDaemonRpcRequest);
 
 describe("RemoteProviderService", () => {
+  it("binds stable rewind command identities to their phase and finish outcome", () => {
+    const ids = new Set<string>();
+    for (const input of rewindRequests) {
+      const request = providerDaemonConversationRollbackRequest(input);
+      assert.deepEqual(request, providerDaemonConversationRollbackRequest(input));
+      assert.deepEqual(attachCommandIdToMutatingProviderDaemonRequest(request), request);
+      assert.doesNotThrow(() => encodeRpcRequest(request));
+      assert.deepEqual(providerDaemonRequestThreadIds(request), [rewindIdentity.threadId]);
+      assert.isTrue(isVoidProviderDaemonRpcMethod(request.method));
+      ids.add(request.commandId!);
+    }
+    assert.equal(ids.size, 4);
+  });
+
+  it.each(rewindRequests)(
+    "replays $method only with the same exact phase bytes after reset",
+    async (request) => {
+      const bodies: Array<string | undefined> = [];
+      await requestProviderDaemonConversationRollback(
+        rewindConfig,
+        request,
+        async (_config, _path, options) => {
+          bodies.push(options?.body);
+          if (bodies.length === 1)
+            throw Object.assign(new Error("private-transport-details"), { code: "ECONNRESET" });
+          return { statusCode: 200, body: '{"ok":true,"value":null}' };
+        },
+      );
+      assert.equal(bodies.length, 2);
+      assert.equal(bodies[0], bodies[1]);
+      assert.equal(
+        JSON.parse(bodies[0]!).commandId,
+        providerDaemonConversationRollbackRequest(request).commandId,
+      );
+    },
+  );
+
+  it.each([
+    ["malformed envelope", { statusCode: 200, body: "private-provider-response" }],
+    ["absent acknowledgement", { statusCode: 200, body: '{"ok":true}' }],
+    [
+      "invalid void value",
+      { statusCode: 200, body: '{"ok":true,"value":"private-provider-response"}' },
+    ],
+    ["unsuccessful status", { statusCode: 503, body: '{"ok":true,"value":null}' }],
+    [
+      "provider mutation uncertainty",
+      {
+        statusCode: 200,
+        body: '{"ok":false,"error":{"tag":"ProviderAdapterRewindOutcomeUnknownError","message":"private-provider-response"}}',
+      },
+    ],
+    [
+      "ledger in progress",
+      {
+        statusCode: 200,
+        body: '{"ok":false,"error":{"tag":"ProviderDaemonCommandAlreadyRunning","message":"private-provider-response"}}',
+      },
+    ],
+    [
+      "ledger identity conflict",
+      {
+        statusCode: 200,
+        body: '{"ok":false,"error":{"tag":"ProviderDaemonCommandIdentityMismatch","message":"private-provider-response"}}',
+      },
+    ],
+    [
+      "unknown server error",
+      {
+        statusCode: 500,
+        body: '{"ok":false,"error":{"tag":"UnexpectedFailure","message":"private-provider-response"}}',
+      },
+    ],
+  ] as const)("keeps %s rewind outcome unknown and redacted", async (_scenario, response) => {
+    let attempts = 0;
+    const error = await requestProviderDaemonConversationRollback(
+      rewindConfig,
+      rewindRequests[1],
+      async () => {
+        attempts += 1;
+        return response;
+      },
+    ).catch((cause: unknown) => cause);
+    assert.instanceOf(error, ProviderAdapterRewindOutcomeUnknownError);
+    assert.equal(attempts, 1);
+    assert.notProperty(error, "cause");
+    assert.notInclude(JSON.stringify(error), "private-provider-response");
+  });
+
+  it("keeps exhausted transport retries unknown without exposing socket or capability data", async () => {
+    let attempts = 0;
+    const error = await requestProviderDaemonConversationRollback(
+      rewindConfig,
+      rewindRequests[1],
+      async () => {
+        attempts += 1;
+        throw Object.assign(new Error("private-provider-socket-and-capability"), {
+          code: "ECONNRESET",
+        });
+      },
+    ).catch((cause: unknown) => cause);
+    assert.instanceOf(error, ProviderAdapterRewindOutcomeUnknownError);
+    assert.equal(attempts, 2);
+    assert.notInclude(String(error), "private-provider");
+  });
+
+  it("does not treat authentication after a lost response as a definite rewind refusal", async () => {
+    let attempts = 0;
+    let bodyReads = 0;
+    const error = await requestProviderDaemonConversationRollback(
+      rewindConfig,
+      rewindRequests[1],
+      async () => {
+        if (++attempts === 1) throw Object.assign(new Error("response lost"), { code: "EPIPE" });
+        return {
+          statusCode: 403,
+          get body() {
+            bodyReads += 1;
+            return "private-provider-response";
+          },
+        };
+      },
+    ).catch((cause: unknown) => cause);
+    assert.instanceOf(error, ProviderAdapterRewindOutcomeUnknownError);
+    assert.equal(attempts, 2);
+    assert.equal(bodyReads, 0);
+  });
+
+  it("preserves recognized definitive rewind refusal tags without native diagnostics", async () => {
+    const error = await requestProviderDaemonConversationRollback(
+      rewindConfig,
+      rewindRequests[0],
+      async () => ({
+        statusCode: 200,
+        body: JSON.stringify({
+          ok: false,
+          error: { tag: "ProviderAdapterValidationError", message: "private-checkpoint-path" },
+        }),
+      }),
+    ).catch((cause: unknown) => cause);
+    assert.instanceOf(error, ProviderAdapterRequestError);
+    assert.equal(error.remoteErrorTag, "ProviderAdapterValidationError");
+    assert.notInclude(JSON.stringify(error), "private-checkpoint-path");
+  });
+
+  it("rejects malformed local rewind identity without submitting an RPC", async () => {
+    let attempts = 0;
+    const request = {
+      ...rewindRequests[1],
+      payload: { ...rewindIdentity, operationId: "not-a-uuid" },
+    };
+    const error = await requestProviderDaemonConversationRollback(
+      rewindConfig,
+      request,
+      async () => {
+        attempts += 1;
+        return { statusCode: 200, body: '{"ok":true,"value":null}' };
+      },
+    ).catch((cause: unknown) => cause);
+    assert.equal(attempts, 0);
+    assert.notInstanceOf(error, ProviderAdapterRewindOutcomeUnknownError);
+  });
   it.each([401, 403] as const)(
     "rejects HTTP %s before reading the RPC body without retrying",
     async (status) => {

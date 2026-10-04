@@ -4,6 +4,7 @@ import {
   EventId,
   MessageId,
   type ProjectId,
+  type ProviderDriverKind,
   ThreadId,
   TurnId,
   type OrchestrationEvent,
@@ -17,6 +18,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { makeDrainableWorker } from "@cafecode/shared/DrainableWorker";
 
 import { parseTurnDiffFilesFromUnifiedDiff } from "../../checkpointing/Diffs.ts";
@@ -35,7 +37,13 @@ import { CheckpointReactor, type CheckpointReactorShape } from "../Services/Chec
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { RuntimeReceiptBus } from "../Services/RuntimeReceiptBus.ts";
-import type { CheckpointStoreError } from "../../checkpointing/Errors.ts";
+import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
+import { makeConversationRewindStore } from "../../persistence/Layers/ConversationRewinds.ts";
+import {
+  CheckpointInvariantError,
+  CheckpointUnavailableError,
+  type CheckpointStoreError,
+} from "../../checkpointing/Errors.ts";
 import type { OrchestrationDispatchError } from "../Errors.ts";
 import { isGitRepository } from "../../git/Utils.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
@@ -144,6 +152,9 @@ const make = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
+  const providerRuntimeIngestion = yield* ProviderRuntimeIngestionService;
+  const sql = yield* SqlClient.SqlClient;
+  const conversationRewinds = makeConversationRewindStore(sql);
   const checkpointStore = yield* CheckpointStore;
   const receiptBus = yield* RuntimeReceiptBus;
   const workspaceEntries = yield* WorkspaceEntries;
@@ -207,11 +218,17 @@ const make = Effect.gen(function* () {
 
   const resolveSessionRuntimeForThread = Effect.fn("resolveSessionRuntimeForThread")(function* (
     threadId: ThreadId,
-  ): Effect.fn.Return<Option.Option<{ readonly threadId: ThreadId; readonly cwd: string }>> {
+  ): Effect.fn.Return<
+    Option.Option<{
+      readonly threadId: ThreadId;
+      readonly cwd: string;
+      readonly provider: ProviderDriverKind;
+    }>
+  > {
     const sessions = yield* providerService.listSessions();
     const session = sessions.find((entry) => entry.threadId === threadId);
     return session?.cwd
-      ? Option.some({ threadId: session.threadId, cwd: session.cwd })
+      ? Option.some({ threadId: session.threadId, cwd: session.cwd, provider: session.provider })
       : Option.none();
   });
 
@@ -647,6 +664,21 @@ const make = Effect.gen(function* () {
       return;
     }
 
+    // Ingestion can enqueue a placeholder before a rewind fence is installed,
+    // while this reactor is still performing that rewind. The durable current
+    // projection must continue to authorize the exact placeholder after the
+    // queued event reaches us; otherwise it would resurrect removed history.
+    if (
+      !thread.checkpoints.some(
+        (checkpoint) =>
+          checkpoint.turnId === turnId &&
+          checkpoint.checkpointTurnCount === checkpointTurnCount &&
+          checkpoint.status === "missing",
+      )
+    ) {
+      return;
+    }
+
     const latestTurnForPlaceholder =
       thread.latestTurn?.turnId === turnId ? thread.latestTurn : null;
     if (thread.session?.activeTurnId === turnId || latestTurnForPlaceholder?.state === "running") {
@@ -1051,88 +1083,181 @@ const make = Effect.gen(function* () {
       });
       return;
     }
-    yield* checkpointStore.captureCheckpoint({
-      cwd: sessionRuntime.value.cwd,
-      checkpointRef: recoveryCheckpointRef,
-    });
-
-    const restored = yield* checkpointStore.restoreCheckpoint({
-      cwd: sessionRuntime.value.cwd,
-      checkpointRef: targetCheckpointRef,
-      fallbackToHead: event.payload.turnCount === 0,
-    });
-    if (!restored) {
-      yield* checkpointStore
-        .deleteCheckpointRefs({
-          cwd: sessionRuntime.value.cwd,
-          checkpointRefs: [recoveryCheckpointRef],
-        })
-        .pipe(Effect.ignore);
-      yield* appendRevertFailureActivity({
-        threadId: event.payload.threadId,
-        turnCount: event.payload.turnCount,
-        detail: `Filesystem checkpoint is unavailable for turn ${event.payload.turnCount}.`,
-        createdAt: now,
-      }).pipe(Effect.catch(() => Effect.void));
-      return;
-    }
-
-    // Invalidate the workspace entry cache so the @-mention file picker
-    // reflects the reverted filesystem state.
-    yield* workspaceEntries.invalidate(sessionRuntime.value.cwd);
-
     const rolledBackTurns = Math.max(0, currentTurnCount - event.payload.turnCount);
-    if (rolledBackTurns > 0) {
-      yield* providerService
-        .rollbackConversation({
-          threadId: sessionRuntime.value.threadId,
-          numTurns: rolledBackTurns,
-        })
-        .pipe(
-          Effect.tapError((error) =>
-            isProviderRewindOutcomeUnknown(error)
-              ? Effect.void
-              : checkpointStore
-                  .restoreCheckpoint({
-                    cwd: sessionRuntime.value.cwd,
-                    checkpointRef: recoveryCheckpointRef,
-                    fallbackToHead: false,
-                  })
-                  .pipe(
-                    Effect.flatMap(() => workspaceEntries.invalidate(sessionRuntime.value.cwd)),
-                    Effect.catchCause((cause) =>
-                      Effect.logError("failed to restore workspace after provider rewind failure", {
-                        threadId: event.payload.threadId,
-                        cause: Cause.pretty(cause),
-                      }),
-                    ),
-                    Effect.ensuring(
-                      checkpointStore
-                        .deleteCheckpointRefs({
-                          cwd: sessionRuntime.value.cwd,
-                          checkpointRefs: [recoveryCheckpointRef],
-                        })
-                        .pipe(Effect.ignore),
-                    ),
-                  ),
-          ),
-          // Daemon wrappers may carry provider detail alongside the finite
-          // outcome tag. Only the fixed actionable message crosses into the
-          // work log; no raw provider error, path or native identity is needed.
-          Effect.mapError((error) =>
-            isProviderRewindOutcomeUnknown(error)
-              ? new ProviderAdapterRewindOutcomeUnknownError({})
-              : error,
-          ),
+    const cwd = sessionRuntime.value.cwd;
+    const prepareRollback = providerService.prepareConversationRollback;
+    const commitRollback = providerService.commitConversationRollback;
+    const finishRollback = providerService.finishConversationRollback;
+    const usesPreparedRollback = sessionRuntime.value.provider === "claudeAgent";
+    const operation = { threadId: sessionRuntime.value.threadId, operationId: crypto.randomUUID() };
+
+    if (usesPreparedRollback) {
+      // A count alone cannot identify the native prefix. Bind the first removed
+      // turn to the exact checkpoint ordinal, never array order or the latest
+      // turn. Missing/ambiguous legacy metadata is not authority to truncate.
+      const firstRemovedCheckpoints = thread.checkpoints.filter(
+        (checkpoint) => checkpoint.checkpointTurnCount === event.payload.turnCount + 1,
+      );
+      const firstRemoved = firstRemovedCheckpoints[0];
+      if (rolledBackTurns === 0 || firstRemovedCheckpoints.length !== 1 || !firstRemoved) {
+        return yield* Effect.fail(
+          new CheckpointInvariantError({
+            operation: "prepare conversation rewind",
+            detail:
+              rolledBackTurns === 0
+                ? "There is no conversation history to remove. The current checkpoint cannot be safely restored through conversation rewind."
+                : "The first removed turn has no unambiguous checkpoint identity. No files or provider history were changed.",
+          }),
         );
+      }
+      if (!prepareRollback || !commitRollback || !finishRollback) {
+        return yield* Effect.fail(
+          new CheckpointInvariantError({
+            operation: "prepare conversation rewind",
+            detail:
+              "This provider runtime does not support safe prepared conversation rewind. No files or provider history were changed.",
+          }),
+        );
+      }
+      // The service durably reserves this exact control sequence and retires
+      // the proven-idle whole native tree before any recovery capture or file
+      // mutation. It retains the source and a closed candidate until finish.
+      yield* prepareRollback({
+        ...operation,
+        numTurns: rolledBackTurns,
+        firstRemovedTurnId: firstRemoved.turnId,
+        retainedTurnCount: event.payload.turnCount,
+        expectedControlSequence: event.sequence,
+      }).pipe(
+        Effect.mapError((error) =>
+          isProviderRewindOutcomeUnknown(error)
+            ? new ProviderAdapterRewindOutcomeUnknownError({})
+            : error,
+        ),
+      );
+      // Admission is now durably fenced and the native source tree is retired.
+      // Drain any event whose ingestion began before that fence, so it cannot
+      // append old-generation history across the upcoming checkpoint restore.
+      yield* providerRuntimeIngestion.drain.pipe(
+        Effect.timeoutOrElse({
+          duration: "30 seconds",
+          orElse: () => Effect.fail(new ProviderAdapterRewindOutcomeUnknownError({})),
+        }),
+      );
     }
 
-    yield* checkpointStore
-      .deleteCheckpointRefs({
-        cwd: sessionRuntime.value.cwd,
-        checkpointRefs: [recoveryCheckpointRef],
-      })
-      .pipe(Effect.ignore);
+    let recoveryCaptured = false;
+    let restoreAttempted = false;
+    yield* Effect.gen(function* () {
+      yield* checkpointStore.captureCheckpoint({ cwd, checkpointRef: recoveryCheckpointRef });
+      recoveryCaptured = true;
+      // A restore can mutate files before reporting an error. Record the attempt
+      // first, and compensate even a false/failed target restore from the exact
+      // pre-operation snapshot; never assume that an error implies no mutation.
+      restoreAttempted = true;
+      const restored = yield* checkpointStore.restoreCheckpoint({
+        cwd,
+        checkpointRef: targetCheckpointRef,
+        fallbackToHead: event.payload.turnCount === 0,
+      });
+      if (!restored) {
+        return yield* Effect.fail(
+          new CheckpointUnavailableError({
+            threadId: event.payload.threadId,
+            turnCount: event.payload.turnCount,
+            detail: "The filesystem checkpoint could not be restored.",
+          }),
+        );
+      }
+      yield* workspaceEntries.invalidate(cwd);
+
+      if (usesPreparedRollback && commitRollback) {
+        yield* commitRollback(operation);
+      } else if (rolledBackTurns > 0) {
+        yield* providerService.rollbackConversation({
+          threadId: operation.threadId,
+          numTurns: rolledBackTurns,
+        });
+      }
+    }).pipe(
+      Effect.tapError((error) =>
+        Effect.gen(function* () {
+          // Lost acknowledgements may conceal a committed native cursor. Do not
+          // restore newer files or release the durable reservation in that case.
+          // Defects/interruption also bypass this typed-error compensation path
+          // and leave the recovery evidence for explicit inspection.
+          if (isProviderRewindOutcomeUnknown(error)) return;
+          if (recoveryCaptured && restoreAttempted) {
+            const recovered = yield* checkpointStore
+              .restoreCheckpoint({
+                cwd,
+                checkpointRef: recoveryCheckpointRef,
+                fallbackToHead: false,
+              })
+              .pipe(
+                Effect.catch(() =>
+                  Effect.fail(
+                    new CheckpointInvariantError({
+                      operation: "compensate conversation rewind",
+                      detail:
+                        "The original workspace could not be restored. The recovery checkpoint was retained; inspect the saved workspace and provider history before continuing.",
+                    }),
+                  ),
+                ),
+              );
+            if (!recovered) {
+              return yield* Effect.fail(
+                new CheckpointInvariantError({
+                  operation: "compensate conversation rewind",
+                  detail:
+                    "The original workspace restore was not confirmed. The recovery checkpoint was retained; inspect the saved workspace and provider history before continuing.",
+                }),
+              );
+            }
+            yield* workspaceEntries.invalidate(cwd);
+          }
+          // Only a confirmed compensation (or no attempted filesystem mutation)
+          // permits restoring the source binding and clearing the reservation.
+          // If abort itself fails, retain the ref as durable recovery evidence.
+          if (usesPreparedRollback && finishRollback) {
+            yield* finishRollback({ ...operation, outcome: "aborted" });
+          }
+          if (recoveryCaptured) {
+            yield* checkpointStore
+              .deleteCheckpointRefs({ cwd, checkpointRefs: [recoveryCheckpointRef] })
+              .pipe(Effect.ignore);
+          }
+        }),
+      ),
+      Effect.mapError((error) =>
+        isProviderRewindOutcomeUnknown(error)
+          ? new ProviderAdapterRewindOutcomeUnknownError({})
+          : error,
+      ),
+    );
+
+    // Provider commit, the durable conversation projection and native admission
+    // release are separate acknowledgements. A failure after provider commit
+    // must not compensate files or discard either recovery evidence or the
+    // newer checkpoint refs. The still-held reservation blocks new turns.
+    const completionCommandId = serverCommandId("checkpoint-revert-complete");
+    yield* orchestrationEngine.dispatch({
+      type: "thread.revert.complete",
+      commandId: completionCommandId,
+      threadId: event.payload.threadId,
+      turnCount: event.payload.turnCount,
+      createdAt: now,
+      ...(usesPreparedRollback ? { expectedControlSequence: event.sequence } : {}),
+    });
+    if (usesPreparedRollback && finishRollback) {
+      yield* finishRollback({ ...operation, outcome: "committed", completionCommandId }).pipe(
+        Effect.mapError((error) =>
+          isProviderRewindOutcomeUnknown(error)
+            ? new ProviderAdapterRewindOutcomeUnknownError({})
+            : error,
+        ),
+      );
+    }
 
     const staleCheckpointRefs = thread.checkpoints
       .filter(
@@ -1151,30 +1276,16 @@ const make = Effect.gen(function* () {
 
     if (staleCheckpointRefs.length > 0) {
       yield* checkpointStore.deleteCheckpointRefs({
-        cwd: sessionRuntime.value.cwd,
+        cwd,
         checkpointRefs: staleCheckpointRefs,
       });
     }
 
-    yield* orchestrationEngine
-      .dispatch({
-        type: "thread.revert.complete",
-        commandId: serverCommandId("checkpoint-revert-complete"),
-        threadId: event.payload.threadId,
-        turnCount: event.payload.turnCount,
-        createdAt: now,
-      })
-      .pipe(
-        Effect.catch((error) =>
-          appendRevertFailureActivity({
-            threadId: event.payload.threadId,
-            turnCount: event.payload.turnCount,
-            detail: error.message,
-            createdAt: now,
-          }),
-        ),
-        Effect.asVoid,
-      );
+    // This is intentionally last, not an unconditional finalizer: failure to
+    // restore/commit/project/release must never delete the only original state.
+    yield* checkpointStore
+      .deleteCheckpointRefs({ cwd, checkpointRefs: [recoveryCheckpointRef] })
+      .pipe(Effect.ignore);
   });
 
   const processDomainEvent = Effect.fn("processDomainEvent")(function* (event: OrchestrationEvent) {
@@ -1245,6 +1356,18 @@ const make = Effect.gen(function* () {
   const processRuntimeEvent = Effect.fn("processRuntimeEvent")(function* (
     event: ProviderRuntimeEvent,
   ) {
+    // This reactor consumes raw provider events independently of ingestion.
+    // Even an old terminal ingestion receipt is not authority to recreate a
+    // removed checkpoint after rewind. Recheck the durable native-generation
+    // fence when dequeuing, including events queued before the rewind began.
+    const accepted = yield* conversationRewinds.acceptsEvent(event).pipe(
+      Effect.catch(() =>
+        Effect.logWarning("checkpoint runtime event admission could not verify the rewind fence", {
+          threadId: event.threadId,
+        }).pipe(Effect.as(false)),
+      ),
+    );
+    if (!accepted) return;
     if (event.type === "turn.started") {
       yield* ensurePreTurnBaselineFromTurnStart(event);
       return;

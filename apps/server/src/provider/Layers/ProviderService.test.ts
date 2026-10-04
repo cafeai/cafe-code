@@ -31,6 +31,7 @@ import { CodexAppServerIncomingMessageTooLargeError } from "effect-codex-app-ser
 import { it, assert, vi } from "@effect/vitest";
 import { beforeEach } from "vitest";
 
+import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -49,6 +50,8 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import {
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
+  ProviderAdapterRewindOutcomeUnknownError,
+  ProviderAdapterValidationError,
   ProviderAdapterSessionNotFoundError,
   ProviderUnsupportedError,
   ProviderValidationError,
@@ -365,6 +368,483 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
 
 const advanceTestClock = (ms: number) =>
   TestClock.adjust(`${ms} millis`).pipe(Effect.andThen(Effect.yieldNow));
+
+/** Isolated transaction fixture: real migrated directory/store, synthetic
+ * provider lifecycle only. It does not share the routing suite's database, so
+ * an intentionally unresolved rewind fence cannot pollute another test. */
+function makeTransactionalClaudeRewindFixture(withCallback = true, baseline = false) {
+  const claude = makeFakeCodexAdapter(CLAUDE_AGENT_DRIVER);
+  const originalStart = claude.startSession.getMockImplementation()!;
+  let starts = 0;
+  claude.startSession.mockImplementation((input) =>
+    originalStart(input).pipe(
+      Effect.map((session) => {
+        const qualified = {
+          ...session,
+          subagentRuntimeId:
+            ++starts === 1
+              ? "e1904de9-a6e5-42b6-80dc-ea37a03ab616"
+              : "0ce6c0e7-dcdc-4d89-aacb-110610fca13c",
+        };
+        claude.updateSession(input.threadId, () => qualified);
+        return qualified;
+      }),
+    ),
+  );
+  const candidateCursor = baseline
+    ? undefined
+    : { resume: "synthetic-rewound-native-session", turnCount: 1 };
+  const prepare = vi.fn(
+    (threadId: ThreadId): Effect.Effect<ProviderSession, ProviderAdapterError> =>
+      Effect.gen(function* () {
+        const session = (yield* claude.listSessions()).find((entry) => entry.threadId === threadId);
+        if (!session)
+          return yield* new ProviderAdapterSessionNotFoundError({
+            provider: "claudeAgent",
+            threadId,
+          });
+        // Match the real adapter's retirement boundary: no live query is left to
+        // answer a follow-up against the history that was just prepared away.
+        yield* claude.stopSession(threadId);
+        return {
+          provider: session.provider,
+          providerInstanceId: session.providerInstanceId!,
+          threadId,
+          runtimeMode: session.runtimeMode,
+          cwd: session.cwd!,
+          status: "closed",
+          resumeCursor: candidateCursor,
+          createdAt: session.createdAt,
+          updatedAt: session.updatedAt,
+        };
+      }),
+  );
+  const adapter: ProviderAdapterShape<ProviderAdapterError> = {
+    ...claude.adapter,
+    ...(withCallback ? { prepareRollbackThread: prepare } : {}),
+  };
+  const registry = Layer.succeed(
+    ProviderAdapterRegistry,
+    makeAdapterRegistryMock({ [CLAUDE_AGENT_DRIVER]: adapter }),
+  );
+  const repository = ProviderSessionRuntimeRepositoryLive.pipe(
+    Layer.provide(SqlitePersistenceMemory),
+  );
+  const directory = ProviderSessionDirectoryLive.pipe(Layer.provide(repository));
+  const layer = Layer.mergeAll(
+    makeProviderServiceLive().pipe(
+      Layer.provide(registry),
+      Layer.provide(directory),
+      Layer.provide(defaultServerSettingsLayer),
+      Layer.provide(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+    ),
+    directory,
+    repository,
+    SqlitePersistenceMemory,
+    NodeServices.layer,
+  );
+  const threadId = asThreadId("transactional-rewind");
+  const startInput = {
+    threadId,
+    provider: CLAUDE_AGENT_DRIVER,
+    providerInstanceId: claudeAgentInstanceId,
+    runtimeMode: "approval-required" as const,
+  };
+  const input = {
+    threadId,
+    operationId: "2d157a02-7309-45ee-8b1c-4bf5da146a51",
+    numTurns: 2,
+    firstRemovedTurnId: asTurnId("first-removed-turn"),
+    retainedTurnCount: baseline ? 0 : 1,
+    expectedControlSequence: 0,
+  };
+  return { layer, claude, prepare, candidateCursor, threadId, startInput, input };
+}
+
+for (const baseline of [false, true])
+  it.effect(
+    `ProviderService fences work until prepare, commit and accepted projection finish agree (${baseline ? "empty baseline" : "retained prefix"})`,
+    () => {
+      const fixture = makeTransactionalClaudeRewindFixture(true, baseline);
+      return Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const directory = yield* ProviderSessionDirectory;
+        const sql = yield* SqlClient.SqlClient;
+        yield* provider.startSession(fixture.threadId, fixture.startInput);
+        assert.isDefined(provider.prepareConversationRollback);
+        assert.isDefined(provider.commitConversationRollback);
+        assert.isDefined(provider.finishConversationRollback);
+        yield* provider.prepareConversationRollback!(fixture.input);
+        yield* provider.prepareConversationRollback!(fixture.input);
+        assert.equal(fixture.prepare.mock.calls.length, 1);
+        const work = [
+          provider.startSession(fixture.threadId, fixture.startInput),
+          provider.sendTurn({
+            threadId: fixture.threadId,
+            input: "must stay unsent",
+            attachments: [],
+          }),
+          provider.steerTurn({
+            threadId: fixture.threadId,
+            expectedTurnId: asTurnId("old-turn"),
+            input: "must not steer",
+            attachments: [],
+          }),
+          provider.respondToRequest({
+            threadId: fixture.threadId,
+            requestId: asRequestId("old-approval"),
+            decision: "accept",
+          }),
+        ];
+        for (const operation of work) assert.equal((yield* Effect.exit(operation))._tag, "Failure");
+        assert.equal(fixture.claude.startSession.mock.calls.length, 1);
+        assert.equal(fixture.claude.sendTurn.mock.calls.length, 0);
+        assert.equal(fixture.claude.steerTurn.mock.calls.length, 0);
+        assert.equal(fixture.claude.respondToRequest.mock.calls.length, 0);
+        yield* provider.commitConversationRollback!(fixture.input);
+        yield* provider.commitConversationRollback!(fixture.input);
+        assert.equal((yield* directory.rewinds!.read(fixture.threadId))?.phase, "committed");
+        assert.equal(
+          (yield* Effect.exit(
+            provider.finishConversationRollback!({ ...fixture.input, outcome: "committed" }),
+          ))._tag,
+          "Failure",
+        );
+        for (const operation of work) assert.equal((yield* Effect.exit(operation))._tag, "Failure");
+        const completedAt = "2026-10-04T00:00:00.000Z";
+        yield* sql`INSERT INTO orchestration_events
+      (sequence,event_id,aggregate_kind,stream_id,stream_version,event_type,occurred_at,command_id,actor_kind,payload_json,metadata_json)
+      VALUES (1,'synthetic-revert-event','thread',${fixture.threadId},1,'thread.reverted',${completedAt},'synthetic-completion','server',
+        ${JSON.stringify({ threadId: fixture.threadId, turnCount: fixture.input.retainedTurnCount })},'{}')`;
+        yield* sql`INSERT INTO orchestration_command_receipts
+      (command_id,aggregate_kind,aggregate_id,accepted_at,result_sequence,status)
+      VALUES ('synthetic-completion','thread',${fixture.threadId},${completedAt},1,'accepted')`;
+        const finish = {
+          ...fixture.input,
+          outcome: "committed" as const,
+          completionCommandId: "synthetic-completion",
+        };
+        yield* provider.finishConversationRollback!(finish);
+        yield* provider.finishConversationRollback!(finish);
+        if (baseline) {
+          const [saved] = yield* sql<{
+            runtime_payload_json: string;
+            candidate_session_json: string;
+          }>`
+            SELECT r.runtime_payload_json,w.candidate_session_json FROM provider_session_runtime r
+            JOIN provider_conversation_rewinds w ON w.thread_id=r.thread_id WHERE r.thread_id=${fixture.threadId}`;
+          assert.isDefined(saved);
+          const payload = JSON.parse(saved!.runtime_payload_json);
+          const candidate = JSON.parse(saved!.candidate_session_json);
+          // These mutations simulate unrelated or stale durable state. None
+          // may turn an absent cursor into permission for a fresh conversation.
+          for (const changed of [
+            { label: "unfinished", phase: "committed" },
+            { label: "aborted", phase: "aborted" },
+            { label: "account", candidate: { ...candidate, providerInstanceId: "other-claude" } },
+            { label: "cwd", candidate: { ...candidate, cwd: path.join(os.tmpdir(), "other-cwd") } },
+            { label: "permission", candidate: { ...candidate, runtimeMode: "full-access" } },
+            {
+              label: "candidate cursor",
+              candidate: {
+                ...candidate,
+                resumeCursor: { resume: "other-native-history", turnCount: 1 },
+              },
+            },
+            {
+              label: "new generation",
+              payload: { ...payload, subagentRuntimeId: "4ed7dbd1-a4e7-4ed7-ad46-041339384945" },
+            },
+            { label: "active turn", payload: { ...payload, activeTurnId: "another-turn" } },
+            {
+              label: "later restart",
+              payload: { ...payload, lastRuntimeEvent: "provider.runtime.restart" },
+            },
+          ]) {
+            yield* sql`UPDATE provider_session_runtime SET runtime_payload_json=${JSON.stringify(changed.payload ?? payload)}
+              WHERE thread_id=${fixture.threadId}`;
+            yield* sql`UPDATE provider_conversation_rewinds
+              SET phase=${changed.phase ?? "finished"},candidate_session_json=${JSON.stringify(changed.candidate ?? candidate)}
+              WHERE thread_id=${fixture.threadId}`;
+            const refused = yield* provider
+              .sendTurn({ threadId: fixture.threadId, input: "must stay unsent", attachments: [] })
+              .pipe(Effect.flip);
+            assert.equal(refused._tag, "ProviderValidationError", changed.label);
+            assert.equal(fixture.claude.startSession.mock.calls.length, 1, changed.label);
+            yield* sql`UPDATE provider_conversation_rewinds SET phase='finished',candidate_session_json=${saved!.candidate_session_json}
+              WHERE thread_id=${fixture.threadId}`;
+            yield* sql`UPDATE provider_session_runtime SET runtime_payload_json=${saved!.runtime_payload_json}
+              WHERE thread_id=${fixture.threadId}`;
+          }
+        }
+        yield* provider.sendTurn({
+          threadId: fixture.threadId,
+          input: "new retained-history input",
+          attachments: [],
+        });
+        assert.equal(fixture.claude.startSession.mock.calls.length, 2);
+        assert.deepEqual(
+          fixture.claude.startSession.mock.calls[1]?.[0].resumeCursor,
+          fixture.candidateCursor,
+        );
+        assert.equal(fixture.claude.sendTurn.mock.calls.length, 1);
+      }).pipe(Effect.provide(fixture.layer));
+    },
+  );
+
+for (const concurrentResult of ["committed", "identity-replaced"] as const) {
+  it.effect(`ProviderService re-observes a rewind commit CAS after ${concurrentResult}`, () => {
+    const fixture = makeTransactionalClaudeRewindFixture();
+    return Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      const sql = yield* SqlClient.SqlClient;
+      yield* provider.startSession(fixture.threadId, fixture.startInput);
+      yield* provider.prepareConversationRollback!(fixture.input);
+      const commit = directory.rewinds!.commit;
+      const intercepted = vi.spyOn(directory.rewinds!, "commit").mockImplementationOnce((input) =>
+        Effect.gen(function* () {
+          if (concurrentResult === "committed") {
+            assert.equal(yield* commit(input), true);
+          } else {
+            yield* sql`UPDATE provider_conversation_rewinds
+              SET operation_id='ded73bce-dcc1-45cb-9aeb-02c54e6897df'
+              WHERE thread_id=${fixture.threadId}`.pipe(Effect.orDie);
+          }
+          // Simulate another SQL writer winning between service observation
+          // and this coordinator's guarded switch. No real provider is used.
+          return false;
+        }),
+      );
+      const result = yield* provider.commitConversationRollback!(fixture.input).pipe(Effect.exit);
+      intercepted.mockRestore();
+      if (concurrentResult === "committed") {
+        assert.equal(result._tag, "Success");
+        const binding = Option.getOrThrow(yield* directory.getBinding(fixture.threadId));
+        assert.deepEqual(binding.resumeCursor, fixture.candidateCursor);
+      } else {
+        assert.equal(result._tag, "Failure");
+        if (result._tag === "Failure")
+          assert.include(Cause.pretty(result.cause), "ProviderAdapterRewindOutcomeUnknownError");
+      }
+    }).pipe(Effect.provide(fixture.layer));
+  });
+}
+
+for (const phase of ["prepared", "committed"] as const) {
+  it.effect(
+    `ProviderService refuses restart before any side effects for a closed ${phase} rewind`,
+    () => {
+      const fixture = makeTransactionalClaudeRewindFixture();
+      return Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const directory = yield* ProviderSessionDirectory;
+        const otherThread = asThreadId("restart-other-active");
+        yield* provider.startSession(fixture.threadId, fixture.startInput);
+        yield* provider.startSession(otherThread, { ...fixture.startInput, threadId: otherThread });
+        yield* provider.prepareConversationRollback!(fixture.input);
+        if (phase === "committed") yield* provider.commitConversationRollback!(fixture.input);
+        const before = yield* directory.listBindings();
+        const error = yield* provider
+          .restartProviderRuntime({ instanceId: claudeAgentInstanceId })
+          .pipe(Effect.flip);
+        assert.equal(error._tag, "ProviderValidationError");
+        assert.equal(fixture.claude.stopAll.mock.calls.length, 0);
+        assert.deepEqual(yield* directory.listBindings(), before);
+        assert.isTrue(yield* fixture.claude.hasSession(otherThread));
+        assert.equal((yield* directory.rewinds!.read(fixture.threadId))?.phase, phase);
+      }).pipe(Effect.provide(fixture.layer));
+    },
+  );
+}
+
+it.effect("ProviderService restart waits for an in-flight prepare and observes its fence", () => {
+  const fixture = makeTransactionalClaudeRewindFixture();
+  return Effect.gen(function* () {
+    const provider = yield* ProviderService;
+    const prepareEntered = yield* Deferred.make<void>();
+    const releasePrepare = yield* Deferred.make<void>();
+    const restartListed = yield* Deferred.make<void>();
+    const originalPrepare = fixture.prepare.getMockImplementation()!;
+    fixture.prepare.mockImplementation((threadId) =>
+      Deferred.succeed(prepareEntered, undefined).pipe(
+        Effect.andThen(Deferred.await(releasePrepare)),
+        Effect.andThen(originalPrepare(threadId)),
+      ),
+    );
+    yield* provider.startSession(fixture.threadId, fixture.startInput);
+    const prepare = yield* provider.prepareConversationRollback!(fixture.input).pipe(
+      Effect.forkChild,
+    );
+    yield* Deferred.await(prepareEntered);
+    const originalList = fixture.claude.listSessions.getMockImplementation()!;
+    fixture.claude.listSessions.mockImplementationOnce(() =>
+      originalList().pipe(Effect.tap(() => Deferred.succeed(restartListed, undefined))),
+    );
+    const restart = yield* provider
+      .restartProviderRuntime({ instanceId: claudeAgentInstanceId })
+      .pipe(Effect.exit, Effect.forkChild);
+    yield* Deferred.await(restartListed);
+    yield* Deferred.succeed(releasePrepare, undefined);
+    yield* Fiber.join(prepare);
+    const result = yield* Fiber.join(restart);
+    assert.equal(result._tag, "Failure");
+    assert.equal(fixture.claude.stopAll.mock.calls.length, 0);
+  }).pipe(Effect.provide(fixture.layer));
+});
+
+it.effect(
+  "ProviderService restart excludes new rewinds without blocking ordinary new sessions",
+  () => {
+    const fixture = makeTransactionalClaudeRewindFixture();
+    return Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      yield* provider.startSession(fixture.threadId, fixture.startInput);
+      const listed = yield* Deferred.make<void>();
+      const releaseList = yield* Deferred.make<void>();
+      const initial = yield* fixture.claude.listSessions();
+      fixture.claude.listSessions.mockImplementationOnce(() =>
+        Deferred.succeed(listed, undefined).pipe(
+          Effect.andThen(Deferred.await(releaseList)),
+          Effect.as(initial),
+        ),
+      );
+      const restart = yield* provider
+        .restartProviderRuntime({ instanceId: claudeAgentInstanceId })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(listed);
+      const newThreadId = asThreadId("restart-new-thread");
+      const start = { ...fixture.startInput, threadId: newThreadId };
+      yield* provider.startSession(newThreadId, start);
+      const input = { ...fixture.input, threadId: newThreadId };
+      const error = yield* provider.prepareConversationRollback!(input).pipe(Effect.flip);
+      assert.equal(error._tag, "ProviderValidationError");
+      assert.isNull(yield* directory.rewinds!.read(newThreadId));
+      assert.equal(fixture.prepare.mock.calls.length, 0);
+      yield* Deferred.succeed(releaseList, undefined);
+      yield* Fiber.join(restart);
+      // The scoped exclusion ends with restart, including ordinary teardown.
+      yield* provider.startSession(newThreadId, start);
+      yield* provider.prepareConversationRollback!(input);
+      assert.equal(fixture.prepare.mock.calls.length, 1);
+    }).pipe(Effect.provide(fixture.layer));
+  },
+);
+
+it.effect("ProviderService refreshes stale restart inventory after a rewind fully commits", () => {
+  const fixture = makeTransactionalClaudeRewindFixture();
+  return Effect.gen(function* () {
+    const provider = yield* ProviderService;
+    const directory = yield* ProviderSessionDirectory;
+    const sql = yield* SqlClient.SqlClient;
+    yield* provider.startSession(fixture.threadId, fixture.startInput);
+    const stale = yield* fixture.claude.listSessions();
+    const prepareEntered = yield* Deferred.make<void>();
+    const releasePrepare = yield* Deferred.make<void>();
+    const listed = yield* Deferred.make<void>();
+    const releaseList = yield* Deferred.make<void>();
+    const originalPrepare = fixture.prepare.getMockImplementation()!;
+    fixture.prepare.mockImplementation((threadId) =>
+      Deferred.succeed(prepareEntered, undefined).pipe(
+        Effect.andThen(Deferred.await(releasePrepare)),
+        Effect.andThen(originalPrepare(threadId)),
+      ),
+    );
+    const prepare = yield* provider.prepareConversationRollback!(fixture.input).pipe(
+      Effect.forkChild,
+    );
+    yield* Deferred.await(prepareEntered);
+    fixture.claude.listSessions.mockImplementationOnce(() =>
+      Deferred.succeed(listed, undefined).pipe(
+        Effect.andThen(Deferred.await(releaseList)),
+        Effect.as(stale),
+      ),
+    );
+    const restart = yield* provider
+      .restartProviderRuntime({ instanceId: claudeAgentInstanceId })
+      .pipe(Effect.forkChild);
+    yield* Deferred.await(listed);
+    yield* Deferred.succeed(releasePrepare, undefined);
+    yield* Fiber.join(prepare);
+    yield* provider.commitConversationRollback!(fixture.input);
+    const completedAt = "2026-10-04T00:00:00.000Z";
+    yield* sql`INSERT INTO orchestration_events
+      (sequence,event_id,aggregate_kind,stream_id,stream_version,event_type,occurred_at,command_id,actor_kind,payload_json,metadata_json)
+      VALUES (1,'restart-revert-event','thread',${fixture.threadId},1,'thread.reverted',${completedAt},'restart-completion','server',
+        ${JSON.stringify({ threadId: fixture.threadId, turnCount: 1 })},'{}')`;
+    yield* sql`INSERT INTO orchestration_command_receipts
+      (command_id,aggregate_kind,aggregate_id,accepted_at,result_sequence,status)
+      VALUES ('restart-completion','thread',${fixture.threadId},${completedAt},1,'accepted')`;
+    yield* provider.finishConversationRollback!({
+      ...fixture.input,
+      outcome: "committed",
+      completionCommandId: "restart-completion",
+    });
+    yield* Deferred.succeed(releaseList, undefined);
+    const result = yield* Fiber.join(restart);
+    assert.equal(result.stoppedSessionCount, 0);
+    assert.equal(fixture.claude.stopAll.mock.calls.length, 1);
+    const binding = Option.getOrThrow(yield* directory.getBinding(fixture.threadId));
+    assert.deepEqual(binding.resumeCursor, fixture.candidateCursor);
+  }).pipe(Effect.provide(fixture.layer));
+});
+
+for (const refusal of ["definite", "unknown", "transport", "unsupported"] as const) {
+  it.effect(
+    `ProviderService preserves the correct rewind fence after ${refusal} preparation`,
+    () => {
+      const fixture = makeTransactionalClaudeRewindFixture(refusal !== "unsupported");
+      if (refusal !== "unsupported")
+        fixture.prepare.mockImplementation(() =>
+          Effect.fail(
+            refusal === "unknown"
+              ? new ProviderAdapterRewindOutcomeUnknownError({})
+              : refusal === "transport"
+                ? new ProviderAdapterRequestError({
+                    provider: "claudeAgent",
+                    method: "prepareRollbackThread",
+                    detail: "synthetic lost response",
+                  })
+                : new ProviderAdapterValidationError({
+                    provider: "claudeAgent",
+                    operation: "prepareRollbackThread",
+                    issue: "definite synthetic refusal",
+                  }),
+          ),
+        );
+      return Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const directory = yield* ProviderSessionDirectory;
+        yield* provider.startSession(fixture.threadId, fixture.startInput);
+        assert.equal(
+          (yield* Effect.exit(provider.prepareConversationRollback!(fixture.input)))._tag,
+          "Failure",
+        );
+        const phase = (yield* directory.rewinds!.read(fixture.threadId))?.phase;
+        assert.equal(
+          phase,
+          refusal === "unknown" || refusal === "transport"
+            ? "preparing"
+            : refusal === "definite"
+              ? "refused"
+              : undefined,
+        );
+        const send = yield* Effect.exit(
+          provider.sendTurn({
+            threadId: fixture.threadId,
+            input: "after preparation",
+            attachments: [],
+          }),
+        );
+        const uncertain = refusal === "unknown" || refusal === "transport";
+        assert.equal(send._tag, uncertain ? "Failure" : "Success");
+        assert.equal(fixture.claude.sendTurn.mock.calls.length, uncertain ? 0 : 1);
+        assert.equal(fixture.claude.startSession.mock.calls.length, 1);
+      }).pipe(Effect.provide(fixture.layer));
+    },
+  );
+}
 
 /** A settings reload drops the old scoped adapter without delivering an exit. */
 function makeReloadableProviderServiceFixture() {

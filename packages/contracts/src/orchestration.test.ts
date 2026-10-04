@@ -601,6 +601,45 @@ it.effect("keeps startup-failure intent guards server-only and validates their s
   }),
 );
 
+it.effect("keeps rewind completion guards server-only and validates their sequence", () =>
+  Effect.gen(function* () {
+    const command = {
+      type: "thread.revert.complete",
+      commandId: "server:rewind-complete",
+      threadId: "thread-1",
+      turnCount: 0,
+      expectedControlSequence: 12,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+    const parsed = yield* decodeOrchestrationCommand(command);
+    assert.strictEqual(parsed.type, "thread.revert.complete");
+    if (parsed.type === "thread.revert.complete") {
+      assert.strictEqual(parsed.expectedControlSequence, 12);
+    }
+    for (const commandId of [command.commandId, "client:rewind-complete"]) {
+      assert.strictEqual(
+        (yield* Effect.exit(decodeClientOrchestrationCommand({ ...command, commandId })))._tag,
+        "Failure",
+      );
+    }
+    for (const sequence of [-1, 1.5, "12", Number.POSITIVE_INFINITY, Number.NaN]) {
+      assert.strictEqual(
+        (yield* Effect.exit(
+          decodeOrchestrationCommand({ ...command, expectedControlSequence: sequence }),
+        ))._tag,
+        "Failure",
+      );
+    }
+    // Legacy Codex/Grok completion remains valid without a native-rewind CAS.
+    assert.strictEqual(
+      (yield* Effect.exit(
+        decodeOrchestrationCommand({ ...command, expectedControlSequence: undefined }),
+      ))._tag,
+      "Success",
+    );
+  }),
+);
+
 it.effect("reserves server command ids at the external client decode boundary", () =>
   Effect.gen(function* () {
     const clientResult = yield* Effect.exit(

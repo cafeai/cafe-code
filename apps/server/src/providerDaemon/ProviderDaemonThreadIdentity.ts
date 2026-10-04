@@ -28,6 +28,9 @@ export function providerDaemonRequestThreadIds(
     case "setGoal":
     case "clearGoal":
     case "rollbackConversation":
+    case "prepareConversationRollback":
+    case "commitConversationRollback":
+    case "finishConversationRollback":
     case "readSubagentDetail":
       return [request.payload.threadId];
     case "forkSession":

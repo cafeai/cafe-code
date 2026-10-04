@@ -13,6 +13,7 @@ import { lstat, mkdir, open, opendir, readFile, rm, writeFile } from "node:fs/pr
 import {
   deleteSession,
   forkSession,
+  getSessionMessages,
   getSubagentMessages,
   listSubagents,
   type ForkSessionOptions,
@@ -21,7 +22,6 @@ import {
   type OnElicitation,
   type FastModeDisabledReason,
   type FastModeState,
-  query,
   type SDKControlInterruptResponse,
   type Options as ClaudeQueryOptions,
   type PermissionMode,
@@ -106,6 +106,15 @@ import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
 import { makeProviderSessionTitle } from "../providerSessionTitle.ts";
 import { awaitClaudeDecision } from "../claudeDecision.ts";
 import { recoverClaudeResume } from "../claudeResumeRecovery.ts";
+import { createObservedClaudeQuery } from "../claudeQueryProcess.ts";
+import {
+  readClaudeRewindMessageIds,
+  readClaudeRewindSnapshot,
+  publishClaudeRewindCandidate,
+  remapClaudeRewindMessageIds,
+  selectClaudeRewindCutoff,
+  type ClaudeRewindMessageIds,
+} from "../claudeConversationRewind.ts";
 import { readClaudeUsageBaseline } from "../claudeUsageBaseline.ts";
 import { prepareFileAttachmentPrompt } from "../fileAttachmentPrompt.ts";
 import {
@@ -126,6 +135,7 @@ import {
 import {
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
+  ProviderAdapterRewindOutcomeUnknownError,
   ProviderAdapterSessionClosedError,
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
@@ -337,6 +347,8 @@ interface ClaudeResumeState {
   readonly resume?: string;
   readonly resumeSessionAt?: string;
   readonly turnCount?: number;
+  readonly rewindMessageIds?: ClaudeRewindMessageIds;
+  readonly rewindMessageIdsInvalid?: true;
 }
 
 interface ClaudeTurnState {
@@ -478,6 +490,8 @@ interface ClaudeSessionContext {
   inFlightSdkMessageCount: number;
   /** Native close threw; never admit another owner until explicit recovery. */
   queryClosureUncertain: boolean;
+  /** A rewind's exact-exit requirement survives later explicit stop attempts. */
+  rewindRetirementUncertain: boolean;
   readonly promptQueue: Queue.Queue<PromptQueueItem>;
   readonly query: ClaudeQueryRuntime;
   readonly runFork: RuntimeFork;
@@ -490,6 +504,7 @@ interface ClaudeSessionContext {
   resumeSessionId: string | undefined;
   resumeCursorDurable: boolean;
   resumeBaseTurnCount: number;
+  rewindMessageIds: ClaudeRewindMessageIds | undefined;
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
   readonly turns: Array<{
@@ -591,6 +606,8 @@ interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
     thinkingDisplay?: ClaudeSdkThinkingDisplay,
   ) => Promise<void>;
   readonly close: () => void;
+  /** Cafe-owned exact process exit observation, never SDK close acknowledgement. */
+  readonly waitForExit?: () => Promise<void>;
 }
 
 export interface ClaudeAdapterLiveOptions {
@@ -627,6 +644,15 @@ export interface ClaudeAdapterLiveOptions {
 
 function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function makeClaudeRewindRefusal(): ProviderAdapterValidationError {
+  return new ProviderAdapterValidationError({
+    provider: PROVIDER,
+    operation: "prepareRollbackThread",
+    issue:
+      "Claude could not prove this checkpoint's exact idle native conversation boundary. Its original history was preserved.",
+  });
 }
 
 function isSyntheticClaudeThreadId(value: string): boolean {
@@ -2657,6 +2683,7 @@ function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undef
     sessionId?: unknown;
     resumeSessionAt?: unknown;
     turnCount?: unknown;
+    rewindMessageIds?: unknown;
   };
 
   const threadIdCandidate = typeof cursor.threadId === "string" ? cursor.threadId : undefined;
@@ -2674,11 +2701,20 @@ function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undef
   const resumeSessionAt =
     typeof cursor.resumeSessionAt === "string" ? cursor.resumeSessionAt : undefined;
   const turnCountValue = typeof cursor.turnCount === "number" ? cursor.turnCount : undefined;
+  let rewindMessageIds: ClaudeRewindMessageIds | undefined;
+  let rewindMessageIdsInvalid = false;
+  try {
+    rewindMessageIds = readClaudeRewindMessageIds(cursor.rewindMessageIds);
+  } catch {
+    rewindMessageIdsInvalid = true;
+  }
 
   return {
     ...(threadId ? { threadId } : {}),
     ...(resume ? { resume } : {}),
     ...(resumeSessionAt ? { resumeSessionAt } : {}),
+    ...(rewindMessageIds ? { rewindMessageIds } : {}),
+    ...(rewindMessageIdsInvalid ? { rewindMessageIdsInvalid: true as const } : {}),
     ...(turnCountValue !== undefined && Number.isInteger(turnCountValue) && turnCountValue >= 0
       ? { turnCount: turnCountValue }
       : {}),
@@ -3790,16 +3826,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         })
       : undefined);
 
-  const createQuery =
-    options?.createQuery ??
-    ((input: {
-      readonly prompt: AsyncIterable<SDKUserMessage>;
-      readonly options: ClaudeQueryOptions;
-    }) =>
-      query({
-        prompt: input.prompt,
-        options: input.options,
-      }) as ClaudeQueryRuntime);
+  const createQuery = options?.createQuery ?? createObservedClaudeQuery;
   const forkNativeSession = options?.forkNativeSession ?? forkSession;
   const deleteNativeSession = options?.deleteNativeSession ?? deleteSession;
   const listNativeSubagents = options?.listNativeSubagents ?? listSubagents;
@@ -3997,6 +4024,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       threadId,
       ...(context.resumeSessionId ? { resume: context.resumeSessionId } : {}),
       turnCount: context.resumeBaseTurnCount + context.turns.length,
+      ...(context.rewindMessageIds ? { rewindMessageIds: context.rewindMessageIds } : {}),
     };
 
     context.session = {
@@ -4282,6 +4310,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return;
     }
     const nextThreadId = message.session_id;
+    if (context.resumeSessionId !== message.session_id) context.rewindMessageIds = undefined;
     context.resumeSessionId = message.session_id;
     yield* updateResumeCursor(context);
 
@@ -7169,10 +7198,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       yield* Fiber.interrupt(streamFiber);
     }
 
-    yield* Effect.try({
-      try: () => {
+    yield* Effect.tryPromise({
+      try: async () => {
         if (!options?.queryAlreadyClosed) context.query.close();
+        if (context.rewindRetirementUncertain && !options?.queryAlreadyClosed) {
+          if (!context.query.waitForExit) throw new Error("Claude rewind has no exit observation.");
+          await context.query.waitForExit();
+        }
         context.queryClosureUncertain = false;
+        context.rewindRetirementUncertain = false;
       },
       catch: (cause) =>
         new ProviderAdapterProcessError({
@@ -7182,6 +7216,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           cause,
         }),
     }).pipe(
+      Effect.timeoutOrElse({
+        duration: 10_000,
+        orElse: () =>
+          Effect.fail(
+            new ProviderAdapterProcessError({
+              provider: PROVIDER,
+              threadId: context.session.threadId,
+              detail: "Claude runtime exit could not be verified.",
+            }),
+          ),
+      }),
       Effect.catch((cause) => {
         context.queryClosureUncertain = true;
         return emitRuntimeError(context, "Failed to close Claude runtime query.", cause);
@@ -7363,6 +7408,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
       const startedAt = yield* nowIso;
       const resumeState = readClaudeResumeState(input.resumeCursor);
+      if (resumeState?.rewindMessageIdsInvalid) {
+        return yield* new ProviderAdapterValidationError({
+          provider: PROVIDER,
+          operation: "startSession",
+          issue: "The saved Claude checkpoint lineage is invalid; its conversation was preserved.",
+        });
+      }
       let durableResumeState = isDurableClaudeResumeState(resumeState) ? resumeState : undefined;
       const threadId = input.threadId;
 
@@ -8027,6 +8079,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               ...(threadId ? { threadId } : {}),
               resume: existingResumeSessionId,
               turnCount: resumeBaseTurnCount,
+              ...(durableResumeState?.rewindMessageIds
+                ? { rewindMessageIds: durableResumeState.rewindMessageIds }
+                : {}),
             }
           : undefined;
       const subagentRuntimeId = randomUUID();
@@ -8056,6 +8111,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         taskLivenessUncertain: false,
         inFlightSdkMessageCount: 0,
         queryClosureUncertain: false,
+        rewindRetirementUncertain: false,
         promptQueue,
         query: queryRuntime,
         runFork,
@@ -8068,6 +8124,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         resumeSessionId: existingResumeSessionId,
         resumeCursorDurable: existingResumeSessionId !== undefined,
         resumeBaseTurnCount,
+        rewindMessageIds: durableResumeState?.rewindMessageIds,
         pendingApprovals,
         pendingUserInputs,
         turns: [],
@@ -8736,15 +8793,231 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       ),
     );
 
-  const rollbackThread: ClaudeAdapterShape["rollbackThread"] = Effect.fn("rollbackThread")(
-    function* (threadId, numTurns) {
-      const context = yield* requireSession(threadId);
-      const nextLength = Math.max(0, context.turns.length - numTurns);
-      context.turns.splice(nextLength);
-      yield* updateResumeCursor(context);
-      return yield* snapshotThread(context);
-    },
-  );
+  const rollbackThread: ClaudeAdapterShape["rollbackThread"] = () =>
+    Effect.fail(
+      new ProviderAdapterValidationError({
+        provider: PROVIDER,
+        operation: "rollbackThread",
+        issue: "Claude conversation rewind requires an exact prepared checkpoint transaction.",
+      }),
+    );
+
+  const prepareRollbackThread: NonNullable<ClaudeAdapterShape["prepareRollbackThread"]> = Effect.fn(
+    "prepareRollbackThread",
+  )(function* (threadId, numTurns, boundary) {
+    const context = yield* requireSession(threadId);
+    const refused = makeClaudeRewindRefusal;
+    // Live SDK messages can replace this identity after persisted-cursor
+    // validation. Admit it again before it becomes a native transcript path,
+    // including baseline rewinds that have no retained-message cutoff check.
+    const sessionId = context.resumeSessionId;
+    const cwd = context.session.cwd;
+    const waitForExit = context.query.waitForExit;
+    if (
+      !Number.isSafeInteger(numTurns) ||
+      numTurns < 1 ||
+      !Number.isSafeInteger(boundary.retainedTurnCount) ||
+      boundary.retainedTurnCount < 0 ||
+      boundary.retainedTurnCount + numTurns !==
+        context.resumeBaseTurnCount + context.turns.length ||
+      !sessionId ||
+      !isUuid(sessionId) ||
+      !context.resumeCursorDurable ||
+      !cwd ||
+      !waitForExit
+    )
+      return yield* refused();
+
+    const projectKey = claudeSessionStoreProjectKey(path, cwd);
+    // The SDK disk-fork API derives its key from cwd. A separately configured
+    // key has no public per-call override here; never read a different home
+    // or silently fork the similarly named default transcript.
+    if (
+      context.environment.CLAUDE_CODE_PROJECT_DIR_NAME?.trim() &&
+      context.environment.CLAUDE_CODE_PROJECT_DIR_NAME.trim() !== projectKey
+    ) {
+      return yield* refused();
+    }
+    const configDirectory = resolveClaudeConfigDirectory(path, context.environment);
+    const projectsDirectory = path.join(configDirectory, "projects");
+    const projectDirectory = path.join(projectsDirectory, projectKey);
+    const snapshotInput = {
+      filePath: path.join(projectDirectory, `${sessionId}.jsonl`),
+      directories: [configDirectory, projectsDirectory, projectDirectory],
+    };
+    const snapshot = yield* Effect.tryPromise({
+      try: () => readClaudeRewindSnapshot(snapshotInput),
+      catch: refused,
+    });
+    const frozenStore: SessionStore = {
+      load: async (key) => {
+        if (
+          key.projectKey !== projectKey ||
+          key.sessionId !== sessionId ||
+          key.subpath !== undefined
+        ) {
+          throw new Error("Claude rewind requested an unrelated transcript.");
+        }
+        return structuredClone(snapshot.entries);
+      },
+      append: async () => {
+        throw new Error("Claude rewind inspection is read-only.");
+      },
+    };
+    let cutoff: string | null = null;
+    // Discarding the complete conversation has no retained native boundary.
+    // It is still safe after compaction removed its oldest prompt; partial
+    // history rewinds must prove the exact current-chain prompt below.
+    if (boundary.retainedTurnCount > 0) {
+      cutoff = yield* Effect.try({
+        try: () =>
+          selectClaudeRewindCutoff({
+            entries: snapshot.entries,
+            sessionId,
+            firstRemovedTurnId: boundary.firstRemovedTurnId,
+            ...(context.rewindMessageIds ? { messageIds: context.rewindMessageIds } : {}),
+          }),
+        catch: refused,
+      });
+      const selectedPrompt =
+        context.rewindMessageIds?.[boundary.firstRemovedTurnId] ?? boundary.firstRemovedTurnId;
+      const nativeMessages = yield* Effect.tryPromise({
+        try: () => getSessionMessages(sessionId, { dir: cwd, sessionStore: frozenStore }),
+        catch: refused,
+      });
+      if (
+        !nativeMessages.some(
+          (message) => message.type === "user" && message.uuid === selectedPrompt,
+        ) ||
+        cutoff === null
+      )
+        return yield* refused();
+    }
+
+    // No await may separate the liveness check from reservation. Once this
+    // succeeds, every send/callback sees stopped=true. Keep that fence on any
+    // inconclusive exit rather than allowing a competing native writer.
+    if (sessions.get(threadId) !== context || !reserveClaudeIdleRetirement(context))
+      return yield* refused();
+    context.queryClosureUncertain = true;
+    context.rewindRetirementUncertain = true;
+    context.session = { ...context.session, status: "error" };
+    const retire = Effect.tryPromise({
+      try: async () => {
+        context.query.close();
+        await waitForExit();
+      },
+      catch: () => new ProviderAdapterRewindOutcomeUnknownError(),
+    }).pipe(
+      Effect.timeoutOrElse({
+        duration: 10_000,
+        orElse: () => Effect.fail(new ProviderAdapterRewindOutcomeUnknownError()),
+      }),
+    );
+    yield* retire;
+    // An event already consumed during shutdown is not projected after the
+    // reservation, but it is evidence that the supposedly idle tree moved.
+    const settledSnapshot = yield* Effect.tryPromise({
+      try: () => readClaudeRewindSnapshot(snapshotInput),
+      catch: () => new ProviderAdapterRewindOutcomeUnknownError(),
+    });
+    if (settledSnapshot.commitment !== snapshot.commitment || context.inFlightSdkMessageCount > 0) {
+      return yield* new ProviderAdapterRewindOutcomeUnknownError();
+    }
+    context.queryClosureUncertain = false;
+    yield* stopSessionInternal(context, {
+      retirementReserved: true,
+      queryAlreadyClosed: true,
+      emitExitEvent: false,
+    });
+    const {
+      subagentRuntimeId: _retiredRuntimeId,
+      activeTurnId: _retiredTurnId,
+      ...closedSession
+    } = context.session;
+    // A baseline rewind intentionally has no native transcript to resume.
+    // Do not manufacture an empty native session id or start paid inference.
+    if (boundary.retainedTurnCount === 0) {
+      return { ...closedSession, status: "closed" as const, resumeCursor: undefined };
+    }
+
+    let publishedSessionId: string | undefined;
+    let publishedEntries: SessionStoreEntry[] | undefined;
+    const publicationStore: SessionStore = {
+      ...frozenStore,
+      append: async (key, entries) => {
+        if (
+          publishedSessionId !== undefined ||
+          key.subpath !== undefined ||
+          key.projectKey !== projectKey ||
+          !isUuid(key.sessionId) ||
+          key.sessionId === sessionId
+        ) {
+          throw new Error("Claude rewind produced an invalid publication target.");
+        }
+        // Record before I/O. A thrown fsync/close is ambiguous and must never
+        // authorize blind replay or deletion of a possibly durable candidate.
+        publishedSessionId = key.sessionId;
+        publishedEntries = entries;
+        await publishClaudeRewindCandidate({
+          filePath: path.join(projectDirectory, `${key.sessionId}.jsonl`),
+          snapshot,
+          entries,
+        });
+      },
+    };
+    const forked = yield* Effect.tryPromise({
+      try: () =>
+        forkNativeSession(sessionId, {
+          dir: cwd,
+          upToMessageId: cutoff!,
+          sessionStore: publicationStore,
+        }),
+      // Retirement itself changes event authority. Even a disk-fork refusal
+      // before publication must retain the durable fence for this generation.
+      catch: () => new ProviderAdapterRewindOutcomeUnknownError(),
+    });
+    if (forked.sessionId !== publishedSessionId || !publishedEntries) {
+      return yield* new ProviderAdapterRewindOutcomeUnknownError();
+    }
+    const rewindMessageIds = yield* Effect.try({
+      try: () =>
+        remapClaudeRewindMessageIds({
+          sourceSessionId: sessionId,
+          targetSessionId: forked.sessionId,
+          entries: publishedEntries!,
+          ...(context.rewindMessageIds ? { previous: context.rewindMessageIds } : {}),
+        }),
+      catch: () => new ProviderAdapterRewindOutcomeUnknownError(),
+    });
+    // Validate the exact durable candidate and recheck the original after
+    // SDK work. A concurrent external writer cannot be hidden by a successful
+    // fork acknowledgement. Both files remain available on ambiguous error.
+    yield* Effect.tryPromise({
+      try: async () => {
+        const candidate = await readClaudeRewindSnapshot({
+          ...snapshotInput,
+          filePath: path.join(projectDirectory, `${forked.sessionId}.jsonl`),
+        });
+        if (JSON.stringify(candidate.entries) !== JSON.stringify(publishedEntries))
+          throw new Error("Claude rewind candidate changed.");
+        const original = await readClaudeRewindSnapshot(snapshotInput);
+        if (original.commitment !== snapshot.commitment)
+          throw new Error("Claude rewind source changed.");
+      },
+      catch: () => new ProviderAdapterRewindOutcomeUnknownError(),
+    });
+    return {
+      ...closedSession,
+      status: "closed" as const,
+      resumeCursor: {
+        threadId,
+        resume: forked.sessionId,
+        turnCount: boundary.retainedTurnCount,
+        rewindMessageIds,
+      },
+    };
+  });
 
   const respondToRequest: ClaudeAdapterShape["respondToRequest"] = Effect.fn("respondToRequest")(
     function* (threadId, requestId, decision) {
@@ -8943,6 +9216,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     readThread,
     readSubagentDetail,
     rollbackThread,
+    prepareRollbackThread,
     respondToRequest,
     respondToUserInput,
     resolveInteractionUrl,

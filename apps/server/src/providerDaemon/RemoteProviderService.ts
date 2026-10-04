@@ -37,6 +37,7 @@ import * as Stream from "effect/Stream";
 
 import {
   ProviderAdapterRequestError,
+  ProviderAdapterRewindOutcomeUnknownError,
   ProviderValidationError,
   type ProviderServiceError,
 } from "../provider/Errors.ts";
@@ -69,6 +70,7 @@ const decodeEventRecordJson = Schema.decodeUnknownSync(
 const decodeAdapterCapabilities = Schema.decodeUnknownSync(ProviderDaemonAdapterCapabilities);
 const decodeInstanceRoutingInfo = Schema.decodeUnknownSync(ProviderDaemonInstanceRoutingInfo);
 const encodeRpcRequestJson = Schema.encodeSync(Schema.fromJsonString(ProviderDaemonRpcRequest));
+const validateRpcRequest = Schema.encodeSync(ProviderDaemonRpcRequest);
 const VOID_RPC_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
   "respondToInteraction",
   "discardSessionFork",
@@ -79,6 +81,9 @@ const VOID_RPC_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
   "stopSession",
   "quiesceThreadForHardDelete",
   "rollbackConversation",
+  "prepareConversationRollback",
+  "commitConversationRollback",
+  "finishConversationRollback",
   "compactThread",
 ]);
 const MUTATING_RPC_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
@@ -97,6 +102,9 @@ const MUTATING_RPC_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
   "setGoal",
   "clearGoal",
   "rollbackConversation",
+  "prepareConversationRollback",
+  "commitConversationRollback",
+  "finishConversationRollback",
   "compactThread",
 ]);
 const PROVIDER_DAEMON_REPLAY_OVERLAP_EVENTS = 1_000;
@@ -215,6 +223,40 @@ export function providerDaemonCompactionRequest(
   };
 }
 
+type ConversationRollbackRequest = Extract<
+  ProviderDaemonRpcRequest,
+  {
+    method:
+      | "prepareConversationRollback"
+      | "commitConversationRollback"
+      | "finishConversationRollback";
+  }
+>;
+
+const isConversationRollbackRequest = (
+  request: ProviderDaemonRpcRequest,
+): request is ConversationRollbackRequest =>
+  request.method === "prepareConversationRollback" ||
+  request.method === "commitConversationRollback" ||
+  request.method === "finishConversationRollback";
+
+/**
+ * Every retry of one transaction phase has the same durable identity. Finish
+ * outcomes are distinct phases: an aborted release must never borrow a prior
+ * committed receipt. The daemon ledger additionally binds the complete payload,
+ * including thread/checkpoint/control sequence and the exact completion proof.
+ */
+export function providerDaemonConversationRollbackRequest<R extends ConversationRollbackRequest>(
+  request: R,
+): R & { readonly commandId: string } {
+  const outcome =
+    request.method === "finishConversationRollback" ? `:${request.payload.outcome}` : "";
+  return {
+    ...request,
+    commandId: `thread.rewind:${request.payload.operationId}:${request.method}${outcome}`,
+  };
+}
+
 export const attachCommandIdToMutatingProviderDaemonRequest = <
   M extends ProviderDaemonRpcRequest["method"],
 >(
@@ -289,6 +331,77 @@ export async function requestProviderDaemonRpcJsonWithStableRetry<
   }
 }
 
+// Only these typed refusals establish that the requested phase was rejected
+// before its mutation boundary. Generic request failures, ledger failures,
+// already-running receipts and mismatched identities remain inconclusive.
+const DEFINITIVE_REWIND_REFUSALS = new Set([
+  "ProviderValidationError",
+  "ProviderAdapterValidationError",
+  "ProviderUnsupportedError",
+  "ProviderInstanceNotFoundError",
+  "ProviderSessionNotFoundError",
+  "ProviderAdapterSessionNotFoundError",
+  "ProviderAdapterSessionClosedError",
+  "ProviderDaemonThreadRetired",
+  "ProviderDaemonMissingCommandId",
+]);
+
+/**
+ * Qualify phase acknowledgements independently of the generic void RPC path.
+ * A lost/invalid response can hide an applied rewind, so it must not be
+ * interpreted as an ordinary refusal that authorizes filesystem compensation.
+ * Neither transport bodies nor provider causes survive the fixed unknown error.
+ * The only automatic replay is the existing single reset-only, byte-identical
+ * command-ledger retry; there is no new mutation attempt or provider restart.
+ */
+export async function requestProviderDaemonConversationRollback(
+  daemonConfig: ProviderDaemonClientConfig,
+  request: ConversationRollbackRequest,
+  requestJson: ProviderDaemonControlRequester = requestProviderDaemonJson,
+): Promise<void> {
+  // Fail malformed local inputs before entering the possibly-submitted region.
+  // This remains ordinary validation, not a claim that an invalid request ran.
+  validateRpcRequest(request);
+  let definitiveRefusal: ProviderAdapterRequestError | undefined;
+  try {
+    const response = await requestProviderDaemonRpcJsonWithStableRetry(
+      daemonConfig,
+      providerDaemonConversationRollbackRequest(request),
+      requestJson,
+    );
+    const envelope = decodeRpcEnvelopeJson(response.body);
+    if (!envelope.ok) {
+      if (DEFINITIVE_REWIND_REFUSALS.has(envelope.error.tag)) {
+        // Tags retain recovery meaning, but arbitrary native diagnostics must
+        // not leak through this security-sensitive cross-store boundary.
+        definitiveRefusal = toRemoteRequestError(
+          request.method,
+          new ProviderDaemonRpcResponseError(
+            envelope.error.tag,
+            "The provider refused this rewind phase before applying it.",
+          ),
+        );
+        throw definitiveRefusal;
+      }
+      throw new ProviderAdapterRewindOutcomeUnknownError({});
+    }
+    // The server encodes successful void values as JSON null. Missing, forged
+    // or unexpected values cannot certify a destructive transaction phase.
+    if (response.statusCode < 200 || response.statusCode >= 300 || envelope.value !== null)
+      throw new ProviderAdapterRewindOutcomeUnknownError({});
+  } catch (cause) {
+    // Only the error created from the decoded server refusal above is definite;
+    // a transport exception with a similar-looking tag has no such authority.
+    if (definitiveRefusal !== undefined && cause === definitiveRefusal) throw definitiveRefusal;
+    if (cause instanceof ProviderDaemonAuthenticationError) {
+      // Preserve bounded authentication diagnostics without retaining its
+      // cause: a prior reset-only attempt might already have applied the phase.
+      toRemoteRequestError(request.method, cause);
+    }
+    throw new ProviderAdapterRewindOutcomeUnknownError({});
+  }
+}
+
 /** Reject locally retired identities before evaluating the HTTP request. */
 export const guardRemoteProviderThreadOperation = <A, E, R>(input: {
   readonly retiredThreadIds: ReadonlySet<string>;
@@ -316,6 +429,10 @@ const rpc = <M extends ProviderDaemonRpcRequest["method"]>(
 ) =>
   Effect.tryPromise({
     try: async () => {
+      if (isConversationRollbackRequest(request)) {
+        await requestProviderDaemonConversationRollback(daemonConfig, request);
+        return undefined as Schema.Schema.Type<(typeof ProviderDaemonRpcResultByMethod)[M]>;
+      }
       const response = await requestProviderDaemonRpcJsonWithStableRetry(daemonConfig, request);
       const envelope = decodeRpcEnvelopeJson(response.body);
       if (!envelope.ok) {
@@ -337,7 +454,12 @@ const rpc = <M extends ProviderDaemonRpcRequest["method"]>(
         (typeof ProviderDaemonRpcResultByMethod)[M]
       >;
     },
-    catch: (cause) => toRemoteRequestError(request.method, cause),
+    catch: (cause) =>
+      isConversationRollbackRequest(request) &&
+      (cause instanceof ProviderAdapterRewindOutcomeUnknownError ||
+        cause instanceof ProviderAdapterRequestError)
+        ? cause
+        : toRemoteRequestError(request.method, cause),
   });
 
 async function readEventStream(
@@ -719,6 +841,12 @@ const makeRemoteProviderService = Effect.gen(function* () {
     setGoal: (input) => guardedRpc({ method: "setGoal", payload: input }),
     clearGoal: (input) => guardedRpc({ method: "clearGoal", payload: input }),
     rollbackConversation: (input) => guardedRpc({ method: "rollbackConversation", payload: input }),
+    prepareConversationRollback: (input) =>
+      guardedRpc({ method: "prepareConversationRollback", payload: input }),
+    commitConversationRollback: (input) =>
+      guardedRpc({ method: "commitConversationRollback", payload: input }),
+    finishConversationRollback: (input) =>
+      guardedRpc({ method: "finishConversationRollback", payload: input }),
     readSubagentDetail: (input) => guardedRpc({ method: "readSubagentDetail", payload: input }),
     get streamEvents(): ProviderServiceShape["streamEvents"] {
       return Stream.fromPubSub(runtimeEventPubSub);

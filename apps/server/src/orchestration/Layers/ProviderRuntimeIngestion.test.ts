@@ -514,6 +514,7 @@ describe("ProviderRuntimeIngestion", () => {
       setProviderSession: provider.setSession,
       clearProviderSessions: provider.clearSessions,
       receiptBus,
+      sql,
       drain,
       readTurnStartBinding: (threadId: ThreadId, turnId: TurnId | null) =>
         Effect.runPromise(
@@ -575,6 +576,265 @@ describe("ProviderRuntimeIngestion", () => {
       retireThreadForHardDelete: ingestion.retireThreadForHardDelete,
     };
   }
+
+  it.each([
+    { phase: "prepared", restart: false },
+    { phase: "finished", restart: false },
+    { phase: "prepared", restart: true },
+    { phase: "finished", restart: true },
+  ] as const)(
+    "rejects retired Claude content and terminal replay behind a $phase rewind fence (restart=$restart)",
+    async ({ phase, restart }) => {
+      const databasePath = path.join(makeTempDir("cafe-rewind-ingestion-"), "fixture.sqlite");
+      const options = { databasePath, serverSettings: { enableAssistantStreaming: true } } as const;
+      let harness = await createHarness(options);
+      const threadId = asThreadId("thread-1");
+      const turnId = asTurnId("rewind-native-turn");
+      const provider = ProviderDriverKind.make("claudeAgent");
+      const instanceId = ProviderInstanceId.make("claudeAgent");
+      const runtimeId = "00000000-0000-4000-8000-000000000111";
+      const createdAt = "2026-01-01T00:00:01.000Z";
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("rewind-claude-binding"),
+          threadId,
+          createdAt,
+          session: {
+            threadId,
+            providerName: provider,
+            providerInstanceId: instanceId,
+            subagentRuntimeId: runtimeId,
+            status: "ready",
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: createdAt,
+          },
+        }),
+      );
+      harness.setProviderSession({
+        threadId,
+        provider,
+        providerInstanceId: instanceId,
+        subagentRuntimeId: runtimeId,
+        status: "ready",
+        runtimeMode: "approval-required",
+        createdAt,
+        updatedAt: createdAt,
+      });
+      const eventBase = {
+        threadId,
+        turnId,
+        provider,
+        providerInstanceId: instanceId,
+        subagentRuntimeId: runtimeId,
+        createdAt,
+      };
+      harness.emit({
+        ...eventBase,
+        type: "turn.started",
+        eventId: asEventId("rewind-original-start"),
+      });
+      harness.emit({
+        ...eventBase,
+        type: "content.delta",
+        eventId: asEventId("rewind-original-text"),
+        itemId: asItemId("rewind-original-item"),
+        payload: { streamKind: "assistant_text", delta: "Original conversation answer." },
+      });
+      const completed = {
+        ...eventBase,
+        type: "turn.completed",
+        eventId: asEventId("rewind-original-completed"),
+        payload: { state: "completed" },
+      };
+      harness.emit(completed);
+      await harness.drain();
+      await waitForThread(harness.readModel, (thread) =>
+        thread.messages.some((message) => message.text === "Original conversation answer."),
+      );
+      // The real projection drops the old conversation, but the daemon may
+      // still replay its complete event or previously unpublished suffixes.
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.revert.complete",
+          commandId: CommandId.make("rewind-projection-finished"),
+          threadId,
+          turnCount: 0,
+          createdAt,
+        }),
+      );
+      await harness.drain();
+      await Effect.runPromise(harness.sql`
+        INSERT INTO provider_session_runtime
+          (thread_id,provider_name,provider_instance_id,adapter_key,runtime_mode,status,last_seen_at,runtime_payload_json)
+        VALUES (${threadId},'claudeAgent',${instanceId},'fixture','approval-required','stopped',${createdAt},
+          ${JSON.stringify({ subagentRuntimeId: runtimeId })})
+      `);
+      await Effect.runPromise(harness.sql`
+        INSERT INTO provider_conversation_rewinds
+          (thread_id,operation_id,phase,provider_instance_id,runtime_id,expected_control_sequence,
+            retained_turn_count,removed_turn_count,first_removed_turn_id,original_session_json,candidate_session_json)
+        VALUES (${threadId},${crypto.randomUUID()},${phase},${instanceId},${runtimeId},0,0,1,${turnId},
+          ${JSON.stringify({
+            threadId,
+            provider,
+            providerInstanceId: instanceId,
+            subagentRuntimeId: runtimeId,
+            status: "ready",
+            runtimeMode: "approval-required",
+            createdAt,
+            updatedAt: createdAt,
+          })},NULL)
+      `);
+      if (restart) {
+        // Close and reopen the isolated on-disk SQLite connection, dropping the
+        // ingestion event cache. Rejection must come from the persisted fence.
+        await disposeCurrentHarness();
+        harness = await createHarness(options);
+      }
+      const before = (await harness.readModel()).threads[0]!;
+      expect(before.messages).toHaveLength(0);
+      await harness.setDurableProviderDaemonCursor(0);
+      // An earlier completion receipt cannot grant old-generation authority.
+      await Effect.runPromise(
+        harness.receiptBus.publish({
+          type: "provider.turn.ingestion-quiesced",
+          threadId,
+          turnId,
+          provider,
+          providerInstanceId: instanceId,
+          sourceEventId: completed.eventId,
+          createdAt,
+        }),
+      );
+      harness.emit(withDaemonCursor(completed, 1_000));
+      harness.emit({
+        ...eventBase,
+        type: "content.delta",
+        eventId: asEventId("rewind-late-text"),
+        itemId: asItemId("rewind-late-item"),
+        payload: { streamKind: "assistant_text", delta: "Must not resurrect removed history." },
+      });
+      harness.emit(
+        withDaemonCursor({ ...completed, eventId: asEventId("rewind-late-completed") }, 2_000),
+      );
+      await harness.drain();
+      const after = (await harness.readModel()).threads[0]!;
+      expect(after.messages).toEqual(before.messages);
+      expect(after.checkpoints).toEqual(before.checkpoints);
+      expect(after.latestTurn).toEqual(before.latestTurn);
+      expect(after.session).toEqual(before.session);
+      expect(await harness.readDurableProviderDaemonCursor()).toBe(2_000);
+    },
+  );
+
+  it("preserves original preparation-time content when another chat advances the global cursor before refusal and restart", async () => {
+    const databasePath = path.join(makeTempDir("cafe-preparing-replay-gap-"), "fixture.sqlite");
+    const options = { databasePath, serverSettings: { enableAssistantStreaming: true } } as const;
+    let harness = await createHarness(options);
+    const threadId = asThreadId("thread-1");
+    const otherThreadId = asThreadId("thread-2");
+    const provider = ProviderDriverKind.make("claudeAgent");
+    const instanceId = ProviderInstanceId.make("claudeAgent");
+    const runtimeId = "00000000-0000-4000-8000-000000000112";
+    const createdAt = "2026-01-01T00:00:01.000Z";
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("prepare-gap-other-chat"),
+        threadId: otherThreadId,
+        projectId: asProjectId("project-1"),
+        title: "Other chat",
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: null,
+        createdAt,
+      }),
+    );
+    await Effect.runPromise(harness.sql`
+      INSERT INTO provider_session_runtime
+        (thread_id,provider_name,provider_instance_id,adapter_key,runtime_mode,status,last_seen_at,runtime_payload_json)
+      VALUES (${threadId},'claudeAgent',${instanceId},'fixture','approval-required','ready',${createdAt},
+        ${JSON.stringify({ subagentRuntimeId: runtimeId })})
+    `);
+    await Effect.runPromise(harness.sql`
+      INSERT INTO provider_conversation_rewinds
+        (thread_id,operation_id,phase,provider_instance_id,runtime_id,expected_control_sequence,
+          retained_turn_count,removed_turn_count,first_removed_turn_id,original_session_json,candidate_session_json)
+      VALUES (${threadId},${crypto.randomUUID()},'preparing',${instanceId},${runtimeId},0,0,1,'original-turn',
+        ${JSON.stringify({
+          threadId,
+          provider,
+          providerInstanceId: instanceId,
+          subagentRuntimeId: runtimeId,
+          status: "ready",
+          runtimeMode: "approval-required",
+          createdAt,
+          updatedAt: createdAt,
+        })},NULL)
+    `);
+    harness.emit(
+      withDaemonCursor(
+        {
+          type: "content.delta",
+          eventId: asEventId("original-during-preparation"),
+          threadId,
+          provider,
+          providerInstanceId: instanceId,
+          subagentRuntimeId: runtimeId,
+          turnId: asTurnId("original-turn"),
+          itemId: asItemId("original-preparation-item"),
+          createdAt,
+          payload: { streamKind: "assistant_text", delta: "Original source history must survive." },
+        },
+        1_000,
+      ),
+    );
+    harness.emit(
+      withDaemonCursor(
+        {
+          type: "content.delta",
+          eventId: asEventId("other-chat-after-preparation"),
+          threadId: otherThreadId,
+          provider: ProviderDriverKind.make("codex"),
+          turnId: asTurnId("other-turn"),
+          itemId: asItemId("other-item"),
+          createdAt,
+          payload: {
+            streamKind: "assistant_text",
+            delta: "Other chat advanced the replay cursor.",
+          },
+        },
+        2_000,
+      ),
+    );
+    await harness.drain();
+    expect(await harness.readDurableProviderDaemonCursor()).toBe(2_000);
+    expect(
+      (await harness.readModel()).threads.find((thread) => thread.id === threadId)?.messages,
+    ).toContainEqual(expect.objectContaining({ text: "Original source history must survive." }));
+    // The exact source query refused before native retirement. This is the
+    // production transition, unlike prepared -> refused, which is forbidden.
+    await Effect.runPromise(
+      harness.sql`UPDATE provider_conversation_rewinds SET phase='refused' WHERE thread_id=${threadId} AND phase='preparing'`,
+    );
+    await disposeCurrentHarness();
+    harness = await createHarness(options);
+    expect(await harness.readDurableProviderDaemonCursor()).toBe(2_000);
+    const reopened = (await harness.readModel()).threads.find((thread) => thread.id === threadId)!;
+    expect(reopened.messages).toContainEqual(
+      expect.objectContaining({ text: "Original source history must survive." }),
+    );
+    expect(
+      reopened.messages.filter(
+        (message) => message.text === "Original source history must survive.",
+      ),
+    ).toHaveLength(1);
+  });
 
   it("retains exact runtime evidence across SQL snapshots, ordinary updates and explicit legacy replacement", async () => {
     const harness = await createHarness();

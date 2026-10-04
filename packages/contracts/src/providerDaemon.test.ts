@@ -15,6 +15,44 @@ import {
 const OWNERSHIP_ID = "9a90b48d-868f-4614-ae9c-66d50293d52b";
 const decodeDaemonLiveness = Schema.decodeUnknownSync(ProviderDaemonLiveness);
 
+it("requires exact rewind identities, checkpoint boundaries and outcome values across daemon RPC", () => {
+  const decode = Schema.decodeUnknownSync(ProviderDaemonRpcRequest);
+  const identity = { threadId: "thread-1", operationId: OWNERSHIP_ID };
+  const prepare = {
+    method: "prepareConversationRollback",
+    payload: {
+      ...identity,
+      numTurns: 2,
+      firstRemovedTurnId: "turn-2",
+      retainedTurnCount: 1,
+      expectedControlSequence: 8,
+    },
+  };
+  for (const request of [
+    prepare,
+    { method: "commitConversationRollback", payload: identity },
+    { method: "finishConversationRollback", payload: { ...identity, outcome: "aborted" } },
+    {
+      method: "finishConversationRollback",
+      payload: { ...identity, outcome: "committed", completionCommandId: "completion-receipt" },
+    },
+  ])
+    assert.deepEqual(decode(request), request);
+  for (const patch of [
+    { operationId: "not-a-uuid" },
+    { numTurns: 0 },
+    { numTurns: 1.5 },
+    { firstRemovedTurnId: "" },
+    { retainedTurnCount: -1 },
+    { expectedControlSequence: -1 },
+    { expectedControlSequence: undefined },
+  ])
+    assert.throws(() => decode({ ...prepare, payload: { ...prepare.payload, ...patch } }));
+  assert.throws(() =>
+    decode({ method: "finishConversationRollback", payload: { ...identity, outcome: "maybe" } }),
+  );
+});
+
 it("validates Windows PID and exact canonical unsigned FILETIME boundaries", () => {
   const decode = Schema.decodeUnknownSync(WindowsProcessIdentity);
   for (const identity of [

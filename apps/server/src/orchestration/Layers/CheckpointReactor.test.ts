@@ -23,6 +23,7 @@ import {
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -30,10 +31,12 @@ import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CheckpointStoreLive } from "../../checkpointing/Layers/CheckpointStore.ts";
 import { CheckpointStore } from "../../checkpointing/Services/CheckpointStore.ts";
+import { CheckpointInvariantError } from "../../checkpointing/Errors.ts";
 import * as VcsDriverRegistry from "../../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../../vcs/VcsProcess.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
@@ -44,6 +47,8 @@ import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import { RuntimeReceiptBusLive } from "./RuntimeReceiptBus.ts";
 import { RuntimeReceiptBus } from "../Services/RuntimeReceiptBus.ts";
+import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
+import { OrchestrationCommandInvariantError } from "../Errors.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
@@ -132,6 +137,15 @@ function createProviderServiceHarness(
       readonly numTurns: number;
     }): ReturnType<ProviderServiceShape["rollbackConversation"]> => Effect.void,
   );
+  const prepareConversationRollback = vi.fn<
+    NonNullable<ProviderServiceShape["prepareConversationRollback"]>
+  >(() => Effect.void);
+  const commitConversationRollback = vi.fn<
+    NonNullable<ProviderServiceShape["commitConversationRollback"]>
+  >(() => Effect.void);
+  const finishConversationRollback = vi.fn<
+    NonNullable<ProviderServiceShape["finishConversationRollback"]>
+  >(() => Effect.void);
 
   const unsupported = <A>() =>
     Effect.die(new Error("Unsupported provider call in test")) as Effect.Effect<A, never>;
@@ -177,6 +191,9 @@ function createProviderServiceHarness(
         },
       }),
     rollbackConversation,
+    prepareConversationRollback,
+    commitConversationRollback,
+    finishConversationRollback,
     readSubagentDetail: () => unsupported(),
     get streamEvents() {
       return Stream.fromPubSub(runtimeEventPubSub);
@@ -190,6 +207,9 @@ function createProviderServiceHarness(
   return {
     service,
     rollbackConversation,
+    prepareConversationRollback,
+    commitConversationRollback,
+    finishConversationRollback,
     emit,
   };
 }
@@ -321,7 +341,8 @@ describe("CheckpointReactor", () => {
     | CheckpointReactor
     | CheckpointStore
     | ProjectionSnapshotQuery
-    | RuntimeReceiptBus,
+    | RuntimeReceiptBus
+    | SqlClient.SqlClient,
     unknown
   > | null = null;
   let scope: Scope.Closeable | null = null;
@@ -355,6 +376,8 @@ describe("CheckpointReactor", () => {
     readonly gitStatusFullRefreshCalls?: Array<string>;
     readonly autoPublishIngestionReceipt?: boolean;
     readonly runtimeReceiptBusLayer?: Layer.Layer<RuntimeReceiptBus>;
+    readonly ingestionDrain?: Effect.Effect<void>;
+    readonly testClock?: Clock.Clock;
   }) {
     const cwd = createGitRepository();
     tempDirs.push(cwd);
@@ -423,6 +446,14 @@ describe("CheckpointReactor", () => {
       Layer.provideMerge(projectionSnapshotLayer),
       Layer.provideMerge(options?.runtimeReceiptBusLayer ?? RuntimeReceiptBusLive),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
+      Layer.provide(
+        Layer.succeed(ProviderRuntimeIngestionService, {
+          start: () => Effect.void,
+          drain: options?.ingestionDrain ?? Effect.void,
+          retireThreadForHardDelete: () => Effect.void,
+          completeThreadHardDelete: () => Effect.void,
+        }),
+      ),
       Layer.provideMerge(vcsStatusBroadcasterLayer),
       Layer.provideMerge(CheckpointStoreLive.pipe(Layer.provide(VcsDriverRegistry.layer))),
       Layer.provideMerge(
@@ -435,13 +466,19 @@ describe("CheckpointReactor", () => {
       Layer.provideMerge(VcsProcess.layer),
       Layer.provideMerge(ServerConfigLayer),
       Layer.provideMerge(NodeServices.layer),
+      Layer.provideMerge(SqlitePersistenceMemory),
     );
 
-    runtime = ManagedRuntime.make(layer);
+    runtime = ManagedRuntime.make(
+      options?.testClock
+        ? layer.pipe(Layer.provideMerge(Layer.succeed(Clock.Clock, options.testClock)))
+        : layer,
+    );
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
     const reactor = await runtime.runPromise(Effect.service(CheckpointReactor));
     const checkpointStore = await runtime.runPromise(Effect.service(CheckpointStore));
+    const sql = await runtime.runPromise(Effect.service(SqlClient.SqlClient));
     const receiptBus = await runtime.runPromise(Effect.service(RuntimeReceiptBus));
     scope = await Effect.runPromise(Scope.make("sequential"));
     await Effect.runPromise(reactor.start().pipe(Scope.provide(scope)));
@@ -538,6 +575,74 @@ describe("CheckpointReactor", () => {
       drain,
       checkpointStore,
       snapshotQuery,
+      sql,
+    };
+  }
+
+  // Real filesystem refs and the real SQL-backed orchestration projection are
+  // used below. Only the native provider phases are mocked, so the tests can
+  // prove when recoverable files and durable conversation receipts exist.
+  async function createRewindHarness(
+    providerName: ProviderDriverKind = ProviderDriverKind.make("claudeAgent"),
+    turnCounts: ReadonlyArray<number> = [1, 2],
+    ingestionDrain?: Effect.Effect<void>,
+    options?: { readonly testClock?: Clock.Clock; readonly gitStatusRefreshCalls?: string[] },
+  ) {
+    const harness = await createHarness({
+      providerName,
+      ...(ingestionDrain ? { ingestionDrain } : {}),
+      ...options,
+    });
+    const threadId = ThreadId.make("thread-1");
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("rewind-session"),
+        threadId,
+        session: {
+          threadId,
+          status: "ready",
+          providerName,
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      }),
+    );
+    for (const turnCount of turnCounts) {
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.diff.complete",
+          commandId: CommandId.make(`rewind-diff-${turnCount}`),
+          threadId,
+          turnId: asTurnId(`native-turn-${turnCount}`),
+          checkpointTurnCount: turnCount,
+          checkpointRef: checkpointRefForThreadTurn(threadId, turnCount),
+          status: "ready",
+          files: [],
+          createdAt,
+          completedAt: createdAt,
+        }),
+      );
+    }
+    await harness.drain();
+    const request = (turnCount = 1) =>
+      Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.checkpoint.revert",
+          commandId: CommandId.make(`rewind-request-${crypto.randomUUID()}`),
+          threadId,
+          turnCount,
+          createdAt,
+        }),
+      );
+    return {
+      ...harness,
+      request,
+      recoveryRef: checkpointRefForThreadTurn(threadId, Number.MAX_SAFE_INTEGER),
     };
   }
 
@@ -1476,6 +1581,7 @@ describe("CheckpointReactor", () => {
     );
 
     await waitForEvent(harness.engine, (event) => event.type === "thread.reverted");
+    await harness.drain();
     const thread = await waitForThread(
       harness.readModel,
       (entry) => entry.checkpoints.length === 1,
@@ -1722,12 +1828,607 @@ describe("CheckpointReactor", () => {
     );
 
     await waitForEvent(harness.engine, (event) => event.type === "thread.reverted");
-    expect(harness.provider.rollbackConversation).toHaveBeenCalledTimes(1);
-    expect(harness.provider.rollbackConversation).toHaveBeenCalledWith({
+    await harness.drain();
+    expect(harness.provider.rollbackConversation).not.toHaveBeenCalled();
+    const prepared = harness.provider.prepareConversationRollback.mock.calls[0]?.[0];
+    expect(prepared).toEqual({
       threadId: ThreadId.make("thread-1"),
       numTurns: 1,
+      operationId: expect.any(String),
+      expectedControlSequence: expect.any(Number),
+      firstRemovedTurnId: asTurnId("turn-claude-2"),
+      retainedTurnCount: 1,
+    });
+    expect(harness.provider.prepareConversationRollback).toHaveBeenCalledTimes(1);
+    expect(harness.provider.commitConversationRollback).toHaveBeenCalledExactlyOnceWith({
+      threadId: ThreadId.make("thread-1"),
+      operationId: prepared?.operationId,
+    });
+    expect(harness.provider.finishConversationRollback).toHaveBeenCalledExactlyOnceWith({
+      threadId: ThreadId.make("thread-1"),
+      operationId: prepared?.operationId,
+      outcome: "committed",
+      completionCommandId: expect.any(String),
     });
   });
+
+  it("waits for Claude preparation before capturing or restoring files and retains recovery until the exact projection receipt", async () => {
+    const harness = await createRewindHarness();
+    const entered = Effect.runSync(Deferred.make<void>());
+    const release = Effect.runSync(Deferred.make<void>());
+    const order: string[] = [];
+    const capture = harness.checkpointStore.captureCheckpoint;
+    const restore = harness.checkpointStore.restoreCheckpoint;
+    const remove = harness.checkpointStore.deleteCheckpointRefs;
+    const dispatch = harness.engine.dispatch;
+    const captureSpy = vi
+      .spyOn(harness.checkpointStore, "captureCheckpoint")
+      .mockImplementation((input) =>
+        Effect.sync(() => order.push("capture")).pipe(Effect.andThen(capture(input))),
+      );
+    const restoreSpy = vi
+      .spyOn(harness.checkpointStore, "restoreCheckpoint")
+      .mockImplementation((input) =>
+        Effect.sync(() => order.push("restore")).pipe(Effect.andThen(restore(input))),
+      );
+    vi.spyOn(harness.checkpointStore, "deleteCheckpointRefs").mockImplementation((input) =>
+      Effect.sync(() => {
+        order.push(
+          input.checkpointRefs.includes(harness.recoveryRef) ? "delete recovery" : "prune",
+        );
+      }).pipe(Effect.andThen(remove(input))),
+    );
+    let completionCommandId: string | undefined;
+    vi.spyOn(harness.engine, "dispatch").mockImplementation((command) => {
+      if (command.type !== "thread.revert.complete") return dispatch(command);
+      completionCommandId = command.commandId;
+      return Effect.sync(() => {
+        order.push("projection");
+        expect(gitRefExists(harness.cwd, harness.recoveryRef)).toBe(true);
+        expect(
+          gitRefExists(harness.cwd, checkpointRefForThreadTurn(ThreadId.make("thread-1"), 2)),
+        ).toBe(true);
+      }).pipe(Effect.andThen(dispatch(command)));
+    });
+    harness.provider.prepareConversationRollback.mockImplementation(() =>
+      Effect.sync(() => order.push("prepare")).pipe(
+        Effect.andThen(Deferred.succeed(entered, undefined)),
+        Effect.andThen(Deferred.await(release)),
+      ),
+    );
+    harness.provider.commitConversationRollback.mockImplementation(() =>
+      Effect.sync(() => {
+        order.push("commit");
+        expect(fs.readFileSync(path.join(harness.cwd, "README.md"), "utf8")).toBe("v2\n");
+        expect(gitShowFileAtRef(harness.cwd, harness.recoveryRef, "README.md")).toBe("v3\n");
+      }),
+    );
+    harness.provider.finishConversationRollback.mockImplementation((input) =>
+      Effect.gen(function* () {
+        order.push("finish");
+        expect(input).toMatchObject({ outcome: "committed", completionCommandId });
+        const snapshot = yield* harness.snapshotQuery.getSnapshot();
+        expect(snapshot.threads[0]?.checkpoints).toHaveLength(1);
+        expect(gitRefExists(harness.cwd, harness.recoveryRef)).toBe(true);
+      }),
+    );
+    try {
+      await harness.request();
+      await Effect.runPromise(Deferred.await(entered).pipe(Effect.timeout("5 seconds")));
+      expect(captureSpy).not.toHaveBeenCalled();
+      expect(restoreSpy).not.toHaveBeenCalled();
+      expect(fs.readFileSync(path.join(harness.cwd, "README.md"), "utf8")).toBe("v3\n");
+    } finally {
+      // Always release the synthetic provider barrier before scope cleanup, even
+      // when an ordering assertion fails. No provider or wall-clock race is used.
+      await Effect.runPromise(Deferred.succeed(release, undefined));
+      await harness.drain();
+    }
+    expect(order).toEqual([
+      "prepare",
+      "capture",
+      "restore",
+      "commit",
+      "projection",
+      "finish",
+      "prune",
+      "delete recovery",
+    ]);
+    const events = await Effect.runPromise(Stream.runCollect(harness.engine.readEvents(0)));
+    const requested = events.find((event) => event.type === "thread.checkpoint-revert-requested");
+    expect(harness.provider.prepareConversationRollback.mock.calls[0]?.[0]).toMatchObject({
+      firstRemovedTurnId: "native-turn-2",
+      expectedControlSequence: requested?.sequence,
+    });
+    expect(gitRefExists(harness.cwd, harness.recoveryRef)).toBe(false);
+  });
+
+  it.each([
+    "prepareConversationRollback",
+    "commitConversationRollback",
+    "finishConversationRollback",
+  ] as const)(
+    "refuses Claude rewind without %s before capturing or changing files",
+    async (method) => {
+      const harness = await createRewindHarness();
+      delete harness.provider.service[method];
+      const capture = vi.spyOn(harness.checkpointStore, "captureCheckpoint");
+      const restore = vi.spyOn(harness.checkpointStore, "restoreCheckpoint");
+      await harness.request();
+      await harness.drain();
+      expect(capture).not.toHaveBeenCalled();
+      expect(restore).not.toHaveBeenCalled();
+      expect(harness.provider.prepareConversationRollback).not.toHaveBeenCalled();
+      expect(harness.provider.rollbackConversation).not.toHaveBeenCalled();
+      const snapshot = await harness.readModel();
+      expect(snapshot.threads[0]?.activities).toContainEqual(
+        expect.objectContaining({ kind: "checkpoint.revert.failed" }),
+      );
+    },
+  );
+
+  it("drains old-generation ingestion after Claude preparation and before touching the workspace", async () => {
+    const entered = Effect.runSync(Deferred.make<void>());
+    const release = Effect.runSync(Deferred.make<void>());
+    const harness = await createRewindHarness(
+      ProviderDriverKind.make("claudeAgent"),
+      [1, 2],
+      Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
+    );
+    const capture = vi.spyOn(harness.checkpointStore, "captureCheckpoint");
+    const restore = vi.spyOn(harness.checkpointStore, "restoreCheckpoint");
+    try {
+      await harness.request();
+      await Effect.runPromise(Deferred.await(entered).pipe(Effect.timeout("5 seconds")));
+      expect(harness.provider.prepareConversationRollback).toHaveBeenCalledTimes(1);
+      expect(harness.provider.commitConversationRollback).not.toHaveBeenCalled();
+      expect(capture).not.toHaveBeenCalled();
+      expect(restore).not.toHaveBeenCalled();
+      expect(fs.readFileSync(path.join(harness.cwd, "README.md"), "utf8")).toBe("v3\n");
+    } finally {
+      await Effect.runPromise(Deferred.succeed(release, undefined));
+      await harness.drain();
+    }
+    expect(harness.provider.finishConversationRollback).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ outcome: "committed" }),
+    );
+  });
+
+  it("bounds a stuck ingestion drain without restoring files or releasing its prepared reservation", async () => {
+    const drainEntered = Effect.runSync(Deferred.make<void>());
+    const timerEntered = Effect.runSync(Deferred.make<void>());
+    const expire = Effect.runSync(Deferred.make<void>());
+    const liveClock = Effect.runSync(Effect.service(Clock.Clock));
+    const harness = await createRewindHarness(
+      ProviderDriverKind.make("claudeAgent"),
+      [1, 2],
+      Deferred.succeed(drainEntered, undefined).pipe(Effect.andThen(Effect.never)),
+      {
+        testClock: {
+          currentTimeMillisUnsafe: () => liveClock.currentTimeMillisUnsafe(),
+          currentTimeNanosUnsafe: () => liveClock.currentTimeNanosUnsafe(),
+          currentTimeMillis: liveClock.currentTimeMillis,
+          currentTimeNanos: liveClock.currentTimeNanos,
+          sleep: (duration) =>
+            Duration.toMillis(duration) === 30_000
+              ? Deferred.succeed(timerEntered, undefined).pipe(
+                  Effect.andThen(Deferred.await(expire)),
+                )
+              : liveClock.sleep(duration),
+        },
+      },
+    );
+    const capture = vi.spyOn(harness.checkpointStore, "captureCheckpoint");
+    const restore = vi.spyOn(harness.checkpointStore, "restoreCheckpoint");
+    try {
+      await harness.request();
+      await Effect.runPromise(Deferred.await(drainEntered).pipe(Effect.timeout("5 seconds")));
+      await Effect.runPromise(Deferred.await(timerEntered).pipe(Effect.timeout("5 seconds")));
+    } finally {
+      await Effect.runPromise(Deferred.succeed(expire, undefined));
+      await harness.drain();
+    }
+    expect(capture).not.toHaveBeenCalled();
+    expect(restore).not.toHaveBeenCalled();
+    expect(harness.provider.prepareConversationRollback).toHaveBeenCalledTimes(1);
+    expect(harness.provider.commitConversationRollback).not.toHaveBeenCalled();
+    expect(harness.provider.finishConversationRollback).not.toHaveBeenCalled();
+    expect((await harness.readModel()).threads[0]?.activities).toContainEqual(
+      expect.objectContaining({
+        kind: "checkpoint.revert.failed",
+        payload: { turnCount: 1, detail: new ProviderAdapterRewindOutcomeUnknownError({}).message },
+      }),
+    );
+  });
+
+  it("does not recreate a removed checkpoint from a retired native generation with an old terminal receipt", async () => {
+    const refreshes: string[] = [];
+    const harness = await createRewindHarness(
+      ProviderDriverKind.make("claudeAgent"),
+      [1, 2],
+      undefined,
+      { gitStatusRefreshCalls: refreshes },
+    );
+    await harness.request();
+    await harness.drain();
+    // Simulate the durable service's completed rewind and later fresh runtime.
+    // The SQL store, not the mocked provider's current in-memory list, owns the
+    // generation fence. No external database or native provider is involved.
+    const threadId = ThreadId.make("thread-1");
+    const instanceId = ProviderInstanceId.make("claude-fixture");
+    const original = {
+      threadId,
+      provider: "claudeAgent",
+      providerInstanceId: instanceId,
+      status: "ready",
+      runtimeMode: "full-access",
+      subagentRuntimeId: "retired-generation",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    await Effect.runPromise(harness.sql`
+      INSERT INTO provider_session_runtime
+        (thread_id,provider_name,provider_instance_id,adapter_key,runtime_mode,status,last_seen_at,runtime_payload_json)
+      VALUES (${threadId},'claudeAgent',${instanceId},'fixture','full-access','ready',
+        '2026-01-01T00:00:00.000Z',${JSON.stringify({ subagentRuntimeId: "fresh-generation" })})
+    `);
+    await Effect.runPromise(harness.sql`
+      INSERT INTO provider_conversation_rewinds
+        (thread_id,operation_id,phase,provider_instance_id,runtime_id,expected_control_sequence,
+          retained_turn_count,removed_turn_count,first_removed_turn_id,original_session_json,candidate_session_json)
+      VALUES (${threadId},${crypto.randomUUID()},'finished',${instanceId},'retired-generation',0,
+        1,1,'native-turn-2',${JSON.stringify(original)},NULL)
+    `);
+    const capture = vi.spyOn(harness.checkpointStore, "captureCheckpoint");
+    const prune = vi.spyOn(harness.checkpointStore, "deleteCheckpointRefs");
+    // publishIngestionReceipt deliberately leaves an apparently valid previous
+    // terminal acknowledgement: that must not override retired-generation SQL.
+    const retiredTerminal: LegacyProviderRuntimeEvent = {
+      type: "turn.completed",
+      eventId: EventId.make("retired-terminal"),
+      threadId,
+      provider: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: instanceId,
+      subagentRuntimeId: "retired-generation",
+      turnId: "native-turn-2",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      payload: { state: "completed" },
+    };
+    await harness.publishIngestionReceipt(retiredTerminal);
+    harness.provider.emit(retiredTerminal);
+    // A valid fresh-generation invalidation behind the stale frame is an
+    // explicit processing barrier, avoiding a timing-based negative assertion.
+    harness.provider.emit({
+      type: "vcs.state.changed",
+      eventId: EventId.make("fresh-after-retired"),
+      threadId,
+      provider: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: instanceId,
+      subagentRuntimeId: "fresh-generation",
+      createdAt: "2026-01-01T00:00:01.000Z",
+      payload: { kind: "commit" },
+    });
+    await expect.poll(() => refreshes.length).toBe(1);
+    await harness.drain();
+    expect(capture).not.toHaveBeenCalled();
+    expect(prune).not.toHaveBeenCalled();
+    expect(gitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 2))).toBe(false);
+    expect((await harness.readModel()).threads[0]?.checkpoints).toHaveLength(1);
+  });
+
+  it("does not resurrect an old placeholder queued behind a successful rewind", async () => {
+    const harness = await createRewindHarness();
+    const committing = Effect.runSync(Deferred.make<void>());
+    const release = Effect.runSync(Deferred.make<void>());
+    harness.provider.commitConversationRollback.mockReturnValue(
+      Deferred.succeed(committing, undefined).pipe(Effect.andThen(Deferred.await(release))),
+    );
+    const capture = vi.spyOn(harness.checkpointStore, "captureCheckpoint");
+    const threadId = ThreadId.make("thread-1");
+    try {
+      await harness.request();
+      await Effect.runPromise(Deferred.await(committing).pipe(Effect.timeout("5 seconds")));
+      // This represents ingestion that started before admission was fenced and
+      // already durably projected its placeholder; its checkpoint worker item
+      // cannot run until the current rewind releases the same serial worker.
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.diff.complete",
+          commandId: CommandId.make("old-placeholder-during-rewind"),
+          threadId,
+          turnId: asTurnId("native-turn-2"),
+          checkpointTurnCount: 2,
+          checkpointRef: checkpointRefForThreadTurn(threadId, 2),
+          status: "missing",
+          files: [],
+          createdAt: "2026-01-01T00:00:01.000Z",
+          completedAt: "2026-01-01T00:00:01.000Z",
+        }),
+      );
+    } finally {
+      await Effect.runPromise(Deferred.succeed(release, undefined));
+      await harness.drain();
+    }
+    expect(capture).toHaveBeenCalledExactlyOnceWith({
+      cwd: harness.cwd,
+      checkpointRef: harness.recoveryRef,
+    });
+    expect(gitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 2))).toBe(false);
+    expect((await harness.readModel()).threads[0]?.checkpoints).toHaveLength(1);
+  });
+
+  it("retains recovery and native admission when a newer user control arrives after native commit", async () => {
+    const harness = await createRewindHarness();
+    const threadId = ThreadId.make("thread-1");
+    harness.provider.commitConversationRollback.mockImplementation(() =>
+      harness.engine
+        .dispatch({
+          type: "thread.runtime-mode.set",
+          commandId: CommandId.make("newer-control-after-native-commit"),
+          threadId,
+          runtimeMode: "full-access",
+          createdAt: "2026-01-01T00:00:02.000Z",
+        })
+        .pipe(Effect.orDie, Effect.asVoid),
+    );
+    const restore = vi.spyOn(harness.checkpointStore, "restoreCheckpoint");
+    const dispatch = vi.spyOn(harness.engine, "dispatch");
+    await harness.request();
+    await harness.drain();
+    expect(harness.provider.commitConversationRollback).toHaveBeenCalledTimes(1);
+    expect(harness.provider.finishConversationRollback).not.toHaveBeenCalled();
+    const prepared = harness.provider.prepareConversationRollback.mock.calls[0]?.[0];
+    const complete = dispatch.mock.calls.find(
+      ([command]) => command.type === "thread.revert.complete",
+    )?.[0];
+    expect(complete).toMatchObject({ expectedControlSequence: prepared?.expectedControlSequence });
+    expect(restore).toHaveBeenCalledExactlyOnceWith({
+      cwd: harness.cwd,
+      checkpointRef: checkpointRefForThreadTurn(threadId, 1),
+      fallbackToHead: false,
+    });
+    expect(fs.readFileSync(path.join(harness.cwd, "README.md"), "utf8")).toBe("v2\n");
+    expect(gitShowFileAtRef(harness.cwd, harness.recoveryRef, "README.md")).toBe("v3\n");
+    expect(gitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 2))).toBe(true);
+    const thread = (await harness.readModel()).threads[0]!;
+    expect(thread.checkpoints).toHaveLength(2);
+    expect(thread.runtimeMode).toBe("full-access");
+    expect(thread.activities).toContainEqual(
+      expect.objectContaining({ kind: "checkpoint.revert.failed" }),
+    );
+  });
+
+  it.each([
+    { label: "the current checkpoint has no removed history", turnCounts: [1, 2], target: 2 },
+    { label: "the exact first removed turn is missing", turnCounts: [1, 3], target: 1 },
+  ])("refuses Claude rewind when $label", async ({ turnCounts, target }) => {
+    const harness = await createRewindHarness(ProviderDriverKind.make("claudeAgent"), turnCounts);
+    const capture = vi.spyOn(harness.checkpointStore, "captureCheckpoint");
+    const restore = vi.spyOn(harness.checkpointStore, "restoreCheckpoint");
+    await harness.request(target);
+    await harness.drain();
+    expect(capture).not.toHaveBeenCalled();
+    expect(restore).not.toHaveBeenCalled();
+    expect(harness.provider.prepareConversationRollback).not.toHaveBeenCalled();
+    expect(harness.provider.rollbackConversation).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    "does not touch files when Claude preparation refuses (unknown=%s)",
+    async (unknown) => {
+      const harness = await createRewindHarness();
+      const failure = unknown
+        ? new ProviderAdapterRewindOutcomeUnknownError({})
+        : new ProviderAdapterRequestError({
+            provider: "claudeAgent",
+            method: "prepareConversationRollback",
+            detail: "Native tree is not idle.",
+          });
+      harness.provider.prepareConversationRollback.mockReturnValue(Effect.fail(failure));
+      const capture = vi.spyOn(harness.checkpointStore, "captureCheckpoint");
+      const restore = vi.spyOn(harness.checkpointStore, "restoreCheckpoint");
+      await harness.request();
+      await harness.drain();
+      expect(capture).not.toHaveBeenCalled();
+      expect(restore).not.toHaveBeenCalled();
+      expect(harness.provider.commitConversationRollback).not.toHaveBeenCalled();
+      expect(harness.provider.finishConversationRollback).not.toHaveBeenCalled();
+      expect(fs.readFileSync(path.join(harness.cwd, "README.md"), "utf8")).toBe("v3\n");
+    },
+  );
+
+  it.each([
+    "capture failed",
+    "target restore failed",
+    "target restore false",
+    "native commit refused",
+    "native commit unknown",
+    "compensation failed",
+    "compensation false",
+    "abort acknowledgement unknown",
+    "projection failed",
+    "finish acknowledgement unknown",
+  ] as const)("preserves the correct Claude recovery boundary when %s", async (scenario) => {
+    const harness = await createRewindHarness();
+    const fileError = new CheckpointInvariantError({
+      operation: "test fixture",
+      detail: "Controlled filesystem failure.",
+    });
+    const providerError = new ProviderAdapterRequestError({
+      provider: "claudeAgent",
+      method: "commitConversationRollback",
+      detail: "Native commit refused before mutation.",
+    });
+    const unknown = new ProviderAdapterRewindOutcomeUnknownError({});
+    const capture = harness.checkpointStore.captureCheckpoint;
+    vi.spyOn(harness.checkpointStore, "captureCheckpoint").mockImplementation((input) =>
+      scenario === "capture failed" ? Effect.fail(fileError) : capture(input),
+    );
+    const restore = harness.checkpointStore.restoreCheckpoint;
+    const restoreSpy = vi
+      .spyOn(harness.checkpointStore, "restoreCheckpoint")
+      .mockImplementation((input) => {
+        if (input.checkpointRef === harness.recoveryRef) {
+          if (scenario === "compensation failed") return Effect.fail(fileError);
+          if (scenario === "compensation false") return Effect.succeed(false);
+          return restore(input);
+        }
+        if (scenario === "target restore failed" || scenario === "target restore false") {
+          // A partially applied target is intentionally observable before the
+          // failure, proving compensation is needed even without a successful ACK.
+          return restore(input).pipe(
+            Effect.andThen(
+              scenario === "target restore failed" ? Effect.fail(fileError) : Effect.succeed(false),
+            ),
+          );
+        }
+        return restore(input);
+      });
+    if (scenario === "native commit unknown") {
+      harness.provider.commitConversationRollback.mockReturnValue(Effect.fail(unknown));
+    } else if (
+      [
+        "native commit refused",
+        "compensation failed",
+        "compensation false",
+        "abort acknowledgement unknown",
+      ].includes(scenario)
+    ) {
+      harness.provider.commitConversationRollback.mockReturnValue(Effect.fail(providerError));
+    }
+    if (
+      scenario === "abort acknowledgement unknown" ||
+      scenario === "finish acknowledgement unknown"
+    ) {
+      harness.provider.finishConversationRollback.mockReturnValue(Effect.fail(unknown));
+    }
+    const dispatch = harness.engine.dispatch;
+    const dispatchSpy = vi.spyOn(harness.engine, "dispatch").mockImplementation((command) =>
+      scenario === "projection failed" && command.type === "thread.revert.complete"
+        ? Effect.fail(
+            new OrchestrationCommandInvariantError({
+              commandType: command.type,
+              detail: "Controlled projection failure.",
+            }),
+          )
+        : dispatch(command),
+    );
+    await harness.request();
+    await harness.drain();
+    const retained = [
+      "native commit unknown",
+      "compensation failed",
+      "compensation false",
+      "abort acknowledgement unknown",
+      "projection failed",
+      "finish acknowledgement unknown",
+    ].includes(scenario);
+    const compensated = [
+      "target restore failed",
+      "target restore false",
+      "native commit refused",
+      "abort acknowledgement unknown",
+    ].includes(scenario);
+    const expectedContent = scenario === "capture failed" || compensated ? "v3\n" : "v2\n";
+    expect(fs.readFileSync(path.join(harness.cwd, "README.md"), "utf8")).toBe(expectedContent);
+    expect(gitRefExists(harness.cwd, harness.recoveryRef)).toBe(retained);
+    if (retained)
+      expect(gitShowFileAtRef(harness.cwd, harness.recoveryRef, "README.md")).toBe("v3\n");
+    expect(
+      gitRefExists(harness.cwd, checkpointRefForThreadTurn(ThreadId.make("thread-1"), 2)),
+    ).toBe(true);
+    const finish = harness.provider.finishConversationRollback;
+    if (scenario === "capture failed" || compensated) {
+      expect(finish).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ outcome: "aborted" }),
+      );
+    } else if (scenario === "finish acknowledgement unknown") {
+      expect(finish).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ outcome: "committed" }),
+      );
+    } else {
+      expect(finish).not.toHaveBeenCalled();
+    }
+    const recoveryRestores = restoreSpy.mock.calls.filter(
+      ([input]) => input.checkpointRef === harness.recoveryRef,
+    );
+    expect(recoveryRestores).toHaveLength(
+      compensated || scenario === "compensation failed" || scenario === "compensation false"
+        ? 1
+        : 0,
+    );
+    const projectionAttempted =
+      scenario === "projection failed" || scenario === "finish acknowledgement unknown";
+    expect(
+      dispatchSpy.mock.calls.some(([command]) => command.type === "thread.revert.complete"),
+    ).toBe(projectionAttempted);
+    const snapshot = await harness.readModel();
+    expect(snapshot.threads[0]?.checkpoints).toHaveLength(
+      scenario === "finish acknowledgement unknown" ? 1 : 2,
+    );
+    expect(snapshot.threads[0]?.activities).toContainEqual(
+      expect.objectContaining({ kind: "checkpoint.revert.failed" }),
+    );
+  });
+
+  it.each([
+    { providerName: "codex", scenario: "compensation failed" },
+    { providerName: "codex", scenario: "compensation false" },
+    { providerName: "codex", scenario: "projection failed" },
+    { providerName: "grok", scenario: "compensation failed" },
+    { providerName: "grok", scenario: "compensation false" },
+    { providerName: "grok", scenario: "projection failed" },
+  ] as const)(
+    "retains legacy $providerName recovery when $scenario",
+    async ({ providerName, scenario }) => {
+      const harness = await createRewindHarness(ProviderDriverKind.make(providerName));
+      const restore = harness.checkpointStore.restoreCheckpoint;
+      vi.spyOn(harness.checkpointStore, "restoreCheckpoint").mockImplementation((input) => {
+        if (input.checkpointRef !== harness.recoveryRef || scenario === "projection failed")
+          return restore(input);
+        return scenario === "compensation false"
+          ? Effect.succeed(false)
+          : Effect.fail(
+              new CheckpointInvariantError({
+                operation: "test compensation",
+                detail: "Controlled compensation failure.",
+              }),
+            );
+      });
+      if (scenario !== "projection failed") {
+        harness.provider.rollbackConversation.mockReturnValue(
+          Effect.fail(
+            new ProviderAdapterRequestError({
+              provider: providerName,
+              method: "rollbackConversation",
+              detail: "Controlled refusal.",
+            }),
+          ),
+        );
+      }
+      const dispatch = harness.engine.dispatch;
+      vi.spyOn(harness.engine, "dispatch").mockImplementation((command) =>
+        scenario === "projection failed" && command.type === "thread.revert.complete"
+          ? Effect.fail(
+              new OrchestrationCommandInvariantError({
+                commandType: command.type,
+                detail: "Controlled projection failure.",
+              }),
+            )
+          : dispatch(command),
+      );
+      await harness.request();
+      await harness.drain();
+      expect(harness.provider.prepareConversationRollback).not.toHaveBeenCalled();
+      expect(harness.provider.rollbackConversation).toHaveBeenCalledTimes(1);
+      expect(gitShowFileAtRef(harness.cwd, harness.recoveryRef, "README.md")).toBe("v3\n");
+      expect(fs.readFileSync(path.join(harness.cwd, "README.md"), "utf8")).toBe("v2\n");
+      expect(
+        gitRefExists(harness.cwd, checkpointRefForThreadTurn(ThreadId.make("thread-1"), 2)),
+      ).toBe(true);
+      expect((await harness.readModel()).threads[0]?.checkpoints).toHaveLength(2);
+    },
+  );
 
   it("processes consecutive revert requests with deterministic rollback sequencing", async () => {
     const harness = await createHarness();

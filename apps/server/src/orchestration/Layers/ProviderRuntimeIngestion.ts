@@ -37,6 +37,7 @@ import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { makeConversationRewindStore } from "../../persistence/Layers/ConversationRewinds.ts";
 import { makeDrainableWorker } from "@cafecode/shared/DrainableWorker";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
@@ -1137,6 +1138,7 @@ interface EnrichedCodexSteerProcessingActivities {
 
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+  const conversationRewinds = makeConversationRewindStore(sql);
   const orchestrationEngine = yield* OrchestrationEngineService;
   const dispatchObservedSession = (
     command: Extract<OrchestrationCommand, { readonly type: "thread.session.set" }>,
@@ -3568,6 +3570,25 @@ const make = Effect.gen(function* () {
 
   const processRuntimeEventOnce = (event: ProviderRuntimeEvent) =>
     Effect.gen(function* () {
+      // This second fence covers records already published into the daemon
+      // journal or this worker before provider admission was reserved. The
+      // checkpoint reactor drains in-flight ingestion before changing files.
+      const rewindAdmission = yield* conversationRewinds.classifyEvent(event);
+      if (rewindAdmission !== "accepted") {
+        // Only a definitive retired generation advances authenticated replay
+        // progress. Unknown pending identities have no projection authority.
+        // Exact original-generation frames during preparation are accepted
+        // above because an early refusal leaves that source valid. Neither
+        // rejected branch marks the cache or publishes a terminal receipt.
+        if (rewindAdmission === "retired") {
+          const retiredCursor = readProviderDaemonRuntimeEventCursor(event);
+          if (retiredCursor !== undefined) {
+            recordProviderRuntimeIngestionCursor(retiredCursor);
+            yield* persistProviderDaemonCursor(retiredCursor);
+          }
+        }
+        return;
+      }
       const eventKey = providerRuntimeEventKey(event);
       const providerDaemonCursor = readProviderDaemonRuntimeEventCursor(event);
       const alreadyProcessed = yield* Cache.getOption(processedRuntimeEventIds, eventKey);

@@ -13,6 +13,9 @@
  */
 import type {
   ProviderCompactThreadInput,
+  ProviderPrepareConversationRollbackInput,
+  ProviderConversationRewindIdentity,
+  ProviderFinishConversationRollbackInput,
   ProviderDriverKind,
   ProviderInterruptTurnInput,
   ProviderInstanceId,
@@ -245,6 +248,20 @@ export interface ProviderServiceShape {
     readonly threadId: ThreadId;
     readonly numTurns: number;
   }) => Effect.Effect<void, ProviderServiceError>;
+
+  /** Reserve a whole-tree native rewind before any checkpoint filesystem write.
+   * Optional only for older daemon compatibility: absence must fail closed. */
+  readonly prepareConversationRollback?: (
+    input: ProviderPrepareConversationRollbackInput,
+  ) => Effect.Effect<void, ProviderServiceError>;
+  /** Persist the prepared closed candidate; keep its admission fence in place. */
+  readonly commitConversationRollback?: (
+    input: ProviderConversationRewindIdentity,
+  ) => Effect.Effect<void, ProviderServiceError>;
+  /** Release only after a verified projection receipt or definite compensation. */
+  readonly finishConversationRollback?: (
+    input: ProviderFinishConversationRollbackInput,
+  ) => Effect.Effect<void, ProviderServiceError>;
 
   /**
    * Canonical provider runtime event stream.

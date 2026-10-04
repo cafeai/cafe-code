@@ -1387,6 +1387,9 @@ const ThreadRevertCompleteCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   turnCount: NonNegativeInt,
+  // Server-only completion fence. A provider-native rewind may finish after a
+  // newer human control commits; never truncate that newer intent's view.
+  expectedControlSequence: Schema.optional(NonNegativeInt),
   createdAt: IsoDateTime,
 });
 

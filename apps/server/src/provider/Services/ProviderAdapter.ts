@@ -73,6 +73,12 @@ export interface ProviderThreadSnapshot {
   readonly turns: ReadonlyArray<ProviderThreadTurnSnapshot>;
 }
 
+/** Authoritative Cafe checkpoint boundary, independent of native UUID remaps. */
+export interface ProviderRewindBoundary {
+  readonly firstRemovedTurnId: TurnId;
+  readonly retainedTurnCount: number;
+}
+
 /** Public transcript material extracted from a provider-owned child thread. */
 export interface ProviderSubagentDetailMessage {
   /** Stable Cafe-owned sequence key; never a provider-native item id. */
@@ -273,6 +279,17 @@ export interface ProviderAdapterShape<TError> {
     threadId: ThreadId,
     numTurns: number,
   ) => Effect.Effect<ProviderThreadSnapshot, TError>;
+
+  /**
+   * Prepare a closed native-history candidate under a whole-tree retirement
+   * fence. The caller durably owns the checkpoint transaction and activates
+   * this candidate only after filesystem restoration and cursor commit.
+   */
+  readonly prepareRollbackThread?: (
+    threadId: ThreadId,
+    numTurns: number,
+    boundary: ProviderRewindBoundary,
+  ) => Effect.Effect<ProviderSession, TError>;
 
   /**
    * Stop all sessions owned by this adapter.

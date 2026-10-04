@@ -6,6 +6,7 @@ Created: 2026-10-04 14:08:58 JST (UTC+0900)
 Last updated: 2026-10-04 14:50:28 JST (UTC+0900)
 Decision authority: implementation choice within the user's request to fix sparse/stale subagent detail and push dev
 Supersedes: none; supplements existing lifecycle retention and immutable history ownership
+Partially superseded by: [Codex history ancestry](codex-history-ancestry.md), which corrects the stored-thread session-ID interpretation while preserving this decision's other boundaries.
 
 ## Context
 

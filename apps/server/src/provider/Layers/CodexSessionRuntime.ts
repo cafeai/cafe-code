@@ -467,42 +467,76 @@ type CodexThreadReadMetadata = Pick<
   "id" | "parentThreadId" | "sessionId" | "source"
 >;
 
+// Provider metadata is read on a separate, untrusted transport. A malformed
+// ancestry must not trigger unbounded requests or retain arbitrarily long IDs.
+// This is a read budget, not an inferred native collaboration depth limit.
+export const CODEX_SUBAGENT_HISTORY_MAX_ANCESTRY_HOPS = 32;
+const CODEX_SUBAGENT_HISTORY_MAX_ANCESTOR_ID_CHARS = 512;
+
+function validateCodexSubagentParentMetadata(
+  child: CodexThreadReadMetadata,
+): CodexSubagentThreadValidationFailure | undefined {
+  const source = child.source;
+  if (
+    typeof source !== "object" ||
+    source === null ||
+    !("subAgent" in source) ||
+    typeof child.parentThreadId !== "string" ||
+    child.parentThreadId.trim().length === 0 ||
+    child.parentThreadId.length > CODEX_SUBAGENT_HISTORY_MAX_ANCESTOR_ID_CHARS
+  ) {
+    return "missing-subagent-metadata";
+  }
+
+  // Only native thread_spawn records bind an explicit parent. Other subagent
+  // source variants (review, compaction, other) are not ancestry evidence.
+  const subagentSource = source.subAgent;
+  if (
+    typeof subagentSource !== "object" ||
+    subagentSource === null ||
+    !("thread_spawn" in subagentSource)
+  ) {
+    return "missing-subagent-metadata";
+  }
+  return subagentSource.thread_spawn.parent_thread_id === child.parentThreadId
+    ? undefined
+    : "parent-metadata-mismatch";
+}
+
 /**
- * Verify that an opaque child id resolves inside the recovered root session
- * tree before its transcript is canonicalized. Nested descendants are valid:
- * their immediate parent need not equal the root, but Codex's duplicate parent
- * metadata must agree and both threads must share one provider session id.
+ * Verify an exact descendant path before disclosing any transcript. Ancestors
+ * are ordered from the child's immediate parent toward (but excluding) root.
+ * Do not use sessionId as ownership: Codex's persisted thread conversion sets
+ * it to that individual thread's ID, and only loaded threads are enriched with
+ * the live shared session ID. Our isolated reader deliberately loads neither.
+ * https://github.com/openai/codex/blob/a956835d020762cb2b570053af06f643a11c0ecc/codex-rs/app-server/src/request_processors/thread_processor.rs#L5801-L5808
  */
 export function validateCodexSubagentThreadReadMetadata(input: {
   readonly expectedRootThreadId: string;
   readonly expectedChildThreadId: string;
   readonly root: CodexThreadReadMetadata;
   readonly child: CodexThreadReadMetadata;
+  readonly ancestors?: ReadonlyArray<CodexThreadReadMetadata>;
 }): CodexSubagentThreadValidationFailure | undefined {
   if (input.root.id !== input.expectedRootThreadId) return "root-identity-mismatch";
   if (input.child.id !== input.expectedChildThreadId) return "child-identity-mismatch";
 
-  const source = input.child.source;
-  if (
-    typeof source !== "object" ||
-    source === null ||
-    !("subAgent" in source) ||
-    typeof input.child.parentThreadId !== "string" ||
-    input.child.parentThreadId.length === 0
-  ) {
-    return "missing-subagent-metadata";
+  const chain = [input.child, ...(input.ancestors ?? [])];
+  if (chain.length > CODEX_SUBAGENT_HISTORY_MAX_ANCESTRY_HOPS) return "session-tree-mismatch";
+  const seen = new Set([input.root.id]);
+  let expectedId = input.expectedChildThreadId;
+  for (const [index, thread] of chain.entries()) {
+    if (thread.id !== expectedId) return "child-identity-mismatch";
+    if (seen.has(thread.id)) return "session-tree-mismatch";
+    seen.add(thread.id);
+    const failure = validateCodexSubagentParentMetadata(thread);
+    if (failure !== undefined) return failure;
+    if (thread.parentThreadId === input.root.id) {
+      return index === chain.length - 1 ? undefined : "session-tree-mismatch";
+    }
+    expectedId = thread.parentThreadId!;
   }
-
-  const subagentSource = source.subAgent;
-  if (
-    typeof subagentSource === "object" &&
-    subagentSource !== null &&
-    "thread_spawn" in subagentSource &&
-    subagentSource.thread_spawn.parent_thread_id !== input.child.parentThreadId
-  ) {
-    return "parent-metadata-mismatch";
-  }
-  return input.child.sessionId === input.root.sessionId ? undefined : "session-tree-mismatch";
+  return "session-tree-mismatch";
 }
 
 /** Reserve the ACK-to-notification gap without inventing a native turn id.
@@ -4929,23 +4963,54 @@ const readCodexVerifiedSubagentMetadataWithClient = Effect.fn(
       reason: "root-identity-mismatch",
     });
   }
-  const childMetadata = yield* input.client.request("thread/read", {
-    threadId: input.subagentThreadId,
-    includeTurns: false,
-  });
-  const validationFailure = validateCodexSubagentThreadReadMetadata({
-    expectedRootThreadId: input.rootProviderThreadId,
-    expectedChildThreadId: input.subagentThreadId,
-    root: rootResponse.thread,
-    child: childMetadata.thread,
-  });
-  if (validationFailure !== undefined) {
-    return yield* new CodexSessionRuntimeInvalidSubagentThreadError({
-      reason: validationFailure,
+  const seen = new Set([input.rootProviderThreadId]);
+  const ancestors: CodexThreadReadMetadata[] = [];
+  let childMetadata: EffectCodexSchema.V2ThreadReadResponse | undefined;
+  let nextThreadId = input.subagentThreadId;
+  for (let hop = 0; hop < CODEX_SUBAGENT_HISTORY_MAX_ANCESTRY_HOPS; hop += 1) {
+    // Reject self-selection and cycles before even requesting that node. The
+    // already verified root is the sole permitted successful chain endpoint.
+    if (seen.has(nextThreadId)) break;
+    seen.add(nextThreadId);
+    const metadata = yield* input.client.request("thread/read", {
+      threadId: nextThreadId,
+      includeTurns: false,
     });
+    if (metadata.thread.id !== nextThreadId) {
+      return yield* new CodexSessionRuntimeInvalidSubagentThreadError({
+        reason: "child-identity-mismatch",
+      });
+    }
+    const parentFailure = validateCodexSubagentParentMetadata(metadata.thread);
+    if (parentFailure !== undefined) {
+      return yield* new CodexSessionRuntimeInvalidSubagentThreadError({ reason: parentFailure });
+    }
+    if (childMetadata === undefined) childMetadata = metadata;
+    else ancestors.push(metadata.thread);
+
+    if (metadata.thread.parentThreadId === input.rootProviderThreadId) {
+      const validationFailure = validateCodexSubagentThreadReadMetadata({
+        expectedRootThreadId: input.rootProviderThreadId,
+        expectedChildThreadId: input.subagentThreadId,
+        root: rootResponse.thread,
+        child: childMetadata.thread,
+        ancestors,
+      });
+      if (validationFailure !== undefined) {
+        return yield* new CodexSessionRuntimeInvalidSubagentThreadError({
+          reason: validationFailure,
+        });
+      }
+      return childMetadata;
+    }
+    // The parent validator above proves this is a bounded nonempty string. No
+    // trim, path derivation, fork relationship, or session-label guess is used.
+    nextThreadId = metadata.thread.parentThreadId!;
   }
 
-  return childMetadata;
+  return yield* new CodexSessionRuntimeInvalidSubagentThreadError({
+    reason: "session-tree-mismatch",
+  });
 });
 
 /** The live runtime keeps its existing summary-only compatibility read. */

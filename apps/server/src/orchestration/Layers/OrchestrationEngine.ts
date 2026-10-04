@@ -527,6 +527,11 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           envelope.command.scheduledFollowUp !== undefined
             ? envelope.command
             : undefined;
+        const guardedRevertCommand =
+          envelope.command.type === "thread.revert.complete" &&
+          envelope.command.expectedControlSequence !== undefined
+            ? envelope.command
+            : undefined;
         const decide = (scheduledFollowUpVerified = false) =>
           decideOrchestrationCommand({
             command: envelope.command,
@@ -540,10 +545,41 @@ const makeOrchestrationEngine = Effect.gen(function* () {
         // revision inside the event transaction. A concurrent Pause/edit or
         // second backend therefore cannot leave an accepted event without the
         // matching durable authority, or consume authority without its event.
-        const ordinaryEventBase = scheduledCommand === undefined ? yield* decide() : undefined;
+        // Provider-native rewind completion has a separate compare-and-swap:
+        // its original revert intent must remain the newest durable control.
+        // Defer its decision until that authority is checked under the writer.
+        const ordinaryEventBase =
+          scheduledCommand === undefined && guardedRevertCommand === undefined
+            ? yield* decide()
+            : undefined;
         const committedCommand = yield* sql
           .withTransaction(
             Effect.gen(function* () {
+              if (guardedRevertCommand !== undefined) {
+                // A deferred SQLite transaction is not yet a writer. Take the
+                // writer before reading authority so a second connection cannot
+                // accept a prompt, settings change or Stop between this read
+                // and publication of the destructive thread.reverted event.
+                // This leaves the indexing completeness boundary unchanged.
+                yield* sql`UPDATE orchestration_runtime_recovery_control_state
+                  SET singleton = singleton WHERE singleton = 1`;
+                const [latestControl] = yield* sql<{ sequence: number }>`
+                  SELECT sequence FROM orchestration_runtime_recovery_controls
+                    INDEXED BY idx_runtime_recovery_controls_thread_sequence
+                  WHERE thread_id = ${guardedRevertCommand.threadId}
+                  ORDER BY sequence DESC LIMIT 1
+                `;
+                // Missing authority is a refusal, including expected zero.
+                // Receipt replays were handled above and do not repeat this
+                // destructive transition after its own event changes the head.
+                if (latestControl?.sequence !== guardedRevertCommand.expectedControlSequence) {
+                  return yield* new OrchestrationCommandInvariantError({
+                    commandType: guardedRevertCommand.type,
+                    detail:
+                      "Conversation rewind completion was superseded by a newer thread control.",
+                  });
+                }
+              }
               const eventBase =
                 ordinaryEventBase ??
                 (yield* decide(

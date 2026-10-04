@@ -245,6 +245,7 @@ const makeProviderSessionDirectory = Effect.gen(function* () {
       );
 
   return {
+    ...(repository.rewinds ? { rewinds: repository.rewinds } : {}),
     upsert,
     remove,
     getProvider,

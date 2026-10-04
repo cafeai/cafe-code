@@ -147,6 +147,11 @@ jobs:
           corepack yarn workspace @cafeai/cafe-code test src/provider/Layers/CodexProvider.test.ts src/provider/Layers/CodexSessionRuntime.exit.test.ts src/provider/Layers/ProviderRegistry.test.ts src/launcher.test.ts src/sourceControl/AzureDevOpsCli.test.ts
           corepack yarn workspace @cafeai/cafe-code test src/textGeneration/CodexTextGeneration.test.ts
 
+      - name: Isolated Claude process-exit qualification
+        # Exercise the public SDK spawn hook with one synthetic Node child.
+        # Never launch an installed provider, account profile or paid request.
+        run: corepack yarn workspace @cafeai/cafe-code exec vitest run --config vitest.e2e.config.ts integration/ClaudeQueryProcess.e2e.test.ts
+
       - name: Isolated Windows editor launcher
         # Synthetic copied Node/CLI fixture: no installed editor, provider,
         # credentials or live user profile participates in this native test.
