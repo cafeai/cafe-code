@@ -1226,7 +1226,13 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
-      const expectedLifecycle = command.expectedSessionLifecycle;
+      // Normalize the captured guard as well as the live state. Legacy guards
+      // may omit a null native generation after SQL hydration, while the
+      // in-memory projector still retains an explicit clear from startup.
+      const expectedLifecycle =
+        command.expectedSessionLifecycle === undefined
+          ? undefined
+          : sessionLifecycleSnapshot(command.expectedSessionLifecycle);
       const currentLifecycle = sessionLifecycleSnapshot(thread.session);
       if (
         command.expectedSubagentRuntimeId !== undefined &&

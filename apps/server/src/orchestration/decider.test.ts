@@ -227,6 +227,100 @@ describe("Provider observation lifecycle admission", () => {
     expect(event).toMatchObject({ payload: { session: { status: "ready", activeTurnId: null } } });
   });
 
+  const absentRuntimeCases = [
+    { name: "omitted", fields: {} },
+    { name: "undefined", fields: { subagentRuntimeId: undefined } },
+    { name: "null", fields: { subagentRuntimeId: null } },
+  ] as const;
+  for (const status of ["running", "starting"] as const) {
+    it.each(
+      absentRuntimeCases.flatMap((current) =>
+        absentRuntimeCases.map((expected) => ({ current, expected })),
+      ),
+    )(
+      `admits ${status} lifecycle with current $current.name and legacy expected $expected.name generation`,
+      async ({ current, expected }) => {
+        const original = makeThread();
+        const observed = {
+          ...original.session!,
+          status,
+          providerName: "grok",
+          providerInstanceId: ProviderInstanceId.make("grok"),
+          activeTurnId: status === "running" ? oldRoot : null,
+        };
+        // Deliberately construct the captured guard without calling the new
+        // normalizer: real legacy/SQL observations can still omit this field.
+        const expectedSessionLifecycle = {
+          status: observed.status,
+          activeTurnId: observed.activeTurnId,
+          providerName: observed.providerName,
+          providerInstanceId: observed.providerInstanceId,
+          updatedAt: observed.updatedAt,
+          ...expected.fields,
+        };
+        const event = await Effect.runPromise(
+          decide(
+            {
+              ...original,
+              session: {
+                ...observed,
+                ...current.fields,
+                // Exercise the concrete-turn comparison separately from the
+                // full tuple path used for a provisional Starting session.
+                ...(status === "running" ? { updatedAt: "2026-09-23T10:44:00.000Z" } : {}),
+              },
+            },
+            {
+              ...completionCommand(),
+              expectedSessionLifecycle,
+              session: { ...observed, status: "ready", activeTurnId: null },
+            },
+          ),
+        );
+        expect(event).toMatchObject({
+          type: "thread.session-set",
+          payload: { session: { providerName: "grok", status: "ready", activeTurnId: null } },
+        });
+        expect(event).not.toHaveProperty("payload.expectedSessionLifecycle");
+      },
+    );
+  }
+
+  it.each([
+    ["omitted", {}],
+    ["explicitly absent", { subagentRuntimeId: null }],
+    ["replacement", { subagentRuntimeId: "00000000-0000-4000-8000-000000000002" }],
+  ] as const)(
+    "rejects an exact-generation observation when current evidence is %s",
+    async (_name, fields) => {
+      const original = makeThread();
+      const result = await Effect.runPromise(
+        Effect.exit(
+          decide(
+            { ...original, session: { ...original.session!, ...fields } },
+            {
+              ...completionCommand(),
+              expectedSessionLifecycle: sessionLifecycleSnapshot({
+                ...original.session!,
+                subagentRuntimeId: "00000000-0000-4000-8000-000000000001",
+              }),
+            },
+          ),
+        ),
+      );
+      expect(result).toMatchObject({ _tag: "Failure" });
+      expect(JSON.stringify(result)).toContain(SESSION_LIFECYCLE_SUPERSEDED);
+    },
+  );
+
+  it("keeps an explicitly absent session guard distinct from a session with no generation", async () => {
+    const result = await Effect.runPromise(
+      Effect.exit(decide(makeThread(), { ...completionCommand(), expectedSessionLifecycle: null })),
+    );
+    expect(result).toMatchObject({ _tag: "Failure" });
+    expect(JSON.stringify(result)).toContain(SESSION_LIFECYCLE_SUPERSEDED);
+  });
+
   it("fences positive native admission separately from ordinary turn ACK races", async () => {
     const original = makeThread();
     const runtimeId = "00000000-0000-4000-8000-000000000001";

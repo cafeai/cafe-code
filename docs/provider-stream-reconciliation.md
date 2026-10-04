@@ -1,6 +1,6 @@
 # Provider stream reconciliation
 
-Last updated: 2026-10-04 03:45:51 JST (UTC+0900)
+Last updated: 2026-10-04 17:49:25 JST (UTC+0900)
 
 ## Ownership and exact text
 
@@ -17,6 +17,25 @@ Source: [official Codex app-server item lifecycle](https://learn.chatgpt.com/doc
 Provider ingestion and accepted user starts use different asynchronous lanes. Checking a thread before dispatching its session update is insufficient: a new turn ACK can arrive between that read and serialized command admission. A completed turn from a resume snapshot could then set the session to ready with no active turn, accidentally closing the newly accepted turn while its output continued streaming.
 
 Terminal, idle, startup-settlement, goal-settlement and runtime-error observations now include a server-only `expectedSessionLifecycle` tuple. The decider compares that tuple against the current lifecycle under serialized admission. If a newer lifecycle won, the old mutation receives a fixed benign rejection; ingestion still processes its scoped content and receipt. Only heartbeat clock changes for the same concrete active turn are tolerated, so real completions are not discarded just because a heartbeat ran. This internal admission guard is not persisted in public events or accepted from renderer commands.
+
+The comparison canonicalizes an omitted or explicitly null `subagentRuntimeId`
+to the same absent-generation value on **both** the captured guard and current
+session. SQL hydration omits a NULL runtime ID, while an in-memory session can
+retain an explicit null after provider binding. Comparing those representations
+literally previously rejected a genuine Grok completion as superseded, leaving
+the completed chat displayed as running. Concrete generation IDs, provider,
+account, turn, status, and provisional-session timestamps remain strict fences.
+An absent session is still distinct from a session without generation evidence.
+This normalization applies only to the internal comparison tuple: omission in a
+session update still means preserve existing evidence, while null clears it.
+
+The correction prevents false rejection of newly processed observations. A
+completion already recorded as rejected remains an immutable command receipt;
+replaying that command does not repair it. Normal startup reconciliation can
+clear orphaned running state only after checking provider ownership and active
+turns, and may classify it as interrupted rather than reconstructing completion.
+Do not delete receipts, reset replay cursors, resend the prompt, or infer success
+from a final-looking assistant message to repair historical state.
 
 Already-terminal historical starts/completions cannot consume a newer pending start. An exact indexed turn lookup supplies that fact without a transcript scan. Session-ready initialization metadata cannot clear a concrete active turn. Positive provider starts and independently verified ownership recovery keep their existing authority; generic output and historical replay do not gain authority to reopen terminal work, bypass Stop, or restart providers.
 
@@ -100,7 +119,7 @@ Use the repository-pinned Node runtime and Yarn through Corepack, with the check
 - `yarn workspace @cafeai/cafe-code test src/provider/Layers/CodexAdapter.test.ts`: exact leading/trailing whitespace, CRLF, whitespace-only suppression and strict streamed-prefix compatibility.
 - `yarn workspace @cafeai/cafe-code test src/provider/Layers/ClaudeAdapter.test.ts`: multiple block snapshots sharing an API message id, reused block indexes, duplicate wrappers, partial/no-delta repair, split surrogates and cross-message/prefix rejection.
 - `yarn workspace @cafeai/cafe-code test src/orchestration/Layers/ProviderRuntimeIngestion.test.ts`: late old-turn exact completion restores full text without disturbing a newer active turn or timestamps; replay is idempotent, mismatches retain streamed text and diagnostics remain content-free.
-- `yarn workspace @cafeai/cafe-code test src/orchestration/decider.test.ts src/orchestration/Layers/ProviderRuntimeIngestion.test.ts`: stale observations racing accepted new turns, historical resume start/completion, readiness while active, genuine completion across heartbeat-only changes, and exact rejection behavior on replay.
+- `yarn workspace @cafeai/cafe-code test src/orchestration/sessionLifecycle.test.ts src/orchestration/decider.test.ts src/orchestration/Layers/ProviderRuntimeIngestion.test.ts`: absent/null runtime-ID normalization across SQL hydration and in-memory admission, stale observations racing accepted new turns, historical resume start/completion, readiness while active, genuine completion across heartbeat-only changes, and exact rejection behavior on replay.
 - Run `yarn fmt`, `yarn lint`, `yarn typecheck`, and `yarn test`, followed by `yarn build:desktop --force` after tests. A successful build does not replace the already-running desktop/daemon processes; applying it requires the normal app restart lifecycle.
 
 The stream-content corrections stay within the existing adapter/ingestion/projection contracts and add no persistence migration or new repair authority. The separate subagent retention correction adds schema-only migration 82 and bounded per-thread legacy hydration, as documented in the [retention decision](decisions/subagent-lifecycle-retention.md). Neither change adds public protocol or provider inference.

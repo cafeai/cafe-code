@@ -34,6 +34,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as ManagedRuntime from "effect/ManagedRuntime";
+import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -505,6 +506,10 @@ describe("ProviderRuntimeIngestion", () => {
     return {
       engine,
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
+      readThreadShell: (threadId: ThreadId) =>
+        Effect.runPromise(
+          snapshotQuery.getThreadShellById(threadId).pipe(Effect.map(Option.getOrNull)),
+        ),
       emit: provider.emit,
       setProviderSession: provider.setSession,
       clearProviderSessions: provider.clearSessions,
@@ -603,6 +608,194 @@ describe("ProviderRuntimeIngestion", () => {
       expect(thread.session?.subagentRuntimeId ?? null).toBe(index === 2 ? null : runtimeId);
     }
   });
+
+  it.each(["grok", "claudeAgent", "codex"] as const)(
+    "settles %s completion after an explicit runtime clear is omitted by the SQL shell",
+    async (providerName) => {
+      const harness = await createHarness();
+      const threadId = asThreadId("thread-1");
+      const turnId = asTurnId("turn-with-cleared-runtime");
+      const providerInstanceId = ProviderInstanceId.make(providerName);
+      const startedAt = "2026-01-01T00:00:01.000Z";
+      const completedAt = "2026-01-01T00:00:03.000Z";
+
+      // Reproduce the real binding sequence, not just a comparison of hand-built
+      // tuples: a native Codex generation exists, then bindSessionToThread clears
+      // it for a session without generation evidence. The engine retains that
+      // explicit null, while the SQL shell decoder omits its nullable column.
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("seed-previous-codex-runtime"),
+          threadId,
+          session: {
+            threadId,
+            status: "ready",
+            providerName: "codex",
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            subagentRuntimeId: "00000000-0000-4000-8000-000000000001",
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: startedAt,
+          },
+          createdAt: startedAt,
+        }),
+      );
+      for (const [index, runtimeField] of [{ subagentRuntimeId: null }, {}].entries()) {
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make(`cleared-runtime-binding-${index}`),
+            threadId,
+            session: {
+              threadId,
+              status: index === 0 ? "starting" : "running",
+              providerName,
+              providerInstanceId,
+              ...runtimeField,
+              runtimeMode: "approval-required",
+              activeTurnId: index === 0 ? null : turnId,
+              lastError: null,
+              updatedAt: startedAt,
+            },
+            createdAt: startedAt,
+          }),
+        );
+      }
+      const runningShell = await harness.readThreadShell(threadId);
+      expect(runningShell?.session).toMatchObject({ status: "running", activeTurnId: turnId });
+      expect(runningShell?.session).not.toHaveProperty("subagentRuntimeId");
+      const beforeCompletion = await Effect.runPromise(harness.engine.diagnosticsSnapshot);
+
+      harness.emit({
+        type: "turn.completed",
+        eventId: asEventId("completion-with-cleared-runtime"),
+        provider: ProviderDriverKind.make(providerName),
+        providerInstanceId,
+        threadId,
+        turnId,
+        createdAt: completedAt,
+        payload: { state: "completed" },
+      });
+      await harness.drain();
+
+      // The real engine must accept the SQL-derived observation, persist the
+      // terminal transition, and expose it through both detail and shell reads.
+      // A benign-looking swallowed CAS rejection used to leave these running.
+      const completed = (await harness.readModel()).threads[0]!;
+      expect(completed.session).toMatchObject({
+        status: "ready",
+        activeTurnId: null,
+        updatedAt: completedAt,
+      });
+      expect(completed.latestTurn).toMatchObject({
+        turnId,
+        state: "completed",
+        completedAt,
+      });
+      expect((await harness.readThreadShell(threadId))?.session).toMatchObject({
+        status: "ready",
+        activeTurnId: null,
+      });
+      const afterCompletion = await Effect.runPromise(harness.engine.diagnosticsSnapshot);
+      expect(afterCompletion.rejectedCommandCount).toBe(beforeCompletion.rejectedCommandCount);
+    },
+  );
+
+  it.each(["stopped", "new-turn", "new-runtime"] as const)(
+    "does not let a completion with absent generation evidence overwrite a %s lifecycle",
+    async (replacement) => {
+      const terminalDispatchStarted = Effect.runSync(Deferred.make<void>());
+      const releaseTerminalDispatch = Effect.runSync(Deferred.make<void>());
+      const threadId = asThreadId("thread-1");
+      const turnId = asTurnId("original-grok-turn");
+      const newTurnId = asTurnId("new-grok-turn");
+      const runtimeId = "00000000-0000-4000-8000-000000000002";
+      const startedAt = "2026-01-01T00:00:01.000Z";
+      const replacedAt = "2026-01-01T00:00:03.000Z";
+      const session = {
+        threadId,
+        status: "running" as const,
+        providerName: "grok",
+        providerInstanceId: ProviderInstanceId.make("grok"),
+        subagentRuntimeId: null,
+        runtimeMode: "approval-required" as const,
+        activeTurnId: turnId,
+        lastError: null,
+        updatedAt: startedAt,
+      };
+      const harness = await createHarness({
+        dispatchGate: (command, dispatch) =>
+          command.type === "thread.session.set" &&
+          String(command.commandId).includes(":late-absent-generation-completion:")
+            ? Deferred.succeed(terminalDispatchStarted, undefined).pipe(
+                Effect.andThen(Deferred.await(releaseTerminalDispatch)),
+                Effect.andThen(dispatch(command)),
+              )
+            : dispatch(command),
+      });
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("running-without-generation"),
+          threadId,
+          session,
+          createdAt: startedAt,
+        }),
+      );
+      harness.emit({
+        type: "turn.completed",
+        eventId: asEventId("late-absent-generation-completion"),
+        provider: ProviderDriverKind.make("grok"),
+        providerInstanceId: session.providerInstanceId,
+        threadId,
+        turnId,
+        createdAt: "2026-01-01T00:00:02.000Z",
+        payload: { state: "completed" },
+      });
+      await Effect.runPromise(Deferred.await(terminalDispatchStarted));
+
+      // The completion already captured the old SQL shell. Let an actual
+      // competing lifecycle commit before the observed command enters the
+      // serialized engine. Normalizing missing evidence must never turn it
+      // into authority over Stop, a newer turn, or a concrete native generation.
+      const replacementSession = {
+        ...session,
+        status: replacement === "stopped" ? ("stopped" as const) : ("running" as const),
+        activeTurnId:
+          replacement === "stopped" ? null : replacement === "new-turn" ? newTurnId : turnId,
+        subagentRuntimeId: replacement === "new-runtime" ? runtimeId : null,
+        updatedAt: replacedAt,
+      };
+      try {
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("replacement-lifecycle"),
+            threadId,
+            session: replacementSession,
+            createdAt: replacedAt,
+          }),
+        );
+      } finally {
+        // Even an assertion/dispatch failure must release the ingestion fiber
+        // so scoped cleanup never waits on a fixture-owned barrier.
+        await Effect.runPromise(Deferred.succeed(releaseTerminalDispatch, undefined));
+      }
+      await harness.drain();
+      const thread = (await harness.readModel()).threads[0]!;
+      expect(thread.session).toMatchObject({
+        status: replacementSession.status,
+        activeTurnId: replacementSession.activeTurnId,
+        updatedAt: replacedAt,
+      });
+      expect(thread.session?.subagentRuntimeId ?? null).toBe(replacementSession.subagentRuntimeId);
+      expect(
+        (await Effect.runPromise(harness.engine.diagnosticsSnapshot)).rejectedCommandCount,
+      ).toBe(1);
+    },
+  );
 
   it.each(["task.progress", "session.exited", "turn.started", "session.state.changed"] as const)(
     "keeps stale %s history without replacing current runtime generation or parent liveness",

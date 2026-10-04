@@ -3,8 +3,25 @@ import type { OrchestrationSession, OrchestrationSessionStatus } from "@cafecode
 export const SESSION_LIFECYCLE_SUPERSEDED =
   "Provider session lifecycle observation was superseded.";
 
-/** Capture only the lifecycle tuple used by server-side compare-and-set. */
-export function sessionLifecycleSnapshot(session: OrchestrationSession | null) {
+type SessionLifecycleObservation = Pick<
+  OrchestrationSession,
+  "status" | "activeTurnId" | "providerName" | "subagentRuntimeId" | "updatedAt"
+> & {
+  readonly providerInstanceId?: OrchestrationSession["providerInstanceId"] | null;
+};
+
+/**
+ * Capture only the lifecycle tuple used by server-side compare-and-set.
+ *
+ * SQL hydration omits a NULL native generation, whereas a materialized
+ * session can explicitly clear an older generation with null. They are the
+ * same absence of generation evidence at this comparison boundary. Normalize
+ * both current sessions and older captured guards here; never normalize or
+ * discard a concrete generation, provider/account identity, or turn identity.
+ * This does not change the null-versus-omitted semantics of session updates:
+ * only the comparison tuple is canonicalized, not the persisted session.
+ */
+export function sessionLifecycleSnapshot(session: SessionLifecycleObservation | null) {
   return session === null
     ? null
     : {
@@ -12,9 +29,7 @@ export function sessionLifecycleSnapshot(session: OrchestrationSession | null) {
         activeTurnId: session.activeTurnId,
         providerName: session.providerName,
         providerInstanceId: session.providerInstanceId ?? null,
-        ...(session.subagentRuntimeId !== undefined
-          ? { subagentRuntimeId: session.subagentRuntimeId }
-          : {}),
+        subagentRuntimeId: session.subagentRuntimeId ?? null,
         updatedAt: session.updatedAt,
       };
 }
