@@ -6,6 +6,7 @@ import { crc32, deflateRawSync } from "node:zlib";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { createPdfFixture as pdf } from "../../integration/fixtures/pdf.ts";
 import { storeFileAttachment } from "../fileAttachmentStore.ts";
 import * as Extraction from "./fileAttachmentExtraction.ts";
 import {
@@ -53,36 +54,7 @@ function inventory(manifest: string): Array<{
   return JSON.parse(manifest.split("\n").at(-1) ?? "[]");
 }
 
-/** Minimal deterministic fixtures use the format, never external office tools. */
-function pdf(text: string, pageCount = 1): Uint8Array {
-  const stream = text ? `BT /F1 12 Tf 10 100 Td (${text}) Tj ET` : "";
-  const objects = [
-    "<< /Type /Catalog /Pages 2 0 R >>",
-    `<< /Type /Pages /Kids [${Array.from({ length: pageCount }, (_, index) => `${index + 5} 0 R`).join(" ")}] /Count ${pageCount} >>`,
-    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-    `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`,
-    ...Array.from(
-      { length: pageCount },
-      () =>
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 3 0 R >> >> /Contents 4 0 R >>",
-    ),
-  ];
-  let body = "%PDF-1.4\n";
-  const offsets = [0];
-  for (const [index, object] of objects.entries()) {
-    offsets.push(Buffer.byteLength(body));
-    body += `${index + 1} 0 obj\n${object}\nendobj\n`;
-  }
-  const xref = Buffer.byteLength(body);
-  body += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
-  body += offsets
-    .slice(1)
-    .map((offset) => `${String(offset).padStart(10, "0")} 00000 n \n`)
-    .join("");
-  body += `trailer\n<< /Root 1 0 R /Size ${objects.length + 1} >>\nstartxref\n${xref}\n%%EOF\n`;
-  return Buffer.from(body);
-}
-
+/** Minimal deterministic DOCX fixtures use the format, never external office tools. */
 function docx(
   xml: string,
   options: { duplicate?: boolean; declaredSize?: number; badCrc?: boolean } = {},
@@ -218,19 +190,31 @@ describe("provider file attachments", () => {
   });
 
   it("creates a bounded PDF text view while preserving the original native PDF", async () => {
-    const parser = vi.spyOn(Extraction, "extractFileAttachmentText");
-    const input = await upload("example.pdf", pdf("Attachment PDF body"), "application/pdf");
+    // This suite verifies prompt/cache policy against controlled extraction
+    // results. The matching real PDF child is required in the isolated all-host
+    // FileAttachmentPdfExtraction.e2e.test.ts qualification, with no mock.
+    const parser = vi.spyOn(Extraction, "extractFileAttachmentText").mockResolvedValue({
+      text: "\n[Page 1]\nAttachment PDF body ",
+      truncated: false,
+      pagesRead: 1,
+      totalPages: 1,
+      hasText: true,
+    });
+    const source = pdf("Attachment PDF body");
+    const input = await upload("example.pdf", source, "application/pdf");
     const manifest = await prepareFileAttachmentPrompt(input);
     const entry = inventory(manifest)[0]!;
     expect(entry.path).toMatch(/\.pdf$/);
     expect(entry.textView?.path).toMatch(/\.provider\.pdf\.txt$/);
     expect(entry.textView?.pagesRead).toBe(1);
+    expect(await readFile(entry.path)).toEqual(Buffer.from(source));
     expect(await readFile(entry.textView!.path!, "utf8")).toContain("Attachment PDF body");
     expect(manifest).not.toContain("Attachment PDF body");
     expect(entry.textView?.scope).toContain("images, charts, layout");
     expect(await prepareFileAttachmentPrompt(input)).toBe(manifest);
     expect(parser).toHaveBeenCalledTimes(1);
-  }, 20_000);
+    expect(parser).toHaveBeenCalledWith("pdf", source);
+  });
 
   it("single-flights extraction and verifies cached sidecars before reuse", async () => {
     const parser = vi.spyOn(Extraction, "extractFileAttachmentText");
@@ -263,21 +247,43 @@ describe("provider file attachments", () => {
   }, 20_000);
 
   it("does not call a visual-only or malformed PDF successfully understood", async () => {
+    const parser = vi
+      .spyOn(Extraction, "extractFileAttachmentText")
+      .mockResolvedValueOnce({
+        text: "\n[Page 1]\n",
+        truncated: false,
+        pagesRead: 1,
+        totalPages: 1,
+        hasText: false,
+      })
+      .mockResolvedValueOnce(undefined);
     for (const content of [pdf(""), Buffer.from("%PDF-1.4\nmalformed")]) {
       const input = await upload("scan.pdf", content, "application/pdf");
       const entry = inventory(await prepareFileAttachmentPrompt(input))[0]!;
       expect(entry.textView?.status).toBe("unavailable");
+      expect(entry.textView?.path).toBeUndefined();
       expect(await readFile(entry.path)).toEqual(Buffer.from(content));
+      expect(parser).toHaveBeenLastCalledWith("pdf", content);
     }
-  }, 20_000);
+    expect(parser).toHaveBeenCalledTimes(2);
+  });
 
   it("bounds PDF extraction to 200 pages and declares remaining pages", async () => {
-    const input = await upload("long.pdf", pdf("page text", 201), "application/pdf");
+    const parser = vi.spyOn(Extraction, "extractFileAttachmentText").mockResolvedValue({
+      text: Array.from({ length: 200 }, (_, index) => `\n[Page ${index + 1}]\npage text `).join(""),
+      truncated: true,
+      pagesRead: 200,
+      totalPages: 201,
+      hasText: true,
+    });
+    const source = pdf("page text", 201);
+    const input = await upload("long.pdf", source, "application/pdf");
     const entry = inventory(await prepareFileAttachmentPrompt(input))[0]!;
     expect(entry.textView?.pagesRead).toBe(200);
     expect(entry.textView?.truncated).toBe(true);
     expect(await readFile(entry.textView!.path!, "utf8")).not.toContain("[Page 201]");
-  }, 20_000);
+    expect(parser).toHaveBeenCalledExactlyOnceWith("pdf", source);
+  });
 
   it("extracts only bounded DOCX body text and leaves the full archive intact", async () => {
     const content = docx(

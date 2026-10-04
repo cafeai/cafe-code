@@ -25,3 +25,19 @@ Use the pencil on an **unsent** queued message to bring it back into the compose
 A message already being sent or accepted as steering cannot be edited as if it were unsent. Send another steer to amend it. A previous steer waiting to be processed no longer prevents a second steer once its submission has been acknowledged; the short submission lock still prevents duplicate or overlapping sends.
 
 Unsent queues retain bounded attachment metadata across reloads. If a reload happens during dispatch and delivery is uncertain, the recovered item requires an explicit action rather than automatically replaying a potentially accepted message.
+
+## Parser verification
+
+The default attachment tests verify prompt inventories, private copies, cache reuse, text-view metadata and unavailable outcomes. PDF prompt cases use controlled extraction results; separate child-boundary tests check deadline enforcement, output limits and fail-closed behavior. Run them with the repository-pinned Node and Yarn:
+
+```sh
+corepack yarn workspace @cafeai/cafe-code test src/provider/fileAttachmentPrompt.test.ts src/provider/fileAttachmentExtraction.test.ts
+```
+
+The real PDF parser qualification uses the same inert PDF bytes without substituting extraction results. It verifies native-file preservation, extracted text and cache reuse, visual-only/malformed handling, and the 200-page extraction bound. CI explicitly runs this command after the default suite on every supported host:
+
+```sh
+corepack yarn workspace @cafeai/cafe-code exec vitest run --config vitest.e2e.config.ts integration/FileAttachmentPdfExtraction.e2e.test.ts
+```
+
+This qualification retains the production 15-second child deadline and existing 20-second per-test budget, with no retries or skips. It creates only isolated temporary attachments and launches no provider or paid inference.

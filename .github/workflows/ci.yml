@@ -121,6 +121,12 @@ jobs:
         if: runner.os == 'Windows'
         run: corepack yarn test --concurrency=2 -- --maxWorkers=2
 
+      - name: Isolated PDF attachment parser qualification
+        # Keep real bounded parser success, malformed-input and page-cap checks
+        # on every native host without simultaneous whole-workspace test load.
+        # Synthetic PDFs only: no providers, credentials or external tools.
+        run: corepack yarn workspace @cafeai/cafe-code exec vitest run --config vitest.e2e.config.ts integration/FileAttachmentPdfExtraction.e2e.test.ts
+
       - name: Isolated Effect test cancellation qualification
         # The child runner intentionally times out one synthetic case, then
         # proves scoped finalizers finish before the next case can start.
