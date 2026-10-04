@@ -70,6 +70,10 @@ last-owner quarantine as deletion. A failed or inconclusive provider fork/cleanu
 retains ownership evidence rather than assuming its execution directory is unused.
 Compensation diagnostics contain operation metadata, never raw provider errors.
 
+The macOS device-number durability assumption above is superseded by
+[stable workspace volume identity](standalone-workspace-volume-identity.md),
+which preserves the remaining ownership and cleanup rules.
+
 New standalone chats default to approval-required; existing project defaults are
 unchanged. This is not an OS sandbox, tool-free policy, credential isolation from
 an explicitly full-access agent, or separate ChatGPT service. User/provider-level

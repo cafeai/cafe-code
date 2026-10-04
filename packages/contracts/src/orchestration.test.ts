@@ -559,6 +559,48 @@ it.effect("keeps provider journal repair out of client-dispatchable commands", (
   }),
 );
 
+it.effect("keeps startup-failure intent guards server-only and validates their sequence", () =>
+  Effect.gen(function* () {
+    const command = {
+      type: "thread.session.set",
+      commandId: "server:startup-failure",
+      threadId: "thread-1",
+      session: {
+        threadId: "thread-1",
+        status: "error",
+        providerName: "codex",
+        providerInstanceId: "codex",
+        runtimeMode: "full-access",
+        activeTurnId: null,
+        lastError: "Provider did not start.",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+      expectedTurnStartIntentSequence: 12,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+    const parsed = yield* decodeOrchestrationCommand(command);
+    assert.strictEqual(parsed.type, "thread.session.set");
+    if (parsed.type === "thread.session.set") {
+      assert.strictEqual(parsed.expectedTurnStartIntentSequence, 12);
+    }
+    // Clients cannot mint session state even with a non-reserved command id.
+    for (const commandId of [command.commandId, "client:startup-failure"]) {
+      assert.strictEqual(
+        (yield* Effect.exit(decodeClientOrchestrationCommand({ ...command, commandId })))._tag,
+        "Failure",
+      );
+    }
+    for (const sequence of [-1, 1.5, "12", Number.POSITIVE_INFINITY, Number.NaN]) {
+      assert.strictEqual(
+        (yield* Effect.exit(
+          decodeOrchestrationCommand({ ...command, expectedTurnStartIntentSequence: sequence }),
+        ))._tag,
+        "Failure",
+      );
+    }
+  }),
+);
+
 it.effect("reserves server command ids at the external client decode boundary", () =>
   Effect.gen(function* () {
     const clientResult = yield* Effect.exit(

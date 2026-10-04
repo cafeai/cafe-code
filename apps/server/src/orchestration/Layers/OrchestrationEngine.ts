@@ -47,6 +47,7 @@ import {
   type PersistedMessageIdentity,
 } from "../messageIdentityLedger.ts";
 import { createEmptyReadModel, projectEvent } from "../projector.ts";
+import { SESSION_LIFECYCLE_SUPERSEDED } from "../sessionLifecycle.ts";
 import { purgeHardDeletedThreadPersistence } from "../threadHardDelete.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -461,6 +462,40 @@ const makeOrchestrationEngine = Effect.gen(function* () {
                 threadId: envelope.command.threadId,
               })
             : false;
+        if (
+          envelope.command.type === "thread.session.set" &&
+          envelope.command.expectedTurnStartIntentSequence !== undefined
+        ) {
+          // A reactor's earlier read cannot fence a Stop accepted while this
+          // failure update waited in the command queue. In particular, stopping
+          // a session need not mutate its lifecycle tuple immediately. Compare
+          // the latest exact durable intent here, in the same serialized worker
+          // that decides and commits the update, before emitting any event.
+          const [latestControl] = yield* sql<{
+            sequence: number;
+            event_type: string;
+          }>`
+            SELECT sequence, event_type
+            FROM orchestration_runtime_recovery_controls
+              INDEXED BY idx_runtime_recovery_controls_thread_sequence
+            WHERE thread_id = ${envelope.command.threadId}
+            ORDER BY sequence DESC
+            LIMIT 1
+          `.pipe(
+            Effect.mapError(
+              toPersistenceSqlError("OrchestrationEngine.processEnvelope:turnStartIntent"),
+            ),
+          );
+          if (
+            latestControl?.sequence !== envelope.command.expectedTurnStartIntentSequence ||
+            latestControl.event_type !== "thread.turn-start-requested"
+          ) {
+            return yield* new OrchestrationCommandInvariantError({
+              commandType: envelope.command.type,
+              detail: SESSION_LIFECYCLE_SUPERSEDED,
+            });
+          }
+        }
         let codexRootReplacementVerified = false;
         if (
           envelope.command.type === "thread.session.set" &&

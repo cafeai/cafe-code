@@ -1263,6 +1263,11 @@ const ThreadSessionSetCommand = Schema.Struct({
       }),
     ),
   ),
+  // A failed asynchronous startup must also still own the latest durable user
+  // intent. Stop/settings commands can supersede a start without changing the
+  // session tuple above. The engine checks this sequence in its serial worker;
+  // this server-only admission field is never copied into the persisted event.
+  expectedTurnStartIntentSequence: Schema.optional(NonNegativeInt),
   // Positive native starts have their own turn-admission semantics, but must
   // still not replace a newer native context while their observation is queued.
   expectedSubagentRuntimeId: Schema.optional(Schema.NullOr(SubagentRuntimeId)),

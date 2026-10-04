@@ -9,9 +9,14 @@ import type { CommandId, ThreadId } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { ServerConfig } from "../config.ts";
+import {
+  isStandaloneStableDevice,
+  readStandaloneDeviceIdentity,
+} from "./standaloneFilesystemIdentity.ts";
 
 const WORKSPACE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 type Identity = { directoryDevice: string; directoryInode: string };
+type ObservedIdentity = Identity & { nativeDevice: bigint };
 type Ownership = {
   workspaceId: string;
   directoryDevice: string | null;
@@ -41,7 +46,7 @@ export const makeStandaloneWorkspaceStore = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const config = yield* ServerConfig;
   const root = nodePath.join(config.baseDir, "standalone-workspaces");
-  const io = <A>(run: () => Promise<A>) =>
+  const io = <A>(run: (signal: AbortSignal) => Promise<A>) =>
     Effect.tryPromise({
       try: run,
       catch: () => new Error("Standalone chat directory is unavailable."),
@@ -55,7 +60,10 @@ export const makeStandaloneWorkspaceStore = Effect.gen(function* () {
     directory: string,
     create: boolean,
     expected?: Identity,
-  ): Promise<Identity> => {
+    rootIdentity?: ObservedIdentity,
+    signal?: AbortSignal,
+  ): Promise<ObservedIdentity> => {
+    signal?.throwIfAborted();
     if (create) {
       try {
         await fs.mkdir(directory, { mode: 0o700 });
@@ -64,10 +72,21 @@ export const makeStandaloneWorkspaceStore = Effect.gen(function* () {
       }
     }
     const before = await fs.lstat(directory, { bigint: true });
+    signal?.throwIfAborted();
     if (!before.isDirectory() || before.isSymbolicLink()) throw new Error("Unsafe directory");
-    if (expected && !equalIdentity(expected, identityOf(before)))
+    const expectedIsStable = expected && isStandaloneStableDevice(expected.directoryDevice);
+    if (expectedIsStable && process.platform !== "darwin")
+      throw new Error("Directory filesystem changed");
+    if (expected && !expectedIsStable && !equalIdentity(expected, identityOf(before)))
       throw new Error("Directory identity changed");
-    if (process.platform === "win32") return identityOf(before);
+    // Every minted child belongs to the admitted root's filesystem. Nested
+    // replacement mounts cannot inherit its durable volume identity.
+    if (rootIdentity && rootIdentity.nativeDevice !== before.dev)
+      throw new Error("Directory filesystem changed");
+    if (process.platform === "win32") {
+      if (expectedIsStable) throw new Error("Directory filesystem changed");
+      return { ...identityOf(before), nativeDevice: before.dev };
+    }
     // Permissions and identity bind to one held inode rather than a mutable
     // path. Windows keeps the user-owned directory ACL and does not chmod.
     const handle = await fs.open(
@@ -76,17 +95,35 @@ export const makeStandaloneWorkspaceStore = Effect.gen(function* () {
     );
     try {
       const held = await handle.stat({ bigint: true });
+      signal?.throwIfAborted();
       if (
         !held.isDirectory() ||
         held.uid !== BigInt(process.getuid!()) ||
         !equalIdentity(identityOf(held), identityOf(before))
       )
         throw new Error("Unsafe directory owner");
+      const directoryDevice =
+        rootIdentity?.directoryDevice ??
+        (await readStandaloneDeviceIdentity(directory, held.dev, signal));
+      const observed = {
+        directoryDevice,
+        directoryInode: String(held.ino),
+        nativeDevice: held.dev,
+      };
+      if (expectedIsStable && !equalIdentity(expected, observed))
+        throw new Error("Directory identity changed");
+      // A native metadata helper may yield while the path is replaced. Check
+      // raw identity again before changing permissions, not only afterwards.
+      const admitted = await fs.lstat(directory, { bigint: true });
+      if (admitted.isSymbolicLink() || !equalIdentity(identityOf(admitted), identityOf(held)))
+        throw new Error("Directory identity changed");
+      signal?.throwIfAborted();
       await handle.chmod(0o700);
       const after = await fs.lstat(directory, { bigint: true });
       if (after.isSymbolicLink() || !equalIdentity(identityOf(after), identityOf(held)))
         throw new Error("Directory identity changed");
-      return identityOf(held);
+      signal?.throwIfAborted();
+      return observed;
     } finally {
       await handle.close();
     }
@@ -95,8 +132,34 @@ export const makeStandaloneWorkspaceStore = Effect.gen(function* () {
   const admitRoot = Effect.fn("StandaloneWorkspace.admitRoot")(function* (create: boolean) {
     const rows =
       yield* sql<Identity>`SELECT directory_device AS "directoryDevice", directory_inode AS "directoryInode" FROM standalone_workspace_root_identity WHERE singleton = 1`;
-    const observed = yield* io(() => inspectDirectory(root, create && !rows[0], rows[0]));
-    yield* sql`INSERT INTO standalone_workspace_root_identity VALUES (1, ${observed.directoryDevice}, ${observed.directoryInode}) ON CONFLICT (singleton) DO NOTHING`;
+    const observed = yield* io((signal) =>
+      inspectDirectory(root, create && !rows[0], rows[0], undefined, signal),
+    );
+    yield* sql.withTransaction(
+      Effect.gen(function* () {
+        const previous = rows[0];
+        if (previous && previous.directoryDevice !== observed.directoryDevice) {
+          if (
+            isStandaloneStableDevice(previous.directoryDevice) ||
+            !isStandaloneStableDevice(observed.directoryDevice)
+          )
+            return yield* Effect.fail(new Error("Standalone chat directory ownership changed."));
+          // Upgrade only after exact legacy dev+inode admission. Root and children
+          // recorded on that same filesystem move atomically to its stable UUID.
+          // A legacy device mismatch cannot prove the old volume and still fails
+          // closed above; it requires an explicit, separately verified repair.
+          const [current] =
+            yield* sql<Identity>`SELECT directory_device AS "directoryDevice", directory_inode AS "directoryInode" FROM standalone_workspace_root_identity WHERE singleton = 1`;
+          if (!current || (!equalIdentity(current, previous) && !equalIdentity(current, observed)))
+            return yield* Effect.fail(new Error("Standalone chat directory ownership changed."));
+          yield* sql`UPDATE standalone_workspace_root_identity SET directory_device = ${observed.directoryDevice}
+          WHERE singleton = 1 AND directory_device = ${previous.directoryDevice} AND directory_inode = ${previous.directoryInode}`;
+          yield* sql`UPDATE standalone_thread_workspaces SET directory_device = ${observed.directoryDevice}
+          WHERE directory_device = ${previous.directoryDevice}`;
+        }
+        yield* sql`INSERT INTO standalone_workspace_root_identity VALUES (1, ${observed.directoryDevice}, ${observed.directoryInode}) ON CONFLICT (singleton) DO NOTHING`;
+      }),
+    );
     const admitted =
       yield* sql<Identity>`SELECT directory_device AS "directoryDevice", directory_inode AS "directoryInode" FROM standalone_workspace_root_identity WHERE singleton = 1`;
     if (!admitted[0] || !equalIdentity(admitted[0], observed))
@@ -122,17 +185,36 @@ export const makeStandaloneWorkspaceStore = Effect.gen(function* () {
       catch: () => new Error("Standalone chat directory is unavailable."),
     });
     const rootIdentity = yield* admitRoot(row.directoryInode === null);
+    // Root admission may atomically upgrade this row's legacy mount number.
+    const [currentRow] = yield* ownership(threadId);
+    if (
+      !currentRow ||
+      currentRow.workspaceId !== row.workspaceId ||
+      currentRow.cleanupName !== null
+    )
+      return yield* Effect.fail(new Error("Standalone chat is unavailable."));
     const expected =
-      row.directoryDevice !== null && row.directoryInode !== null
-        ? { directoryDevice: row.directoryDevice, directoryInode: row.directoryInode }
+      currentRow.directoryDevice !== null && currentRow.directoryInode !== null
+        ? { directoryDevice: currentRow.directoryDevice, directoryInode: currentRow.directoryInode }
         : undefined;
-    const observed = yield* io(() =>
-      inspectDirectory(directory, row.directoryInode === null, expected),
+    const observed = yield* io((signal) =>
+      inspectDirectory(
+        directory,
+        currentRow.directoryInode === null,
+        expected,
+        rootIdentity,
+        signal,
+      ),
     );
-    if (row.directoryInode !== null && !equalIdentity(row, observed))
+    if (currentRow.directoryInode !== null && !equalIdentity(currentRow, observed))
       return yield* Effect.fail(new Error("Standalone chat directory ownership changed."));
     yield* sql`UPDATE standalone_thread_workspaces SET directory_device = ${observed.directoryDevice}, directory_inode = ${observed.directoryInode} WHERE workspace_id = ${row.workspaceId} AND directory_inode IS NULL`;
-    if (!equalIdentity(rootIdentity, yield* io(() => inspectDirectory(root, false, rootIdentity))))
+    if (
+      !equalIdentity(
+        rootIdentity,
+        yield* io((signal) => inspectDirectory(root, false, rootIdentity, undefined, signal)),
+      )
+    )
       return yield* Effect.fail(new Error("Standalone chat directory ownership changed."));
     return directory;
   });
@@ -212,6 +294,13 @@ export const makeStandaloneWorkspaceStore = Effect.gen(function* () {
       return;
     }
     const rootIdentity = yield* admitRoot(false);
+    const [currentRow] = yield* ownership(threadId);
+    if (
+      !currentRow ||
+      currentRow.workspaceId !== row.workspaceId ||
+      currentRow.cleanupName !== row.cleanupName
+    )
+      return yield* Effect.fail(new Error("Standalone chat directory ownership changed."));
     const cleanupName = row.cleanupName;
     if (!/^delete-[0-9a-f-]{36}$/.test(cleanupName))
       return yield* Effect.fail(new Error("Standalone chat directory ownership changed."));
@@ -219,36 +308,48 @@ export const makeStandaloneWorkspaceStore = Effect.gen(function* () {
     // Persist before rename so a crash retries exactly this quarantine. Keep
     // the ownership row until cleanup settles, and never delete a replacement.
     const expected =
-      row.directoryDevice !== null && row.directoryInode !== null
-        ? { directoryDevice: row.directoryDevice, directoryInode: row.directoryInode }
+      currentRow.directoryDevice !== null && currentRow.directoryInode !== null
+        ? { directoryDevice: currentRow.directoryDevice, directoryInode: currentRow.directoryInode }
         : undefined;
-    yield* io(async () => {
-      if (!equalIdentity(rootIdentity, await inspectDirectory(root, false, rootIdentity)))
+    yield* io(async (signal) => {
+      if (
+        !equalIdentity(
+          rootIdentity,
+          await inspectDirectory(root, false, rootIdentity, undefined, signal),
+        )
+      )
         throw new Error("Root identity changed");
       let held: Identity | undefined;
       try {
-        held = await inspectDirectory(quarantine, false, expected);
+        held = await inspectDirectory(quarantine, false, expected, rootIdentity, signal);
       } catch (error) {
         if (!isMissing(error)) throw error;
       }
       if (!held) {
         try {
-          const leaf = await inspectDirectory(original, false, expected);
-          if (row.directoryInode !== null && !equalIdentity(row, leaf))
+          const leaf = await inspectDirectory(original, false, expected, rootIdentity, signal);
+          if (currentRow.directoryInode !== null && !equalIdentity(currentRow, leaf))
             throw new Error("Leaf identity changed");
+          signal.throwIfAborted();
           await fs.rename(original, quarantine);
-          held = await inspectDirectory(quarantine, false, leaf);
+          held = await inspectDirectory(quarantine, false, leaf, rootIdentity, signal);
           if (!equalIdentity(leaf, held)) throw new Error("Quarantine identity changed");
         } catch (error) {
           if (!isMissing(error)) throw error;
         }
       }
       if (held) {
-        if (row.directoryInode !== null && !equalIdentity(row, held))
+        if (currentRow.directoryInode !== null && !equalIdentity(currentRow, held))
           throw new Error("Quarantine identity changed");
-        if (!equalIdentity(rootIdentity, await inspectDirectory(root, false, rootIdentity)))
+        if (
+          !equalIdentity(
+            rootIdentity,
+            await inspectDirectory(root, false, rootIdentity, undefined, signal),
+          )
+        )
           throw new Error("Root identity changed");
         // Node rm unlinks child symlinks rather than following their targets.
+        signal.throwIfAborted();
         await fs.rm(quarantine, { recursive: true });
       }
     });

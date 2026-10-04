@@ -31,5 +31,16 @@ Older saved servers must advertise standalone-chat support before creation is
 available. Upgrade that server if Cafe reports the capability is unavailable;
 the client will not silently manufacture a project instead.
 
+If Cafe cannot prepare a standalone chat's private directory, it reports a start
+failure instead of leaving the chat on Starting. Local directory preparation is
+limited to 15 seconds; Codex native session startup is separately limited to
+60 seconds. These are setup limits, not limits on how long a model may think.
+Failed setup does not automatically resend your message.
+
+macOS workspaces use stable volume identity so ordinary device renumbering after
+a reboot does not invalidate newly enrolled folders. Older folders whose saved
+device identity has already changed need a verified ownership repair; Cafe will
+not silently adopt a potentially replaced folder or delete its contents.
+
 See [the architecture decision](decisions/standalone-chats.md) for persistence,
 provider-context, security and compatibility boundaries.

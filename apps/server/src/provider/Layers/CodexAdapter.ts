@@ -115,6 +115,13 @@ import type { CodexShadowHomeError } from "../Drivers/CodexHomeLayout.ts";
 import { resolveConfiguredSubagentLimit } from "../Drivers/SubagentConcurrency.ts";
 const isCodexAppServerProcessExitedError = Schema.is(CodexErrors.CodexAppServerProcessExitedError);
 const CODEX_SUBAGENT_HISTORY_READ_TIMEOUT_MS = 15_000;
+// The native handshake consists of initialize/initialized and thread/start or
+// thread/resume (https://developers.openai.com/codex/app-server). Neither the
+// protocol nor the local typed transport imposes an RPC deadline. Bound that
+// acquisition as one operation, including process construction and descriptor
+// reads, so a live but silent child cannot retain startup ownership forever.
+// This is not a model-generation deadline and never retries a native request.
+const CODEX_SESSION_START_TIMEOUT_MS = 60_000;
 const isCodexAppServerTransportError = Schema.is(CodexErrors.CodexAppServerTransportError);
 const isCodexSessionRuntimeThreadIdMissingError = Schema.is(
   CodexSessionRuntimeThreadIdMissingError,
@@ -4760,225 +4767,262 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           sessionScopeTransferred ? Effect.void : Scope.close(sessionScope, Exit.void),
         );
         const createRuntime = options?.makeRuntime ?? makeCodexSessionRuntime;
-        const runtime = yield* createRuntime(runtimeInput).pipe(
-          Effect.provideService(Scope.Scope, sessionScope),
-          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
-          Effect.mapError(
-            (cause) =>
-              new ProviderAdapterProcessError({
-                provider: PROVIDER,
-                threadId: input.threadId,
-                detail: cause.message,
-                cause,
-              }),
-          ),
-        );
-        // Keep lifecycle authority inside the exact native runtime's bridge.
-        // A replacement allocates a separate cache; delayed old-runtime events
-        // must never mutate the replacement's terminal or timer evidence.
-        const subagentPresentationsByThreadId = new Map<string, CodexSubagentPresentationState>();
-        // This reads the runtime's in-memory descriptor, not native history or
-        // a provider RPC. Bind naming to the bridge's own generation before
-        // consuming any event, including a delayed foreign first notification.
-        const subagentTitleRuntimeId = (yield* runtime.getSession).subagentRuntimeId;
-        // Auth recovery can fail by terminalizing its owning turn without an
-        // upstream authRecoveryCompleted notification. Retain only opaque task
-        // digests in session memory so that terminal envelopes can close those
-        // rows without persisting native thread/turn identity.
-        const activeAuthRecoveryTasksById = new Map<string, TurnId | null>();
-
-        const eventFiber = yield* Stream.runForEach(runtime.events, (rawEvent) =>
-          Effect.gen(function* () {
-            // Injected runtimes and replay can bypass the current runtime's
-            // metadata filter. Drop provider-owned attachment and gateway
-            // login notifications before the native logger as well as before
-            // canonical mapping; they can contain paths, auth URLs or errors.
-            if (isCodexPrivateMetadataNotification(rawEvent.method)) {
-              return;
-            }
-            const event = redactDesktopToolEvent(rawEvent);
-            yield* writeNativeEvent(event).pipe(
-              Effect.catchCause((cause) =>
-                Effect.logWarning("codex.runtime.bridge.native-log-write-failed", {
-                  ...bridgeEventLogContext(event, {
-                    stage: "native-log",
-                    cause: Cause.pretty(cause),
+        const { runtime, eventFiber, started, activeAuthRecoveryTasksById } = yield* Effect.gen(
+          function* () {
+            const runtime = yield* createRuntime(runtimeInput).pipe(
+              Effect.provideService(Scope.Scope, sessionScope),
+              Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapterProcessError({
+                    provider: PROVIDER,
+                    threadId: input.threadId,
+                    detail: cause.message,
+                    cause,
                   }),
-                }),
               ),
             );
-
-            const runtimeEvents = yield* Effect.sync(() => {
-              const mapped = mapToRuntimeEvents(
-                event,
-                event.threadId,
-                codexConfig.autoCompactTokenLimit,
-              );
-              const authRecoveryTerminals = reconcileCodexAuthRecoveryLifecycle(
-                event,
-                event.threadId,
-                activeAuthRecoveryTasksById,
-              );
-              return enrichCodexSubagentPresentations(
-                [...authRecoveryTerminals, ...mapped],
-                subagentPresentationsByThreadId,
-                event,
-                subagentTitleRuntimeId,
-              );
-            }).pipe(
-              Effect.catchCause((cause) =>
-                Effect.logWarning("codex.runtime.bridge.map-failed", {
-                  ...bridgeEventLogContext(event, {
-                    stage: "map",
-                    cause: Cause.pretty(cause),
-                  }),
-                }).pipe(Effect.as([] as ReadonlyArray<ProviderRuntimeEvent>)),
-              ),
+            // Until the session is published, this caller owns its runtime. A
+            // deadline or cancellation must close that exact runtime before the
+            // error escapes, including when startup has not reached start() yet.
+            // Scope closure also retains the native child's existing force-kill
+            // grace; do not detach cleanup or leave a late request able to publish.
+            yield* Effect.addFinalizer(() =>
+              sessionScopeTransferred ? Effect.void : runtime.close.pipe(Effect.ignore),
             );
+            // Keep lifecycle authority inside the exact native runtime's bridge.
+            // A replacement allocates a separate cache; delayed old-runtime events
+            // must never mutate the replacement's terminal or timer evidence.
+            const subagentPresentationsByThreadId = new Map<
+              string,
+              CodexSubagentPresentationState
+            >();
+            // This reads the runtime's in-memory descriptor, not native history or
+            // a provider RPC. Bind naming to the bridge's own generation before
+            // consuming any event, including a delayed foreign first notification.
+            const subagentTitleRuntimeId = (yield* runtime.getSession).subagentRuntimeId;
+            // Auth recovery can fail by terminalizing its owning turn without an
+            // upstream authRecoveryCompleted notification. Retain only opaque task
+            // digests in session memory so that terminal envelopes can close those
+            // rows without persisting native thread/turn identity.
+            const activeAuthRecoveryTasksById = new Map<string, TurnId | null>();
 
-            if (
-              desktopBinding &&
-              !manualCompactions.has(input.threadId) &&
-              runtimeEvents.some((v) => v.threadId === input.threadId && v.type === "turn.started")
-            )
-              yield* Effect.tryPromise({
-                try: () => desktopBinding.startTurn(),
-                catch: () => new Error("Desktop turn ownership unavailable."),
-              }).pipe(
-                // Native goal continuations can start without sendTurn. They
-                // must acquire the same root lease; an unavailable desktop
-                // cancels this turn instead of overlapping another owner.
-                Effect.catch(() => runtime.interruptTurn().pipe(Effect.ignore)),
-              );
-            if (
-              desktopBinding &&
-              runtimeEvents.some(
-                (v) =>
-                  v.threadId === input.threadId &&
-                  (v.type === "turn.completed" || v.type === "session.exited"),
-              )
-            )
-              yield* Effect.promise(() => desktopBinding.endTurn());
-            if (
-              runtimeEvents.some(
-                (v) =>
-                  v.threadId === input.threadId &&
-                  (v.type === "turn.completed" || v.type === "session.exited"),
-              )
-            ) {
-              manualCompactions.delete(input.threadId);
-            }
-            if (runtimeEvents.length === 0) {
-              const context = bridgeEventLogContext(event, {
-                stage: "map",
-                runtimeEvents,
-              });
-              if (shouldAuditCodexBridgeEvent(event)) {
-                yield* Effect.logWarning("codex.runtime.bridge.important-event-unmapped", context);
-              } else {
-                yield* Effect.logDebug("ignoring unhandled Codex provider event", context);
-              }
-              return;
-            }
-            if (isCodexResponsesWebsocketFallbackEvent(event)) {
-              yield* disableResponsesWebsocketsFromEvent(event);
-            }
-            const enqueued = yield* Queue.offerAll(runtimeEventQueue, runtimeEvents).pipe(
-              Effect.as(true),
-              Effect.catchCause((cause) =>
-                Effect.logWarning("codex.runtime.bridge.enqueue-failed", {
-                  ...bridgeEventLogContext(event, {
-                    stage: "enqueue",
-                    runtimeEvents,
-                    cause: Cause.pretty(cause),
-                  }),
-                }).pipe(Effect.as(false)),
-              ),
-            );
-            if (enqueued && shouldAuditCodexBridgeEvent(event)) {
-              yield* Effect.logDebug("codex.runtime.bridge.enqueued", {
-                ...bridgeEventLogContext(event, {
-                  stage: "enqueue",
-                  runtimeEvents,
-                }),
-              });
-            }
-            if (isCodexAuthInvalidatedEvent(event)) {
-              yield* prepareRuntimeHome.pipe(
-                Effect.tapError((cause) =>
-                  Effect.logWarning("codex.home.authRefreshAfterInvalidationFailed", {
-                    instanceId: boundInstanceId,
-                    threadId: event.threadId,
-                    turnId: event.turnId,
-                    detail: cause instanceof Error ? cause.message : String(cause),
-                  }),
-                ),
-                Effect.ignore,
-              );
-              yield* retireSession(
-                event.threadId,
-                "Codex reported an invalidated OAuth token; refreshed the shadow auth copy and retired the app-server so the next turn starts with current login material.",
-                "codex.session.retired-after-auth-invalidation",
-              );
-              return;
-            }
-            if (isCodexTurnTerminalEvent(event)) {
-              const session = sessions.get(event.threadId);
-              const pendingRetirement = session?.pendingTransportPolicyRetirement;
-              if (session && !session.stopped && pendingRetirement !== undefined) {
-                yield* retireSessionAfterTransportFallback(
-                  event.threadId,
-                  `Codex Responses WebSocket fallback was observed at ${pendingRetirement.observedAt}; restarting future turns with HTTP Responses transport. Fallback event: ${pendingRetirement.fallbackEventId}.`,
+            const eventFiber = yield* Stream.runForEach(runtime.events, (rawEvent) =>
+              Effect.gen(function* () {
+                // Injected runtimes and replay can bypass the current runtime's
+                // metadata filter. Drop provider-owned attachment and gateway
+                // login notifications before the native logger as well as before
+                // canonical mapping; they can contain paths, auth URLs or errors.
+                if (isCodexPrivateMetadataNotification(rawEvent.method)) {
+                  return;
+                }
+                const event = redactDesktopToolEvent(rawEvent);
+                yield* writeNativeEvent(event).pipe(
+                  Effect.catchCause((cause) =>
+                    Effect.logWarning("codex.runtime.bridge.native-log-write-failed", {
+                      ...bridgeEventLogContext(event, {
+                        stage: "native-log",
+                        cause: Cause.pretty(cause),
+                      }),
+                    }),
+                  ),
                 );
-                return;
-              }
-            }
-            if (event.method === "session/exited" || event.method === "session/closed") {
-              yield* retireExitedSession(
-                event.threadId,
-                event.message ?? `${event.method} received from Codex runtime`,
-              );
-            }
-          }).pipe(
-            Effect.catchCause((cause) => {
-              if (Cause.hasInterruptsOnly(cause)) {
-                return Effect.failCause(cause);
-              }
-              return Effect.logWarning("codex.runtime.bridge.event-failed", {
-                ...bridgeEventLogContext(rawEvent, {
-                  stage: "event",
-                  cause: Cause.pretty(cause),
-                }),
-              });
-            }),
-          ),
-        ).pipe(
-          // This bridge is the only path from the Codex runtime's native
-          // event queue into the provider daemon journal. It must be owned by
-          // the durable session scope, not by the short-lived `startSession`
-          // caller scope, otherwise a session can accept `turn/start` and then
-          // silently strand every later assistant/token/tool event in the
-          // runtime queue.
-          Effect.forkIn(sessionScope),
-        );
 
-        const started = yield* runtime.start().pipe(
-          Effect.mapError(
-            (cause) =>
-              new ProviderAdapterProcessError({
-                provider: PROVIDER,
+                const runtimeEvents = yield* Effect.sync(() => {
+                  const mapped = mapToRuntimeEvents(
+                    event,
+                    event.threadId,
+                    codexConfig.autoCompactTokenLimit,
+                  );
+                  const authRecoveryTerminals = reconcileCodexAuthRecoveryLifecycle(
+                    event,
+                    event.threadId,
+                    activeAuthRecoveryTasksById,
+                  );
+                  return enrichCodexSubagentPresentations(
+                    [...authRecoveryTerminals, ...mapped],
+                    subagentPresentationsByThreadId,
+                    event,
+                    subagentTitleRuntimeId,
+                  );
+                }).pipe(
+                  Effect.catchCause((cause) =>
+                    Effect.logWarning("codex.runtime.bridge.map-failed", {
+                      ...bridgeEventLogContext(event, {
+                        stage: "map",
+                        cause: Cause.pretty(cause),
+                      }),
+                    }).pipe(Effect.as([] as ReadonlyArray<ProviderRuntimeEvent>)),
+                  ),
+                );
+
+                if (
+                  desktopBinding &&
+                  !manualCompactions.has(input.threadId) &&
+                  runtimeEvents.some(
+                    (v) => v.threadId === input.threadId && v.type === "turn.started",
+                  )
+                )
+                  yield* Effect.tryPromise({
+                    try: () => desktopBinding.startTurn(),
+                    catch: () => new Error("Desktop turn ownership unavailable."),
+                  }).pipe(
+                    // Native goal continuations can start without sendTurn. They
+                    // must acquire the same root lease; an unavailable desktop
+                    // cancels this turn instead of overlapping another owner.
+                    Effect.catch(() => runtime.interruptTurn().pipe(Effect.ignore)),
+                  );
+                if (
+                  desktopBinding &&
+                  runtimeEvents.some(
+                    (v) =>
+                      v.threadId === input.threadId &&
+                      (v.type === "turn.completed" || v.type === "session.exited"),
+                  )
+                )
+                  yield* Effect.promise(() => desktopBinding.endTurn());
+                if (
+                  runtimeEvents.some(
+                    (v) =>
+                      v.threadId === input.threadId &&
+                      (v.type === "turn.completed" || v.type === "session.exited"),
+                  )
+                ) {
+                  manualCompactions.delete(input.threadId);
+                }
+                if (runtimeEvents.length === 0) {
+                  const context = bridgeEventLogContext(event, {
+                    stage: "map",
+                    runtimeEvents,
+                  });
+                  if (shouldAuditCodexBridgeEvent(event)) {
+                    yield* Effect.logWarning(
+                      "codex.runtime.bridge.important-event-unmapped",
+                      context,
+                    );
+                  } else {
+                    yield* Effect.logDebug("ignoring unhandled Codex provider event", context);
+                  }
+                  return;
+                }
+                if (isCodexResponsesWebsocketFallbackEvent(event)) {
+                  yield* disableResponsesWebsocketsFromEvent(event);
+                }
+                const enqueued = yield* Queue.offerAll(runtimeEventQueue, runtimeEvents).pipe(
+                  Effect.as(true),
+                  Effect.catchCause((cause) =>
+                    Effect.logWarning("codex.runtime.bridge.enqueue-failed", {
+                      ...bridgeEventLogContext(event, {
+                        stage: "enqueue",
+                        runtimeEvents,
+                        cause: Cause.pretty(cause),
+                      }),
+                    }).pipe(Effect.as(false)),
+                  ),
+                );
+                if (enqueued && shouldAuditCodexBridgeEvent(event)) {
+                  yield* Effect.logDebug("codex.runtime.bridge.enqueued", {
+                    ...bridgeEventLogContext(event, {
+                      stage: "enqueue",
+                      runtimeEvents,
+                    }),
+                  });
+                }
+                if (isCodexAuthInvalidatedEvent(event)) {
+                  yield* prepareRuntimeHome.pipe(
+                    Effect.tapError((cause) =>
+                      Effect.logWarning("codex.home.authRefreshAfterInvalidationFailed", {
+                        instanceId: boundInstanceId,
+                        threadId: event.threadId,
+                        turnId: event.turnId,
+                        detail: cause instanceof Error ? cause.message : String(cause),
+                      }),
+                    ),
+                    Effect.ignore,
+                  );
+                  yield* retireSession(
+                    event.threadId,
+                    "Codex reported an invalidated OAuth token; refreshed the shadow auth copy and retired the app-server so the next turn starts with current login material.",
+                    "codex.session.retired-after-auth-invalidation",
+                  );
+                  return;
+                }
+                if (isCodexTurnTerminalEvent(event)) {
+                  const session = sessions.get(event.threadId);
+                  const pendingRetirement = session?.pendingTransportPolicyRetirement;
+                  if (session && !session.stopped && pendingRetirement !== undefined) {
+                    yield* retireSessionAfterTransportFallback(
+                      event.threadId,
+                      `Codex Responses WebSocket fallback was observed at ${pendingRetirement.observedAt}; restarting future turns with HTTP Responses transport. Fallback event: ${pendingRetirement.fallbackEventId}.`,
+                    );
+                    return;
+                  }
+                }
+                if (event.method === "session/exited" || event.method === "session/closed") {
+                  yield* retireExitedSession(
+                    event.threadId,
+                    event.message ?? `${event.method} received from Codex runtime`,
+                  );
+                }
+              }).pipe(
+                Effect.catchCause((cause) => {
+                  if (Cause.hasInterruptsOnly(cause)) {
+                    return Effect.failCause(cause);
+                  }
+                  return Effect.logWarning("codex.runtime.bridge.event-failed", {
+                    ...bridgeEventLogContext(rawEvent, {
+                      stage: "event",
+                      cause: Cause.pretty(cause),
+                    }),
+                  });
+                }),
+              ),
+            ).pipe(
+              // This bridge is the only path from the Codex runtime's native
+              // event queue into the provider daemon journal. It must be owned by
+              // the durable session scope, not by the short-lived `startSession`
+              // caller scope, otherwise a session can accept `turn/start` and then
+              // silently strand every later assistant/token/tool event in the
+              // runtime queue.
+              Effect.forkIn(sessionScope),
+            );
+
+            const started = yield* runtime.start().pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapterProcessError({
+                    provider: PROVIDER,
+                    threadId: input.threadId,
+                    detail: cause.message,
+                    cause,
+                  }),
+              ),
+            );
+
+            return { runtime, eventFiber, started, activeAuthRecoveryTasksById };
+          },
+        ).pipe(
+          Effect.timeoutOrElse({
+            duration: CODEX_SESSION_START_TIMEOUT_MS,
+            orElse: () =>
+              Effect.logWarning("codex.session.start-timeout", {
                 threadId: input.threadId,
-                detail: cause.message,
-                cause,
-              }),
-          ),
-          Effect.onError(() =>
-            runtime.close.pipe(
-              Effect.andThen(Effect.ignore(Scope.close(sessionScope, Exit.void))),
-              Effect.andThen(Fiber.interrupt(eventFiber)),
-              Effect.ignore,
-            ),
-          ),
+                providerInstanceId: boundInstanceId,
+                timeoutMs: CODEX_SESSION_START_TIMEOUT_MS,
+              }).pipe(
+                Effect.andThen(
+                  Effect.fail(
+                    new ProviderAdapterRequestError({
+                      provider: PROVIDER,
+                      method: "session/start",
+                      remoteErrorTag: "startup-timeout",
+                      detail:
+                        "Codex did not finish starting within 60 seconds. The incomplete session was closed; try again when the provider is available.",
+                    }),
+                  ),
+                ),
+              ),
+          }),
         );
 
         if (desktopBinding && started.activeTurnId)

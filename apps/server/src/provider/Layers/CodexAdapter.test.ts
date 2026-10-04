@@ -374,11 +374,12 @@ it("retains scalar-safe UTF-8 head and tail fragments for one oversized message"
 class FakeCodexRuntime implements CodexSessionRuntimeShape {
   private readonly eventQueue = Effect.runSync(Queue.unbounded<ProviderEvent>());
   private readonly now = "2026-01-01T00:00:00.000Z";
+  private currentSession: ProviderSession | undefined;
 
-  public readonly startImpl = vi.fn((): Promise<ProviderSession> =>
-    Promise.resolve({
+  private initialSession(status: ProviderSession["status"]): ProviderSession {
+    return {
       provider: ProviderDriverKind.make("codex"),
-      status: "ready" as const,
+      status,
       runtimeMode: this.options.runtimeMode,
       maxConcurrentSubagents: this.options.maxConcurrentSubagents ?? null,
       threadId: this.options.threadId,
@@ -387,7 +388,18 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
       resumeCursor: this.options.resumeCursor ?? { threadId: "provider-thread-1" },
       createdAt: this.now,
       updatedAt: this.now,
-    } satisfies ProviderSession),
+    };
+  }
+
+  public readonly startImpl = vi.fn((): Promise<ProviderSession> =>
+    Promise.resolve(this.initialSession("ready")),
+  );
+
+  // A production descriptor read is independent of native startup. Keeping
+  // this seam separate catches acquisition-order bugs and lets timeout tests
+  // stall start() without accidentally stalling its earlier descriptor read.
+  public readonly getSessionImpl = vi.fn((): Promise<ProviderSession> =>
+    Promise.resolve(this.currentSession ?? this.initialSession("connecting")),
   );
 
   public readonly sendTurnImpl = vi.fn(
@@ -470,10 +482,16 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   }
 
   start() {
-    return Effect.promise(() => this.startImpl());
+    return Effect.promise(() => this.startImpl()).pipe(
+      Effect.tap((session) =>
+        Effect.sync(() => {
+          this.currentSession = session;
+        }),
+      ),
+    );
   }
 
-  getSession = Effect.promise(() => this.startImpl());
+  getSession = Effect.promise(() => this.getSessionImpl());
 
   sendTurn(input: CodexSessionRuntimeSendTurnInput) {
     return Effect.promise(() => this.sendTurnImpl(input));
@@ -6201,6 +6219,181 @@ scopedFailureLayer("CodexAdapterLive scoped startup failure", (it) => {
   );
 });
 
+for (const phase of ["construction", "descriptor", "handshake"] as const) {
+  it.effect(`bounds stalled Codex ${phase} acquisition and retires only its owned scope`, () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const threadId = asThreadId(`startup-timeout-${phase}`);
+        const siblingId = asThreadId(`startup-timeout-sibling-${phase}`);
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const released: ThreadId[] = [];
+        const runtimes: FakeCodexRuntime[] = [];
+        let targetAttempts = 0;
+        let interrupted = 0;
+        let retiredTargetBridges = 0;
+        const stall = Deferred.succeed(entered, undefined).pipe(
+          Effect.andThen(Deferred.await(release)),
+          Effect.onInterrupt(() =>
+            Effect.sync(() => {
+              interrupted += 1;
+            }),
+          ),
+        );
+        const adapter = yield* makeCodexAdapter(decodeCodexSettings({}), {
+          makeRuntime: (options) =>
+            Effect.gen(function* () {
+              yield* Effect.addFinalizer(() =>
+                Effect.sync(() => {
+                  released.push(options.threadId);
+                }),
+              );
+              const firstTargetAttempt = options.threadId === threadId && ++targetAttempts === 1;
+              if (firstTargetAttempt && phase === "construction") yield* stall;
+              const runtime = new FakeCodexRuntime(options);
+              runtimes.push(runtime);
+              if (firstTargetAttempt) {
+                const events = runtime.events;
+                Object.defineProperty(runtime, "events", {
+                  get: () =>
+                    events.pipe(
+                      Stream.ensuring(
+                        Effect.sync(() => {
+                          retiredTargetBridges += 1;
+                        }),
+                      ),
+                    ),
+                });
+              }
+              if (firstTargetAttempt && phase === "descriptor") {
+                const descriptor = runtime.getSession;
+                runtime.getSession = stall.pipe(Effect.andThen(descriptor));
+              }
+              if (firstTargetAttempt && phase === "handshake") {
+                const start = runtime.start.bind(runtime);
+                runtime.start = () => stall.pipe(Effect.andThen(start()));
+              }
+              return runtime;
+            }),
+        });
+        yield* adapter.startSession({ threadId: siblingId, runtimeMode: "full-access" });
+        const sibling = runtimes[0]!;
+        const pending = yield* adapter
+          .startSession({ threadId, runtimeMode: "full-access" })
+          .pipe(Effect.result, Effect.forkChild);
+        yield* Deferred.await(entered);
+        yield* TestClock.adjust("59 seconds");
+        assert.equal(pending.pollUnsafe(), undefined);
+        assert.equal(yield* adapter.hasSession(threadId), false);
+        yield* TestClock.adjust("1 second");
+        const result = yield* Fiber.join(pending);
+        assert.equal(result._tag, "Failure");
+        assert.equal(result.failure._tag, "ProviderAdapterRequestError");
+        assert.equal(
+          "remoteErrorTag" in result.failure && result.failure.remoteErrorTag,
+          "startup-timeout",
+        );
+        assert.equal("method" in result.failure && result.failure.method, "session/start");
+        assert.equal(
+          "detail" in result.failure && result.failure.detail,
+          "Codex did not finish starting within 60 seconds. The incomplete session was closed; try again when the provider is available.",
+        );
+        assert.deepEqual(released, [threadId]);
+        assert.equal(interrupted, 1);
+        assert.equal(retiredTargetBridges, phase === "handshake" ? 1 : 0);
+        assert.equal(yield* adapter.hasSession(threadId), false);
+        assert.equal(yield* adapter.hasSession(siblingId), true);
+        assert.equal(sibling.closeImpl.mock.calls.length, 0);
+        if (phase !== "construction") {
+          assert.equal(runtimes[1]!.closeImpl.mock.calls.length, 1);
+        }
+        assert.equal(
+          runtimes.every((runtime) => runtime.sendTurnImpl.mock.calls.length === 0),
+          true,
+        );
+
+        // A delayed native completion cannot publish the abandoned runtime.
+        // Only a new explicit caller may make a second acquisition attempt.
+        yield* Deferred.succeed(release, undefined);
+        yield* Effect.yieldNow;
+        assert.equal(yield* adapter.hasSession(threadId), false);
+        assert.equal(targetAttempts, 1);
+        yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
+        assert.equal(targetAttempts, 2);
+        assert.equal(yield* adapter.hasSession(threadId), true);
+        assert.equal(runtimes.at(-1)!.startImpl.mock.calls.length, 1);
+        assert.equal(runtimes.at(-1)!.closeImpl.mock.calls.length, 0);
+        assert.deepEqual(released, [threadId]);
+      }),
+    ).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          ServerConfig.layerTest(process.cwd(), process.cwd()),
+          ServerSettingsService.layerTest(),
+          providerSessionDirectoryTestLayer,
+        ).pipe(Layer.provideMerge(NodeServices.layer)),
+      ),
+    ),
+  );
+}
+
+it.effect("keeps a Codex session that finishes acquisition before the startup deadline", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      let runtime: FakeCodexRuntime | undefined;
+      let released = 0;
+      const adapter = yield* makeCodexAdapter(decodeCodexSettings({}), {
+        makeRuntime: (options) =>
+          Effect.gen(function* () {
+            yield* Effect.addFinalizer(() =>
+              Effect.sync(() => {
+                released += 1;
+              }),
+            );
+            const created = new FakeCodexRuntime(options);
+            runtime = created;
+            const start = created.start.bind(created);
+            created.start = () =>
+              Deferred.succeed(entered, undefined).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.andThen(start()),
+              );
+            return created;
+          }),
+      });
+      const threadId = asThreadId("startup-before-deadline");
+      const pending = yield* adapter
+        .startSession({ threadId, runtimeMode: "full-access" })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(entered);
+      yield* TestClock.adjust("59 seconds");
+      yield* Deferred.succeed(release, undefined);
+      const session = yield* Fiber.join(pending);
+      assert.equal(session.status, "ready");
+      assert.ok(runtime);
+      assert.equal(runtime.startImpl.mock.calls.length, 1);
+      assert.equal(runtime.getSessionImpl.mock.calls.length, 1);
+      yield* TestClock.adjust("2 seconds");
+      assert.equal(yield* adapter.hasSession(threadId), true);
+      assert.equal(runtime.closeImpl.mock.calls.length, 0);
+      assert.equal(released, 0);
+      yield* adapter.stopSession(threadId);
+      assert.equal(runtime.closeImpl.mock.calls.length, 1);
+      assert.equal(released, 1);
+    }),
+  ).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        ServerConfig.layerTest(process.cwd(), process.cwd()),
+        ServerSettingsService.layerTest(),
+        providerSessionDirectoryTestLayer,
+      ).pipe(Layer.provideMerge(NodeServices.layer)),
+    ),
+  ),
+);
+
 it.effect("flushes managed native logs when the adapter layer shuts down", () =>
   Effect.gen(function* () {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cafecode-codex-adapter-native-log-"));
@@ -6454,7 +6647,7 @@ it.effect(
         select("desktop-a");
         const original = yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
         const old = factory.lastRuntime!;
-        old.startImpl.mockResolvedValue({
+        old.getSessionImpl.mockResolvedValue({
           ...original,
           status: "running",
           activeTurnId: asTurnId("active"),
@@ -6462,7 +6655,7 @@ it.effect(
         select("desktop-b");
         yield* adapter.sendTurn({ threadId, input: "Steered while active" });
         assert.equal(factory.lastRuntime, old);
-        old.startImpl.mockResolvedValue({ ...original, status: "ready" });
+        old.getSessionImpl.mockResolvedValue({ ...original, status: "ready" });
         yield* adapter.sendTurn({ threadId, input: "Next turn" });
         assert.notEqual(factory.lastRuntime, old);
         assert.deepEqual(factory.lastRuntime!.options.resumeCursor, original.resumeCursor);
@@ -6509,7 +6702,7 @@ it.effect(
         const original = yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
         const old = factory.lastRuntime!;
         const { resumeCursor: _cursor, ...withoutCursor } = original;
-        old.startImpl.mockResolvedValue(withoutCursor);
+        old.getSessionImpl.mockResolvedValue(withoutCursor);
         select("desktop-a");
         const result = yield* Effect.exit(adapter.sendTurn({ threadId, input: "Continue" }));
         assert.equal(Exit.isFailure(result), true);

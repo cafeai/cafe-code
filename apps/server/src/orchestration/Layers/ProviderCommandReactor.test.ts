@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import fs from "node:fs";
+import * as fsPromises from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
@@ -76,6 +77,13 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService, type GitWorkflowServiceShape } from "../../git/GitWorkflowService.ts";
+
+// Node ESM namespace exports are immutable. Retain the real filesystem by
+// default, with one explicit module seam for the no-progress local-I/O test.
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, lstat: vi.fn(actual.lstat) };
+});
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asApprovalRequestId = (value: string): ApprovalRequestId => ApprovalRequestId.make(value);
@@ -224,6 +232,8 @@ describe("ProviderCommandReactor", () => {
     readonly manualCompaction?: "supported" | "unsupported";
     readonly startReactor?: boolean;
     readonly getCodexSteerAcceptanceEvidence?: ProjectionSnapshotQueryShape["getCodexSteerAcceptanceEvidence"];
+    readonly beforeProjectRead?: Effect.Effect<void, Error>;
+    readonly beforeTurnStartFailureDispatch?: Effect.Effect<void>;
     readonly beforeCodexSteerDeliveryAttemptDispatch?: Effect.Effect<void>;
     readonly beforeCodexRootReplacementDispatch?: Effect.Effect<void>;
     readonly beforeRuntimeRecoveryAttemptDispatch?: Effect.Effect<void>;
@@ -525,6 +535,7 @@ describe("ProviderCommandReactor", () => {
       input?.beforeCodexSteerDeliveryAttemptDispatch === undefined &&
       input?.beforeCodexRootReplacementDispatch === undefined &&
       input?.beforeRuntimeRecoveryAttemptDispatch === undefined &&
+      input?.beforeTurnStartFailureDispatch === undefined &&
       input?.beforeTurnConfigurationDispatch === undefined
         ? orchestrationLayer
         : Layer.effect(
@@ -532,33 +543,42 @@ describe("ProviderCommandReactor", () => {
             Effect.map(Effect.service(OrchestrationEngineService), (engine) => ({
               ...engine,
               dispatch: (command: Parameters<typeof engine.dispatch>[0]) =>
-                command.type === "thread.activity.append" &&
-                command.activity.kind === "provider.turn.configuration" &&
-                input.beforeTurnConfigurationDispatch !== undefined
-                  ? input.beforeTurnConfigurationDispatch.pipe(
+                command.type === "thread.session.set" &&
+                command.expectedTurnStartIntentSequence !== undefined &&
+                input.beforeTurnStartFailureDispatch !== undefined
+                  ? input.beforeTurnStartFailureDispatch.pipe(
                       Effect.andThen(engine.dispatch(command)),
                     )
                   : command.type === "thread.activity.append" &&
-                      command.activity.kind === "provider.turn.steer.delivery-attempted" &&
-                      input.beforeCodexSteerDeliveryAttemptDispatch !== undefined
-                    ? input.beforeCodexSteerDeliveryAttemptDispatch!.pipe(
+                      command.activity.kind === "provider.turn.configuration" &&
+                      input.beforeTurnConfigurationDispatch !== undefined
+                    ? input.beforeTurnConfigurationDispatch.pipe(
                         Effect.andThen(engine.dispatch(command)),
                       )
                     : command.type === "thread.activity.append" &&
-                        command.activity.kind === "runtime.warning" &&
-                        (command.activity.payload as Readonly<Record<string, unknown>> | undefined)
-                          ?.recovery === "provider-runtime-continuation-attempted" &&
-                        input.beforeRuntimeRecoveryAttemptDispatch !== undefined
-                      ? input.beforeRuntimeRecoveryAttemptDispatch.pipe(
+                        command.activity.kind === "provider.turn.steer.delivery-attempted" &&
+                        input.beforeCodexSteerDeliveryAttemptDispatch !== undefined
+                      ? input.beforeCodexSteerDeliveryAttemptDispatch!.pipe(
                           Effect.andThen(engine.dispatch(command)),
                         )
-                      : command.type === "thread.session.set" &&
-                          command.codexRootReplacement !== undefined &&
-                          input.beforeCodexRootReplacementDispatch !== undefined
-                        ? input.beforeCodexRootReplacementDispatch.pipe(
+                      : command.type === "thread.activity.append" &&
+                          command.activity.kind === "runtime.warning" &&
+                          (
+                            command.activity.payload as
+                              | Readonly<Record<string, unknown>>
+                              | undefined
+                          )?.recovery === "provider-runtime-continuation-attempted" &&
+                          input.beforeRuntimeRecoveryAttemptDispatch !== undefined
+                        ? input.beforeRuntimeRecoveryAttemptDispatch.pipe(
                             Effect.andThen(engine.dispatch(command)),
                           )
-                        : engine.dispatch(command),
+                        : command.type === "thread.session.set" &&
+                            command.codexRootReplacement !== undefined &&
+                            input.beforeCodexRootReplacementDispatch !== undefined
+                          ? input.beforeCodexRootReplacementDispatch.pipe(
+                              Effect.andThen(engine.dispatch(command)),
+                            )
+                          : engine.dispatch(command),
             })),
           ).pipe(Layer.provide(orchestrationLayer));
     const baseProjectionSnapshotLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
@@ -566,13 +586,24 @@ describe("ProviderCommandReactor", () => {
       Layer.provide(SqlitePersistenceMemory),
     );
     const projectionSnapshotLayer =
-      input?.getCodexSteerAcceptanceEvidence === undefined
+      input?.getCodexSteerAcceptanceEvidence === undefined && input?.beforeProjectRead === undefined
         ? baseProjectionSnapshotLayer
         : Layer.effect(
             ProjectionSnapshotQuery,
             Effect.map(Effect.service(ProjectionSnapshotQuery), (query) => ({
               ...query,
-              getCodexSteerAcceptanceEvidence: input.getCodexSteerAcceptanceEvidence!,
+              ...(input.getCodexSteerAcceptanceEvidence !== undefined
+                ? { getCodexSteerAcceptanceEvidence: input.getCodexSteerAcceptanceEvidence }
+                : {}),
+              ...(input.beforeProjectRead !== undefined
+                ? {
+                    getProjectShellById: (id: ProjectId) =>
+                      input.beforeProjectRead!.pipe(
+                        Effect.orDie,
+                        Effect.andThen(query.getProjectShellById(id)),
+                      ),
+                  }
+                : {}),
             })),
           ).pipe(Layer.provide(baseProjectionSnapshotLayer));
     const layer = ProviderCommandReactorLive.pipe(
@@ -910,6 +941,258 @@ describe("ProviderCommandReactor", () => {
       expect(harness.startSession).not.toHaveBeenCalled();
       expect(harness.stopSession).not.toHaveBeenCalled();
       expect((await harness.readThreadDetail(threadId))?.subagentLimits).toEqual({ codex: 2 });
+    });
+  });
+
+  describe("turn preparation failures", () => {
+    const threadId = ThreadId.make("thread-1");
+    const send = (harness: Awaited<ReturnType<typeof createHarness>>) =>
+      Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("preparation-start"),
+          threadId,
+          message: {
+            messageId: asMessageId("preparation-message"),
+            role: "user",
+            text: "Hello",
+            attachments: [],
+          },
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          titleSeed: "Thread",
+          createdAt: "2026-01-01T00:00:01.000Z",
+        }),
+      );
+    const waitForFailure = (harness: Awaited<ReturnType<typeof createHarness>>) =>
+      waitFor(
+        async () =>
+          (await harness.readThreadDetail(threadId))?.activities.some(
+            (activity) => activity.kind === "provider.turn.start.failed",
+          ) === true,
+      );
+
+    it("settles invalid standalone storage before starting a provider or title request", async () => {
+      const harness = await createHarness({ standalone: true });
+      const root = path.join(path.dirname(harness.stateDir), "standalone-workspaces");
+      // A regular file is a deterministic rejected directory on every host;
+      // this fixture does not require symlink privileges or live providers.
+      fs.writeFileSync(root, "not a workspace");
+      await send(harness);
+      await waitForFailure(harness);
+      await harness.drain();
+      const thread = await harness.readThreadDetail(threadId);
+      expect(thread?.session).toMatchObject({ status: "ready", activeTurnId: null });
+      expect(thread?.session?.lastError).toContain("Standalone chat directory is unavailable.");
+      expect(thread?.session?.lastError).not.toContain(root);
+      expect(harness.startSession).not.toHaveBeenCalled();
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      expect(harness.generateThreadTitle).not.toHaveBeenCalled();
+    });
+
+    it("reports an unexpected preparation defect without exposing its private cause", async () => {
+      const harness = await createHarness({
+        beforeProjectRead: Effect.fail(new Error("secret filesystem path /private/account")),
+      });
+      await send(harness);
+      await waitForFailure(harness);
+      await harness.drain();
+      const thread = await harness.readThreadDetail(threadId);
+      expect(thread?.session).toMatchObject({
+        status: "ready",
+        activeTurnId: null,
+        lastError: "Cafe Code could not prepare this turn. No message was sent to the provider.",
+      });
+      expect(JSON.stringify(thread?.activities)).not.toContain("/private/account");
+      expect(harness.startSession).not.toHaveBeenCalled();
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+    });
+
+    it("redacts unexpected provider-initialization defects through the ordinary failure path", async () => {
+      const harness = await createHarness();
+      harness.startSession.mockImplementationOnce(() =>
+        Effect.die(new Error("private initialization /secret/account")),
+      );
+      await send(harness);
+      await waitForFailure(harness);
+      await harness.drain();
+      const thread = await harness.readThreadDetail(threadId);
+      expect(thread?.session).toMatchObject({
+        status: "ready",
+        activeTurnId: null,
+        lastError:
+          "Cafe Code could not start this turn. Check the provider connection before trying again.",
+      });
+      expect(JSON.stringify(thread?.activities)).not.toContain("/secret/account");
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+    });
+
+    it.each(["running", "stopped"] as const)(
+      "does not overwrite newer %s state after delayed preparation fails",
+      async (state) => {
+        const entered = Effect.runSync(Deferred.make<void>());
+        const release = Effect.runSync(Deferred.make<void>());
+        const harness = await createHarness({
+          beforeProjectRead: Deferred.succeed(entered, undefined).pipe(
+            Effect.andThen(Deferred.await(release)),
+            Effect.andThen(Effect.fail(new Error("delayed preparation failure"))),
+          ),
+        });
+        await send(harness);
+        await Effect.runPromise(Deferred.await(entered));
+        if (state === "running") {
+          await harness.setRunningCodexTurn(
+            asTurnId("new-native-turn"),
+            "2026-01-01T00:00:02.000Z",
+          );
+        } else {
+          const session = (await harness.readThreadDetail(threadId))!.session!;
+          await Effect.runPromise(
+            harness.engine.dispatch({
+              type: "thread.session.set",
+              commandId: CommandId.make("newer-stopped-state"),
+              threadId,
+              session: {
+                ...session,
+                status: "stopped",
+                lastError: null,
+                updatedAt: "2026-01-01T00:00:02.000Z",
+              },
+              createdAt: "2026-01-01T00:00:02.000Z",
+            }),
+          );
+        }
+        await Effect.runPromise(Deferred.succeed(release, undefined));
+        await harness.drain();
+        const thread = await harness.readThreadDetail(threadId);
+        expect(thread?.session?.status).toBe(state);
+        expect(thread?.session?.lastError).toBeNull();
+        expect(
+          thread?.activities.some((activity) => activity.kind === "provider.turn.start.failed"),
+        ).toBe(false);
+        expect(harness.sendTurn).not.toHaveBeenCalled();
+      },
+    );
+
+    it("rejects a failure publication when Stop commits after its last observation", async () => {
+      const entered = Effect.runSync(Deferred.make<void>());
+      const release = Effect.runSync(Deferred.make<void>());
+      const harness = await createHarness({
+        beforeProjectRead: Effect.fail(new Error("preparation rejected")),
+        beforeTurnStartFailureDispatch: Deferred.succeed(entered, undefined).pipe(
+          Effect.andThen(Deferred.await(release)),
+        ),
+      });
+      await send(harness);
+      await Effect.runPromise(Deferred.await(entered));
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.stop",
+          commandId: CommandId.make("stop-racing-failure-publication"),
+          threadId,
+          createdAt: "2026-01-01T00:00:02.000Z",
+        }),
+      );
+      await Effect.runPromise(Deferred.succeed(release, undefined));
+      await harness.drain();
+      const thread = await harness.readThreadDetail(threadId);
+      expect(thread?.session).toMatchObject({ status: "stopped", lastError: null });
+      expect(
+        thread?.activities.some((activity) => activity.kind === "provider.turn.start.failed"),
+      ).toBe(false);
+      expect(harness.startSession).not.toHaveBeenCalled();
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+    });
+
+    it("preserves a durable Stop when delayed standalone preparation fails", async () => {
+      const harness = await createHarness({ standalone: true });
+      const root = path.join(path.dirname(harness.stateDir), "standalone-workspaces");
+      const original = vi.mocked(fsPromises.lstat).getMockImplementation()!;
+      const blocked: Array<(error: Error) => void> = [];
+      const lstat = vi
+        .mocked(fsPromises.lstat)
+        .mockImplementation((...args: Parameters<typeof fsPromises.lstat>) =>
+          args[0] === root
+            ? new Promise((_resolve, reject) => {
+                blocked.push(reject);
+              })
+            : original(...args),
+        );
+      try {
+        await send(harness);
+        await waitFor(() => blocked.length >= 2);
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.session.stop",
+            commandId: CommandId.make("stop-pending-preparation"),
+            threadId,
+            createdAt: "2026-01-01T00:00:02.000Z",
+          }),
+        );
+        for (const reject of blocked) reject(new Error("workspace unavailable after Stop"));
+        await harness.drain();
+        const thread = await harness.readThreadDetail(threadId);
+        expect(thread?.session?.status).toBe("stopped");
+        expect(thread?.session?.lastError).toBeNull();
+        expect(
+          thread?.activities.some((activity) => activity.kind === "provider.turn.start.failed"),
+        ).toBe(false);
+        expect(harness.startSession).not.toHaveBeenCalled();
+        expect(harness.sendTurn).not.toHaveBeenCalled();
+      } finally {
+        for (const reject of blocked) reject(new Error("test cleanup"));
+        lstat.mockImplementation(original);
+      }
+    });
+
+    it("bounds local workspace preparation without starting or replaying a provider request", async () => {
+      const clockScope = await Effect.runPromise(Scope.make());
+      testClockScope = clockScope;
+      const clock = await Effect.runPromise(TestClock.make().pipe(Scope.provide(clockScope)));
+      await Effect.runPromise(
+        clock.setTime(Date.parse("2026-01-01T00:00:01.000Z")).pipe(Scope.provide(clockScope)),
+      );
+      const harness = await createHarness({
+        standalone: true,
+        testClock: {
+          ...clock,
+          adjust: (duration) => clock.adjust(duration).pipe(Scope.provide(clockScope)),
+          setTime: (timestamp) => clock.setTime(timestamp).pipe(Scope.provide(clockScope)),
+        },
+      });
+      const root = path.join(path.dirname(harness.stateDir), "standalone-workspaces");
+      const original = vi.mocked(fsPromises.lstat).getMockImplementation()!;
+      let blocked = 0;
+      const lstat = vi
+        .mocked(fsPromises.lstat)
+        .mockImplementation((...args: Parameters<typeof fsPromises.lstat>) => {
+          if (args[0] === root) {
+            blocked++;
+            return new Promise(() => {});
+          }
+          return original(...args);
+        });
+      try {
+        await send(harness);
+        // Both the optional metadata lane and the required session lane must
+        // have entered their independently bounded local preparation before
+        // advancing the clock; an earlier jump would start the second lane's
+        // deadline after the simulated time jump instead of expiring it.
+        await waitFor(() => blocked >= 2);
+        await Effect.runPromise(clock.adjust("15 seconds").pipe(Scope.provide(clockScope)));
+        await waitForFailure(harness);
+        await harness.drain();
+        const thread = await harness.readThreadDetail(threadId);
+        expect(thread?.session).toMatchObject({ status: "ready", activeTurnId: null });
+        expect(thread?.session?.lastError).toContain(
+          "Preparing the standalone chat directory timed out.",
+        );
+        expect(harness.startSession).not.toHaveBeenCalled();
+        expect(harness.sendTurn).not.toHaveBeenCalled();
+      } finally {
+        lstat.mockImplementation(original);
+      }
     });
   });
 

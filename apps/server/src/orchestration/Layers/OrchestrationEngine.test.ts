@@ -55,6 +55,11 @@ import {
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { ServerConfig } from "../../config.ts";
 import { makeRuntimeRecoveryBarrierReader } from "../providerRuntimeRecovery.ts";
+import {
+  isSupersededSessionLifecycle,
+  SESSION_LIFECYCLE_SUPERSEDED,
+  sessionLifecycleSnapshot,
+} from "../sessionLifecycle.ts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asMessageId = (value: string): MessageId => MessageId.make(value);
@@ -125,6 +130,141 @@ async function createPersistentOrchestrationSystem(dbPath: string, baseDir: stri
 function now() {
   return "2026-01-01T00:00:00.000Z";
 }
+
+describe("OrchestrationEngine startup-failure admission", () => {
+  it.each([
+    "accepted",
+    "session-stop",
+    "stop-sequence",
+    "newer-start",
+    "wrong-sequence",
+    "missing-intent",
+  ] as const)("binds failure projection to the exact latest intent: %s", async (variant) => {
+    const system = await createOrchestrationSystem();
+    const threadId = ThreadId.make("startup-failure-thread");
+    const projectId = asProjectId("startup-failure-project");
+    const modelSelection = {
+      instanceId: ProviderInstanceId.make("codex"),
+      model: "gpt-6-astra",
+    };
+    const dispatch = (command: OrchestrationCommand) => system.run(system.engine.dispatch(command));
+    try {
+      await dispatch({
+        type: "project.create",
+        commandId: CommandId.make("startup-failure-project"),
+        projectId,
+        title: "Startup failure",
+        workspaceRoot: process.cwd(),
+        defaultModelSelection: modelSelection,
+        createdAt: now(),
+      });
+      await dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("startup-failure-thread"),
+        threadId,
+        projectId,
+        title: "Startup failure",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdAt: now(),
+      });
+      const start = (suffix: string): OrchestrationCommand => ({
+        type: "thread.turn.start",
+        commandId: CommandId.make(`startup-failure-${suffix}`),
+        threadId,
+        message: {
+          messageId: asMessageId(`startup-failure-message-${suffix}`),
+          role: "user",
+          text: "Start this task.",
+          attachments: [],
+        },
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        createdAt: now(),
+      });
+      let expectedSequence =
+        variant === "missing-intent" ? 0 : (await dispatch(start("first"))).sequence;
+      // Capture the reactor's earlier observation. All timestamps are equal:
+      // only serialized durable intent, not time or a changed tuple, can fence
+      // a Stop accepted while a failed startup is returning to the engine.
+      const observedSession = (await system.readModel()).threads[0]?.session ?? null;
+      if (variant === "session-stop" || variant === "stop-sequence") {
+        const stopped = await dispatch({
+          type: "thread.session.stop",
+          commandId: CommandId.make("startup-failure-stop"),
+          threadId,
+          createdAt: now(),
+        });
+        expect((await system.readModel()).threads[0]?.session ?? null).toEqual(observedSession);
+        if (variant === "stop-sequence") expectedSequence = stopped.sequence;
+      } else if (variant === "newer-start") {
+        await dispatch(start("newer"));
+        expect((await system.readModel()).threads[0]?.session ?? null).toEqual(observedSession);
+      } else if (variant === "wrong-sequence") {
+        expectedSequence -= 1;
+      }
+      const before = await system.readModel();
+      const command: Extract<OrchestrationCommand, { type: "thread.session.set" }> = {
+        type: "thread.session.set",
+        commandId: CommandId.make("server:startup-failure"),
+        threadId,
+        session: {
+          threadId,
+          status: "error",
+          providerName: "codex",
+          providerInstanceId: modelSelection.instanceId,
+          runtimeMode: "full-access",
+          activeTurnId: null,
+          lastError: "Provider did not start.",
+          updatedAt: now(),
+        },
+        expectedSessionLifecycle: sessionLifecycleSnapshot(observedSession),
+        expectedTurnStartIntentSequence: expectedSequence,
+        createdAt: now(),
+      };
+      const result = await system.run(
+        system.engine
+          .dispatch(command)
+          .pipe(Effect.match({ onSuccess: () => null, onFailure: (error) => error })),
+      );
+      const after = await system.readModel();
+      const events = await system.run(
+        system.engine.readEvents(before.snapshotSequence).pipe(Stream.runCollect),
+      );
+      if (variant === "accepted") {
+        expect(result).toBeNull();
+        expect(after.threads[0]?.session?.status).toBe("error");
+        expect(events).toHaveLength(1);
+        expect(events[0]?.type).toBe("thread.session-set");
+        expect(events[0]?.payload).not.toHaveProperty("expectedTurnStartIntentSequence");
+      } else {
+        expect(result).toMatchObject({
+          _tag: "OrchestrationCommandInvariantError",
+          detail: SESSION_LIFECYCLE_SUPERSEDED,
+        });
+        expect(events).toHaveLength(0);
+        expect(after.threads[0]?.session).toEqual(before.threads[0]?.session);
+        expect(after.snapshotSequence).toBe(before.snapshotSequence);
+        // Replaying the rejected command keeps the same benign supersession
+        // semantics. It cannot later overwrite a newer session or emit events.
+        const replay = await system.run(
+          system.engine
+            .dispatch(command)
+            .pipe(Effect.match({ onSuccess: () => null, onFailure: (error) => error })),
+        );
+        expect(replay?._tag).toBe("OrchestrationCommandPreviouslyRejectedError");
+        expect(replay && isSupersededSessionLifecycle(replay)).toBe(true);
+        expect((await system.readModel()).snapshotSequence).toBe(before.snapshotSequence);
+      }
+    } finally {
+      await system.dispose();
+    }
+  });
+});
 
 describe("OrchestrationEngine completed-root replacement admission", () => {
   it.each(["accepted", "interrupt", "session-stop", "newer-projection", "invalid-intent"] as const)(

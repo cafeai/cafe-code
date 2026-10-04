@@ -5,6 +5,8 @@ import { CommandId, ThreadId } from "@cafecode/contracts";
 import { assert, it } from "@effect/vitest";
 import { vi } from "vitest";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -17,15 +19,55 @@ import { makeStandaloneWorkspaceStore } from "./standaloneWorkspace.ts";
 // probabilistic racing processes, and no fabricated inode/permission results.
 const filesystemObservation = vi.hoisted(() => ({
   beforeLstat: undefined as ((directory: unknown) => Promise<void>) | undefined,
+  deviceDelta: 0n,
+  volumeUuid: "darwin-volume:11111111-2222-4333-8444-555555555555",
+  beforeReadIdentity: undefined as (() => Promise<void>) | undefined,
+  afterClose: undefined as (() => void) | undefined,
+}));
+// Unit fixtures keep native filesystem/descriptor operations, but do not launch
+// df/diskutil. The separately selected native identity test qualifies that
+// read-only OS boundary. A device offset deterministically models remounting.
+vi.mock("./standaloneFilesystemIdentity.ts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./standaloneFilesystemIdentity.ts")>()),
+  readStandaloneDeviceIdentity: async (_directory: string, device: bigint) => {
+    await filesystemObservation.beforeReadIdentity?.();
+    return process.platform === "darwin" ? filesystemObservation.volumeUuid : String(device);
+  },
 }));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
+  const remount = <T extends { dev: number | bigint } | undefined>(stat: T): T =>
+    stat === undefined || filesystemObservation.deviceDelta === 0n
+      ? stat
+      : Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, {
+          dev:
+            typeof stat.dev === "bigint"
+              ? stat.dev + filesystemObservation.deviceDelta
+              : stat.dev + Number(filesystemObservation.deviceDelta),
+        });
   return {
     ...actual,
     lstat: (async (...args: Parameters<typeof actual.lstat>) => {
       await filesystemObservation.beforeLstat?.(args[0]);
-      return actual.lstat(...args);
+      return remount(await actual.lstat(...args));
     }) as typeof actual.lstat,
+    open: (async (...args: Parameters<typeof actual.open>) => {
+      const handle = await actual.open(...args);
+      return new Proxy(handle, {
+        get(target, key) {
+          if (key === "stat")
+            return async (...options: Parameters<typeof handle.stat>) =>
+              remount(await target.stat(...options));
+          if (key === "close")
+            return async () => {
+              await target.close();
+              filesystemObservation.afterClose?.();
+            };
+          const value = Reflect.get(target, key, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    }) as typeof actual.open,
   };
 });
 
@@ -40,6 +82,223 @@ const createThread = (threadId: ThreadId, projectId: string | null = null) =>
   });
 
 layer("standalone workspace ownership", (it) => {
+  it.effect(
+    "does not chmod or rewrite ownership after cancelled volume admission finishes late",
+    (context) =>
+      Effect.gen(function* () {
+        if (process.platform === "win32")
+          return context.skip("POSIX held-descriptor cancellation policy");
+        const sql = yield* SqlClient.SqlClient;
+        const thread = ThreadId.make("cancelled-volume-admission");
+        yield* createThread(thread);
+        const store = yield* makeStandaloneWorkspaceStore;
+        const cwd = yield* store.resolve(thread);
+        const root = path.dirname(cwd);
+        yield* Effect.promise(() => fs.chmod(root, 0o755));
+        const original = yield* sql`SELECT * FROM standalone_workspace_root_identity`;
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const closed = yield* Deferred.make<void>();
+        yield* Effect.gen(function* () {
+          filesystemObservation.beforeReadIdentity = async () => {
+            await Effect.runPromise(Deferred.succeed(entered, undefined));
+            await Effect.runPromise(Deferred.await(release));
+          };
+          filesystemObservation.afterClose = () => {
+            Effect.runSync(Deferred.succeed(closed, undefined));
+          };
+          const attempt = yield* store.resolve(thread).pipe(Effect.forkScoped);
+          yield* Deferred.await(entered);
+          yield* Fiber.interrupt(attempt);
+          yield* Deferred.succeed(release, undefined);
+          yield* Deferred.await(closed);
+          assert.equal((yield* Effect.promise(() => fs.lstat(root))).mode & 0o777, 0o755);
+          assert.deepEqual(yield* sql`SELECT * FROM standalone_workspace_root_identity`, original);
+        }).pipe(
+          Effect.ensuring(
+            Effect.gen(function* () {
+              filesystemObservation.beforeReadIdentity = undefined;
+              filesystemObservation.afterClose = undefined;
+              yield* Deferred.succeed(release, undefined);
+            }),
+          ),
+        );
+        yield* store.remove(thread);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "does not rewrite leaf ownership if legacy root migration loses its comparison",
+    (context) =>
+      Effect.gen(function* () {
+        if (process.platform !== "darwin")
+          return context.skip("macOS durable volume identity policy");
+        const sql = yield* SqlClient.SqlClient;
+        const thread = ThreadId.make("legacy-volume-race");
+        yield* createThread(thread);
+        const store = yield* makeStandaloneWorkspaceStore;
+        const cwd = yield* store.resolve(thread);
+        const raw = String((yield* Effect.promise(() => fs.lstat(cwd, { bigint: true }))).dev);
+        yield* sql`UPDATE standalone_workspace_root_identity SET directory_device = ${raw}`;
+        yield* sql`UPDATE standalone_thread_workspaces SET directory_device = ${raw} WHERE thread_id = ${thread}`;
+        yield* Effect.gen(function* () {
+          filesystemObservation.beforeReadIdentity = async () => {
+            filesystemObservation.beforeReadIdentity = undefined;
+            await Effect.runPromise(
+              sql`UPDATE standalone_workspace_root_identity SET directory_device = '987654321'`,
+            );
+          };
+          assert.equal((yield* Effect.result(store.resolve(thread)))._tag, "Failure");
+          assert.deepEqual(
+            yield* sql`SELECT directory_device FROM standalone_thread_workspaces WHERE thread_id = ${thread}`,
+            [{ directory_device: raw }],
+          );
+          assert.deepEqual(
+            yield* sql`SELECT directory_device FROM standalone_workspace_root_identity`,
+            [{ directory_device: "987654321" }],
+          );
+        }).pipe(
+          Effect.ensuring(
+            Effect.gen(function* () {
+              filesystemObservation.beforeReadIdentity = undefined;
+              yield* sql`UPDATE standalone_workspace_root_identity SET directory_device = ${raw}`;
+            }).pipe(Effect.orDie),
+          ),
+        );
+        yield* store.remove(thread);
+      }),
+  );
+
+  it.effect("rejects a macOS volume identity on other hosts without rewriting it", (context) =>
+    Effect.gen(function* () {
+      if (process.platform === "darwin") return context.skip("non-macOS admission policy");
+      const sql = yield* SqlClient.SqlClient;
+      const thread = ThreadId.make("foreign-host-volume");
+      yield* createThread(thread);
+      const store = yield* makeStandaloneWorkspaceStore;
+      const cwd = yield* store.resolve(thread);
+      const raw = String((yield* Effect.promise(() => fs.lstat(cwd, { bigint: true }))).dev);
+      yield* sql`UPDATE standalone_workspace_root_identity SET directory_device = ${filesystemObservation.volumeUuid}`;
+      assert.equal((yield* Effect.result(store.resolve(thread)))._tag, "Failure");
+      assert.deepEqual(
+        yield* sql`SELECT directory_device FROM standalone_workspace_root_identity`,
+        [{ directory_device: filesystemObservation.volumeUuid }],
+      );
+      yield* sql`UPDATE standalone_workspace_root_identity SET directory_device = ${raw}`;
+      yield* store.remove(thread);
+    }),
+  );
+
+  it.effect("retains macOS volume ownership across mount-device renumbering", (context) =>
+    Effect.gen(function* () {
+      if (process.platform !== "darwin")
+        return context.skip("macOS durable volume identity policy");
+      const thread = ThreadId.make("remounted-volume");
+      yield* createThread(thread);
+      const store = yield* makeStandaloneWorkspaceStore;
+      const cwd = yield* store.resolve(thread);
+      yield* Effect.gen(function* () {
+        filesystemObservation.deviceDelta = 31n;
+        const restarted = yield* makeStandaloneWorkspaceStore;
+        assert.equal(yield* restarted.resolve(thread), cwd);
+        yield* restarted.remove(thread);
+      }).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            filesystemObservation.deviceDelta = 0n;
+          }),
+        ),
+      );
+    }),
+  );
+
+  it.effect(
+    "rejects another macOS volume with the same inode without changing permissions",
+    (context) =>
+      Effect.gen(function* () {
+        if (process.platform !== "darwin")
+          return context.skip("macOS durable volume identity policy");
+        const thread = ThreadId.make("foreign-volume");
+        yield* createThread(thread);
+        const store = yield* makeStandaloneWorkspaceStore;
+        const cwd = yield* store.resolve(thread);
+        const root = path.dirname(cwd);
+        yield* Effect.promise(() => fs.chmod(root, 0o755));
+        const saved = filesystemObservation.volumeUuid;
+        yield* Effect.gen(function* () {
+          filesystemObservation.volumeUuid = "darwin-volume:99999999-2222-4333-8444-555555555555";
+          assert.equal((yield* Effect.result(store.resolve(thread)))._tag, "Failure");
+          assert.equal((yield* Effect.result(store.remove(thread)))._tag, "Failure");
+          assert.equal((yield* Effect.promise(() => fs.lstat(root))).mode & 0o777, 0o755);
+        }).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              filesystemObservation.volumeUuid = saved;
+            }),
+          ),
+        );
+        yield* store.remove(thread);
+      }),
+  );
+
+  it.effect(
+    "upgrades exact legacy macOS root and fork ownership together, never mismatched legacy mounts",
+    (context) =>
+      Effect.gen(function* () {
+        if (process.platform !== "darwin")
+          return context.skip("macOS durable volume identity policy");
+        const sql = yield* SqlClient.SqlClient;
+        const thread = ThreadId.make("legacy-volume");
+        const fork = ThreadId.make("legacy-volume-fork");
+        yield* createThread(thread);
+        const store = yield* makeStandaloneWorkspaceStore;
+        const cwd = yield* store.resolve(thread);
+        yield* store.shareFork(thread, fork, CommandId.make("legacy-fork"));
+        yield* createThread(fork);
+        const raw = String((yield* Effect.promise(() => fs.lstat(cwd, { bigint: true }))).dev);
+        yield* sql`UPDATE standalone_workspace_root_identity SET directory_device = ${raw}`;
+        yield* sql`UPDATE standalone_thread_workspaces SET directory_device = ${raw} WHERE thread_id IN (${thread}, ${fork})`;
+        yield* Effect.gen(function* () {
+          filesystemObservation.deviceDelta = 31n;
+          assert.equal((yield* Effect.result(store.resolve(thread)))._tag, "Failure");
+          assert.deepEqual(
+            yield* sql`SELECT directory_device FROM standalone_workspace_root_identity`,
+            [{ directory_device: raw }],
+          );
+          assert.deepEqual(
+            yield* sql`SELECT directory_device FROM standalone_thread_workspaces WHERE thread_id IN (${thread}, ${fork})`,
+            [{ directory_device: raw }, { directory_device: raw }],
+          );
+        }).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              filesystemObservation.deviceDelta = 0n;
+            }),
+          ),
+        );
+        assert.equal(yield* store.resolve(thread), cwd);
+        assert.deepEqual(
+          yield* sql`SELECT directory_device FROM standalone_thread_workspaces WHERE thread_id IN (${thread}, ${fork})`,
+          [
+            { directory_device: filesystemObservation.volumeUuid },
+            { directory_device: filesystemObservation.volumeUuid },
+          ],
+        );
+        filesystemObservation.deviceDelta = 31n;
+        yield* Effect.gen(function* () {
+          assert.equal(yield* store.resolve(fork), cwd);
+          yield* store.remove(thread);
+          yield* store.remove(fork);
+        }).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              filesystemObservation.deviceDelta = 0n;
+            }),
+          ),
+        );
+      }),
+  );
+
   it.effect("rejects a symlinked cwd while preserving its target and permissions", (context) =>
     Effect.gen(function* () {
       const config = yield* ServerConfig;
