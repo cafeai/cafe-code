@@ -1005,6 +1005,22 @@ export const ThreadTurnRuntimeRecovery = Schema.Struct({
 });
 export type ThreadTurnRuntimeRecovery = typeof ThreadTurnRuntimeRecovery.Type;
 
+/**
+ * Durable, server-only authority for one scheduled occurrence. Expected chat
+ * settings fence a concurrent user edit separately from the optional model
+ * selected for this run. This is deliberately absent from the client command
+ * schema: a renderer cannot turn an ordinary submission into unattended work.
+ */
+export const ThreadTurnScheduledFollowUp = Schema.Struct({
+  scheduleId: TrimmedNonEmptyString,
+  runId: TrimmedNonEmptyString,
+  revision: PositiveInt,
+  expectedModelSelection: ModelSelection,
+  expectedRuntimeMode: RuntimeMode,
+  expectedInteractionMode: ProviderInteractionMode,
+});
+export type ThreadTurnScheduledFollowUp = typeof ThreadTurnScheduledFollowUp.Type;
+
 export const ThreadTurnStartCommand = Schema.Struct({
   type: Schema.Literal("thread.turn.start"),
   commandId: CommandId,
@@ -1025,6 +1041,7 @@ export const ThreadTurnStartCommand = Schema.Struct({
   bootstrap: Schema.optional(ThreadTurnStartBootstrap),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
   runtimeRecovery: Schema.optional(ThreadTurnRuntimeRecovery),
+  scheduledFollowUp: Schema.optional(ThreadTurnScheduledFollowUp),
   createdAt: IsoDateTime,
 });
 
@@ -1583,6 +1600,7 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
   ),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
   runtimeRecovery: Schema.optional(ThreadTurnRuntimeRecovery),
+  scheduledFollowUp: Schema.optional(ThreadTurnScheduledFollowUp),
   terminalSteerRecovery: Schema.optional(
     Schema.Struct({
       staleTurnId: TurnId,

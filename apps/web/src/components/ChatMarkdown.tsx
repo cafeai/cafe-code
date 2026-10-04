@@ -19,6 +19,7 @@ import React, {
 } from "react";
 import type { Components, ExtraProps } from "react-markdown";
 import ReactMarkdown from "react-markdown";
+import { stripScheduledFollowupResultForDisplay } from "@cafecode/shared/scheduledFollowupResult";
 import { defaultUrlTransform } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
@@ -715,7 +716,10 @@ function ChatMarkdown({
     [diffThemeName, resolvedTheme, isStreaming, skills],
   );
   const normalizedText = useMemo(() => {
-    return normalizeAroundMermaidFences(text, (source) => {
+    // The optional final result footer is scheduler metadata, not transcript
+    // prose. Strip only a fully validated marker from this derived rendering;
+    // canonical message bytes remain available for exact-run reconciliation.
+    return normalizeAroundMermaidFences(stripScheduledFollowupResultForDisplay(text), (source) => {
       const citationNormalizedText = normalizeCodexCitations
         ? normalizeCodexCitationMarkers(source, { mode: "display" })
         : source;

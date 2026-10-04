@@ -16,7 +16,13 @@ export default mergeConfig(
       // Vitest 5 no longer brings Vite as its own dependency. Prebundle all
       // React entrypoints before assertions begin;
       // discovering react-dom/client later reloads the iframe mid-test.
-      include: ["react", "react-dom/client", "react/jsx-runtime", "react/jsx-dev-runtime"],
+      include: [
+        "react",
+        "react-dom/client",
+        "react/jsx-runtime",
+        "react/jsx-dev-runtime",
+        "effect/Cron",
+      ],
     },
     resolve: {
       alias: {

@@ -2,11 +2,14 @@ import { useEffect, useRef } from "react";
 import { useParams, useRouter } from "@tanstack/react-router";
 import { useShallow } from "zustand/react/shallow";
 import { scopedThreadKey, scopeThreadRef } from "@cafecode/client-runtime";
+import type { TurnId } from "@cafecode/contracts";
 
 import { selectSidebarThreadsAcrossEnvironments, useStore } from "../store";
 import { isElectron } from "../env";
 import { useSettings } from "../hooks/useSettings";
 import { buildThreadRouteParams, resolveThreadRouteTarget } from "../threadRoutes";
+import { readEnvironmentApi } from "../environmentApi";
+import { shouldNotifyScheduledTurn } from "../lib/scheduledNotification";
 
 /**
  * Desktop-app counterpart of Web Push: the Electron renderer keeps its
@@ -29,15 +32,34 @@ export function DesktopNotificationWatcher() {
   activeThreadKeyRef.current = activeThreadKey;
   const notificationsEnabledRef = useRef(settings.notificationsEnabled);
   notificationsEnabledRef.current = settings.notificationsEnabled;
-  const runningByKeyRef = useRef<Map<string, boolean> | null>(null);
+  const runningByKeyRef = useRef<Map<string, { running: boolean; turnId: TurnId | null }> | null>(
+    null,
+  );
+  const pendingByKeyRef = useRef(new Map<string, symbol>());
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    const pending = pendingByKeyRef.current;
+    return () => {
+      mountedRef.current = false;
+      pending.clear();
+    };
+  }, []);
 
   useEffect(() => {
     if (!isElectron) return;
     const previous = runningByKeyRef.current;
-    const next = new Map<string, boolean>();
+    const next = new Map<string, { running: boolean; turnId: TurnId | null }>();
     for (const thread of threads) {
       const key = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
-      next.set(key, thread.session?.status === "running" && thread.session.activeTurnId != null);
+      const running = thread.session?.status === "running" && thread.session.activeTurnId != null;
+      next.set(key, { running, turnId: thread.session?.activeTurnId ?? null });
+      // A later turn supersedes any delayed decision for the preceding one.
+      if (running) pendingByKeyRef.current.delete(key);
+    }
+    for (const key of pendingByKeyRef.current.keys()) {
+      if (!next.has(key)) pendingByKeyRef.current.delete(key);
     }
     runningByKeyRef.current = next;
     // First sync after load: seed the baseline without notifying.
@@ -47,20 +69,35 @@ export function DesktopNotificationWatcher() {
 
     for (const thread of threads) {
       const key = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
-      if (previous.get(key) !== true || next.get(key) !== false) continue;
+      const previousTurn = previous.get(key);
+      if (previousTurn?.running !== true || next.get(key)?.running !== false) continue;
       // Watching the thread with the window focused — nothing to announce.
       if (key === activeThreadKeyRef.current && document.hasFocus()) continue;
 
       const threadRef = scopeThreadRef(thread.environmentId, thread.id);
-      const notification = new Notification(thread.title, {
-        body: "Finished running",
-        tag: `cafe-code-thread-${thread.id}`,
-      });
-      notification.addEventListener("click", () => {
-        window.focus();
-        void router.navigate({
-          to: "/$environmentId/$threadId",
-          params: buildThreadRouteParams(threadRef),
+      const candidate = Symbol("completion notification");
+      pendingByKeyRef.current.set(key, candidate);
+      // Capture the exact formerly running turn before this asynchronous read.
+      // The current shell may already refer to another turn when it resolves.
+      void shouldNotifyScheduledTurn(
+        readEnvironmentApi(thread.environmentId),
+        thread.id,
+        previousTurn.turnId,
+      ).then((notify) => {
+        if (!mountedRef.current || pendingByKeyRef.current.get(key) !== candidate) return;
+        pendingByKeyRef.current.delete(key);
+        if (!notify || !notificationsEnabledRef.current) return;
+        if (key === activeThreadKeyRef.current && document.hasFocus()) return;
+        const notification = new Notification(thread.title, {
+          body: "Finished running",
+          tag: `cafe-code-thread-${thread.environmentId}-${thread.id}`,
+        });
+        notification.addEventListener("click", () => {
+          window.focus();
+          void router.navigate({
+            to: "/$environmentId/$threadId",
+            params: buildThreadRouteParams(threadRef),
+          });
         });
       });
     }

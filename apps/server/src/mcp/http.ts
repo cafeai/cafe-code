@@ -12,6 +12,7 @@ import { ServerRuntimeStartup } from "../serverRuntimeStartup.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { WorkspacePaths } from "../workspace/Services/WorkspacePaths.ts";
 import { makeCafeMcpServer } from "./CafeMcpServer.ts";
+import { ScheduledFollowups } from "../scheduledFollowups/service.ts";
 
 // Cafe management only. Desktop Control must use a separate endpoint and
 // session credential, so this owner credential/toggle cannot grant desktop input.
@@ -47,6 +48,7 @@ export const cafeMcpRouteLayer = HttpRouter.add(
     }
     const startup = yield* ServerRuntimeStartup;
     const workspacePaths = yield* WorkspacePaths;
+    const scheduledFollowups = yield* ScheduledFollowups;
     const webRequest = yield* HttpServerRequest.toWeb(request);
 
     const webResponse = yield* Effect.tryPromise({
@@ -65,6 +67,7 @@ export const cafeMcpRouteLayer = HttpRouter.add(
           serverSettings,
           startup,
           workspacePaths,
+          scheduledFollowups,
         });
         try {
           await mcpServer.connect(transport);

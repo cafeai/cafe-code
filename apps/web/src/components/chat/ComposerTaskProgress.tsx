@@ -7,6 +7,7 @@ import { Button } from "../ui/button";
 import { Popover, PopoverPopup, PopoverTitle, PopoverTrigger } from "../ui/popover";
 import { SessionPlacementButton } from "./SessionRail";
 import { TaskProgressDetails } from "./TaskProgressDetails";
+import { ScheduledFollowups, type ScheduledFollowupsContext } from "./ScheduledFollowups";
 import {
   deriveTaskProgressPresentation,
   type ComposerTaskProgressPlan,
@@ -34,6 +35,7 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
     | undefined;
   readonly sessionRailVisible?: boolean;
   readonly onShowOnSide?: () => void;
+  readonly scheduledFollowups?: ScheduledFollowupsContext | undefined;
 }) {
   const { plan } = props;
   const [open, setOpen] = useState(false);
@@ -45,7 +47,8 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
   );
   const hasPlan = Boolean(plan && plan.steps.length > 0);
   const hasSubagents = subagents.length > 0;
-  if (props.sessionRailVisible || (!hasPlan && !hasSubagents)) return null;
+  if (props.sessionRailVisible || (!hasPlan && !hasSubagents && !props.scheduledFollowups))
+    return null;
 
   const handleOpenChange = (nextOpen: boolean, details: { readonly reason: string }) => {
     if (details.reason === "trigger-press") {
@@ -80,7 +83,9 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
   const completionPercentage = total > 0 ? (completedCount / total) * 100 : 0;
   const liveLabel = hasPlan
     ? `Task progress: step ${currentIndex} of ${total}${hasSubagents ? `, ${subagents.length} active ${subagents.length === 1 ? "subagent" : "subagents"}` : ""}`
-    : `${subagents.length} active ${subagents.length === 1 ? "subagent" : "subagents"}`;
+    : hasSubagents
+      ? `${subagents.length} active ${subagents.length === 1 ? "subagent" : "subagents"}`
+      : "Tasks and scheduled follow-ups";
 
   const triggerContent = (
     <>
@@ -121,6 +126,7 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
         {hasPlan ? `Step ${currentIndex} / ${total}` : null}
         {hasPlan && hasSubagents ? " · " : null}
         {hasSubagents ? `${subagents.length} ${subagents.length === 1 ? "agent" : "agents"}` : null}
+        {!hasPlan && !hasSubagents ? "Tasks" : null}
       </span>
     </>
   );
@@ -214,6 +220,12 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
                 props.onOpenSubagentDetail?.(selectedEntry, triggerRef.current ?? rowTrigger);
               }}
             />
+            {open && props.scheduledFollowups ? (
+              <ScheduledFollowups
+                key={`${props.scheduledFollowups.environmentId}:${props.scheduledFollowups.threadId}:${props.scheduledFollowups.modelSelection.instanceId}`}
+                context={props.scheduledFollowups}
+              />
+            ) : null}
           </div>
         </div>
       </PopoverPopup>

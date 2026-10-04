@@ -13,6 +13,26 @@ afterEach(() => {
 });
 
 describe("numeric Markdown whitespace", () => {
+  it("hides only the bounded final scheduled-result footer without mutating message bytes", async () => {
+    const footer =
+      '<!-- cafe-scheduled-followup: {"runId":"22222222-2222-4222-8222-222222222222","result":"no-change","summary":"Nothing changed.","finish":false} -->';
+    const text = `The build is still running.\n\n${footer}`;
+    const screen = await render(<ChatMarkdown text={text} cwd={undefined} />);
+    try {
+      expect(document.querySelector(".chat-markdown")?.textContent).toBe(
+        "The build is still running.",
+      );
+      expect(text).toContain(footer);
+      const malformed = "The build is still running.\n\n<!-- cafe-scheduled-followup: not-json -->";
+      await screen.rerender(<ChatMarkdown text={malformed} cwd={undefined} />);
+      expect(document.querySelector(".chat-markdown")?.textContent).toContain(
+        "cafe-scheduled-followup: not-json",
+      );
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("preserves numeric boundaries throughout streamed rerenders, including inline code and links", async () => {
     const deltas = [
       "record",

@@ -528,6 +528,28 @@ export interface LocalApi {
  * `environmentId` rather than reaching through the local desktop bridge.
  */
 export interface EnvironmentApi {
+  /** Absent on older backends; never emulate a scheduler in the renderer. */
+  scheduledFollowups?: {
+    list: (
+      input: import("./scheduledFollowups.ts").ScheduledFollowupListInput,
+    ) => Promise<import("./scheduledFollowups.ts").ScheduledFollowupListResult>;
+    save: (
+      input: import("./scheduledFollowups.ts").ScheduledFollowupSaveInput,
+    ) => Promise<import("./scheduledFollowups.ts").ScheduledFollowupRecord>;
+    setStatus: (
+      input: import("./scheduledFollowups.ts").ScheduledFollowupSetStatusInput,
+    ) => Promise<import("./scheduledFollowups.ts").ScheduledFollowupRecord>;
+    runNow: (
+      input: import("./scheduledFollowups.ts").ScheduledFollowupRunNowInput,
+    ) => Promise<import("./scheduledFollowups.ts").ScheduledFollowupRun>;
+    history: (
+      input: import("./scheduledFollowups.ts").ScheduledFollowupHistoryInput,
+    ) => Promise<import("./scheduledFollowups.ts").ScheduledFollowupHistoryResult>;
+    notification: (input: {
+      threadId: import("./baseSchemas.ts").ThreadId;
+      turnId: import("./baseSchemas.ts").TurnId | null;
+    }) => Promise<{ notify: boolean }>;
+  };
   /** Private live callback transport. Optional only for older environment clients. */
   providerInteractions?: {
     respond: (input: ProviderRespondToInteractionInput) => Promise<void>;

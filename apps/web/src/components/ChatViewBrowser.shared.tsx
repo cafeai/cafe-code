@@ -1184,6 +1184,9 @@ function resolveWsRpc(body: NormalizedWsRpcRequestBody): unknown {
   if (tag === WS_METHODS.serverGetConfig) {
     return encodeServerConfig(fixture.serverConfig);
   }
+  if (tag === WS_METHODS.scheduledFollowupsList) {
+    return { schedules: [], backendOnline: true };
+  }
   if (tag === WS_METHODS.dictationGetStatus) {
     return { configured: false, canManage: true };
   }
@@ -2639,7 +2642,10 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         await page.getByRole("button", { name: "Show in composer" }).click();
         await vi.waitFor(() => {
           expect(findSessionRail()).toBeNull();
-          expect(findComposerTaskProgressTrigger()).toBeNull();
+          expect(findComposerTaskProgressTrigger()?.getAttribute("aria-label")).toBe(
+            "Tasks and scheduled follow-ups. Show task list",
+          );
+          expect(findComposerTaskProgressTrigger()?.textContent).not.toContain("agent");
         });
       } finally {
         await mounted.cleanup();
@@ -2709,7 +2715,10 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         await page.getByRole("button", { name: "Show in composer" }).click();
         await vi.waitFor(() => {
           expect(findSessionRail()).toBeNull();
-          expect(findComposerTaskProgressTrigger()).toBeNull();
+          expect(findComposerTaskProgressTrigger()?.getAttribute("aria-label")).toBe(
+            "Tasks and scheduled follow-ups. Show task list",
+          );
+          expect(findComposerTaskProgressTrigger()?.textContent).not.toContain("agent");
         });
 
         useTaskAtriumStore.getState().setOpen(true);
@@ -2799,21 +2808,26 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
     it.each([
       ["the latest provider checklist is explicitly empty", { steps: [] }],
       ["the latest turn is terminal", { terminal: true }],
-    ] as const)("hides task progress when %s", async (_reason, options) => {
-      const mounted = await mountChatView({
-        viewport: DEFAULT_VIEWPORT,
-        snapshot: createSnapshotWithRuntimeTaskProgress(options),
-      });
+    ] as const)(
+      "retains scheduling without stale task progress when %s",
+      async (_reason, options) => {
+        const mounted = await mountChatView({
+          viewport: DEFAULT_VIEWPORT,
+          snapshot: createSnapshotWithRuntimeTaskProgress(options),
+        });
 
-      try {
-        await waitForLayout();
-        expect(findComposerTaskProgressTrigger()).toBeNull();
-        expect(findComposerTaskProgressPopup()).toBeNull();
-        expect(document.querySelector('button[aria-label^="Task progress: step"]')).toBeNull();
-      } finally {
-        await mounted.cleanup();
-      }
-    });
+        try {
+          await waitForLayout();
+          expect(findComposerTaskProgressTrigger()?.getAttribute("aria-label")).toBe(
+            "Tasks and scheduled follow-ups. Show task list",
+          );
+          expect(findComposerTaskProgressPopup()).toBeNull();
+          expect(document.querySelector('button[aria-label^="Task progress: step"]')).toBeNull();
+        } finally {
+          await mounted.cleanup();
+        }
+      },
+    );
 
     it("temporarily hides an authored plan during implementation without persisting a closed preference", async () => {
       useUiStateStore.setState({
@@ -2916,7 +2930,9 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
               document.querySelector('button[aria-label="Close plan sidebar"]'),
             ).not.toBeNull();
             expect(document.body.textContent).toContain("Future authored plan");
-            expect(findComposerTaskProgressTrigger()).toBeNull();
+            expect(findComposerTaskProgressTrigger()?.getAttribute("aria-label")).toBe(
+              "Tasks and scheduled follow-ups. Show task list",
+            );
             expect(useUiStateStore.getState().threadPlanSidebarOpenById[THREAD_KEY]).toBe(true);
           },
           { timeout: 8_000, interval: 16 },

@@ -10,7 +10,8 @@
  *
  * @module WebPushNotifications
  */
-import { ThreadId } from "@cafecode/contracts";
+import { ThreadId, TurnId } from "@cafecode/contracts";
+import { ScheduledFollowups } from "../scheduledFollowups/service.ts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
@@ -131,6 +132,7 @@ function deliveryStatusCode(cause: unknown): number | null {
 const make = Effect.gen(function* () {
   const config = yield* ServerConfig;
   const providerService = yield* ProviderService;
+  const scheduledFollowups = yield* ScheduledFollowups;
   const snapshotQuery = yield* ProjectionSnapshotQuery;
   const serverEnvironment = yield* ServerEnvironment;
   const fs = yield* FileSystem.FileSystem;
@@ -323,17 +325,26 @@ const make = Effect.gen(function* () {
         if (event.type !== "turn.completed") {
           return Effect.void;
         }
-        return notifyTurnCompleted(ThreadId.make(String(event.threadId))).pipe(
-          Effect.catchCause((cause) => {
-            if (Cause.hasInterruptsOnly(cause)) {
-              return Effect.failCause(cause);
-            }
-            return Effect.logWarning("web push reactor failed to process turn completion", {
-              threadId: event.threadId,
-              cause: Cause.pretty(cause),
-            });
-          }),
-        );
+        return scheduledFollowups
+          .notification(
+            ThreadId.make(String(event.threadId)),
+            event.turnId ? TurnId.make(String(event.turnId)) : null,
+          )
+          .pipe(
+            Effect.catch(() => Effect.succeed({ notify: true })),
+            Effect.flatMap(({ notify }) =>
+              notify ? notifyTurnCompleted(ThreadId.make(String(event.threadId))) : Effect.void,
+            ),
+            Effect.catchCause((cause) => {
+              if (Cause.hasInterruptsOnly(cause)) {
+                return Effect.failCause(cause);
+              }
+              return Effect.logWarning("web push reactor failed to process turn completion", {
+                threadId: event.threadId,
+                cause: Cause.pretty(cause),
+              });
+            }),
+          );
       }),
     );
   });

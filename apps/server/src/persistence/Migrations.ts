@@ -11,6 +11,7 @@
 import * as Migrator from "effect/unstable/sql/Migrator";
 import * as Layer from "effect/Layer";
 import * as Effect from "effect/Effect";
+import Migration0084 from "./Migrations/084_ScheduledFollowups.ts";
 import * as Schedule from "effect/Schedule";
 
 import { isSqliteLockTimeoutError } from "./sqliteLockRetry.ts";
@@ -197,6 +198,7 @@ export const migrationEntries = [
   [81, "ThreadSubagentLimits", Migration0081],
   [82, "SubagentLifecycleRetention", Migration0082],
   [83, "SubagentRuntimeGeneration", Migration0083],
+  [84, "ScheduledFollowups", Migration0084],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

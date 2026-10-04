@@ -1494,6 +1494,36 @@ describe("incremental orchestration updates", () => {
     });
   });
 
+  it("does not replace interactive model settings with a scheduled-run override", () => {
+    const thread = makeThread();
+    const next = applyOrchestrationEvent(
+      makeState(thread),
+      makeEvent("thread.turn-start-requested", {
+        threadId: thread.id,
+        messageId: MessageId.make("scheduled-message"),
+        modelSelection: {
+          instanceId: thread.modelSelection.instanceId,
+          model: "gpt-6.1-sol",
+          options: [{ id: "reasoningEffort", value: "medium" }],
+        },
+        runtimeMode: thread.runtimeMode,
+        interactionMode: thread.interactionMode,
+        scheduledFollowUp: {
+          scheduleId: "schedule-1",
+          runId: "run-1",
+          revision: 1,
+          expectedModelSelection: thread.modelSelection,
+          expectedRuntimeMode: thread.runtimeMode,
+          expectedInteractionMode: thread.interactionMode,
+        },
+        createdAt: "2026-02-27T00:00:00.000Z",
+      }),
+      localEnvironmentId,
+    );
+    expect(threadsOf(next)[0]?.modelSelection).toEqual(thread.modelSelection);
+    expect(threadsOf(next)[0]?.session?.orchestrationStatus).toBe("starting");
+  });
+
   it("does not regress latestTurn when an older turn diff completes late", () => {
     const state = makeState(
       makeThread({

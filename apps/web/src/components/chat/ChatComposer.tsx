@@ -1,4 +1,5 @@
 import { DesktopPicker } from "../virtualDesktop/VirtualDesktops";
+import type { ScheduledFollowupsContext } from "./ScheduledFollowups";
 import { resolveComposerThreadId } from "~/composerDraftStore";
 import type {
   ApprovalRequestId,
@@ -799,6 +800,7 @@ export interface ChatComposerProps extends ComposerInteractionCallbacks {
   sessionRailVisible?: boolean;
   onShowSessionRail?: () => void;
   goalControlsSupported: boolean;
+  scheduledFollowups?: ScheduledFollowupsContext | undefined;
 
   // Mode
   runtimeMode: RuntimeMode;
@@ -915,6 +917,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     planSidebarOpen,
     sessionRailVisible = false,
     onShowSessionRail,
+    scheduledFollowups,
     goalControlsSupported,
     runtimeMode,
     interactionMode,
@@ -3571,6 +3574,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   className="absolute bottom-0 right-0 flex items-center justify-end gap-1.5"
                 >
                   <ComposerTaskProgress
+                    scheduledFollowups={scheduledFollowups}
                     plan={activePlan}
                     subagents={activeSubagents}
                     onOpenSubagentDetail={onOpenSubagentDetail}
@@ -3622,6 +3626,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             !showCollapsedMobilePromptRow) ? null : activePendingApproval ? (
             <div className="flex min-w-0 items-center justify-end gap-2 px-2.5 pb-2.5 sm:px-3 sm:pb-3">
               <ComposerTaskProgress
+                scheduledFollowups={scheduledFollowups}
                 plan={activePlan}
                 subagents={activeSubagents}
                 onOpenSubagentDetail={onOpenSubagentDetail}
@@ -3754,6 +3759,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   controls so the status remains legible on narrow screens. The
                   popover itself is portaled and cannot be clipped by the footer. */}
               <ComposerTaskProgress
+                scheduledFollowups={scheduledFollowups}
                 plan={activePlan}
                 subagents={activeSubagents}
                 onOpenSubagentDetail={onOpenSubagentDetail}

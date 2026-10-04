@@ -24,6 +24,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ResolvedKeybindingRule,
+  ScheduledFollowupId,
   ThreadId,
   TurnId,
   WS_METHODS,
@@ -66,6 +67,7 @@ const TEST_EPOCH = DateTime.makeUnsafe("1970-01-01T00:00:00.000Z");
 import type { ServerConfigShape } from "./config.ts";
 import { deriveServerPaths, ServerConfig } from "./config.ts";
 import { makeRoutesLayer } from "./server.ts";
+import { ScheduledFollowups, type ScheduledFollowupsShape } from "./scheduledFollowups/service.ts";
 import { WebPushNotificationsTest } from "./notifications/WebPushNotifications.ts";
 import * as NodeHttpServerCompression from "./nodeHttpServerCompression.ts";
 import { resolveAttachmentRelativePath } from "./attachmentPaths.ts";
@@ -475,6 +477,7 @@ const buildAppUnderTest = (options?: {
     serverEnvironment?: Partial<ServerEnvironmentShape>;
     repositoryIdentityResolver?: Partial<RepositoryIdentityResolverShape>;
     usageStats?: Partial<UsageStatsServiceShape>;
+    scheduledFollowups?: Partial<ScheduledFollowupsShape>;
   };
 }) =>
   Effect.gen(function* () {
@@ -723,6 +726,11 @@ const buildAppUnderTest = (options?: {
             updateSettings: () => Effect.succeed(DEFAULT_CLIENT_SETTINGS),
             streamChanges: Stream.empty,
             ...options?.layers?.clientSettings,
+          }),
+          Layer.mock(ScheduledFollowups)({
+            list: () => Effect.succeed({ schedules: [], backendOnline: true as const }),
+            notification: () => Effect.succeed({ notify: true }),
+            ...options?.layers?.scheduledFollowups,
           }),
           Layer.mock(UsageStatsService)({
             recordAccounting: () => Effect.void,
@@ -2778,6 +2786,89 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         ),
       );
     }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
+  );
+
+  it.effect(
+    "rejects scheduled execution mutations from a paired non-owner before service access",
+    () =>
+      Effect.gen(function* () {
+        let mutations = 0;
+        yield* buildAppUnderTest({
+          layers: {
+            scheduledFollowups: {
+              save: () =>
+                Effect.sync(() => {
+                  mutations++;
+                  throw new Error("must not reach mutation");
+                }),
+              setStatus: () =>
+                Effect.sync(() => {
+                  mutations++;
+                  throw new Error("must not reach mutation");
+                }),
+              runNow: () =>
+                Effect.sync(() => {
+                  mutations++;
+                  throw new Error("must not reach mutation");
+                }),
+            },
+          },
+        });
+        const pairing = yield* HttpClient.post("/api/auth/pairing-token", {
+          headers: { cookie: yield* getAuthenticatedSessionCookieHeader() },
+        });
+        const { credential } = (yield* pairing.json) as { credential: string };
+        const wsUrl = appendSessionCookieToWsUrl(
+          yield* getWsServerUrl("/ws", { authenticated: false }),
+          yield* getAuthenticatedSessionCookieHeader(credential),
+        );
+        yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            Effect.gen(function* () {
+              const threadId = ThreadId.make("scheduled-chat");
+              const id = ScheduledFollowupId.make("be14727c-10a8-4f44-aa16-44f2b1cd4dbe");
+              const draft = {
+                threadId,
+                name: "Check build",
+                prompt: "Check for changes",
+                recurrence: {
+                  kind: "interval" as const,
+                  anchorAt: "2026-10-04T12:00:00.000Z",
+                  everyMinutes: 5,
+                  timeZone: "Asia/Tokyo",
+                },
+                modelSelection: null,
+                notificationPolicy: "changes-and-errors" as const,
+                endAt: null,
+                maxRuns: null,
+                allowAutoFinish: false,
+              };
+              for (const action of [
+                client[WS_METHODS.scheduledFollowupsSave](draft).pipe(Effect.asVoid),
+                client[WS_METHODS.scheduledFollowupsSetStatus]({
+                  threadId,
+                  id,
+                  expectedRevision: 1,
+                  state: "active",
+                }).pipe(Effect.asVoid),
+                client[WS_METHODS.scheduledFollowupsRunNow]({
+                  threadId,
+                  id,
+                  expectedRevision: 1,
+                }).pipe(Effect.asVoid),
+              ]) {
+                const error = yield* Effect.flip(Effect.asVoid(action));
+                assert.include(error.message, "owner");
+              }
+              assert.deepEqual(yield* client[WS_METHODS.scheduledFollowupsList]({ threadId }), {
+                schedules: [],
+                backendOnline: true,
+              });
+            }),
+          ),
+        );
+        assert.equal(mutations, 0);
+      }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
   );
 
   it.effect("rejects MCP installation and toggling from a paired non-owner", () =>

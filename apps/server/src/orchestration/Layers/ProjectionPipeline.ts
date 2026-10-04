@@ -1082,7 +1082,8 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           }
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
-            ...(event.payload.modelSelection !== undefined
+            ...(event.payload.modelSelection !== undefined &&
+            event.payload.scheduledFollowUp === undefined
               ? { modelSelection: event.payload.modelSelection }
               : {}),
             ...(event.payload.subagentLimits !== undefined

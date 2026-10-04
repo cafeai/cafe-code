@@ -55,6 +55,7 @@ import {
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { ServerConfig } from "../../config.ts";
 import { makeRuntimeRecoveryBarrierReader } from "../providerRuntimeRecovery.ts";
+import { seedScheduledFollowUp } from "../scheduledFollowUp.testSupport.ts";
 import {
   isSupersededSessionLifecycle,
   SESSION_LIFECYCLE_SUPERSEDED,
@@ -130,6 +131,225 @@ async function createPersistentOrchestrationSystem(dbPath: string, baseDir: stri
 function now() {
   return "2026-01-01T00:00:00.000Z";
 }
+
+describe("OrchestrationEngine scheduled admission transaction", () => {
+  const threadId = ThreadId.make("scheduled-engine-thread");
+  const modelSelection = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-6-astra" };
+
+  async function createScheduledSystem() {
+    const system = await createOrchestrationSystem();
+    await system.run(
+      system.engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("scheduled-create"),
+        threadId,
+        projectId: null,
+        title: "Scheduled fixture",
+        modelSelection,
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdAt: now(),
+      }),
+    );
+    const command = await system.run(
+      seedScheduledFollowUp(system.sql, { threadId, modelSelection }),
+    );
+    return { ...system, command };
+  }
+
+  it("commits a claim, exact intent and receipt together and deduplicates receipt retries", async () => {
+    const system = await createScheduledSystem();
+    try {
+      const receipt = await system.run(system.engine.dispatch(system.command));
+      expect(await system.run(system.engine.dispatch(system.command))).toEqual(receipt);
+      const rows = await system.run(system.sql<{ state: string; intent_sequence: number }>`
+        SELECT state, intent_sequence FROM scheduled_followup_runs
+        WHERE id = ${system.command.scheduledFollowUp!.runId}`);
+      expect(rows).toEqual([{ state: "dispatching", intent_sequence: receipt.sequence }]);
+      const [count] = await system.run(system.sql<{ n: number }>`
+        SELECT COUNT(*) AS n FROM orchestration_events WHERE command_id = ${system.command.commandId}`);
+      expect(count?.n).toBe(2);
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it.each(["paused", "revision", "run identity", "account"] as const)(
+    "rejects %s with no message or event and no consumed occurrence",
+    async (variant) => {
+      const system = await createScheduledSystem();
+      try {
+        const guard = system.command.scheduledFollowUp!;
+        if (variant === "paused")
+          await system.run(
+            system.sql`UPDATE scheduled_followups SET state = 'paused' WHERE id = ${guard.scheduleId}`,
+          );
+        if (variant === "revision")
+          await system.run(
+            system.sql`UPDATE scheduled_followups SET revision = 2 WHERE id = ${guard.scheduleId}`,
+          );
+        if (variant === "account")
+          await system.run(
+            system.sql`UPDATE scheduled_followups SET authorized_instance_id = 'other' WHERE id = ${guard.scheduleId}`,
+          );
+        const command =
+          variant === "run identity"
+            ? { ...system.command, scheduledFollowUp: { ...guard, runId: crypto.randomUUID() } }
+            : system.command;
+        await expect(system.run(system.engine.dispatch(command))).rejects.toThrow(
+          "Scheduled follow-up authorization no longer matches this chat.",
+        );
+        const [run] = await system.run(
+          system.sql<{
+            state: string;
+          }>`SELECT state FROM scheduled_followup_runs WHERE id = ${guard.runId}`,
+        );
+        expect(run?.state).toBe("waiting");
+        expect((await system.readModel()).threads[0]?.messages).toHaveLength(0);
+      } finally {
+        await system.dispose();
+      }
+    },
+  );
+
+  it("rolls back the conditional claim when newer interactive work wins the engine queue", async () => {
+    const system = await createScheduledSystem();
+    try {
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("interactive-wins"),
+          threadId,
+          message: {
+            messageId: asMessageId("interactive-wins"),
+            role: "user",
+            text: "User work",
+            attachments: [],
+          },
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          createdAt: now(),
+        }),
+      );
+      await expect(system.run(system.engine.dispatch(system.command))).rejects.toThrow(
+        "Scheduled follow-up is waiting for an idle chat.",
+      );
+      const [run] = await system.run(system.sql<{ state: string; intent_sequence: number | null }>`
+        SELECT state, intent_sequence FROM scheduled_followup_runs WHERE id = ${system.command.scheduledFollowUp!.runId}`);
+      expect(run).toEqual({ state: "waiting", intent_sequence: null });
+      const messages = (await system.readModel()).threads[0]?.messages;
+      expect(messages).toHaveLength(1);
+      expect(messages?.[0]?.text).toBe("User work");
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it("keeps a one-run model override out of the persisted thread defaults", async () => {
+    const system = await createScheduledSystem();
+    try {
+      await system.run(
+        system.engine.dispatch({
+          ...system.command,
+          modelSelection: {
+            ...modelSelection,
+            model: "gpt-6.1-sol",
+            options: [{ id: "reasoningEffort", value: "medium" }],
+          },
+        }),
+      );
+      expect((await system.readModel()).threads[0]?.modelSelection).toEqual(modelSelection);
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it.each([
+    "approval count",
+    "input count",
+    "approval row",
+    "SQL session",
+    "other schedule",
+    "latest turn",
+  ] as const)(
+    "rejects cross-process %s busy evidence despite its idle local read model",
+    async (variant) => {
+      const system = await createScheduledSystem();
+      try {
+        if (variant === "approval count")
+          await system.run(
+            system.sql`UPDATE projection_threads SET pending_approval_count = 1 WHERE thread_id = ${threadId}`,
+          );
+        if (variant === "input count")
+          await system.run(
+            system.sql`UPDATE projection_threads SET pending_user_input_count = 1 WHERE thread_id = ${threadId}`,
+          );
+        if (variant === "approval row")
+          await system.run(system.sql`INSERT INTO projection_pending_approvals
+          (request_id,thread_id,turn_id,status,decision,created_at,resolved_at)
+          VALUES ('scheduled-approval',${threadId},NULL,'pending',NULL,${now()},NULL)`);
+        if (variant === "SQL session")
+          await system.run(system.sql`INSERT INTO projection_thread_sessions
+          (thread_id,status,provider_name,active_turn_id,last_error,updated_at,runtime_mode)
+          VALUES (${threadId},'starting','codex',NULL,NULL,${now()},'approval-required')`);
+        if (variant === "other schedule") {
+          const other = await system.run(
+            seedScheduledFollowUp(system.sql, { threadId, modelSelection }),
+          );
+          await system.run(
+            system.sql`UPDATE scheduled_followup_runs SET state = 'dispatching' WHERE id = ${other.scheduledFollowUp!.runId}`,
+          );
+        }
+        if (variant === "latest turn") {
+          await system.run(system.sql`INSERT INTO projection_turns
+            (thread_id,turn_id,state,requested_at,checkpoint_files_json)
+            VALUES (${threadId},'scheduled-latest-turn','running',${now()},'[]')`);
+          await system.run(
+            system.sql`UPDATE projection_threads SET latest_turn_id = 'scheduled-latest-turn' WHERE thread_id = ${threadId}`,
+          );
+        }
+        await expect(system.run(system.engine.dispatch(system.command))).rejects.toThrow(
+          "Scheduled follow-up is waiting for an idle chat.",
+        );
+        const [run] = await system.run(system.sql<{
+          state: string;
+          intent_sequence: number | null;
+        }>`
+          SELECT state, intent_sequence FROM scheduled_followup_runs WHERE id = ${system.command.scheduledFollowUp!.runId}`);
+        expect(run).toEqual({ state: "waiting", intent_sequence: null });
+        const [messageCount] = await system.run(system.sql<{
+          count: number;
+        }>`SELECT COUNT(*) AS count
+          FROM projection_thread_messages WHERE message_id = ${system.command.message.messageId}`);
+        expect(messageCount?.count).toBe(0);
+      } finally {
+        await system.dispose();
+      }
+    },
+  );
+
+  it("rejects an account-preserving SQL model edit hidden from the local command snapshot", async () => {
+    const system = await createScheduledSystem();
+    try {
+      await system.run(
+        system.sql`UPDATE projection_threads SET model_selection_json = ${JSON.stringify({ ...modelSelection, model: "new-human-selection" })} WHERE thread_id = ${threadId}`,
+      );
+      await expect(system.run(system.engine.dispatch(system.command))).rejects.toThrow(
+        "Scheduled follow-up authorization no longer matches this chat.",
+      );
+      const [run] = await system.run(
+        system.sql<{
+          state: string;
+        }>`SELECT state FROM scheduled_followup_runs WHERE id = ${system.command.scheduledFollowUp!.runId}`,
+      );
+      expect(run?.state).toBe("waiting");
+    } finally {
+      await system.dispose();
+    }
+  });
+});
 
 describe("OrchestrationEngine startup-failure admission", () => {
   it.each([
@@ -493,6 +713,66 @@ async function createRuntimeRecoveryFixture() {
 }
 
 describe("OrchestrationEngine runtime recovery barriers", () => {
+  it("does not treat a scheduled start as fresh human recovery consent", async () => {
+    const system = await createRuntimeRecoveryFixture();
+    try {
+      const scheduled = await system.run(
+        seedScheduledFollowUp(system.sql, {
+          threadId: system.threadId,
+          modelSelection: system.command.modelSelection!,
+          runtimeMode: "full-access",
+          createdAt: now(),
+        }),
+      );
+      await system.dispatch(scheduled);
+      const markLoss = async (key: string) => {
+        const marker = await system.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make(`server:${key}`),
+          threadId: system.threadId,
+          activity: {
+            id: EventId.make(key),
+            kind: "runtime.warning",
+            tone: "info",
+            summary: "Synthetic ownership loss",
+            turnId: system.turnId,
+            createdAt: now(),
+            payload: { recovery: "provider-runtime-ownership-lost", sessionUpdatedAt: now() },
+          },
+          createdAt: now(),
+        });
+        return system.run(
+          system.readRuntimeRecoveryBarrier({
+            ...system.runtimeRecovery,
+            threadId: system.threadId,
+            sourceEventSequence: marker.sequence,
+          }),
+        );
+      };
+      expect(await markLoss("scheduled-loss")).toBe(false);
+      await system.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("fresh-human-after-schedule"),
+        threadId: system.threadId,
+        message: {
+          messageId: asMessageId("fresh-human-after-schedule"),
+          role: "user",
+          text: "Continue this work.",
+          attachments: [],
+        },
+        modelSelection: system.command.modelSelection!,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        createdAt: now(),
+      });
+      // A historical scheduled row remains a valid control record, not corrupt
+      // evidence that blocks later independently authorized human work forever.
+      expect(await markLoss("human-loss-after-schedule")).toBe(true);
+    } finally {
+      await system.dispose();
+    }
+  });
+
   it("preserves continuation consent through title-only metadata before or after loss", async () => {
     const system = await createRuntimeRecoveryFixture();
     try {

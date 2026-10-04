@@ -128,6 +128,7 @@ import {
 import * as NetService from "@cafecode/shared/Net";
 import * as NodeHttpServerCompression from "./nodeHttpServerCompression.ts";
 import { cafeMcpRouteLayer } from "./mcp/http.ts";
+import { ScheduledFollowupsLive } from "./scheduledFollowups/service.ts";
 
 const HttpServerLive = Layer.unwrap(
   Effect.gen(function* () {
@@ -148,6 +149,7 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(CheckpointReactorLive),
   Layer.provideMerge(ThreadDeletionReactorLive),
   Layer.provideMerge(WebPushNotificationsLive),
+  Layer.provideMerge(ScheduledFollowupsLive),
   Layer.provideMerge(RuntimeReceiptBusLive),
   // Self-starting daemon: forks a consumer of ProviderService.streamEvents that merges
   // Claude's `rate_limit_event`-sourced usage windows into the provider snapshot.

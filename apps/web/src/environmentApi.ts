@@ -11,6 +11,7 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       respond: rpcClient.server.respondToInteraction,
       resolveUrl: rpcClient.server.resolveInteractionUrl,
     },
+    scheduledFollowups: rpcClient.scheduledFollowups,
     projects: {
       searchEntries: rpcClient.projects.searchEntries,
       writeFile: rpcClient.projects.writeFile,

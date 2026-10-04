@@ -114,6 +114,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
   readModel,
   runtimeRecoveryBarrierVerified = false,
   codexRootReplacementVerified = false,
+  scheduledFollowUpVerified = false,
 }: {
   readonly command: OrchestrationCommand;
   readonly readModel: OrchestrationReadModel;
@@ -121,6 +122,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
   readonly runtimeRecoveryBarrierVerified?: boolean;
   /** Only the engine's serialized durable steer/control-barrier read may set this. */
   readonly codexRootReplacementVerified?: boolean;
+  /** Only an exact occurrence claimed in the event commit transaction may set this. */
+  readonly scheduledFollowUpVerified?: boolean;
 }): Effect.fn.Return<DecideOrchestrationCommandResult, OrchestrationCommandInvariantError> {
   switch (command.type) {
     case "project.create": {
@@ -660,6 +663,42 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      if (command.scheduledFollowUp !== undefined) {
+        const scheduled = command.scheduledFollowUp;
+        // Scheduling is idle-only. It must never inherit ordinary user-submit
+        // recovery that steers a live turn or replaces its provider instance.
+        // Validate authority first so a forged/retired occurrence cannot use a
+        // busy rejection as permission to queue a new dispatch identity.
+        if (
+          !scheduledFollowUpVerified ||
+          !command.commandId.startsWith("server:") ||
+          targetThread.archivedAt !== null ||
+          targetThread.deletedAt !== null ||
+          command.bootstrap !== undefined ||
+          command.runtimeRecovery !== undefined ||
+          command.sourceProposedPlan !== undefined ||
+          command.runtimeMode !== targetThread.runtimeMode ||
+          command.interactionMode !== targetThread.interactionMode ||
+          scheduled.expectedRuntimeMode !== targetThread.runtimeMode ||
+          scheduled.expectedInteractionMode !== targetThread.interactionMode ||
+          !isDeepStrictEqual(scheduled.expectedModelSelection, targetThread.modelSelection) ||
+          (command.modelSelection !== undefined &&
+            command.modelSelection.instanceId !== targetThread.modelSelection.instanceId) ||
+          (command.subagentLimits !== undefined &&
+            !isDeepStrictEqual(command.subagentLimits, targetThread.subagentLimits ?? {}))
+        ) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: "Scheduled follow-up authorization no longer matches this chat.",
+          });
+        }
+        if (threadHasUnsettledTurnStart(targetThread)) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: "Scheduled follow-up is waiting for an idle chat.",
+          });
+        }
+      }
       if (command.runtimeRecovery !== undefined) {
         // A verified loss is permission to continue precisely one stopped
         // session, not permission to steer newer work or reopen an archived
@@ -852,6 +891,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(sourceProposedPlan !== undefined ? { sourceProposedPlan } : {}),
           ...(command.runtimeRecovery !== undefined
             ? { runtimeRecovery: command.runtimeRecovery }
+            : {}),
+          ...(command.scheduledFollowUp !== undefined
+            ? { scheduledFollowUp: command.scheduledFollowUp }
             : {}),
           createdAt: command.createdAt,
         },

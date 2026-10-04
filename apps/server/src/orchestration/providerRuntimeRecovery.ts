@@ -34,6 +34,9 @@ const MAX_PRIOR_RECOVERY_CONTROLS = 64;
  * The prior-control check also covers Stop/settings accepted between recording
  * the stopped session and recording the loss warning. Only fresh explicit
  * input after the ledger completeness fence can renew continuation consent.
+ * Scheduled starts remain authentic control barriers but are not new human
+ * continuation consent: an uncertain scheduled attempt belongs to its run
+ * ledger and must never become an automatic paid recovery prompt here.
  */
 export const makeRuntimeRecoveryBarrierReader = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -76,7 +79,9 @@ export const makeRuntimeRecoveryBarrierReader = Effect.gen(function* () {
           ORDER BY sequence DESC
           LIMIT ${MAX_PRIOR_RECOVERY_CONTROLS}
         ), authenticated_prior_controls AS MATERIALIZED (
-          SELECT candidate.sequence, candidate.event_type, candidate.turn_id
+          SELECT candidate.sequence, candidate.event_type, candidate.turn_id,
+            CASE WHEN json_type(event.payload_json, '$.scheduledFollowUp') IS NOT NULL
+              THEN 1 ELSE 0 END AS scheduled_followup
           FROM prior_control_candidates AS candidate
           CROSS JOIN orchestration_events AS event ON event.sequence = candidate.sequence
           WHERE event.aggregate_kind = 'thread'
@@ -109,7 +114,7 @@ export const makeRuntimeRecoveryBarrierReader = Effect.gen(function* () {
               ) AND candidate.turn_id IS NULL)
             )
         ), latest_prior_control AS (
-          SELECT event_type FROM authenticated_prior_controls
+          SELECT event_type, scheduled_followup FROM authenticated_prior_controls
           WHERE event_type <> 'thread.turn-interrupt-requested'
             OR turn_id IS NULL OR turn_id = ${turnId}
           ORDER BY sequence DESC LIMIT 1
@@ -151,6 +156,7 @@ export const makeRuntimeRecoveryBarrierReader = Effect.gen(function* () {
           AND EXISTS (
             SELECT 1 FROM latest_prior_control
             WHERE event_type IN ('thread.turn-start-requested', 'thread.turn-steer-requested')
+              AND scheduled_followup = 0
           )
           AND (${recoveryIntentSequence} IS NULL OR EXISTS (SELECT 1 FROM exact_recovery_intent))
           AND (SELECT COUNT(*) FROM later_events) <= ${MAX_RECOVERY_SUFFIX_EVENTS}

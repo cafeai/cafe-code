@@ -42,6 +42,8 @@ import type { ProviderServiceShape } from "../provider/Services/ProviderService.
 import type { ServerRuntimeStartupShape } from "../serverRuntimeStartup.ts";
 import { redactServerSettingsForClient, type ServerSettingsShape } from "../serverSettings.ts";
 import type { WorkspacePathsShape } from "../workspace/Services/WorkspacePaths.ts";
+import type { ScheduledFollowupsShape } from "../scheduledFollowups/service.ts";
+import { registerScheduledFollowupTools } from "../scheduledFollowups/mcp.ts";
 
 const CAFE_MCP_SERVER_NAME = "cafe-code";
 const CAFE_MCP_SERVER_VERSION = "1.0.0";
@@ -122,6 +124,7 @@ const providerSummary = z.object({
 });
 
 export interface CafeMcpDependencies extends ProviderRuntimeControlDependencies {
+  readonly scheduledFollowups?: ScheduledFollowupsShape;
   readonly orchestrationEngine: Pick<OrchestrationEngineShape, "dispatch">;
   readonly projectionSnapshotQuery: Pick<
     ProjectionSnapshotQueryShape,
@@ -1325,6 +1328,8 @@ export function makeCafeMcpServer(
   );
 
   registerDiscoveryTools(server, dependencies);
+  if (dependencies.scheduledFollowups)
+    registerScheduledFollowupTools(server, dependencies.scheduledFollowups);
   registerProjectTools(server, dependencies);
   registerThreadTools(server, dependencies);
   registerProviderMutationTools(server, dependencies, options);

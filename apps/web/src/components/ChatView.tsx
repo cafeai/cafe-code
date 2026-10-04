@@ -6941,6 +6941,30 @@ export default function ChatView(props: ChatViewProps) {
     return () => observer.disconnect();
   }, [sharedChatRuntime, activeThread?.id]);
 
+  // Scheduling is a low-rate independent projection. Stable context keeps
+  // token-by-token conversation renders out of its editor/list hot path.
+  const scheduledThreadId = isServerThread ? activeThread?.id : undefined;
+  const scheduledModelSelection = activeThread?.modelSelection;
+  const scheduledFollowupsContext = useMemo(
+    () =>
+      scheduledThreadId && scheduledModelSelection
+        ? {
+            environmentId,
+            threadId: scheduledThreadId,
+            modelSelection: scheduledModelSelection,
+            provider: activeProviderStatus ?? null,
+            unavailable: activeEnvironmentUnavailable,
+          }
+        : undefined,
+    [
+      environmentId,
+      scheduledThreadId,
+      scheduledModelSelection,
+      activeProviderStatus,
+      activeEnvironmentUnavailable,
+    ],
+  );
+
   if (!activeThread) {
     return <NoActiveThreadState />;
   }
@@ -7117,6 +7141,7 @@ export default function ChatView(props: ChatViewProps) {
                   activeProposedPlan={activeProposedPlan}
                   activePlan={composerActivePlan}
                   activeSubagents={activeSubagentEntries}
+                  scheduledFollowups={scheduledFollowupsContext}
                   onOpenSubagentDetail={openSubagentDetail}
                   sidebarProposedPlan={visibleSidebarProposedPlan}
                   planSidebarLabel={planSidebarLabel}
@@ -7250,6 +7275,7 @@ export default function ChatView(props: ChatViewProps) {
             ) : null}
             {sessionRailVisible ? (
               <SessionRail
+                scheduledFollowups={scheduledFollowupsContext}
                 plan={composerActivePlan}
                 subagents={activeSubagentEntries}
                 onOpenSubagentDetail={openSubagentDetail}

@@ -33,3 +33,4 @@ export * from "./mcp.ts";
 export * from "./virtualDesktop.ts";
 
 export * from "./providerCompaction.ts";
+export * from "./scheduledFollowups.ts";

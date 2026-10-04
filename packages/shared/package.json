@@ -4,6 +4,14 @@
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "exports": {
+    "./scheduledFollowupResult": {
+      "types": "./src/scheduledFollowupResult.ts",
+      "import": "./src/scheduledFollowupResult.ts"
+    },
+    "./scheduledFollowups": {
+      "types": "./src/scheduledFollowups.ts",
+      "import": "./src/scheduledFollowups.ts"
+    },
     "./windowsProcessOwnership": {
       "types": "./src/windowsProcessOwnership.ts",
       "import": "./src/windowsProcessOwnership.ts"

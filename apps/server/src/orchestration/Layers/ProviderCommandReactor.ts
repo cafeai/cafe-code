@@ -35,6 +35,7 @@ import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
@@ -74,6 +75,7 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 import { ServerConfig } from "../../config.ts";
+import { isSqliteLockTimeoutError } from "../../persistence/sqliteLockRetry.ts";
 import { makeStandaloneWorkspaceStore } from "../standaloneWorkspace.ts";
 import {
   composeSystemPromptProviderInput,
@@ -81,6 +83,10 @@ import {
 } from "../../systemPromptFile.ts";
 import { makeProviderTurnRecoveryEvidenceReader } from "../providerTurnRecoveryEvidence.ts";
 import { makeRuntimeRecoveryBarrierReader } from "../providerRuntimeRecovery.ts";
+import {
+  isScheduledFollowUpAuthorized,
+  verifyScheduledFollowUpDispatch,
+} from "../../scheduledFollowups/authorization.ts";
 import {
   buildCodexSteerAcceptedActivityCommand,
   buildCodexSteerDeliveredActivityCommand,
@@ -2016,6 +2022,8 @@ const make = Effect.gen(function* () {
     readonly threadId: ThreadId;
     readonly messageId?: MessageId;
     readonly allowActiveTurnSteerFallback?: boolean;
+    /** A one-run schedule override must not become the next interactive default. */
+    readonly rememberModelSelection?: boolean;
     readonly messageText: string;
     readonly attachments?: ReadonlyArray<ChatAttachment>;
     readonly modelSelection?: ModelSelection;
@@ -2053,7 +2061,7 @@ const make = Effect.gen(function* () {
       activeSessionResolved: true,
       ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
     });
-    if (input.modelSelection !== undefined) {
+    if (input.modelSelection !== undefined && input.rememberModelSelection !== false) {
       threadModelSelections.set(input.threadId, input.modelSelection);
     }
     const normalizedInput = toNonEmptyProviderInput(input.messageText);
@@ -2188,6 +2196,7 @@ const make = Effect.gen(function* () {
       readonly createdAt?: string;
       readonly supersededCompletedRootTurnId?: TurnId;
       readonly steerIntent?: { readonly messageId: MessageId; readonly intentSequence: number };
+      readonly expectedTurnStartIntentSequence?: number;
     }) {
       const providerSessions = yield* providerService
         .listSessions()
@@ -2314,6 +2323,9 @@ const make = Effect.gen(function* () {
           updatedAt,
         },
         createdAt: updatedAt,
+        ...(input.expectedTurnStartIntentSequence !== undefined
+          ? { expectedTurnStartIntentSequence: input.expectedTurnStartIntentSequence }
+          : {}),
         ...(codexRootReplacement !== undefined ? { codexRootReplacement } : {}),
       });
       yield* codexRootReplacement === undefined
@@ -2726,6 +2738,10 @@ const make = Effect.gen(function* () {
   const processTurnStartRequested = Effect.fn("processTurnStartRequested")(function* (
     event: Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>,
   ) {
+    if (event.payload.scheduledFollowUp !== undefined) {
+      yield* processScheduledFollowUpStart(event);
+      return;
+    }
     if (event.payload.runtimeRecovery !== undefined) {
       yield* processRuntimeRecoveryStart(event, 0);
       return;
@@ -2886,7 +2902,7 @@ const make = Effect.gen(function* () {
                   detail,
                   turnId: null,
                   createdAt: event.payload.createdAt,
-                })
+                }).pipe(Effect.asVoid)
               : Effect.void,
           ),
           Effect.asVoid,
@@ -5151,6 +5167,208 @@ const make = Effect.gen(function* () {
     });
   });
 
+  const processScheduledFollowUpStart = Effect.fn("processScheduledFollowUpStart")(function* (
+    event: Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>,
+  ) {
+    const scheduled = event.payload.scheduledFollowUp;
+    if (scheduled === undefined) return;
+    const threadId = event.payload.threadId;
+
+    const settle = (state: "skipped" | "failed" | "unknown", errorCode: string, detail: string) =>
+      Effect.gen(function* () {
+        const now = DateTime.formatIso(yield* DateTime.now);
+        yield* sql.withTransaction(
+          Effect.gen(function* () {
+            // A late preparation/ACK failure must never overwrite a terminal
+            // result already reconciled from its exact native provider turn.
+            const updated = yield* sql<{ readonly id: string }>`
+              UPDATE scheduled_followup_runs
+              SET state = ${state}, completed_at = ${now}, error_code = ${errorCode}
+              WHERE id = ${scheduled.runId} AND thread_id = ${threadId}
+                AND schedule_id = ${scheduled.scheduleId} AND revision = ${scheduled.revision}
+                AND intent_sequence = ${event.sequence} AND state = 'dispatching'
+                AND (${state} = 'unknown' OR attempt_at IS NULL)
+              RETURNING id
+            `;
+            if (updated.length > 0 && state !== "skipped") {
+              yield* sql`
+                UPDATE scheduled_followups
+                SET state = 'needs_attention', next_run_at = NULL, updated_at = ${now}
+                WHERE id = ${scheduled.scheduleId} AND thread_id = ${threadId}
+                  AND revision = ${scheduled.revision} AND state = 'active'
+              `;
+            }
+          }),
+        );
+        // Reuse the exact-intent/lifecycle compare-and-set used by ordinary
+        // startup failures. Stop or newer user input always wins over cleanup.
+        yield* setThreadSessionErrorOnTurnStartFailure({
+          threadId,
+          intentSequence: event.sequence,
+          detail,
+        });
+      });
+
+    // A replayed event can encounter the immutable attempt boundary after a
+    // crash but before its ACK was persisted. That is not revocation proof:
+    // never turn it into a skipped/reusable occurrence or enable the next tick.
+    const [priorRun] = yield* sql<{ state: string; attempt_at: string | null }>`
+      SELECT state, attempt_at FROM scheduled_followup_runs
+      WHERE id = ${scheduled.runId} AND schedule_id = ${scheduled.scheduleId}
+        AND thread_id = ${threadId} AND revision = ${scheduled.revision}
+        AND intent_sequence = ${event.sequence}
+    `;
+    if (priorRun?.state !== "dispatching") return;
+    if (priorRun.attempt_at !== null) {
+      yield* settle(
+        "unknown",
+        "acceptance-unknown",
+        "Scheduled follow-up acceptance could not be confirmed. It was not resent.",
+      );
+      return;
+    }
+    if (
+      !(yield* isScheduledFollowUpAuthorized(event).pipe(
+        Effect.provideService(SqlClient.SqlClient, sql),
+      ))
+    ) {
+      yield* settle(
+        "skipped",
+        "admission-revoked",
+        "Scheduled follow-up was cancelled before starting.",
+      );
+      return;
+    }
+    const thread = yield* resolveThread(threadId);
+    const message = thread?.messages.find((entry) => entry.id === event.payload.messageId);
+    if (thread === undefined || message?.role !== "user") {
+      yield* settle(
+        "failed",
+        "preparation-failed",
+        "Scheduled follow-up could not prepare its saved input.",
+      );
+      return;
+    }
+
+    const prepared = yield* Effect.gen(function* () {
+      const before = (yield* providerService.listSessions()).find(
+        (session) => session.threadId === threadId,
+      );
+      if (before !== undefined && hasActiveSubagentSessionWork(before)) {
+        return undefined;
+      }
+      const request = yield* buildSendTurnRequestForThread({
+        threadId,
+        messageId: message.id,
+        messageText: message.text,
+        attachments: message.attachments ?? [],
+        modelSelection: event.payload.modelSelection ?? thread.modelSelection,
+        interactionMode: event.payload.interactionMode,
+        allowActiveTurnSteerFallback: false,
+        rememberModelSelection: false,
+        createdAt: event.payload.createdAt,
+        thread,
+      });
+      // Native resume may itself restore live work. It has precedence over a
+      // clock tick, even if the earlier projection legitimately looked idle.
+      const after = (yield* providerService.listSessions()).find(
+        (session) => session.threadId === threadId,
+      );
+      return after !== undefined && hasActiveSubagentSessionWork(after) ? undefined : request;
+    }).pipe(
+      Effect.matchCause({
+        onFailure: () => ({ failed: true }) as const,
+        onSuccess: (value) => value,
+      }),
+    );
+
+    if (prepared === undefined) {
+      yield* settle(
+        "skipped",
+        "runtime-busy",
+        "Scheduled follow-up skipped because this chat is already working.",
+      );
+      return;
+    }
+    if ("failed" in prepared) {
+      yield* settle(
+        "failed",
+        "preparation-failed",
+        "Scheduled follow-up could not prepare the provider. Review it before resuming.",
+      );
+      return;
+    }
+    // This durable CAS binds the exact occurrence, revision, admitted intent,
+    // current user controls and one pre-I/O attempt. A crash or lost ACK after
+    // this boundary is deliberately not a fresh scheduled prompt on restart.
+    if (
+      !(yield* verifyScheduledFollowUpDispatch(event).pipe(
+        Effect.provideService(SqlClient.SqlClient, sql),
+      ))
+    ) {
+      const [competingRun] = yield* sql<{ attempt_at: string | null }>`
+        SELECT attempt_at FROM scheduled_followup_runs
+        WHERE id = ${scheduled.runId} AND schedule_id = ${scheduled.scheduleId}
+          AND thread_id = ${threadId} AND revision = ${scheduled.revision}
+          AND intent_sequence = ${event.sequence} AND state = 'dispatching'
+      `;
+      if (competingRun?.attempt_at !== null && competingRun?.attempt_at !== undefined) {
+        yield* settle(
+          "unknown",
+          "acceptance-unknown",
+          "Scheduled follow-up acceptance could not be confirmed. It was not resent.",
+        );
+      } else {
+        yield* settle(
+          "skipped",
+          "admission-revoked",
+          "Scheduled follow-up was cancelled before starting.",
+        );
+      }
+      return;
+    }
+    // Stay on the existing serial provider worker. In particular, do not use
+    // ordinary turn-start's active-turn recovery, fallback steering, inferred
+    // completion, retry timers or runtime-loss continuation for this request.
+    const accepted = yield* sendPreparedProviderTurn(prepared).pipe(
+      Effect.matchCause({ onFailure: () => undefined, onSuccess: (turn) => turn }),
+    );
+    if (
+      accepted === undefined ||
+      accepted.deliveryKind === "steer" ||
+      accepted.clientCorrelationId !== undefined
+    ) {
+      yield* settle(
+        "unknown",
+        "acceptance-unknown",
+        "Scheduled follow-up acceptance could not be confirmed. It was not resent.",
+      );
+      return;
+    }
+    const now = DateTime.formatIso(yield* DateTime.now);
+    // Only the winner of the pre-I/O CAS reaches this ACK. Another observer
+    // may have conservatively marked its in-flight receipt unknown; exact
+    // positive acceptance can still bind the native turn without resuming a
+    // paused/needs-attention schedule or changing any terminal run outcome.
+    yield* sql`
+      UPDATE scheduled_followup_runs
+      SET turn_id = ${accepted.turnId}, state = 'running', started_at = ${now},
+        completed_at = NULL, error_code = NULL
+      WHERE id = ${scheduled.runId} AND thread_id = ${threadId}
+        AND schedule_id = ${scheduled.scheduleId} AND revision = ${scheduled.revision}
+        AND intent_sequence = ${event.sequence} AND state IN ('dispatching', 'unknown')
+        AND (turn_id IS NULL OR turn_id = ${accepted.turnId})
+        AND attempt_at IS NOT NULL
+    `;
+    yield* markThreadRunningFromSendTurnResult({
+      threadId,
+      turnId: accepted.turnId,
+      createdAt: event.payload.createdAt,
+      expectedTurnStartIntentSequence: event.sequence,
+    }).pipe(Effect.catchIf(isSupersededSessionLifecycle, () => Effect.void));
+    yield* recordAcceptedTurnConfiguration(prepared, accepted);
+  });
+
   const processRuntimeRecoveryStart = Effect.fn("processRuntimeRecoveryStart")(function* (
     event: Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>,
     attempt: number,
@@ -5395,6 +5613,55 @@ const make = Effect.gen(function* () {
     }
   });
 
+  const recoverUnattemptedScheduledFollowUpsOnStartup = Effect.fn(
+    "recoverUnattemptedScheduledFollowUpsOnStartup",
+  )(function* () {
+    // Receipt deduplication does not republish an already committed intent on
+    // the hot stream. Recover only the original pre-I/O occurrence from its
+    // indexed ledger: an attempt marker is never permission for another send.
+    // A fixed high-water mark excludes new live events, and bounded keyset
+    // pages avoid loading the transcript or every schedule into memory.
+    const upperSequence = (yield* orchestrationEngine.diagnosticsSnapshot).commandReadModelSequence;
+    let afterSequence = 0;
+    while (afterSequence < upperSequence) {
+      const rows = yield* sql<{
+        id: string;
+        schedule_id: string;
+        revision: number;
+        thread_id: string;
+        message_id: string;
+        intent_sequence: number;
+      }>`SELECT id, schedule_id, revision, thread_id, message_id, intent_sequence
+        FROM scheduled_followup_runs
+        WHERE state = 'dispatching' AND attempt_at IS NULL
+          AND intent_sequence > ${afterSequence} AND intent_sequence <= ${upperSequence}
+        ORDER BY intent_sequence LIMIT 100`;
+      if (rows.length === 0) return;
+      for (const row of rows) {
+        afterSequence = row.intent_sequence;
+        const persisted = yield* orchestrationEngine
+          .readEvents(row.intent_sequence - 1, 1)
+          .pipe(Stream.runHead);
+        if (
+          Option.isNone(persisted) ||
+          persisted.value.sequence !== row.intent_sequence ||
+          persisted.value.type !== "thread.turn-start-requested" ||
+          persisted.value.payload.threadId !== row.thread_id ||
+          persisted.value.payload.messageId !== row.message_id ||
+          persisted.value.payload.scheduledFollowUp?.runId !== row.id ||
+          persisted.value.payload.scheduledFollowUp.scheduleId !== row.schedule_id ||
+          persisted.value.payload.scheduledFollowUp.revision !== row.revision
+        ) {
+          continue;
+        }
+        // The worker rechecks active revision, user controls, provider liveness
+        // and the one-shot attempt CAS. Pause during startup still wins.
+        yield* enqueueProviderIntentEvent(persisted.value);
+      }
+      yield* Effect.yieldNow;
+    }
+  });
+
   const processEvent = Effect.fn("processEvent")(function* (event: OrchestrationEvent) {
     if (isRuntimeLossEvent(event)) {
       yield* worker.enqueue(event);
@@ -5481,6 +5748,26 @@ const make = Effect.gen(function* () {
           "provider command reactor failed to reconcile interrupted provider work after restart",
           { cause: Cause.pretty(cause) },
         ),
+      ),
+    );
+    yield* recoverUnattemptedScheduledFollowUpsOnStartup().pipe(
+      // Retry only a typed transient SQLite lock while rereading the original
+      // durable intents. Already queued events are process-deduplicated, and
+      // paid submission still requires the immutable attempt CAS. Decode,
+      // integrity and provider errors never enter this local read retry.
+      Effect.retry({
+        times: 2,
+        schedule: Schedule.spaced("100 millis"),
+        while: (error) =>
+          isSqliteLockTimeoutError(error) ||
+          (error._tag === "PersistenceSqlError" && isSqliteLockTimeoutError(error.cause)),
+      }),
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.interrupt
+          : Effect.logWarning(
+              "scheduled follow-up startup replay deferred; durable state retained",
+            ),
       ),
     );
     yield* recoverUnsettledCodexSteerIntentsOnStartup().pipe(

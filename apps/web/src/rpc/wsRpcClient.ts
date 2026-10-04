@@ -184,6 +184,14 @@ export interface WsRpcClient {
     readonly subscribeShell: RpcStreamMethod<typeof ORCHESTRATION_WS_METHODS.subscribeShell>;
     readonly subscribeThread: RpcInputStreamMethod<typeof ORCHESTRATION_WS_METHODS.subscribeThread>;
   };
+  readonly scheduledFollowups: {
+    readonly list: RpcUnaryMethod<typeof WS_METHODS.scheduledFollowupsList>;
+    readonly save: RpcUnaryMethod<typeof WS_METHODS.scheduledFollowupsSave>;
+    readonly setStatus: RpcUnaryMethod<typeof WS_METHODS.scheduledFollowupsSetStatus>;
+    readonly runNow: RpcUnaryMethod<typeof WS_METHODS.scheduledFollowupsRunNow>;
+    readonly history: RpcUnaryMethod<typeof WS_METHODS.scheduledFollowupsHistory>;
+    readonly notification: RpcUnaryMethod<typeof WS_METHODS.scheduledFollowupsNotification>;
+  };
 }
 
 export function createWsRpcClient(transport: WsTransport): WsRpcClient {
@@ -353,6 +361,20 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
           ...options,
           tag: WS_METHODS.subscribeUsageStats,
         }),
+    },
+    scheduledFollowups: {
+      list: (input) =>
+        transport.request((client) => client[WS_METHODS.scheduledFollowupsList](input)),
+      save: (input) =>
+        transport.request((client) => client[WS_METHODS.scheduledFollowupsSave](input)),
+      setStatus: (input) =>
+        transport.request((client) => client[WS_METHODS.scheduledFollowupsSetStatus](input)),
+      runNow: (input) =>
+        transport.request((client) => client[WS_METHODS.scheduledFollowupsRunNow](input)),
+      history: (input) =>
+        transport.request((client) => client[WS_METHODS.scheduledFollowupsHistory](input)),
+      notification: (input) =>
+        transport.request((client) => client[WS_METHODS.scheduledFollowupsNotification](input)),
     },
     orchestration: {
       dispatchCommand: (input) =>

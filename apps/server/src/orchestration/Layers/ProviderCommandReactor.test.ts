@@ -38,6 +38,8 @@ import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlError from "effect/unstable/sql/SqlError";
 import * as TestClock from "effect/testing/TestClock";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -46,6 +48,7 @@ import { TextGenerationError } from "@cafecode/contracts";
 import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
 import { buildCodexSteerClientCorrelationId } from "../../provider/codexSteerCorrelation.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
+import { PersistenceSqlError } from "../../persistence/Errors.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import {
@@ -78,6 +81,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService, type GitWorkflowServiceShape } from "../../git/GitWorkflowService.ts";
+import { seedScheduledFollowUp } from "../scheduledFollowUp.testSupport.ts";
 
 // Node ESM namespace exports are immutable. Retain the real filesystem by
 // default, with one explicit module seam for the no-progress local-I/O test.
@@ -146,7 +150,10 @@ async function waitFor(
 
 describe("ProviderCommandReactor", () => {
   let runtime: ManagedRuntime.ManagedRuntime<
-    OrchestrationEngineService | ProviderCommandReactor | ProjectionSnapshotQuery,
+    | OrchestrationEngineService
+    | ProviderCommandReactor
+    | ProjectionSnapshotQuery
+    | SqlClient.SqlClient,
     unknown
   > | null = null;
   let scope: Scope.Closeable | null = null;
@@ -672,10 +679,31 @@ describe("ProviderCommandReactor", () => {
     );
 
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
+    const sql = await runtime.runPromise(Effect.service(SqlClient.SqlClient));
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
     const reactor = await runtime.runPromise(Effect.service(ProviderCommandReactor));
     scope = await Effect.runPromise(Scope.make("sequential"));
-    const startReactor = () => runtime!.runPromise(reactor.start().pipe(Scope.provide(scope!)));
+    const startReactor = () => {
+      const start = reactor.start().pipe(Scope.provide(scope!));
+      // Layer construction logs and later start() logs execute in different
+      // fibers. Capture both explicitly when a fixture audits redaction.
+      return runtime!.runPromise(
+        input?.logMessages === undefined
+          ? start
+          : start.pipe(
+              Effect.provide(
+                Logger.layer(
+                  [
+                    Logger.make(({ message }) => {
+                      input.logMessages!.push(...(Array.isArray(message) ? message : [message]));
+                    }),
+                  ],
+                  { mergeWithExisting: false },
+                ),
+              ),
+            ),
+      );
+    };
     if (input?.startReactor !== false) {
       await startReactor();
     }
@@ -778,6 +806,7 @@ describe("ProviderCommandReactor", () => {
 
     return {
       engine,
+      sql,
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
       readThreadDetail: async (threadId: ThreadId) =>
         Option.getOrUndefined(await Effect.runPromise(snapshotQuery.getThreadDetailById(threadId))),
@@ -813,6 +842,386 @@ describe("ProviderCommandReactor", () => {
       setRunningCodexTurn,
     };
   }
+
+  describe("scheduled follow-up dispatch", () => {
+    const threadId = ThreadId.make("thread-1");
+    const selection = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" };
+
+    async function seed(harness: Awaited<ReturnType<typeof createHarness>>) {
+      return Effect.runPromise(
+        seedScheduledFollowUp(harness.sql, { threadId, modelSelection: selection }),
+      );
+    }
+
+    async function readRun(harness: Awaited<ReturnType<typeof createHarness>>, id: string) {
+      const [row] = await Effect.runPromise(
+        harness.sql<{
+          state: string;
+          turn_id: string | null;
+          attempt_at: string | null;
+          error_code: string | null;
+        }>`SELECT state, turn_id, attempt_at, error_code FROM scheduled_followup_runs WHERE id = ${id}`,
+      );
+      return row;
+    }
+
+    it.each(["codex", "claudeAgent", "grok"] as const)(
+      "submits an authorized %s occurrence once without live-steer fallback",
+      async (provider) => {
+        const modelSelection = {
+          instanceId: ProviderInstanceId.make(provider),
+          model: "synthetic-model",
+        };
+        const harness = await createHarness({ threadModelSelection: modelSelection });
+        const command = await Effect.runPromise(
+          seedScheduledFollowUp(harness.sql, { threadId, modelSelection }),
+        );
+        const accepted = Effect.runSync(Deferred.make<void>());
+        const originalSend = harness.sendTurn.getMockImplementation()!;
+        harness.sendTurn.mockImplementationOnce((request) =>
+          originalSend(request).pipe(Effect.tap(() => Deferred.succeed(accepted, undefined))),
+        );
+        const receipt = await Effect.runPromise(harness.engine.dispatch(command));
+        // Preparation includes asynchronous local filesystem work. Observe
+        // the mock's actual acceptance boundary instead of requiring full
+        // preparation to finish inside the unrelated 2-second polling helper.
+        // The enclosing test deadline remains unchanged and still bounds bugs.
+        await Effect.runPromise(Deferred.await(accepted));
+        await harness.drain();
+        const repeated = await Effect.runPromise(harness.engine.dispatch(command));
+        await harness.drain();
+        expect(repeated.sequence).toBe(receipt.sequence);
+        expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+        expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
+          threadId,
+          messageId: command.message.messageId,
+          modelSelection,
+          allowActiveTurnSteerFallback: false,
+        });
+        expect(harness.steerTurn).not.toHaveBeenCalled();
+        expect(await readRun(harness, command.scheduledFollowUp!.runId)).toMatchObject({
+          state: "running",
+          turn_id: "turn-1",
+          attempt_at: expect.any(String),
+        });
+        expect(harness.generateThreadMetadata).not.toHaveBeenCalled();
+      },
+    );
+
+    it("waits for explicit preparation and acceptance barriers before asserting scheduled delivery", async () => {
+      const preparationEntered = Effect.runSync(Deferred.make<void>());
+      const releasePreparation = Effect.runSync(Deferred.make<void>());
+      const accepted = Effect.runSync(Deferred.make<void>());
+      const harness = await createHarness({
+        beforeProjectRead: Deferred.succeed(preparationEntered, undefined).pipe(
+          Effect.andThen(Deferred.await(releasePreparation)),
+        ),
+      });
+      const command = await seed(harness);
+      const originalSend = harness.sendTurn.getMockImplementation()!;
+      harness.sendTurn.mockImplementationOnce((request) =>
+        originalSend(request).pipe(Effect.tap(() => Deferred.succeed(accepted, undefined))),
+      );
+      await Effect.runPromise(harness.engine.dispatch(command));
+      await Effect.runPromise(Deferred.await(preparationEntered));
+      try {
+        // An accepted event is not provider acceptance. A deliberately held
+        // preparation must retain its unattempted ledger, without a send or
+        // implicit steering regardless of how the host schedules this fiber.
+        expect(harness.sendTurn).not.toHaveBeenCalled();
+        expect(await readRun(harness, command.scheduledFollowUp!.runId)).toMatchObject({
+          state: "dispatching",
+          attempt_at: null,
+        });
+      } finally {
+        await Effect.runPromise(Deferred.succeed(releasePreparation, undefined));
+      }
+      await Effect.runPromise(Deferred.await(accepted));
+      await harness.drain();
+      expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+      expect(harness.steerTurn).not.toHaveBeenCalled();
+      expect(await readRun(harness, command.scheduledFollowUp!.runId)).toMatchObject({
+        state: "running",
+        turn_id: "turn-1",
+        attempt_at: expect.any(String),
+      });
+    });
+
+    it.each(["unattempted", "attempted", "paused"] as const)(
+      "reconciles a committed %s occurrence when the reactor starts after the original event",
+      async (state) => {
+        const harness = await createHarness({ startReactor: false });
+        const command = await seed(harness);
+        const first = await Effect.runPromise(harness.engine.dispatch(command));
+        expect(harness.sendTurn).not.toHaveBeenCalled();
+        if (state === "attempted") {
+          await Effect.runPromise(harness.sql`
+            UPDATE scheduled_followup_runs SET attempt_at = '2026-10-04T10:00:01.000Z'
+            WHERE id = ${command.scheduledFollowUp!.runId}`);
+        } else if (state === "paused") {
+          await Effect.runPromise(harness.sql`
+            UPDATE scheduled_followups SET state = 'paused', revision = revision + 1
+            WHERE id = ${command.scheduledFollowUp!.scheduleId}`);
+        }
+        // This is a fresh worker/hot subscription with a durable event that
+        // predates it, exactly the crash-between-commit-and-enqueue boundary.
+        await harness.startReactor();
+        await harness.drain();
+        const repeated = await Effect.runPromise(harness.engine.dispatch(command));
+        await harness.drain();
+        expect(repeated.sequence).toBe(first.sequence);
+        expect(harness.sendTurn).toHaveBeenCalledTimes(state === "unattempted" ? 1 : 0);
+        expect(harness.steerTurn).not.toHaveBeenCalled();
+        const run = await readRun(harness, command.scheduledFollowUp!.runId);
+        expect(run).toMatchObject(
+          state === "unattempted"
+            ? { state: "running", turn_id: "turn-1", attempt_at: expect.any(String) }
+            : state === "paused"
+              ? { state: "skipped", attempt_at: null }
+              : { state: "dispatching", attempt_at: "2026-10-04T10:00:01.000Z" },
+        );
+      },
+    );
+
+    it.each(["transient lock", "persistent lock", "connection failure"] as const)(
+      "bounds startup intent reads after a %s without duplicating paid submissions",
+      async (failure) => {
+        const logMessages: unknown[] = [];
+        const harness = await createHarness({ startReactor: false, logMessages });
+        const command = await seed(harness);
+        const receipt = await Effect.runPromise(harness.engine.dispatch(command));
+        const readEvents = harness.engine.readEvents;
+        let attempts = 0;
+        const spy = vi.spyOn(harness.engine, "readEvents").mockImplementation((sequence, limit) => {
+          if (sequence === receipt.sequence - 1) {
+            attempts += 1;
+            if (failure !== "transient lock" || attempts === 1) {
+              return Stream.fail(
+                new PersistenceSqlError({
+                  operation: "synthetic-startup-read",
+                  detail: "synthetic private database detail must not appear in diagnostics",
+                  cause: new SqlError.SqlError({
+                    reason:
+                      failure === "connection failure"
+                        ? new SqlError.ConnectionError({
+                            operation: "execute",
+                            cause: new Error("fixture"),
+                          })
+                        : new SqlError.LockTimeoutError({
+                            operation: "execute",
+                            cause: new Error("fixture"),
+                          }),
+                  }),
+                }),
+              );
+            }
+          }
+          return readEvents(sequence, limit);
+        });
+        try {
+          await harness.startReactor();
+          await harness.drain();
+          expect(attempts).toBe(
+            failure === "transient lock" ? 2 : failure === "persistent lock" ? 3 : 1,
+          );
+          expect(harness.sendTurn).toHaveBeenCalledTimes(failure === "transient lock" ? 1 : 0);
+          expect(harness.steerTurn).not.toHaveBeenCalled();
+          if (failure !== "transient lock") {
+            expect(await readRun(harness, command.scheduledFollowUp!.runId)).toMatchObject({
+              state: "dispatching",
+              attempt_at: null,
+            });
+            expect(logMessages.join(" ")).toContain(
+              "scheduled follow-up startup replay deferred; durable state retained",
+            );
+            expect(logMessages.join(" ")).not.toContain("synthetic private database detail");
+          }
+        } finally {
+          spy.mockRestore();
+        }
+      },
+    );
+
+    it("does not submit or restart when live runtime is busy behind an idle projection", async () => {
+      const harness = await createHarness();
+      const command = await seed(harness);
+      harness.runtimeSessions.push({
+        threadId,
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: selection.instanceId,
+        status: "running",
+        runtimeMode: "approval-required",
+        activeTurnId: asTurnId("native-existing"),
+        createdAt: command.createdAt,
+        updatedAt: command.createdAt,
+      });
+      await Effect.runPromise(harness.engine.dispatch(command));
+      await waitFor(
+        async () => (await readRun(harness, command.scheduledFollowUp!.runId))?.state === "skipped",
+      );
+      expect(harness.startSession).not.toHaveBeenCalled();
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      expect(harness.steerTurn).not.toHaveBeenCalled();
+    });
+
+    it("a pause during preparation wins before the paid submission CAS", async () => {
+      const harness = await createHarness();
+      const command = await seed(harness);
+      const original = harness.startSession.getMockImplementation()!;
+      harness.startSession.mockImplementationOnce((...args) =>
+        original(...args).pipe(
+          Effect.tap(() =>
+            harness.sql`UPDATE scheduled_followups SET state = 'paused', revision = revision + 1
+          WHERE id = ${command.scheduledFollowUp!.scheduleId}`.pipe(Effect.orDie),
+          ),
+        ),
+      );
+      await Effect.runPromise(harness.engine.dispatch(command));
+      await waitFor(
+        async () => (await readRun(harness, command.scheduledFollowUp!.runId))?.state === "skipped",
+      );
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      expect(harness.steerTurn).not.toHaveBeenCalled();
+      await harness.drain();
+      expect((await harness.readThreadDetail(threadId))?.session?.status).not.toBe("starting");
+    });
+
+    it.each(["expiry", "run limit"] as const)(
+      "rechecks the owner's %s after preparation before attempting a paid turn",
+      async (limit) => {
+        const clockScope = await Effect.runPromise(Scope.make());
+        testClockScope = clockScope;
+        const clock = await Effect.runPromise(TestClock.make().pipe(Scope.provide(clockScope)));
+        await Effect.runPromise(
+          clock.setTime(Date.parse("2026-10-04T10:00:00.000Z")).pipe(Scope.provide(clockScope)),
+        );
+        const harness = await createHarness({
+          testClock: {
+            ...clock,
+            adjust: (duration) => clock.adjust(duration).pipe(Scope.provide(clockScope)),
+            setTime: (timestamp) => clock.setTime(timestamp).pipe(Scope.provide(clockScope)),
+          },
+        });
+        const command = await seed(harness);
+        const scheduleId = command.scheduledFollowUp!.scheduleId;
+        await Effect.runPromise(
+          harness.sql`UPDATE scheduled_followups
+            SET definition_json = json_set(definition_json, '$.endAt', '2026-10-04T10:00:01.000Z', '$.maxRuns', 1)
+            WHERE id = ${scheduleId}`,
+        );
+        const original = harness.startSession.getMockImplementation()!;
+        harness.startSession.mockImplementationOnce((...args) =>
+          original(...args).pipe(
+            Effect.tap(() =>
+              limit === "expiry"
+                ? clock.adjust("2 seconds").pipe(Scope.provide(clockScope))
+                : harness.sql`UPDATE scheduled_followups SET run_count = 1
+                    WHERE id = ${scheduleId}`.pipe(Effect.orDie, Effect.asVoid),
+            ),
+          ),
+        );
+        await Effect.runPromise(harness.engine.dispatch(command));
+        await waitFor(
+          async () =>
+            (await readRun(harness, command.scheduledFollowUp!.runId))?.state === "skipped",
+        );
+        await harness.drain();
+        expect(harness.startSession).toHaveBeenCalledTimes(1);
+        expect(harness.sendTurn).not.toHaveBeenCalled();
+        expect(harness.steerTurn).not.toHaveBeenCalled();
+        expect(await readRun(harness, command.scheduledFollowUp!.runId)).toMatchObject({
+          state: "skipped",
+          attempt_at: null,
+        });
+        const [schedule] = await Effect.runPromise(harness.sql<{ run_count: number }>`
+          SELECT run_count FROM scheduled_followups WHERE id = ${scheduleId}`);
+        expect(schedule?.run_count).toBe(limit === "expiry" ? 0 : 1);
+      },
+    );
+
+    it("does not replay an ambiguous provider acceptance and requires attention", async () => {
+      const harness = await createHarness();
+      const command = await seed(harness);
+      harness.sendTurn.mockImplementationOnce(() =>
+        Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: "codex",
+            method: "turn/start",
+            detail: "Synthetic acknowledgement was lost.",
+          }),
+        ),
+      );
+      await Effect.runPromise(harness.engine.dispatch(command));
+      await waitFor(
+        async () => (await readRun(harness, command.scheduledFollowUp!.runId))?.state === "unknown",
+      );
+      await Effect.runPromise(harness.engine.dispatch(command));
+      await harness.drain();
+      expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+      expect(harness.steerTurn).not.toHaveBeenCalled();
+      const [schedule] = await Effect.runPromise(harness.sql<{ state: string }>`
+        SELECT state FROM scheduled_followups WHERE id = ${command.scheduledFollowUp!.scheduleId}`);
+      expect(schedule?.state).toBe("needs_attention");
+      expect(await readRun(harness, command.scheduledFollowUp!.runId)).toMatchObject({
+        state: "unknown",
+        error_code: "acceptance-unknown",
+        attempt_at: expect.any(String),
+      });
+    });
+
+    it("never reclassifies another owner's unconfirmed attempt as a skipped occurrence", async () => {
+      const harness = await createHarness();
+      const command = await seed(harness);
+      const attemptedAt = "2026-10-04T10:00:00.500Z";
+      const original = harness.startSession.getMockImplementation()!;
+      harness.startSession.mockImplementationOnce((...args) =>
+        original(...args).pipe(
+          Effect.tap(() =>
+            harness.sql`UPDATE scheduled_followup_runs SET attempt_at = ${attemptedAt}
+          WHERE id = ${command.scheduledFollowUp!.runId}`.pipe(Effect.orDie),
+          ),
+        ),
+      );
+      await Effect.runPromise(harness.engine.dispatch(command));
+      await waitFor(
+        async () => (await readRun(harness, command.scheduledFollowUp!.runId))?.state === "unknown",
+      );
+      await harness.drain();
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      expect(harness.steerTurn).not.toHaveBeenCalled();
+      expect(await readRun(harness, command.scheduledFollowUp!.runId)).toMatchObject({
+        state: "unknown",
+        attempt_at: attemptedAt,
+        error_code: "acceptance-unknown",
+      });
+      const [schedule] = await Effect.runPromise(harness.sql<{ state: string }>`
+        SELECT state FROM scheduled_followups WHERE id = ${command.scheduledFollowUp!.scheduleId}`);
+      expect(schedule?.state).toBe("needs_attention");
+    });
+
+    it("an exact Stop accepted during the provider ACK cannot be reopened by that ACK", async () => {
+      const harness = await createHarness();
+      const command = await seed(harness);
+      harness.sendTurn.mockImplementationOnce(() =>
+        harness.engine
+          .dispatch({
+            type: "thread.session.stop",
+            commandId: CommandId.make("scheduled-stop-during-ack"),
+            threadId,
+            createdAt: "2026-10-04T10:00:01.000Z",
+          })
+          .pipe(Effect.orDie, Effect.as({ threadId, turnId: asTurnId("accepted-before-stop") })),
+      );
+      await Effect.runPromise(harness.engine.dispatch(command));
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await harness.drain();
+      const thread = await harness.readThreadDetail(threadId);
+      expect(thread?.session?.status).not.toBe("running");
+      expect(thread?.session?.activeTurnId).toBeNull();
+      expect(harness.steerTurn).not.toHaveBeenCalled();
+    });
+  });
 
   describe("per-chat subagent process policy", () => {
     const threadId = ThreadId.make("thread-1");

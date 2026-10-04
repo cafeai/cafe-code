@@ -581,7 +581,7 @@ export function projectEvent(
           return {
             ...nextBase,
             threads: updateThread(nextBase.threads, payload.threadId, {
-              ...(payload.modelSelection !== undefined
+              ...(payload.modelSelection !== undefined && payload.scheduledFollowUp === undefined
                 ? { modelSelection: payload.modelSelection }
                 : {}),
               ...(payload.subagentLimits !== undefined

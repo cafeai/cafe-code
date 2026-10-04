@@ -2161,7 +2161,12 @@ function applyEnvironmentOrchestrationEvent(
           const previousSession = thread.session;
           return {
             ...thread,
-            ...(event.payload.modelSelection !== undefined
+            // Scheduled overrides configure this occurrence, not the user's
+            // next interactive turn. Match the server projection and retain the
+            // reviewed chat selection while still showing actual accepted-turn
+            // configuration through the normal activity/session surfaces.
+            ...(event.payload.modelSelection !== undefined &&
+            event.payload.scheduledFollowUp === undefined
               ? { modelSelection: normalizeModelSelection(event.payload.modelSelection) }
               : {}),
             runtimeMode: event.payload.runtimeMode,

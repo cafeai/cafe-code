@@ -11,6 +11,7 @@ import { ScrollArea } from "../ui/scroll-area";
 import { ContextWindowDetails } from "./ContextWindowDetails";
 import type { SubagentConcurrencyPresentation } from "../../subagentConcurrency";
 import { TaskProgressDetails } from "./TaskProgressDetails";
+import { ScheduledFollowups, type ScheduledFollowupsContext } from "./ScheduledFollowups";
 import {
   deriveTaskProgressPresentation,
   type ComposerTaskProgressPlan,
@@ -55,6 +56,7 @@ interface SessionRailProps {
   readonly usageResetAction?: ReactNode;
   readonly subagentConcurrency?: SubagentConcurrencyPresentation | null;
   readonly onShowInComposer: () => void;
+  readonly scheduledFollowups?: ScheduledFollowupsContext | undefined;
   readonly className?: string;
 }
 
@@ -107,6 +109,12 @@ export const SessionRail = memo(
             ) : (
               <p className="text-[13px] text-muted-foreground/40">No tasks yet.</p>
             )}
+            {props.scheduledFollowups ? (
+              <ScheduledFollowups
+                key={`${props.scheduledFollowups.environmentId}:${props.scheduledFollowups.threadId}:${props.scheduledFollowups.modelSelection.instanceId}`}
+                context={props.scheduledFollowups}
+              />
+            ) : null}
           </div>
         </ScrollArea>
 

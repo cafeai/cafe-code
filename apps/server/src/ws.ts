@@ -65,6 +65,8 @@ import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner
 import * as ProviderLoginLauncher from "./provider/providerLoginLauncher.ts";
 import { ServerLifecycleEvents } from "./serverLifecycleEvents.ts";
 import { UsageStatsService } from "./usageStats/Services/UsageStatsService.ts";
+import { ScheduledFollowups } from "./scheduledFollowups/service.ts";
+import { ScheduledFollowupError } from "@cafecode/contracts";
 import { ProviderUsageResetError } from "@cafecode/contracts";
 import { ServerRuntimeStartup } from "./serverRuntimeStartup.ts";
 import { redactServerSettingsForClient, ServerSettingsService } from "./serverSettings.ts";
@@ -229,6 +231,15 @@ const makeWsRpcLayer = (
       const serverSettings = yield* ServerSettingsService;
       const clientSettings = yield* ServerClientSettingsService;
       const usageStats = yield* UsageStatsService;
+      const scheduledFollowups = yield* ScheduledFollowups;
+      const ownerScheduleMutation = <A>(operation: Effect.Effect<A, ScheduledFollowupError>) =>
+        currentSession.role === "owner"
+          ? operation
+          : Effect.fail(
+              new ScheduledFollowupError({
+                message: "Only the owner can manage scheduled follow-ups.",
+              }),
+            );
       const startup = yield* ServerRuntimeStartup;
       const workspaceEntries = yield* WorkspaceEntries;
       const workspaceFileSystem = yield* WorkspaceFileSystem;
@@ -1394,6 +1405,16 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.usageStatsGet, usageStats.get, {
             "rpc.aggregate": "server",
           }),
+        [WS_METHODS.scheduledFollowupsList]: (input) => scheduledFollowups.list(input),
+        [WS_METHODS.scheduledFollowupsSave]: (input) =>
+          ownerScheduleMutation(scheduledFollowups.save(input)),
+        [WS_METHODS.scheduledFollowupsSetStatus]: (input) =>
+          ownerScheduleMutation(scheduledFollowups.setStatus(input)),
+        [WS_METHODS.scheduledFollowupsRunNow]: (input) =>
+          ownerScheduleMutation(scheduledFollowups.runNow(input)),
+        [WS_METHODS.scheduledFollowupsHistory]: (input) => scheduledFollowups.history(input),
+        [WS_METHODS.scheduledFollowupsNotification]: (input) =>
+          scheduledFollowups.notification(input.threadId, input.turnId),
         [WS_METHODS.subscribeUsageStats]: (_input) =>
           observeRpcStreamEffect(
             WS_METHODS.subscribeUsageStats,

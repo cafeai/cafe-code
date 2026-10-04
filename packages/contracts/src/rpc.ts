@@ -5,6 +5,19 @@ import {
 } from "./virtualDesktop.ts";
 import * as Schema from "effect/Schema";
 import {
+  ScheduledFollowupListInput,
+  ScheduledFollowupListResult,
+  ScheduledFollowupSaveInput,
+  ScheduledFollowupRecord,
+  ScheduledFollowupSetStatusInput,
+  ScheduledFollowupRunNowInput,
+  ScheduledFollowupRun,
+  ScheduledFollowupHistoryInput,
+  ScheduledFollowupHistoryResult,
+  ScheduledFollowupError,
+} from "./scheduledFollowups.ts";
+import { ThreadId, TurnId } from "./baseSchemas.ts";
+import {
   ProviderUsageResetError,
   ProviderUsageResetInput,
   ProviderUsageResetResult,
@@ -188,6 +201,12 @@ export const WS_METHODS = {
 
   // Usage stats
   usageStatsGet: "usageStats.get",
+  scheduledFollowupsList: "scheduledFollowups.list",
+  scheduledFollowupsSave: "scheduledFollowups.save",
+  scheduledFollowupsSetStatus: "scheduledFollowups.setStatus",
+  scheduledFollowupsRunNow: "scheduledFollowups.runNow",
+  scheduledFollowupsHistory: "scheduledFollowups.history",
+  scheduledFollowupsNotification: "scheduledFollowups.notification",
 
   // Source control methods
   sourceControlLookupRepository: "sourceControl.lookupRepository",
@@ -633,6 +652,36 @@ export const WsSubscribeUsageStatsRpc = Rpc.make(WS_METHODS.subscribeUsageStats,
 });
 
 export const WsRpcGroup = RpcGroup.make(
+  Rpc.make(WS_METHODS.scheduledFollowupsList, {
+    payload: ScheduledFollowupListInput,
+    success: ScheduledFollowupListResult,
+    error: ScheduledFollowupError,
+  }),
+  Rpc.make(WS_METHODS.scheduledFollowupsSave, {
+    payload: ScheduledFollowupSaveInput,
+    success: ScheduledFollowupRecord,
+    error: ScheduledFollowupError,
+  }),
+  Rpc.make(WS_METHODS.scheduledFollowupsSetStatus, {
+    payload: ScheduledFollowupSetStatusInput,
+    success: ScheduledFollowupRecord,
+    error: ScheduledFollowupError,
+  }),
+  Rpc.make(WS_METHODS.scheduledFollowupsRunNow, {
+    payload: ScheduledFollowupRunNowInput,
+    success: ScheduledFollowupRun,
+    error: ScheduledFollowupError,
+  }),
+  Rpc.make(WS_METHODS.scheduledFollowupsHistory, {
+    payload: ScheduledFollowupHistoryInput,
+    success: ScheduledFollowupHistoryResult,
+    error: ScheduledFollowupError,
+  }),
+  Rpc.make(WS_METHODS.scheduledFollowupsNotification, {
+    payload: Schema.Struct({ threadId: ThreadId, turnId: Schema.NullOr(TurnId) }),
+    success: Schema.Struct({ notify: Schema.Boolean }),
+    error: ScheduledFollowupError,
+  }),
   WsServerGetConfigRpc,
   WsServerGetMcpStatusRpc,
   WsServerVirtualDesktopRpc,

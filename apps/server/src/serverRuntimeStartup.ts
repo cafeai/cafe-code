@@ -34,6 +34,7 @@ import { ServerClientSettingsService } from "./serverClientSettings.ts";
 import { ServerEnvironment } from "./environment/Services/ServerEnvironment.ts";
 import { ServerAuth } from "./auth/Services/ServerAuth.ts";
 import { ProviderSessionReaper } from "./provider/Services/ProviderSessionReaper.ts";
+import { ScheduledFollowups } from "./scheduledFollowups/service.ts";
 import {
   formatHeadlessServeOutput,
   formatHostForUrl,
@@ -263,6 +264,7 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
   const serverConfig = yield* ServerConfig;
   const keybindings = yield* Keybindings;
   const orchestrationReactor = yield* OrchestrationReactor;
+  const scheduledFollowups = yield* ScheduledFollowups;
   const providerSessionReaper = yield* ProviderSessionReaper;
   const lifecycleEvents = yield* ServerLifecycleEvents;
   const serverSettings = yield* ServerSettingsService;
@@ -327,6 +329,7 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
       Effect.gen(function* () {
         yield* orchestrationReactor.start().pipe(Scope.provide(reactorScope));
         yield* providerSessionReaper.start().pipe(Scope.provide(reactorScope));
+        yield* scheduledFollowups.start().pipe(Scope.provide(reactorScope));
       }),
     );
 

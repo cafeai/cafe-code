@@ -142,6 +142,16 @@ certificate, firewall, or reverse proxy separately, then use the server's
 pairing details. Desktop credentials are encrypted with Electron safe storage;
 browser credentials are retained only for the current browser session.
 
+### Scheduled Follow-ups
+
+Use **Tasks → Scheduled** to schedule one-time or recurring work in a
+Codex, Claude, or Grok chat. Schedules and run history persist across restarts;
+missed checks catch up once after reopening while busy chats wait. Execution
+requires the owning backend online and the computer awake. Agent-created
+proposals need your approval before they run. See the
+[scheduled follow-ups guide](docs/scheduled-followups.md) for model overrides,
+notifications, limits, and recovery behavior.
+
 ### Agent Control over MCP
 
 Cafe Code exposes an authenticated Streamable HTTP MCP endpoint at `/mcp` on

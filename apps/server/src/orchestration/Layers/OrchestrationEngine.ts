@@ -42,6 +42,10 @@ import {
 import { decideOrchestrationCommand } from "../decider.ts";
 import { makeRuntimeRecoveryBarrierReader } from "../providerRuntimeRecovery.ts";
 import {
+  markScheduledFollowUpAdmitted,
+  verifyScheduledFollowUpAdmission,
+} from "../../scheduledFollowups/authorization.ts";
+import {
   hydrateLegacyMessageIdentitiesForThread,
   readLatestMessageIdentity,
   type PersistedMessageIdentity,
@@ -518,16 +522,37 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             !barriers.interruptRequested &&
             !barriers.newerTurnRequested;
         }
-        const eventBase = yield* decideOrchestrationCommand({
-          command: envelope.command,
-          readModel: commandReadModel,
-          runtimeRecoveryBarrierVerified,
-          codexRootReplacementVerified,
-        });
-        const eventBases = Array.isArray(eventBase) ? eventBase : [eventBase];
+        const scheduledCommand =
+          envelope.command.type === "thread.turn.start" &&
+          envelope.command.scheduledFollowUp !== undefined
+            ? envelope.command
+            : undefined;
+        const decide = (scheduledFollowUpVerified = false) =>
+          decideOrchestrationCommand({
+            command: envelope.command,
+            readModel: commandReadModel,
+            runtimeRecoveryBarrierVerified,
+            codexRootReplacementVerified,
+            scheduledFollowUpVerified,
+          });
+        // Ordinary commands retain their existing decision boundary. An
+        // unattended occurrence additionally claims its exact schedule/run
+        // revision inside the event transaction. A concurrent Pause/edit or
+        // second backend therefore cannot leave an accepted event without the
+        // matching durable authority, or consume authority without its event.
+        const ordinaryEventBase = scheduledCommand === undefined ? yield* decide() : undefined;
         const committedCommand = yield* sql
           .withTransaction(
             Effect.gen(function* () {
+              const eventBase =
+                ordinaryEventBase ??
+                (yield* decide(
+                  scheduledCommand !== undefined &&
+                    (yield* verifyScheduledFollowUpAdmission(scheduledCommand).pipe(
+                      Effect.provideService(SqlClient.SqlClient, sql),
+                    )),
+                ));
+              const eventBases = Array.isArray(eventBase) ? eventBase : [eventBase];
               const committedEvents: OrchestrationEvent[] = [];
               let nextCommandReadModel = commandReadModel;
 
@@ -535,6 +560,14 @@ const makeOrchestrationEngine = Effect.gen(function* () {
                 const savedEvent = yield* eventStore.append(nextEvent);
                 nextCommandReadModel = yield* projectEvent(nextCommandReadModel, savedEvent);
                 yield* projectionPipeline.projectEvent(savedEvent);
+                if (
+                  savedEvent.type === "thread.turn-start-requested" &&
+                  savedEvent.payload.scheduledFollowUp !== undefined
+                ) {
+                  yield* markScheduledFollowUpAdmitted(savedEvent).pipe(
+                    Effect.provideService(SqlClient.SqlClient, sql),
+                  );
+                }
                 committedEvents.push(savedEvent);
               }
 
