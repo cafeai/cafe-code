@@ -13,6 +13,7 @@
 import {
   DEFAULT_GIT_TEXT_GENERATION_MODEL,
   DEFAULT_GIT_TEXT_GENERATION_MODEL_BY_PROVIDER,
+  DEFAULT_GIT_TEXT_GENERATION_REASONING_EFFORT,
   DEFAULT_SERVER_SETTINGS,
   isProviderDriverKind,
   isRetiredProviderDriverKind,
@@ -283,6 +284,15 @@ function fallbackTextGenerationProvider(settings: ServerSettings): ServerSetting
       model:
         DEFAULT_GIT_TEXT_GENERATION_MODEL_BY_PROVIDER[fallback] ??
         DEFAULT_GIT_TEXT_GENERATION_MODEL,
+      // Only Codex's helper effort is configured by this policy. Other drivers
+      // retain their native option defaults when replacing an unavailable account.
+      ...(fallback === "codex"
+        ? {
+            options: [
+              { id: "reasoningEffort", value: DEFAULT_GIT_TEXT_GENERATION_REASONING_EFFORT },
+            ],
+          }
+        : {}),
     } satisfies ModelSelection,
   };
 }

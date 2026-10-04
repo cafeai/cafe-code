@@ -16,6 +16,7 @@ import { expect } from "vitest";
 
 import {
   CodexSettings,
+  DEFAULT_SERVER_SETTINGS,
   ProviderInstanceId,
   TextGenerationError,
   type UsageAccountingSnapshot,
@@ -720,14 +721,17 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
     );
   }
 
-  it.effect("defaults git text generation codex effort to low", () =>
+  it.effect("defaults omitted Codex helper effort to Medium without changing the saved model", () =>
     withFakeCodexSpawner(
       {
         output: JSON.stringify({
           subject: "Add important change",
           body: "",
         }),
-        requireReasoningEffort: "low",
+        requireReasoningEffort: "medium",
+        inspectCommand: (command) => {
+          expect(command.args[command.args.indexOf("--model") + 1]).toBe("gpt-5.4-mini");
+        },
       },
       (textGeneration) =>
         textGeneration.generateCommitMessage({
@@ -739,6 +743,42 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
         }),
     ),
   );
+
+  for (const operation of [
+    "generateThreadTitle",
+    "generateBranchName",
+    "generateThreadMetadata",
+  ] as const) {
+    it.effect(`dispatches Sol 6.1 Medium defaults for ${operation} in one helper request`, () =>
+      Effect.gen(function* () {
+        let requests = 0;
+        yield* withFakeCodexSpawner(
+          {
+            output: JSON.stringify({ title: "Helper title", branch: "helper-branch" }),
+            requireReasoningEffort: "medium",
+            expectedServiceTier: "omitted",
+            inspectCommand: (command) => {
+              requests += 1;
+              expect(command.args[command.args.indexOf("--model") + 1]).toBe("gpt-6.1-sol");
+              // The model policy must not grant helpers mutable workspace access
+              // or retain conversations; both protections stay on the exact argv.
+              expect(command.args[command.args.indexOf("-s") + 1]).toBe("read-only");
+              expect(command.args).toContain("--ephemeral");
+            },
+          },
+          (generation) => {
+            const result: Effect.Effect<unknown, TextGenerationError> = generation[operation]({
+              cwd: process.cwd(),
+              message: "Name the supplied task",
+              modelSelection: DEFAULT_SERVER_SETTINGS.textGenerationModelSelection,
+            });
+            return result;
+          },
+        );
+        expect(requests).toBe(1);
+      }),
+    );
+  }
 
   it.effect("generates commit message with branch when includeBranch is true", () =>
     withFakeCodexSpawner(

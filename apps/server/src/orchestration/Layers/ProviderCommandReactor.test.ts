@@ -82,6 +82,28 @@ const asApprovalRequestId = (value: string): ApprovalRequestId => ApprovalReques
 const asMessageId = (value: string): MessageId => MessageId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
 
+// Exercise all active metadata paths with a missing helper setting and an
+// explicit saved choice. These models intentionally differ from the harness's
+// chat model so a caller cannot accidentally use the interactive selection.
+const savedHelperSelection = createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.6-sol", [
+  { id: "reasoningEffort", value: "low" },
+  { id: "fastMode", value: false },
+]);
+const metadataHelperSelectionCases = [
+  {
+    name: "default Sol 6.1 Medium",
+    settingsOverride: {},
+    expected: createModelSelection(ProviderInstanceId.make("codex"), "gpt-6.1-sol", [
+      { id: "reasoningEffort", value: "medium" },
+    ]),
+  },
+  {
+    name: "saved helper override",
+    settingsOverride: { textGenerationModelSelection: savedHelperSelection },
+    expected: savedHelperSelection,
+  },
+] as const;
+
 const liveDurableRuntimeOwnerPayload = () => {
   const now = new Date().toISOString();
   return {
@@ -194,6 +216,7 @@ describe("ProviderCommandReactor", () => {
   async function createHarness(input?: {
     readonly baseDir?: string;
     readonly threadModelSelection?: ModelSelection;
+    readonly textGenerationModelSelection?: ModelSelection;
     readonly missingProviderInstanceIds?: ReadonlySet<string>;
     readonly sessionModelSwitch?: "unsupported" | "restart-resume" | "in-session";
     readonly liveSteer?: "supported" | "unsupported";
@@ -584,7 +607,13 @@ describe("ProviderCommandReactor", () => {
           generateThreadMetadata,
         }),
       ),
-      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(
+        ServerSettingsService.layerTest(
+          input?.textGenerationModelSelection === undefined
+            ? {}
+            : { textGenerationModelSelection: input.textGenerationModelSelection },
+        ),
+      ),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
       Layer.provideMerge(NodeServices.layer),
     );
@@ -2827,55 +2856,59 @@ describe("ProviderCommandReactor", () => {
     });
   });
 
-  it("generates a thread title on the first turn", async () => {
-    const harness = await createHarness();
-    const now = "2026-01-01T00:00:00.000Z";
-    const seededTitle = "Please investigate reconnect failures after restar...";
-    harness.generateThreadTitle.mockReturnValue(Effect.succeed({ title: "Generated title" }));
+  it.each(metadataHelperSelectionCases)(
+    "generates a thread title using $name on the first turn",
+    async ({ settingsOverride, expected }) => {
+      const harness = await createHarness(settingsOverride);
+      const now = "2026-01-01T00:00:00.000Z";
+      const seededTitle = "Please investigate reconnect failures after restar...";
+      harness.generateThreadTitle.mockReturnValue(Effect.succeed({ title: "Generated title" }));
 
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.meta.update",
-        commandId: CommandId.make("cmd-thread-title-seed"),
-        threadId: ThreadId.make("thread-1"),
-        title: seededTitle,
-      }),
-    );
-
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.turn.start",
-        commandId: CommandId.make("cmd-turn-start-title"),
-        threadId: ThreadId.make("thread-1"),
-        message: {
-          messageId: asMessageId("user-message-title"),
-          role: "user",
-          text: "Please investigate reconnect failures after restarting the session.",
-          attachments: [],
-        },
-        titleSeed: seededTitle,
-        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
-        createdAt: now,
-      }),
-    );
-
-    await waitFor(() => harness.generateThreadTitle.mock.calls.length === 1);
-    expect(harness.generateThreadTitle.mock.calls[0]?.[0]).toMatchObject({
-      message: "Please investigate reconnect failures after restarting the session.",
-    });
-
-    await waitFor(async () => {
-      const readModel = await harness.readModel();
-      return (
-        readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"))?.title ===
-        "Generated title"
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("cmd-thread-title-seed"),
+          threadId: ThreadId.make("thread-1"),
+          title: seededTitle,
+        }),
       );
-    });
-    const readModel = await harness.readModel();
-    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
-    expect(thread?.title).toBe("Generated title");
-  });
+
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-start-title"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("user-message-title"),
+            role: "user",
+            text: "Please investigate reconnect failures after restarting the session.",
+            attachments: [],
+          },
+          titleSeed: seededTitle,
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        }),
+      );
+
+      await waitFor(() => harness.generateThreadTitle.mock.calls.length === 1);
+      expect(harness.generateThreadTitle.mock.calls[0]?.[0]).toMatchObject({
+        message: "Please investigate reconnect failures after restarting the session.",
+      });
+      expect(harness.generateThreadTitle.mock.calls[0]?.[0].modelSelection).toEqual(expected);
+
+      await waitFor(async () => {
+        const readModel = await harness.readModel();
+        return (
+          readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"))?.title ===
+          "Generated title"
+        );
+      });
+      const readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      expect(thread?.title).toBe("Generated title");
+    },
+  );
 
   it("does not overwrite an existing custom thread title on the first turn", async () => {
     const harness = await createHarness();
@@ -2968,106 +3001,114 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.title).toBe("Reconnect spinner resume bug");
   });
 
-  it("generates a worktree branch name for the first turn", async () => {
-    const harness = await createHarness();
-    const now = "2026-01-01T00:00:00.000Z";
+  it.each(metadataHelperSelectionCases)(
+    "generates a worktree branch name using $name for the first turn",
+    async ({ settingsOverride, expected }) => {
+      const harness = await createHarness(settingsOverride);
+      const now = "2026-01-01T00:00:00.000Z";
 
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.meta.update",
-        commandId: CommandId.make("cmd-thread-branch"),
-        threadId: ThreadId.make("thread-1"),
-        title: "Keep this custom title",
-        branch: "t3code/1234abcd",
-        worktreePath: "/tmp/provider-project-worktree",
-      }),
-    );
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("cmd-thread-branch"),
+          threadId: ThreadId.make("thread-1"),
+          title: "Keep this custom title",
+          branch: "t3code/1234abcd",
+          worktreePath: "/tmp/provider-project-worktree",
+        }),
+      );
 
-    harness.generateBranchName.mockImplementation((input: unknown) =>
-      Effect.succeed({
-        branch:
-          typeof input === "object" &&
-          input !== null &&
-          "modelSelection" in input &&
-          typeof input.modelSelection === "object" &&
-          input.modelSelection !== null &&
-          "model" in input.modelSelection &&
-          typeof input.modelSelection.model === "string"
-            ? `feature/${input.modelSelection.model}`
-            : "feature/generated",
-      }),
-    );
+      harness.generateBranchName.mockImplementation((input: unknown) =>
+        Effect.succeed({
+          branch:
+            typeof input === "object" &&
+            input !== null &&
+            "modelSelection" in input &&
+            typeof input.modelSelection === "object" &&
+            input.modelSelection !== null &&
+            "model" in input.modelSelection &&
+            typeof input.modelSelection.model === "string"
+              ? `feature/${input.modelSelection.model}`
+              : "feature/generated",
+        }),
+      );
 
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.turn.start",
-        commandId: CommandId.make("cmd-turn-start-branch-model"),
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-start-branch-model"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("user-message-branch-model"),
+            role: "user",
+            text: "Add a safer reconnect backoff.",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        }),
+      );
+
+      await waitFor(() => harness.generateBranchName.mock.calls.length === 1);
+      await waitFor(() => harness.refreshStatus.mock.calls.length === 1);
+      expect(harness.generateBranchName.mock.calls[0]?.[0]).toMatchObject({
+        message: "Add a safer reconnect backoff.",
+      });
+      expect(harness.generateBranchName.mock.calls[0]?.[0].modelSelection).toEqual(expected);
+      expect(harness.refreshStatus.mock.calls[0]?.[0]).toBe("/tmp/provider-project-worktree");
+    },
+  );
+
+  it.each(metadataHelperSelectionCases)(
+    "generates and applies first-turn title and branch using $name with one deduplicated request",
+    async ({ settingsOverride, expected }) => {
+      const harness = await createHarness(settingsOverride);
+      harness.generateThreadMetadata.mockReturnValue(
+        Effect.succeed({ title: "Safer reconnect backoff", branch: "safer-reconnect" }),
+      );
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("cmd-combined-metadata-setup"),
+          threadId: ThreadId.make("thread-1"),
+          title: "New thread",
+          branch: "t3code/1234abcd",
+          worktreePath: "/tmp/provider-project-worktree",
+        }),
+      );
+      const command = {
+        type: "thread.turn.start" as const,
+        commandId: CommandId.make("cmd-combined-metadata-turn"),
         threadId: ThreadId.make("thread-1"),
         message: {
-          messageId: asMessageId("user-message-branch-model"),
-          role: "user",
+          messageId: asMessageId("combined-metadata-message"),
+          role: "user" as const,
           text: "Add a safer reconnect backoff.",
           attachments: [],
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
-        createdAt: now,
-      }),
-    );
-
-    await waitFor(() => harness.generateBranchName.mock.calls.length === 1);
-    await waitFor(() => harness.refreshStatus.mock.calls.length === 1);
-    expect(harness.generateBranchName.mock.calls[0]?.[0]).toMatchObject({
-      message: "Add a safer reconnect backoff.",
-    });
-    expect(harness.refreshStatus.mock.calls[0]?.[0]).toBe("/tmp/provider-project-worktree");
-  });
-
-  it("generates and applies first-turn title and branch with one deduplicated request", async () => {
-    const harness = await createHarness();
-    harness.generateThreadMetadata.mockReturnValue(
-      Effect.succeed({ title: "Safer reconnect backoff", branch: "safer-reconnect" }),
-    );
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.meta.update",
-        commandId: CommandId.make("cmd-combined-metadata-setup"),
-        threadId: ThreadId.make("thread-1"),
-        title: "New thread",
-        branch: "t3code/1234abcd",
-        worktreePath: "/tmp/provider-project-worktree",
-      }),
-    );
-    const command = {
-      type: "thread.turn.start" as const,
-      commandId: CommandId.make("cmd-combined-metadata-turn"),
-      threadId: ThreadId.make("thread-1"),
-      message: {
-        messageId: asMessageId("combined-metadata-message"),
-        role: "user" as const,
-        text: "Add a safer reconnect backoff.",
-        attachments: [],
-      },
-      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-      runtimeMode: "approval-required" as const,
-      createdAt: "2026-01-01T00:00:00.000Z",
-    };
-    await Effect.runPromise(harness.engine.dispatch(command));
-    await Effect.runPromise(harness.engine.dispatch(command));
-    await waitFor(() => harness.refreshStatus.mock.calls.length === 1);
-    await waitFor(
-      async () => (await harness.readModel()).threads[0]?.title === "Safer reconnect backoff",
-    );
-    expect(harness.generateThreadMetadata).toHaveBeenCalledTimes(1);
-    expect(harness.generateThreadMetadata.mock.calls[0]?.[0]).toMatchObject({
-      cwd: "/tmp/provider-project-worktree",
-      message: "Add a safer reconnect backoff.",
-    });
-    expect(harness.generateBranchName).not.toHaveBeenCalled();
-    expect(harness.generateThreadTitle).not.toHaveBeenCalled();
-    expect(harness.renameBranch).toHaveBeenCalledTimes(1);
-    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
-  });
+        runtimeMode: "approval-required" as const,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      };
+      await Effect.runPromise(harness.engine.dispatch(command));
+      await Effect.runPromise(harness.engine.dispatch(command));
+      await waitFor(() => harness.refreshStatus.mock.calls.length === 1);
+      await waitFor(
+        async () => (await harness.readModel()).threads[0]?.title === "Safer reconnect backoff",
+      );
+      expect(harness.generateThreadMetadata).toHaveBeenCalledTimes(1);
+      expect(harness.generateThreadMetadata.mock.calls[0]?.[0]).toMatchObject({
+        cwd: "/tmp/provider-project-worktree",
+        message: "Add a safer reconnect backoff.",
+      });
+      expect(harness.generateThreadMetadata.mock.calls[0]?.[0].modelSelection).toEqual(expected);
+      expect(harness.generateBranchName).not.toHaveBeenCalled();
+      expect(harness.generateThreadTitle).not.toHaveBeenCalled();
+      expect(harness.renameBranch).toHaveBeenCalledTimes(1);
+      expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it.each(["title", "branch", "rename-failure"] as const)(
     "applies combined metadata independently after %s changes during generation",

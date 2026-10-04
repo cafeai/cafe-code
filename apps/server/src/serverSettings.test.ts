@@ -33,22 +33,37 @@ const makeServerSettingsLayer = () =>
 
 it.layer(NodeServices.layer)("server settings", (it) => {
   it.effect(
-    "defaults metadata helpers to supported Luna while preserving explicit selections",
+    "defaults metadata helpers to Sol 6.1 Medium while preserving explicit selections",
     () =>
       Effect.sync(() => {
         const decode = Schema.decodeUnknownSync(ServerSettings);
         assert.deepEqual(decode({}).textGenerationModelSelection, {
           instanceId: ProviderInstanceId.make("codex"),
-          model: "gpt-5.6-luna",
+          model: "gpt-6.1-sol",
+          options: [{ id: "reasoningEffort", value: "medium" }],
         });
         const explicit = {
           instanceId: ProviderInstanceId.make("codex"),
           model: "gpt-5.4-mini",
-          options: [{ id: "fastMode", value: false }],
+          options: [
+            { id: "reasoningEffort", value: "low" },
+            { id: "fastMode", value: false },
+          ],
         };
         assert.deepEqual(
           decode({ textGenerationModelSelection: explicit }).textGenerationModelSelection,
           explicit,
+        );
+        // Changing an absent-selection default is not a migration of saved
+        // selections, including selections that leave effort to the helper.
+        const savedWithoutOptions = {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5.6-luna",
+        };
+        assert.deepEqual(
+          decode({ textGenerationModelSelection: savedWithoutOptions })
+            .textGenerationModelSelection,
+          savedWithoutOptions,
         );
       }),
   );
@@ -231,6 +246,49 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 
+  for (const fallbackCase of [
+    {
+      disabled: "claudeAgent",
+      savedModel: "claude-sonnet-4-6",
+      expected: {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-6.1-sol",
+        options: [{ id: "reasoningEffort", value: "medium" }],
+      },
+    },
+    {
+      disabled: "codex",
+      savedModel: "gpt-6-astra",
+      expected: {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-haiku-4-5",
+      },
+    },
+  ] as const) {
+    it.effect(`uses helper defaults when the selected ${fallbackCase.disabled} is disabled`, () =>
+      Effect.gen(function* () {
+        const serverSettings = yield* ServerSettingsService;
+        const saved = {
+          instanceId: ProviderInstanceId.make(fallbackCase.disabled),
+          model: fallbackCase.savedModel,
+          options: [{ id: "reasoningEffort", value: "high" }],
+        };
+        yield* serverSettings.updateSettings({ textGenerationModelSelection: saved });
+        const next = yield* serverSettings.updateSettings({
+          providers: { [fallbackCase.disabled]: { enabled: false } },
+        });
+        assert.deepEqual(next.textGenerationModelSelection, fallbackCase.expected);
+
+        // The read-time fallback must not overwrite the saved account/model:
+        // re-enabling it restores the user's exact selection and options.
+        const restored = yield* serverSettings.updateSettings({
+          providers: { [fallbackCase.disabled]: { enabled: true } },
+        });
+        assert.deepEqual(restored.textGenerationModelSelection, saved);
+      }).pipe(Effect.provide(makeServerSettingsLayer())),
+    );
+  }
+
   it.effect(
     "uses explicit provider instance enabled state over legacy provider enabled state",
     () =>
@@ -310,15 +368,13 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       });
 
       const next = yield* serverSettings.updateSettings({
-        textGenerationModelSelection: {
-          instanceId: DEFAULT_SERVER_SETTINGS.textGenerationModelSelection.instanceId,
-          model: DEFAULT_SERVER_SETTINGS.textGenerationModelSelection.model,
-        },
+        textGenerationModelSelection: DEFAULT_SERVER_SETTINGS.textGenerationModelSelection,
       });
 
       assert.deepEqual(next.textGenerationModelSelection, {
         instanceId: DEFAULT_SERVER_SETTINGS.textGenerationModelSelection.instanceId,
-        model: DEFAULT_SERVER_SETTINGS.textGenerationModelSelection.model,
+        model: "gpt-6.1-sol",
+        options: [{ id: "reasoningEffort", value: "medium" }],
       });
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );

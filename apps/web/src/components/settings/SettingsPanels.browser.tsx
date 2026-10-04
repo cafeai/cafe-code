@@ -48,6 +48,7 @@ import {
   FilesSettingsPanel,
   ProviderSettingsPanel,
   SystemSettingsPanel,
+  TextGenerationModelSettingsRow,
 } from "./SettingsPanels";
 import { SourceControlSettingsPanel } from "./SourceControlSettings";
 
@@ -702,6 +703,98 @@ describe("settings panels", () => {
     resetServerStateForTests();
     await __resetLocalApiForTests();
     authAccessHarness.reset();
+  });
+
+  it("preserves saved helper choices and resets to Sol 6.1 with Medium reasoning", async () => {
+    const updateSettings = vi.fn().mockResolvedValue(undefined);
+    window.nativeApi = {
+      persistence: {
+        getClientSettings: vi.fn().mockResolvedValue(null),
+        setClientSettings: vi.fn().mockResolvedValue(undefined),
+      },
+      server: { updateSettings },
+    } as unknown as LocalApi;
+    const config = createBaseServerConfig();
+    setServerConfigSnapshot({
+      ...config,
+      settings: {
+        ...config.settings,
+        textGenerationModelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5.6-luna",
+          options: [
+            { id: "reasoningEffort", value: "high" },
+            { id: "fastMode", value: true },
+          ],
+        },
+      },
+      providers: [
+        {
+          ...createOutdatedProvider("codex"),
+          models: [
+            { slug: "gpt-6.1-sol", name: "GPT-6.1 Sol" },
+            { slug: "gpt-5.6-luna", name: "GPT-5.6 Luna" },
+          ].map((model) => ({
+            slug: model.slug,
+            name: model.name,
+            isCustom: false,
+            capabilities: {
+              // Use a native Low default so the assertion proves that the
+              // helper-specific Medium choice reaches the actual control.
+              optionDescriptors: [
+                {
+                  id: "reasoningEffort",
+                  label: "Reasoning",
+                  type: "select",
+                  currentValue: "low",
+                  options: [
+                    { id: "low", label: "Low", isDefault: true },
+                    { id: "medium", label: "Medium" },
+                    { id: "high", label: "High" },
+                  ],
+                },
+                { id: "fastMode", label: "Fast", type: "boolean", currentValue: false },
+              ],
+            },
+          })),
+        },
+      ],
+    });
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <TextGenerationModelSettingsRow />
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect
+      .element(
+        page.getByText(
+          "Choose the model and settings used for automatic chat titles and worktree branch names.",
+        ),
+      )
+      .toBeVisible();
+    await expect.element(page.getByRole("button", { name: /GPT-5.6 Luna/ })).toBeVisible();
+    await expect
+      .element(page.getByRole("button", { name: "High · Fast", exact: true }))
+      .toBeVisible();
+    expect(updateSettings).not.toHaveBeenCalled();
+
+    await page.getByRole("button", { name: "Reset text generation model to default" }).click();
+    expect(updateSettings).toHaveBeenCalledTimes(1);
+    expect(updateSettings).toHaveBeenCalledWith({
+      textGenerationModelSelection: {
+        instanceId: "codex",
+        model: "gpt-6.1-sol",
+        options: [{ id: "reasoningEffort", value: "medium" }],
+      },
+    });
+    await expect.element(page.getByRole("button", { name: /GPT-6.1 Sol/ })).toBeVisible();
+    await expect
+      .element(page.getByRole("button", { name: "Medium · Normal", exact: true }))
+      .toBeVisible();
+    await expect
+      .element(page.getByRole("button", { name: "Reset text generation model to default" }))
+      .not.toBeInTheDocument();
   });
 
   it("hides owner pairing tools in browser-served loopback builds without remote exposure", async () => {

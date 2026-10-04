@@ -11,7 +11,11 @@ import {
   TrimmedString,
   TurnId,
 } from "./baseSchemas.ts";
-import { DEFAULT_GIT_TEXT_GENERATION_MODEL, ProviderOptionSelections } from "./model.ts";
+import {
+  DEFAULT_GIT_TEXT_GENERATION_MODEL,
+  DEFAULT_GIT_TEXT_GENERATION_REASONING_EFFORT,
+  ProviderOptionSelections,
+} from "./model.ts";
 import { ModelSelection } from "./orchestration.ts";
 import { ProviderInstanceConfig, ProviderInstanceId } from "./providerInstance.ts";
 import { EditorId } from "./editor.ts";
@@ -899,6 +903,7 @@ export const ServerSettings = Schema.Struct({
       Effect.succeed({
         instanceId: ProviderInstanceId.make("codex"),
         model: DEFAULT_GIT_TEXT_GENERATION_MODEL,
+        options: [{ id: "reasoningEffort", value: DEFAULT_GIT_TEXT_GENERATION_REASONING_EFFORT }],
       }),
     ),
   ),

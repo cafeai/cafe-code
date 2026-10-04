@@ -1,6 +1,6 @@
 # Usage statistics
 
-Last updated: 2026-10-04 00:42:33 JST (UTC+0900)
+Last updated: 2026-10-04 12:21:42 JST (UTC+0900)
 
 Settings → Usage has one date-range selector for its reporting statistics. The default is 30 days. Selecting 7 days, 30 days, 90 days or All updates generated tokens, chats sent, generating time, estimated USD cost, provider/model breakdowns, token composition, cache savings, cost quality and usage charts together. Activity always shows all recorded daily history, independently of this selector. Cost/Tokens changes the graph's measurement without changing the selected period. The shared detailed cost view in Atrium uses the same range semantics; Atrium's ambient lifetime counters remain lifetime counters.
 
@@ -34,6 +34,19 @@ The timer settles an elapsed interval before its attribution changes, so a model
 Time follows the same 7/30/90/All calendar bounds, independently of token observations. A model can have measured time without reported tokens, for example an in-flight or aborted turn; those rows remain available in the table without inflating token totals or cost quality. Model rows refresh with the existing atomic detail response rather than extrapolating a model share from the headline timer or adding per-row animation loops.
 
 “Not recorded” means no measured duration is available for that model in the selected period, not zero work. This includes older history, older servers and token-only metadata helpers/subagent observations whose interactive durations were not collected. The table identifies when tracking began; even All covers only recorded time since that point. Historical turn projections or token shares cannot truthfully recover discarded model timings, so no retrospective backfill is performed. See the [model-time decision](decisions/model-generation-time.md) for storage, coverage and compatibility rationale.
+
+## Metadata helper settings
+
+Automatic chat titles and temporary worktree branch names share the text-generation
+selection in **Settings → Source Control → Generated Text**. When both labels are
+needed for the first message, Cafe requests them together in one inference. The
+Codex helper default is **GPT-6.1 Sol, Medium reasoning effort**; Reset restores
+that selection, while explicit saved models and effort choices remain unchanged.
+An existing Codex helper selection without an effort uses Medium. Other providers
+retain their existing helper defaults. The helper setting does not change an
+interactive chat's model, provider-managed compaction or agent progress summaries.
+Fast remains independently configurable; omission still follows the provider's
+native service-tier configuration rather than forcing Fast on or off.
 
 ## Estimates and missing history
 

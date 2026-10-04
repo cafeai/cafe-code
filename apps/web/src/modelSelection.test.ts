@@ -257,3 +257,248 @@ describe("instance-scoped model selection", () => {
     });
   });
 });
+
+function codexProvider(instanceId = "codex"): ServerProvider {
+  const snapshot = provider({
+    instanceId,
+    // Deliberately advertise the chat default first. The helper fallback
+    // must select its own default without changing the conversation picker.
+    models: ["gpt-6-astra", "gpt-6.1-sol", "gpt-5.6-luna"],
+  });
+  return {
+    ...snapshot,
+    models: snapshot.models.map(({ slug, name, isCustom }) => ({
+      slug,
+      name,
+      isCustom,
+      capabilities: {
+        optionDescriptors: [
+          {
+            id: "reasoningEffort",
+            label: "Reasoning",
+            type: "select",
+            options: [
+              { id: "low", label: "Low", isDefault: true },
+              { id: "medium", label: "Medium" },
+              { id: "high", label: "High" },
+              { id: "ultra", label: "Ultra" },
+            ],
+            currentValue: "low",
+          },
+          { id: "fastMode", label: "Fast", type: "boolean", currentValue: false },
+        ],
+      },
+    })),
+  };
+}
+
+describe("text-generation helper selection", () => {
+  it("uses Sol 6.1 Medium instead of the native chat model and Low effort defaults", () => {
+    expect(resolveAppModelSelectionState(DEFAULT_UNIFIED_SETTINGS, [codexProvider()])).toEqual({
+      instanceId: "codex",
+      model: "gpt-6.1-sol",
+      options: [
+        { id: "reasoningEffort", value: "medium" },
+        { id: "fastMode", value: false },
+      ],
+    });
+    expect(
+      resolveAppModelSelection(
+        ProviderDriverKind.make("codex"),
+        DEFAULT_UNIFIED_SETTINGS,
+        [codexProvider()],
+        null,
+      ),
+    ).toBe("gpt-6-astra");
+  });
+
+  it("fills a genuinely absent helper selection with the same model and effort", () => {
+    const settings = { ...DEFAULT_UNIFIED_SETTINGS };
+    // Exercise the bootstrap/legacy absence branch even though decoded modern
+    // settings always materialize the contracts-level default.
+    Reflect.deleteProperty(settings, "textGenerationModelSelection");
+    const result = resolveAppModelSelectionState(settings, [codexProvider()]);
+    expect(result.model).toBe("gpt-6.1-sol");
+    expect(result.options).toContainEqual({ id: "reasoningEffort", value: "medium" });
+  });
+
+  it("preserves an explicitly saved model, effort, and Fast setting on its exact account", () => {
+    const selection = {
+      instanceId: ProviderInstanceId.make("codex_work"),
+      model: "gpt-5.6-luna",
+      options: [
+        { id: "reasoningEffort", value: "ultra" },
+        { id: "fastMode", value: true },
+      ],
+    };
+    expect(
+      resolveAppModelSelectionState(
+        { ...DEFAULT_UNIFIED_SETTINGS, textGenerationModelSelection: selection },
+        [codexProvider(), codexProvider("codex_work")],
+      ),
+    ).toEqual(selection);
+  });
+
+  it("defaults only omitted helper effort without replacing a saved model or Fast choice", () => {
+    const result = resolveAppModelSelectionState(
+      {
+        ...DEFAULT_UNIFIED_SETTINGS,
+        textGenerationModelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5.6-luna",
+          options: [{ id: "fastMode", value: true }],
+        },
+      },
+      [codexProvider()],
+    );
+    expect(result.model).toBe("gpt-5.6-luna");
+    expect(result.options).toEqual([
+      { id: "reasoningEffort", value: "medium" },
+      { id: "fastMode", value: true },
+    ]);
+  });
+
+  it("prefers the helper default when a disabled account falls back to available Codex", () => {
+    const result = resolveAppModelSelectionState(
+      {
+        ...DEFAULT_UNIFIED_SETTINGS,
+        textGenerationModelSelection: {
+          instanceId: ProviderInstanceId.make("codex_disabled"),
+          model: "gpt-5.6-luna",
+          options: [{ id: "reasoningEffort", value: "ultra" }],
+        },
+      },
+      [{ ...codexProvider("codex_disabled"), enabled: false }, codexProvider()],
+    );
+    expect(result.instanceId).toBe("codex");
+    expect(result.model).toBe("gpt-6.1-sol");
+    expect(result.options).toContainEqual({ id: "reasoningEffort", value: "medium" });
+  });
+
+  it("displays the requested helper default even when the catalog does not list it", () => {
+    const snapshot = codexProvider();
+    const result = resolveAppModelSelectionState(DEFAULT_UNIFIED_SETTINGS, [
+      { ...snapshot, models: snapshot.models.filter((model) => model.slug !== "gpt-6.1-sol") },
+    ]);
+    expect(result).toEqual({
+      instanceId: "codex",
+      model: "gpt-6.1-sol",
+      options: [{ id: "reasoningEffort", value: "medium" }],
+    });
+  });
+
+  it.each(["codex", "claudeAgent"])(
+    "preserves a saved uncatalogued %s helper model and options on its exact account",
+    (driver) => {
+      const selection = {
+        instanceId: ProviderInstanceId.make("custom_account"),
+        model: "gateway/private-helper-model",
+        options: [
+          { id: "reasoningEffort", value: "high" },
+          { id: "customOption", value: "saved-choice" },
+        ],
+      };
+      expect(
+        resolveAppModelSelectionState(
+          { ...DEFAULT_UNIFIED_SETTINGS, textGenerationModelSelection: selection },
+          [
+            codexProvider(),
+            provider({
+              provider: ProviderDriverKind.make(driver),
+              instanceId: selection.instanceId,
+              models: ["different-catalog-model"],
+            }),
+          ],
+        ),
+      ).toEqual(selection);
+    },
+  );
+
+  it.each([{}, null])("preserves explicit helper options with capabilities %j", (capabilities) => {
+    const selection = {
+      instanceId: ProviderInstanceId.make("codex"),
+      model: "gpt-6.1-sol",
+      options: [{ id: "reasoningEffort", value: "high" }],
+    };
+    expect(
+      resolveAppModelSelectionState(
+        { ...DEFAULT_UNIFIED_SETTINGS, textGenerationModelSelection: selection },
+        [
+          {
+            ...provider({ instanceId: "codex" }),
+            models: [
+              {
+                slug: selection.model,
+                name: selection.model,
+                isCustom: false,
+                capabilities,
+              },
+            ],
+          },
+        ],
+      ),
+    ).toEqual(selection);
+  });
+
+  it("keeps the existing non-Codex fallback without injecting Codex effort", () => {
+    expect(
+      resolveAppModelSelectionState(DEFAULT_UNIFIED_SETTINGS, [
+        provider({
+          provider: ProviderDriverKind.make("claudeAgent"),
+          instanceId: "claudeAgent",
+          models: ["claude-sonnet-4-6", "claude-haiku-4-5"],
+        }),
+      ]),
+    ).toEqual({ instanceId: "claudeAgent", model: "claude-sonnet-4-6" });
+  });
+
+  it("retains the helper default while the provider catalog has not hydrated", () => {
+    const settings = { ...DEFAULT_UNIFIED_SETTINGS };
+    Reflect.deleteProperty(settings, "textGenerationModelSelection");
+    expect(resolveAppModelSelectionState(settings, [])).toEqual({
+      instanceId: "codex",
+      model: "gpt-6.1-sol",
+      options: [{ id: "reasoningEffort", value: "medium" }],
+    });
+  });
+
+  it.each(["codex", "claudeAgent", "custom_unknown"])(
+    "preserves all saved %s helper choices before catalog hydration",
+    (instanceId) => {
+      const selection = {
+        instanceId: ProviderInstanceId.make(instanceId),
+        model: "saved-model",
+        options: [
+          { id: "reasoningEffort", value: "high" },
+          { id: "customOption", value: "saved-choice" },
+        ],
+      };
+      expect(
+        resolveAppModelSelectionState(
+          { ...DEFAULT_UNIFIED_SETTINGS, textGenerationModelSelection: selection },
+          [],
+        ),
+      ).toEqual(selection);
+    },
+  );
+
+  it("seeds missing effort only for an exactly configured custom Codex account during hydration", () => {
+    const selection = {
+      instanceId: ProviderInstanceId.make("custom_account"),
+      model: "saved-model",
+    };
+    const settings = { ...DEFAULT_UNIFIED_SETTINGS, textGenerationModelSelection: selection };
+    expect(resolveAppModelSelectionState(settings, [])).toEqual(selection);
+    expect(
+      resolveAppModelSelectionState(
+        {
+          ...settings,
+          providerInstances: {
+            [selection.instanceId]: { driver: ProviderDriverKind.make("codex"), config: {} },
+          },
+        },
+        [],
+      ),
+    ).toEqual({ ...selection, options: [{ id: "reasoningEffort", value: "medium" }] });
+  });
+});

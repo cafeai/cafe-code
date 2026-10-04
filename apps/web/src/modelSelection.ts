@@ -1,6 +1,7 @@
 import {
   DEFAULT_GIT_TEXT_GENERATION_MODEL,
   DEFAULT_GIT_TEXT_GENERATION_MODEL_BY_PROVIDER,
+  DEFAULT_GIT_TEXT_GENERATION_REASONING_EFFORT,
   defaultInstanceIdForDriver,
   type ModelSelection,
   ProviderDriverKind,
@@ -278,6 +279,20 @@ export function getCustomModelOptionsByInstance(
   return out;
 }
 
+function helperOptions(
+  driver: ProviderDriverKind | undefined,
+  options: ModelSelection["options"],
+): ModelSelection["options"] {
+  // This default belongs only to Cafe's one-shot helper requests. A normal
+  // conversation must continue to use its own explicit/native model defaults.
+  return driver === "codex" && !options?.some((option) => option.id === "reasoningEffort")
+    ? [
+        ...(options ?? []),
+        { id: "reasoningEffort", value: DEFAULT_GIT_TEXT_GENERATION_REASONING_EFFORT },
+      ]
+    : options;
+}
+
 export function resolveAppModelSelectionState(
   settings: UnifiedSettings,
   providers: ReadonlyArray<ServerProvider>,
@@ -286,6 +301,22 @@ export function resolveAppModelSelectionState(
     instanceId: DEFAULT_TEXT_GENERATION_INSTANCE_ID,
     model: DEFAULT_GIT_TEXT_GENERATION_MODEL,
   };
+
+  if (providers.length === 0) {
+    // An unhydrated catalog cannot revoke the saved helper account, model, or
+    // traits. Only infer a custom account's driver from its exact saved config;
+    // an arbitrary account id is not evidence that it uses Codex.
+    const driver =
+      settings.providerInstances?.[selection.instanceId]?.driver ??
+      (selection.instanceId === DEFAULT_TEXT_GENERATION_INSTANCE_ID
+        ? ProviderDriverKind.make("codex")
+        : undefined);
+    return createModelSelection(
+      selection.instanceId,
+      selection.model,
+      helperOptions(driver, selection.options),
+    );
+  }
   const entries = deriveProviderInstanceEntries(providers);
   const selectedEntry = entries.find(
     (entry) => entry.instanceId === selection.instanceId && entry.enabled && entry.isAvailable,
@@ -295,8 +326,15 @@ export function resolveAppModelSelectionState(
   if (entry) {
     // When the instance changed due to fallback (e.g. selected instance was disabled),
     // don't carry over the old instance's model — use the fallback instance's default.
-    const selectedModel = selectedEntry ? selection.model : null;
+    const selectedModel = selectedEntry
+      ? selection.model
+      : entry.driverKind === "codex"
+        ? DEFAULT_GIT_TEXT_GENERATION_MODEL
+        : null;
     const model =
+      // Helpers execute the requested slug directly. A stale or partial model
+      // catalog is not authority to display a different, unrequested model.
+      selectedModel ??
       resolveAppModelSelectionForInstance(entry.instanceId, settings, providers, selectedModel) ??
       entry.models[0]?.slug ??
       DEFAULT_GIT_TEXT_GENERATION_MODEL_BY_PROVIDER[entry.driverKind];
@@ -304,31 +342,49 @@ export function resolveAppModelSelectionState(
       return createModelSelection(entry.instanceId, "", []);
     }
     const provider = entry.driverKind;
+    const requestedOptions = helperOptions(provider, selectedEntry ? selection.options : undefined);
+    const descriptors = entry.models.find(
+      (candidate) => candidate.slug === normalizeModelSlug(model, provider),
+    )?.capabilities?.optionDescriptors;
     const { modelOptionsForDispatch } = getComposerProviderState({
       provider,
       model,
       models: entry.models,
       prompt: "",
-      modelOptions: selectedEntry ? selection.options : undefined,
+      modelOptions: requestedOptions,
     });
 
-    return createModelSelection(entry.instanceId, model, modelOptionsForDispatch);
+    // Without descriptors there is nothing authoritative to validate against.
+    // Preserve the options the server will use rather than silently erase them.
+    return createModelSelection(
+      entry.instanceId,
+      model,
+      descriptors?.length ? modelOptionsForDispatch : requestedOptions,
+    );
   }
 
   const provider = resolveSelectableProvider(providers, null);
-  const keptSelectedProvider = false;
 
   // When the provider changed due to fallback (e.g. selected provider was disabled),
   // don't carry over the old provider's model — use the fallback provider's default.
-  const selectedModel = keptSelectedProvider ? selection.model : null;
-  const model = resolveAppModelSelection(provider, settings, providers, selectedModel);
+  const selectedModel = provider === "codex" ? DEFAULT_GIT_TEXT_GENERATION_MODEL : null;
+  const model = selectedModel ?? resolveAppModelSelection(provider, settings, providers, null);
+  const models = getProviderModels(providers, provider);
+  const requestedOptions = helperOptions(provider, undefined);
+  const descriptors = models.find(
+    (candidate) => candidate.slug === normalizeModelSlug(model, provider),
+  )?.capabilities?.optionDescriptors;
   const { modelOptionsForDispatch } = getComposerProviderState({
     provider,
     model,
-    models: getProviderModels(providers, provider),
+    models,
     prompt: "",
-    modelOptions: keptSelectedProvider ? selection.options : undefined,
+    modelOptions: requestedOptions,
   });
 
-  return createModelSelection(defaultInstanceIdForDriver(provider), model, modelOptionsForDispatch);
+  return createModelSelection(
+    defaultInstanceIdForDriver(provider),
+    model,
+    descriptors?.length ? modelOptionsForDispatch : requestedOptions,
+  );
 }

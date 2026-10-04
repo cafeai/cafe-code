@@ -573,7 +573,7 @@ export function TextGenerationModelSettingsRow() {
   return (
     <SettingsRow
       title="Text generation model"
-      description="Configure the model used for generated commit messages, PR titles, and similar Git text."
+      description="Choose the model and settings used for automatic chat titles and worktree branch names."
       resetAction={
         isGitWritingModelDirty ? (
           <SettingResetButton

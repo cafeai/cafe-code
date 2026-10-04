@@ -11,7 +11,12 @@ import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { codexCommandUsesShell } from "effect-codex-app-server/command";
 
-import { ProviderDriverKind, type CodexSettings, type ModelSelection } from "@cafecode/contracts";
+import {
+  DEFAULT_GIT_TEXT_GENERATION_REASONING_EFFORT,
+  ProviderDriverKind,
+  type CodexSettings,
+  type ModelSelection,
+} from "@cafecode/contracts";
 import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@cafecode/shared/git";
 
 import { resolveAttachmentPath } from "../attachmentStore.ts";
@@ -44,7 +49,6 @@ import {
   getModelSelectionStringOptionValue,
 } from "@cafecode/shared/model";
 
-const CODEX_GIT_TEXT_GENERATION_REASONING_EFFORT = "low";
 const CODEX_TIMEOUT_MS = 180_000;
 const encodeJsonString = Schema.encodeEffect(Schema.UnknownFromJsonString);
 /**
@@ -196,7 +200,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
     const runCodexCommand = Effect.fn("runCodexJson.runCodexCommand")(function* () {
       const reasoningEffort =
         getModelSelectionStringOptionValue(modelSelection, "reasoningEffort") ??
-        CODEX_GIT_TEXT_GENERATION_REASONING_EFFORT;
+        DEFAULT_GIT_TEXT_GENERATION_REASONING_EFFORT;
       const fastMode = getModelSelectionBooleanOptionValue(modelSelection, "fastMode");
       const command = ChildProcess.make(
         codexConfig.binaryPath || "codex",

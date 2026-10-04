@@ -137,12 +137,12 @@ const OPENCODE_DRIVER_KIND = ProviderDriverKind.make("opencode");
 // Codex rust-v0.153.4's bundled catalog defaults to Astra. This is only the
 // missing-selection fallback; explicit project/thread model slugs are retained.
 export const DEFAULT_MODEL = "gpt-6-astra";
-// GPT-5.4 Mini retired from Codex ChatGPT sign-in on 2026-08-31. The existing
-// GPT-5.6 Luna catalogue remains available during the GPT-6 rollout, so helpers
-// can use a supported small model without requiring a newly entitled account.
-// https://learn.chatgpt.com/docs/models
-// This applies only to absent selections; explicitly saved models are retained.
-export const DEFAULT_GIT_TEXT_GENERATION_MODEL = "gpt-5.6-luna";
+// Cafe's metadata helpers have their own defaults, independent of a chat's
+// model/effort. Automatic titles and temporary worktree branch names use these
+// when the corresponding helper preference is absent; explicit model and effort
+// choices remain authoritative. Keep Settings reset and CLI fallback aligned.
+export const DEFAULT_GIT_TEXT_GENERATION_MODEL = "gpt-6.1-sol";
+export const DEFAULT_GIT_TEXT_GENERATION_REASONING_EFFORT = "medium";
 
 export const DEFAULT_MODEL_BY_PROVIDER: Partial<Record<ProviderDriverKind, string>> = {
   [CODEX_DRIVER_KIND]: DEFAULT_MODEL,
