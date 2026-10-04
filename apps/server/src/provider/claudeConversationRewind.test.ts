@@ -1,5 +1,15 @@
 // @effect-diagnostics nodeBuiltinImport:off
-import { mkdtemp, mkdir, writeFile, rm, chmod, open, readFile, rename } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  writeFile,
+  rm,
+  chmod,
+  open,
+  readFile,
+  rename,
+  lstat,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { forkSession, type SessionStoreEntry } from "@anthropic-ai/claude-agent-sdk";
@@ -14,7 +24,7 @@ import {
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
-  return { ...actual, open: vi.fn(actual.open) };
+  return { ...actual, open: vi.fn(actual.open), lstat: vi.fn(actual.lstat) };
 });
 
 const sessionId = "70000000-0000-4000-8000-000000000001";
@@ -170,37 +180,130 @@ describe("Claude conversation rewind boundary", () => {
       const displaced = path.join(root, "displaced-project");
       await mkdir(directory, { mode: 0o700 });
       const sourcePath = path.join(directory, `${sessionId}.jsonl`);
-      await writeFile(
-        sourcePath,
-        `${transcript()
-          .map((entry) => JSON.stringify(entry))
-          .join("\n")}\n`,
-        { mode: 0o600 },
-      );
+      const sourceBytes = `${transcript()
+        .map((entry) => JSON.stringify(entry))
+        .join("\n")}\n`;
+      await writeFile(sourcePath, sourceBytes, { mode: 0o600 });
       const snapshot = await readClaudeRewindSnapshot({
         filePath: sourcePath,
         directories: [root, directory],
       });
       const targetName = "70000000-0000-4000-8000-000000000009.jsonl";
       const targetPath = path.join(directory, targetName);
+      let targetHandle: Awaited<ReturnType<typeof open>> | undefined;
+      let windowsRenameRefusal: unknown;
       vi.mocked(open).mockImplementation(async (file, flags, mode) => {
         const handle = await actual.open(file, flags, mode);
         if (file === targetPath) {
-          await rename(directory, displaced);
-          await mkdir(directory, { mode: 0o700 });
+          targetHandle = handle;
+          try {
+            try {
+              await rename(directory, displaced);
+            } catch (error) {
+              // Some Windows filesystems refuse this precise namespace move
+              // while the candidate handle is held. That is an observed OS
+              // refusal, not evidence that Cafe's revalidation ran. Every
+              // other error still fails the original guard assertion below.
+              if (
+                process.platform === "win32" &&
+                error instanceof Error &&
+                "code" in error &&
+                error.code === "EPERM"
+              ) {
+                windowsRenameRefusal = error;
+              }
+              throw error;
+            }
+            await mkdir(directory, { mode: 0o700 });
+          } catch (error) {
+            // The production caller cannot close a handle the injected open
+            // never returns. Retire this exact fixture-owned handle before
+            // propagating any injection failure, including Windows EPERM.
+            await handle.close();
+            throw error;
+          }
         }
         return handle;
+      });
+      const failure = await publishClaudeRewindCandidate({
+        filePath: targetPath,
+        snapshot,
+        entries: transcript(),
+      }).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect(targetHandle).toBeDefined();
+      expect(targetHandle?.fd).toBe(-1);
+      if (windowsRenameRefusal !== undefined) {
+        // Admit only the exact error observed at the exact injected rename;
+        // do not turn unrelated permission failures into passing coverage.
+        expect(failure).toBe(windowsRenameRefusal);
+        expect(await readFile(targetPath, "utf8")).toBe("");
+        expect(await readFile(sourcePath, "utf8")).toBe(sourceBytes);
+        await expect(lstat(displaced)).rejects.toMatchObject({ code: "ENOENT" });
+      } else {
+        expect(failure).toBeInstanceOf(Error);
+        expect(failure).toMatchObject({ message: expect.stringContaining("directory changed") });
+        expect(await readFile(path.join(displaced, targetName), "utf8")).toBe("");
+        await expect(readFile(targetPath)).rejects.toMatchObject({ code: "ENOENT" });
+        expect(await readFile(path.join(displaced, `${sessionId}.jsonl`), "utf8")).toBe(
+          sourceBytes,
+        );
+      }
+    } finally {
+      vi.mocked(open).mockImplementation(actual.open);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a post-open directory identity mismatch before writing on every host", async () => {
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    const root = await mkdtemp(path.join(os.tmpdir(), "cafe-claude-rewind-identity-"));
+    try {
+      const directory = path.join(root, "project");
+      await mkdir(directory, { mode: 0o700 });
+      const sourcePath = path.join(directory, `${sessionId}.jsonl`);
+      const sourceBytes = `${transcript()
+        .map((entry) => JSON.stringify(entry))
+        .join("\n")}\n`;
+      await writeFile(sourcePath, sourceBytes, { mode: 0o600 });
+      const snapshot = await readClaudeRewindSnapshot({
+        filePath: sourcePath,
+        directories: [root, directory],
+      });
+      const targetPath = path.join(directory, "70000000-0000-4000-8000-000000000009.jsonl");
+      let targetHandle: Awaited<ReturnType<typeof open>> | undefined;
+      let injectedChecks = 0;
+      vi.mocked(open).mockImplementation(async (file, flags, mode) => {
+        const handle = await actual.open(file, flags, mode);
+        if (file === targetPath) targetHandle = handle;
+        return handle;
+      });
+      vi.mocked(lstat).mockImplementation(async (file, options) => {
+        const metadata = await actual.lstat(file, options);
+        if (file === directory && targetHandle !== undefined) {
+          // Leave all pre-open checks and all other paths' real metadata alone.
+          // This exact post-open identity substitution proves Cafe's pre-write
+          // fence even on hosts whose native handle locking prevents rename.
+          injectedChecks += 1;
+          return Object.assign(metadata, {
+            ino: typeof metadata.ino === "bigint" ? metadata.ino + 1n : metadata.ino + 1,
+          });
+        }
+        return metadata;
       });
       await expect(
         publishClaudeRewindCandidate({ filePath: targetPath, snapshot, entries: transcript() }),
       ).rejects.toThrow("directory changed");
-      expect(await readFile(path.join(displaced, targetName), "utf8")).toBe("");
-      await expect(readFile(targetPath)).rejects.toMatchObject({ code: "ENOENT" });
-      expect(await readFile(path.join(displaced, `${sessionId}.jsonl`), "utf8")).toContain(
-        "keep me",
-      );
+      expect(injectedChecks).toBe(1);
+      expect(targetHandle).toBeDefined();
+      expect(targetHandle?.fd).toBe(-1);
+      expect(await readFile(targetPath, "utf8")).toBe("");
+      expect(await readFile(sourcePath, "utf8")).toBe(sourceBytes);
     } finally {
       vi.mocked(open).mockImplementation(actual.open);
+      vi.mocked(lstat).mockImplementation(actual.lstat);
       await rm(root, { recursive: true, force: true });
     }
   });

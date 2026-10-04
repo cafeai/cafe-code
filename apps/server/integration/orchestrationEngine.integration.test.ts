@@ -740,6 +740,10 @@ it.live("reverts to an earlier checkpoint and trims checkpoint projections + git
         (entry) =>
           entry.checkpoints.length === 1 && entry.checkpoints[0]?.checkpointTurnCount === 1,
       );
+      // The accepted projection is deliberately published before pruning the
+      // newer refs and recovery snapshot. Wait for this same worker's complete
+      // transaction, not merely its earlier thread.reverted acknowledgement.
+      yield* harness.checkpointReactor.drain;
       assert.equal(revertedThread.checkpoints[0]?.checkpointTurnCount, 1);
       assert.deepEqual(
         revertedThread.messages.map((message) => ({ role: message.role, text: message.text })),
@@ -767,6 +771,13 @@ it.live("reverts to an earlier checkpoint and trims checkpoint projections + git
       assert.equal(fs.readFileSync(path.join(harness.workspaceDir, "README.md"), "utf8"), "v2\n");
       assert.equal(
         gitRefExists(harness.workspaceDir, checkpointRefForThreadTurn(THREAD_ID, 2)),
+        false,
+      );
+      assert.equal(
+        gitRefExists(
+          harness.workspaceDir,
+          checkpointRefForThreadTurn(THREAD_ID, Number.MAX_SAFE_INTEGER),
+        ),
         false,
       );
       assert.deepEqual(harness.adapterHarness!.getRollbackCalls(THREAD_ID), [1]);
