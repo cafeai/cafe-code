@@ -2594,10 +2594,17 @@ routing.layer("ProviderServiceLive routing", (it) => {
             privateProviderField: privateFieldSentinel,
             toJSON: () => ({ leaked: nestedToJsonSentinel }),
           },
-          { key: "m1", role: "assistant" as const, text: "Completed safely." },
+          {
+            key: "m1",
+            role: "assistant" as const,
+            text: "Completed safely.",
+            phase: "final_answer" as const,
+            timestamp: "2026-01-01T00:00:12.000Z",
+          },
         ],
         gaps: [],
-        truncated: false,
+        truncated: true,
+        historyIncomplete: true,
         privateProviderField: privateFieldSentinel,
         toJSON: () => ({ leaked: rootToJsonSentinel }),
       };
@@ -2615,10 +2622,17 @@ routing.layer("ProviderServiceLive routing", (it) => {
       assert.equal(detail.providerInstanceId, codexInstanceId);
       assert.deepEqual(detail.messages, [
         { key: "m0", role: "user", text: "Assignment for provider-child-completed" },
-        { key: "m1", role: "assistant", text: "Completed safely." },
+        {
+          key: "m1",
+          role: "assistant",
+          text: "Completed safely.",
+          phase: "final_answer",
+          timestamp: "2026-01-01T00:00:12.000Z",
+        },
       ]);
       assert.deepEqual(detail.gaps, []);
-      assert.equal(detail.truncated, false);
+      assert.equal(detail.truncated, true);
+      assert.equal(detail.historyIncomplete, true);
       const serializedDetail = JSON.stringify(detail);
       assert.notInclude(serializedDetail, rootToJsonSentinel);
       assert.notInclude(serializedDetail, nestedToJsonSentinel);

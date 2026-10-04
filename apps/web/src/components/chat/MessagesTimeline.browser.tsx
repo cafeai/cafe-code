@@ -644,6 +644,95 @@ describe("MessagesTimeline", () => {
     }
   });
 
+  it("labels dated final replies and commentary without treating prior finals as live updates", async () => {
+    const threadId = ThreadId.make("cafe-thread-dated-detail");
+    const turnId = TurnId.make("cafe-turn-dated-detail");
+    const priorFinalTimestamp = "2026-04-13T11:15:00.000Z";
+    const commentaryTimestamp = "2026-04-13T12:30:00.000Z";
+    setSubagentDetailApi(async () => ({
+      provider: ProviderDriverKind.make("codex"),
+      messages: [
+        {
+          key: "prior-final",
+          role: "assistant" as const,
+          text: "Paused; no owned jobs remain from the earlier turn.",
+          phase: "final_answer" as const,
+          timestamp: priorFinalTimestamp,
+        },
+        {
+          key: "active-commentary",
+          role: "assistant" as const,
+          text: "Reviewing the current native recovery boundary.",
+          phase: "commentary" as const,
+          timestamp: commentaryTimestamp,
+        },
+      ],
+      gaps: [],
+      truncated: true,
+      historyIncomplete: true,
+    }));
+    const entry = buildSubagentWorkEntry({
+      id: "subagent-dated-detail",
+      label: "Dated detail worker",
+      subagentId: "codex-child-dated-detail",
+      turnId,
+      status: "active",
+    });
+    const screen = await render(
+      <MessagesTimeline {...buildProps()} activeThreadId={threadId} timelineEntries={[entry]} />,
+    );
+
+    try {
+      await page.getByRole("button", { name: /^Dated detail worker, Working\./ }).click();
+      await expect
+        .element(
+          page.getByText("Paused; no owned jobs remain from the earlier turn.", {
+            exact: true,
+          }),
+        )
+        .toBeVisible();
+
+      const priorFinal = document.querySelector<HTMLElement>(
+        '[data-subagent-detail-message-key="prior-final"]',
+      );
+      const activeCommentary = document.querySelector<HTMLElement>(
+        '[data-subagent-detail-message-key="active-commentary"]',
+      );
+      expect(priorFinal?.textContent).toContain("Final reply");
+      expect(priorFinal?.textContent).not.toContain("Update");
+      expect(activeCommentary?.textContent).toContain("Update");
+      expect(activeCommentary?.textContent).not.toContain("Final reply");
+
+      const formatter = new Intl.DateTimeFormat(undefined, {
+        dateStyle: "medium",
+        timeStyle: "short",
+      });
+      const priorFinalTime = priorFinal?.querySelector<HTMLTimeElement>("time");
+      const commentaryTime = activeCommentary?.querySelector<HTMLTimeElement>("time");
+      expect(priorFinalTime?.dateTime).toBe(priorFinalTimestamp);
+      expect(priorFinalTime?.textContent).toBe(formatter.format(new Date(priorFinalTimestamp)));
+      expect(commentaryTime?.dateTime).toBe(commentaryTimestamp);
+      expect(commentaryTime?.textContent).toBe(formatter.format(new Date(commentaryTimestamp)));
+
+      await expect
+        .element(
+          page.getByText(
+            "Showing recent public messages. Earlier history is outside this view’s retrieval limit.",
+            { exact: true },
+          ),
+        )
+        .toBeVisible();
+      expect(
+        document.querySelector('[data-subagent-detail-history-incomplete="true"]'),
+      ).not.toBeNull();
+      expect(document.body.textContent).not.toContain(
+        "This long subagent history was shortened to keep the chat responsive.",
+      );
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("refreshes an open live detail on provider lifecycle revisions", async () => {
     const threadId = ThreadId.make("cafe-thread-live-detail");
     const turnId = TurnId.make("cafe-turn-live-detail");
@@ -713,6 +802,330 @@ describe("MessagesTimeline", () => {
       await expect.element(page.getByText("Latest live update", { exact: true })).toBeVisible();
       expect(getThreadTurnSubagentDetail).toHaveBeenCalledTimes(2);
     } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("marks a retained transcript stale and retries after a live refresh fails", async () => {
+    const threadId = ThreadId.make("cafe-thread-stale-detail");
+    const turnId = TurnId.make("cafe-turn-stale-detail");
+    let releaseRetry: (() => void) | undefined;
+    const retryGate = new Promise<void>((resolve) => {
+      releaseRetry = resolve;
+    });
+    const getThreadTurnSubagentDetail = vi.fn(async () => {
+      const requestNumber = getThreadTurnSubagentDetail.mock.calls.length;
+      if (requestNumber === 2) {
+        throw new Error("private provider refresh failure");
+      }
+      if (requestNumber === 3) await retryGate;
+      return {
+        provider: ProviderDriverKind.make("codex"),
+        messages: [
+          {
+            key: requestNumber === 1 ? "safe-initial" : "safe-recovered",
+            role: "assistant" as const,
+            text:
+              requestNumber === 1
+                ? "Last authenticated provider update"
+                : "Recovered provider update",
+          },
+        ],
+        gaps: [],
+        truncated: false,
+      };
+    });
+    setSubagentDetailApi(getThreadTurnSubagentDetail);
+    const props = buildProps();
+    const initial = buildSubagentWorkEntry({
+      id: "subagent-stale-detail",
+      label: "Stale detail worker",
+      subagentId: "codex-child-stale-detail",
+      turnId,
+      status: "active",
+      lifecycleRevision: "sequence:1:initial",
+    });
+    const screen = await render(
+      <MessagesTimeline {...props} activeThreadId={threadId} timelineEntries={[initial]} />,
+    );
+
+    try {
+      await page.getByRole("button", { name: /^Stale detail worker, Working\./ }).click();
+      await expect
+        .element(page.getByText("Last authenticated provider update", { exact: true }))
+        .toBeVisible();
+
+      const revised = buildSubagentWorkEntry({
+        id: "subagent-stale-detail",
+        label: "Stale detail worker",
+        subagentId: "codex-child-stale-detail",
+        turnId,
+        status: "active",
+        lifecycleRevision: "sequence:2:refresh",
+      });
+      await screen.rerender(
+        <MessagesTimeline {...props} activeThreadId={threadId} timelineEntries={[revised]} />,
+      );
+
+      await vi.waitFor(
+        () => {
+          expect(getThreadTurnSubagentDetail).toHaveBeenCalledTimes(2);
+          expect(
+            document.querySelector('[data-subagent-detail-refresh-unavailable="true"]'),
+          ).not.toBeNull();
+        },
+        { timeout: 2_500 },
+      );
+      await expect
+        .element(page.getByText("Last authenticated provider update", { exact: true }))
+        .toBeVisible();
+      await expect
+        .element(
+          page.getByText(
+            "New provider updates could not be loaded. This is the last available transcript.",
+            { exact: true },
+          ),
+        )
+        .toBeVisible();
+      expect(document.body.textContent).not.toContain("private provider refresh failure");
+
+      await page.getByRole("button", { name: "Retry" }).click();
+      await expect.element(page.getByText("Retrying…", { exact: true })).toBeVisible();
+      await expect
+        .element(page.getByText("Last authenticated provider update", { exact: true }))
+        .toBeVisible();
+      releaseRetry?.();
+      await expect
+        .element(page.getByText("Recovered provider update", { exact: true }))
+        .toBeVisible();
+      expect(getThreadTurnSubagentDetail).toHaveBeenCalledTimes(3);
+      expect(
+        document.querySelector('[data-subagent-detail-refresh-unavailable="true"]'),
+      ).toBeNull();
+      expect(document.body.textContent).not.toContain("Last authenticated provider update");
+    } finally {
+      releaseRetry?.();
+      await screen.unmount();
+    }
+  });
+
+  it("coalesces Retry behind an in-flight automatic detail refresh", async () => {
+    const threadId = ThreadId.make("cafe-thread-overlap-detail");
+    const turnId = TurnId.make("cafe-turn-overlap-detail");
+    let rejectAutomaticRefresh: ((error: Error) => void) | undefined;
+    let rejectTrailingRetry: ((error: Error) => void) | undefined;
+    const automaticRefresh = new Promise<never>((_resolve, reject) => {
+      rejectAutomaticRefresh = reject;
+    });
+    const trailingRetry = new Promise<never>((_resolve, reject) => {
+      rejectTrailingRetry = reject;
+    });
+    // Both held rejections are observed by the component, but attach fixture
+    // handlers too so a failed assertion cannot leave cleanup rejections
+    // unhandled after the view unmounts.
+    void automaticRefresh.catch(() => undefined);
+    void trailingRetry.catch(() => undefined);
+    let readsInFlight = 0;
+    let maximumReadsInFlight = 0;
+    const getThreadTurnSubagentDetail = vi.fn(async () => {
+      const requestNumber = getThreadTurnSubagentDetail.mock.calls.length;
+      readsInFlight += 1;
+      maximumReadsInFlight = Math.max(maximumReadsInFlight, readsInFlight);
+      try {
+        if (requestNumber === 1) {
+          return {
+            provider: ProviderDriverKind.make("codex"),
+            messages: [
+              {
+                key: "safe-overlap-snapshot",
+                role: "assistant" as const,
+                text: "Safe transcript retained across overlapping refresh requests",
+              },
+            ],
+            gaps: [],
+            truncated: false,
+          };
+        }
+        if (requestNumber === 2) throw new Error("first private refresh failure");
+        if (requestNumber === 3) return await automaticRefresh;
+        if (requestNumber === 4) return await trailingRetry;
+        throw new Error("unexpected extra provider history read");
+      } finally {
+        readsInFlight -= 1;
+      }
+    });
+    setSubagentDetailApi(getThreadTurnSubagentDetail);
+    const props = buildProps();
+    const entry = (revision: number) =>
+      buildSubagentWorkEntry({
+        id: "subagent-overlap-detail",
+        label: "Overlap detail worker",
+        subagentId: "codex-child-overlap-detail",
+        turnId,
+        status: "active",
+        lifecycleRevision: `sequence:${revision}:overlap`,
+      });
+    const screen = await render(
+      <MessagesTimeline {...props} activeThreadId={threadId} timelineEntries={[entry(1)]} />,
+    );
+
+    try {
+      await page.getByRole("button", { name: /^Overlap detail worker, Working\./ }).click();
+      await expect
+        .element(
+          page.getByText("Safe transcript retained across overlapping refresh requests", {
+            exact: true,
+          }),
+        )
+        .toBeVisible();
+
+      await screen.rerender(
+        <MessagesTimeline {...props} activeThreadId={threadId} timelineEntries={[entry(2)]} />,
+      );
+      await vi.waitFor(
+        () =>
+          expect(
+            document.querySelector('[data-subagent-detail-refresh-unavailable="true"]'),
+          ).not.toBeNull(),
+        { timeout: 2_500 },
+      );
+      expect(getThreadTurnSubagentDetail).toHaveBeenCalledTimes(2);
+
+      await screen.rerender(
+        <MessagesTimeline {...props} activeThreadId={threadId} timelineEntries={[entry(3)]} />,
+      );
+      await vi.waitFor(() => expect(getThreadTurnSubagentDetail).toHaveBeenCalledTimes(3), {
+        timeout: 2_500,
+      });
+      expect(readsInFlight).toBe(1);
+
+      const retry = document.querySelector<HTMLButtonElement>(
+        '[data-subagent-detail-retry="true"]',
+      );
+      expect(retry).not.toBeNull();
+      // Two activation events before React commits the retrying state must
+      // still collapse into the scheduler's one trailing refresh.
+      retry?.click();
+      retry?.click();
+      await vi.waitFor(() => expect(document.body.textContent).toContain("Retrying…"));
+      expect(getThreadTurnSubagentDetail).toHaveBeenCalledTimes(3);
+      expect(maximumReadsInFlight).toBe(1);
+
+      rejectAutomaticRefresh?.(new Error("automatic private refresh failure"));
+      await vi.waitFor(() => expect(getThreadTurnSubagentDetail).toHaveBeenCalledTimes(4));
+      expect(readsInFlight).toBe(1);
+      expect(maximumReadsInFlight).toBe(1);
+      expect(document.querySelector('[data-subagent-detail-retry="true"]')).toBeNull();
+
+      rejectTrailingRetry?.(new Error("retry private refresh failure"));
+      await vi.waitFor(() => {
+        expect(readsInFlight).toBe(0);
+        expect(document.querySelector('[data-subagent-detail-retry="true"]')).not.toBeNull();
+      });
+      expect(getThreadTurnSubagentDetail).toHaveBeenCalledTimes(4);
+      expect(maximumReadsInFlight).toBe(1);
+      await expect
+        .element(
+          page.getByText("Safe transcript retained across overlapping refresh requests", {
+            exact: true,
+          }),
+        )
+        .toBeVisible();
+      expect(document.body.textContent).not.toContain("private refresh failure");
+    } finally {
+      rejectAutomaticRefresh?.(new Error("fixture cleanup"));
+      rejectTrailingRetry?.(new Error("fixture cleanup"));
+      await screen.unmount();
+    }
+  });
+
+  it("coalesces an initial-history Retry behind an automatic detail refresh", async () => {
+    const threadId = ThreadId.make("cafe-thread-initial-overlap-detail");
+    const turnId = TurnId.make("cafe-turn-initial-overlap-detail");
+    let rejectAutomaticRefresh: ((error: Error) => void) | undefined;
+    let rejectTrailingRetry: ((error: Error) => void) | undefined;
+    const automaticRefresh = new Promise<never>((_resolve, reject) => {
+      rejectAutomaticRefresh = reject;
+    });
+    const trailingRetry = new Promise<never>((_resolve, reject) => {
+      rejectTrailingRetry = reject;
+    });
+    void automaticRefresh.catch(() => undefined);
+    void trailingRetry.catch(() => undefined);
+    let readsInFlight = 0;
+    let maximumReadsInFlight = 0;
+    const getThreadTurnSubagentDetail = vi.fn(async () => {
+      const requestNumber = getThreadTurnSubagentDetail.mock.calls.length;
+      readsInFlight += 1;
+      maximumReadsInFlight = Math.max(maximumReadsInFlight, readsInFlight);
+      try {
+        if (requestNumber === 1) throw new Error("initial private read failure");
+        if (requestNumber === 2) return await automaticRefresh;
+        if (requestNumber === 3) return await trailingRetry;
+        throw new Error("unexpected extra initial-history read");
+      } finally {
+        readsInFlight -= 1;
+      }
+    });
+    setSubagentDetailApi(getThreadTurnSubagentDetail);
+    const props = buildProps();
+    const entry = (revision: number) =>
+      buildSubagentWorkEntry({
+        id: "subagent-initial-overlap-detail",
+        label: "Initial overlap worker",
+        subagentId: "codex-child-initial-overlap-detail",
+        turnId,
+        status: "active",
+        lifecycleRevision: `sequence:${revision}:initial-overlap`,
+      });
+    const screen = await render(
+      <MessagesTimeline {...props} activeThreadId={threadId} timelineEntries={[entry(1)]} />,
+    );
+
+    try {
+      await page.getByRole("button", { name: /^Initial overlap worker, Working\./ }).click();
+      await vi.waitFor(() =>
+        expect(document.querySelector('[data-subagent-detail-retry="true"]')).not.toBeNull(),
+      );
+      expect(getThreadTurnSubagentDetail).toHaveBeenCalledTimes(1);
+
+      await screen.rerender(
+        <MessagesTimeline {...props} activeThreadId={threadId} timelineEntries={[entry(2)]} />,
+      );
+      await vi.waitFor(() => expect(getThreadTurnSubagentDetail).toHaveBeenCalledTimes(2), {
+        timeout: 2_500,
+      });
+      expect(readsInFlight).toBe(1);
+
+      const retry = document.querySelector<HTMLButtonElement>(
+        '[data-subagent-detail-retry="true"]',
+      );
+      expect(retry).not.toBeNull();
+      retry?.click();
+      retry?.click();
+      await vi.waitFor(() =>
+        expect(document.body.textContent).toContain("Loading subagent history…"),
+      );
+      expect(getThreadTurnSubagentDetail).toHaveBeenCalledTimes(2);
+      expect(maximumReadsInFlight).toBe(1);
+
+      rejectAutomaticRefresh?.(new Error("automatic initial private failure"));
+      await vi.waitFor(() => expect(getThreadTurnSubagentDetail).toHaveBeenCalledTimes(3));
+      expect(readsInFlight).toBe(1);
+      expect(maximumReadsInFlight).toBe(1);
+      expect(document.querySelector('[data-subagent-detail-retry="true"]')).toBeNull();
+
+      rejectTrailingRetry?.(new Error("trailing initial private failure"));
+      await vi.waitFor(() => {
+        expect(readsInFlight).toBe(0);
+        expect(document.querySelector('[data-subagent-detail-retry="true"]')).not.toBeNull();
+      });
+      expect(getThreadTurnSubagentDetail).toHaveBeenCalledTimes(3);
+      expect(maximumReadsInFlight).toBe(1);
+      expect(document.body.textContent).not.toContain("private failure");
+    } finally {
+      rejectAutomaticRefresh?.(new Error("fixture cleanup"));
+      rejectTrailingRetry?.(new Error("fixture cleanup"));
       await screen.unmount();
     }
   });

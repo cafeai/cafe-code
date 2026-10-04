@@ -8,6 +8,7 @@ import {
   ProviderDaemonLiveness,
   ProviderDaemonMarker,
   ProviderDaemonSubagentDetail,
+  ProviderDaemonRpcRequest,
   WindowsProcessIdentity,
 } from "./providerDaemon.ts";
 
@@ -102,6 +103,23 @@ it("preserves legacy marker and POSIX payload shape while accepting Windows owne
 });
 
 const decodeProviderDaemonSubagentDetail = Schema.decodeUnknownEffect(ProviderDaemonSubagentDetail);
+
+it("preserves byte-exact child/history authorization keys through daemon RPC", () => {
+  const decode = Schema.decodeUnknownSync(ProviderDaemonRpcRequest);
+  const request = {
+    method: "readSubagentDetail",
+    payload: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      subagentId: " child-1 ",
+      historyId: " history-1 ",
+    },
+  };
+  assert.deepEqual(decode(request), request);
+  for (const subagentId of ["child\u0000", "child\u202e", "x".repeat(513)]) {
+    assert.throws(() => decode({ ...request, payload: { ...request.payload, subagentId } }));
+  }
+});
 
 it.effect("bounds provider-daemon subagent detail by aggregate UTF-8 bytes", () =>
   Effect.gen(function* () {

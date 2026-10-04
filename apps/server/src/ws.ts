@@ -1024,6 +1024,9 @@ const makeWsRpcLayer = (
                 messages: detail.messages,
                 gaps: detail.gaps,
                 truncated: detail.truncated,
+                ...(detail.historyIncomplete !== undefined
+                  ? { historyIncomplete: detail.historyIncomplete }
+                  : {}),
               };
             }),
             { "rpc.aggregate": "orchestration" },

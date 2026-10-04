@@ -14,6 +14,8 @@ export interface ProviderSubagentPublicMessageInput {
   readonly role: "user" | "assistant";
   /** Multiple fragments are separated by one public newline without joining first. */
   readonly text: string | ReadonlyArray<string>;
+  readonly timestamp?: string | undefined;
+  readonly phase?: "commentary" | "final_answer" | undefined;
 }
 
 interface MeasuredCandidate {
@@ -22,6 +24,8 @@ interface MeasuredCandidate {
   readonly role: "user" | "assistant";
   readonly text: string | ReadonlyArray<string>;
   readonly sanitizedUtf8Bytes: number;
+  readonly timestamp?: string | undefined;
+  readonly phase?: "commentary" | "final_answer" | undefined;
 }
 
 const RETAINED_HEAD_MESSAGES = 4;
@@ -199,7 +203,13 @@ function allocateRetainedGroup(
         ? 0
         : new TextEncoder().encode(content.omission.tail).byteLength);
     remainingBytes -= retainedBytes;
-    retained.push({ key: candidate.key, role: candidate.role, ...content });
+    retained.push({
+      key: candidate.key,
+      role: candidate.role,
+      ...content,
+      ...(candidate.timestamp !== undefined ? { timestamp: candidate.timestamp } : {}),
+      ...(candidate.phase !== undefined ? { phase: candidate.phase } : {}),
+    });
   }
   return newestFirst ? retained.toReversed() : retained;
 }
@@ -217,6 +227,11 @@ function allocateRetainedGroup(
  */
 export function canonicalizeProviderSubagentDetail(
   input: ReadonlyArray<ProviderSubagentPublicMessageInput>,
+  options?: {
+    readonly historyIncomplete?: boolean;
+    /** A bounded native window may begin with public replies before a user. */
+    readonly preservePrefix?: boolean;
+  },
 ): ProviderSubagentDetail {
   let initialAssignmentIndex = -1;
   for (let index = 0; index < input.length; index += 1) {
@@ -231,7 +246,8 @@ export function canonicalizeProviderSubagentDetail(
   // A malformed provider snapshot can omit its assignment. In that case keep
   // the public transcript from its first visible message instead of returning
   // an empty detail screen.
-  const scanStart = initialAssignmentIndex >= 0 ? initialAssignmentIndex : 0;
+  const scanStart =
+    options?.preservePrefix === true ? 0 : initialAssignmentIndex >= 0 ? initialAssignmentIndex : 0;
   const head: MeasuredCandidate[] = [];
   const tail: MeasuredCandidate[] = [];
   let finalAssistant: MeasuredCandidate | undefined;
@@ -248,6 +264,18 @@ export function canonicalizeProviderSubagentDetail(
       role: providerMessage.role,
       text: providerMessage.text,
       sanitizedUtf8Bytes: measurement.utf8Bytes,
+      // Never forward unknown metadata or native item identities. Dates are
+      // revalidated here because other adapters can also call this boundary.
+      ...(providerMessage.timestamp !== undefined &&
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(providerMessage.timestamp) &&
+      Number.isFinite(Date.parse(providerMessage.timestamp)) &&
+      new Date(providerMessage.timestamp).toISOString() === providerMessage.timestamp
+        ? { timestamp: providerMessage.timestamp }
+        : {}),
+      ...(providerMessage.role === "assistant" &&
+      (providerMessage.phase === "commentary" || providerMessage.phase === "final_answer")
+        ? { phase: providerMessage.phase }
+        : {}),
     };
     publicSequence += 1;
     if (candidate.role === "assistant") finalAssistant = candidate;
@@ -350,6 +378,7 @@ export function canonicalizeProviderSubagentDetail(
   return {
     messages,
     gaps,
-    truncated: gaps.length > 0 || hasContentOmission,
+    truncated: options?.historyIncomplete === true || gaps.length > 0 || hasContentOmission,
+    ...(options?.historyIncomplete === true ? { historyIncomplete: true } : {}),
   };
 }

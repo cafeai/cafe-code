@@ -323,6 +323,30 @@ export function canonicalizeCodexSubagentDetail(
   snapshot: CodexThreadSnapshot,
 ): ProviderSubagentDetail {
   const publicMessages: ProviderSubagentPublicMessageInput[] = [];
+  // The dedicated reader already discarded every private native variant.
+  // Reconstruct metadata explicitly rather than forwarding an upstream object.
+  if (snapshot.publicHistory !== undefined) {
+    for (const message of snapshot.publicHistory) {
+      const milliseconds = message.completedAtMs ?? message.startedAtMs;
+      const timestamp =
+        typeof milliseconds === "number" &&
+        Number.isSafeInteger(milliseconds) &&
+        milliseconds >= 0 &&
+        milliseconds <= 253_402_300_799_999
+          ? new Date(milliseconds).toISOString()
+          : undefined;
+      publicMessages.push({
+        role: message.role,
+        text: message.text,
+        ...(timestamp !== undefined ? { timestamp } : {}),
+        ...(message.phase !== undefined ? { phase: message.phase } : {}),
+      });
+    }
+    return canonicalizeProviderSubagentDetail(publicMessages, {
+      historyIncomplete: snapshot.historyIncomplete === true,
+      preservePrefix: true,
+    });
+  }
   for (const turn of snapshot.turns) {
     for (const item of turn.items) {
       if (item.type === "userMessage") {
@@ -333,7 +357,13 @@ export function canonicalizeCodexSubagentDetail(
           text: item.content.flatMap((content) => (content.type === "text" ? [content.text] : [])),
         });
       } else if (item.type === "agentMessage") {
-        publicMessages.push({ role: "assistant", text: item.text });
+        publicMessages.push({
+          role: "assistant",
+          text: item.text,
+          ...(item.phase === "commentary" || item.phase === "final_answer"
+            ? { phase: item.phase }
+            : {}),
+        });
       }
     }
   }
@@ -2354,6 +2384,11 @@ function codexSubagentReasoningSummary(
 
 function codexSubagentItemProgress(item: CodexLifecycleItem): string | undefined {
   switch (item.type) {
+    case "agentMessage":
+      // This redacted lifecycle edge invalidates open history details when
+      // public prose arrives without a subsequent command/tool notification.
+      // A final reply is not proof that the native child has stopped.
+      return "Posted an update";
     case "reasoning":
       return codexSubagentReasoningSummary(item);
     case "commandExecution":
@@ -5207,8 +5242,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       return Effect.fail(makeProviderSubagentDetailReadError("invalid-request"));
     }
 
-    const readPersistedSnapshot = () => {
-      const resumeCursor = context?.resumeCursor;
+    const readPersistedSnapshot = (resumeCursor = context?.resumeCursor) => {
       if (!isCodexResumeCursorSchema(resumeCursor)) {
         return Effect.fail(makeProviderSubagentDetailReadError("session-unavailable"));
       }
@@ -5259,28 +5293,20 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         return readPersistedSnapshot();
       }
 
-      // Calls without durable history context are internal live-session reads
-      // and retain the direct fast path. ProviderService always supplies the
-      // `resumeCursor` property (including an explicit null), so an ended-child
-      // read can only use the live runtime after proving that it is still the
-      // exact same native root. This matters after Codex -> Claude -> Codex or
-      // rejected-resume recovery: the Cafe thread id is reused, but the native
-      // Codex root is not.
+      // Public item history includes native private variants before filtering.
+      // Always isolate those bounded reads from the live notification channel:
+      // an oversized historical item must not disconnect ongoing model work.
+      // ProviderService supplies immutable history context, including explicit
+      // null. Only internal calls lacking that context may use the live root
+      // as provenance; they still launch the isolated read-only client.
       if (context === undefined || !("resumeCursor" in context)) {
-        return liveSession.runtime.readSubagentThread(subagentId);
+        return liveSession.runtime.getSession.pipe(
+          Effect.flatMap((liveProviderSession) =>
+            readPersistedSnapshot(liveProviderSession.resumeCursor),
+          ),
+        );
       }
-
-      const persistedResumeCursor = context.resumeCursor;
-      return liveSession.runtime.getSession.pipe(
-        Effect.flatMap((liveProviderSession) => {
-          const liveResumeCursor = liveProviderSession.resumeCursor;
-          return isCodexResumeCursorSchema(persistedResumeCursor) &&
-            isCodexResumeCursorSchema(liveResumeCursor) &&
-            persistedResumeCursor.threadId === liveResumeCursor.threadId
-            ? liveSession.runtime.readSubagentThread(subagentId)
-            : readPersistedSnapshot();
-        }),
-      );
+      return readPersistedSnapshot();
     });
 
     return readSnapshot.pipe(

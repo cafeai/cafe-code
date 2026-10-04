@@ -246,6 +246,8 @@ const makePublicProviderSubagentDetailBody = (input: unknown) =>
         key: message.key,
         role: message.role,
         text: message.text,
+        ...(message.timestamp !== undefined ? { timestamp: message.timestamp } : {}),
+        ...(message.phase !== undefined ? { phase: message.phase } : {}),
         ...(message.omission === undefined
           ? {}
           : {
@@ -261,6 +263,9 @@ const makePublicProviderSubagentDetailBody = (input: unknown) =>
         omittedUtf8Bytes: gap.omittedUtf8Bytes,
       })),
       truncated: detail.truncated,
+      ...(detail.historyIncomplete !== undefined
+        ? { historyIncomplete: detail.historyIncomplete }
+        : {}),
     })),
   );
 
@@ -3026,6 +3031,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       messages: publicDetail.messages,
       gaps: publicDetail.gaps,
       truncated: publicDetail.truncated,
+      ...(publicDetail.historyIncomplete !== undefined
+        ? { historyIncomplete: publicDetail.historyIncomplete }
+        : {}),
     };
   });
 

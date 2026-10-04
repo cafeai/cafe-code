@@ -657,6 +657,16 @@ export const OrchestrationThreadTurnSubagentDetailContentOmission = Schema.Struc
 export type OrchestrationThreadTurnSubagentDetailContentOmission =
   typeof OrchestrationThreadTurnSubagentDetailContentOmission.Type;
 
+// Provider item times are display provenance, never lifecycle authority. Admit
+// only a finite canonical UTC timestamp, not arbitrary provider-owned strings.
+const ThreadTurnSubagentDetailTimestamp = Schema.String.check(
+  Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
+  Schema.makeFilter((value) => {
+    const time = Date.parse(value);
+    return Number.isFinite(time) && new Date(time).toISOString() === value;
+  }),
+);
+
 export const OrchestrationThreadTurnSubagentDetailMessage = Schema.Struct({
   key: ThreadTurnSubagentDetailMessageKey,
   role: Schema.Literals(["user", "assistant"]),
@@ -664,7 +674,10 @@ export const OrchestrationThreadTurnSubagentDetailMessage = Schema.Struct({
   // newlines are public assistant content and must survive the wire boundary.
   text: ThreadTurnSubagentDetailText,
   omission: Schema.optional(OrchestrationThreadTurnSubagentDetailContentOmission),
+  timestamp: Schema.optional(ThreadTurnSubagentDetailTimestamp),
+  phase: Schema.optional(Schema.Literals(["commentary", "final_answer"])),
 }).check(
+  Schema.makeFilter((message) => message.phase === undefined || message.role === "assistant"),
   Schema.makeFilter(
     (message) =>
       threadTurnSubagentUtf8ByteLength(message.text) +
@@ -704,6 +717,9 @@ export const OrchestrationThreadTurnSubagentDetailBodyFields = {
     Schema.isMaxLength(THREAD_TURN_SUBAGENT_DETAIL_MAX_GAPS),
   ),
   truncated: Schema.Boolean,
+  // Native pagination may stop before its beginning; missing totals are not
+  // guessed or represented as an exact counted gap. Older adapters omit this.
+  historyIncomplete: Schema.optional(Schema.Boolean),
 } as const;
 
 const OrchestrationThreadTurnSubagentDetailBodyStruct = Schema.Struct(
@@ -778,11 +794,13 @@ export function orchestrationThreadTurnSubagentDetailBodyIssues(
     }
   }
   const hasOmission =
-    detail.gaps.length > 0 || detail.messages.some((message) => message.omission !== undefined);
+    detail.historyIncomplete === true ||
+    detail.gaps.length > 0 ||
+    detail.messages.some((message) => message.omission !== undefined);
   if (detail.truncated !== hasOmission) {
     issues.push({
       path: ["truncated"],
-      issue: "truncated must exactly reflect typed message or transcript omissions",
+      issue: "truncated must exactly reflect upstream, message or transcript omissions",
     });
   }
   if (

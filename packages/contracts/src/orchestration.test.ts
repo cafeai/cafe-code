@@ -249,6 +249,40 @@ it.effect("rejects command fields that become empty after trim", () =>
   }),
 );
 
+it.effect("validates optional public history provenance without accepting native metadata", () =>
+  Effect.gen(function* () {
+    const detail = {
+      provider: "codex",
+      messages: [
+        {
+          key: "m0",
+          role: "assistant",
+          text: "Earlier final reply",
+          timestamp: "2026-01-01T00:00:12.000Z",
+          phase: "final_answer",
+        },
+      ],
+      gaps: [],
+      historyIncomplete: true,
+      truncated: true,
+    };
+    assert.deepEqual(yield* decodeThreadTurnSubagentDetail(detail), detail);
+    for (const invalid of [
+      { ...detail, truncated: false },
+      { ...detail, messages: [{ ...detail.messages[0], timestamp: "/private/path" }] },
+      { ...detail, messages: [{ ...detail.messages[0], timestamp: "2026-02-30T00:00:12.000Z" }] },
+      { ...detail, messages: [{ ...detail.messages[0], timestamp: "2026-01-01T00:00:12Z" }] },
+      { ...detail, messages: [{ ...detail.messages[0], phase: "private" }] },
+      { ...detail, messages: [{ ...detail.messages[0], role: "user" }] },
+    ]) {
+      assert.equal(
+        (yield* decodeThreadTurnSubagentDetail(invalid).pipe(Effect.result))._tag,
+        "Failure",
+      );
+    }
+  }),
+);
+
 it.effect("bounds subagent detail identities and public transcript payloads", () =>
   Effect.gen(function* () {
     const input = yield* decodeThreadTurnSubagentDetailInput({

@@ -105,6 +105,53 @@ const retainedDetailBytes = (detail: ReturnType<typeof canonicalizeCodexSubagent
     0,
   );
 
+it("preserves public reply phase and canonical item times with honest native cutoff", () => {
+  const detail = canonicalizeCodexSubagentDetail({
+    threadId: "private-native-child",
+    turns: [],
+    historyIncomplete: true,
+    publicHistory: [
+      { role: "assistant", text: "Prior final", phase: "final_answer", completedAtMs: 0 },
+      { role: "user", text: "Continue" },
+      {
+        role: "assistant",
+        text: "New work\u202e safely",
+        phase: "commentary",
+        startedAtMs: 1_767_225_612_000,
+      },
+      { role: "assistant", text: "Unknown item time", completedAtMs: Infinity },
+    ],
+  });
+  assert.deepEqual(detail, {
+    messages: [
+      {
+        key: "m0",
+        role: "assistant",
+        text: "Prior final",
+        phase: "final_answer",
+        timestamp: "1970-01-01T00:00:00.000Z",
+      },
+      {
+        key: "m1",
+        role: "user",
+        text: "Continue",
+      },
+      {
+        key: "m2",
+        role: "assistant",
+        text: "New work safely",
+        phase: "commentary",
+        timestamp: "2026-01-01T00:00:12.000Z",
+      },
+      { key: "m3", role: "assistant", text: "Unknown item time" },
+    ],
+    gaps: [],
+    truncated: true,
+    historyIncomplete: true,
+  });
+  assert.doesNotMatch(JSON.stringify(detail), /private-native-child|Infinity/);
+});
+
 it("canonicalizes only public subagent chat text and strips unsafe controls", () => {
   const detail = canonicalizeCodexSubagentDetail({
     threadId: "provider-child-1",
@@ -834,7 +881,9 @@ validationLayer("CodexAdapterLive validation", (it) => {
 
 const sessionRuntimeFactory = makeRuntimeFactory();
 const transientSubagentHistoryRead = vi.fn(
-  (options: { readonly subagentThreadId: string }): Effect.Effect<CodexThreadSnapshot> =>
+  (options: {
+    readonly subagentThreadId: string;
+  }): Effect.Effect<CodexThreadSnapshot, CodexErrors.CodexAppServerTransportError> =>
     Effect.succeed({
       threadId: options.subagentThreadId,
       turns: [],
@@ -889,7 +938,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
     }),
   );
 
-  it.effect("reuses a live root without invoking the transient reader", () =>
+  it.effect("isolates public history reads even when the exact root is live", () =>
     Effect.gen(function* () {
       const adapter = yield* CodexAdapter;
       const threadId = asThreadId("sess-live-subagent-detail");
@@ -910,8 +959,9 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
         resumeCursor: { threadId: "provider-thread-1" },
       });
 
-      assert.equal(transientSubagentHistoryRead.mock.calls.length, 0);
-      assert.deepEqual(runtime.readSubagentThreadImpl.mock.calls[0], [childId]);
+      assert.equal(transientSubagentHistoryRead.mock.calls.length, 1);
+      assert.equal(runtime.readSubagentThreadImpl.mock.calls.length, 0);
+      assert.equal(transientSubagentHistoryRead.mock.calls[0]?.[0].subagentThreadId, childId);
     }),
   );
 
@@ -1076,11 +1126,13 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
 
       const upstreamCause = new Error(`${sentinels[1]} ${sentinels[2]} ${sentinels[3]}`);
       upstreamCause.stack = `Error: ${sentinels[4]}\n    at ${sentinels[1]}:1:1`;
-      runtime.readSubagentThreadImpl.mockRejectedValueOnce(
-        new CodexErrors.CodexAppServerTransportError({
-          detail: `transport rejected ${childId}: ${sentinels[3]}`,
-          cause: upstreamCause,
-        }),
+      transientSubagentHistoryRead.mockImplementationOnce(() =>
+        Effect.fail(
+          new CodexErrors.CodexAppServerTransportError({
+            detail: `transport rejected ${childId}: ${sentinels[3]}`,
+            cause: upstreamCause,
+          }),
+        ),
       );
 
       const readSubagentDetail = adapter.readSubagentDetail;
@@ -2799,6 +2851,52 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
           .update("provider-child-0", "utf8")
           .digest("hex"),
       });
+    }),
+  );
+
+  it.effect("invalidates child detail for public replies without exposing their text", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 2)).pipe(
+        Effect.forkChild,
+      );
+      for (const [index, phase] of ["commentary", "final_answer"].entries()) {
+        yield* runtime.emit({
+          id: asEventId(`evt-public-child-${index}`),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:12.000Z",
+          method: "codex.subagent/itemCompleted",
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-parent"),
+          itemId: asItemId(`private-item-${index}`),
+          payload: {
+            completedAtMs: 1_767_225_612_000,
+            threadId: "provider-thread-child",
+            turnId: "private-native-turn",
+            item: {
+              type: "agentMessage",
+              id: `private-item-${index}`,
+              phase,
+              text: "public-message-not-for-lifecycle-storage",
+            },
+          },
+        } satisfies ProviderEvent);
+      }
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      assert.equal(events.length, 2);
+      for (const event of events) {
+        assert.equal(event.type, "task.progress");
+        if (event.type !== "task.progress") continue;
+        assert.equal(event.payload.taskId, "provider-thread-child");
+        assert.equal(event.payload.description, "Posted an update");
+        assert.equal(event.payload.subagent?.status, "active");
+        assert.doesNotMatch(
+          JSON.stringify(event),
+          /public-message-not-for-lifecycle-storage|private-native-turn/,
+        );
+        assert.doesNotMatch(JSON.stringify(event.raw?.payload), /private-item/);
+      }
     }),
   );
 

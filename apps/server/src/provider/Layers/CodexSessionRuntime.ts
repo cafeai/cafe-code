@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   desktopMcpOverride,
   type DesktopMcpLaunch,
@@ -441,6 +441,18 @@ export interface CodexThreadTurnSnapshot {
 export interface CodexThreadSnapshot {
   readonly threadId: string;
   readonly turns: ReadonlyArray<CodexThreadTurnSnapshot>;
+  /** Present only on the isolated, public-only subagent history read. */
+  readonly publicHistory?: ReadonlyArray<CodexSubagentPublicHistoryMessage>;
+  /** Upstream history remains outside this bounded read; counts are unknown. */
+  readonly historyIncomplete?: boolean;
+}
+
+export interface CodexSubagentPublicHistoryMessage {
+  readonly role: "user" | "assistant";
+  readonly text: string;
+  readonly phase?: "commentary" | "final_answer";
+  readonly startedAtMs?: number;
+  readonly completedAtMs?: number;
 }
 
 export type CodexSubagentThreadValidationFailure =
@@ -4901,8 +4913,8 @@ export interface CodexSubagentHistoryReadClient {
  * Root metadata is intentionally fetched first: a missing or inaccessible root
  * short-circuits before Cafe sends the browser-supplied child id upstream.
  */
-export const readCodexSubagentThreadWithClient = Effect.fn(
-  "CodexSessionRuntime.readSubagentThreadWithClient",
+const readCodexVerifiedSubagentMetadataWithClient = Effect.fn(
+  "CodexSessionRuntime.readVerifiedSubagentMetadataWithClient",
 )(function* (input: {
   readonly client: CodexSubagentHistoryReadClient;
   readonly rootProviderThreadId: string;
@@ -4933,6 +4945,19 @@ export const readCodexSubagentThreadWithClient = Effect.fn(
     });
   }
 
+  return childMetadata;
+});
+
+/** The live runtime keeps its existing summary-only compatibility read. */
+export const readCodexSubagentThreadWithClient = Effect.fn(
+  "CodexSessionRuntime.readSubagentThreadWithClient",
+)(function* (input: {
+  readonly client: CodexSubagentHistoryReadClient;
+  readonly rootProviderThreadId: string;
+  readonly subagentThreadId: string;
+}) {
+  const childMetadata = yield* readCodexVerifiedSubagentMetadataWithClient(input);
+
   // Do not disclose even bounded child history until both metadata reads prove
   // that the browser-supplied id belongs to the root's provider session tree.
   const childTurns = yield* readCodexBoundedSummaryTurnsWithClient({
@@ -4950,6 +4975,129 @@ export const readCodexSubagentThreadWithClient = Effect.fn(
   return parseThreadSnapshot(childResponse);
 });
 
+// Full item pages can contain large private command output even though this
+// feature only needs public prose. Never read them on a live provider client.
+// The isolated client enforces its line cap before JSON decoding; these
+// additional budgets bound repeated small pages and retained public material.
+export const CODEX_SUBAGENT_HISTORY_MAX_INCOMING_LINE_BYTES = 1024 * 1024;
+export const CODEX_SUBAGENT_HISTORY_PAGE_ITEM_LIMIT = 32;
+export const CODEX_SUBAGENT_HISTORY_MAX_PAGES = 16;
+export const CODEX_SUBAGENT_HISTORY_MAX_ITEMS = 512;
+export const CODEX_SUBAGENT_HISTORY_MAX_PUBLIC_BYTES = 2 * 1024 * 1024;
+const CODEX_SUBAGENT_HISTORY_MAX_CURSOR_CHARS = 4096;
+
+function publicHistoryTimestamp(value: number | null | undefined): number | undefined {
+  // The optional metadata is display-only, never lifecycle authority. Reject
+  // non-integral/out-of-Date-range producer values rather than normalizing them.
+  return typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= 0 &&
+    value <= 8_640_000_000_000_000
+    ? value
+    : undefined;
+}
+
+/**
+ * Read public child history through an already isolated read-only client.
+ * Native summary turns omit commentary, so use item pagination while proving
+ * the exact root/child ownership first. Project each item immediately: no
+ * native identifier, input annotation, private tool or reasoning field leaves
+ * this reader. Provider errors still fail the refresh instead of making a
+ * partial snapshot look fresh; only known local cutoffs report incompleteness.
+ */
+const readCodexSubagentPublicHistoryWithClient = Effect.fn(
+  "CodexSessionRuntime.readSubagentPublicHistoryWithClient",
+)(function* (input: {
+  readonly client: CodexSubagentHistoryReadClient;
+  readonly rootProviderThreadId: string;
+  readonly subagentThreadId: string;
+}): Effect.fn.Return<CodexThreadSnapshot, CodexSessionRuntimeError> {
+  yield* readCodexVerifiedSubagentMetadataWithClient(input);
+  const descendingMessages: CodexSubagentPublicHistoryMessage[] = [];
+  const seenItems = new Set<string>();
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+  let scannedItems = 0;
+  let publicBytes = 0;
+  let historyIncomplete = false;
+
+  for (let page = 0; page < CODEX_SUBAGENT_HISTORY_MAX_PAGES; page += 1) {
+    const limit = Math.min(
+      CODEX_SUBAGENT_HISTORY_PAGE_ITEM_LIMIT,
+      CODEX_SUBAGENT_HISTORY_MAX_ITEMS - scannedItems,
+    );
+    const response = yield* input.client.request("thread/items/list", {
+      threadId: input.subagentThreadId,
+      sortDirection: "desc",
+      limit,
+      ...(cursor !== undefined ? { cursor } : {}),
+    });
+    for (const entry of response.data.slice(0, limit)) {
+      scannedItems += 1;
+      const item = entry.item;
+      if (item.type !== "userMessage" && item.type !== "agentMessage") continue;
+
+      // Pagination can overlap while a child is appending work. Preserve the
+      // newest exact native item once, with bounded digests rather than keeping
+      // native IDs. UTF-16 preserves even malformed opaque string identities.
+      const identity = createHash("sha256")
+        .update(JSON.stringify([entry.turnId, item.id]), "utf16le")
+        .digest("hex");
+      if (seenItems.has(identity)) continue;
+      seenItems.add(identity);
+      const text =
+        item.type === "agentMessage"
+          ? item.text
+          : item.content
+              .flatMap((content) => (content.type === "text" ? [content.text] : []))
+              .join("\n");
+      const bytes = Buffer.byteLength(text, "utf8");
+      if (publicBytes + bytes > CODEX_SUBAGENT_HISTORY_MAX_PUBLIC_BYTES) {
+        historyIncomplete = true;
+        break;
+      }
+      publicBytes += bytes;
+      const startedAtMs = publicHistoryTimestamp(entry.startedAtMs);
+      const completedAtMs = publicHistoryTimestamp(entry.completedAtMs);
+      descendingMessages.push({
+        role: item.type === "userMessage" ? "user" : "assistant",
+        text,
+        ...(item.type === "agentMessage" &&
+        (item.phase === "commentary" || item.phase === "final_answer")
+          ? { phase: item.phase }
+          : {}),
+        ...(startedAtMs !== undefined ? { startedAtMs } : {}),
+        ...(completedAtMs !== undefined ? { completedAtMs } : {}),
+      });
+    }
+    if (historyIncomplete || response.data.length > limit) {
+      historyIncomplete = true;
+      break;
+    }
+    const nextCursor = response.nextCursor;
+    if (nextCursor === undefined || nextCursor === null) break;
+    if (
+      response.data.length === 0 ||
+      nextCursor.length === 0 ||
+      nextCursor.length > CODEX_SUBAGENT_HISTORY_MAX_CURSOR_CHARS ||
+      seenCursors.has(nextCursor) ||
+      scannedItems >= CODEX_SUBAGENT_HISTORY_MAX_ITEMS ||
+      page + 1 >= CODEX_SUBAGENT_HISTORY_MAX_PAGES
+    ) {
+      historyIncomplete = true;
+      break;
+    }
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+  }
+  return {
+    threadId: input.subagentThreadId,
+    turns: [],
+    publicHistory: descendingMessages.toReversed(),
+    historyIncomplete,
+  };
+});
+
 export interface CodexInitializedSubagentHistoryReadClient extends CodexSubagentHistoryReadClient {
   readonly notify: CodexClient.CodexAppServerClientShape["notify"];
 }
@@ -4964,7 +5112,7 @@ export const readCodexSubagentThreadWithInitializedClient = Effect.fn(
 }) {
   yield* input.client.request("initialize", buildCodexInitializeParams());
   yield* input.client.notify("initialized", undefined);
-  return yield* readCodexSubagentThreadWithClient(input);
+  return yield* readCodexSubagentPublicHistoryWithClient(input);
 });
 
 export interface CodexTransientSubagentHistoryReadOptions {
@@ -4993,6 +5141,13 @@ export const readCodexSubagentThreadTransient = Effect.fn(
     Effect.gen(function* () {
       const clientContext = yield* Layer.build(
         CodexClient.layerCommand({
+          maxIncomingLineBytes: CODEX_SUBAGENT_HISTORY_MAX_INCOMING_LINE_BYTES,
+          logIncoming: false,
+          logOutgoing: false,
+          // Undefined logger uses the protocol's default debug logger for
+          // decoding failures, whose cause can contain malformed private wire
+          // data. Explicitly suppress that isolated diagnostic path as well.
+          logger: () => Effect.void,
           command: options.binaryPath,
           args: buildCodexAppServerArgs({
             maxConcurrentSubagents: options.maxConcurrentSubagents,
@@ -5004,7 +5159,6 @@ export const readCodexSubagentThreadTransient = Effect.fn(
             ...(options.environment ?? process.env),
             ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
           },
-          // Do not install a protocol logger for this privacy-sensitive read.
           // The finite adapter error mapping is the only diagnostic boundary.
         }),
       );

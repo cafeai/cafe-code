@@ -57,8 +57,22 @@ const EMPTY_SUBAGENT_DETAIL_GAPS: LoadedSubagentDetail["gaps"] = [];
 
 type DetailLoadState =
   | { readonly status: "idle" | "loading" }
-  | { readonly status: "loaded"; readonly detail: LoadedSubagentDetail }
-  | { readonly status: "unavailable" };
+  | {
+      readonly status: "loaded";
+      readonly detail: LoadedSubagentDetail;
+      /**
+       * A refresh failure must not erase the last authenticated snapshot, but
+       * preserving it silently would present old provider text as current.
+       * Keep the failure state beside that exact keyed snapshot so the user
+       * can distinguish retained history from a successful live refresh.
+       */
+      readonly refreshStatus: "current" | "unavailable" | "retrying";
+    }
+  | {
+      readonly status: "unavailable";
+      /** API discovery must rebind the effect; provider read failures retry through its scheduler. */
+      readonly retryMode: "rebind" | "scheduled";
+    };
 
 function isLiveStatus(status: SubagentWorkEntry["subagent"]["status"]): boolean {
   return status === "active" || status === "waiting";
@@ -83,6 +97,10 @@ function statusLabel(status: SubagentWorkEntry["subagent"]["status"]): string {
 
 const DETAIL_FOLLOW_THRESHOLD_PX = 48;
 const DETAIL_REFRESH_MIN_INTERVAL_MS = 1_000;
+const SUBAGENT_MESSAGE_TIMESTAMP_FORMATTER = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "medium",
+  timeStyle: "short",
+});
 
 type DetailRefreshRequest = { readonly immediate?: boolean };
 
@@ -200,7 +218,7 @@ function BoundSubagentDetailView({
     }
     const api = readEnvironmentApi(environmentId);
     if (!api) {
-      setLoadState({ status: "unavailable" });
+      setLoadState({ status: "unavailable", retryMode: "rebind" });
       refreshDetailRef.current = () => undefined;
       return;
     }
@@ -238,15 +256,35 @@ function BoundSubagentDetailView({
       lastRequestStartedAt = Date.now();
       try {
         const detail = await api.orchestration.getThreadTurnSubagentDetail(request);
-        if (!cancelled) setLoadState({ status: "loaded", detail });
+        if (!cancelled) setLoadState({ status: "loaded", detail, refreshStatus: "current" });
       } catch {
         // Provider errors are intentionally opaque here: upstream responses
         // can include account, filesystem, or transport details. Retain the
-        // last safe snapshot only within this keyed child-detail instance.
+        // last safe snapshot only within this keyed child-detail instance,
+        // while marking it unavailable so stale text never appears current.
         if (!cancelled) {
-          setLoadState((current) =>
-            current.status === "loaded" ? current : { status: "unavailable" },
-          );
+          // React may evaluate a functional state update after this request's
+          // finally block consumes the mutable trailing flag. Snapshot it now
+          // so the visible retry state agrees with the scheduler decision.
+          const trailingRefreshWillRun = trailingRefreshRequested;
+          setLoadState((current) => {
+            if (current.status === "loaded") {
+              return {
+                ...current,
+                // If an invalidation arrived while this request was in
+                // flight, the same scheduler will immediately run its one
+                // trailing refresh. Keep Retry hidden until that attempt
+                // settles so rapid input cannot grow a request chain.
+                refreshStatus: trailingRefreshWillRun ? "retrying" : "unavailable",
+              };
+            }
+            // An initial-history Retry can also arrive behind an automatic
+            // lifecycle refresh. Preserve its loading state until the single
+            // trailing attempt settles instead of exposing another Retry.
+            return trailingRefreshWillRun && current.status === "loading"
+              ? current
+              : { status: "unavailable", retryMode: "scheduled" };
+          });
         }
       } finally {
         inFlight = false;
@@ -476,6 +514,16 @@ function BoundSubagentDetailView({
           {keyedMessages.map(({ key, message }, index) => {
             const isFinalResult =
               !live && message.role === "assistant" && index === lastAssistantIndex;
+            const messageLabel =
+              message.role === "user"
+                ? "Assignment"
+                : message.phase === "final_answer"
+                  ? "Final reply"
+                  : message.phase === "commentary"
+                    ? "Update"
+                    : isFinalResult
+                      ? "Result"
+                      : "Update";
             const followingGap = transcriptGapByAnchor.get(message.key);
             return (
               <Fragment key={key}>
@@ -488,9 +536,19 @@ function BoundSubagentDetailView({
                   data-subagent-detail-message={message.role}
                   data-subagent-detail-message-key={message.key}
                 >
-                  <p className="mb-2 text-[9px] font-medium uppercase tracking-[0.16em] text-muted-foreground/55">
-                    {message.role === "user" ? "Assignment" : isFinalResult ? "Result" : "Update"}
-                  </p>
+                  <div className="mb-2 flex min-w-0 flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-muted-foreground/55">
+                    <p className="text-[9px] font-medium uppercase tracking-[0.16em]">
+                      {messageLabel}
+                    </p>
+                    {message.timestamp ? (
+                      <time
+                        className="max-w-full text-right font-mono text-[10px] leading-4 tabular-nums break-words"
+                        dateTime={message.timestamp}
+                      >
+                        {SUBAGENT_MESSAGE_TIMESTAMP_FORMATTER.format(new Date(message.timestamp))}
+                      </time>
+                    ) : null}
+                  </div>
                   <div className="min-w-0 text-sm leading-6 break-words">
                     <ChatMarkdown
                       text={message.text}
@@ -548,11 +606,57 @@ function BoundSubagentDetailView({
                 data-subagent-detail-retry="true"
                 onClick={() => {
                   setLoadState({ status: "loading" });
-                  setRetryRevision((revision) => revision + 1);
+                  if (loadState.retryMode === "rebind") {
+                    // The environment API did not exist when this keyed view
+                    // mounted, so there is no scheduler to reuse yet.
+                    setRetryRevision((revision) => revision + 1);
+                  } else {
+                    refreshDetailRef.current({ immediate: true });
+                  }
                 }}
               >
                 Retry
               </button>
+            </div>
+          ) : null}
+
+          {loadState.status === "loaded" && loadState.refreshStatus !== "current" ? (
+            <div
+              className="rounded-xl border border-border/40 bg-muted/15 px-3 py-3 text-xs leading-5 text-muted-foreground/65"
+              role="status"
+              data-subagent-detail-refresh-unavailable="true"
+            >
+              <p>
+                New provider updates could not be loaded. This is the last available transcript.
+              </p>
+              {loadState.refreshStatus === "retrying" ? (
+                <span className="mt-2 inline-flex items-center gap-1.5 text-foreground/75">
+                  <LoaderCircleIcon className="size-3.5 animate-spin" />
+                  Retrying…
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  className="mt-2 rounded-md border border-border/55 bg-background/45 px-2.5 py-1 text-xs font-medium text-foreground transition-colors hover:bg-muted/55 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                  data-subagent-detail-retry="true"
+                  onClick={() => {
+                    // Retain the authenticated snapshot while retrying. The
+                    // keyed detail instance guarantees it belongs to this
+                    // exact child/turn/history identity.
+                    setLoadState((current) =>
+                      current.status === "loaded"
+                        ? { ...current, refreshStatus: "retrying" }
+                        : current,
+                    );
+                    // Reuse the mounted request coalescer. Remounting this
+                    // effect would abandon its in-flight flag without
+                    // cancelling the provider RPC and permit a parallel read.
+                    refreshDetailRef.current({ immediate: true });
+                  }}
+                >
+                  Retry
+                </button>
+              )}
             </div>
           ) : null}
 
@@ -563,8 +667,20 @@ function BoundSubagentDetailView({
             </p>
           ) : null}
 
+          {loadState.status === "loaded" && loadState.detail.historyIncomplete === true ? (
+            <p
+              className="rounded-lg border border-dashed border-border/45 bg-muted/10 px-3 py-2 text-center text-[11px] leading-5 text-muted-foreground/55"
+              role="note"
+              data-subagent-detail-history-incomplete="true"
+            >
+              Showing recent public messages. Earlier history is outside this view’s retrieval
+              limit.
+            </p>
+          ) : null}
+
           {loadState.status === "loaded" &&
           loadState.detail.truncated &&
+          loadState.detail.historyIncomplete !== true &&
           loadState.detail.gaps.length === 0 &&
           !messages.some((message) => message.omission) ? (
             <p className="text-[11px] leading-5 text-muted-foreground/55" role="note">

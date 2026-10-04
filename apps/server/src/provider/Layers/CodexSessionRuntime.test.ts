@@ -5,11 +5,16 @@ import { it as effectIt } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Logger from "effect/Logger";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as References from "effect/References";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
+import * as Sink from "effect/Sink";
+import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
+import { ChildProcessSpawner } from "effect/unstable/process";
 import { describe, it, vi } from "vitest";
 import {
   MessageId,
@@ -34,6 +39,11 @@ import {
   CODEX_SUMMARY_HISTORY_MAX_PAGES,
   CODEX_SUMMARY_HISTORY_MAX_TURNS,
   CODEX_SUMMARY_HISTORY_PAGE_TURN_LIMIT,
+  CODEX_SUBAGENT_HISTORY_MAX_INCOMING_LINE_BYTES,
+  CODEX_SUBAGENT_HISTORY_MAX_ITEMS,
+  CODEX_SUBAGENT_HISTORY_MAX_PAGES,
+  CODEX_SUBAGENT_HISTORY_MAX_PUBLIC_BYTES,
+  CODEX_SUBAGENT_HISTORY_PAGE_ITEM_LIMIT,
   CODEX_PENDING_STEER_UNRESOLVED_CAPACITY,
   CODEX_RESUME_CHILD_RECONCILIATION_LIMIT,
   CODEX_CHILD_ACTIVITY_RECEIVER_LIMIT,
@@ -90,6 +100,7 @@ import {
   readCodexChildLivenessSnapshotWithClient,
   readCodexExpectedActiveTurnMismatchActualTurnId,
   readCodexSubagentThreadWithInitializedClient,
+  readCodexSubagentThreadTransient,
   readCodexNotificationEmittedAtIso,
   readCodexNotificationRouteFields,
   readCodexSteerExpectedTurnMismatchActualTurnId,
@@ -128,6 +139,15 @@ import {
 } from "../codexSteerCorrelation.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
 const decodeMessageId = Schema.decodeUnknownSync(MessageId);
+
+const publicEntry = (
+  id: string,
+  text = id,
+  turnId = "child-turn",
+): EffectCodexSchema.V2ThreadItemsListResponse__ThreadItemEntry => ({
+  turnId,
+  item: { type: "agentMessage", id, text, phase: "commentary" },
+});
 
 it("binds native event generations to the originating runtime across resume and delayed publication", () => {
   const original = makeCodexSubagentRuntimeGeneration();
@@ -1270,6 +1290,310 @@ describe("Codex subagent thread ownership validation", () => {
     } as const,
   };
 
+  const readPublicHistoryFixture = (
+    readPage: (
+      input: EffectCodexSchema.V2ThreadItemsListParams,
+    ) => Effect.Effect<
+      EffectCodexSchema.V2ThreadItemsListResponse,
+      CodexErrors.CodexAppServerError
+    >,
+  ) => {
+    const request = ((method: string, payload: unknown) => {
+      if (method === "initialize") return Effect.succeed({ userAgent: "codex-test" });
+      if (method === "thread/items/list") {
+        return readPage(payload as EffectCodexSchema.V2ThreadItemsListParams);
+      }
+      if (method === "thread/read") {
+        const threadId = (payload as { threadId: string }).threadId;
+        assert.ok(threadId === root.id || threadId === nestedChild.id);
+        return Effect.succeed({
+          thread: { ...(threadId === root.id ? root : nestedChild), turns: [] },
+        });
+      }
+      return Effect.die(new Error(`Unexpected history fixture method: ${method}`));
+    }) as CodexSubagentHistoryReadClient["request"];
+    return readCodexSubagentThreadWithInitializedClient({
+      client: { request, notify: () => Effect.void },
+      rootProviderThreadId: root.id,
+      subagentThreadId: nestedChild.id,
+    });
+  };
+
+  effectIt.effect(
+    "retains public commentary and final items in chronology without private fields",
+    () =>
+      Effect.gen(function* () {
+        const calls: EffectCodexSchema.V2ThreadItemsListParams[] = [];
+        const snapshot = yield* readPublicHistoryFixture((input) => {
+          calls.push(input);
+          return Effect.succeed(
+            input.cursor === undefined
+              ? {
+                  data: [
+                    {
+                      ...publicEntry("reply-id", "Latest reply"),
+                      startedAtMs: 1234,
+                      completedAtMs: 1456,
+                      item: {
+                        type: "agentMessage",
+                        id: "reply-id",
+                        text: "Latest reply",
+                        phase: "final_answer",
+                      },
+                    },
+                    {
+                      turnId: "child-turn",
+                      item: {
+                        id: "reasoning-id",
+                        type: "reasoning",
+                        summary: ["PRIVATE_REASONING"],
+                        content: ["PRIVATE_REASONING"],
+                      },
+                    },
+                    publicEntry("commentary-id", "New public commentary"),
+                    {
+                      turnId: "child-turn",
+                      item: {
+                        id: "tool-id",
+                        type: "functionCallOutput",
+                        name: "PRIVATE_TOOL",
+                        namespace: null,
+                        output: "PRIVATE_OUTPUT",
+                      },
+                    },
+                  ],
+                  nextCursor: "older-page",
+                }
+              : {
+                  data: [
+                    publicEntry(
+                      "commentary-id",
+                      "Old overlapping commentary must not replace newest",
+                    ),
+                    {
+                      turnId: "child-turn",
+                      item: {
+                        id: "assignment-id",
+                        type: "userMessage",
+                        content: [
+                          { type: "text", text: "Initial assignment" },
+                          { type: "skill", name: "PRIVATE_NAME", path: "/PRIVATE_PATH" },
+                          { type: "text", text: "Second public line" },
+                        ],
+                      },
+                    },
+                  ],
+                  nextCursor: null,
+                },
+          );
+        });
+        assert.deepEqual(snapshot.publicHistory, [
+          { role: "user", text: "Initial assignment\nSecond public line" },
+          { role: "assistant", text: "New public commentary", phase: "commentary" },
+          {
+            role: "assistant",
+            text: "Latest reply",
+            phase: "final_answer",
+            startedAtMs: 1234,
+            completedAtMs: 1456,
+          },
+        ]);
+        assert.deepEqual(snapshot.turns, []);
+        assert.equal(snapshot.historyIncomplete, false);
+        assert.equal(calls.length, 2);
+        assert.equal(calls[1]?.cursor, "older-page");
+        assert.ok(
+          calls.every((call) => call.sortDirection === "desc" && call.threadId === nestedChild.id),
+        );
+        assert.doesNotMatch(
+          JSON.stringify(snapshot.publicHistory),
+          /PRIVATE_|-id|child-turn|overlapping/,
+        );
+      }),
+  );
+
+  effectIt.effect(
+    "keeps reused item IDs separate across turns and rejects invalid timestamps",
+    () =>
+      Effect.gen(function* () {
+        const snapshot = yield* readPublicHistoryFixture(() =>
+          Effect.succeed({
+            data: [
+              {
+                ...publicEntry("same-id", "Newest", "new-turn"),
+                startedAtMs: -1,
+                completedAtMs: Number.NaN,
+              },
+              {
+                ...publicEntry("same-id", "Earlier", "old-turn"),
+                startedAtMs: 1.5,
+                completedAtMs: 8_640_000_000_000_001,
+              },
+              publicEntry("\ud800", "Distinct malformed identity one"),
+              publicEntry("\ud801", "Distinct malformed identity two"),
+            ],
+            nextCursor: null,
+          }),
+        );
+        assert.deepEqual(
+          snapshot.publicHistory?.map((message) => message.text),
+          [
+            "Distinct malformed identity two",
+            "Distinct malformed identity one",
+            "Earlier",
+            "Newest",
+          ],
+        );
+        assert.ok(
+          snapshot.publicHistory?.every(
+            (message) => message.startedAtMs === undefined && message.completedAtMs === undefined,
+          ),
+        );
+      }),
+  );
+
+  effectIt.effect("bounds scanned private items and reports retained-history cutoff", () =>
+    Effect.gen(function* () {
+      let pageCalls = 0;
+      const snapshot = yield* readPublicHistoryFixture((input) => {
+        pageCalls += 1;
+        assert.equal(input.limit, CODEX_SUBAGENT_HISTORY_PAGE_ITEM_LIMIT);
+        return Effect.succeed({
+          data: Array.from({ length: CODEX_SUBAGENT_HISTORY_PAGE_ITEM_LIMIT }, (_, index) => ({
+            turnId: "private-turn",
+            item: {
+              type: "reasoning" as const,
+              id: `${pageCalls}-${index}`,
+              summary: ["PRIVATE"],
+              content: [],
+            },
+          })),
+          nextCursor: `page-${pageCalls}`,
+        });
+      });
+      assert.equal(pageCalls, CODEX_SUBAGENT_HISTORY_MAX_PAGES);
+      assert.equal(
+        pageCalls * CODEX_SUBAGENT_HISTORY_PAGE_ITEM_LIMIT,
+        CODEX_SUBAGENT_HISTORY_MAX_ITEMS,
+      );
+      assert.deepEqual(snapshot.publicHistory, []);
+      assert.equal(snapshot.historyIncomplete, true);
+    }),
+  );
+
+  effectIt.effect("bounds public bytes and overlarge provider pages without inventing counts", () =>
+    Effect.gen(function* () {
+      let calls = 0;
+      const snapshot = yield* readPublicHistoryFixture(() => {
+        calls += 1;
+        return Effect.succeed({
+          data: [publicEntry(`public-${calls}`, "x".repeat(512 * 1024))],
+          nextCursor: `page-${calls}`,
+        });
+      });
+      assert.equal(calls, 5);
+      assert.equal(
+        snapshot.publicHistory?.reduce(
+          (sum, message) => sum + Buffer.byteLength(message.text, "utf8"),
+          0,
+        ),
+        CODEX_SUBAGENT_HISTORY_MAX_PUBLIC_BYTES,
+      );
+      assert.equal(snapshot.historyIncomplete, true);
+      const oversizedPage = yield* readPublicHistoryFixture(() =>
+        Effect.succeed({
+          data: Array.from({ length: CODEX_SUBAGENT_HISTORY_PAGE_ITEM_LIMIT + 1 }, (_, index) =>
+            publicEntry(`message-${index}`),
+          ),
+          nextCursor: null,
+        }),
+      );
+      assert.equal(oversizedPage.publicHistory?.length, CODEX_SUBAGENT_HISTORY_PAGE_ITEM_LIMIT);
+      assert.equal(oversizedPage.historyIncomplete, true);
+    }),
+  );
+
+  effectIt.effect("reports broken cursor progress as incomplete and fails real read errors", () =>
+    Effect.gen(function* () {
+      for (const nextCursor of ["repeated", "", "x".repeat(4097)]) {
+        let calls = 0;
+        const snapshot = yield* readPublicHistoryFixture(() => {
+          calls += 1;
+          return Effect.succeed({ data: [publicEntry(`item-${calls}`)], nextCursor });
+        });
+        assert.equal(calls, nextCursor === "repeated" ? 2 : 1);
+        assert.equal(snapshot.historyIncomplete, true);
+      }
+      const emptyContinuation = yield* readPublicHistoryFixture(() =>
+        Effect.succeed({ data: [], nextCursor: "more" }),
+      );
+      assert.equal(emptyContinuation.historyIncomplete, true);
+      let calls = 0;
+      const failure = CodexErrors.CodexAppServerRequestError.internalError(
+        "Synthetic provider read failure",
+      );
+      const actual = yield* readPublicHistoryFixture(() => {
+        calls += 1;
+        return calls === 1
+          ? Effect.succeed({ data: [publicEntry("newest")], nextCursor: "older" })
+          : Effect.fail(failure);
+      }).pipe(Effect.flip);
+      assert.equal(actual, failure);
+    }),
+  );
+
+  effectIt.effect(
+    "isolates oversized history and suppresses malformed private wire diagnostics",
+    () =>
+      Effect.gen(function* () {
+        let spawnCalls = 0;
+        const logs: unknown[] = [];
+        const logger = Logger.make(({ message }) => logs.push(message));
+        const spawner = ChildProcessSpawner.make(() => {
+          spawnCalls += 1;
+          return Effect.succeed(
+            ChildProcessSpawner.makeHandle({
+              pid: ChildProcessSpawner.ProcessId(7001),
+              exitCode: Effect.never,
+              isRunning: Effect.succeed(true),
+              kill: () => Effect.void,
+              unref: Effect.succeed(Effect.void),
+              stdin: Sink.drain,
+              // Separate chunks ensure the malformed first line reaches the
+              // decoder before the oversized second chunk closes the transport.
+              stdout: Stream.make(
+                new TextEncoder().encode('{"PRIVATE_MALFORMED_WIRE":\n'),
+                new TextEncoder().encode(
+                  "PRIVATE_WIRE".padEnd(CODEX_SUBAGENT_HISTORY_MAX_INCOMING_LINE_BYTES + 1, "x"),
+                ),
+              ),
+              stderr: Stream.empty,
+              all: Stream.empty,
+              getInputFd: () => Sink.drain,
+              getOutputFd: () => Stream.empty,
+            }),
+          );
+        });
+        const failure = yield* readCodexSubagentThreadTransient({
+          binaryPath: "synthetic-provider-never-spawned",
+          appServerCwd: "synthetic-cwd",
+          rootProviderThreadId: root.id,
+          subagentThreadId: nestedChild.id,
+          environment: {},
+        }).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          Effect.provideService(References.MinimumLogLevel, "Debug"),
+          Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
+          Effect.flip,
+        );
+        assert.equal(spawnCalls, 1);
+        assert.ok(failure instanceof CodexErrors.CodexAppServerIncomingMessageTooLargeError);
+        assert.equal(failure.maxBytes, CODEX_SUBAGENT_HISTORY_MAX_INCOMING_LINE_BYTES);
+        assert.doesNotMatch(JSON.stringify(failure), /PRIVATE_WIRE/);
+        assert.deepEqual(logs, []);
+      }),
+  );
+
   it("accepts a nested child in the recovered root session tree", () => {
     assert.equal(
       validateCodexSubagentThreadReadMetadata({
@@ -1349,14 +1673,12 @@ describe("Codex subagent thread ownership validation", () => {
           if (method === "initialize") {
             return { userAgent: "codex-test" };
           }
-          if (method === "thread/turns/list") {
+          if (method === "thread/items/list") {
             return {
               data: [
                 {
-                  id: "child-turn-1",
-                  status: "completed",
-                  itemsView: "summary",
-                  items: [],
+                  turnId: "child-turn-1",
+                  item: { id: "update-1", type: "agentMessage", text: "Public update" },
                 },
               ],
               nextCursor: null,
@@ -1387,21 +1709,22 @@ describe("Codex subagent thread ownership validation", () => {
       assert.equal(snapshot.threadId, nestedChild.id);
       assert.deepEqual(
         calls.map((call) => call.method),
-        ["initialize", "initialized", "thread/read", "thread/read", "thread/turns/list"],
+        ["initialize", "initialized", "thread/read", "thread/read", "thread/items/list"],
       );
       assert.deepEqual(calls.slice(2), [
         { method: "thread/read", payload: { threadId: root.id, includeTurns: false } },
         { method: "thread/read", payload: { threadId: nestedChild.id, includeTurns: false } },
         {
-          method: "thread/turns/list",
+          method: "thread/items/list",
           payload: {
             threadId: nestedChild.id,
-            limit: CODEX_SUMMARY_HISTORY_PAGE_TURN_LIMIT,
+            limit: CODEX_SUBAGENT_HISTORY_PAGE_ITEM_LIMIT,
             sortDirection: "desc",
-            itemsView: "summary",
           },
         },
       ]);
+      assert.deepEqual(snapshot.publicHistory, [{ role: "assistant", text: "Public update" }]);
+      assert.equal(snapshot.historyIncomplete, false);
       assert.equal(
         calls.some((call) => call.method === "thread/resume"),
         false,
@@ -1443,7 +1766,7 @@ describe("Codex subagent thread ownership validation", () => {
 
       assert.equal(exit._tag, "Failure");
       assert.equal(
-        calls.some((call) => call.method === "thread/turns/list"),
+        calls.some((call) => call.method === "thread/items/list"),
         false,
       );
     }),

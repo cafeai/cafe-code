@@ -80,6 +80,9 @@ export interface ProviderSubagentDetailMessage {
   readonly role: "user" | "assistant";
   /** Complete public text, or the retained head when `omission` is present. */
   readonly text: string;
+  /** Canonical UTC item timestamp; presentation only, never liveness evidence. */
+  readonly timestamp?: string | undefined;
+  readonly phase?: "commentary" | "final_answer" | undefined;
   readonly omission?:
     | {
         /** Retained public suffix rendered after a typed content-gap marker. */
@@ -109,6 +112,8 @@ export interface ProviderSubagentDetail {
   /** Ordered discontinuities between retained chronological message blocks. */
   readonly gaps: ReadonlyArray<ProviderSubagentDetailGap>;
   readonly truncated: boolean;
+  /** Native scan ended before exhausting history; omitted totals are unknown. */
+  readonly historyIncomplete?: boolean | undefined;
 }
 
 export interface ProviderAdapterShape<TError> {

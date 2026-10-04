@@ -15,7 +15,7 @@ import {
 } from "./baseSchemas.ts";
 import {
   OrchestrationThreadTurnSubagentDetailBodyFields,
-  THREAD_TURN_SUBAGENT_ID_MAX_LENGTH,
+  ThreadTurnSubagentId,
   orchestrationThreadTurnSubagentDetailBodyIssues,
 } from "./orchestration.ts";
 import {
@@ -513,10 +513,8 @@ const RollbackConversationPayload = Schema.Struct({
 const ReadSubagentDetailPayload = Schema.Struct({
   threadId: ThreadId,
   turnId: TurnId,
-  subagentId: TrimmedNonEmptyString.check(Schema.isMaxLength(THREAD_TURN_SUBAGENT_ID_MAX_LENGTH)),
-  historyId: Schema.optional(
-    TrimmedNonEmptyString.check(Schema.isMaxLength(THREAD_TURN_SUBAGENT_ID_MAX_LENGTH)),
-  ),
+  subagentId: ThreadTurnSubagentId,
+  historyId: Schema.optional(ThreadTurnSubagentId),
 });
 
 export const ProviderDaemonSubagentDetail = Schema.Struct({
