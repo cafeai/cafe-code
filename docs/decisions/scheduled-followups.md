@@ -42,6 +42,12 @@ Provider-specific native schedulers would create incompatible ownership and dupl
 
 ## Verification
 
+### Renderer visibility implementation
+
+Updated: 2026-10-05 05:54:23 JST (UTC+0900). The owner requested inline proposal visibility while explicitly retaining approval. The conversation tail now projects saved schedules with bounded pagination and pending proposals first; it does not fabricate a message/turn association. Review opens the existing Tasks editor rather than creating a second approval/mutation path. Merely displaying or opening a card cannot authorize execution.
+
+Tasks and conversation cards subscribe to one exact environment/chat read resource. One visible, reference-counted poller coalesces reads, generation-fences manual refresh/reconnect results and retires cached instructions at the last unsubscribe. Renderer polling discovers proposals even with Tasks closed but never drives scheduling. Failed reads preserve clearly labelled last-known rows. Review uses the selected chat/account and the saved revision, and resets on ownership changes; the backend remains the final authority. Provider session, persistence and delivery decisions above are unchanged.
+
 Qualification covers strict contracts, timezone/DST/date-line behavior, genuine SQLite persistence/concurrency/revision/control fences, exact command deduplication, all three provider dispatch paths, lost acknowledgements, preparation/Stop races, canonical outcomes and notifications, owner-vs-paired RPC, real in-memory MCP transport, renderer reopening, responsive browser controls, and preservation of chat defaults/themes.
 
 Required release gates: `yarn fmt`, `yarn lint`, `yarn typecheck`, `yarn test`, browser qualification, then `yarn build:desktop --force` last on the pinned standalone Node/Corepack Yarn runtime. Verify the exact published commit in hosted CI; synthetic tests do not claim live provider inference or execution while the host is asleep.

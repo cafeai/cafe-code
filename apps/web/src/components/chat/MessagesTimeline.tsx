@@ -114,6 +114,8 @@ import { useHistoricalWorkLogPresence } from "./useHistoricalWorkLogPresence";
 import { DesktopObservation } from "../virtualDesktop/DesktopObservation";
 import { SubagentRosterRow, type SubagentRosterEntry } from "../subagents/SubagentRosterRow";
 import { SubagentDetailView, type SubagentDetailSelection } from "./SubagentDetailView";
+import { ScheduledFollowupConversation } from "./ScheduledFollowupConversation";
+import type { ScheduledFollowupsContext } from "./ScheduledFollowups";
 
 export {
   extractOpenablePathTokens,
@@ -185,6 +187,8 @@ const TIMELINE_REVIEW_VISIBLE_CONTENT_POSITION = {
 // ---------------------------------------------------------------------------
 
 interface MessagesTimelineProps {
+  /** Live saved follow-ups are visible without opening the separate Tasks rail. */
+  scheduledFollowups?: ScheduledFollowupsContext;
   /** Missing session evidence is explicitly unknown, never implicitly live. */
   subagentRuntimeSession?: SubagentRuntimeContext | null;
   /** True until the detail stream has delivered its first complete snapshot. */
@@ -230,6 +234,7 @@ interface MessagesTimelineProps {
 // ---------------------------------------------------------------------------
 
 export const MessagesTimeline = memo(function MessagesTimeline({
+  scheduledFollowups,
   isThreadHistoryHydrating = false,
   isWorking,
   activeTurnInProgress,
@@ -537,11 +542,16 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       }
       const state = onDebugScrollEvent ? list.getState?.() : null;
       void list.scrollToEnd?.({ animated: false });
-      void list.scrollToIndex?.({
-        index: rowCount - 1,
-        animated: false,
-        viewPosition: 1,
-      });
+      // The last-row fallback predates the live follow-up footer. Aligning the
+      // last message after scrollToEnd would hide that entire footer below the
+      // viewport. Only the footer-aware end position is valid for these views.
+      if (!scheduledFollowups) {
+        void list.scrollToIndex?.({
+          index: rowCount - 1,
+          animated: false,
+          viewPosition: 1,
+        });
+      }
       emitScrollDebugEvent(reason, {
         state: state ?? null,
         details: {
@@ -551,7 +561,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         },
       });
     },
-    [emitScrollDebugEvent, listRef, onDebugScrollEvent, rows.length],
+    [emitScrollDebugEvent, listRef, onDebugScrollEvent, rows.length, scheduledFollowups],
   );
   const cancelTailFollowItemLayoutRepin = useCallback(() => {
     if (tailFollowItemLayoutRepinFrameRef.current === null) {
@@ -583,6 +593,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     });
   }, [forceScrollToEnd, rows.length]);
   const handleItemSizeChanged = useCallback(() => {
+    // Footer metrics use this same follow-only path: delayed proposals can
+    // grow after the initial scroll settles, but must never move a reader who
+    // deliberately scrolled away. Coalescing covers item and footer changes.
     scheduleTailFollowItemLayoutRepin();
   }, [scheduleTailFollowItemLayoutRepin]);
   const cancelSubmitStickToEnd = useCallback(() => {
@@ -975,6 +988,23 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     [],
   );
 
+  // Schedule reads are independent of streaming tokens. Keep the footer
+  // element stable so a token update does not churn the virtualizer's footer
+  // or recreate the shared scheduler subscription. Subagent detail has its own
+  // transcript and must not present the parent's schedule as the child's.
+  const timelineFooter = useMemo(
+    () =>
+      scheduledFollowups && !isSubagentDetailOpen ? (
+        <div className="mx-auto w-full min-w-0 max-w-3xl" data-timeline-scheduled-followups="true">
+          <ScheduledFollowupConversation context={scheduledFollowups} />
+          {TIMELINE_LIST_FOOTER}
+        </div>
+      ) : (
+        TIMELINE_LIST_FOOTER
+      ),
+    [isSubagentDetailOpen, scheduledFollowups],
+  );
+
   if (
     rows.length === 0 &&
     !isWorking &&
@@ -986,10 +1016,13 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 
   if (rows.length === 0 && !isWorking && resolvedSelectedSubagent === null) {
     return (
-      <div className="flex h-full items-center justify-center">
-        <p className="text-sm text-muted-foreground/30">
-          Send a message to start the conversation.
-        </p>
+      <div className="flex h-full min-w-0 flex-col overflow-y-auto px-3 sm:px-5">
+        <div className="flex min-h-40 flex-1 shrink-0 items-center justify-center">
+          <p className="text-sm text-muted-foreground/30">
+            Send a message to start the conversation.
+          </p>
+        </div>
+        {timelineFooter}
       </div>
     );
   }
@@ -1021,6 +1054,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
                   : TIMELINE_REVIEW_VISIBLE_CONTENT_POSITION
               }
               onItemSizeChanged={handleItemSizeChanged}
+              {...(scheduledFollowups ? { onMetricsChange: handleItemSizeChanged } : {})}
               onScroll={handleScroll}
               onWheel={handleWheel}
               onTouchStart={handleTouchStart}
@@ -1033,7 +1067,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
               onKeyDown={handleKeyDown}
               className="h-full overflow-x-hidden overscroll-y-contain px-3 sm:px-5"
               ListHeaderComponent={TIMELINE_LIST_HEADER}
-              ListFooterComponent={TIMELINE_LIST_FOOTER}
+              ListFooterComponent={timelineFooter}
             />
           </div>
         </TimelineRowActivityCtx>

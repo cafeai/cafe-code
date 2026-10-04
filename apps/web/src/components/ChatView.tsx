@@ -7030,6 +7030,9 @@ export default function ChatView(props: ChatViewProps) {
             {/* Messages — LegendList handles virtualization and scrolling internally */}
             <MessagesTimeline
               key={activeThread.id}
+              {...(pane.visible && scheduledFollowupsContext
+                ? { scheduledFollowups: scheduledFollowupsContext }
+                : {})}
               isThreadHistoryHydrating={isServerThread && !serverThreadDetailHydrated}
               isWorking={isWorking}
               activeTurnInProgress={isWorking || !latestTurnSettled}

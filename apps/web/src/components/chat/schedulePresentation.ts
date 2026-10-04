@@ -1,4 +1,17 @@
-import type { ModelSelection, ServerProvider } from "@cafecode/contracts";
+import type { ModelSelection, ScheduledFollowupRecord, ServerProvider } from "@cafecode/contracts";
+
+/** The transcript and Tasks must describe the same saved recurrence. Labels
+ * are presentation only; the backend's named-zone recurrence owns execution. */
+export function scheduleRecurrenceLabel(record: ScheduledFollowupRecord): string {
+  const recurrence = record.recurrence;
+  if (recurrence.kind === "once") return "One-time follow-up";
+  if (recurrence.kind === "interval") return `Every ${recurrence.everyMinutes} minutes`;
+  const time = `${String(recurrence.hour).padStart(2, "0")}:${String(recurrence.minute).padStart(2, "0")}`;
+  if (recurrence.monthDays || recurrence.months) return `Custom calendar · ${time}`;
+  if (!recurrence.weekdays) return `Daily · ${time}`;
+  if (recurrence.weekdays.toSorted().join(",") === "1,2,3,4,5") return `Weekdays · ${time}`;
+  return `${recurrence.weekdays.map((day) => ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][day]).join(", ")} · ${time}`;
+}
 
 /** Render only the provider's public account label, never authentication metadata. */
 export function scheduleAccountLabel(

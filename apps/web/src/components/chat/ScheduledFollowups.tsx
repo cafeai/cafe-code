@@ -3,6 +3,7 @@ import type {
   ModelSelection,
   ScheduledFollowupDraft,
   ScheduledFollowupHistoryResult,
+  ScheduledFollowupId,
   ScheduledFollowupRecord,
   ScheduledFollowupRun,
   ServerProvider,
@@ -18,6 +19,7 @@ import {
   formatScheduleTime,
   scheduleAccountLabel,
   scheduleModelLabel,
+  scheduleRecurrenceLabel,
 } from "./schedulePresentation";
 import { useScheduledFollowups } from "./useScheduledFollowups";
 
@@ -54,17 +56,6 @@ function runLabel(run: ScheduledFollowupRun): string {
   return run.state === "completed" && run.result === "no-change"
     ? "No changes"
     : RUN_LABELS[run.state];
-}
-
-function recurrenceLabel(record: ScheduledFollowupRecord): string {
-  const recurrence = record.recurrence;
-  if (recurrence.kind === "once") return "One-time follow-up";
-  if (recurrence.kind === "interval") return `Every ${recurrence.everyMinutes} minutes`;
-  const time = `${String(recurrence.hour).padStart(2, "0")}:${String(recurrence.minute).padStart(2, "0")}`;
-  if (recurrence.monthDays || recurrence.months) return `Custom calendar · ${time}`;
-  if (!recurrence.weekdays) return `Daily · ${time}`;
-  if (recurrence.weekdays.toSorted().join(",") === "1,2,3,4,5") return `Weekdays · ${time}`;
-  return `${recurrence.weekdays.map((day) => ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][day]).join(", ")} · ${time}`;
 }
 
 /** One bounded history page is held at a time. Moving backwards remembers only
@@ -185,6 +176,7 @@ function ScheduleCard(props: {
   context: ScheduledFollowupsContext;
   record: ScheduledFollowupRecord;
   pending: boolean;
+  readUnavailable?: boolean;
   onEdit: () => void;
   onStatus: (state: "active" | "paused" | "deleted") => void;
   onRun: () => void;
@@ -198,7 +190,7 @@ function ScheduleCard(props: {
     record.state === "active" && liveRun ? runLabel(lastRun) : STATE_LABELS[record.state];
   const selection = record.modelSelection ?? context.modelSelection;
   const accountMatches = record.authorizedInstanceId === context.modelSelection.instanceId;
-  const disabled = props.pending || context.unavailable;
+  const disabled = props.pending || context.unavailable || props.readUnavailable;
 
   return (
     <article
@@ -217,7 +209,7 @@ function ScheduleCard(props: {
         </p>
       ) : null}
       <p className="mt-1 break-words text-[11px] text-muted-foreground [overflow-wrap:anywhere]">
-        {recurrenceLabel(record)} · {record.recurrence.timeZone}
+        {scheduleRecurrenceLabel(record)} · {record.recurrence.timeZone}
       </p>
       <p className="mt-2 break-words text-[11px] text-muted-foreground [overflow-wrap:anywhere]">
         {record.modelSelection
@@ -335,8 +327,12 @@ function ScheduleCard(props: {
  */
 export const ScheduledFollowups = memo(function ScheduledFollowups({
   context,
+  initialReviewScheduleId,
 }: {
   context: ScheduledFollowupsContext;
+  /** Navigation only: resolve this ID through the exact chat's authoritative
+   * list. Never take a model-authored definition or enable it on mount. */
+  initialReviewScheduleId?: ScheduledFollowupId;
 }) {
   const { schedules, loading, error, refresh } = useScheduledFollowups(
     context.environmentId,
@@ -351,6 +347,28 @@ export const ScheduledFollowups = memo(function ScheduledFollowups({
   const [page, setPage] = useState(0);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const createRef = useRef<HTMLButtonElement>(null);
+  const initialReviewHandled = useRef(false);
+  // An inline review first refreshes its exact saved target. Do not let a new
+  // draft or cached-card action race that read and get replaced by its result.
+  const reviewReadUnavailable = Boolean(initialReviewScheduleId && (loading || error));
+
+  useEffect(() => {
+    if (!initialReviewScheduleId || initialReviewHandled.current || loading || error) return;
+    initialReviewHandled.current = true;
+    const record = schedules.find(
+      (entry) =>
+        entry.id === initialReviewScheduleId &&
+        entry.threadId === context.threadId &&
+        entry.state !== "deleted",
+    );
+    if (record) {
+      // Capture the reviewed revision. Later remote edits must fail the normal
+      // backend revision fence, not silently replace a form under the owner.
+      setEditor({ record });
+    } else {
+      setNotice("This schedule is no longer available. No changes were made.");
+    }
+  }, [context.threadId, error, initialReviewScheduleId, loading, schedules]);
   const current = schedules.filter(
     (record) => record.state !== "completed" && record.state !== "deleted",
   );
@@ -417,7 +435,7 @@ export const ScheduledFollowups = memo(function ScheduledFollowups({
             ref={createRef}
             size="xs"
             variant="ghost"
-            disabled={pending || context.unavailable}
+            disabled={pending || context.unavailable || reviewReadUnavailable}
             onClick={() => {
               setMutationError(null);
               setNotice(null);
@@ -485,6 +503,7 @@ export const ScheduledFollowups = memo(function ScheduledFollowups({
                   context={context}
                   record={record}
                   pending={pending}
+                  readUnavailable={reviewReadUnavailable}
                   onEdit={() => {
                     setMutationError(null);
                     setNotice(null);

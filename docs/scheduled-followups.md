@@ -4,6 +4,10 @@ Scheduled follow-ups run instructions in an existing Cafe chat using **Codex, Cl
 
 You can also ask the model, for example, “Check this build every ten minutes.” Cafe automatically connects scheduling tools to each session, including separate account profiles. **No MCP installation is needed for chats inside Cafe.** Review the proposal in Tasks and the account that will execute and pay for it, then choose **Approve & enable**. Connectivity is automatic; recurring paid execution still needs your approval.
 
+Saved follow-ups also appear as cards at the bottom of the conversation, even when Tasks is closed. Proposals are shown first with **Needs your approval** and **Won’t run until you approve**. Choose **Review schedule** to open the same review form used by Tasks, already filled with the saved instructions and timing. Opening a card does not approve, enable or run anything. You must still review the paying account and choose **Approve & enable** yourself.
+
+The conversation shows three cards at a time, with controls to see the rest. These are live views of saved schedules, not permanent copies attached to an assistant message: approval, pauses, completion and deletion are reflected in both views. Saved proposals reappear after reopening the chat. Updates refresh approximately every 15 seconds while the view is visible and on reconnection; failed refreshes show last-known status rather than claiming it is current. Reading older messages does not force the conversation to scroll to a new proposal.
+
 ## Creating and managing a follow-up
 
 Give the follow-up a short name and instructions explaining what to check and what counts as a meaningful change. Choose once, an interval of at least five minutes, daily, weekdays, weekly, or a custom calendar. Calendar rules use the selected IANA timezone; the next three occurrences are previewed before saving. One-time dates and optional end dates are explicitly entered in UTC. Custom weekday, month-day, and month selections are intersections, not alternatives.

@@ -1,12 +1,26 @@
 import "../../index.css";
 
-import { EnvironmentId, MessageId, ProviderDriverKind, ThreadId } from "@cafecode/contracts";
+import {
+  EnvironmentId,
+  MessageId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ScheduledFollowupId,
+  ThreadId,
+  type EnvironmentApi,
+  type ScheduledFollowupRecord,
+} from "@cafecode/contracts";
 import type { LegendListRef } from "@legendapp/list/react";
 import { createRef, useCallback, useState, type ComponentProps } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
+import {
+  __resetEnvironmentApiOverridesForTests,
+  __setEnvironmentApiOverrideForTests,
+} from "../../environmentApi";
 import { MessagesTimeline } from "./MessagesTimeline";
+import { refreshScheduledFollowups } from "./scheduledFollowupsResource";
 
 type TimelineProps = ComponentProps<typeof MessagesTimeline>;
 type TimelineEntries = TimelineProps["timelineEntries"];
@@ -54,10 +68,12 @@ function TimelineFixture({
   entries,
   listRef,
   scope,
+  scheduledFollowups,
 }: {
   entries: TimelineEntries;
   listRef: TimelineProps["listRef"];
   scope: string;
+  scheduledFollowups?: TimelineProps["scheduledFollowups"];
 }) {
   const [following, setFollowing] = useState(true);
   const stopFollowing = useCallback(() => setFollowing(false), []);
@@ -83,6 +99,7 @@ function TimelineFixture({
         onRevertUserMessage={ignore}
         onUserScrollIntent={stopFollowing}
         revertTurnCountByUserMessageId={EMPTY_REVERT_COUNTS}
+        {...(scheduledFollowups ? { scheduledFollowups } : {})}
         stickToEndRevision={0}
         timelineEntries={entries}
         timestampFormat="24-hour"
@@ -146,6 +163,135 @@ async function expectTail(
 }
 
 describe("MessagesTimeline with real LegendList", () => {
+  it.each([true, false])(
+    "preserves the real scroll position when a proposal arrives with tail following %s",
+    async (following) => {
+      const scope = following ? "schedule-follow" : "schedule-review";
+      const environmentId = EnvironmentId.make("real-list-fixture");
+      const threadId = ThreadId.make(scope);
+      const instanceId = ProviderInstanceId.make("real-list-schedule-account");
+      const context = {
+        environmentId,
+        threadId,
+        provider: null,
+        modelSelection: { instanceId, model: "gpt-6-astra" },
+        unavailable: false,
+      };
+      let records: readonly ScheduledFollowupRecord[] = [];
+      const list = vi.fn(async () => ({ schedules: records, backendOnline: true }));
+      __setEnvironmentApiOverrideForTests(environmentId, {
+        scheduledFollowups: { list },
+      } as unknown as EnvironmentApi);
+      const host = createHost();
+      const listRef = createRef<LegendListRef>();
+      const view = await render(
+        <TimelineFixture
+          entries={messages(scope)}
+          listRef={listRef}
+          scope={scope}
+          scheduledFollowups={context}
+        />,
+        { container: host },
+      );
+      try {
+        await vi.waitFor(() => {
+          expect(list).toHaveBeenCalledTimes(1);
+          expect(host.querySelector("[data-scheduled-followup-notices]")).toBeNull();
+        });
+        await expectTail(host, listRef, `${scope}-message-39`);
+        // Finish the initial alignment frames before exercising independent
+        // footer growth, then place the real browser at the physical tail.
+        for (let frame = 0; frame < 4; frame += 1) {
+          await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+        }
+        const scroller = readScroller(listRef);
+        scroller.scrollTop = scroller.scrollHeight;
+        await vi.waitFor(() => expect(Math.abs(tailDistance(scroller))).toBeLessThanOrEqual(2));
+        if (!following) {
+          scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -500, bubbles: true }));
+          scroller.scrollTop -= 500;
+          await vi.waitFor(() => {
+            expect(host.querySelector('[data-real-list-following="false"]')).not.toBeNull();
+            expect(tailDistance(scroller)).toBeGreaterThan(400);
+          });
+        }
+        const previousTop = scroller.scrollTop;
+        const viewportBefore = scroller.getBoundingClientRect();
+        const visibleMessage = Array.from(
+          host.querySelectorAll<HTMLElement>("[data-message-id]"),
+        ).find((row) => {
+          const bounds = row.getBoundingClientRect();
+          return bounds.top >= viewportBefore.top && bounds.bottom <= viewportBefore.bottom;
+        });
+        expect(visibleMessage).toBeDefined();
+        const visibleMessageId = visibleMessage!.dataset.messageId!;
+        const previousMessageTop = visibleMessage!.getBoundingClientRect().top;
+        records = [
+          {
+            id: ScheduledFollowupId.make("11111111-1111-4111-8111-111111111111"),
+            threadId,
+            revision: 1,
+            state: "pending_confirmation",
+            name: "Synthetic proposal at the conversation tail",
+            prompt: "Check synthetic results only.",
+            recurrence: {
+              kind: "interval",
+              anchorAt: CREATED_AT,
+              everyMinutes: 5,
+              timeZone: "UTC",
+            },
+            modelSelection: null,
+            notificationPolicy: "changes-and-errors",
+            endAt: null,
+            maxRuns: null,
+            allowAutoFinish: false,
+            authorizedInstanceId: instanceId,
+            permissionCeiling: "approval-required",
+            createdAt: CREATED_AT,
+            updatedAt: CREATED_AT,
+            nextRunAt: null,
+            runCount: 0,
+            lastRun: null,
+          },
+        ];
+        refreshScheduledFollowups(environmentId, threadId);
+        await vi.waitFor(() => {
+          expect(host.querySelector("[data-scheduled-followup-notices] article")).not.toBeNull();
+        });
+        // Let actual ResizeObserver/list measurement settle before asserting the
+        // anchor: an immediate assertion could pass before the footer was sized.
+        for (let frame = 0; frame < 4; frame += 1) {
+          await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+        }
+        if (following) {
+          await vi.waitFor(() => {
+            const viewport = scroller.getBoundingClientRect();
+            const review = host.querySelector<HTMLButtonElement>(
+              'button[aria-label="Review schedule: Synthetic proposal at the conversation tail"]',
+            );
+            expect(review).not.toBeNull();
+            expect(review!.getBoundingClientRect().top).toBeGreaterThanOrEqual(viewport.top);
+            expect(review!.getBoundingClientRect().bottom).toBeLessThanOrEqual(viewport.bottom + 2);
+            expect(Math.abs(tailDistance(scroller))).toBeLessThanOrEqual(2);
+          });
+        } else {
+          expect(Math.abs(scroller.scrollTop - previousTop)).toBeLessThanOrEqual(2);
+          expect(
+            Math.abs(
+              readMessage(host, visibleMessageId).getBoundingClientRect().top - previousMessageTop,
+            ),
+          ).toBeLessThanOrEqual(2);
+          expect(tailDistance(scroller)).toBeGreaterThan(400);
+        }
+        expect(list).toHaveBeenCalledTimes(2);
+      } finally {
+        await view.unmount();
+        host.remove();
+        __resetEnvironmentApiOverridesForTests();
+      }
+    },
+  );
+
   it("opens at the newest message and follows appended rows and row growth", async () => {
     const host = createHost();
     const listRef = createRef<LegendListRef>();

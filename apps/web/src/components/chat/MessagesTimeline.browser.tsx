@@ -34,6 +34,14 @@ const getStateSpy = vi.fn<
 >(() => ({ isAtEnd: true }));
 const legendListPropsSpy = vi.fn();
 
+// This suite qualifies the timeline's mount and scroll boundary. The real
+// schedule API/editor and real virtualizer each have separate browser coverage.
+vi.mock("./ScheduledFollowupConversation", () => ({
+  ScheduledFollowupConversation: ({ context }: { context: { threadId: string } }) => (
+    <section aria-label="Synthetic inline schedules">Schedules for {context.threadId}</section>
+  ),
+}));
+
 vi.mock("@legendapp/list/react", async () => {
   const React = await import("react");
 
@@ -355,6 +363,142 @@ describe("MessagesTimeline", () => {
     delete (window as typeof window & { nativeApi?: unknown }).nativeApi;
     await __resetLocalApiForTests();
     document.body.innerHTML = "";
+  });
+
+  it("mounts inline schedules beneath an empty conversation", async () => {
+    const props = buildProps();
+    const threadId = ThreadId.make("empty-schedule-chat");
+    const screen = await render(
+      <MessagesTimeline
+        {...props}
+        activeThreadId={threadId}
+        timelineEntries={[]}
+        scheduledFollowups={{
+          environmentId: props.activeThreadEnvironmentId,
+          threadId,
+          provider: null,
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("schedule-account"),
+            model: "gpt-6-astra",
+          },
+          unavailable: false,
+        }}
+      />,
+    );
+    try {
+      await expect
+        .element(page.getByText("Send a message to start the conversation."))
+        .toBeVisible();
+      await expect
+        .element(page.getByRole("region", { name: "Synthetic inline schedules" }))
+        .toBeVisible();
+      expect(document.querySelectorAll("[data-timeline-scheduled-followups]")).toHaveLength(1);
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("adds the schedule footer without moving a reader who detached from the tail", async () => {
+    // Complete the initial alignment frames before clearing the spies. This
+    // test observes adding the footer, not the separately tested initial mount.
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation(
+      (callback: FrameRequestCallback) => {
+        callback(0);
+        return 1;
+      },
+    );
+    vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => undefined);
+    const props = buildProps();
+    const threadId = ThreadId.make("detached-schedule-chat");
+    const entries = [buildUserTimelineEntry("The earlier message being reviewed")];
+    const screen = await render(
+      <MessagesTimeline
+        {...props}
+        activeThreadId={threadId}
+        timelineEntries={entries}
+        autoFollowTail={false}
+      />,
+    );
+    try {
+      scrollToEndSpy.mockClear();
+      scrollToIndexSpy.mockClear();
+      await screen.rerender(
+        <MessagesTimeline
+          {...props}
+          activeThreadId={threadId}
+          timelineEntries={entries}
+          autoFollowTail={false}
+          scheduledFollowups={{
+            environmentId: props.activeThreadEnvironmentId,
+            threadId,
+            provider: null,
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("schedule-account"),
+              model: "gpt-6-astra",
+            },
+            unavailable: false,
+          }}
+        />,
+      );
+      await expect
+        .element(page.getByRole("region", { name: "Synthetic inline schedules" }))
+        .toBeVisible();
+      expect(legendListPropsSpy.mock.lastCall?.[0].maintainScrollAtEnd).toBe(false);
+      expect(scrollToEndSpy).not.toHaveBeenCalled();
+      expect(scrollToIndexSpy).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("unmounts the parent's schedule footer while the selected subagent detail is shown", async () => {
+    const props = buildProps();
+    const threadId = ThreadId.make("parent-schedule-chat");
+    const turnId = TurnId.make("parent-schedule-turn");
+    const entry = buildSubagentWorkEntry({
+      id: "schedule-child-row",
+      label: "Schedule isolation worker",
+      subagentId: "schedule-child",
+      turnId,
+      status: "completed",
+    });
+    setSubagentDetailApi(async () => ({
+      provider: ProviderDriverKind.make("codex"),
+      messages: [],
+      gaps: [],
+      truncated: false,
+    }));
+    const scheduleContext = {
+      environmentId: props.activeThreadEnvironmentId,
+      threadId,
+      provider: null,
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("schedule-account"),
+        model: "gpt-6-astra",
+      },
+      unavailable: false,
+    };
+    const screen = await render(
+      <MessagesTimeline
+        {...props}
+        activeThreadId={threadId}
+        timelineEntries={[entry]}
+        scheduledFollowups={scheduleContext}
+      />,
+    );
+    try {
+      await expect
+        .element(page.getByRole("region", { name: "Synthetic inline schedules" }))
+        .toBeVisible();
+      await page.getByRole("button", { name: /^Schedule isolation worker, Done\./ }).click();
+      await vi.waitFor(() =>
+        expect(document.querySelector("[data-subagent-detail-view]")).not.toBeNull(),
+      );
+      expect(document.querySelector("[data-timeline-scheduled-followups]")).toBeNull();
+      expect(document.body.textContent).not.toContain(`Schedules for ${threadId}`);
+    } finally {
+      await screen.unmount();
+    }
   });
 
   it("renders activity rows instead of the empty placeholder when a thread has non-message timeline data", async () => {
