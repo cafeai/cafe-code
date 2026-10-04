@@ -1447,8 +1447,20 @@ const lifecycleLayer = it.layer(
   ),
 );
 
-function startLifecycleRuntime() {
+function startLifecycleRuntime(subagentRuntimeId?: string) {
   return Effect.gen(function* () {
+    if (subagentRuntimeId !== undefined) {
+      lifecycleRuntimeFactory.factory.mockImplementationOnce((options) => {
+        const runtime = new FakeCodexRuntime(options);
+        // The bridge reads this already-created descriptor before consuming
+        // events. Supply synthetic runtime authority without starting a CLI.
+        runtime.getSession = runtime.getSession.pipe(
+          Effect.map((session) => ({ ...session, subagentRuntimeId })),
+        );
+        lifecycleRuntimeFactory.runtimes.push(runtime);
+        return Effect.succeed(runtime);
+      });
+    }
     const adapter = yield* CodexAdapter;
     yield* adapter.startSession({
       provider: ProviderDriverKind.make("codex"),
@@ -3046,7 +3058,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     () =>
       Effect.gen(function* () {
         const { adapter, runtime } = yield* startLifecycleRuntime();
-        const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 5)).pipe(
+        const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 10)).pipe(
           Effect.forkChild,
         );
         const emit = (index: number, method: string, payload: unknown) =>
@@ -3105,10 +3117,44 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
             agentPath: "workers/updated",
           },
         });
+        const activity = (index: number, kind: "interacted" | "completed", agentPath: string) =>
+          emit(index, "item/completed", {
+            completedAtMs: Date.parse(`2026-10-03T00:00:0${index}.000Z`),
+            threadId: "native-parent",
+            turnId: "parent-refresh",
+            item: {
+              type: "subAgentActivity",
+              id: `activity-${index}`,
+              kind,
+              agentThreadId: "renamed-child",
+              agentPath,
+            },
+          });
+        // An old address can recur in progress after explicit reuse. It is
+        // not permission to rename the new assignment back to the old slug.
+        yield* activity(5, "interacted", "workers/original");
+        yield* emit(6, "codex.subagent/threadNameUpdated", {
+          threadId: "renamed-child",
+          threadName: "Fresh reused child title",
+        });
+        yield* activity(7, "interacted", "workers/updated");
+        yield* activity(8, "completed", "workers/original");
+        yield* activity(9, "interacted", "workers/updated");
         const events = Array.from(yield* Fiber.join(eventsFiber));
         assert.deepEqual(
           events.map((event) => event.type),
-          ["task.started", "task.completed", "task.progress", "task.progress", "task.started"],
+          [
+            "task.started",
+            "task.completed",
+            "task.progress",
+            "task.progress",
+            "task.started",
+            "task.progress",
+            "task.progress",
+            "task.progress",
+            "task.completed",
+            "task.progress",
+          ],
         );
         const presentations = events.map((event) =>
           "subagent" in event.payload ? event.payload.subagent : undefined,
@@ -3119,6 +3165,418 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         assert.equal(presentations[3]?.status, "completed");
         assert.equal(presentations[4]?.status, "active");
         assert.equal(presentations[4]?.startedAt, "2026-10-03T00:00:04.000Z");
+        assert.equal(presentations[4]?.label, "Updated");
+        assert.equal(presentations[5]?.label, "Updated");
+        assert.equal(presentations[5]?.path, "workers/updated");
+        for (const presentation of presentations.slice(6)) {
+          assert.equal(presentation?.label, "Fresh reused child title");
+          assert.equal(presentation?.path, "workers/updated");
+        }
+        assert.equal(presentations[8]?.status, "completed");
+        assert.equal(presentations[9]?.status, "completed");
+        assert.doesNotMatch(JSON.stringify(events), /titleSource|titleRuntimeId|fallbackLabel/u);
+      }),
+  );
+
+  it.effect("prefers each new child's native name over its path, nickname and role", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 4)).pipe(
+        Effect.forkChild,
+      );
+      for (const [index, title] of ["First fresh title", "Second fresh title"].entries()) {
+        const childId = `fresh-child-${index}`;
+        yield* runtime.emit({
+          id: asEventId(`fresh-thread-${index}`),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("parent-titles"),
+          createdAt: "2026-10-04T00:00:00.000Z",
+          method: "codex.subagent/threadStarted",
+          payload: {
+            thread: {
+              id: childId,
+              name: title,
+              agentNickname: "Lower priority nickname",
+              agentRole: "Lower priority role",
+              cliVersion: "0.160.0",
+              createdAt: 1_791_072_000,
+              updatedAt: 1_791_072_000,
+              cwd: process.cwd(),
+              ephemeral: false,
+              modelProvider: "openai",
+              preview: "",
+              projectId: null,
+              sessionId: "native-session",
+              source: {
+                subAgent: {
+                  thread_spawn: {
+                    parent_thread_id: "native-parent",
+                    depth: 1,
+                    agent_path: "/root/same_old_path",
+                    agent_nickname: "Lower priority source nickname",
+                    agent_role: "Lower priority source role",
+                  },
+                },
+              },
+              status: { type: "active", activeFlags: [] },
+              turns: [],
+            },
+          },
+        });
+        yield* runtime.emit({
+          id: asEventId(`fresh-activity-${index}`),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("parent-titles"),
+          createdAt: "2026-10-04T00:00:01.000Z",
+          method: "item/started",
+          payload: {
+            startedAtMs: Date.parse("2026-10-04T00:00:01.000Z"),
+            threadId: "native-parent",
+            turnId: "parent-titles",
+            item: {
+              type: "subAgentActivity",
+              id: `fresh-start-${index}`,
+              kind: "started",
+              agentThreadId: childId,
+              agentPath: "/root/same_old_path",
+            },
+          },
+        });
+      }
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      const presentations = events.map((event) =>
+        "subagent" in event.payload ? event.payload.subagent : undefined,
+      );
+      assert.deepEqual(
+        presentations.map((value) => value?.label),
+        ["First fresh title", "First fresh title", "Second fresh title", "Second fresh title"],
+      );
+      assert.deepEqual(
+        presentations.map((value) => value?.threadId),
+        ["fresh-child-0", "fresh-child-0", "fresh-child-1", "fresh-child-1"],
+      );
+      assert.doesNotMatch(JSON.stringify(events), /titleSource|titleRuntimeId|fallbackLabel/u);
+    }),
+  );
+
+  it.effect(
+    "clears only an explicit native null title, retaining path fallback and later renames",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 8)).pipe(
+          Effect.forkChild,
+        );
+        const frames = [
+          [
+            "item/started",
+            {
+              startedAtMs: Date.parse("2026-10-04T00:00:00.000Z"),
+              threadId: "native-parent",
+              turnId: "parent-clear",
+              item: {
+                type: "subAgentActivity",
+                id: "clear-start",
+                kind: "started",
+                agentThreadId: "clear-child",
+                agentPath: "/root/path_fallback",
+              },
+            },
+          ],
+          [
+            "codex.subagent/threadNameUpdated",
+            { threadId: "clear-child", threadName: "Native title" },
+          ],
+          ["codex.subagent/threadNameUpdated", { threadId: "clear-child" }],
+          [
+            "codex.subagent/threadNameUpdated",
+            { threadId: "clear-child", threadName: "\u0000\u202e " },
+          ],
+          ["codex.subagent/threadNameUpdated", { threadId: "clear-child", threadName: null }],
+          ["codex.subagent/threadNameUpdated", { threadId: "clear-child" }],
+          [
+            "codex.subagent/threadNameUpdated",
+            { threadId: "clear-child", threadName: "New native title" },
+          ],
+          ["codex.subagent/threadNameUpdated", { threadId: "clear-child", threadName: "   " }],
+        ] as const;
+        for (const [index, [method, payload]] of frames.entries()) {
+          yield* runtime.emit({
+            id: asEventId(`clear-title-${index}`),
+            kind: "notification",
+            provider: ProviderDriverKind.make("codex"),
+            threadId: asThreadId("thread-1"),
+            turnId: asTurnId("parent-clear"),
+            createdAt: "2026-10-04T00:00:00.000Z",
+            method,
+            payload,
+          });
+        }
+        const events = Array.from(yield* Fiber.join(eventsFiber));
+        const presentations = events.map((event) =>
+          "subagent" in event.payload ? event.payload.subagent : undefined,
+        );
+        assert.deepEqual(
+          presentations.map((value) => value?.label),
+          [
+            "Path fallback",
+            "Native title",
+            "Native title",
+            "Native title",
+            "Path fallback",
+            "Path fallback",
+            "New native title",
+            "New native title",
+          ],
+        );
+        assert.ok(presentations.every((value) => value?.status === "active"));
+      }),
+  );
+
+  it.effect("retains a native nickname fallback across progress and foreign role metadata", () =>
+    Effect.gen(function* () {
+      const currentId = "42b69839-1c6d-45f5-ab7b-7d7cc374342c";
+      const foreignId = "e9480f5a-911a-44ce-906d-c6011f13aaed";
+      const { adapter, runtime } = yield* startLifecycleRuntime(currentId);
+      const thread = {
+        id: "nickname-child",
+        name: "Native title",
+        agentNickname: "Rose",
+        agentRole: "worker",
+        cliVersion: "0.160.0",
+        createdAt: 1_791_072_000,
+        updatedAt: 1_791_072_000,
+        cwd: process.cwd(),
+        ephemeral: false,
+        modelProvider: "openai",
+        preview: "",
+        projectId: null,
+        sessionId: "native-session",
+        source: "appServer",
+        status: { type: "active", activeFlags: [] },
+        turns: [],
+      };
+      const frames = [
+        [currentId, "codex.subagent/threadStarted", { thread }],
+        [
+          currentId,
+          "codex.subagent/itemCompleted",
+          {
+            completedAtMs: Date.parse("2026-10-04T00:00:00.000Z"),
+            threadId: "nickname-child",
+            turnId: "child-nickname",
+            item: { type: "webSearch", id: "nickname-progress", query: "synthetic", action: null },
+          },
+        ],
+        [
+          foreignId,
+          "codex.subagent/threadStarted",
+          {
+            thread: {
+              ...thread,
+              name: "Foreign title",
+              agentNickname: "Foreign nickname",
+              agentRole: "Foreign role",
+            },
+          },
+        ],
+        [
+          foreignId,
+          "codex.subagent/threadNameUpdated",
+          { threadId: "nickname-child", threadName: null },
+        ],
+        [
+          currentId,
+          "codex.subagent/itemCompleted",
+          {
+            completedAtMs: Date.parse("2026-10-04T00:00:00.000Z"),
+            threadId: "nickname-child",
+            turnId: "child-nickname",
+            item: {
+              type: "webSearch",
+              id: "nickname-progress-again",
+              query: "synthetic",
+              action: null,
+            },
+          },
+        ],
+        [
+          currentId,
+          "codex.subagent/threadNameUpdated",
+          { threadId: "nickname-child", threadName: null },
+        ],
+      ] as const;
+      const eventsFiber = yield* Stream.runCollect(
+        Stream.take(adapter.streamEvents, frames.length),
+      ).pipe(Effect.forkChild);
+      for (const [index, [subagentRuntimeId, method, payload]] of frames.entries()) {
+        yield* runtime.emit({
+          id: asEventId(`nickname-title-${index}`),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("parent-nickname"),
+          createdAt: "2026-10-04T00:00:00.000Z",
+          subagentRuntimeId,
+          method,
+          payload,
+        });
+      }
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      assert.deepEqual(
+        events.map((event) =>
+          "subagent" in event.payload ? event.payload.subagent?.label : undefined,
+        ),
+        ["Native title", "Native title", "Native title", "Native title", "Native title", "Rose"],
+      );
+      assert.doesNotMatch(JSON.stringify(events), /titleSource|titleRuntimeId|fallbackLabel/u);
+    }),
+  );
+
+  it.effect(
+    "fences titles to the bridge generation before and after foreign liveness metadata",
+    () =>
+      Effect.gen(function* () {
+        const currentId = "42b69839-1c6d-45f5-ab7b-7d7cc374342c";
+        const foreignId = "e9480f5a-911a-44ce-906d-c6011f13aaed";
+        const { adapter, runtime } = yield* startLifecycleRuntime(currentId);
+        const frames = [
+          [
+            foreignId,
+            "codex.subagent/threadNameUpdated",
+            { threadId: "generation-child", threadName: "Foreign first title" },
+          ],
+          [
+            currentId,
+            "item/started",
+            {
+              startedAtMs: Date.parse("2026-10-04T00:00:00.000Z"),
+              threadId: "native-parent",
+              turnId: "parent-generation",
+              item: {
+                type: "subAgentActivity",
+                id: "generation-start",
+                kind: "started",
+                agentThreadId: "generation-child",
+                agentPath: "/root/current_path",
+              },
+            },
+          ],
+          [
+            currentId,
+            "codex.subagent/threadNameUpdated",
+            { threadId: "generation-child", threadName: "Current title" },
+          ],
+          [
+            foreignId,
+            "codex.subagent/threadStatusChanged",
+            { threadId: "generation-child", status: { type: "active", activeFlags: [] } },
+          ],
+          [
+            foreignId,
+            "codex.subagent/threadNameUpdated",
+            { threadId: "generation-child", threadName: "Foreign renamed title" },
+          ],
+          [
+            foreignId,
+            "codex.subagent/threadNameUpdated",
+            { threadId: "generation-child", threadName: null },
+          ],
+          [
+            undefined,
+            "codex.subagent/threadNameUpdated",
+            { threadId: "generation-child", threadName: "Unstamped stale title" },
+          ],
+          [
+            currentId,
+            "codex.subagent/threadNameUpdated",
+            { threadId: "generation-child", threadName: "Current fresh title" },
+          ],
+          [
+            currentId,
+            "codex.subagent/itemCompleted",
+            {
+              completedAtMs: Date.parse("2026-10-04T00:00:00.000Z"),
+              threadId: "generation-child",
+              turnId: "child-generation",
+              item: { type: "webSearch", id: "current-progress", query: "synthetic", action: null },
+            },
+          ],
+          [
+            foreignId,
+            "codex.subagent/threadStatusChanged",
+            { threadId: "generation-child", status: { type: "active", activeFlags: [] } },
+          ],
+          [
+            currentId,
+            "codex.subagent/threadNameUpdated",
+            { threadId: "generation-child", threadName: null },
+          ],
+          [
+            currentId,
+            "codex.subagent/itemCompleted",
+            {
+              completedAtMs: Date.parse("2026-10-04T00:00:00.000Z"),
+              threadId: "generation-child",
+              turnId: "child-generation",
+              item: {
+                type: "webSearch",
+                id: "current-progress-cleared",
+                query: "synthetic",
+                action: null,
+              },
+            },
+          ],
+        ] as const;
+        const eventsFiber = yield* Stream.runCollect(
+          Stream.take(adapter.streamEvents, frames.length),
+        ).pipe(Effect.forkChild);
+        for (const [index, [subagentRuntimeId, method, payload]] of frames.entries()) {
+          yield* runtime.emit({
+            id: asEventId(`generation-title-${index}`),
+            kind: "notification",
+            provider: ProviderDriverKind.make("codex"),
+            threadId: asThreadId("thread-1"),
+            turnId: asTurnId("parent-generation"),
+            createdAt: "2026-10-04T00:00:00.000Z",
+            subagentRuntimeId,
+            method,
+            payload,
+          });
+        }
+        const events = Array.from(yield* Fiber.join(eventsFiber));
+        const presentations = events.map((event) =>
+          "subagent" in event.payload ? event.payload.subagent : undefined,
+        );
+        assert.deepEqual(
+          presentations.map((value) => value?.label),
+          [
+            undefined,
+            "Current path",
+            "Current title",
+            "Current title",
+            "Current title",
+            "Current title",
+            "Current title",
+            "Current fresh title",
+            "Current fresh title",
+            "Current fresh title",
+            "Current path",
+            "Current path",
+          ],
+        );
+        // This change concerns naming only. Runtime provenance remains exactly
+        // the existing lifecycle policy, including foreign/unverified metadata.
+        assert.equal(presentations[3]?.runtimeId, foreignId);
+        assert.equal(presentations[7]?.runtimeId, undefined);
+        assert.equal(presentations[8]?.runtimeId, currentId);
+        assert.equal(presentations[10]?.runtimeId, undefined);
+        assert.equal(presentations[11]?.runtimeId, currentId);
+        assert.doesNotMatch(JSON.stringify(events), /titleSource|titleRuntimeId|fallbackLabel/u);
       }),
   );
 

@@ -3,7 +3,7 @@
 Decision status: Accepted within the authorized history repair
 Implementation status: Implemented; verification requirements and operational limits are below
 Created: 2026-10-04 14:08:58 JST (UTC+0900)
-Last updated: 2026-10-04 14:19:55 JST (UTC+0900)
+Last updated: 2026-10-04 14:50:28 JST (UTC+0900)
 Decision authority: implementation choice within the user's request to fix sparse/stale subagent detail and push dev
 Supersedes: none; supplements existing lifecycle retention and immutable history ownership
 
@@ -34,6 +34,16 @@ Durable exact child/root/account authorization is unchanged. Both authenticated 
 Provider errors, unsupported item APIs, oversized wire items and deadlines fail the refresh with finite redacted errors and visible Retry. A successful finite scan is not a guarantee that native indexed storage already contains every in-memory update. Full tool history is intentionally not displayed. No additional inference is used.
 
 Fields are optional for older adapters/daemons; coordinated backend/renderer deployment is required for the new display. No database migration, dependency update, provider authentication change or platform-specific launch behavior is introduced. Existing Windows/macOS/Linux command policies are retained.
+
+## Provider naming audit and correction
+
+The user's follow-up asks whether a newly spawned child receives a visible fresh title on both providers. Cafe displays provider-authored task/thread names and bounded metadata fallbacks; it does not call a title model for each child or promise globally unique names. The exact child identity, not its title, separates roster entries.
+
+Codex native thread names and rename notifications take precedence over a task-path leaf or nickname/role. Ordinary activity repeating the original path must not undo a native rename. A concrete assignment start with a changed path may establish a new fallback name for reused work; an explicit null native rename clears the title back to bounded fallback metadata. Naming provenance is private, bounded inside the existing per-runtime child LRU, and generation-bound independently of mutable liveness observations. A foreign status event cannot authorize a foreign rename, including when it arrives first. This changes neither terminal state nor timing/history authorization.
+
+Claude task descriptions establish the visible title. Retry diagnostics belong in progress text, not in the title. An assistant-first recovery may provide useful child metadata before its authoritative task lifecycle arrives; that recovery description cannot supersede a later task description. Explicit SDK parent-tool identity is structured evidence of nested output, not prose-derived liveness or a guessed transcript identity. Provisional tool/task correlation must be retired on an exact authoritative binding without inventing a completed, failed, or stopped result. Private naming/correlation provenance never enters public presentation fields.
+
+Regression qualification includes native title/path precedence, rename followed by stale-path progress/control completion, nullable title clears, reused assignment names, sibling isolation and foreign-generation sequences. Claude tests cover stable retry titles, assistant-first recovery followed by independent task identity, and stale recovery descriptions after a native title. Shared roster tests verify exact-row label replacement/restart and retraction while preserving existing clocks and liveness overlay.
 
 ## Verification and operational limits
 

@@ -6354,6 +6354,240 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect(
+    "shows an assistant-first subagent and lets its later task start replace the recovery title",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const taskEventsFiber = yield* Stream.filter(
+          adapter.streamEvents,
+          (event) => event.type === "task.progress" || event.type === "task.started",
+        ).pipe(Stream.take(5), Stream.runCollect, Effect.forkChild);
+
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+
+        // parent_tool_use_id is the SDK's explicit indication that this frame
+        // came from a subagent. Older or reordered producers may deliver this
+        // public child output before task_started and omit subagent_type.
+        harness.query.emit({
+          type: "assistant",
+          parent_tool_use_id: "agent-tool-assistant-first",
+          task_description: "Recovered child title",
+          session_id: "sdk-session-assistant-first-subagent",
+          uuid: "assistant-first-subagent-progress",
+          message: {
+            id: "assistant-first-subagent-message",
+            role: "assistant",
+            content: [{ type: "text", text: "The child has started its review." }],
+            usage: {
+              input_tokens: 100,
+              output_tokens: 20,
+            },
+          },
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "assistant",
+          parent_tool_use_id: "agent-tool-independent",
+          task_description: "Independent child title",
+          session_id: "sdk-session-assistant-first-subagent",
+          uuid: "assistant-first-independent-progress",
+          message: {
+            id: "assistant-first-independent-message",
+            role: "assistant",
+            content: [{ type: "text", text: "The independent child is still working." }],
+            usage: {
+              input_tokens: 80,
+              output_tokens: 16,
+            },
+          },
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "system",
+          subtype: "task_started",
+          task_id: "task-assistant-first",
+          tool_use_id: "agent-tool-assistant-first",
+          description: "Authoritative child title",
+          task_type: "local_agent",
+          session_id: "sdk-session-assistant-first-subagent",
+          uuid: "assistant-first-subagent-started",
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "assistant",
+          parent_tool_use_id: "agent-tool-assistant-first",
+          // A replayed assistant frame can retain the provisional description;
+          // it must not roll the authoritative task_started title backward.
+          task_description: "Recovered child title",
+          session_id: "sdk-session-assistant-first-subagent",
+          uuid: "assistant-first-subagent-late-progress",
+          message: {
+            id: "assistant-first-subagent-late-message",
+            role: "assistant",
+            content: [{ type: "text", text: "The child review is still active." }],
+            usage: {
+              input_tokens: 120,
+              output_tokens: 24,
+            },
+          },
+        } as unknown as SDKMessage);
+
+        const taskEvents = Array.from(yield* Fiber.join(taskEventsFiber));
+        assert.deepEqual(
+          taskEvents.map((event) => event.type),
+          ["task.progress", "task.progress", "task.progress", "task.started", "task.progress"],
+        );
+        assert.deepEqual(
+          taskEvents.map((event) => String(event.payload.taskId)),
+          [
+            "agent-tool-assistant-first",
+            "agent-tool-independent",
+            "agent-tool-assistant-first",
+            "task-assistant-first",
+            "task-assistant-first",
+          ],
+        );
+        assert.deepEqual(
+          taskEvents.map((event) => event.payload.visibility),
+          ["visible", "visible", "ambient", "visible", "visible"],
+        );
+        assert.deepEqual(
+          taskEvents.map((event) => event.payload.subagent?.label),
+          [
+            "Recovered child title",
+            "Independent child title",
+            "Recovered child title",
+            "Authoritative child title",
+            "Authoritative child title",
+          ],
+        );
+        assert.equal(taskEvents[4]?.payload.description, "Authoritative child title");
+        const owningTurnId = taskEvents[0]?.turnId;
+        assert.ok(owningTurnId);
+        assert.equal(
+          taskEvents.every((event) => event.turnId === owningTurnId),
+          true,
+        );
+        assert.equal(
+          taskEvents.every((event) => event.payload.subagent?.historyId === undefined),
+          true,
+        );
+        assert.equal(
+          taskEvents.every(
+            (event) =>
+              event.payload.subagent === undefined ||
+              (!("provisionalDescription" in event.payload.subagent) &&
+                !("provisionalTaskIdentity" in event.payload.subagent) &&
+                !("provisionalTaskId" in event.payload.subagent) &&
+                !("provisionalToolUseKey" in event.payload.subagent) &&
+                !("toolUseKey" in event.payload.subagent)),
+          ),
+          true,
+        );
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect(
+    "reconciles assistant-first aliases from exact progress and notification task identities",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const taskEventsFiber = yield* Stream.filter(
+          adapter.streamEvents,
+          (event) =>
+            event.type === "task.progress" ||
+            event.type === "task.started" ||
+            event.type === "task.completed",
+        ).pipe(Stream.take(6), Stream.runCollect, Effect.forkChild);
+
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        for (const [suffix, title] of [
+          ["progress", "Recovered progress child"],
+          ["notification", "Recovered notification child"],
+        ] as const) {
+          harness.query.emit({
+            type: "assistant",
+            parent_tool_use_id: `agent-tool-${suffix}`,
+            task_description: title,
+            session_id: "sdk-session-assistant-first-lifecycle",
+            uuid: `assistant-first-${suffix}`,
+            message: {
+              id: `assistant-first-${suffix}-message`,
+              role: "assistant",
+              content: [{ type: "text", text: `${title} is active.` }],
+              usage: { input_tokens: 50, output_tokens: 10 },
+            },
+          } as unknown as SDKMessage);
+        }
+        harness.query.emit({
+          type: "system",
+          subtype: "task_progress",
+          task_id: "task-authoritative-progress",
+          tool_use_id: "agent-tool-progress",
+          description: "Authoritative progress child",
+          summary: "Reviewing the exact task identity.",
+          usage: { total_tokens: 100, tool_uses: 1, duration_ms: 500 },
+          session_id: "sdk-session-assistant-first-lifecycle",
+          uuid: "assistant-first-authoritative-progress",
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "system",
+          subtype: "task_notification",
+          task_id: "task-authoritative-notification",
+          tool_use_id: "agent-tool-notification",
+          status: "completed",
+          output_file: "/tmp/assistant-first-notification",
+          summary: "Notification child completed.",
+          session_id: "sdk-session-assistant-first-lifecycle",
+          uuid: "assistant-first-authoritative-notification",
+        } as unknown as SDKMessage);
+
+        const taskEvents = Array.from(yield* Fiber.join(taskEventsFiber));
+        assert.deepEqual(
+          taskEvents.map((event) => [
+            event.type,
+            String(event.payload.taskId),
+            event.payload.visibility,
+            event.payload.subagent?.label,
+          ]),
+          [
+            ["task.progress", "agent-tool-progress", "visible", "Recovered progress child"],
+            ["task.progress", "agent-tool-notification", "visible", "Recovered notification child"],
+            ["task.progress", "agent-tool-progress", "ambient", "Recovered progress child"],
+            [
+              "task.progress",
+              "task-authoritative-progress",
+              "visible",
+              "Authoritative progress child",
+            ],
+            ["task.progress", "agent-tool-notification", "ambient", "Recovered notification child"],
+            [
+              "task.completed",
+              "task-authoritative-notification",
+              "visible",
+              "Recovered notification child",
+            ],
+          ],
+        );
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
   it.effect("keeps Claude task progress usage out of context window updates", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -6814,11 +7048,57 @@ describe("ClaudeAdapterLive", () => {
       assert.equal(retryEvent?.type, "task.progress");
       if (retryEvent?.type === "task.progress") {
         assert.equal(retryEvent.payload.taskId, RuntimeTaskId.make("task-retry-1"));
+        assert.equal(retryEvent.payload.subagent?.label, "Code reviewer");
         assert.equal(
           retryEvent.payload.summary,
           "Retrying code-reviewer subagent after overloaded (retry 2/3, 500 ms delay).",
         );
         assert.equal(retryEvent.payload.lastToolName, "Agent");
+      }
+
+      const startedFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) => event.type === "task.started",
+      ).pipe(Stream.runHead, Effect.forkChild);
+      harness.query.emit({
+        type: "system",
+        subtype: "task_started",
+        task_id: "task-retry-1",
+        tool_use_id: "tool-retry-1",
+        description: "Audit retry title stability",
+        subagent_type: "code-reviewer",
+        task_type: "local_agent",
+        session_id: "sdk-session-subagent-retry",
+        uuid: "00000000-0000-4000-8000-000000000224",
+      } as unknown as SDKMessage);
+      const started = yield* Fiber.join(startedFiber);
+      assert.equal(started._tag, "Some");
+      if (started._tag === "Some" && started.value.type === "task.started") {
+        assert.equal(started.value.payload.subagent?.label, "Audit retry title stability");
+      }
+
+      const stableRetryFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) => event.type === "task.progress",
+      ).pipe(Stream.runHead, Effect.forkChild);
+      harness.query.emit({
+        ...retryMessage,
+        elapsed_time_seconds: 32,
+        subagent_retry: {
+          ...retryMessage.subagent_retry,
+          attempt: 3,
+        },
+        uuid: "00000000-0000-4000-8000-000000000225",
+      });
+      const stableRetry = yield* Fiber.join(stableRetryFiber);
+      assert.equal(stableRetry._tag, "Some");
+      if (stableRetry._tag === "Some" && stableRetry.value.type === "task.progress") {
+        assert.equal(stableRetry.value.payload.subagent?.label, "Audit retry title stability");
+        assert.equal(
+          stableRetry.value.payload.description,
+          "Retrying code-reviewer subagent after overloaded (retry 3/3, 500 ms delay).",
+        );
+        assert.equal(stableRetry.value.payload.summary, stableRetry.value.payload.description);
       }
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),

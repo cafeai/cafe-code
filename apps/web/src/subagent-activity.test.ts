@@ -15,7 +15,9 @@ function activity(
   kind: "task.started" | "task.progress" | "task.completed",
   sequence: number,
   runtimeId: string | undefined = "native-runtime-a",
-): OrchestrationThreadActivity {
+  label = "Audit worker",
+  childId = "exact-child",
+) {
   return {
     id: EventId.make(`child-event-${sequence}`),
     turnId: oldTurn,
@@ -26,17 +28,17 @@ function activity(
     // A very old start is deliberate: age is not evidence of completion.
     createdAt: `2026-01-01T00:00:0${sequence}.000Z`,
     payload: {
-      taskId: "exact-child",
+      taskId: childId,
       ...(kind === "task.completed" ? { status: "completed" } : {}),
       subagent: {
-        threadId: "exact-child",
+        threadId: childId,
         historyId: "exact-public-history",
-        label: "Audit worker",
+        label,
         status: kind === "task.completed" ? "completed" : "active",
         ...(runtimeId !== undefined ? { runtimeId } : {}),
       },
     },
-  };
+  } satisfies OrchestrationThreadActivity;
 }
 
 describe("subagent native runtime liveness overlay", () => {
@@ -125,6 +127,88 @@ describe("subagent native runtime liveness overlay", () => {
     expect(
       deriveSubagentActivities([...rows, delayed, restarted], { runtimeSession: replacement })[0],
     ).toMatchObject({ status: "active", startedAt: restarted.createdAt });
+  });
+
+  it("uses the latest structured label when a live child is renamed", () => {
+    const started = activity("task.started", 1, "native-runtime-a", "Initial worker title");
+    const renamed = activity("task.progress", 2, "native-runtime-a", "Fresh worker title");
+
+    expect(deriveSubagentActivities([started, renamed], { runtimeSession })[0]).toMatchObject({
+      label: "Fresh worker title",
+      status: "active",
+      startedAt: started.createdAt,
+    });
+  });
+
+  it("uses the fresh structured label when an explicit start reopens a terminal child", () => {
+    const started = activity("task.started", 1, "native-runtime-a", "Completed worker title");
+    const completed = activity("task.completed", 2, "native-runtime-a", "Completed worker title");
+    const restarted = activity("task.started", 3, "native-runtime-a", "New worker title");
+
+    expect(
+      deriveSubagentActivities([started, completed, restarted], { runtimeSession })[0],
+    ).toMatchObject({
+      label: "New worker title",
+      status: "active",
+      startedAt: restarted.createdAt,
+    });
+  });
+
+  it("retracts an assistant-first provisional identity before showing its authoritative task", () => {
+    const provisional = activity(
+      "task.progress",
+      1,
+      "native-runtime-a",
+      "Recovered child title",
+      "agent-tool-assistant-first",
+    );
+    const independent = activity(
+      "task.progress",
+      2,
+      "native-runtime-a",
+      "Independent child title",
+      "agent-tool-independent",
+    );
+    const retractionBase = activity(
+      "task.progress",
+      3,
+      "native-runtime-a",
+      "Recovered child title",
+      "agent-tool-assistant-first",
+    );
+    const retraction: OrchestrationThreadActivity = {
+      ...retractionBase,
+      payload: {
+        ...retractionBase.payload,
+        visibility: "ambient",
+      },
+    };
+    const authoritative = activity(
+      "task.started",
+      4,
+      "native-runtime-a",
+      "Authoritative child title",
+      "task-assistant-first",
+    );
+
+    const rows = deriveSubagentActivities([provisional, independent, retraction, authoritative], {
+      runtimeSession,
+    });
+    expect(rows).toHaveLength(2);
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "agent-tool-independent",
+          label: "Independent child title",
+          status: "active",
+        }),
+        expect.objectContaining({
+          id: "task-assistant-first",
+          label: "Authoritative child title",
+          status: "active",
+        }),
+      ]),
+    );
   });
 
   it.each(["task.progress", "task.completed"] as const)(

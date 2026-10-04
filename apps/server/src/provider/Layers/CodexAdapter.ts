@@ -822,15 +822,19 @@ function codexSubagentDisplayLabel(input: {
   readonly nickname?: string | undefined | null;
   readonly role?: string | undefined | null;
 }): string | undefined {
-  // Codex's installed Subagents panel prefers the human task-name leaf from
-  // `agentPath`, then falls back to child thread/nickname metadata. Mirror that
-  // precedence so `/root/audit_atrium_ui` becomes `Audit atrium ui` instead of
-  // exposing an opaque thread id or a generic "Subagent task" label.
+  // A provider-authored thread title is more specific than its stable task
+  // address. Paths remain useful when a fresh child has not received a title,
+  // but must not hide a later native rename behind its original task slug.
+  const nativeTitle = boundedSingleLine(
+    input.name?.replace(/^@+/u, ""),
+    CODEX_SUBAGENT_LABEL_MAX_CHARS,
+  );
+  if (nativeTitle) return nativeTitle;
   const pathLabel = codexSubagentPathLabel(input.path);
   if (pathLabel) {
     return pathLabel;
   }
-  for (const candidate of [input.name, input.nickname, input.role]) {
+  for (const candidate of [input.nickname, input.role]) {
     const label = boundedSingleLine(candidate?.replace(/^@+/u, ""), CODEX_SUBAGENT_LABEL_MAX_CHARS);
     if (label) {
       return label;
@@ -2028,10 +2032,27 @@ function subagentCompletedEvent(input: {
   };
 }
 
+interface CodexSubagentPresentationState {
+  readonly presentation: RuntimeSubagentPresentation;
+  /** Private provenance only; never spread this state into a canonical event. */
+  readonly titleSource: "native" | "path" | "fallback";
+  readonly titleRuntimeId: string | undefined;
+  readonly fallbackLabel: string | undefined;
+}
+
 function enrichCodexSubagentPresentations(
   events: ReadonlyArray<ProviderRuntimeEvent>,
-  presentationByThreadId: Map<string, RuntimeSubagentPresentation>,
+  presentationByThreadId: Map<string, CodexSubagentPresentationState>,
+  sourceEvent: ProviderEvent,
+  bridgeRuntimeId: string | undefined,
 ): ReadonlyArray<ProviderRuntimeEvent> {
+  // Retain only a bounded display fallback, not the native thread snapshot.
+  // This allows an explicit native name clear to reveal its original nickname
+  // when no task path was provided. The snapshot never enters canonical raw data.
+  const startedThread =
+    sourceEvent.method === "codex.subagent/threadStarted"
+      ? readPayload(EffectCodexSchema.V2ThreadStartedNotification, sourceEvent.payload)?.thread
+      : undefined;
   return events.map((event) => {
     if (
       event.type !== "task.started" &&
@@ -2045,12 +2066,93 @@ function enrichCodexSubagentPresentations(
       return event;
     }
 
-    const previous = presentationByThreadId.get(incoming.threadId);
+    const previousState = presentationByThreadId.get(incoming.threadId);
+    const previous = previousState?.presentation;
     const previousTerminal =
       previous?.status === "completed" ||
       previous?.status === "failed" ||
       previous?.status === "stopped";
     const rawPayload = readRecordValue(event.raw?.payload);
+    // Naming authority is independent of the liveness descriptor below: a
+    // foreign status edge must not first replace runtimeId and then authorize
+    // that foreign runtime's delayed rename. A replacement bridge owns a fresh
+    // cache; this private title generation binds once within the current bridge.
+    const titleRuntimeId =
+      bridgeRuntimeId ?? previousState?.titleRuntimeId ?? event.subagentRuntimeId;
+    const titleGenerationMatches =
+      titleRuntimeId === undefined || titleRuntimeId === event.subagentRuntimeId;
+    const nativeTitle =
+      titleGenerationMatches &&
+      incoming.label !== undefined &&
+      rawPayload?.hasName === true &&
+      (rawPayload.source === "codex.child.threadNameUpdated" ||
+        rawPayload.source === "codex.child.threadStarted");
+    const nativeTitleCleared =
+      titleGenerationMatches &&
+      rawPayload?.source === "codex.child.threadNameUpdated" &&
+      rawPayload.nameCleared === true;
+    const newAssignmentPath =
+      titleGenerationMatches &&
+      event.type === "task.started" &&
+      rawPayload?.source === "codex.subAgentActivity" &&
+      incoming.path !== undefined &&
+      previous?.path !== undefined &&
+      incoming.path !== previous.path;
+    const acceptedPath = newAssignmentPath
+      ? incoming.path
+      : (previous?.path ?? (titleGenerationMatches ? incoming.path : undefined));
+    const startedThreadMatches =
+      startedThread !== undefined &&
+      normalizeCodexSubagentThreadId(startedThread.id) === incoming.threadId;
+    const threadSpawn = startedThreadMatches
+      ? readRecordValue(
+          readRecordValue(readRecordValue(startedThread.source)?.subAgent)?.thread_spawn,
+        )
+      : undefined;
+    const fallbackLabel = titleGenerationMatches
+      ? (codexSubagentPathLabel(acceptedPath) ??
+        (startedThreadMatches
+          ? codexSubagentDisplayLabel({
+              nickname: startedThread.agentNickname ?? readStringValue(threadSpawn?.agent_nickname),
+              role: incoming.role,
+            })
+          : undefined) ??
+        previousState?.fallbackLabel ??
+        codexSubagentDisplayLabel({ role: incoming.role }))
+      : previousState?.fallbackLabel;
+    // A progress event without fresh naming metadata cannot replace a retained
+    // nickname with a generic role. Nor may a foreign event's publicly merged
+    // role become a naming fallback after the owning runtime clears its title.
+    // Every ordinary activity repeats the child address, not a fresh naming
+    // instruction. Keep an established title until a native rename or an
+    // explicit start with a different assignment path supplies new authority.
+    // The first path after thread/started only completes fresh metadata and
+    // must not erase the native title that arrived just before it.
+    const keepPreviousTitle =
+      !nativeTitle &&
+      !nativeTitleCleared &&
+      !newAssignmentPath &&
+      previous?.label !== undefined &&
+      (!titleGenerationMatches ||
+        previousState?.titleSource === "native" ||
+        previousState?.titleSource === "path");
+    const titleSource = nativeTitle
+      ? "native"
+      : nativeTitleCleared
+        ? acceptedPath !== undefined
+          ? "path"
+          : "fallback"
+        : keepPreviousTitle && previousState !== undefined
+          ? previousState.titleSource
+          : incoming.path !== undefined && incoming.label !== undefined && titleGenerationMatches
+            ? "path"
+            : (previousState?.titleSource ?? "fallback");
+    const label =
+      !titleGenerationMatches || keepPreviousTitle
+        ? previous?.label
+        : nativeTitleCleared
+          ? (fallbackLabel ?? "Subagent")
+          : (incoming.label ?? previous?.label);
     const metadataOnly =
       rawPayload?.source === "codex.child.threadNameUpdated" ||
       (rawPayload?.source === "codex.child.threadStarted" &&
@@ -2087,12 +2189,27 @@ function enrichCodexSubagentPresentations(
       runtimeId !== previous?.runtimeId &&
       (incoming.status === "active" || incoming.status === "waiting") &&
       (!terminalIsAuthoritative || restarting);
-    const { runtimeId: _previousRuntimeId, ...previousPresentation } = previous ?? {};
-    const { runtimeId: _incomingRuntimeId, ...incomingPresentation } = incoming;
+    const {
+      runtimeId: _previousRuntimeId,
+      label: _previousLabel,
+      path: _previousPath,
+      ...previousPresentation
+    } = previous ?? {};
+    const {
+      runtimeId: _incomingRuntimeId,
+      label: _incomingLabel,
+      path: _incomingPath,
+      ...incomingPresentation
+    } = incoming;
     const merged: RuntimeSubagentPresentation = {
       ...previousPresentation,
       ...incomingPresentation,
       threadId: incoming.threadId,
+      ...(label !== undefined ? { label } : {}),
+      // A late passive activity may still repeat the previous assignment's
+      // address after reuse. It cannot roll back the display path and thereby
+      // make a later start appear to be a different assignment again.
+      ...(acceptedPath !== undefined ? { path: acceptedPath } : {}),
       // Native presentation fields are not generation authority. Only the
       // producing app-server's Cafe-authored envelope can attest this edge.
       // Unstamped legacy child history has no runtime evidence. Do not let
@@ -2121,7 +2238,32 @@ function enrichCodexSubagentPresentations(
     // could look like a fresh confirmation and reopen a terminal worker.
     if (runtimeId !== undefined || previous?.runtimeId === undefined) {
       presentationByThreadId.delete(incoming.threadId);
-      presentationByThreadId.set(incoming.threadId, merged);
+      presentationByThreadId.set(incoming.threadId, {
+        presentation: merged,
+        titleSource,
+        titleRuntimeId,
+        fallbackLabel,
+      });
+    } else if (titleGenerationMatches && previousState !== undefined) {
+      // The owning bridge may rename/clear metadata immediately after a
+      // foreign liveness observation. Persist only trusted naming fields in
+      // that case; retain the exact prior lifecycle descriptor instead of
+      // lending its runtime proof to the emitted metadata-only notification.
+      const {
+        label: _cachedLabel,
+        path: _cachedPath,
+        ...cachedLifecycle
+      } = previousState.presentation;
+      presentationByThreadId.set(incoming.threadId, {
+        presentation: {
+          ...cachedLifecycle,
+          ...(label !== undefined ? { label } : {}),
+          ...(acceptedPath !== undefined ? { path: acceptedPath } : {}),
+        },
+        titleSource,
+        titleRuntimeId,
+        fallbackLabel,
+      });
     }
     while (presentationByThreadId.size > CODEX_SUBAGENT_PRESENTATION_LIMIT) {
       const oldest = presentationByThreadId.keys().next().value;
@@ -2519,7 +2661,9 @@ function mapCodexSubagentProjection(
       source: "codex.child.threadStarted",
       childThreadIdHash: hashTextSha256(thread.id),
       status: thread.status.type,
-      hasName: Boolean(thread.name),
+      hasName: Boolean(
+        boundedSingleLine(thread.name?.replace(/^@+/u, ""), CODEX_SUBAGENT_LABEL_MAX_CHARS),
+      ),
       hasPath: Boolean(path),
     };
     return status === "failed"
@@ -2592,7 +2736,13 @@ function mapCodexSubagentProjection(
             rawPayload: {
               source: "codex.child.threadNameUpdated",
               childThreadIdHash: hashTextSha256(payload.threadId),
-              hasName: Boolean(payload.threadName),
+              hasName: Boolean(
+                boundedSingleLine(
+                  payload.threadName?.replace(/^@+/u, ""),
+                  CODEX_SUBAGENT_LABEL_MAX_CHARS,
+                ),
+              ),
+              nameCleared: payload.threadName === null,
             },
           }),
         ]
@@ -4626,7 +4776,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         // Keep lifecycle authority inside the exact native runtime's bridge.
         // A replacement allocates a separate cache; delayed old-runtime events
         // must never mutate the replacement's terminal or timer evidence.
-        const subagentPresentationsByThreadId = new Map<string, RuntimeSubagentPresentation>();
+        const subagentPresentationsByThreadId = new Map<string, CodexSubagentPresentationState>();
+        // This reads the runtime's in-memory descriptor, not native history or
+        // a provider RPC. Bind naming to the bridge's own generation before
+        // consuming any event, including a delayed foreign first notification.
+        const subagentTitleRuntimeId = (yield* runtime.getSession).subagentRuntimeId;
         // Auth recovery can fail by terminalizing its owning turn without an
         // upstream authRecoveryCompleted notification. Retain only opaque task
         // digests in session memory so that terminal envelopes can close those
@@ -4668,6 +4822,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               return enrichCodexSubagentPresentations(
                 [...authRecoveryTerminals, ...mapped],
                 subagentPresentationsByThreadId,
+                event,
+                subagentTitleRuntimeId,
               );
             }).pipe(
               Effect.catchCause((cause) =>
