@@ -41,6 +41,39 @@ const request: ProviderSendTurnInput = {
 };
 
 describe("snapshotProviderTurnConfiguration", () => {
+  it("freezes exact Codex service tiers independently of legacy Fast and does not copy another account", () => {
+    const tierRequest = {
+      ...request,
+      modelSelection: {
+        instanceId,
+        model: "gpt-6.1-sol",
+        options: [{ id: "serviceTier", value: "ultrafast" }],
+      },
+    };
+    const result = snapshotProviderTurnConfiguration({
+      session,
+      request: tierRequest,
+      instanceId,
+      settingsSource: "submitted",
+    });
+    expect(result?.serviceTier).toBe("ultrafast");
+    expect(result).not.toHaveProperty("fastMode");
+    expect(
+      snapshotProviderTurnConfiguration({
+        session,
+        request: {
+          ...tierRequest,
+          modelSelection: {
+            ...tierRequest.modelSelection,
+            instanceId: ProviderInstanceId.make("different"),
+          },
+        },
+        instanceId,
+        settingsSource: "submitted",
+      })?.serviceTier,
+    ).toBeUndefined();
+  });
+
   it("freezes only known finite settings and cached presentation labels", () => {
     const result = snapshotProviderTurnConfiguration({
       session,

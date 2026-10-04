@@ -28,7 +28,7 @@ export function formatProviderSkillInstallSource(
   if (skill.pluginId?.trim()) {
     return "App";
   }
-  const normalizedPath = normalizePathSeparators(skill.path);
+  const normalizedPath = normalizePathSeparators(skill.path ?? "");
   if (normalizedPath.includes("/.codex/plugins/") || normalizedPath.includes("/.agents/plugins/")) {
     return "App";
   }
@@ -39,6 +39,7 @@ export function formatProviderSkillInstallSource(
   }
   if (
     normalizedScope === "project" ||
+    normalizedScope === "repo" ||
     normalizedScope === "workspace" ||
     normalizedScope === "local"
   ) {

@@ -6,6 +6,8 @@ export * from "./dictation.ts";
 export * from "./remoteAccess.ts";
 export * from "./ipc.ts";
 export * from "./provider.ts";
+export * from "./providerSkills.ts";
+export * from "./providerTaskControls.ts";
 export * from "./providerGoal.ts";
 export * from "./providerInstance.ts";
 export * from "./providerRuntime.ts";
@@ -33,4 +35,5 @@ export * from "./mcp.ts";
 export * from "./virtualDesktop.ts";
 
 export * from "./providerCompaction.ts";
+export * from "./codexReview.ts";
 export * from "./scheduledFollowups.ts";

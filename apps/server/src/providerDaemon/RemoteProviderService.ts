@@ -87,6 +87,7 @@ const VOID_RPC_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
   "compactThread",
 ]);
 const MUTATING_RPC_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
+  "controlTask",
   "startSession",
   "forkSession",
   "discardSessionFork",
@@ -803,6 +804,7 @@ const makeRemoteProviderService = Effect.gen(function* () {
     discardSessionFork: (input) => guardedRpc({ method: "discardSessionFork", payload: input }),
     sendTurn: (input) => guardedRpc({ method: "sendTurn", payload: input }),
     steerTurn: (input) => guardedRpc({ method: "steerTurn", payload: input }),
+    controlTask: (input) => guardedRpc({ method: "controlTask", payload: input }),
     interruptTurn: (input) => guardedRpc({ method: "interruptTurn", payload: input }),
     respondToRequest: (input) => guardedRpc({ method: "respondToRequest", payload: input }),
     respondToUserInput: (input) => guardedRpc({ method: "respondToUserInput", payload: input }),

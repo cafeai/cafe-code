@@ -62,6 +62,7 @@ export const makeStandaloneWorkspaceStore = Effect.gen(function* () {
     expected?: Identity,
     rootIdentity?: ObservedIdentity,
     signal?: AbortSignal,
+    mutatePermissions = true,
   ): Promise<ObservedIdentity> => {
     signal?.throwIfAborted();
     if (create) {
@@ -118,7 +119,7 @@ export const makeStandaloneWorkspaceStore = Effect.gen(function* () {
       if (admitted.isSymbolicLink() || !equalIdentity(identityOf(admitted), identityOf(held)))
         throw new Error("Directory identity changed");
       signal?.throwIfAborted();
-      await handle.chmod(0o700);
+      if (mutatePermissions) await handle.chmod(0o700);
       const after = await fs.lstat(directory, { bigint: true });
       if (after.isSymbolicLink() || !equalIdentity(identityOf(after), identityOf(held)))
         throw new Error("Directory identity changed");
@@ -216,6 +217,59 @@ export const makeStandaloneWorkspaceStore = Effect.gen(function* () {
       )
     )
       return yield* Effect.fail(new Error("Standalone chat directory ownership changed."));
+    return directory;
+  });
+
+  /** Metadata discovery may inspect an already provisioned neutral workspace,
+   * but must never create ownership, migrate volume records or change modes.
+   * A missing/legacy-unadmitted workspace becomes available after its ordinary
+   * provider session resolves it, not as a side effect of opening a picker. */
+  const readExisting = Effect.fn("StandaloneWorkspace.readExisting")(function* (
+    threadId: ThreadId,
+  ) {
+    const admissible = () => sql`SELECT thread_id FROM projection_threads
+      WHERE thread_id = ${threadId} AND project_id IS NULL AND deleted_at IS NULL
+      AND archived_at IS NULL
+      AND NOT EXISTS (SELECT 1 FROM hard_deleted_threads WHERE thread_id = ${threadId})`;
+    if ((yield* admissible()).length !== 1) return null;
+    const [row] = yield* ownership(threadId);
+    const [rootRow] =
+      yield* sql<Identity>`SELECT directory_device AS "directoryDevice", directory_inode AS "directoryInode" FROM standalone_workspace_root_identity WHERE singleton = 1`;
+    if (
+      !row ||
+      !rootRow ||
+      row.cleanupName !== null ||
+      row.directoryDevice === null ||
+      row.directoryInode === null
+    )
+      return null;
+    const directory = yield* Effect.try({
+      try: () => pathFor(row.workspaceId),
+      catch: () => new Error("Standalone chat directory is unavailable."),
+    });
+    const expected = { directoryDevice: row.directoryDevice, directoryInode: row.directoryInode };
+    const rootIdentity = yield* io((signal) =>
+      inspectDirectory(root, false, rootRow, undefined, signal, false),
+    );
+    if (!equalIdentity(rootRow, rootIdentity)) return null;
+    const observed = yield* io((signal) =>
+      inspectDirectory(directory, false, expected, rootIdentity, signal, false),
+    );
+    if (!equalIdentity(expected, observed)) return null;
+    const [current] = yield* ownership(threadId);
+    const [currentRoot] =
+      yield* sql<Identity>`SELECT directory_device AS "directoryDevice", directory_inode AS "directoryInode" FROM standalone_workspace_root_identity WHERE singleton = 1`;
+    if (
+      !current ||
+      current.workspaceId !== row.workspaceId ||
+      current.cleanupName !== null ||
+      !equalIdentity(current, observed) ||
+      !currentRoot ||
+      !equalIdentity(currentRoot, rootIdentity) ||
+      (yield* admissible()).length !== 1
+    )
+      return null;
+    yield* io((signal) => inspectDirectory(root, false, rootIdentity, undefined, signal, false));
     return directory;
   });
 
@@ -361,5 +415,5 @@ export const makeStandaloneWorkspaceStore = Effect.gen(function* () {
   // including when its source was retired during native fork preparation.
   const discardFork = (target: ThreadId, operationId: CommandId) =>
     releaseWorkspace(target, operationId).pipe(Effect.asVoid);
-  return { resolve, remove, shareFork, discardFork };
+  return { resolve, readExisting, remove, shareFork, discardFork };
 });

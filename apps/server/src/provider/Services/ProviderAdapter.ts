@@ -8,6 +8,8 @@
  * @module ProviderAdapter
  */
 import type {
+  ProviderTaskControlInput,
+  ProviderTaskControlResult,
   ApprovalRequestId,
   ProviderApprovalDecision,
   ProviderDriverKind,
@@ -123,6 +125,9 @@ export interface ProviderSubagentDetail {
 }
 
 export interface ProviderAdapterShape<TError> {
+  readonly controlTask?: (
+    input: ProviderTaskControlInput,
+  ) => Effect.Effect<ProviderTaskControlResult, TError>;
   /**
    * Provider kind implemented by this adapter.
    */

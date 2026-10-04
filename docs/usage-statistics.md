@@ -45,10 +45,26 @@ that selection, while explicit saved models and effort choices remain unchanged.
 An existing Codex helper selection without an effort uses Medium. Other providers
 retain their existing helper defaults. The helper setting does not change an
 interactive chat's model, provider-managed compaction or agent progress summaries.
-Fast remains independently configurable; omission still follows the provider's
-native service-tier configuration rather than forcing Fast on or off.
+Service tier remains independently configurable, including the legacy Fast
+choice. Omission still follows the provider's native service-tier configuration;
+Cafe does not automatically activate an advertised paid tier.
 
 ## Estimates and missing history
+
+Codex subagent tokens are recorded prospectively from independently owned child
+counters, in addition to the existing root usage. The first child observation in
+each native runtime is a subtract-only baseline: preexisting, resumed or inherited
+history is not billed again. Subsequent validated increments count once through
+the durable accounting ledger, even if the backend replays notifications. The
+first response, unavailable ancestry/counters, ambiguous resets or model-switch
+intervals may therefore be missing. This is explicitly partial coverage, not a
+complete native billing total or a reconstruction of earlier child work.
+
+Only the child's reported model is used; a missing model remains unpriced rather
+than borrowing the parent's selection. Child tokens do not change the main chat's
+context-window meter and do not fabricate per-model generating time. New accounting
+adopts through the normal rebuilt native runtime lifecycle; no live session is
+restarted by opening Usage. See the [child accounting decision](decisions/codex-child-usage-accounting.md).
 
 The cost table's tokens are **processed tokens**: recorded input plus output.
 Input already includes cache reads/writes, and output already includes reasoning;

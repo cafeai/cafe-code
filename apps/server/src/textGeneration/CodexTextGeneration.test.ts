@@ -395,7 +395,8 @@ function withFakeCodexSpawner<A, E, R>(
     stderr?: string;
     requireImage?: boolean;
     requireFastServiceTier?: boolean;
-    expectedServiceTier?: "priority" | "default" | "omitted";
+    expectedServiceTier?: "priority" | "default" | "omitted" | "ultrafast";
+    tierAuthority?: Parameters<typeof makeCodexTextGeneration>[2];
     requireReasoningEffort?: string;
     forbidReasoningEffort?: boolean;
     stdinMustContain?: string;
@@ -463,9 +464,11 @@ function withFakeCodexSpawner<A, E, R>(
         );
       }),
     );
-    const textGeneration = yield* makeCodexTextGeneration(config, input.environment).pipe(
-      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-    );
+    const textGeneration = yield* makeCodexTextGeneration(
+      config,
+      input.environment,
+      input.tierAuthority,
+    ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
     return yield* effectFn(textGeneration);
   }).pipe(Effect.scoped);
 }
@@ -720,6 +723,63 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
       ),
     );
   }
+
+  it.effect(
+    "passes an exact advertised helper tier and refuses a removed tier before invoking the child",
+    () =>
+      Effect.gen(function* () {
+        let calls = 0;
+        const tierAuthority = {
+          instanceId: ProviderInstanceId.make("codex"),
+          getModels: () =>
+            Effect.succeed([
+              {
+                slug: "helper-model",
+                name: "Helper",
+                isCustom: false,
+                capabilities: {
+                  optionDescriptors: [
+                    {
+                      id: "serviceTier",
+                      label: "Service tier",
+                      type: "select" as const,
+                      options: [{ id: "ultrafast", label: "Ultra fast" }],
+                    },
+                  ],
+                },
+              },
+            ]),
+        };
+        yield* withFakeCodexSpawner(
+          {
+            output: JSON.stringify({ title: "Exact tier" }),
+            expectedServiceTier: "ultrafast",
+            tierAuthority,
+            inspectCommand: () => {
+              calls += 1;
+            },
+          },
+          (generation) =>
+            Effect.gen(function* () {
+              for (const value of ["ultrafast", "removed"]) {
+                const result = yield* Effect.exit(
+                  generation.generateThreadTitle({
+                    cwd: process.cwd(),
+                    message: "Name this",
+                    modelSelection: createModelSelection(
+                      ProviderInstanceId.make("codex"),
+                      "helper-model",
+                      [{ id: "serviceTier", value }],
+                    ),
+                  }),
+                );
+                expect(result._tag).toBe(value === "ultrafast" ? "Success" : "Failure");
+              }
+            }),
+        );
+        expect(calls).toBe(1);
+      }),
+  );
 
   it.effect("defaults omitted Codex helper effort to Medium without changing the saved model", () =>
     withFakeCodexSpawner(

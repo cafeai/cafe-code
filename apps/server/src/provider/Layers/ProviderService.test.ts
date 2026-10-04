@@ -13,6 +13,8 @@ import type {
   ProviderSteerTurnInput,
   ProviderTurnSteerResult,
   ProviderTurnStartResult,
+  ProviderTaskControlInput,
+  ProviderTaskControlResult,
   ServerProviderModel,
 } from "@cafecode/contracts";
 import {
@@ -23,6 +25,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderSessionStartInput,
+  SubagentRuntimeId,
   ThreadId,
   TurnId,
 } from "@cafecode/contracts";
@@ -105,6 +108,12 @@ type LegacyProviderRuntimeEvent = {
 };
 
 function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
+  const controlTask = vi.fn(
+    (
+      _input: ProviderTaskControlInput,
+    ): Effect.Effect<ProviderTaskControlResult, ProviderAdapterError> =>
+      Effect.succeed({ status: "accepted" }),
+  );
   const sessions = new Map<ThreadId, ProviderSession>();
   let runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
 
@@ -298,6 +307,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
       sessionFork:
         provider === CODEX_DRIVER || provider === CLAUDE_AGENT_DRIVER ? "supported" : "unsupported",
     },
+    controlTask,
     startSession,
     forkSession,
     discardSessionFork,
@@ -344,6 +354,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
 
   return {
     adapter,
+    controlTask,
     emit,
     updateSession,
     startSession,
@@ -1299,6 +1310,75 @@ function makeProviderServiceLayer() {
 }
 
 const imageValidation = makeProviderServiceLayer();
+const taskControlValidation = makeProviderServiceLayer();
+taskControlValidation.layer("ProviderService durable task controls", (it) => {
+  beforeEach(taskControlValidation.reset);
+  const input = (suffix: string): ProviderTaskControlInput => ({
+    threadId: asThreadId(`task-control-${suffix}`),
+    turnId: asTurnId("original-turn"),
+    providerInstanceId: claudeAgentInstanceId,
+    runtimeId: SubagentRuntimeId.make("10000000-0000-4000-8000-000000000001"),
+    taskId: "child",
+    taskGeneration: "00000000-0000-4000-8000-000000000001",
+    action: "stop",
+  });
+  it.effect(
+    "rejects account changes and closed sessions without recovery; deduplicates matching actions",
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const action = input("binding");
+        yield* provider.startSession(action.threadId, {
+          threadId: action.threadId,
+          provider: CLAUDE_AGENT_DRIVER,
+          providerInstanceId: claudeAgentInstanceId,
+          runtimeMode: "approval-required",
+        });
+        assert.equal(
+          (yield* provider.controlTask!({ ...action, providerInstanceId: codexInstanceId }).pipe(
+            Effect.result,
+          ))._tag,
+          "Failure",
+        );
+        assert.equal(taskControlValidation.claude.controlTask.mock.calls.length, 0);
+        assert.deepEqual(yield* provider.controlTask!(action), { status: "accepted" });
+        assert.deepEqual(yield* provider.controlTask!(action), { status: "accepted" });
+        assert.equal(taskControlValidation.claude.controlTask.mock.calls.length, 1);
+        yield* provider.stopSession({ threadId: action.threadId });
+        assert.equal(
+          (yield* provider.controlTask!({ ...action, action: "background" }).pipe(Effect.result))
+            ._tag,
+          "Failure",
+        );
+        assert.equal(taskControlValidation.claude.startSession.mock.calls.length, 1);
+      }),
+  );
+  it.effect(
+    "bounds hanging native control and durably refuses replay after an ambiguous outcome",
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const action = input("timeout");
+        const entered = yield* Deferred.make<void>();
+        taskControlValidation.claude.controlTask.mockImplementation(() =>
+          Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)),
+        );
+        yield* provider.startSession(action.threadId, {
+          threadId: action.threadId,
+          provider: CLAUDE_AGENT_DRIVER,
+          providerInstanceId: claudeAgentInstanceId,
+          runtimeMode: "approval-required",
+        });
+        const pending = yield* provider.controlTask!(action).pipe(Effect.forkChild);
+        yield* Deferred.await(entered);
+        yield* TestClock.adjust("15 seconds");
+        assert.deepEqual(yield* Fiber.join(pending), { status: "unknown" });
+        assert.deepEqual(yield* provider.controlTask!(action), { status: "unknown" });
+        assert.equal(taskControlValidation.claude.controlTask.mock.calls.length, 1);
+        assert.equal(taskControlValidation.claude.interruptTurn.mock.calls.length, 0);
+      }),
+  );
+});
 imageValidation.layer("ProviderService image modality validation", (it) => {
   beforeEach(imageValidation.reset);
   const imageAttachment = {
@@ -2825,6 +2905,41 @@ routing.layer("ProviderServiceLive routing", (it) => {
         expectedCompletedRootTurnId: asTurnId("turn-original"),
         input: "deliver only as the next turn",
         attachments: [],
+      });
+    }),
+  );
+
+  it.effect("never downgrades a native review into an active steer", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const threadId = asThreadId("native-review-no-steer");
+      yield* provider.startSession(threadId, {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "approval-required",
+      });
+      routing.codex.updateSession(threadId, (current) => ({
+        ...current,
+        status: "running",
+        activeTurnId: asTurnId("existing"),
+      }));
+      routing.codex.sendTurn.mockClear();
+      routing.codex.steerTurn.mockClear();
+      yield* provider.sendTurn({
+        threadId,
+        input: "Native review",
+        codexReview: { type: "baseBranch", branch: "main" },
+      });
+      assert.equal(routing.codex.steerTurn.mock.calls.length, 0);
+      // The fake accepts; the runtime performs final atomic idle admission.
+      assert.deepEqual(routing.codex.sendTurn.mock.calls[0]?.[0], {
+        threadId,
+        input: "Native review",
+        codexReview: { type: "baseBranch", branch: "main" },
+        attachments: [],
+        allowActiveTurnSteerFallback: false,
       });
     }),
   );

@@ -732,6 +732,9 @@ function runtimeEventToActivities(
                   ? `${event.payload.taskType} task started`
                   : "Task started",
           payload: {
+            ...(event.payload.individualTaskControl
+              ? { individualTaskControl: event.payload.individualTaskControl }
+              : {}),
             taskId: event.payload.taskId,
             ...(event.payload.taskType ? { taskType: event.payload.taskType } : {}),
             ...(event.payload.visibility ? { visibility: event.payload.visibility } : {}),
@@ -755,6 +758,9 @@ function runtimeEventToActivities(
           kind: "task.progress",
           summary: event.payload.subagent ? "Subagent update" : "Reasoning update",
           payload: {
+            ...(event.payload.individualTaskControl
+              ? { individualTaskControl: event.payload.individualTaskControl }
+              : {}),
             taskId: event.payload.taskId,
             detail: truncateDetail(event.payload.summary ?? event.payload.description),
             ...(event.payload.visibility ? { visibility: event.payload.visibility } : {}),
@@ -924,6 +930,10 @@ function runtimeEventToActivities(
           kind: "tool.updated",
           summary: event.payload.title ?? "Tool updated",
           payload: {
+            ...(event.payload.individualTaskControl
+              ? { individualTaskControl: event.payload.individualTaskControl }
+              : {}),
+            ...(event.itemId !== undefined ? { itemId: event.itemId } : {}),
             itemType: event.payload.itemType,
             ...(event.payload.status ? { status: event.payload.status } : {}),
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
@@ -936,6 +946,27 @@ function runtimeEventToActivities(
     }
 
     case "item.completed": {
+      if (event.provider === "codex" && event.payload.itemType === "review_exited") {
+        // The native exit item is a review lifecycle boundary, not a terminal
+        // turn or a second assistant message. Codex emits the rendered findings
+        // separately as an ordinary assistant item; preserve only bounded work
+        // log presentation here so reconnect replay cannot duplicate output.
+        return [
+          {
+            id: event.eventId,
+            createdAt: event.createdAt,
+            tone: "info",
+            kind: "review.exited",
+            summary: "Native review exited",
+            payload: {
+              itemType: "review_exited",
+              ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
+            },
+            turnId: toTurnId(event.turnId) ?? null,
+            ...maybeSequence,
+          },
+        ];
+      }
       const asyncQuestionsActivity = codexAsyncQuestionsActivity(event);
       if (asyncQuestionsActivity !== null) {
         return [{ ...asyncQuestionsActivity, ...maybeSequence }];
@@ -968,6 +999,23 @@ function runtimeEventToActivities(
     }
 
     case "item.started": {
+      if (event.provider === "codex" && event.payload.itemType === "review_entered") {
+        return [
+          {
+            id: event.eventId,
+            createdAt: event.createdAt,
+            tone: "info",
+            kind: "review.started",
+            summary: "Native review started",
+            payload: {
+              itemType: "review_entered",
+              ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
+            },
+            turnId: toTurnId(event.turnId) ?? null,
+            ...maybeSequence,
+          },
+        ];
+      }
       if (!isToolLifecycleItemType(event.payload.itemType)) {
         return [];
       }
@@ -979,6 +1027,9 @@ function runtimeEventToActivities(
           kind: "tool.started",
           summary: itemLifecycleActivitySummary(event.payload, "started"),
           payload: {
+            ...(event.payload.individualTaskControl
+              ? { individualTaskControl: event.payload.individualTaskControl }
+              : {}),
             itemType: event.payload.itemType,
             ...(event.itemId !== undefined ? { itemId: event.itemId } : {}),
             ...(event.payload.title !== undefined ? { title: event.payload.title } : {}),

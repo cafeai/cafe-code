@@ -36,6 +36,7 @@ export const ProviderTurnConfiguration = Schema.Struct({
   modelDisplayName: Schema.optional(SingleLineLabel),
   effort: Schema.optional(EffortLabel),
   fastMode: Schema.optional(Schema.Boolean),
+  serviceTier: Schema.optional(EffortLabel),
   runtimeMode: RuntimeMode,
   interactionMode: Schema.optional(ProviderInteractionMode),
   settingsSource: Schema.Literals(["submitted", "session"]),

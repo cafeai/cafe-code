@@ -23,6 +23,7 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  SubagentRuntimeId,
   ResolvedKeybindingRule,
   ScheduledFollowupId,
   ThreadId,
@@ -2916,6 +2917,138 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
   );
 
+  it.effect(
+    "discovers skills only for the owner-selected instance and saved thread workspace",
+    () =>
+      Effect.gen(function* () {
+        const calls: unknown[] = [];
+        const path = yield* Path.Path;
+        const cwd = path.join(process.cwd(), "isolated-skills-worktree");
+        const instanceId = ProviderInstanceId.make("codex-personal");
+        yield* buildAppUnderTest({
+          layers: {
+            providerRegistry: {
+              discoverSkills: (selected, directory) =>
+                Effect.sync(() => {
+                  calls.push({ selected, directory });
+                  return {
+                    status: "available" as const,
+                    skills: [{ name: "review", enabled: true, scope: "repo" }],
+                  };
+                }),
+            },
+            projectionSnapshotQuery: {
+              getThreadShellById: (id) =>
+                Effect.succeed(
+                  id === defaultThreadId
+                    ? Option.some(makeDefaultOrchestrationThreadShell({ worktreePath: cwd }))
+                    : Option.none(),
+                ),
+            },
+          },
+        });
+        const wsUrl = yield* getWsServerUrl("/ws");
+        yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            Effect.gen(function* () {
+              const discovered = yield* client[WS_METHODS.serverListProviderSkills]({
+                instanceId,
+                context: { kind: "thread", threadId: defaultThreadId },
+              });
+              assert.equal(discovered.status, "available");
+              assert.deepEqual(calls, [{ selected: instanceId, directory: cwd }]);
+              const missing = yield* client[WS_METHODS.serverListProviderSkills]({
+                instanceId,
+                context: { kind: "thread", threadId: ThreadId.make("missing-skills-thread") },
+              });
+              assert.deepEqual(missing, { status: "unavailable", skills: [] });
+              assert.lengthOf(calls, 1);
+            }),
+          ),
+        );
+      }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
+  );
+
+  it.effect(
+    "discards skills when saved workspace authority changes while native discovery is pending",
+    () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        let cwd = path.join(process.cwd(), "original-skills-root");
+        const project = makeDefaultOrchestrationReadModel().projects[0]!;
+        yield* buildAppUnderTest({
+          layers: {
+            providerRegistry: {
+              discoverSkills: () =>
+                Effect.sync(() => {
+                  cwd = path.join(process.cwd(), "replacement-skills-root");
+                  return {
+                    status: "available" as const,
+                    skills: [{ name: "private-old-project", enabled: true }],
+                  };
+                }),
+            },
+            projectionSnapshotQuery: {
+              getProjectShellById: () =>
+                Effect.sync(() => Option.some({ ...project, workspaceRoot: cwd })),
+            },
+          },
+        });
+        const wsUrl = yield* getWsServerUrl("/ws");
+        yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            Effect.gen(function* () {
+              const result = yield* client[WS_METHODS.serverListProviderSkills]({
+                instanceId: ProviderInstanceId.make("codex-personal"),
+                context: { kind: "project", projectId: defaultProjectId },
+              });
+              assert.deepEqual(result, { status: "unavailable", skills: [] });
+            }),
+          ),
+        );
+      }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
+  );
+
+  it.effect("rejects paired non-owner skill discovery before resolving native account data", () =>
+    Effect.gen(function* () {
+      let calls = 0;
+      yield* buildAppUnderTest({
+        layers: {
+          providerRegistry: {
+            discoverSkills: () =>
+              Effect.sync(() => {
+                calls += 1;
+                return { status: "empty" as const, skills: [] };
+              }),
+          },
+        },
+      });
+      const pairing = yield* HttpClient.post("/api/auth/pairing-token", {
+        headers: { cookie: yield* getAuthenticatedSessionCookieHeader() },
+      });
+      const { credential } = (yield* pairing.json) as { credential: string };
+      const cookie = yield* getAuthenticatedSessionCookieHeader(credential);
+      const wsUrl = appendSessionCookieToWsUrl(
+        yield* getWsServerUrl("/ws", { authenticated: false }),
+        cookie,
+      );
+      yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.gen(function* () {
+            assert.deepEqual(
+              yield* client[WS_METHODS.serverListProviderSkills]({
+                instanceId: ProviderInstanceId.make("codex-personal"),
+                context: { kind: "project", projectId: defaultProjectId },
+              }),
+              { status: "unavailable", skills: [] },
+            );
+          }),
+        ),
+      );
+      assert.equal(calls, 0);
+    }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
+  );
+
   it.effect("routes owner usage-reset confirmations only to the mocked provider action", () =>
     Effect.gen(function* () {
       const calls: unknown[] = [];
@@ -3098,6 +3231,37 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.equal(Exit.isFailure(result), true);
         assert.equal(readSubagentDetail.mock.calls.length, 0);
       }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
+  );
+
+  it.effect("rejects paired non-owner task controls before reaching the provider", () =>
+    Effect.gen(function* () {
+      const controlTask = vi.fn(() => Effect.succeed({ status: "accepted" as const }));
+      yield* buildAppUnderTest({ layers: { providerService: { controlTask } } });
+      const pairing = yield* HttpClient.post("/api/auth/pairing-token", {
+        headers: { cookie: yield* getAuthenticatedSessionCookieHeader() },
+      });
+      const { credential } = (yield* pairing.json) as { credential: string };
+      const cookie = yield* getAuthenticatedSessionCookieHeader(credential);
+      const wsUrl = appendSessionCookieToWsUrl(
+        yield* getWsServerUrl("/ws", { authenticated: false }),
+        cookie,
+      );
+      const result = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.controlTask]({
+            threadId: ThreadId.make("parent"),
+            turnId: TurnId.make("turn"),
+            providerInstanceId: ProviderInstanceId.make("claude"),
+            runtimeId: SubagentRuntimeId.make("10000000-0000-4000-8000-000000000001"),
+            taskId: "child",
+            taskGeneration: "00000000-0000-4000-8000-000000000001",
+            action: "stop",
+          }),
+        ).pipe(Effect.result),
+      );
+      assert.equal(result._tag, "Failure");
+      assert.equal(controlTask.mock.calls.length, 0);
+    }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
   );
 
   it.effect("returns only canonical verified subagent text over the authenticated RPC", () =>

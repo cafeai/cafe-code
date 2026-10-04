@@ -899,6 +899,15 @@ const executeRpcRequest = (
       return providerService.sendTurn(request.payload);
     case "steerTurn":
       return providerService.steerTurn(request.payload);
+    case "controlTask":
+      return providerService.controlTask
+        ? providerService.controlTask(request.payload)
+        : Effect.fail(
+            new ProviderValidationError({
+              operation: "controlTask",
+              issue: "Task controls are unavailable.",
+            }),
+          );
     case "interruptTurn":
       return providerService.interruptTurn(request.payload);
     case "respondToRequest":

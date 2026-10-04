@@ -897,7 +897,9 @@ describe("ProviderCommandReactor", () => {
           messageId: command.message.messageId,
           modelSelection,
           allowActiveTurnSteerFallback: false,
+          inputOrigin: "scheduled",
         });
+        expect(harness.sendTurn.mock.calls[0]?.[0].deliveryPriority).toBeUndefined();
         expect(harness.steerTurn).not.toHaveBeenCalled();
         expect(await readRun(harness, command.scheduledFollowUp!.runId)).toMatchObject({
           state: "running",
@@ -3185,6 +3187,170 @@ describe("ProviderCommandReactor", () => {
     expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({
       input: "second message",
     });
+  });
+
+  it.each([
+    { type: "uncommittedChanges" as const },
+    { type: "baseBranch" as const, branch: "origin/main" },
+    { type: "commit" as const, sha: "a956835d020762cb2b570053af06f643a11c0ecc" },
+    { type: "custom" as const, instructions: "Inspect race conditions.\nDo not edit." },
+  ])(
+    "dispatches an explicit native $type review without steer or fabricated configuration",
+    async (codexReview) => {
+      const harness = await createHarness({ liveSteer: "supported" });
+      const threadId = ThreadId.make("thread-1");
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("native-review-start"),
+          threadId,
+          message: {
+            messageId: asMessageId("native-review-message"),
+            role: "user",
+            text: "Native review",
+            attachments: [],
+          },
+          codexReview,
+          runtimeMode: "approval-required",
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          createdAt: "2026-01-01T00:00:01.000Z",
+        }),
+      );
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
+        threadId,
+        codexReview,
+        allowActiveTurnSteerFallback: false,
+      });
+      expect(harness.steerTurn).not.toHaveBeenCalled();
+      expect(harness.interruptTurn).not.toHaveBeenCalled();
+      await waitFor(
+        async () => (await harness.readModel()).threads[0]?.latestTurn?.state === "running",
+      );
+      const thread = (await harness.readModel()).threads[0]!;
+      expect(
+        thread.activities.some((activity) => activity.kind === "provider.turn.configuration"),
+      ).toBe(false);
+      expect(thread.messages.find((message) => message.id === "native-review-message")?.text).toBe(
+        "Native review",
+      );
+    },
+  );
+
+  it("rejects a review when the native runtime is busy behind an idle projection without steering or stopping it", async () => {
+    const harness = await createHarness({ liveSteer: "supported" });
+    const threadId = ThreadId.make("thread-1");
+    harness.runtimeSessions.push({
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      status: "running",
+      runtimeMode: "approval-required",
+      threadId,
+      activeTurnId: asTurnId("existing-native-turn"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("busy-review-start"),
+        threadId,
+        message: {
+          messageId: asMessageId("busy-review-message"),
+          role: "user",
+          text: "Native review",
+          attachments: [],
+        },
+        codexReview: { type: "uncommittedChanges" },
+        runtimeMode: "approval-required",
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        createdAt: "2026-01-01T00:00:01.000Z",
+      }),
+    );
+    await waitFor(
+      async () =>
+        (await harness.readModel()).threads[0]?.activities.some(
+          (activity) => activity.kind === "provider.turn.start.failed",
+        ) === true,
+    );
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+    expect(harness.steerTurn).not.toHaveBeenCalled();
+    expect(harness.interruptTurn).not.toHaveBeenCalled();
+    expect(harness.stopSession).not.toHaveBeenCalled();
+  });
+
+  it("never retries or steers a native review that loses idle admission at the adapter boundary", async () => {
+    const harness = await createHarness({ liveSteer: "supported" });
+    harness.sendTurn.mockImplementationOnce(() =>
+      Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: "codex",
+          method: "sendTurn",
+          detail: "Cannot start a new Codex turn while active turn 'new-native-owner' is running.",
+        }),
+      ),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("raced-native-review"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("raced-native-review-message"),
+          role: "user",
+          text: "Native review",
+          attachments: [],
+        },
+        codexReview: { type: "uncommittedChanges" },
+        runtimeMode: "approval-required",
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        createdAt: "2026-01-01T00:00:01.000Z",
+      }),
+    );
+    await waitFor(
+      async () =>
+        (await harness.readModel()).threads[0]?.activities.some(
+          (activity) => activity.kind === "provider.turn.start.failed",
+        ) === true,
+    );
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+    expect(harness.steerTurn).not.toHaveBeenCalled();
+    expect(harness.interruptTurn).not.toHaveBeenCalled();
+  });
+
+  it("rejects a forged native review for another provider without launching it", async () => {
+    const harness = await createHarness({
+      threadModelSelection: {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-sonnet-4-6",
+      },
+    });
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("foreign-native-review"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("foreign-native-review-message"),
+          role: "user",
+          text: "Native review",
+          attachments: [],
+        },
+        codexReview: { type: "uncommittedChanges" },
+        runtimeMode: "approval-required",
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        createdAt: "2026-01-01T00:00:01.000Z",
+      }),
+    );
+    await waitFor(
+      async () =>
+        (await harness.readModel()).threads[0]?.activities.some(
+          (activity) => activity.kind === "provider.turn.start.failed",
+        ) === true,
+    );
+    expect(harness.startSession).not.toHaveBeenCalled();
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+    expect(harness.steerTurn).not.toHaveBeenCalled();
   });
 
   it("routes turn starts through live steer when the Codex runtime still owns an active turn", async () => {

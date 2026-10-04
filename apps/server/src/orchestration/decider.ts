@@ -677,6 +677,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           command.bootstrap !== undefined ||
           command.runtimeRecovery !== undefined ||
           command.sourceProposedPlan !== undefined ||
+          command.deliveryPriority !== undefined ||
           command.runtimeMode !== targetThread.runtimeMode ||
           command.interactionMode !== targetThread.interactionMode ||
           scheduled.expectedRuntimeMode !== targetThread.runtimeMode ||
@@ -731,6 +732,26 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       }
       const boundProviderInstanceId =
         targetThread.session?.providerInstanceId ?? targetThread.session?.providerName;
+      // Native reviews are explicit idle-only operations, never normal text
+      // that can be recovered as a steer or unattended continuation.
+      if (
+        command.codexReview !== undefined &&
+        (threadHasUnsettledTurnStart(targetThread) ||
+          command.message.attachments.length > 0 ||
+          command.runtimeMode !== targetThread.runtimeMode ||
+          command.interactionMode !== targetThread.interactionMode ||
+          (command.modelSelection !== undefined &&
+            !isDeepStrictEqual(command.modelSelection, targetThread.modelSelection)) ||
+          command.runtimeRecovery !== undefined ||
+          command.scheduledFollowUp !== undefined ||
+          command.sourceProposedPlan !== undefined)
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail:
+            "Native review requires an idle chat and cannot include attachments or automatic continuation.",
+        });
+      }
       const requestsProviderInstanceSwitch =
         command.modelSelection !== undefined &&
         boundProviderInstanceId !== undefined &&
@@ -782,6 +803,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           type: "thread.turn-steer-requested",
           payload: {
             threadId: command.threadId,
+            ...(command.deliveryPriority !== undefined
+              ? { deliveryPriority: command.deliveryPriority }
+              : {}),
             messageId: command.message.messageId,
             expectedTurnId: activeTurnId,
             createdAt: command.createdAt,
@@ -878,6 +902,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         type: "thread.turn-start-requested",
         payload: {
           threadId: command.threadId,
+          ...(command.deliveryPriority !== undefined
+            ? { deliveryPriority: command.deliveryPriority }
+            : {}),
+          ...(command.codexReview !== undefined ? { codexReview: command.codexReview } : {}),
           messageId: command.message.messageId,
           ...(command.modelSelection !== undefined
             ? { modelSelection: command.modelSelection }
@@ -971,6 +999,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           type: "thread.turn-start-requested",
           payload: {
             threadId: command.threadId,
+            ...(command.deliveryPriority !== undefined
+              ? { deliveryPriority: command.deliveryPriority }
+              : {}),
             messageId: command.message.messageId,
             modelSelection: targetThread.modelSelection,
             runtimeMode: targetThread.runtimeMode,
@@ -994,6 +1025,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         type: "thread.turn-steer-requested",
         payload: {
           threadId: command.threadId,
+          ...(command.deliveryPriority !== undefined
+            ? { deliveryPriority: command.deliveryPriority }
+            : {}),
           messageId: command.message.messageId,
           expectedTurnId: activeTurnId,
           ...(command.terminalRecovery !== undefined

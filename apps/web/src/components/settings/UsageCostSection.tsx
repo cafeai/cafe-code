@@ -819,6 +819,11 @@ function UsageCostMetrics({
             Priced share covers recorded tokens only. Interrupted provider requests may not report
             all usage, so these totals are estimates, not a complete billing record.
           </p>
+          <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground/70">
+            Codex subagent usage includes only observed increments after a baseline. Earlier or
+            unavailable child usage is not backfilled; child tokens do not increase the main chat’s
+            context-window meter.
+          </p>
         </div>
       </div>
     </div>

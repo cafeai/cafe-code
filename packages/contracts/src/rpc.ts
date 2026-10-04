@@ -4,6 +4,7 @@ import {
   VirtualDesktopError,
 } from "./virtualDesktop.ts";
 import * as Schema from "effect/Schema";
+import { ProviderSkillsInput, ProviderSkillsResult } from "./providerSkills.ts";
 import {
   ScheduledFollowupListInput,
   ScheduledFollowupListResult,
@@ -173,6 +174,7 @@ export const WS_METHODS = {
   serverGetMcpStatus: "server.getMcpStatus",
   serverUpdateMcpClient: "server.updateMcpClient",
   serverRefreshProviders: "server.refreshProviders",
+  serverListProviderSkills: "server.listProviderSkills",
   serverUsageReset: "server.usageReset",
   serverLoginProvider: "server.loginProvider",
   serverUpdateProvider: "server.updateProvider",
@@ -273,6 +275,11 @@ export const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProv
     scope: Schema.optional(Schema.Literals(["full", "models"])),
   }),
   success: ServerProviderUpdatedPayload,
+});
+
+export const WsServerListProviderSkillsRpc = Rpc.make(WS_METHODS.serverListProviderSkills, {
+  payload: ProviderSkillsInput,
+  success: ProviderSkillsResult,
 });
 
 export const WsServerUsageResetRpc = Rpc.make(WS_METHODS.serverUsageReset, {
@@ -604,6 +611,12 @@ export const WsOrchestrationGetThreadTurnSubagentDetailRpc = Rpc.make(
   },
 );
 
+export const WsOrchestrationControlTaskRpc = Rpc.make(ORCHESTRATION_WS_METHODS.controlTask, {
+  payload: OrchestrationRpcSchemas.controlTask.input,
+  success: OrchestrationRpcSchemas.controlTask.output,
+  error: OrchestrationGetSnapshotError,
+});
+
 export const WsOrchestrationSubscribeShellRpc = Rpc.make(ORCHESTRATION_WS_METHODS.subscribeShell, {
   payload: OrchestrationRpcSchemas.subscribeShell.input,
   success: OrchestrationRpcSchemas.subscribeShell.output,
@@ -687,6 +700,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerVirtualDesktopRpc,
   WsServerUpdateMcpClientRpc,
   WsServerRefreshProvidersRpc,
+  WsServerListProviderSkillsRpc,
   WsServerUsageResetRpc,
   WsServerLoginProviderRpc,
   WsServerUpdateProviderRpc,
@@ -744,6 +758,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationGetThreadTurnActivityPageRpc,
   WsOrchestrationGetThreadTurnWorkLogPresenceRpc,
   WsOrchestrationGetThreadTurnSubagentDetailRpc,
+  WsOrchestrationControlTaskRpc,
   WsOrchestrationSubscribeShellRpc,
   WsOrchestrationSubscribeThreadRpc,
 );

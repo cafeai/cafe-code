@@ -15,6 +15,7 @@ export function providerDaemonRequestThreadIds(
     case "startSession":
     case "sendTurn":
     case "steerTurn":
+    case "controlTask":
     case "interruptTurn":
     case "respondToRequest":
     case "respondToUserInput":

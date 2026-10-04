@@ -87,6 +87,14 @@ function decide(thread = makeThread(), command = makeCommand(), scheduledFollowU
 }
 
 describe("scheduled follow-up idle-only admission", () => {
+  it.each(["now", "next", "later"] as const)(
+    "rejects an explicit %s priority on a scheduled occurrence",
+    async (deliveryPriority) => {
+      await expect(
+        Effect.runPromise(decide(makeThread(), { ...makeCommand(), deliveryPriority })),
+      ).rejects.toThrow();
+    },
+  );
   it("retains exact server provenance without emitting any steer intent", async () => {
     const events = await Effect.runPromise(decide());
     expect(events).toMatchObject([

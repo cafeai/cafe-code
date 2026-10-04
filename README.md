@@ -152,6 +152,16 @@ proposals need your approval before they run. See the
 [scheduled follow-ups guide](docs/scheduled-followups.md) for model overrides,
 notifications, limits, and recovery behavior.
 
+### Provider Controls
+
+Codex supports [workspace-scoped skill discovery and advertised service tiers](docs/codex-model-and-skill-picker.md),
+plus an explicit [native code-review action](docs/codex-native-review.md).
+Qualified Claude sessions support [Now / Next / Later delivery and individual task controls](docs/claude-task-controls.md).
+Controls preserve the selected account and native permission boundaries; missing
+capabilities fail visibly instead of silently changing providers or paid tiers.
+See [usage statistics](docs/usage-statistics.md) for the limits of prospective
+Codex child-agent accounting and its separation from the main context window.
+
 ### Agent Control over MCP
 
 Cafe Code exposes an authenticated Streamable HTTP MCP endpoint at `/mcp` on

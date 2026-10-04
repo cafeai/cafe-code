@@ -4,6 +4,10 @@ import type {
   VirtualDesktopConnect,
 } from "./virtualDesktop.ts";
 import type {
+  ProviderTaskControlInput,
+  ProviderTaskControlResult,
+} from "./providerTaskControls.ts";
+import type {
   ProviderRespondToInteractionInput,
   ProviderResolveInteractionUrlInput,
 } from "./providerInteraction.ts";
@@ -35,6 +39,7 @@ import type {
   ProjectWriteFileResult,
 } from "./project.ts";
 import type { ProviderInstanceId } from "./providerInstance.ts";
+import type { ProviderSkillsInput, ProviderSkillsResult } from "./providerSkills.ts";
 import type { ProviderUsageResetInput, ProviderUsageResetResult } from "./providerUsageReset.ts";
 import type {
   ServerConfig,
@@ -493,6 +498,7 @@ export interface LocalApi {
       readonly instanceId?: ProviderInstanceId;
       readonly scope?: "full" | "models";
     }) => Promise<ServerProviderUpdatedPayload>;
+    listProviderSkills: (input: ProviderSkillsInput) => Promise<ProviderSkillsResult>;
     loginProvider: (input: ServerProviderLoginInput) => Promise<ServerProviderLoginResult>;
     updateProvider: (input: ServerProviderUpdateInput) => Promise<ServerProviderUpdatedPayload>;
     restartProviderRuntime: (
@@ -603,6 +609,7 @@ export interface EnvironmentApi {
     getThreadTurnSubagentDetail: (
       input: OrchestrationThreadTurnSubagentDetailInput,
     ) => Promise<OrchestrationThreadTurnSubagentDetail>;
+    controlTask?: (input: ProviderTaskControlInput) => Promise<ProviderTaskControlResult>;
     getThreadTurnWorkLogPresence: (
       input: OrchestrationThreadTurnWorkLogPresenceInput,
     ) => Promise<OrchestrationThreadTurnWorkLogPresenceResult>;

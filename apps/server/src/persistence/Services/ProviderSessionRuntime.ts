@@ -21,6 +21,7 @@ import type * as Effect from "effect/Effect";
 
 import type { ProviderSessionRuntimeRepositoryError } from "../Errors.ts";
 import type { ConversationRewindStore } from "./ConversationRewinds.ts";
+import type { TaskControlJournal } from "../TaskControlJournal.ts";
 
 export const ProviderSessionRuntime = Schema.Struct({
   threadId: ThreadId,
@@ -85,6 +86,7 @@ export type DeleteProviderSessionRuntimeInput = typeof DeleteProviderSessionRunt
 export interface ProviderSessionRuntimeRepositoryShape {
   /** Present on current persistence; older fixtures cannot authorize rewinds. */
   readonly rewinds?: ConversationRewindStore;
+  readonly taskControls?: TaskControlJournal;
   /**
    * Insert or replace a provider runtime row.
    *

@@ -32,6 +32,7 @@ import {
   ServerProviderRuntimeRestartError,
   DictationError,
   ProviderInteractionError,
+  type ProviderSkillsInput,
   WS_METHODS,
   WsRpcGroup,
 } from "@cafecode/contracts";
@@ -1042,6 +1043,30 @@ const makeWsRpcLayer = (
             }),
             { "rpc.aggregate": "orchestration" },
           ),
+        [ORCHESTRATION_WS_METHODS.controlTask]: (input) =>
+          Effect.gen(function* () {
+            if (
+              currentSession.role !== "owner" ||
+              !secureSecretTransport ||
+              !providerService.controlTask
+            ) {
+              return yield* new OrchestrationGetSnapshotError({
+                message:
+                  "Task controls require an owner connection over HTTPS or the same machine.",
+              });
+            }
+            // Native dispatch independently binds this exact chat, owning turn,
+            // account, runtime generation and server-minted task incarnation.
+            // Never materialize or recover a provider as a side effect of control.
+            return yield* providerService.controlTask(input).pipe(
+              Effect.mapError(
+                () =>
+                  new OrchestrationGetSnapshotError({
+                    message: "This task is no longer controllable. Refresh its status.",
+                  }),
+              ),
+            );
+          }),
         [ORCHESTRATION_WS_METHODS.getThreadTurnWorkLogPresence]: (input) =>
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.getThreadTurnWorkLogPresence,
@@ -1152,6 +1177,57 @@ const makeWsRpcLayer = (
                 ? providerRegistry.refreshInstance(input.instanceId)
                 : providerRegistry.refresh()
             ).pipe(Effect.map((providers) => ({ providers }))),
+            { "rpc.aggregate": "server" },
+          ),
+        [WS_METHODS.serverListProviderSkills]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.serverListProviderSkills,
+            Effect.gen(function* () {
+              if (currentSession.role !== "owner" || !providerRegistry.discoverSkills) {
+                return { status: "unavailable" as const, skills: [] };
+              }
+              // Resolve saved workspace authority on both sides of the read. No
+              // renderer-supplied cwd, native skill path or arbitrary directory
+              // can become a metadata scan target, including after a move/delete.
+              const resolveContext = (context: ProviderSkillsInput["context"]) =>
+                Effect.gen(function* () {
+                  if (context.kind === "project") {
+                    const project = yield* projectionSnapshotQuery.getProjectShellById(
+                      context.projectId,
+                    );
+                    return Option.isSome(project) ? project.value.workspaceRoot : null;
+                  }
+                  const found = yield* projectionSnapshotQuery.getThreadShellById(context.threadId);
+                  if (
+                    Option.isNone(found) ||
+                    found.value.deletedAt !== null ||
+                    found.value.archivedAt !== null
+                  )
+                    return null;
+                  const thread = found.value;
+                  if (thread.projectId === null)
+                    return yield* standaloneWorkspaces.readExisting(thread.id);
+                  const project = yield* projectionSnapshotQuery.getProjectShellById(
+                    thread.projectId,
+                  );
+                  return Option.isSome(project)
+                    ? (thread.worktreePath ?? project.value.workspaceRoot)
+                    : null;
+                });
+              const cwd = yield* resolveContext(input.context);
+              if (!cwd) return { status: "unavailable" as const, skills: [] };
+              const result = yield* providerRegistry.discoverSkills(input.instanceId, cwd);
+              return (yield* resolveContext(input.context)) === cwd
+                ? result
+                : { status: "unavailable" as const, skills: [] };
+            }).pipe(
+              Effect.timeout(Duration.seconds(20)),
+              Effect.catchCause((cause) =>
+                Cause.hasInterrupts(cause)
+                  ? Effect.interrupt
+                  : Effect.succeed({ status: "unavailable" as const, skills: [] }),
+              ),
+            ),
             { "rpc.aggregate": "server" },
           ),
         [WS_METHODS.serverUsageReset]: (input) => {

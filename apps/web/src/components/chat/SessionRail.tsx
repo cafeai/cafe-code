@@ -13,6 +13,11 @@ import type { SubagentConcurrencyPresentation } from "../../subagentConcurrency"
 import { TaskProgressDetails } from "./TaskProgressDetails";
 import { ScheduledFollowups, type ScheduledFollowupsContext } from "./ScheduledFollowups";
 import {
+  ProviderTasks,
+  deriveActiveProviderTasks,
+  type ProviderTasksContext,
+} from "./ProviderTasks";
+import {
   deriveTaskProgressPresentation,
   type ComposerTaskProgressPlan,
 } from "./taskProgressPresentation";
@@ -57,6 +62,7 @@ interface SessionRailProps {
   readonly subagentConcurrency?: SubagentConcurrencyPresentation | null;
   readonly onShowInComposer: () => void;
   readonly scheduledFollowups?: ScheduledFollowupsContext | undefined;
+  readonly providerTasks?: ProviderTasksContext | undefined;
   readonly className?: string;
 }
 
@@ -69,6 +75,8 @@ export const SessionRail = memo(
         entry.subagent !== undefined && isLiveSubagentStatus(entry.subagent.status),
     );
     const hasSubagents = subagents.length > 0;
+    const hasProviderTasks =
+      props.providerTasks && deriveActiveProviderTasks(props.providerTasks).length > 0;
     const { completedCount } = plan ? deriveTaskProgressPresentation(plan) : { completedCount: 0 };
     const total = plan?.steps.length ?? 0;
 
@@ -100,15 +108,16 @@ export const SessionRail = memo(
             data-session-rail-tasks="true"
             data-task-list-scroll="true"
           >
+            {props.providerTasks ? <ProviderTasks context={props.providerTasks} /> : null}
             {hasPlan || hasSubagents ? (
               <TaskProgressDetails
                 plan={plan}
                 subagents={subagents}
                 onOpenSubagentDetail={props.onOpenSubagentDetail}
               />
-            ) : (
+            ) : !hasProviderTasks ? (
               <p className="text-[13px] text-muted-foreground/40">No tasks yet.</p>
-            )}
+            ) : null}
             {props.scheduledFollowups ? (
               <ScheduledFollowups
                 key={`${props.scheduledFollowups.environmentId}:${props.scheduledFollowups.threadId}:${props.scheduledFollowups.modelSelection.instanceId}`}

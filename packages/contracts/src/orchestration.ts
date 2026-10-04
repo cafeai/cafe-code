@@ -2,8 +2,14 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 import { ProviderOptionSelections } from "./model.ts";
+import {
+  ProviderDeliveryPriority,
+  ProviderTaskControlInput,
+  ProviderTaskControlResult,
+} from "./providerTaskControls.ts";
 import { MaxConcurrentSubagents, SubagentLimits } from "./subagentLimits.ts";
 import { RepositoryIdentity } from "./environment.ts";
+import { CodexReviewTarget } from "./codexReview.ts";
 import {
   ApprovalRequestId,
   CheckpointRef,
@@ -36,6 +42,7 @@ export const ORCHESTRATION_WS_METHODS = {
   getThreadTurnWorkLogPresence: "orchestration.getThreadTurnWorkLogPresence",
   getThreadTurnActivityPage: "orchestration.getThreadTurnActivityPage",
   getThreadTurnSubagentDetail: "orchestration.getThreadTurnSubagentDetail",
+  controlTask: "orchestration.controlTask",
   hardDeleteThread: "orchestration.hardDeleteThread",
   repairAssistantMessageFromProviderJournal:
     "orchestration.repairAssistantMessageFromProviderJournal",
@@ -1023,6 +1030,8 @@ export type ThreadTurnScheduledFollowUp = typeof ThreadTurnScheduledFollowUp.Typ
 
 export const ThreadTurnStartCommand = Schema.Struct({
   type: Schema.Literal("thread.turn.start"),
+  codexReview: Schema.optional(CodexReviewTarget),
+  deliveryPriority: Schema.optional(ProviderDeliveryPriority),
   commandId: CommandId,
   threadId: ThreadId,
   message: Schema.Struct({
@@ -1047,6 +1056,8 @@ export const ThreadTurnStartCommand = Schema.Struct({
 
 const ClientThreadTurnStartCommand = Schema.Struct({
   type: Schema.Literal("thread.turn.start"),
+  codexReview: Schema.optional(CodexReviewTarget),
+  deliveryPriority: Schema.optional(ProviderDeliveryPriority),
   commandId: CommandId,
   threadId: ThreadId,
   message: Schema.Struct({
@@ -1075,6 +1086,7 @@ const ThreadTurnInterruptCommand = Schema.Struct({
 
 const ThreadTurnSteerCommand = Schema.Struct({
   type: Schema.Literal("thread.turn.steer"),
+  deliveryPriority: Schema.optional(ProviderDeliveryPriority),
   commandId: CommandId,
   threadId: ThreadId,
   message: Schema.Struct({
@@ -1100,6 +1112,7 @@ const ThreadTurnSteerCommand = Schema.Struct({
 
 const ClientThreadTurnSteerCommand = Schema.Struct({
   type: Schema.Literal("thread.turn.steer"),
+  deliveryPriority: Schema.optional(ProviderDeliveryPriority),
   commandId: CommandId,
   threadId: ThreadId,
   message: Schema.Struct({
@@ -1593,6 +1606,8 @@ export const ThreadMessageAssistantRepairAppliedPayload = Schema.Struct({
 
 export const ThreadTurnStartRequestedPayload = Schema.Struct({
   threadId: ThreadId,
+  codexReview: Schema.optional(CodexReviewTarget),
+  deliveryPriority: Schema.optional(ProviderDeliveryPriority),
   messageId: MessageId,
   modelSelection: Schema.optional(ModelSelection),
   subagentLimits: Schema.optional(SubagentLimits),
@@ -1621,6 +1636,7 @@ export const ThreadTurnInterruptRequestedPayload = Schema.Struct({
 
 export const ThreadTurnSteerRequestedPayload = Schema.Struct({
   threadId: ThreadId,
+  deliveryPriority: Schema.optional(ProviderDeliveryPriority),
   messageId: MessageId,
   /**
    * Immutable turn target captured when the orchestration command is
@@ -2100,6 +2116,7 @@ export const OrchestrationRpcSchemas = {
     input: OrchestrationThreadTurnSubagentDetailInput,
     output: OrchestrationThreadTurnSubagentDetail,
   },
+  controlTask: { input: ProviderTaskControlInput, output: ProviderTaskControlResult },
   subscribeThread: {
     input: OrchestrationSubscribeThreadInput,
     output: OrchestrationThreadStreamItem,

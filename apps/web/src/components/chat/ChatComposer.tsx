@@ -1,5 +1,7 @@
 import { DesktopPicker } from "../virtualDesktop/VirtualDesktops";
+import { providerSkillsScopeRevision, useProviderSkills } from "./useProviderSkills";
 import type { ScheduledFollowupsContext } from "./ScheduledFollowups";
+import type { ProviderTasksContext } from "./ProviderTasks";
 import { resolveComposerThreadId } from "~/composerDraftStore";
 import type {
   ApprovalRequestId,
@@ -8,6 +10,8 @@ import type {
   EnvironmentId,
   ModelSelection,
   ProjectEntry,
+  ProjectId,
+  ProviderSkillsInput,
   ProviderApprovalDecision,
   ProviderInteractionMode,
   ResolvedKeybindingsConfig,
@@ -801,6 +805,7 @@ export interface ChatComposerProps extends ComposerInteractionCallbacks {
   onShowSessionRail?: () => void;
   goalControlsSupported: boolean;
   scheduledFollowups?: ScheduledFollowupsContext | undefined;
+  providerTasks?: ProviderTasksContext | undefined;
 
   // Mode
   runtimeMode: RuntimeMode;
@@ -810,6 +815,7 @@ export interface ChatComposerProps extends ComposerInteractionCallbacks {
   lockedProvider: ProviderDriverKind | null;
   providerStatuses: ServerProvider[];
   activeProjectDefaultModelSelection: ModelSelection | null | undefined;
+  skillsProjectId?: ProjectId | null;
   activeThreadModelSelection: ModelSelection | null | undefined;
 
   // Context window
@@ -918,12 +924,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     sessionRailVisible = false,
     onShowSessionRail,
     scheduledFollowups,
+    providerTasks,
     goalControlsSupported,
     runtimeMode,
     interactionMode,
     lockedProvider,
     providerStatuses,
     activeProjectDefaultModelSelection,
+    skillsProjectId,
     activeThreadModelSelection,
     activeThreadActivities,
     resolvedTheme,
@@ -1592,6 +1600,47 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // Derived: composer trigger / menu
   // ------------------------------------------------------------------
   const composerTriggerKind = composerTrigger?.kind ?? null;
+  const skillsInput = useMemo<ProviderSkillsInput | null>(
+    () =>
+      selectedProvider !== "codex"
+        ? null
+        : isServerThread && activeThreadId
+          ? {
+              instanceId: selectedInstanceId,
+              context: { kind: "thread", threadId: activeThreadId },
+            }
+          : !isPreparingWorktree && skillsProjectId
+            ? {
+                instanceId: selectedInstanceId,
+                context: { kind: "project", projectId: skillsProjectId },
+              }
+            : null,
+    [
+      selectedProvider,
+      selectedInstanceId,
+      isServerThread,
+      activeThreadId,
+      skillsProjectId,
+      isPreparingWorktree,
+    ],
+  );
+  const skillsScopeRevision =
+    selectedProvider === "codex"
+      ? providerSkillsScopeRevision({
+          cwd: gitCwd,
+          instanceId: selectedInstanceId,
+          settings,
+          snapshot: selectedProviderStatus,
+        })
+      : "";
+  const discoveredSkills = useProviderSkills(
+    environmentId,
+    skillsInput,
+    composerTriggerKind === "skill" && selectedProvider === "codex",
+    skillsScopeRevision,
+  );
+  const selectedProviderSkills =
+    selectedProvider === "codex" ? discoveredSkills.skills : (selectedProviderStatus?.skills ?? []);
   const pathTriggerQuery = composerTrigger?.kind === "path" ? composerTrigger.query : "";
   const isPathTrigger = composerTriggerKind === "path";
   const [debouncedPathQuery, composerPathQueryDebouncer] = useDebouncedValue(
@@ -1693,19 +1742,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       return searchSlashCommandItems(slashCommandItems, query);
     }
     if (composerTrigger.kind === "skill") {
-      return searchProviderSkills(selectedProviderStatus?.skills ?? [], composerTrigger.query).map(
-        (skill) => ({
-          id: `skill:${selectedProvider}:${skill.name}`,
-          type: "skill" as const,
-          provider: selectedProvider,
-          skill,
-          label: formatProviderSkillDisplayName(skill),
-          description:
-            skill.shortDescription ??
-            skill.description ??
-            (skill.scope ? `${skill.scope} skill` : "Run provider skill"),
-        }),
-      );
+      return searchProviderSkills(selectedProviderSkills, composerTrigger.query).map((skill) => ({
+        id: `skill:${selectedProvider}:${skill.name}`,
+        type: "skill" as const,
+        provider: selectedProvider,
+        skill,
+        label: formatProviderSkillDisplayName(skill),
+        description:
+          skill.shortDescription ??
+          skill.description ??
+          (skill.scope ? `${skill.scope} skill` : "Run provider skill"),
+      }));
     }
     return [];
   }, [
@@ -1713,6 +1760,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     goalControlsSupported,
     selectedProvider,
     selectedProviderStatus,
+    selectedProviderSkills,
     workspaceEntries,
   ]);
 
@@ -1796,18 +1844,25 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   ]);
 
   const isComposerMenuLoading =
-    composerTriggerKind === "path" &&
-    ((pathTriggerQuery.length > 0 && composerPathQueryDebouncer.state.isPending) ||
-      workspaceEntriesQuery.isLoading ||
-      workspaceEntriesQuery.isFetching);
+    (composerTriggerKind === "skill" && discoveredSkills.loading) ||
+    (composerTriggerKind === "path" &&
+      ((pathTriggerQuery.length > 0 && composerPathQueryDebouncer.state.isPending) ||
+        workspaceEntriesQuery.isLoading ||
+        workspaceEntriesQuery.isFetching));
   const composerMenuEmptyState = useMemo(() => {
     if (composerTriggerKind === "skill") {
+      if (selectedProvider === "codex" && skillsInput === null)
+        return "Skills are available once this chat's workspace has been created.";
+      if (selectedProvider === "codex" && discoveredSkills.status === "unavailable")
+        return "Skills unavailable. Close and reopen the picker to retry.";
+      if (selectedProvider === "codex" && discoveredSkills.status === "disabled")
+        return "Enable and sign in to this Codex account to discover skills.";
       return "No skills found. Try / to browse provider commands.";
     }
     return composerTriggerKind === "path"
       ? "No matching files or folders."
       : "No matching command.";
-  }, [composerTriggerKind]);
+  }, [composerTriggerKind, selectedProvider, discoveredSkills.status, skillsInput]);
 
   // ------------------------------------------------------------------
   // Provider traits UI
@@ -3543,7 +3598,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       : prompt
                 }
                 cursor={composerCursor}
-                skills={selectedProviderStatus?.skills ?? []}
+                skills={selectedProviderSkills}
                 focusRequestRevision={composerFocusRequestRevision}
                 {...(showMobileComposerActionsOverlay ? { className: "max-h-40 pb-11" } : {})}
                 onChange={onPromptChange}
@@ -3574,6 +3629,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   className="absolute bottom-0 right-0 flex items-center justify-end gap-1.5"
                 >
                   <ComposerTaskProgress
+                    providerTasks={providerTasks}
                     scheduledFollowups={scheduledFollowups}
                     plan={activePlan}
                     subagents={activeSubagents}
@@ -3626,6 +3682,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             !showCollapsedMobilePromptRow) ? null : activePendingApproval ? (
             <div className="flex min-w-0 items-center justify-end gap-2 px-2.5 pb-2.5 sm:px-3 sm:pb-3">
               <ComposerTaskProgress
+                providerTasks={providerTasks}
                 scheduledFollowups={scheduledFollowups}
                 plan={activePlan}
                 subagents={activeSubagents}
@@ -3759,6 +3816,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   controls so the status remains legible on narrow screens. The
                   popover itself is portaled and cannot be clipped by the footer. */}
               <ComposerTaskProgress
+                providerTasks={providerTasks}
                 scheduledFollowups={scheduledFollowups}
                 plan={activePlan}
                 subagents={activeSubagents}

@@ -2020,6 +2020,9 @@ const make = Effect.gen(function* () {
 
   const buildSendTurnRequestForThread = Effect.fnUntraced(function* (input: {
     readonly threadId: ThreadId;
+    readonly codexReview?: ProviderSendTurnInput["codexReview"];
+    readonly deliveryPriority?: ProviderSendTurnInput["deliveryPriority"];
+    readonly inputOrigin?: ProviderSendTurnInput["inputOrigin"];
     readonly messageId?: MessageId;
     readonly allowActiveTurnSteerFallback?: boolean;
     /** A one-run schedule override must not become the next interactive default. */
@@ -2045,6 +2048,21 @@ const make = Effect.gen(function* () {
       );
     const requestedModelSelection =
       input.modelSelection ?? threadModelSelections.get(input.threadId) ?? thread.modelSelection;
+    if (input.codexReview !== undefined) {
+      const info = yield* providerService.getInstanceInfo(requestedModelSelection.instanceId);
+      if (
+        info.driverKind !== "codex" ||
+        (input.attachments?.length ?? 0) > 0 ||
+        (activeSession !== undefined &&
+          (activeSession.status !== "ready" || activeSession.activeTurnId !== undefined))
+      ) {
+        return yield* new ProviderAdapterRequestError({
+          provider: providerErrorLabel(info.driverKind),
+          method: "review/start",
+          detail: "Native review requires an idle Codex chat and no attachments.",
+        });
+      }
+    }
     const shouldBootstrapProviderContext =
       input.modelSelection !== undefined
         ? yield* shouldBootstrapProviderContinuationContext({
@@ -2109,6 +2127,11 @@ const make = Effect.gen(function* () {
 
     const request: ProviderSendTurnInput = {
       threadId: input.threadId,
+      ...(input.deliveryPriority !== undefined ? { deliveryPriority: input.deliveryPriority } : {}),
+      ...(input.inputOrigin !== undefined ? { inputOrigin: input.inputOrigin } : {}),
+      ...(input.codexReview !== undefined
+        ? { codexReview: input.codexReview, allowActiveTurnSteerFallback: false }
+        : {}),
       ...(input.messageId !== undefined ? { messageId: input.messageId } : {}),
       ...(input.allowActiveTurnSteerFallback !== undefined
         ? { allowActiveTurnSteerFallback: input.allowActiveTurnSteerFallback }
@@ -2131,14 +2154,19 @@ const make = Effect.gen(function* () {
       : undefined;
     return {
       request,
-      configuration: snapshotProviderTurnConfiguration({
-        session: ensuredSession,
-        request,
-        instanceId,
-        providerDisplayName,
-        models,
-        settingsSource: "submitted",
-      }),
+      // review/start inherits native review settings (which may select a
+      // separate review model). Do not publish the ordinary turn's submitted
+      // composer configuration as if those unsupported overrides were applied.
+      configuration: input.codexReview
+        ? undefined
+        : snapshotProviderTurnConfiguration({
+            session: ensuredSession,
+            request,
+            instanceId,
+            providerDisplayName,
+            models,
+            settingsSource: "submitted",
+          }),
       activeTurnId: ensuredSession.status === "running" ? ensuredSession.activeTurnId : undefined,
     } satisfies PreparedProviderTurn;
   });
@@ -3043,6 +3071,7 @@ const make = Effect.gen(function* () {
               ),
             );
       if (
+        event.payload.codexReview === undefined &&
         runtimeActiveSession?.status === "running" &&
         runtimeActiveSession.activeTurnId !== undefined &&
         runtimeActiveSession.providerInstanceId === desiredModelSelection.instanceId
@@ -3204,6 +3233,9 @@ const make = Effect.gen(function* () {
             threadId: event.payload.threadId,
             expectedTurnId: activeTurnId,
             messageId: event.payload.messageId,
+            ...(event.payload.deliveryPriority !== undefined
+              ? { deliveryPriority: event.payload.deliveryPriority }
+              : {}),
             ...(normalizedInput ? { input: normalizedInput } : {}),
             ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
           })
@@ -3277,6 +3309,15 @@ const make = Effect.gen(function* () {
       const sendTurnRequest = yield* buildSendTurnRequestForThread({
         threadId: event.payload.threadId,
         messageId: event.payload.messageId,
+        ...(event.payload.codexReview !== undefined
+          ? { codexReview: event.payload.codexReview, allowActiveTurnSteerFallback: false }
+          : {}),
+        ...(event.payload.deliveryPriority !== undefined
+          ? { deliveryPriority: event.payload.deliveryPriority }
+          : {}),
+        ...(event.payload.scheduledFollowUp !== undefined
+          ? { inputOrigin: "scheduled" as const }
+          : {}),
         ...(terminalSteerRecovery !== undefined ? { allowActiveTurnSteerFallback: false } : {}),
         messageText: message.text,
         ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
@@ -3300,6 +3341,7 @@ const make = Effect.gen(function* () {
         activeTurnId: TurnId,
         cause: Cause.Cause<unknown>,
       ) => {
+        if (event.payload.codexReview !== undefined) return recoverTurnStartFailure(cause);
         if (event.payload.terminalSteerRecovery !== undefined) {
           return queueGuardedTerminalSteerRecovery({
             threadId: event.payload.threadId,
@@ -3320,6 +3362,9 @@ const make = Effect.gen(function* () {
             threadId: event.payload.threadId,
             expectedTurnId: activeTurnId,
             messageId: event.payload.messageId,
+            ...(event.payload.deliveryPriority !== undefined
+              ? { deliveryPriority: event.payload.deliveryPriority }
+              : {}),
             ...(normalizedInput ? { input: normalizedInput } : {}),
             ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
           })
@@ -4582,6 +4627,9 @@ const make = Effect.gen(function* () {
     yield* providerService
       .steerTurn({
         threadId: event.payload.threadId,
+        ...(event.payload.deliveryPriority !== undefined
+          ? { deliveryPriority: event.payload.deliveryPriority }
+          : {}),
         expectedTurnId,
         messageId: event.payload.messageId,
         ...(normalizedInput ? { input: normalizedInput } : {}),
@@ -5266,6 +5314,7 @@ const make = Effect.gen(function* () {
         interactionMode: event.payload.interactionMode,
         allowActiveTurnSteerFallback: false,
         rememberModelSelection: false,
+        inputOrigin: "scheduled",
         createdAt: event.payload.createdAt,
         thread,
       });

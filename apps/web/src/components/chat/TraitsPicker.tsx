@@ -322,6 +322,13 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
             <div className="px-2 pt-1.5 pb-1 font-medium text-muted-foreground text-xs">
               {descriptor.label}
             </div>
+            {descriptor.id === "serviceTier" &&
+            descriptor.currentValue &&
+            !descriptor.options.some((option) => option.id === descriptor.currentValue) ? (
+              <p role="status" className="px-2 pb-1.5 text-destructive text-xs">
+                This saved tier is unavailable. Choose an available tier before sending.
+              </p>
+            ) : null}
             {ultrathinkInBodyText && descriptor.id === primarySelectDescriptor?.id ? (
               <div className="px-2 pb-1.5 text-muted-foreground/80 text-xs">
                 Your prompt contains &quot;ultrathink&quot; in the text. Remove it to change this

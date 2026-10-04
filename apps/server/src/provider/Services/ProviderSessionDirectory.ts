@@ -19,6 +19,7 @@ import type {
   ProviderValidationError,
 } from "../Errors.ts";
 import type { ConversationRewindStore } from "../../persistence/Services/ConversationRewinds.ts";
+import type { TaskControlJournal } from "../../persistence/TaskControlJournal.ts";
 
 export interface ProviderRuntimeBinding {
   readonly threadId: ThreadId;
@@ -49,6 +50,7 @@ export type ProviderSessionDirectoryWriteError =
 export interface ProviderSessionDirectoryShape {
   /** Private cross-store mutation journal, never exposed in renderer snapshots. */
   readonly rewinds?: ConversationRewindStore;
+  readonly taskControls?: TaskControlJournal;
   readonly upsert: (
     binding: ProviderRuntimeBinding,
   ) => Effect.Effect<void, ProviderSessionDirectoryWriteError>;

@@ -14,6 +14,7 @@ import {
   ProviderInstanceId,
   RuntimeItemId,
   RuntimeTaskId,
+  SubagentRuntimeId,
 } from "@cafecode/contracts";
 import {
   ApprovalRequestId,
@@ -576,6 +577,84 @@ describe("ProviderRuntimeIngestion", () => {
       retireThreadForHardDelete: ingestion.retireThreadForHardDelete,
     };
   }
+
+  it("records native review lifecycle without duplicating findings or finishing a still-active turn", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("review-native-turn");
+    const base = {
+      threadId,
+      turnId,
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+    };
+    harness.emit({ ...base, type: "turn.started", eventId: asEventId("review-turn-start") });
+    harness.emit({
+      ...base,
+      type: "item.started",
+      eventId: asEventId("review-entered"),
+      itemId: asItemId("review-enter-item"),
+      payload: {
+        itemType: "review_entered",
+        title: "Native review",
+        detail: "Inspect concurrency",
+      },
+    });
+    harness.emit({
+      ...base,
+      type: "item.completed",
+      eventId: asEventId("review-exited"),
+      itemId: asItemId("review-exit-item"),
+      payload: {
+        itemType: "review_exited",
+        title: "Native review findings",
+        detail: "No findings.",
+      },
+    });
+    await harness.drain();
+    const reviewing = await waitForThread(harness.readModel, (thread) =>
+      thread.activities.some((activity) => activity.kind === "review.exited"),
+    );
+    expect(
+      reviewing.activities
+        .filter((activity) => activity.kind.startsWith("review."))
+        .map((activity) => activity.kind),
+    ).toEqual(["review.started", "review.exited"]);
+    expect(reviewing.latestTurn?.state).toBe("running");
+    expect(reviewing.messages.filter((message) => message.role === "assistant")).toHaveLength(0);
+
+    // Native Codex emits findings as an ordinary assistant item after the exit
+    // marker. That is the single transcript source, even on replay.
+    const assistant = {
+      ...base,
+      type: "item.completed" as const,
+      eventId: asEventId("review-findings"),
+      itemId: asItemId("review-assistant-item"),
+      payload: {
+        itemType: "assistant_message" as const,
+        title: "Assistant message",
+        detail: "No findings.",
+      },
+    };
+    harness.emit(assistant);
+    harness.emit(assistant);
+    harness.emit({
+      ...base,
+      type: "turn.completed",
+      eventId: asEventId("review-turn-complete"),
+      payload: { state: "completed" },
+    });
+    await harness.drain();
+    const done = await waitForThread(
+      harness.readModel,
+      (thread) => thread.latestTurn?.state === "completed",
+    );
+    expect(
+      done.messages
+        .filter((message) => message.role === "assistant")
+        .map((message) => message.text),
+    ).toEqual(["No findings."]);
+  });
 
   it.each([
     { phase: "prepared", restart: false },
@@ -4747,6 +4826,92 @@ describe("ProviderRuntimeIngestion", () => {
     expect(data?.toolCallId).toBe("tool-read-1");
     expect(data?.kind).toBe("read");
     expect(rawOutput?.content).toMatch(/^\[content omitted: \d+ chars, \d+ lines\]$/);
+  });
+
+  it("persists ordinary task controls and exact foreground retraction as distinct durable activities", async () => {
+    const harness = await createHarness();
+    const reference = {
+      taskId: "server-control",
+      runtimeId: SubagentRuntimeId.make("00000000-0000-4000-8000-000000000001"),
+      capability: {
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        taskGeneration: "00000000-0000-4000-8000-000000000002",
+        canStop: false,
+        canBackground: true,
+      },
+    };
+    const base = {
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-controls"),
+    };
+    harness.emit({
+      ...base,
+      type: "item.started",
+      eventId: asEventId("control-item-start"),
+      itemId: asItemId("tool"),
+      payload: { itemType: "dynamic_tool_call", title: "Lookup", individualTaskControl: reference },
+    });
+    harness.emit({
+      ...base,
+      type: "item.updated",
+      eventId: asEventId("control-item-retracted"),
+      itemId: asItemId("tool"),
+      payload: { itemType: "dynamic_tool_call", title: "Lookup" },
+    });
+    const nativeReference = {
+      ...reference,
+      taskId: "native-task",
+      capability: { ...reference.capability, canStop: true },
+    };
+    harness.emit({
+      ...base,
+      type: "task.started",
+      eventId: asEventId("control-native-start"),
+      payload: {
+        taskId: "native-task",
+        taskType: "local_bash",
+        individualTaskControl: nativeReference,
+      },
+    });
+    harness.emit({
+      ...base,
+      type: "item.completed",
+      eventId: asEventId("control-item-end"),
+      itemId: asItemId("tool"),
+      payload: { itemType: "dynamic_tool_call", status: "completed" },
+    });
+    harness.emit({
+      ...base,
+      type: "task.completed",
+      eventId: asEventId("control-native-end"),
+      payload: { taskId: "native-task", status: "completed" },
+    });
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.id === "control-native-end"),
+    );
+    const activities = thread.activities.filter((activity) =>
+      String(activity.id).startsWith("control-"),
+    );
+    expect(activities).toHaveLength(5);
+    expect(activities[0]?.payload).toMatchObject({
+      itemId: "tool",
+      individualTaskControl: reference,
+    });
+    expect(activities[1]?.payload).toMatchObject({ itemId: "tool" });
+    expect(activities[1]?.payload).not.toHaveProperty("individualTaskControl");
+    expect(activities[2]?.payload).toMatchObject({
+      taskId: "native-task",
+      individualTaskControl: nativeReference,
+    });
+    expect(activities.map((activity) => activity.kind)).toEqual([
+      "tool.started",
+      "tool.updated",
+      "task.started",
+      "tool.completed",
+      "task.completed",
+    ]);
   });
 
   it("projects Codex context compaction item lifecycle into visible tool activity", async () => {

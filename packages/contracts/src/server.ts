@@ -192,7 +192,9 @@ export type ServerProviderSlashCommand = typeof ServerProviderSlashCommand.Type;
 export const ServerProviderSkill = Schema.Struct({
   name: TrimmedNonEmptyString,
   description: Schema.optional(TrimmedNonEmptyString),
-  path: TrimmedNonEmptyString,
+  // Legacy provider snapshots can retain paths. On-demand Codex discovery
+  // deliberately omits them: native $name lookup owns skill file resolution.
+  path: Schema.optional(TrimmedNonEmptyString),
   pluginId: Schema.optional(TrimmedNonEmptyString),
   scope: Schema.optional(TrimmedNonEmptyString),
   enabled: Schema.Boolean,
@@ -230,6 +232,9 @@ export type ServerProviderThreadGoalSupport = typeof ServerProviderThreadGoalSup
 export const ServerProviderRuntimeCapabilities = Schema.Struct({
   // Older emitters cannot promise a per-chat override; absence is unsupported.
   subagentConcurrency: Schema.optional(Schema.Boolean),
+  /** Explicit priority is qualified against the configured native CLI. */
+  deliveryPriority: Schema.optional(Schema.Boolean),
+  taskControls: Schema.optional(Schema.Boolean),
   liveSteer: ServerProviderLiveSteerSupport.pipe(
     Schema.withDecodingDefault(Effect.succeed("unsupported" as const)),
   ),

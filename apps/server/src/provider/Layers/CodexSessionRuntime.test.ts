@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import * as Toml from "toml";
+import { makeCodexChildUsageAccounting } from "../codexChildUsageAccounting.ts";
 
 import { it as effectIt } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
@@ -1200,6 +1201,68 @@ describe("Codex bounded reconnect child reconciliation", () => {
             payload: { threadId, includeTurns: false },
           })),
         ]);
+      }),
+  );
+
+  effectIt.effect(
+    "reuses exact liveness metadata for prospective accounting without another read",
+    () =>
+      Effect.gen(function* () {
+        const calls: unknown[] = [];
+        const response = makeCodexMetadataResponseFixture("child");
+        const request = ((method: string, payload: unknown) =>
+          Effect.sync(() => {
+            calls.push({ method, payload });
+            return {
+              thread: {
+                ...response.thread,
+                parentThreadId: "root",
+                model: "gpt-6.1-sol",
+                source: { subAgent: { thread_spawn: { parent_thread_id: "root" } } },
+                preview: "private content must not enter accounting",
+                cwd: "/private/native",
+              },
+            };
+          })) as CodexBoundedThreadSnapshotClient["request"];
+        const result = yield* readCodexChildLivenessSnapshotWithClient({
+          client: { request },
+          providerThreadId: "child",
+        });
+        assert.deepEqual(result.usageMetadata, {
+          id: "child",
+          parentThreadId: "root",
+          model: "gpt-6.1-sol",
+        });
+        const collector = makeCodexChildUsageAccounting();
+        collector.observeMetadata(result.usageMetadata!, "root");
+        const usage = (inputTokens: number) =>
+          collector.observe({
+            rootId: "root",
+            routes: new Map([["child", "parent-turn"]]),
+            method: "thread/tokenUsage/updated",
+            payload: {
+              threadId: "child",
+              tokenUsage: {
+                total: {
+                  inputTokens,
+                  cachedInputTokens: 0,
+                  outputTokens: 0,
+                  reasoningOutputTokens: 0,
+                },
+              },
+            },
+          });
+        assert.equal(usage(100), undefined);
+        assert.equal(usage(130)?.models[0]?.inputTokens, 30);
+        assert.equal(usage(130), undefined);
+        assert.deepEqual(calls, [
+          { method: "thread/read", payload: { threadId: "child", includeTurns: false } },
+        ]);
+        const wrongIdentity = yield* readCodexChildLivenessSnapshotWithClient({
+          client: { request },
+          providerThreadId: "other",
+        });
+        assert.equal(wrongIdentity.usageMetadata, undefined);
       }),
   );
 
@@ -3933,6 +3996,22 @@ describe("Codex child conversation routing", () => {
       }),
       true,
     );
+    for (const method of [
+      "thread/tokenUsage/updated",
+      "thread/settings/updated",
+      "model/rerouted",
+    ]) {
+      assert.deepEqual(
+        resolveCodexChildConversationNotification(
+          new Map([["thread-child", TurnId.make("owner-turn")]]),
+          { method, params: { threadId: "thread-child" } } as Parameters<
+            typeof resolveCodexChildConversationNotification
+          >[1],
+          "root-thread",
+        ),
+        { parentTurnId: "owner-turn", suppressLifecycle: true },
+      );
+    }
     assert.equal(
       isCodexChildConversationWorkNotification({
         method: "thread/tokenUsage/updated",
@@ -5022,6 +5101,26 @@ describe("Codex native root completion and aggregate input admission", () => {
           assert.equal(retry._tag, ambiguous ? "Failure" : "Success");
         }
       }),
+  );
+
+  effectIt.effect("keeps idle-only native reviews behind the active-child aggregate fence", () =>
+    Effect.gen(function* () {
+      const boundary = yield* makeBoundary();
+      // makeBoundary owns a completed native root whose aggregate is still
+      // running for children. A review must not borrow the specialized saved
+      // follow-up proof that can deliberately supersede that aggregate.
+      const before = yield* Ref.get(boundary.sessionRef);
+      assert.equal(before.status, "running");
+      const outcome = yield* admitCodexTurnStartLifecycleBoundary({
+        ...boundary,
+        allowActiveTurnSteerFallback: false,
+        expectedCompletedRootTurnId: undefined,
+      }).pipe(Effect.exit);
+      assert.equal(outcome._tag, "Failure");
+      assert.deepEqual(yield* Ref.get(boundary.sessionRef), before);
+      assert.equal(yield* Ref.get(boundary.nativeTurnStartPendingRef), false);
+      assert.equal(yield* Ref.get(boundary.nativeTurnStartRequestRef), undefined);
+    }),
   );
 
   effectIt.effect("serializes native start and manual compaction admission before either RPC", () =>

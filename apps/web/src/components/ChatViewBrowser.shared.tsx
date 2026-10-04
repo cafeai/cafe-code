@@ -11191,30 +11191,42 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           targetMessageId: "msg-user-skill-tooltip-target" as MessageId,
           targetText: "skill tooltip thread",
         }),
-        configureFixture: (nextFixture) => {
-          const provider = nextFixture.serverConfig.providers[0];
-          if (!provider) {
-            throw new Error("Expected default provider in test fixture.");
-          }
-          (
-            provider as {
-              skills: ServerConfig["providers"][number]["skills"];
-            }
-          ).skills = [
-            {
-              name: "agent-browser",
-              displayName: "Agent Browser",
-              description: "Open pages, click around, and inspect web apps.",
-              path: "/Users/test/.agents/skills/agent-browser/SKILL.md",
-              enabled: true,
-            },
-          ];
+        resolveRpc: (request) => {
+          if (request._tag !== WS_METHODS.serverListProviderSkills) return undefined;
+          // Discovery is owned by the current chat/account, not a deprecated
+          // provider-global catalogue or a renderer-selected filesystem path.
+          expect(request).toEqual({
+            _tag: WS_METHODS.serverListProviderSkills,
+            instanceId: ProviderInstanceId.make("codex"),
+            context: { kind: "thread", threadId: THREAD_ID },
+          });
+          return {
+            status: "available",
+            skills: [
+              {
+                name: "agent-browser",
+                displayName: "Agent Browser",
+                enabled: true,
+                shortDescription: "Open pages, click around, and inspect web apps.",
+                scope: "user",
+              },
+            ],
+          };
         },
       });
 
       try {
-        useComposerDraftStore.getState().setPrompt(THREAD_REF, "use the $agent-browser ");
+        await waitForComposerEditor();
+        expect(
+          wsRequests.filter((request) => request._tag === WS_METHODS.serverListProviderSkills),
+        ).toHaveLength(0);
+        await page.getByTestId("composer-editor").fill("use the $agent");
+        const skillOption = await waitForComposerMenuItem("skill:codex:agent-browser");
+        await skillOption.click();
         await waitForComposerText("use the $agent-browser ");
+        expect(
+          document.querySelector('[data-composer-item-id="skill:codex:agent-browser"]'),
+        ).toBeNull();
 
         await waitForElement(
           () => document.querySelector<HTMLElement>('[data-composer-skill-chip="true"]'),
@@ -11232,6 +11244,9 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           },
           { timeout: 8_000, interval: 16 },
         );
+        expect(
+          wsRequests.filter((request) => request._tag === WS_METHODS.serverListProviderSkills),
+        ).toHaveLength(1);
       } finally {
         await mounted.cleanup();
       }

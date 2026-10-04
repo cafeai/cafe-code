@@ -38,6 +38,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as Semaphore from "effect/Semaphore";
 import { HttpClient } from "effect/unstable/http";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
@@ -53,7 +54,9 @@ import {
   makePendingCodexProvider,
   readCodexAccountRateLimits,
   readCodexAppServerModels,
+  withCodexMetadataClient,
 } from "../Layers/CodexProvider.ts";
+import { requestCodexSkills } from "../codexSkills.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import type { ProviderDriver, ProviderInstance } from "../ProviderDriver.ts";
@@ -261,6 +264,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       // here; the registry only has to worry about snapshot-build and
       // spawner-availability failures surfaced from the status probe below.
       const adapter = yield* makeCodexAdapter(effectiveConfig, {
+        getModels: () => snapshot.getSnapshot.pipe(Effect.map((value) => value.models)),
         getSubagentConcurrencySupport: () =>
           supportsSubagentConcurrency("codex", observedCliVersion),
         instanceId,
@@ -268,7 +272,10 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         prepareRuntimeHome: refreshCodexShadowHome,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
       });
-      const textGeneration = yield* makeCodexTextGeneration(effectiveConfig, effectiveEnvironment);
+      const textGeneration = yield* makeCodexTextGeneration(effectiveConfig, effectiveEnvironment, {
+        instanceId,
+        getModels: () => snapshot.getSnapshot.pipe(Effect.map((value) => value.models)),
+      });
 
       // Build a managed snapshot whose settings never change — mutations come
       // in as instance rebuilds from the registry rather than in-place
@@ -413,6 +420,43 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         ),
       );
 
+      const skillReadPermit = yield* Semaphore.make(1);
+      const discoverSkills: NonNullable<ProviderInstance["discoverSkills"]> = (cwd) =>
+        Effect.gen(function* () {
+          const current = yield* snapshot.getSnapshot;
+          if (!enabled || !current.enabled || current.auth.status !== "authenticated") {
+            return { status: "disabled" as const, skills: [] };
+          }
+          return yield* skillReadPermit
+            .withPermit(
+              refreshCodexShadowHome.pipe(
+                Effect.andThen(
+                  withCodexMetadataClient(
+                    {
+                      binaryPath: effectiveConfig.binaryPath,
+                      homePath: effectiveConfig.homePath,
+                      // Process cwd remains backend-owned; only skills/list receives
+                      // the exact authorized project's cwd. No thread/model starts.
+                      cwd: serverConfig.stateDir,
+                      environment: effectiveEnvironment,
+                    },
+                    (client) => requestCodexSkills(client, cwd),
+                  ),
+                ),
+              ),
+            )
+            .pipe(
+              Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+              Effect.scoped,
+              Effect.timeout(Duration.seconds(15)),
+              Effect.catchCause((cause) =>
+                Cause.hasInterrupts(cause)
+                  ? Effect.interrupt
+                  : Effect.succeed({ status: "unavailable" as const, skills: [] }),
+              ),
+            );
+        });
+
       return {
         instanceId,
         driverKind: DRIVER_KIND,
@@ -423,6 +467,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         snapshot,
         adapter,
         textGeneration,
+        discoverSkills,
         usageReset: {
           run: (operation: ProviderUsageResetOperation) =>
             refreshCodexShadowHome.pipe(

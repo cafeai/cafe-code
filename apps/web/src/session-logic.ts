@@ -92,6 +92,7 @@ export interface WorkLogEntry {
     historyId?: string;
     /** Native liveness evidence only, never a transcript authorization key. */
     runtimeId?: string;
+    taskControl?: import("@cafecode/contracts").ProviderTaskControlCapability;
   };
 }
 
@@ -777,6 +778,7 @@ export function subagentToWorkLogEntry(subagent: DerivedSubagentActivity): WorkL
       ...(subagent.completedAt ? { completedAt: subagent.completedAt } : {}),
       ...(subagent.historyId ? { historyId: subagent.historyId } : {}),
       ...(subagent.runtimeId ? { runtimeId: subagent.runtimeId } : {}),
+      ...(subagent.taskControl ? { taskControl: subagent.taskControl } : {}),
     },
   };
 }

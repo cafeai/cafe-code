@@ -16,6 +16,8 @@ import {
   ProviderDriverKind,
   type CodexSettings,
   type ModelSelection,
+  type ProviderInstanceId,
+  type ServerProviderModel,
 } from "@cafecode/contracts";
 import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@cafecode/shared/git";
 
@@ -25,6 +27,7 @@ import { expandHomePath } from "../pathExpansion.ts";
 import { TextGenerationError } from "@cafecode/contracts";
 import { AuxiliaryUsage } from "../usageStats/Services/AuxiliaryUsage.ts";
 import { makeCodexAuxiliaryUsageReader } from "./auxiliaryUsage.ts";
+import { resolveCodexServiceTier } from "../provider/codexServiceTier.ts";
 import {
   type BranchNameGenerationInput,
   type ThreadTitleGenerationResult,
@@ -44,10 +47,7 @@ import {
   sanitizeThreadTitle,
   toJsonSchemaObject,
 } from "./TextGenerationUtils.ts";
-import {
-  getModelSelectionBooleanOptionValue,
-  getModelSelectionStringOptionValue,
-} from "@cafecode/shared/model";
+import { getModelSelectionStringOptionValue } from "@cafecode/shared/model";
 
 const CODEX_TIMEOUT_MS = 180_000;
 const encodeJsonString = Schema.encodeEffect(Schema.UnknownFromJsonString);
@@ -58,6 +58,10 @@ const encodeJsonString = Schema.encodeEffect(Schema.UnknownFromJsonString);
 export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(function* (
   codexConfig: CodexSettings,
   environment: NodeJS.ProcessEnv = process.env,
+  tierAuthority?: {
+    readonly instanceId: ProviderInstanceId;
+    readonly getModels: () => Effect.Effect<ReadonlyArray<ServerProviderModel>>;
+  },
 ) {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -201,7 +205,12 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       const reasoningEffort =
         getModelSelectionStringOptionValue(modelSelection, "reasoningEffort") ??
         DEFAULT_GIT_TEXT_GENERATION_REASONING_EFFORT;
-      const fastMode = getModelSelectionBooleanOptionValue(modelSelection, "fastMode");
+      const tier = resolveCodexServiceTier(
+        modelSelection,
+        tierAuthority?.instanceId ?? modelSelection.instanceId,
+        tierAuthority ? yield* tierAuthority.getModels() : undefined,
+      );
+      if (tier.error) return yield* new TextGenerationError({ operation, detail: tier.error });
       const command = ChildProcess.make(
         codexConfig.binaryPath || "codex",
         [
@@ -219,8 +228,8 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
           // user's priority config, otherwise even a short metadata helper can
           // silently incur the premium the Cafe selection turned off. Only an
           // absent selection delegates to upstream configuration.
-          ...(fastMode !== undefined
-            ? ["--config", `service_tier="${fastMode ? "priority" : "default"}"`]
+          ...(tier.serviceTier !== undefined
+            ? ["--config", `service_tier=${JSON.stringify(tier.serviceTier)}`]
             : []),
           "--output-schema",
           schemaPath,

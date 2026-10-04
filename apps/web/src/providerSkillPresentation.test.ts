@@ -25,6 +25,11 @@ describe("formatProviderSkillDisplayName", () => {
 });
 
 describe("formatProviderSkillInstallSource", () => {
+  it("presents path-free native Codex scopes and plugin provenance", () => {
+    expect(formatProviderSkillInstallSource({ scope: "repo" })).toBe("Project");
+    expect(formatProviderSkillInstallSource({ scope: "user" })).toBe("Personal");
+    expect(formatProviderSkillInstallSource({ pluginId: "publisher/plugin" })).toBe("App");
+  });
   it("uses explicit Codex plugin ownership before path heuristics", () => {
     expect(
       formatProviderSkillInstallSource({

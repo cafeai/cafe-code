@@ -126,6 +126,10 @@ function resolveDescriptorChoiceValue(
   if (descriptor.options.some((option) => option.id === trimmed)) {
     return trimmed;
   }
+  // Service tiers can spend a different entitlement. Preserve a removed choice
+  // for explicit user correction and server rejection instead of silently
+  // replacing it with the first/default paid choice after a catalogue refresh.
+  if (descriptor.id === "serviceTier") return trimmed;
   return descriptor.currentValue ?? descriptor.options.find((option) => option.isDefault)?.id;
 }
 
@@ -178,13 +182,39 @@ export function getProviderOptionDescriptors(input: {
 }): ReadonlyArray<ProviderOptionDescriptor> {
   const { caps, selections } = input;
   const baseDescriptors = (caps.optionDescriptors ?? []).map(cloneDescriptor);
+  if (
+    !baseDescriptors.some((entry) => entry.id === "serviceTier") &&
+    typeof getRawSelectionValueById(selections, "serviceTier") === "string"
+  ) {
+    // Losing a model/account capability is not consent to erase a persisted
+    // tier. Keep an inert selector with only the safe explicit-standard escape.
+    baseDescriptors.push({
+      id: "serviceTier",
+      label: "Service tier",
+      type: "select",
+      options: [{ id: "default", label: "Standard" }],
+    });
+  }
 
-  return baseDescriptors.map((descriptor) =>
-    withDescriptorCurrentValue(
-      descriptor,
-      getRawSelectionValueById(selections, descriptor.id) ?? descriptor.currentValue,
-    ),
-  );
+  // A retained exact tier and the deprecated Boolean must not both be editable:
+  // changing Fast would appear to work while the exact tier still takes priority.
+  const hasTier = baseDescriptors.some((descriptor) => descriptor.id === "serviceTier");
+  return baseDescriptors
+    .filter((descriptor) => !(hasTier && descriptor.id === "fastMode"))
+    .map((descriptor) =>
+      withDescriptorCurrentValue(
+        descriptor,
+        getRawSelectionValueById(selections, descriptor.id) ??
+          (descriptor.id === "serviceTier"
+            ? getProviderOptionBooleanSelectionValue(selections, "fastMode") === true
+              ? "priority"
+              : getProviderOptionBooleanSelectionValue(selections, "fastMode") === false
+                ? "default"
+                : undefined
+            : undefined) ??
+          descriptor.currentValue,
+      ),
+    );
 }
 
 export function getProviderOptionCurrentValue(
@@ -219,7 +249,10 @@ export function getProviderOptionCurrentLabel(
   if (typeof currentValue !== "string") {
     return undefined;
   }
-  return descriptor.options.find((option) => option.id === currentValue)?.label;
+  return (
+    descriptor.options.find((option) => option.id === currentValue)?.label ??
+    (descriptor.id === "serviceTier" ? "Unavailable service tier" : undefined)
+  );
 }
 
 export function buildProviderOptionSelectionsFromDescriptors(

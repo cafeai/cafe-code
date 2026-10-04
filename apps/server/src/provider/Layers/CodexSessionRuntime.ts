@@ -28,6 +28,11 @@ import {
   TurnId,
 } from "@cafecode/contracts";
 import { normalizeModelSlug } from "@cafecode/shared/model";
+import {
+  codexChildUsageMetadata,
+  makeCodexChildUsageAccounting,
+  type CodexChildUsageMetadata,
+} from "../codexChildUsageAccounting.ts";
 import { validateInteractionResponse } from "@cafecode/shared/providerInteraction";
 import {
   registerCodexInteractions,
@@ -61,6 +66,7 @@ import * as EffectCodexSchema from "effect-codex-app-server/schema";
 import { buildCodexInitializeParams } from "./CodexProvider.ts";
 import { isCodexRootAgentPath } from "./CodexSubagentPath.ts";
 import { rewindCodexThreadWithClient } from "./CodexThreadRewind.ts";
+import { codexNativeReviewParams, decodeCodexNativeReviewResponse } from "./CodexNativeReview.ts";
 import type { ProviderAdapterRewindOutcomeUnknownError } from "../Errors.ts";
 import {
   buildCodexSteerClientCorrelationId,
@@ -440,6 +446,7 @@ export interface CodexSessionRuntimeOptions {
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
+  readonly codexReview?: import("@cafecode/contracts").CodexReviewTarget;
   /** Internal exact-root recovery guard; never forwarded as app-server params. */
   readonly expectedCompletedRootTurnId?: TurnId | undefined;
   /** False without an exact root pin admits only a currently ready native root. */
@@ -937,6 +944,8 @@ export interface CodexChildLivenessSnapshot {
   readonly state: "active" | "inactive" | undefined;
   readonly terminalStatus?: "idle" | "notLoaded" | "systemError" | "stopped" | undefined;
   readonly threadName?: string | undefined;
+  /** Bounded numeric-accounting authority, never public transcript metadata. */
+  readonly usageMetadata?: CodexChildUsageMetadata | undefined;
 }
 
 /**
@@ -2915,8 +2924,10 @@ export const readCodexChildLivenessSnapshotWithClient = Effect.fn(
                     .trim()
                     .slice(0, 160)
                 : undefined;
+            const usageMetadata = codexChildUsageMetadata(response.thread);
             return {
               providerThreadId,
+              ...(usageMetadata ? { usageMetadata } : {}),
               ...(threadName ? { threadName } : {}),
               terminalStatus: status !== undefined && status !== "active" ? status : undefined,
               state: status === "active" ? "active" : status === undefined ? undefined : "inactive",
@@ -3361,6 +3372,10 @@ export function acceptsCodexChildNotification(
 
 function shouldSuppressChildConversationNotification(method: string): boolean {
   return (
+    // These fields describe the child's settings, not the root's attribution.
+    // The private prospective child ledger observes them before suppression.
+    method === "thread/settings/updated" ||
+    method === "model/rerouted" ||
     method === "thread/started" ||
     method === "thread/status/changed" ||
     method === "thread/archived" ||
@@ -5462,6 +5477,7 @@ export const makeCodexSessionRuntime = (
     // liveness of historical children just because it resumes the same root.
     const runtimeGeneration = makeCodexSubagentRuntimeGeneration();
     const { subagentRuntimeId } = runtimeGeneration;
+    const childUsageAccounting = makeCodexChildUsageAccounting();
     const initialSession = {
       provider: PROVIDER,
       subagentRuntimeId,
@@ -6588,12 +6604,26 @@ export const makeCodexSessionRuntime = (
           Effect.gen(function* () {
             if (yield* Ref.get(closedRef)) return;
             const currentRoutes = yield* Ref.get(collabReceiverTurnsRef);
+            const currentChildren = yield* Ref.get(childConversationLivenessRef);
+            const accountingRoot = yield* currentSessionProviderThreadId;
+            for (const result of results) {
+              // Reuse this already-required bounded metadata read; never add a
+              // usage polling request or accept a response for a rebound child.
+              if (
+                result.usageMetadata &&
+                currentRoutes.get(result.providerThreadId) === turnId &&
+                currentChildren.get(result.providerThreadId) ===
+                  childLiveness.get(result.providerThreadId)
+              ) {
+                childUsageAccounting.observeMetadata(result.usageMetadata, accountingRoot);
+              }
+            }
             const reconciled = reconcileCodexChildLivenessSnapshots({
               turnId,
               observedAt,
               routes: currentRoutes,
               sampled: childLiveness,
-              current: yield* Ref.get(childConversationLivenessRef),
+              current: currentChildren,
               results,
             });
             yield* Ref.set(childConversationLivenessRef, reconciled.liveness);
@@ -7051,6 +7081,7 @@ export const makeCodexSessionRuntime = (
           emittedMethod,
           subagentProjectionMethod,
           childActivityNotifications,
+          childAccounting,
           nativeNotificationAdmitted,
           isCurrentRootTurnCompletion,
         } = yield* aggregateLifecycleSemaphore.withPermits(1)(
@@ -7115,12 +7146,24 @@ export const makeCodexSessionRuntime = (
                   notification,
                 )
               : undefined;
+            // Numeric watermarks share this exact admission/route permit with
+            // lifecycle state. Reconnect discovery cannot rebind a child
+            // between authorization and attribution of its counters.
+            const childAccounting = nativeNotificationAdmitted
+              ? childUsageAccounting.observe({
+                  rootId: rootProviderThreadId,
+                  routes: committed?.routes ?? collabReceiverTurns,
+                  method: notification.method,
+                  payload,
+                })
+              : undefined;
             return {
               childRoute,
               routedTurnId,
               emittedMethod,
               subagentProjectionMethod,
               childActivityNotifications,
+              childAccounting,
               nativeNotificationAdmitted,
               isCurrentRootTurnCompletion,
             };
@@ -7133,6 +7176,24 @@ export const makeCodexSessionRuntime = (
         // generation. Observation/private exact old-turn callback retirement
         // above remains safe; no guessed generation or lifecycle is published.
         if (!nativeNotificationAdmitted) return;
+
+        // Child numeric accounting is independent of lifecycle projection. The
+        // collector requires exact root ancestry and a routed owner, subtracts
+        // preexisting history, and emits only anonymous epoch/model counters.
+        // Keep the original child token notification suppressed below so it
+        // cannot overwrite root context or enter root throughput a second time.
+        if (childAccounting) {
+          yield* emitEvent(
+            {
+              kind: "notification",
+              threadId: options.threadId,
+              method: "cafecode/childUsageAccounting",
+              ...(childRoute ? { turnId: childRoute.parentTurnId } : {}),
+              payload: childAccounting,
+            },
+            observedAt,
+          );
+        }
 
         if (childRoute && subagentProjectionMethod) {
           // This event retains the provider child thread id inside the typed
@@ -7954,13 +8015,22 @@ export const makeCodexSessionRuntime = (
       sendTurn: (input) =>
         Effect.gen(function* () {
           const providerThreadId = yield* readProviderThreadId;
+          const reviewParams =
+            input.codexReview === undefined
+              ? undefined
+              : yield* codexNativeReviewParams(providerThreadId, input.codexReview);
+          if (reviewParams && input.attachments?.length) {
+            return yield* CodexErrors.CodexAppServerRequestError.invalidRequest(
+              "Native review cannot include attachments.",
+            );
+          }
           if (yield* Ref.get(manualCompactionPendingRef)) {
             return yield* CodexErrors.CodexAppServerRequestError.invalidRequest(
               "Cannot send a message while manual compaction is starting.",
             );
           }
           const normalizedModel = normalizeCodexModelSlug(
-            input.model ?? (yield* Ref.get(sessionRef)).model,
+            (reviewParams ? undefined : input.model) ?? (yield* Ref.get(sessionRef)).model,
           );
           const effectiveAdditionalDirectories =
             input.additionalDirectories ?? options.additionalDirectories ?? [];
@@ -7988,7 +8058,7 @@ export const makeCodexSessionRuntime = (
               ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
               additionalDirectories: effectiveAdditionalDirectories,
             });
-          let params = yield* buildParams(nativeReasoningEffort);
+          let params = reviewParams ? undefined : yield* buildParams(nativeReasoningEffort);
           const turnStartRequestedAt = yield* nowIso;
           const turnStartRequestedAtMs = yield* Clock.currentTimeMillis;
           const {
@@ -8005,11 +8075,18 @@ export const makeCodexSessionRuntime = (
             manualCompactionPendingRef,
             closedRef,
             sessionRef,
-            reasoningEffortSnapshotRef,
-            expectedCompletedRootTurnId: input.expectedCompletedRootTurnId,
-            allowActiveTurnSteerFallback: input.allowActiveTurnSteerFallback,
+            ...(!reviewParams ? { reasoningEffortSnapshotRef } : {}),
+            // A native review is always idle-only; internal recovery evidence
+            // cannot grant it permission to supersede a child-owning aggregate.
+            expectedCompletedRootTurnId: reviewParams
+              ? undefined
+              : input.expectedCompletedRootTurnId,
+            allowActiveTurnSteerFallback: reviewParams ? false : input.allowActiveTurnSteerFallback,
           });
-          if (admittedReasoningEffortSnapshot?.revision !== reasoningEffortSnapshot?.revision) {
+          if (
+            !reviewParams &&
+            admittedReasoningEffortSnapshot?.revision !== reasoningEffortSnapshot?.revision
+          ) {
             // Preflight validation happens before reserving a native start.
             // If settings changed while waiting for admission, rebuild only
             // the local wire object from the atomically admitted selection.
@@ -8030,7 +8107,13 @@ export const makeCodexSessionRuntime = (
               ),
             );
           }
-          const rawResponse = yield* client.raw.request("turn/start", params).pipe(
+          // Review uses the same exact native-start reservation as ordinary
+          // turns. The API inherits materialized native settings and accepts
+          // no per-turn model, effort, permission or service-tier overrides.
+          const request = reviewParams
+            ? client.raw.request("review/start", reviewParams)
+            : client.raw.request("turn/start", params!);
+          const rawResponse = yield* request.pipe(
             Effect.tapError((error) =>
               rejectCodexTurnStartLifecycleBoundary({
                 semaphore: aggregateLifecycleSemaphore,
@@ -8043,26 +8126,29 @@ export const makeCodexSessionRuntime = (
           );
           const turnStartAcknowledgedAt = yield* nowIso;
           const turnStartAcknowledgedAtMs = yield* Clock.currentTimeMillis;
-          const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(
-            Effect.mapError((error) =>
-              toProtocolParseError("Invalid turn/start response payload", error),
-            ),
-          );
-          const turnId = TurnId.make(response.turn.id);
-          yield* aggregateLifecycleSemaphore.withPermits(1)(
-            Effect.gen(function* () {
-              if (yield* Ref.get(closedRef)) return;
-              yield* Ref.update(reasoningEffortSnapshotRef, (current) =>
-                acknowledgeCodexReasoningEffortRequest({
-                  current,
-                  providerThreadId,
-                  requestToken,
-                  requestedRevision: admittedReasoningEffortSnapshot?.revision,
-                  requestedEffort: input.effort,
-                }),
+          const response = reviewParams
+            ? yield* decodeCodexNativeReviewResponse(providerThreadId, rawResponse)
+            : yield* decodeV2TurnStartResponse(rawResponse).pipe(
+                Effect.mapError((error) =>
+                  toProtocolParseError("Invalid turn/start response payload", error),
+                ),
               );
-            }),
-          );
+          const turnId = TurnId.make(response.turn.id);
+          if (!reviewParams)
+            yield* aggregateLifecycleSemaphore.withPermits(1)(
+              Effect.gen(function* () {
+                if (yield* Ref.get(closedRef)) return;
+                yield* Ref.update(reasoningEffortSnapshotRef, (current) =>
+                  acknowledgeCodexReasoningEffortRequest({
+                    current,
+                    providerThreadId,
+                    requestToken,
+                    requestedRevision: admittedReasoningEffortSnapshot?.revision,
+                    requestedEffort: input.effort,
+                  }),
+                );
+              }),
+            );
           yield* recordTurnStartObservation({
             providerThreadId,
             turnId,
@@ -8071,10 +8157,10 @@ export const makeCodexSessionRuntime = (
             ackLatencyMs: Math.max(0, turnStartAcknowledgedAtMs - turnStartRequestedAtMs),
             promptByteLength: Buffer.byteLength(input.input ?? "", "utf8"),
             attachmentCount: input.attachments?.length ?? 0,
-            model: normalizedModel,
-            effort: input.effort,
-            interactionMode: input.interactionMode,
-            serviceTier: input.serviceTier,
+            model: reviewParams ? undefined : normalizedModel,
+            effort: reviewParams ? undefined : input.effort,
+            interactionMode: reviewParams ? undefined : input.interactionMode,
+            serviceTier: reviewParams ? undefined : input.serviceTier,
             additionalDirectoryCount: effectiveAdditionalDirectories.length,
             firstNotificationAt: undefined,
             firstNotificationMethod: undefined,
@@ -8099,13 +8185,13 @@ export const makeCodexSessionRuntime = (
             ackLatencyMs: Math.max(0, turnStartAcknowledgedAtMs - turnStartRequestedAtMs),
             promptByteLength: Buffer.byteLength(input.input ?? "", "utf8"),
             attachmentCount: input.attachments?.length ?? 0,
-            model: normalizedModel ?? null,
-            effort: input.effort ?? null,
-            interactionMode: input.interactionMode ?? null,
-            serviceTier: input.serviceTier ?? null,
+            model: reviewParams ? null : (normalizedModel ?? null),
+            effort: reviewParams ? null : (input.effort ?? null),
+            interactionMode: reviewParams ? null : (input.interactionMode ?? null),
+            serviceTier: reviewParams ? null : (input.serviceTier ?? null),
+            operation: reviewParams ? "review/start" : "turn/start",
             additionalDirectoryCount: effectiveAdditionalDirectories.length,
-            semantics:
-              "turn/start is an acknowledgement; turn/started must arrive later from the app-server listener.",
+            semantics: `${reviewParams ? "review/start" : "turn/start"} is an acknowledgement; turn/started must arrive later from the app-server listener.`,
           };
           yield* Effect.logInfo("codex.turnStart.accepted", {
             threadId: options.threadId,
@@ -8117,7 +8203,7 @@ export const makeCodexSessionRuntime = (
             threadId: options.threadId,
             method: "codex.turnStart/accepted",
             turnId,
-            message: "Codex app-server accepted turn/start.",
+            message: `Codex app-server accepted ${reviewParams ? "review/start" : "turn/start"}.`,
             payload: turnStartDiagnostics,
           });
           yield* acknowledgeCodexTurnStartLifecycleBoundary({

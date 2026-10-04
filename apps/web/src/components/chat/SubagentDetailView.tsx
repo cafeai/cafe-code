@@ -23,6 +23,7 @@ import ChatMarkdown from "../ChatMarkdown";
 import { SubagentAvatar } from "../subagents/SubagentAvatar";
 import { cn } from "~/lib/utils";
 import { useChatPane } from "../../chatPaneContext";
+import { SubagentTaskControls } from "./SubagentTaskControls";
 
 type SubagentWorkEntry = WorkLogEntry & {
   readonly subagent: NonNullable<WorkLogEntry["subagent"]>;
@@ -462,6 +463,15 @@ function BoundSubagentDetailView({
           </div>
         </div>
       </header>
+      {threadId && selection.turnId && (
+        <SubagentTaskControls
+          key={subagent.taskControl?.taskGeneration ?? subagent.id}
+          environmentId={environmentId}
+          threadId={threadId}
+          turnId={selection.turnId}
+          subagent={subagent}
+        />
+      )}
 
       <div
         ref={detailScrollRef}

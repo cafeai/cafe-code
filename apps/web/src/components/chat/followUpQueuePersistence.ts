@@ -43,6 +43,7 @@ const persistedItem = Schema.Struct({
   model: Schema.NullOr(Schema.String.check(Schema.isMaxLength(256))),
   promptEffort: Schema.NullOr(Schema.String.check(Schema.isMaxLength(100))),
   modelSelection: ModelSelection,
+  deliveryPriority: Schema.optional(Schema.Literals(["now", "next", "later"])),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   queuedAt: Schema.String.check(Schema.isMaxLength(64)),
@@ -75,6 +76,7 @@ export interface FollowUpQueuePersistenceItem {
   readonly model: string | null;
   readonly promptEffort: string | null;
   readonly modelSelection: ModelSelection;
+  readonly deliveryPriority?: import("@cafecode/contracts").ProviderDeliveryPriority;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
   readonly queuedAt: string;
@@ -237,6 +239,7 @@ function itemMetadata(item: FollowUpQueuePersistenceItem): PersistedItem {
     model: item.model,
     promptEffort: item.promptEffort,
     modelSelection: item.modelSelection,
+    ...(item.deliveryPriority !== undefined ? { deliveryPriority: item.deliveryPriority } : {}),
     runtimeMode: item.runtimeMode,
     interactionMode: item.interactionMode,
     queuedAt: item.queuedAt,
@@ -321,6 +324,7 @@ function hydrateItem(item: PersistedItem): HydratedFollowUpQueueItem {
     model: item.model,
     promptEffort: item.promptEffort,
     modelSelection: item.modelSelection,
+    ...(item.deliveryPriority !== undefined ? { deliveryPriority: item.deliveryPriority } : {}),
     runtimeMode: item.runtimeMode,
     interactionMode: item.interactionMode,
     queuedAt: item.queuedAt,

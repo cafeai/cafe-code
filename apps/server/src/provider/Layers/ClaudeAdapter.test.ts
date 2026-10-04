@@ -82,6 +82,19 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
   private failure: unknown | undefined;
 
   public readonly interruptCalls: Array<void> = [];
+  public readonly stopTaskCalls: string[] = [];
+  public readonly backgroundTaskCalls: string[] = [];
+  public backgroundTaskResult = true;
+  public taskControlFailure: unknown = undefined;
+  readonly stopTask = async (taskId: string): Promise<void> => {
+    this.stopTaskCalls.push(taskId);
+    if (this.taskControlFailure) throw this.taskControlFailure;
+  };
+  readonly backgroundTasks = async (toolUseId: string): Promise<boolean> => {
+    this.backgroundTaskCalls.push(toolUseId);
+    if (this.taskControlFailure) throw this.taskControlFailure;
+    return this.backgroundTaskResult;
+  };
   public readonly cancelAsyncMessageCalls: Array<string> = [];
   public readonly setModelCalls: Array<string | undefined> = [];
   public readonly setPermissionModeCalls: Array<string> = [];
@@ -233,6 +246,7 @@ function makeSuccessfulClaudeResult(sessionId: string): SDKResultSuccess {
 }
 
 function makeHarness(config?: {
+  readonly nativeVersion?: string;
   readonly subagentConcurrencySupported?: boolean;
   readonly newQueryPerSession?: boolean;
   readonly nativeEventLogPath?: string;
@@ -263,6 +277,7 @@ function makeHarness(config?: {
     | undefined;
 
   const adapterOptions: ClaudeAdapterLiveOptions = {
+    getNativeVersion: () => config?.nativeVersion,
     getSubagentConcurrencySupport: () => config?.subagentConcurrencySupported ?? false,
     ...(config?.instanceId ? { instanceId: config.instanceId } : {}),
     ...(config?.environment ? { environment: config.environment } : {}),
@@ -552,6 +567,629 @@ describe("Claude project directory encoding", () => {
 });
 
 describe("ClaudeAdapterLive", () => {
+  for (const toolName of ["WebFetch", "WebSearch", "mcp__test__lookup"]) {
+    it.effect(
+      `retains detached ${toolName} through response boundaries and settles the original item exactly once`,
+      () => {
+        const harness = makeHarness({
+          nativeVersion: "2.1.287",
+          subagentConcurrencySupported: true,
+          environment: {},
+        });
+        return Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          const events: ProviderRuntimeEvent[] = [];
+          const started = yield* Deferred.make<void>();
+          const boundary = yield* Deferred.make<void>();
+          const settled = yield* Deferred.make<void>();
+          yield* Stream.runForEach(adapter.streamEvents, (event) =>
+            Effect.gen(function* () {
+              events.push(event);
+              if (event.type === "item.started" && event.itemId === "detached-tool")
+                yield* Deferred.succeed(started, undefined);
+              if (event.type === "turn.completed") yield* Deferred.succeed(boundary, undefined);
+              if (event.type === "item.completed" && event.itemId === "detached-tool")
+                yield* Deferred.succeed(settled, undefined);
+            }),
+          ).pipe(Effect.forkChild);
+          yield* adapter.startSession({
+            threadId: THREAD_ID,
+            runtimeMode: "approval-required",
+            maxConcurrentSubagents: 8,
+          });
+          const first = yield* adapter.sendTurn({ threadId: THREAD_ID, input: "look up" });
+          const prompt = yield* Effect.promise(() =>
+            readFirstPromptMessage(harness.getLastCreateQueryInput()),
+          );
+          harness.query.emit({
+            type: "stream_event",
+            session_id: "synthetic",
+            parent_tool_use_id: null,
+            uuid: "tool-start",
+            event: {
+              type: "content_block_start",
+              index: 0,
+              content_block: {
+                type: "tool_use",
+                id: "detached-tool",
+                name: toolName,
+                input: { query: "safe" },
+              },
+            },
+          } as unknown as SDKMessage);
+          yield* Deferred.await(started);
+          if (toolName !== "WebFetch") {
+            harness.query.emit({
+              type: "system",
+              subtype: "task_started",
+              task_id: "native-detached",
+              tool_use_id: "detached-tool",
+              task_type: "local_bash",
+              description: "Detached lookup",
+              session_id: "synthetic",
+              uuid: "00000000-0000-4000-8000-000000000010",
+            } as SDKMessage);
+          }
+          harness.query.emit({
+            type: "user",
+            session_id: "synthetic",
+            parent_tool_use_id: null,
+            uuid: "detached-placeholder",
+            tool_use_result: { detachedToolCall: true },
+            message: {
+              role: "user",
+              content: [
+                { type: "tool_result", tool_use_id: "detached-tool", content: "Still running" },
+              ],
+            },
+          } as unknown as SDKMessage);
+          harness.query.emit({
+            ...makeSuccessfulClaudeResult("synthetic"),
+            user_message_uuid: prompt?.uuid,
+          } as SDKMessage);
+          yield* Deferred.await(boundary);
+          assert.equal(
+            events.filter(
+              (event) => event.type === "item.completed" && event.itemId === "detached-tool",
+            ).length,
+            0,
+          );
+          assert.equal(
+            (yield* adapter
+              .startSession({
+                threadId: THREAD_ID,
+                runtimeMode: "approval-required",
+                maxConcurrentSubagents: 4,
+                requireIdleForSubagentLimitChange: true,
+              })
+              .pipe(Effect.result))._tag,
+            "Failure",
+          );
+          assert.equal(harness.query.closeCalls, 0);
+          assert.equal(harness.query.waitForExitCalls, 0);
+          yield* adapter.sendTurn({ threadId: THREAD_ID, input: "next response" });
+          // A new response reuses stream index zero but must not replace the old
+          // tool identity or attach its eventual output to this new Cafe turn.
+          harness.query.emit({
+            type: "stream_event",
+            session_id: "synthetic",
+            parent_tool_use_id: null,
+            uuid: "new-tool-start",
+            event: {
+              type: "content_block_start",
+              index: 0,
+              content_block: { type: "tool_use", id: "new-tool", name: "Read", input: {} },
+            },
+          } as unknown as SDKMessage);
+          const late =
+            toolName === "WebSearch"
+              ? ({
+                  type: "system",
+                  subtype: "task_notification",
+                  task_id: "native-detached",
+                  tool_use_id: "detached-tool",
+                  status: "completed",
+                  summary: "Actual output",
+                  output_file: "",
+                  session_id: "synthetic",
+                  uuid: "00000000-0000-4000-8000-000000000011",
+                } as SDKMessage)
+              : toolName === "mcp__test__lookup"
+                ? ({
+                    type: "system",
+                    subtype: "task_updated",
+                    task_id: "native-detached",
+                    patch: {
+                      status: "completed",
+                      tool_use_id: "detached-tool",
+                      summary: "Actual output",
+                    },
+                    session_id: "synthetic",
+                    uuid: "00000000-0000-4000-8000-000000000012",
+                  } as unknown as SDKMessage)
+                : ({
+                    type: "user",
+                    session_id: "synthetic",
+                    parent_tool_use_id: null,
+                    uuid: "late-result",
+                    message: {
+                      role: "user",
+                      content: [
+                        {
+                          type: "tool_result",
+                          tool_use_id: "detached-tool",
+                          content: "Actual output",
+                        },
+                      ],
+                    },
+                  } as unknown as SDKMessage);
+          harness.query.emit(late);
+          yield* Deferred.await(settled);
+          harness.query.emit(late);
+          yield* Effect.yieldNow;
+          yield* Effect.yieldNow;
+          const completions = events.filter(
+            (event) => event.type === "item.completed" && event.itemId === "detached-tool",
+          );
+          assert.equal(completions.length, 1);
+          assert.equal(completions[0]?.turnId, first.turnId);
+          assert.equal(
+            events.some((event) => event.type === "item.completed" && event.itemId === "new-tool"),
+            false,
+          );
+          assert.equal(new Set(events.map((event) => event.eventId)).size, events.length);
+        }).pipe(Effect.provide(harness.layer));
+      },
+    );
+  }
+  for (const priority of [undefined, "now", "next", "later"] as const) {
+    it.effect(
+      `preserves explicit Claude ${priority ?? "default"} delivery and human UUID correlation`,
+      () => {
+        const harness = makeHarness({ nativeVersion: "2.1.287", environment: {} });
+        return Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+          const turn = yield* adapter.sendTurn({
+            threadId: THREAD_ID,
+            input: "first",
+            ...(priority ? { deliveryPriority: priority } : {}),
+          });
+          const executing = yield* adapter.streamEvents.pipe(
+            Stream.filter((event) => event.type === "item.started"),
+            Stream.runHead,
+            Effect.forkChild,
+          );
+          harness.query.emit({
+            type: "stream_event",
+            session_id: "synthetic",
+            parent_tool_use_id: null,
+            uuid: "tool-start",
+            event: {
+              type: "content_block_start",
+              index: 0,
+              content_block: { type: "tool_use", id: "busy-tool", name: "WebSearch", input: {} },
+            },
+          } as unknown as SDKMessage);
+          yield* Fiber.join(executing);
+          yield* adapter.steerTurn({
+            threadId: THREAD_ID,
+            expectedTurnId: turn.turnId,
+            input: "follow up",
+            ...(priority ? { deliveryPriority: priority } : {}),
+          });
+          const messages = yield* Effect.promise(() =>
+            readPromptMessages(harness.getLastCreateQueryInput(), 2),
+          );
+          assert.equal(messages[0]?.priority, priority);
+          assert.equal(messages[1]?.priority, priority);
+          assert.deepEqual(messages[0]?.origin, { kind: "human" });
+          assert.notEqual(messages[0]?.uuid, messages[1]?.uuid);
+          assert.deepEqual(harness.query.interruptCalls, []);
+          assert.equal(harness.createInputs[0]?.options.perTaskStopAffordance, undefined);
+        }).pipe(Effect.provide(harness.layer));
+      },
+    );
+  }
+  it.effect(
+    "rejects unqualified or scheduled priorities before queue admission and preserves synthetic provenance",
+    () => {
+      const harness = makeHarness({ environment: {} });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+        for (const input of [
+          { deliveryPriority: "now" as const },
+          { deliveryPriority: "later" as const, inputOrigin: "scheduled" as const },
+        ]) {
+          assert.equal(
+            (yield* adapter
+              .sendTurn({ threadId: THREAD_ID, input: "denied", ...input })
+              .pipe(Effect.result))._tag,
+            "Failure",
+          );
+        }
+        yield* adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: "scheduled",
+          inputOrigin: "scheduled",
+        });
+        const message = yield* Effect.promise(() =>
+          readFirstPromptMessage(harness.getLastCreateQueryInput()),
+        );
+        assert.equal(message?.priority, undefined);
+        assert.equal(message?.origin, undefined);
+        assert.equal(message?.isSynthetic, true);
+        assert.equal(harness.query.setModelCalls.length, 0);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+  it.effect(
+    "binds task stop/background to exact chat account generation and task incarnation without completing siblings",
+    () => {
+      const harness = makeHarness({ nativeVersion: "2.1.287", environment: {} });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "approval-required",
+        });
+        const turn = yield* adapter.sendTurn({ threadId: THREAD_ID, input: "work" });
+        const observed = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "task.started"),
+          Stream.runHead,
+          Effect.forkChild,
+        );
+        harness.query.emit({
+          type: "system",
+          subtype: "task_started",
+          task_id: "native-task",
+          tool_use_id: "distinct-tool",
+          task_type: "local_agent",
+          description: "Worker",
+          session_id: "synthetic",
+          uuid: "00000000-0000-4000-8000-000000000001",
+        } as SDKMessage);
+        const event = yield* Fiber.join(observed);
+        assert.equal(event._tag, "Some");
+        if (event._tag !== "Some" || event.value.type !== "task.started")
+          throw new Error("Expected task start");
+        const capability = event.value.payload.subagent?.taskControl;
+        assert.ok(capability);
+        assert.ok(session.subagentRuntimeId);
+        const input = {
+          threadId: THREAD_ID,
+          turnId: turn.turnId,
+          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+          runtimeId: session.subagentRuntimeId!,
+          taskId: "native-task",
+          taskGeneration: capability!.taskGeneration,
+          action: "stop" as const,
+        };
+        for (const forged of [
+          { ...input, taskGeneration: "00000000-0000-4000-8000-000000000000" },
+          { ...input, providerInstanceId: ProviderInstanceId.make("different-account") },
+          { ...input, turnId: TurnId.make("different-turn") },
+          { ...input, taskId: "distinct-tool" },
+        ]) {
+          assert.equal((yield* adapter.controlTask!(forged).pipe(Effect.result))._tag, "Failure");
+        }
+        assert.deepEqual(harness.query.stopTaskCalls, []);
+        assert.deepEqual(yield* adapter.controlTask!({ ...input, action: "background" }), {
+          status: "accepted",
+        });
+        assert.deepEqual(harness.query.backgroundTaskCalls, ["distinct-tool"]);
+        assert.deepEqual(yield* adapter.controlTask!(input), { status: "accepted" });
+        assert.deepEqual(harness.query.stopTaskCalls, ["native-task"]);
+        assert.equal((yield* adapter.listSessions())[0]?.status, "running");
+        assert.deepEqual(harness.query.interruptCalls, []);
+        const ended = yield* adapter.streamEvents.pipe(
+          Stream.filter((value) => value.type === "task.completed"),
+          Stream.runHead,
+          Effect.forkChild,
+        );
+        harness.query.emit({
+          type: "system",
+          subtype: "task_notification",
+          task_id: "native-task",
+          tool_use_id: "distinct-tool",
+          status: "stopped",
+          summary: "Stopped",
+          output_file: "",
+          session_id: "synthetic",
+          uuid: "00000000-0000-4000-8000-000000000002",
+        } as SDKMessage);
+        yield* Fiber.join(ended);
+        assert.deepEqual(yield* adapter.controlTask!(input), { status: "already-terminal" });
+        assert.deepEqual(harness.query.stopTaskCalls, ["native-task"]);
+        const restarted = yield* adapter.streamEvents.pipe(
+          Stream.filter((value) => value.type === "task.started"),
+          Stream.runHead,
+          Effect.forkChild,
+        );
+        // This task-id reuse deliberately omits a tool id. No old alias may
+        // supply background authority for the new incarnation.
+        harness.query.emit({
+          type: "system",
+          subtype: "task_started",
+          task_id: "native-task",
+          task_type: "local_agent",
+          description: "New worker",
+          session_id: "synthetic",
+          uuid: "00000000-0000-4000-8000-000000000003",
+        } as SDKMessage);
+        const newStart = yield* Fiber.join(restarted);
+        assert.equal(newStart._tag, "Some");
+        if (newStart._tag !== "Some" || newStart.value.type !== "task.started")
+          throw new Error("Expected restarted task");
+        assert.notEqual(
+          newStart.value.payload.subagent?.taskControl?.taskGeneration,
+          input.taskGeneration,
+        );
+        assert.equal(newStart.value.payload.subagent?.taskControl?.canBackground, false);
+        assert.equal((yield* adapter.controlTask!(input).pipe(Effect.result))._tag, "Failure");
+        const staleIgnored = yield* adapter.streamEvents.pipe(
+          Stream.filter((value) => value.type === "runtime.warning"),
+          Stream.runHead,
+          Effect.forkChild,
+        );
+        harness.query.emit({
+          type: "system",
+          subtype: "task_notification",
+          task_id: "native-task",
+          tool_use_id: "distinct-tool",
+          status: "stopped",
+          ambient: true,
+          summary: "Old worker stopped",
+          output_file: "",
+          session_id: "synthetic",
+          uuid: "00000000-0000-4000-8000-000000000004",
+        } as SDKMessage);
+        yield* Fiber.join(staleIgnored);
+        const omittedIgnored = yield* adapter.streamEvents.pipe(
+          Stream.filter((value) => value.type === "runtime.warning"),
+          Stream.runHead,
+          Effect.forkChild,
+        );
+        harness.query.emit({
+          type: "system",
+          subtype: "task_updated",
+          task_id: "native-task",
+          patch: { status: "completed" },
+          session_id: "synthetic",
+          uuid: "late-unqualified-update",
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "system",
+          subtype: "task_notification",
+          task_id: "native-task",
+          status: "completed",
+          summary: "Ambiguous old worker",
+          output_file: "",
+          session_id: "synthetic",
+          uuid: "00000000-0000-4000-8000-000000000014",
+        } as SDKMessage);
+        yield* Fiber.join(omittedIgnored);
+        assert.deepEqual(
+          yield* adapter.controlTask!({
+            ...input,
+            taskGeneration: newStart.value.payload.subagent!.taskControl!.taskGeneration,
+          }),
+          { status: "accepted" },
+        );
+        assert.deepEqual(harness.query.stopTaskCalls, ["native-task", "native-task"]);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+  for (const priority of [undefined, "now", "next", "later"] as const) {
+    it.effect(
+      `preserves ${priority ?? "default"} delivery while an exact tool approval remains pending`,
+      () => {
+        const harness = makeHarness({ nativeVersion: "2.1.287", environment: {} });
+        return Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+          const first = yield* adapter.sendTurn({ threadId: THREAD_ID, input: "first" });
+          const opened = yield* adapter.streamEvents.pipe(
+            Stream.filter((event) => event.type === "request.opened"),
+            Stream.runHead,
+            Effect.forkChild,
+          );
+          let permissionSettled = false;
+          const permission = harness.getLastCreateQueryInput()!.options.canUseTool!(
+            "Bash",
+            { command: "pwd" },
+            {
+              signal: new AbortController().signal,
+              toolUseID: "pending-tool",
+              requestId: "pending-approval",
+            },
+          ).then((result) => {
+            permissionSettled = true;
+            return result;
+          });
+          const approval = yield* Fiber.join(opened);
+          assert.ok(
+            approval._tag === "Some" &&
+              approval.value.type === "request.opened" &&
+              approval.value.requestId,
+          );
+          yield* adapter.steerTurn({
+            threadId: THREAD_ID,
+            expectedTurnId: first.turnId,
+            input: "during approval",
+            ...(priority ? { deliveryPriority: priority } : {}),
+          });
+          const prompts = yield* Effect.promise(() =>
+            readPromptMessages(harness.getLastCreateQueryInput(), 2),
+          );
+          assert.equal(prompts[1]?.priority, priority);
+          assert.equal(new Set(prompts.map((message) => message.uuid)).size, 2);
+          assert.equal(permissionSettled, false);
+          assert.deepEqual(harness.query.interruptCalls, []);
+          if (approval._tag === "Some" && approval.value.requestId) {
+            yield* adapter.respondToRequest(
+              THREAD_ID,
+              ApprovalRequestId.make(approval.value.requestId),
+              "decline",
+            );
+          }
+          assert.equal((yield* Effect.promise(() => permission))?.behavior, "deny");
+        }).pipe(Effect.provide(harness.layer));
+      },
+    );
+  }
+  it.effect(
+    "publishes background-only controls for ordinary foreground tools and stop controls for exact native non-agent tasks",
+    () => {
+      const harness = makeHarness({ nativeVersion: "2.1.287", environment: {} });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "approval-required",
+        });
+        const turn = yield* adapter.sendTurn({ threadId: THREAD_ID, input: "fetch" });
+        const item = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "item.started"),
+          Stream.runHead,
+          Effect.forkChild,
+        );
+        harness.query.emit({
+          type: "stream_event",
+          session_id: "synthetic",
+          parent_tool_use_id: null,
+          uuid: "tool-start",
+          event: {
+            type: "content_block_start",
+            index: 0,
+            content_block: { type: "tool_use", id: "raw-fetch", name: "WebFetch", input: {} },
+          },
+        } as unknown as SDKMessage);
+        const itemEvent = yield* Fiber.join(item);
+        if (itemEvent._tag !== "Some" || itemEvent.value.type !== "item.started")
+          throw new Error("Missing foreground item");
+        const reference = itemEvent.value.payload.individualTaskControl!;
+        assert.ok(reference);
+        assert.equal(reference.capability.canStop, false);
+        assert.equal(reference.capability.canBackground, true);
+        assert.notEqual(reference.taskId, "raw-fetch");
+        const input = {
+          threadId: THREAD_ID,
+          turnId: turn.turnId,
+          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+          runtimeId: session.subagentRuntimeId!,
+          taskId: reference.taskId,
+          taskGeneration: reference.capability.taskGeneration,
+        };
+        assert.equal(
+          (yield* adapter.controlTask!({ ...input, action: "stop" }).pipe(Effect.result))._tag,
+          "Failure",
+        );
+        assert.deepEqual(yield* adapter.controlTask!({ ...input, action: "background" }), {
+          status: "accepted",
+        });
+        assert.deepEqual(harness.query.backgroundTaskCalls, ["raw-fetch"]);
+        const task = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "task.started"),
+          Stream.runHead,
+          Effect.forkChild,
+        );
+        harness.query.emit({
+          type: "system",
+          subtype: "task_started",
+          task_id: "native-fetch",
+          tool_use_id: "raw-fetch",
+          task_type: "local_bash",
+          is_backgrounded: true,
+          description: "Fetch running",
+          session_id: "synthetic",
+          uuid: "00000000-0000-4000-8000-000000000005",
+        } as unknown as SDKMessage);
+        const taskEvent = yield* Fiber.join(task);
+        if (taskEvent._tag !== "Some" || taskEvent.value.type !== "task.started")
+          throw new Error("Missing native task");
+        assert.equal(taskEvent.value.payload.subagent, undefined);
+        const native = taskEvent.value.payload.individualTaskControl!;
+        assert.ok(native.capability.canStop);
+        assert.equal(native.capability.canBackground, false);
+        assert.deepEqual(yield* adapter.controlTask!({ ...input, action: "background" }), {
+          status: "not-foreground",
+        });
+        assert.deepEqual(harness.query.backgroundTaskCalls, ["raw-fetch"]);
+        assert.deepEqual(
+          yield* adapter.controlTask!({
+            ...input,
+            taskId: native.taskId,
+            taskGeneration: native.capability.taskGeneration,
+            action: "stop",
+          }),
+          { status: "accepted" },
+        );
+        assert.deepEqual(harness.query.stopTaskCalls, ["native-fetch"]);
+        assert.deepEqual(harness.query.interruptCalls, []);
+        assert.equal((yield* adapter.listSessions())[0]?.status, "running");
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+  it.effect(
+    "keeps ordinary task liveness uncertain after unresolved binding eviction even when every retained task ends",
+    () => {
+      const harness = makeHarness({ subagentConcurrencySupported: true, environment: {} });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "full-access",
+          maxConcurrentSubagents: 8,
+        });
+        const done = yield* Deferred.make<void>();
+        yield* adapter.streamEvents.pipe(
+          Stream.runForEach((event) =>
+            event.type === "task.completed" && event.payload.taskId === "native-4096"
+              ? Deferred.succeed(done, undefined)
+              : Effect.void,
+          ),
+          Effect.forkChild,
+        );
+        for (let index = 0; index < 4097; index++)
+          harness.query.emit({
+            type: "system",
+            subtype: "task_started",
+            task_id: `native-${index}`,
+            task_type: "local_bash",
+            description: "Ordinary task",
+            session_id: "synthetic",
+            uuid: "00000000-0000-4000-8000-000000000020",
+          } as SDKMessage);
+        for (let index = 1; index < 4097; index++)
+          harness.query.emit({
+            type: "system",
+            subtype: "task_notification",
+            task_id: `native-${index}`,
+            status: "completed",
+            summary: "Done",
+            output_file: "",
+            session_id: "synthetic",
+            uuid: "00000000-0000-4000-8000-000000000021",
+          } as SDKMessage);
+        yield* Deferred.await(done);
+        assert.equal(
+          (yield* adapter
+            .startSession({
+              threadId: THREAD_ID,
+              runtimeMode: "full-access",
+              maxConcurrentSubagents: 4,
+              requireIdleForSubagentLimitChange: true,
+            })
+            .pipe(Effect.result))._tag,
+          "Failure",
+        );
+        assert.equal(harness.query.closeCalls, 0);
+        assert.equal(harness.query.waitForExitCalls, 0);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
   for (const configuredInstance of [undefined, ProviderInstanceId.make("claude-work-account")]) {
     it.effect(
       `injects same-chat scheduling for ${configuredInstance ?? "the default account"}`,
@@ -5307,6 +5945,11 @@ describe("ClaudeAdapterLive", () => {
       } as unknown as SDKMessage);
 
       const events = Array.from(yield* Fiber.join(eventsFiber));
+      assert.equal(
+        new Set(events.map((event) => event.eventId)).size,
+        events.length,
+        "Each snapshot member and retraction must own a distinct durable event identity",
+      );
       assert.deepEqual(
         events.map((event) => [String(event.payload.taskId), event.type, event.payload.visibility]),
         [
@@ -5537,6 +6180,127 @@ describe("ClaudeAdapterLive", () => {
       Effect.provide(harness.layer),
     );
   });
+
+  it.effect(
+    "retains task incarnation authority when a live background binding is restored after generic map eviction",
+    () => {
+      const harness = makeHarness({ nativeVersion: "2.1.287", environment: {} });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "approval-required",
+        });
+        const turn = yield* adapter.sendTurn({ threadId: THREAD_ID, input: "work" });
+        const observed: ProviderRuntimeEvent[] = [];
+        const done = yield* Deferred.make<void>();
+        yield* adapter.streamEvents.pipe(
+          Stream.runForEach((event) =>
+            Effect.gen(function* () {
+              observed.push(event);
+              if (event.type === "task.progress" && event.payload.summary === "Restored exact task")
+                yield* Deferred.succeed(done, undefined);
+            }),
+          ),
+          Effect.forkChild,
+        );
+        const base = {
+          type: "system",
+          task_id: "reused-task",
+          session_id: "synthetic",
+          uuid: "00000000-0000-4000-8000-000000000023",
+        };
+        harness.query.emit({
+          ...base,
+          subtype: "task_started",
+          tool_use_id: "old-tool",
+          task_type: "local_bash",
+          description: "Old task",
+        } as SDKMessage);
+        harness.query.emit({
+          ...base,
+          subtype: "task_notification",
+          tool_use_id: "old-tool",
+          status: "completed",
+          summary: "Old done",
+          output_file: "",
+        } as SDKMessage);
+        harness.query.emit({
+          ...base,
+          subtype: "task_started",
+          tool_use_id: "new-tool",
+          task_type: "local_bash",
+          description: "New task",
+        } as SDKMessage);
+        const snapshot = {
+          type: "system",
+          subtype: "background_tasks_changed",
+          tasks: [{ task_id: "reused-task", description: "New task" }],
+          session_id: "synthetic",
+          uuid: "snapshot",
+        } as unknown as SDKMessage;
+        harness.query.emit(snapshot);
+        for (let index = 0; index < 4096; index++)
+          harness.query.emit({
+            ...base,
+            subtype: "task_started",
+            task_id: `filler-${index}`,
+            task_type: "local_bash",
+            description: "Filler",
+          } as SDKMessage);
+        harness.query.emit(snapshot);
+        harness.query.emit({
+          ...base,
+          subtype: "task_notification",
+          status: "completed",
+          summary: "Ambiguous old result",
+          output_file: "",
+        } as SDKMessage);
+        harness.query.emit({
+          ...base,
+          subtype: "task_progress",
+          tool_use_id: "new-tool",
+          description: "New task",
+          summary: "Restored exact task",
+          usage: { total_tokens: 0, tool_uses: 0, duration_ms: 0 },
+        } as SDKMessage);
+        yield* Deferred.await(done);
+        const initial = observed.findLast(
+          (event) => event.type === "task.started" && event.payload.taskId === "reused-task",
+        );
+        const restored = observed.findLast(
+          (event) => event.type === "task.progress" && event.payload.taskId === "reused-task",
+        );
+        if (initial?.type !== "task.started" || restored?.type !== "task.progress")
+          throw new Error("Missing exact binding evidence");
+        const reference = restored.payload.individualTaskControl!;
+        assert.ok(reference);
+        assert.equal(
+          reference.capability.taskGeneration,
+          initial.payload.individualTaskControl?.capability.taskGeneration,
+        );
+        assert.equal(
+          observed.filter(
+            (event) => event.type === "task.completed" && event.payload.taskId === "reused-task",
+          ).length,
+          1,
+        );
+        assert.deepEqual(
+          yield* adapter.controlTask!({
+            threadId: THREAD_ID,
+            turnId: turn.turnId,
+            providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+            runtimeId: session.subagentRuntimeId!,
+            taskId: reference.taskId,
+            taskGeneration: reference.capability.taskGeneration,
+            action: "background",
+          }),
+          { status: "accepted" },
+        );
+        assert.deepEqual(harness.query.backgroundTaskCalls, ["new-tool"]);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
 
   it.effect("retains live background metadata across unrelated generic binding churn", () => {
     const harness = makeHarness();

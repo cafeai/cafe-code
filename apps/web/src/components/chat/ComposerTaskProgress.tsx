@@ -8,6 +8,7 @@ import { Popover, PopoverPopup, PopoverTitle, PopoverTrigger } from "../ui/popov
 import { SessionPlacementButton } from "./SessionRail";
 import { TaskProgressDetails } from "./TaskProgressDetails";
 import { ScheduledFollowups, type ScheduledFollowupsContext } from "./ScheduledFollowups";
+import { ProviderTasks, type ProviderTasksContext } from "./ProviderTasks";
 import {
   deriveTaskProgressPresentation,
   type ComposerTaskProgressPlan,
@@ -36,6 +37,7 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
   readonly sessionRailVisible?: boolean;
   readonly onShowOnSide?: () => void;
   readonly scheduledFollowups?: ScheduledFollowupsContext | undefined;
+  readonly providerTasks?: ProviderTasksContext | undefined;
 }) {
   const { plan } = props;
   const [open, setOpen] = useState(false);
@@ -47,7 +49,10 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
   );
   const hasPlan = Boolean(plan && plan.steps.length > 0);
   const hasSubagents = subagents.length > 0;
-  if (props.sessionRailVisible || (!hasPlan && !hasSubagents && !props.scheduledFollowups))
+  if (
+    props.sessionRailVisible ||
+    (!hasPlan && !hasSubagents && !props.scheduledFollowups && !props.providerTasks)
+  )
     return null;
 
   const handleOpenChange = (nextOpen: boolean, details: { readonly reason: string }) => {
@@ -211,6 +216,7 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
             role="region"
             tabIndex={0}
           >
+            {props.providerTasks ? <ProviderTasks context={props.providerTasks} /> : null}
             <TaskProgressDetails
               plan={plan}
               subagents={subagents}

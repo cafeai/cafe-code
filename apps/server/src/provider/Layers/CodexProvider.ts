@@ -728,9 +728,26 @@ function mapCodexModelCapabilities(
   // (codex-rs/protocol/src/openai_models.rs). Current catalogues advertise
   // the wire id in serviceTiers; older providers may supply only the
   // deprecated additionalSpeedTiers alias. Either is authoritative evidence.
-  const supportsFastMode =
-    model.serviceTiers?.some((tier) => tier.id === "priority") === true ||
-    (model.additionalSpeedTiers ?? []).includes("fast");
+  // An explicitly empty modern list revokes all paid choices. The deprecated
+  // alias is compatibility evidence only when the new field is absent.
+  const advertisedTiers =
+    model.serviceTiers ??
+    ((model.additionalSpeedTiers ?? []).includes("fast")
+      ? [{ id: "priority", name: "Fast", description: "Priority service tier" }]
+      : []);
+  const seenTierIds = new Set<string>(["default"]);
+  const tiers = advertisedTiers.slice(0, 32).flatMap((tier) => {
+    if (
+      !/^[a-z][a-z0-9_-]{0,63}$/.test(tier.id) ||
+      seenTierIds.has(tier.id) ||
+      tier.name.length === 0 ||
+      tier.name.length > 80 ||
+      /[\p{Cc}\p{Zl}\p{Zp}\p{Bidi_Control}]/u.test(tier.name)
+    )
+      return [];
+    seenTierIds.add(tier.id);
+    return [{ id: tier.id, label: tier.name.trim() || tier.id }];
+  });
   return createModelCapabilities({
     // Official model/list defaults omitted modalities to text and image for
     // older servers; an explicit text-only response must survive the mapping.
@@ -752,15 +769,16 @@ function mapCodexModelCapabilities(
             },
           ]
         : []),
-      ...(supportsFastMode
-        ? [
-            {
-              id: "fastMode",
-              label: "Fast Mode",
-              type: "boolean" as const,
-            },
-          ]
-        : []),
+      {
+        id: "serviceTier",
+        label: "Service tier",
+        description:
+          "Provider-advertised routing. Availability and charges depend on your account.",
+        type: "select" as const,
+        // No current/default value: omission must not silently change native
+        // routing, and catalogue order is never consent to paid service.
+        options: [{ id: "default", label: "Standard" }, ...tiers],
+      },
     ],
   });
 }
@@ -1006,7 +1024,19 @@ function appendCustomCodexModels(
       slug,
       name: slug,
       isCustom: true,
-      capabilities: fallbackCapabilities,
+      capabilities: fallbackCapabilities
+        ? {
+            ...fallbackCapabilities,
+            // A hand-entered model id cannot borrow another model's paid routing.
+            ...(fallbackCapabilities.optionDescriptors
+              ? {
+                  optionDescriptors: fallbackCapabilities.optionDescriptors.filter(
+                    (entry) => entry.id !== "serviceTier",
+                  ),
+                }
+              : {}),
+          }
+        : null,
     });
   }
   return customEntries.length === 0 ? models : [...models, ...customEntries];

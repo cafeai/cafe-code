@@ -46,6 +46,7 @@ import { localDayKey } from "../dayBuckets.ts";
 import { UsageStatsService, type UsageStatsServiceShape } from "../Services/UsageStatsService.ts";
 import { UsageStatsServiceLive } from "./UsageStatsService.ts";
 import { AuxiliaryUsage, AuxiliaryUsageLive } from "../Services/AuxiliaryUsage.ts";
+import { makeCodexChildUsageAccounting } from "../../provider/codexChildUsageAccounting.ts";
 
 const THREAD_1 = ThreadId.make("thread-1");
 const THREAD_2 = ThreadId.make("thread-2");
@@ -925,6 +926,69 @@ describe("UsageStatsService", () => {
         }),
       ),
   );
+  it.effect(
+    "settles prospective child usage once alongside root tokens across a database-backed rebuild",
+    () =>
+      withHarness((harness) =>
+        Effect.gen(function* () {
+          const child = makeCodexChildUsageAccounting();
+          const routes = new Map([["child", "owner-turn"]]);
+          child.observeMetadata(
+            { id: "child", parentThreadId: "root", model: "gpt-6.1-sol" },
+            "root",
+          );
+          const observe = (inputTokens: number, outputTokens: number) =>
+            child.observe({
+              rootId: "root",
+              routes,
+              method: "thread/tokenUsage/updated",
+              payload: {
+                threadId: "child",
+                tokenUsage: {
+                  total: {
+                    inputTokens,
+                    outputTokens,
+                    cachedInputTokens: 0,
+                    reasoningOutputTokens: 0,
+                  },
+                },
+              },
+            });
+          assert.equal(observe(1_000, 100), undefined);
+          const first = observe(1_100, 110)!;
+          yield* harness.emitProvider({
+            ...providerEventBase(THREAD_1, "root-start"),
+            type: "session.started",
+            payload: {},
+          });
+          yield* harness.emitProvider(
+            tokenUsageEvent(THREAD_1, "root-tokens", {
+              totalInputTokens: 200,
+              totalOutputTokens: 20,
+            }),
+          );
+          yield* harness.service.recordAccounting(CODEX, first, 0);
+          yield* harness.service.recordAccounting(CODEX, first, 0);
+          yield* harness.service.flush;
+          assert.equal((yield* harness.service.get).totals.inputTokens, 300);
+          assert.equal((yield* harness.service.get).totals.outputTokens, 30);
+          const rebuilt = yield* harness.rebuildService;
+          yield* rebuilt.recordAccounting(CODEX, first, 0);
+          const next = observe(1_125, 115)!;
+          yield* rebuilt.recordAccounting(CODEX, next, 0);
+          yield* rebuilt.recordAccounting(CODEX, first, 0);
+          const result = yield* rebuilt.get;
+          assert.equal(result.totals.inputTokens, 325);
+          assert.equal(result.totals.outputTokens, 35);
+          assert.equal(
+            result.tokenBreakdown.find((row) => row.model === "gpt-6.1-sol")?.inputTokens,
+            125,
+          );
+          assert.equal((yield* harness.repository.listDays)[0]?.inputTokens, 325);
+        }),
+      ),
+  );
+
   it.effect("settles acknowledged auxiliary usage through the same durable model/day ledger", () =>
     withHarness((harness) =>
       Effect.gen(function* () {

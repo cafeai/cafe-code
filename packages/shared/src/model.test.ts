@@ -45,6 +45,49 @@ const codexCaps: ModelCapabilities = createModelCapabilities({
 });
 
 describe("native input capabilities", () => {
+  it("maps legacy Fast into exact service tiers and never auto-selects paid routing", () => {
+    const caps: ModelCapabilities = {
+      optionDescriptors: [
+        {
+          id: "serviceTier",
+          label: "Tier",
+          type: "select",
+          options: [
+            { id: "priority", label: "Fast" },
+            { id: "default", label: "Standard" },
+          ],
+        },
+      ],
+    };
+    expect(
+      buildProviderOptionSelectionsFromDescriptors(getProviderOptionDescriptors({ caps })),
+    ).toBeUndefined();
+    for (const [value, tier] of [
+      [true, "priority"],
+      [false, "default"],
+    ] as const) {
+      expect(
+        buildProviderOptionSelectionsFromDescriptors(
+          getProviderOptionDescriptors({ caps, selections: [{ id: "fastMode", value }] }),
+        ),
+      ).toEqual([{ id: "serviceTier", value: tier }]);
+    }
+    const removed = getProviderOptionDescriptors({
+      caps,
+      selections: [{ id: "serviceTier", value: "ultrafast" }],
+    });
+    expect(buildProviderOptionSelectionsFromDescriptors(removed)).toEqual([
+      { id: "serviceTier", value: "ultrafast" },
+    ]);
+    expect(
+      buildProviderOptionSelectionsFromDescriptors(
+        getProviderOptionDescriptors({
+          caps: { optionDescriptors: [] },
+          selections: [{ id: "serviceTier", value: "ultrafast" }],
+        }),
+      ),
+    ).toEqual([{ id: "serviceTier", value: "ultrafast" }]);
+  });
   it("respects explicit modalities, including an empty or audio-only supported subset", () => {
     expect(modelAcceptsImages({ inputModalities: ["text"] }, "future-model")).toBe(false);
     expect(modelAcceptsImages({ inputModalities: [] }, "future-model")).toBe(false);

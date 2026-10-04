@@ -121,6 +121,7 @@ export interface WsRpcClient {
     readonly refreshProviders: (
       input?: RpcInput<typeof WS_METHODS.serverRefreshProviders>,
     ) => ReturnType<RpcUnaryMethod<typeof WS_METHODS.serverRefreshProviders>>;
+    readonly listProviderSkills: RpcUnaryMethod<typeof WS_METHODS.serverListProviderSkills>;
     readonly loginProvider: RpcUnaryMethod<typeof WS_METHODS.serverLoginProvider>;
     readonly updateProvider: RpcUnaryMethod<typeof WS_METHODS.serverUpdateProvider>;
     readonly restartProviderRuntime: RpcUnaryMethod<typeof WS_METHODS.serverRestartProviderRuntime>;
@@ -171,6 +172,7 @@ export interface WsRpcClient {
     readonly getThreadTurnSubagentDetail: RpcUnaryMethod<
       typeof ORCHESTRATION_WS_METHODS.getThreadTurnSubagentDetail
     >;
+    readonly controlTask: RpcUnaryMethod<typeof ORCHESTRATION_WS_METHODS.controlTask>;
     readonly getThreadTurnWorkLogPresence: RpcUnaryMethod<
       typeof ORCHESTRATION_WS_METHODS.getThreadTurnWorkLogPresence
     >;
@@ -295,6 +297,8 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
         transport.request((client) => client[WS_METHODS.serverUpdateMcpClient](input)),
       refreshProviders: (input) =>
         transport.request((client) => client[WS_METHODS.serverRefreshProviders](input ?? {})),
+      listProviderSkills: (input) =>
+        transport.request((client) => client[WS_METHODS.serverListProviderSkills](input)),
       loginProvider: (input) =>
         transport.request((client) => client[WS_METHODS.serverLoginProvider](input)),
       updateProvider: (input) =>
@@ -405,6 +409,8 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
         transport.request((client) =>
           client[ORCHESTRATION_WS_METHODS.getThreadTurnSubagentDetail](input),
         ),
+      controlTask: (input) =>
+        transport.request((client) => client[ORCHESTRATION_WS_METHODS.controlTask](input)),
       getThreadTurnWorkLogPresence: (input) =>
         transport.request((client) =>
           client[ORCHESTRATION_WS_METHODS.getThreadTurnWorkLogPresence](input),

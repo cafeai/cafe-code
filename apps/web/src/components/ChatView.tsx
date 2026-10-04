@@ -58,6 +58,7 @@ import {
 import { useDesktopDebugEnabled } from "~/lib/desktopDebugState";
 import { readPrimaryEnvironmentDescriptor, usePrimaryEnvironmentId } from "../environments/primary";
 import { readEnvironmentApi } from "../environmentApi";
+import { NativeCodexReview } from "./chat/NativeCodexReview";
 import { isElectron } from "../env";
 import { readLocalApi } from "../localApi";
 import {
@@ -184,6 +185,7 @@ import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
 import type { SubagentDetailSelection } from "./chat/SubagentDetailView";
+import { ClaudeDeliveryPriorityPicker } from "./chat/ClaudeDeliveryPriorityPicker";
 import { useTaskAtriumStore } from "./atrium/taskAtriumStore";
 import {
   isTimelineScrolledToEnd,
@@ -480,6 +482,7 @@ type ChatViewProps = { readonly navigationSlot?: ReactNode } & (
 );
 
 interface ComposerSendSnapshot {
+  readonly deliveryPriority?: import("@cafecode/contracts").ProviderDeliveryPriority;
   readonly subagentLimits?: SubagentLimits;
   promptText: string;
   images: ComposerImageAttachment[];
@@ -965,6 +968,11 @@ export default function ChatView(props: ChatViewProps) {
     (store) => store.getComposerDraft(composerDraftTarget)?.queueEditingItemId,
   );
   const localComposerRef = useRef<ChatComposerHandle | null>(null);
+  // Scope urgency to the exact chat/account, never a global model preference.
+  const [deliveryChoice, setDeliveryChoice] = useState<{
+    key: string;
+    priority: import("@cafecode/contracts").ProviderDeliveryPriority | undefined;
+  } | null>(null);
   const activeComposerHandle = useComposerHandleContext();
   // Every pane owns its editor. Only the active pane publishes an alias for the
   // global palette; sharing the actual ref lets a sibling send the wrong draft.
@@ -2615,6 +2623,14 @@ export default function ChatView(props: ChatViewProps) {
   }, [activeProviderInstanceId, providerStatuses, selectedProvider]);
   const activeProviderLiveSteerSupported =
     activeProviderStatus?.runtimeCapabilities?.liveSteer === "supported";
+  const deliveryChoiceKey = `${environmentId}:${activeThread?.id ?? "draft"}:${activeProviderInstanceId ?? ""}`;
+  const deliveryPriorityAvailable =
+    activeProviderStatus?.driver === "claudeAgent" &&
+    activeProviderStatus.runtimeCapabilities?.deliveryPriority === true;
+  const deliveryPriority =
+    deliveryPriorityAvailable && deliveryChoice?.key === deliveryChoiceKey
+      ? deliveryChoice.priority
+      : undefined;
   const goalControlsSupported =
     isServerThread &&
     activeProviderStatus?.driver === "codex" &&
@@ -4351,6 +4367,7 @@ export default function ChatView(props: ChatViewProps) {
       providerModels: sendCtx.selectedProviderModels,
       promptEffort: sendCtx.selectedPromptEffort,
       modelSelection: sendCtx.selectedModelSelection,
+      ...(deliveryPriority !== undefined ? { deliveryPriority } : {}),
       ...(sendCtx.subagentLimits !== undefined
         ? { subagentLimits: { ...sendCtx.subagentLimits } }
         : {}),
@@ -4785,6 +4802,7 @@ export default function ChatView(props: ChatViewProps) {
           attachments: turnAttachments,
         },
         modelSelection: item.modelSelection,
+        ...(item.deliveryPriority !== undefined ? { deliveryPriority: item.deliveryPriority } : {}),
         titleSeed: queuedThread.title,
         runtimeMode: item.runtimeMode,
         interactionMode: item.interactionMode,
@@ -5005,6 +5023,9 @@ export default function ChatView(props: ChatViewProps) {
         type: "thread.turn.steer",
         commandId: commandIdForSend,
         threadId: activeThread.id,
+        ...(snapshot.deliveryPriority !== undefined
+          ? { deliveryPriority: snapshot.deliveryPriority }
+          : {}),
         message: {
           messageId: messageIdForSend,
           role: "user",
@@ -5323,13 +5344,17 @@ export default function ChatView(props: ChatViewProps) {
     updateManualStopBarrier(activeThread.id, null);
     const delivery = decideFollowUpDelivery({
       phase: followUpQueuePhase,
-      requestedSteer: false,
+      requestedSteer: snapshot.deliveryPriority !== undefined,
       liveSteerSupported: activeProviderLiveSteerAvailable,
     });
     if (delivery === "queue") {
       if (!hasSendableContent) return;
       pinTimelineToEndForLocalMessage();
       await enqueueFollowUpSnapshot(snapshot);
+      return;
+    }
+    if (delivery === "steer") {
+      await dispatchSteerSnapshot(snapshot);
       return;
     }
     if (
@@ -5540,6 +5565,9 @@ export default function ChatView(props: ChatViewProps) {
         },
         modelSelection: ctxSelectedModelSelection,
         titleSeed: title,
+        ...(snapshot.deliveryPriority !== undefined
+          ? { deliveryPriority: snapshot.deliveryPriority }
+          : {}),
         ...(snapshot.subagentLimits !== undefined
           ? { subagentLimits: snapshot.subagentLimits }
           : {}),
@@ -6964,6 +6992,25 @@ export default function ChatView(props: ChatViewProps) {
       activeEnvironmentUnavailable,
     ],
   );
+  const providerTasksContext = useMemo(
+    () =>
+      scheduledThreadId && scheduledModelSelection
+        ? {
+            environmentId,
+            threadId: scheduledThreadId,
+            providerInstanceId: scheduledModelSelection.instanceId,
+            activities: threadActivities,
+            runtimeSession: subagentRuntimeSession,
+          }
+        : undefined,
+    [
+      environmentId,
+      scheduledThreadId,
+      scheduledModelSelection,
+      threadActivities,
+      subagentRuntimeSession,
+    ],
+  );
 
   if (!activeThread) {
     return <NoActiveThreadState />;
@@ -7099,6 +7146,58 @@ export default function ChatView(props: ChatViewProps) {
               isGitRepo ? "pb-1" : "pb-3 sm:pb-4",
             )}
           >
+            {isServerThread &&
+              activeThread.session?.provider === "codex" &&
+              activeThread.modelSelection.instanceId ===
+                activeThread.session.providerInstanceId && (
+                <div className="flex justify-end pb-1">
+                  <NativeCodexReview
+                    key={JSON.stringify([
+                      activeThread.environmentId,
+                      activeThread.id,
+                      activeThread.modelSelection.instanceId,
+                    ])}
+                    accountLabel={activeProviderStatus?.displayName ?? "this Codex account"}
+                    runtimeMode={activeThread.runtimeMode}
+                    disabled={
+                      activeThread.session.status !== "ready" ||
+                      isSendBusy ||
+                      isComposerConnecting ||
+                      isWorking ||
+                      isRevertingCheckpoint ||
+                      activeEnvironmentUnavailable
+                    }
+                    onStart={async (codexReview) => {
+                      const api = readEnvironmentApi(activeThread.environmentId);
+                      if (!api) throw new Error("The chat is disconnected.");
+                      const text =
+                        codexReview.type === "uncommittedChanges"
+                          ? "Native review: uncommitted changes"
+                          : codexReview.type === "baseBranch"
+                            ? `Native review against ${codexReview.branch}`
+                            : codexReview.type === "commit"
+                              ? `Native review of commit ${codexReview.sha}`
+                              : `Native review: ${codexReview.instructions}`;
+                      await api.orchestration.dispatchCommand({
+                        type: "thread.turn.start",
+                        commandId: newCommandId(),
+                        threadId: activeThread.id,
+                        message: {
+                          messageId: MessageId.make(crypto.randomUUID()),
+                          role: "user",
+                          text,
+                          attachments: [],
+                        },
+                        codexReview,
+                        modelSelection: activeThread.modelSelection,
+                        runtimeMode: activeThread.runtimeMode,
+                        interactionMode: activeThread.interactionMode,
+                        createdAt: new Date().toISOString(),
+                      });
+                    }}
+                  />
+                </div>
+              )}
             {isServerThread && activeThread.session?.provider === "codex" && (
               <ComposerAsyncQuestionsPanel
                 environmentId={activeThread.environmentId}
@@ -7113,6 +7212,13 @@ export default function ChatView(props: ChatViewProps) {
             <div className="relative isolate">
               <ComposerBannerStack className="relative z-0" items={composerBannerItems} />
               <div className="relative z-10">
+                {deliveryPriorityAvailable && (
+                  <ClaudeDeliveryPriorityPicker
+                    value={deliveryPriority}
+                    onChange={(priority) => setDeliveryChoice({ key: deliveryChoiceKey, priority })}
+                    disabled={isSendBusy || isComposerConnecting || activeEnvironmentUnavailable}
+                  />
+                )}
                 <ChatComposer
                   composerRef={composerRef}
                   composerDraftTarget={composerDraftTarget}
@@ -7145,6 +7251,7 @@ export default function ChatView(props: ChatViewProps) {
                   activePlan={composerActivePlan}
                   activeSubagents={activeSubagentEntries}
                   scheduledFollowups={scheduledFollowupsContext}
+                  providerTasks={providerTasksContext}
                   onOpenSubagentDetail={openSubagentDetail}
                   sidebarProposedPlan={visibleSidebarProposedPlan}
                   planSidebarLabel={planSidebarLabel}
@@ -7163,6 +7270,7 @@ export default function ChatView(props: ChatViewProps) {
                   settings={settings}
                   keybindings={keybindings}
                   gitCwd={gitCwd}
+                  skillsProjectId={gitCwd === activeProject?.cwd ? activeProject.id : null}
                   followUpQueueItems={followUpQueueViewItems}
                   steeringFollowUpItems={steeringFollowUpViewItems}
                   followUpQueueActionLabel={followUpQueueActionLabel}
@@ -7279,6 +7387,7 @@ export default function ChatView(props: ChatViewProps) {
             {sessionRailVisible ? (
               <SessionRail
                 scheduledFollowups={scheduledFollowupsContext}
+                providerTasks={providerTasksContext}
                 plan={composerActivePlan}
                 subagents={activeSubagentEntries}
                 onOpenSubagentDetail={openSubagentDetail}

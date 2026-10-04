@@ -197,6 +197,7 @@ it.effect("compensates provisional standalone ownership without releasing the so
         },
         providerService: { forkSession, discardSessionFork },
         standaloneWorkspaces: {
+          readExisting: () => Effect.succeed("/server-owned-neutral"),
           resolve: () => Effect.succeed("/server-owned-neutral"),
           remove,
           shareFork,

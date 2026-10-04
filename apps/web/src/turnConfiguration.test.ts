@@ -21,6 +21,21 @@ const configuration: ProviderTurnConfiguration = {
 };
 
 describe("accepted turn configuration presentation", () => {
+  it("displays the frozen exact tier instead of a misleading legacy Fast toggle", () => {
+    for (const [serviceTier, label] of [
+      ["ultrafast", "ultrafast"],
+      ["default", "Standard"],
+    ]) {
+      const decoded = readTurnConfiguration({
+        turnConfiguration: { ...configuration, serviceTier },
+      });
+      expect(decoded?.serviceTier).toBe(serviceTier);
+      const settings = presentTurnConfiguration(decoded!).settings;
+      expect(settings).toContain(`Service tier: ${label}`);
+      expect(settings).not.toContain("Fast on");
+    }
+  });
+
   it("shows frozen model, Ultra, explicit Fast on, account, and modes", () => {
     const snapshot = readTurnConfiguration({ turnConfiguration: configuration });
     expect(snapshot).toEqual(configuration);

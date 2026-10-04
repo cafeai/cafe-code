@@ -12,6 +12,8 @@
  * @module ProviderService
  */
 import type {
+  ProviderTaskControlInput,
+  ProviderTaskControlResult,
   ProviderCompactThreadInput,
   ProviderPrepareConversationRollbackInput,
   ProviderConversationRewindIdentity,
@@ -71,6 +73,9 @@ export interface ProviderSubagentDetailReadResult extends ProviderSubagentDetail
  * ProviderServiceShape - Service API for provider session and turn orchestration.
  */
 export interface ProviderServiceShape {
+  readonly controlTask?: (
+    input: ProviderTaskControlInput,
+  ) => Effect.Effect<ProviderTaskControlResult, ProviderServiceError>;
   /**
    * Start a provider session.
    */

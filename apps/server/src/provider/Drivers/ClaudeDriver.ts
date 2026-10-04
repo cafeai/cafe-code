@@ -48,6 +48,7 @@ import {
 } from "../ProviderDriver.ts";
 import type { ServerProviderDraft } from "../providerSnapshot.ts";
 import { supportsSubagentConcurrency } from "./SubagentConcurrency.ts";
+import { supportsClaudeTaskControls } from "../claudeTaskControls.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import {
   enrichProviderSnapshotWithVersionAdvisory,
@@ -125,6 +126,8 @@ const withInstanceIdentity =
       // not expose Codex goal controls for Claude instances.
       threadGoals: "unsupported",
       subagentConcurrency: supportsSubagentConcurrency("claudeAgent", snapshot.version),
+      deliveryPriority: supportsClaudeTaskControls(snapshot.version),
+      taskControls: supportsClaudeTaskControls(snapshot.version),
     },
   });
 
@@ -211,6 +214,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         undefined,
       );
       const adapterOptions = {
+        getNativeVersion: () => observedCliVersion,
         getSubagentConcurrencySupport: () =>
           supportsSubagentConcurrency("claudeAgent", observedCliVersion),
         instanceId,

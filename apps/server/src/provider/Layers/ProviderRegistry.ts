@@ -34,6 +34,7 @@ import {
 } from "@cafecode/contracts";
 import * as Cause from "effect/Cause";
 import { makeProviderUsageReset } from "../ProviderUsageReset.ts";
+import { discoverBoundProviderSkills } from "../providerSkillsDiscovery.ts";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
 import * as FileSystem from "effect/FileSystem";
@@ -956,6 +957,8 @@ export const ProviderRegistryLive = Layer.effect(
 
     return {
       getProviders: Ref.get(providersRef),
+      discoverSkills: (instanceId, cwd) =>
+        discoverBoundProviderSkills(instanceRegistry.getInstance(instanceId), cwd),
       usageReset,
       refresh: (provider?: ProviderDriverKind) =>
         refresh(provider).pipe(Effect.catchCause(recoverRefreshFailure)),

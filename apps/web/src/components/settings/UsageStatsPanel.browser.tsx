@@ -806,6 +806,15 @@ function settleLayoutCountersImmediately(): void {
 }
 
 describe("UsageStatsPanel", () => {
+  it("discloses partial prospective child usage without claiming root context growth", async () => {
+    mounted = await render(<UsageCostContent usage={createUsageDetail()} />);
+    await expect
+      .element(page.getByText(/Codex subagent usage includes only observed increments/))
+      .toBeVisible();
+    await expect
+      .element(page.getByText(/child tokens do not increase the main chat’s context-window meter/))
+      .toBeVisible();
+  });
   let mounted:
     | (Awaited<ReturnType<typeof render>> & {
         cleanup?: () => Promise<void>;

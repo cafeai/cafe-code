@@ -93,6 +93,10 @@ export function snapshotProviderTurnConfiguration(input: {
     session.provider === "codex" || session.provider === "claudeAgent"
       ? getModelSelectionBooleanOptionValue(selection, "fastMode")
       : undefined;
+  const serviceTier =
+    session.provider === "codex"
+      ? safeLabel(getModelSelectionStringOptionValue(selection, "serviceTier"), 64)
+      : undefined;
   const interactionMode =
     input.settingsSource === "session"
       ? session.interactionMode
@@ -108,6 +112,7 @@ export function snapshotProviderTurnConfiguration(input: {
     ...(modelDisplayName !== undefined ? { modelDisplayName } : {}),
     ...(effort !== undefined ? { effort } : {}),
     ...(fastMode !== undefined ? { fastMode } : {}),
+    ...(serviceTier !== undefined ? { serviceTier } : {}),
     runtimeMode: session.runtimeMode,
     ...(interactionMode !== undefined ? { interactionMode } : {}),
     // A request can inherit its model options while explicitly submitting a

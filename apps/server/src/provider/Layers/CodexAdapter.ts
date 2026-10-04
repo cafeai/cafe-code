@@ -47,6 +47,7 @@ import {
   RuntimeTaskId,
   type RuntimeSubagentPresentation,
   VirtualDesktopError,
+  UsageAccountingSnapshot,
 } from "@cafecode/contracts";
 import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
@@ -67,11 +68,9 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
-import {
-  getModelSelectionBooleanOptionValue,
-  getModelSelectionStringOptionValue,
-} from "@cafecode/shared/model";
+import { getModelSelectionStringOptionValue } from "@cafecode/shared/model";
 import { summarizeToolArguments } from "@cafecode/shared/toolActivity";
+import { resolveCodexServiceTier } from "../codexServiceTier.ts";
 
 import {
   ProviderAdapterRequestError,
@@ -163,22 +162,6 @@ function disposeSchedulingSession(binding: SchedulingSessionBinding | undefined)
   );
 }
 
-function codexServiceTierOverride(
-  modelSelection: ProviderSendTurnInput["modelSelection"],
-  instanceId: ProviderInstanceId,
-): Pick<CodexSessionRuntimeOptions, "serviceTier"> {
-  if (modelSelection?.instanceId !== instanceId) {
-    return {};
-  }
-  const fastMode = getModelSelectionBooleanOptionValue(modelSelection, "fastMode");
-  // Codex rust-v0.153.3's TUI service_tiers.rs sends the catalogue wire id
-  // `priority` for Fast and `default` for explicit standard routing. Omission
-  // preserves upstream session/config defaults, so it cannot represent Off
-  // after an earlier Fast turn. Reuse this mapping for both start/resume and
-  // turn submission, without borrowing another provider instance's options.
-  return fastMode === undefined ? {} : { serviceTier: fastMode ? "priority" : "default" };
-}
-
 class CodexTransportPolicyFileError extends Data.TaggedError("CodexTransportPolicyFileError")<{
   readonly cause: unknown;
 }> {
@@ -188,6 +171,10 @@ class CodexTransportPolicyFileError extends Data.TaggedError("CodexTransportPoli
 }
 
 export interface CodexAdapterLiveOptions {
+  /** Exact owning instance's cached catalogue; never runs metadata or paid probes. */
+  readonly getModels?: () => Effect.Effect<
+    ReadonlyArray<import("@cafecode/contracts").ServerProviderModel>
+  >;
   /** Cached owning-driver status only; this getter must never launch a probe. */
   readonly getSubagentConcurrencySupport?: () => boolean;
   readonly instanceId?: ProviderInstanceId;
@@ -798,8 +785,8 @@ function toCanonicalItemType(raw: string | undefined | null): CanonicalItemType 
   if (type.includes("web search")) return "web_search";
   if (type.includes("image generation")) return "image_generation";
   if (type.includes("image")) return "image_view";
-  if (type.includes("review entered")) return "review_entered";
-  if (type.includes("review exited")) return "review_exited";
+  if (type === "entered review mode" || type === "review entered") return "review_entered";
+  if (type === "exited review mode" || type === "review exited") return "review_exited";
   if (type.includes("compact")) return "context_compaction";
   if (type.includes("error")) return "error";
   return "unknown";
@@ -1030,6 +1017,10 @@ function itemTitle(itemType: CanonicalItemType, item: CodexLifecycleItem): strin
       return "Image generation";
     case "context_compaction":
       return "Context compaction";
+    case "review_entered":
+      return "Native review started";
+    case "review_exited":
+      return "Native review findings";
     case "error":
       return "Error";
     default:
@@ -1038,6 +1029,11 @@ function itemTitle(itemType: CanonicalItemType, item: CodexLifecycleItem): strin
 }
 
 function itemDetail(item: CodexLifecycleItem): string | undefined {
+  if (item.type === "enteredReviewMode" || item.type === "exitedReviewMode") {
+    // Native review findings are public assistant output, not a turn terminal
+    // signal. Bound retained text without trimming meaningful Markdown spacing.
+    return item.review.trim().length > 0 ? item.review.slice(0, 131_072) : undefined;
+  }
   if (item.type === "agentMessage") {
     // App-server's item/completed text is the accumulated assistant source,
     // not a work-log label (https://learn.chatgpt.com/docs/app-server#items).
@@ -2927,14 +2923,24 @@ function mapItemLifecycle(
         : undefined;
 
   return {
-    ...runtimeEventBase(event, canonicalThreadId),
+    ...runtimeEventBase(
+      event,
+      canonicalThreadId,
+      itemType === "review_entered" || itemType === "review_exited"
+        ? { rawPayload: { itemType, reviewTextLength: "review" in item ? item.review.length : 0 } }
+        : undefined,
+    ),
     type: lifecycle,
     payload: {
       itemType,
       ...(status ? { status } : {}),
       ...(title ? { title } : {}),
       ...(detail ? { detail } : {}),
-      ...(event.payload !== undefined ? { data: event.payload } : {}),
+      ...(event.payload !== undefined &&
+      itemType !== "review_entered" &&
+      itemType !== "review_exited"
+        ? { data: event.payload }
+        : {}),
     },
   };
 }
@@ -2944,6 +2950,17 @@ function mapToRuntimeEvents(
   canonicalThreadId: ThreadId,
   autoCompactTokenLimit: number | undefined,
 ): ReadonlyArray<ProviderRuntimeEvent> {
+  if (event.method === "cafecode/childUsageAccounting") {
+    const accounting = readPayload(UsageAccountingSnapshot, event.payload);
+    if (!accounting) return [];
+    return [
+      {
+        ...runtimeEventBase(event, canonicalThreadId, { rawPayload: { kind: "child-usage" } }),
+        type: "thread.usage-accounting.updated",
+        payload: accounting,
+      },
+    ];
+  }
   const subagentProjection = mapCodexSubagentProjection(event, canonicalThreadId);
   if (subagentProjection !== undefined) {
     return subagentProjection;
@@ -4663,6 +4680,17 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           });
         }
 
+        const tier = resolveCodexServiceTier(
+          input.modelSelection,
+          boundInstanceId,
+          options?.getModels ? yield* options.getModels() : undefined,
+        );
+        if (tier.error)
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "startSession",
+            issue: tier.error,
+          });
         const existing = sessions.get(input.threadId);
         const maxConcurrentSubagents = yield* Effect.try({
           try: () =>
@@ -4805,7 +4833,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ...(input.modelSelection?.instanceId === boundInstanceId
             ? { model: input.modelSelection.model }
             : {}),
-          ...codexServiceTierOverride(input.modelSelection, boundInstanceId),
+          ...(tier.serviceTier !== undefined ? { serviceTier: tier.serviceTier } : {}),
           ...(currentTransportPolicy !== undefined
             ? { transportPolicy: currentTransportPolicy }
             : {}),
@@ -5173,6 +5201,34 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   });
 
   const sendTurn: CodexAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
+    if (
+      input.codexReview !== undefined &&
+      (input.attachments?.length ||
+        (input.modelSelection !== undefined && input.modelSelection.instanceId !== boundInstanceId))
+    ) {
+      return yield* new ProviderAdapterValidationError({
+        provider: PROVIDER,
+        operation: "sendTurn",
+        issue: "Native review requires the exact Codex account and no attachments.",
+      });
+    }
+    // Native review inherits its materialized session/review-model settings.
+    // No ordinary composer override is supported by review/start; do not even
+    // validate a draft tier as if it were going to be submitted here.
+    const tier =
+      input.codexReview !== undefined
+        ? {}
+        : resolveCodexServiceTier(
+            input.modelSelection,
+            boundInstanceId,
+            options?.getModels ? yield* options.getModels() : undefined,
+          );
+    if (tier.error)
+      return yield* new ProviderAdapterValidationError({
+        provider: PROVIDER,
+        operation: "sendTurn",
+        issue: tier.error,
+      });
     yield* prepareRuntimeHomeForRequest(input.threadId, "turn/start");
 
     const codexAttachments = yield* Effect.forEach(
@@ -5237,23 +5293,28 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         : undefined;
     return yield* session.runtime
       .sendTurn({
-        ...(input.allowActiveTurnSteerFallback !== undefined
+        ...(input.codexReview !== undefined
+          ? { codexReview: input.codexReview, allowActiveTurnSteerFallback: false }
+          : {}),
+        ...(input.codexReview === undefined && input.allowActiveTurnSteerFallback !== undefined
           ? { allowActiveTurnSteerFallback: input.allowActiveTurnSteerFallback }
           : {}),
         ...(input.expectedCompletedRootTurnId !== undefined
           ? { expectedCompletedRootTurnId: input.expectedCompletedRootTurnId }
           : {}),
         ...(prompt !== undefined ? { input: prompt } : {}),
-        ...(input.modelSelection?.instanceId === boundInstanceId
+        ...(input.codexReview === undefined && input.modelSelection?.instanceId === boundInstanceId
           ? { model: input.modelSelection.model }
           : {}),
-        ...(reasoningEffort
+        ...(input.codexReview === undefined && reasoningEffort
           ? {
               effort: reasoningEffort as EffectCodexSchema.V2TurnStartParams__ReasoningEffort,
             }
           : {}),
-        ...codexServiceTierOverride(input.modelSelection, boundInstanceId),
-        ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
+        ...(tier.serviceTier !== undefined ? { serviceTier: tier.serviceTier } : {}),
+        ...(input.codexReview === undefined && input.interactionMode !== undefined
+          ? { interactionMode: input.interactionMode }
+          : {}),
         ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
       })
       .pipe(
@@ -5262,7 +5323,13 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ? Effect.promise(() => session.desktopBinding!.endTurn())
             : Effect.void,
         ),
-        Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "turn/start", cause)),
+        Effect.mapError((cause) =>
+          mapCodexRuntimeError(
+            input.threadId,
+            input.codexReview ? "review/start" : "turn/start",
+            cause,
+          ),
+        ),
       );
   });
 

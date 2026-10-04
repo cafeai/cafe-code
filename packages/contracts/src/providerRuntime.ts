@@ -17,6 +17,10 @@ import {
 import { ProviderThreadGoal } from "./providerGoal.ts";
 import { ProviderInteraction, ProviderNetworkApproval } from "./providerInteraction.ts";
 import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
+import {
+  ProviderIndividualTaskControl,
+  ProviderTaskControlCapability,
+} from "./providerTaskControls.ts";
 
 const TrimmedNonEmptyStringSchema = TrimmedNonEmptyString;
 const UnknownRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
@@ -418,7 +422,7 @@ export const UsageAccountingSnapshot = Schema.Struct({
   ),
   revision: PositiveInt.check(Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER)),
   models: Schema.Array(UsageAccountingModel).check(Schema.isMaxLength(64)),
-  completeness: Schema.Literals(["complete", "input-only"]),
+  completeness: Schema.Literals(["complete", "input-only", "partial"]),
 }).check(
   Schema.makeFilter(
     (snapshot) =>
@@ -448,7 +452,9 @@ export const UsageAccountingSnapshot = Schema.Struct({
           if (!Number.isSafeInteger(totals[field])) return false;
         }
       }
-      return true;
+      // Processed tokens combine input and output. Each column can be safe while
+      // their sum is not; reject that snapshot before persistence or display.
+      return Number.isSafeInteger(totals.inputTokens + totals.outputTokens);
     },
     { expected: "safe integer token totals across all accounting models" },
   ),
@@ -537,6 +543,7 @@ const TurnDiffUpdatedPayload = Schema.Struct({
 export type TurnDiffUpdatedPayload = typeof TurnDiffUpdatedPayload.Type;
 
 export const ItemLifecyclePayload = Schema.Struct({
+  individualTaskControl: Schema.optional(ProviderIndividualTaskControl),
   itemType: CanonicalItemType,
   status: Schema.optional(RuntimeItemStatus),
   title: Schema.optional(TrimmedNonEmptyStringSchema),
@@ -634,6 +641,8 @@ export const RuntimeSubagentPresentation = Schema.Struct({
   // Exact origin of this observation. A later runtime may read the same
   // history, but that cannot make old saved Working rows live again.
   runtimeId: Schema.optional(SubagentRuntimeId),
+  /** Server-minted incarnation, never an arbitrary renderer-supplied native id. */
+  taskControl: Schema.optional(ProviderTaskControlCapability),
   /**
    * Provider-owned history identity for the nested agent transcript.
    *
@@ -695,6 +704,7 @@ export const RuntimeResourceLinks = Schema.Array(RuntimeResourceLink).check(Sche
 export type RuntimeResourceLinks = typeof RuntimeResourceLinks.Type;
 
 const TaskStartedPayload = Schema.Struct({
+  individualTaskControl: Schema.optional(ProviderIndividualTaskControl),
   taskId: RuntimeTaskId,
   description: Schema.optional(TrimmedNonEmptyStringSchema),
   taskType: Schema.optional(TrimmedNonEmptyStringSchema),
@@ -704,6 +714,7 @@ const TaskStartedPayload = Schema.Struct({
 export type TaskStartedPayload = typeof TaskStartedPayload.Type;
 
 const TaskProgressPayload = Schema.Struct({
+  individualTaskControl: Schema.optional(ProviderIndividualTaskControl),
   taskId: RuntimeTaskId,
   description: TrimmedNonEmptyStringSchema,
   summary: Schema.optional(TrimmedNonEmptyStringSchema),
@@ -715,6 +726,7 @@ const TaskProgressPayload = Schema.Struct({
 export type TaskProgressPayload = typeof TaskProgressPayload.Type;
 
 const TaskCompletedPayload = Schema.Struct({
+  individualTaskControl: Schema.optional(ProviderIndividualTaskControl),
   taskId: RuntimeTaskId,
   status: Schema.Literals(["completed", "failed", "stopped"]),
   summary: Schema.optional(TrimmedNonEmptyStringSchema),

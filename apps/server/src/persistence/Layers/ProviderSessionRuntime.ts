@@ -13,6 +13,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Struct from "effect/Struct";
 import { makeConversationRewindStore } from "./ConversationRewinds.ts";
+import { makeTaskControlJournal } from "../TaskControlJournal.ts";
 
 import {
   PersistenceDecodeError,
@@ -106,6 +107,7 @@ function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: st
 
 const makeProviderSessionRuntimeRepository = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+  const taskControls = yield* makeTaskControlJournal;
 
   const upsertRuntimeRow = SqlSchema.void({
     Request: ProviderSessionRuntimeDbRowSchema,
@@ -576,6 +578,7 @@ const makeProviderSessionRuntimeRepository = Effect.gen(function* () {
 
   return {
     rewinds: makeConversationRewindStore(sql),
+    taskControls,
     upsert,
     getByThreadId,
     list,

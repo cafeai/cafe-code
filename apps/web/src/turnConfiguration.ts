@@ -47,13 +47,15 @@ export function presentTurnConfiguration(configuration: ProviderTurnConfiguratio
   // Absence is not false. An inherited provider preference may enable Fast, so
   // the row must not claim Normal/Fast off without an explicit frozen value.
   const fast =
-    configuration.provider === "codex" || configuration.provider === "claudeAgent"
-      ? configuration.fastMode === undefined
-        ? "Fast: provider default"
-        : configuration.fastMode
-          ? "Fast on"
-          : "Fast off"
-      : undefined;
+    configuration.provider === "codex" && configuration.serviceTier !== undefined
+      ? `Service tier: ${configuration.serviceTier === "default" ? "Standard" : configuration.serviceTier}`
+      : configuration.provider === "codex" || configuration.provider === "claudeAgent"
+        ? configuration.fastMode === undefined
+          ? "Fast: provider default"
+          : configuration.fastMode
+            ? "Fast on"
+            : "Fast off"
+        : undefined;
   const runtimeMode = {
     "approval-required": "Approval required",
     "auto-accept-edits": "Auto-accept edits",

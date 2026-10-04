@@ -25,6 +25,8 @@ import {
 } from "./orchestration.ts";
 import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
 import { MaxConcurrentSubagents } from "./subagentLimits.ts";
+import { CodexReviewTarget } from "./codexReview.ts";
+import { ProviderDeliveryPriority } from "./providerTaskControls.ts";
 
 const ProviderSessionStatus = Schema.Literals([
   "connecting",
@@ -171,6 +173,10 @@ export type ProviderSessionForkDiscardInput = typeof ProviderSessionForkDiscardI
 
 export const ProviderSendTurnInput = Schema.Struct({
   threadId: ThreadId,
+  codexReview: Schema.optional(CodexReviewTarget),
+  deliveryPriority: Schema.optional(ProviderDeliveryPriority),
+  /** Trusted orchestration provenance; scheduled input must never gain human urgency. */
+  inputOrigin: Schema.optional(Schema.Literals(["human", "scheduled"])),
   // Cafe's durable message id is correlation metadata. ProviderService passes
   // it only when an ordinary send is reconciled into an adapter-native live
   // steer, allowing Codex to derive its bounded opaque client correlation id.
@@ -201,6 +207,7 @@ export type ProviderSendTurnInput = typeof ProviderSendTurnInput.Type;
 
 export const ProviderSteerTurnInput = Schema.Struct({
   threadId: ThreadId,
+  deliveryPriority: Schema.optional(ProviderDeliveryPriority),
   expectedTurnId: TurnId,
   // Cafe's durable user-message identity is correlation metadata only. The
   // Codex adapter derives a bounded opaque token before forwarding it as

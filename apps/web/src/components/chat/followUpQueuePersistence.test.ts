@@ -79,6 +79,42 @@ function raw(storage: StateStorage): string {
 }
 
 describe("follow-up queue persistence", () => {
+  it("persists each explicit native priority with the exact account and never fabricates one for legacy queued messages", async () => {
+    for (const priority of [undefined, "now", "next", "later"] as const) {
+      const storage = createMemoryStorage();
+      const persistence = createFollowUpQueuePersistence(storage);
+      const original = {
+        ...item(),
+        provider: ProviderDriverKind.make("claudeAgent"),
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("claude-account"),
+          model: "claude-fable-5-1",
+        },
+        ...(priority ? { deliveryPriority: priority } : {}),
+      };
+      expect((await persistence.save(environmentA, [original])).ok).toBe(true);
+      const loaded = persistence.load(environmentA);
+      expect(loaded.ok).toBe(true);
+      if (!loaded.ok) throw new Error(loaded.error);
+      expect(loaded.value.pending[0]?.deliveryPriority).toBe(priority);
+      expect(loaded.value.pending[0]?.modelSelection).toEqual(original.modelSelection);
+      // A disconnected renderer may have lost the dispatch response. Reopen
+      // the durable storage and preserve the exact priority/UUID receipt without
+      // ever returning possibly accepted input to the auto-send queue.
+      expect(persistence.claim(claim(original), original).ok).toBe(true);
+      const reconnected = createFollowUpQueuePersistence(storage);
+      const claimed = reconnected.load(environmentA);
+      expect(claimed.ok).toBe(true);
+      if (!claimed.ok) throw new Error(claimed.error);
+      expect(claimed.value.pending).toEqual([]);
+      expect(claimed.value.claimed[0]?.deliveryPriority).toBe(priority);
+      expect(claimed.value.claimed[0]?.claimedDispatch).toMatchObject({
+        commandId: claim(original).commandId,
+        messageId: claim(original).messageId,
+      });
+      expect(reconnected.claim(claim(original), original).ok).toBe(false);
+    }
+  });
   it("round-trips pending metadata and bounded image data without paths, blobs, or file bodies", async () => {
     const storage = createMemoryStorage();
     const persistence = createFollowUpQueuePersistence(storage);

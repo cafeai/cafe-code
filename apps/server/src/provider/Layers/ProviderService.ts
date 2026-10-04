@@ -36,6 +36,7 @@ import {
   PROVIDER_THREAD_GOAL_MAX_OBJECTIVE_CODE_POINTS,
   ServerProviderRuntimeRestartInput,
   ProviderSteerTurnInput,
+  ProviderTaskControlInput,
   ProviderStopSessionInput,
   TurnId,
   type ProviderSessionRuntimeStatus,
@@ -2147,7 +2148,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     const input = {
       ...parsed,
       attachments: parsed.attachments ?? [],
+      ...(parsed.codexReview !== undefined ? { allowActiveTurnSteerFallback: false } : {}),
     };
+    if (input.deliveryPriority !== undefined && input.inputOrigin === "scheduled") {
+      return yield* toValidationError(
+        "ProviderService.sendTurn",
+        "Scheduled messages cannot set a human delivery priority.",
+      );
+    }
     if (!input.input && input.attachments.length === 0) {
       return yield* toValidationError(
         "ProviderService.sendTurn",
@@ -2169,6 +2177,24 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         allowRecovery: true,
       });
       metricProvider = routed.adapter.provider;
+      if (input.deliveryPriority !== undefined && routed.adapter.provider !== "claudeAgent") {
+        return yield* toValidationError(
+          "ProviderService.sendTurn",
+          "This provider does not support explicit delivery priority.",
+        );
+      }
+      if (
+        input.codexReview !== undefined &&
+        (routed.adapter.provider !== "codex" ||
+          input.attachments.length > 0 ||
+          (input.modelSelection !== undefined &&
+            input.modelSelection.instanceId !== routed.instanceId))
+      ) {
+        return yield* toValidationError(
+          "ProviderService.sendTurn",
+          "Native review requires the exact Codex account and no attachments.",
+        );
+      }
       metricModel = input.modelSelection?.model;
       yield* Effect.annotateCurrentSpan({
         "provider.kind": routed.adapter.provider,
@@ -2214,6 +2240,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             );
           const turn = yield* routed.adapter.steerTurn({
             threadId: input.threadId,
+            ...(input.deliveryPriority !== undefined
+              ? { deliveryPriority: input.deliveryPriority }
+              : {}),
             expectedTurnId: activeSession.activeTurnId,
             ...(input.messageId !== undefined ? { messageId: input.messageId } : {}),
             ...(input.input !== undefined ? { input: input.input } : {}),
@@ -2329,6 +2358,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         allowRecovery: true,
       });
       metricProvider = routed.adapter.provider;
+      if (input.deliveryPriority !== undefined && routed.adapter.provider !== "claudeAgent") {
+        return yield* toValidationError(
+          "ProviderService.steerTurn",
+          "This provider does not support explicit delivery priority.",
+        );
+      }
       if (routed.adapter.capabilities.liveSteer !== "supported") {
         return yield* toValidationError(
           "ProviderService.steerTurn",
@@ -3437,7 +3472,51 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     ),
   );
 
+  const controlTask: NonNullable<ProviderServiceShape["controlTask"]> = (rawInput) =>
+    whileThreadAcceptsProviderWork({
+      operation: "ProviderService.controlTask",
+      threadId: rawInput.threadId,
+      effect: Effect.gen(function* () {
+        const input = yield* decodeInputOrValidationError({
+          operation: "ProviderService.controlTask",
+          schema: ProviderTaskControlInput,
+          payload: rawInput,
+        });
+        yield* assertNoRewind(input.threadId, "ProviderService.controlTask");
+        const routed = yield* resolveRoutableSession({
+          threadId: input.threadId,
+          operation: "ProviderService.controlTask",
+          allowRecovery: false,
+        });
+        if (
+          !routed.isActive ||
+          routed.instanceId !== input.providerInstanceId ||
+          !routed.adapter.controlTask ||
+          !directory.taskControls
+        ) {
+          return yield* toValidationError(
+            "ProviderService.controlTask",
+            "This task no longer has a controllable live provider session.",
+          );
+        }
+        // Record the immutable action before native I/O. A transport failure is
+        // ambiguous: never automatically repeat it, and never invent a terminal
+        // task event from an acknowledgement. Native lifecycle edges settle UI.
+        return yield* directory.taskControls.run(
+          input,
+          Effect.suspend(() => routed.adapter.controlTask!(input)).pipe(
+            // SDK control promises may outlive a lost process/connection. Bound
+            // caller waiting, while the durable receipt makes late/unknown ACKs
+            // non-replayable. This is not evidence that the worker was stopped.
+            Effect.timeout(15_000),
+            Effect.catchCause(() => Effect.succeed({ status: "unknown" as const })),
+          ),
+        );
+      }),
+    });
+
   return {
+    controlTask,
     prepareConversationRollback,
     commitConversationRollback,
     finishConversationRollback,

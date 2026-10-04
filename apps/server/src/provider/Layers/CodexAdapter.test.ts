@@ -21,6 +21,7 @@ import {
   type ProviderTurnStartResult,
   type ProviderTurnSteerResult,
   type ProviderUserInputAnswers,
+  type ServerProviderModel,
   ThreadId,
   THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_BYTES,
   THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES,
@@ -41,6 +42,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
+import * as EffectCodexSchema from "effect-codex-app-server/schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
@@ -83,6 +85,8 @@ import {
 } from "../../virtualDesktop/sessionBroker.ts";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 const decodeMessageId = Schema.decodeUnknownSync(MessageId);
+const isStartedItem = Schema.is(EffectCodexSchema.V2ItemStartedNotification);
+const isCompletedItem = Schema.is(EffectCodexSchema.V2ItemCompletedNotification);
 
 // Test-local service tag so the rest of the file can keep using `yield* CodexAdapter`.
 class CodexAdapter extends Context.Service<CodexAdapter, CodexAdapterShape>()(
@@ -769,6 +773,27 @@ const providerSessionDirectoryTestLayer = Layer.succeed(ProviderSessionDirectory
 });
 
 const validationRuntimeFactory = makeRuntimeFactory();
+const advertisedTierModels: readonly ServerProviderModel[] = [
+  {
+    slug: "catalogued-tier-model",
+    name: "Catalogued tier model",
+    isCustom: false,
+    capabilities: {
+      optionDescriptors: [
+        {
+          id: "serviceTier",
+          label: "Service tier",
+          type: "select",
+          options: [
+            { id: "default", label: "Standard" },
+            { id: "priority", label: "Fast" },
+            { id: "ultrafast", label: "Ultra fast" },
+          ],
+        },
+      ],
+    },
+  },
+];
 const validationLayer = it.layer(
   Layer.effect(
     CodexAdapter,
@@ -776,6 +801,7 @@ const validationLayer = it.layer(
       const codexConfig = decodeCodexSettings({});
       return yield* makeCodexAdapter(codexConfig, {
         makeRuntime: validationRuntimeFactory.factory,
+        getModels: () => Effect.succeed(advertisedTierModels),
       });
     }),
   ).pipe(
@@ -787,9 +813,48 @@ const validationLayer = it.layer(
 );
 
 validationLayer("CodexAdapterLive validation", (it) => {
+  it.effect(
+    "passes an advertised tier exactly at start and rejects an unknown tier before runtime construction",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* CodexAdapter;
+        const threadId = asThreadId("exact-service-tier-start");
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("codex"),
+          threadId,
+          runtimeMode: "full-access",
+          modelSelection: createModelSelection(
+            ProviderInstanceId.make("codex"),
+            "catalogued-tier-model",
+            [{ id: "serviceTier", value: "ultrafast" }],
+          ),
+        });
+        assert.equal(
+          validationRuntimeFactory.factory.mock.calls.at(-1)?.[0].serviceTier,
+          "ultrafast",
+        );
+        const count = validationRuntimeFactory.factory.mock.calls.length;
+        const failed = yield* Effect.exit(
+          adapter.startSession({
+            provider: ProviderDriverKind.make("codex"),
+            threadId: asThreadId("unknown-service-tier-start"),
+            runtimeMode: "full-access",
+            modelSelection: createModelSelection(
+              ProviderInstanceId.make("codex"),
+              "catalogued-tier-model",
+              [{ id: "serviceTier", value: "unadvertised" }],
+            ),
+          }),
+        );
+        assert.equal(failed._tag, "Failure");
+        assert.equal(validationRuntimeFactory.factory.mock.calls.length, count);
+      }),
+  );
+
   it.effect("returns validation error for non-codex provider on startSession", () =>
     Effect.gen(function* () {
       const adapter = yield* CodexAdapter;
+      const before = validationRuntimeFactory.factory.mock.calls.length;
       const result = yield* adapter
         .startSession({
           provider: ProviderDriverKind.make("claudeAgent"),
@@ -807,7 +872,7 @@ validationLayer("CodexAdapterLive validation", (it) => {
           issue: "Expected provider 'codex' but received 'claudeAgent'.",
         }),
       );
-      assert.equal(validationRuntimeFactory.factory.mock.calls.length, 0);
+      assert.equal(validationRuntimeFactory.factory.mock.calls.length, before);
     }),
   );
   it.effect("maps codex model options before starting a session", () =>
@@ -920,6 +985,7 @@ const sessionErrorLayer = it.layer(
       const codexConfig = decodeCodexSettings({});
       return yield* makeCodexAdapter(codexConfig, {
         makeRuntime: sessionRuntimeFactory.factory,
+        getModels: () => Effect.succeed(advertisedTierModels),
         readTransientSubagentThread: transientSubagentHistoryRead,
       });
     }),
@@ -932,6 +998,53 @@ const sessionErrorLayer = it.layer(
 );
 
 sessionErrorLayer("CodexAdapterLive session errors", (it) => {
+  it.effect(
+    "sends exact advertised tiers and rejects removed or foreign model tiers without a paid turn",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* CodexAdapter;
+        const threadId = asThreadId("exact-service-tier-send");
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("codex"),
+          threadId,
+          runtimeMode: "full-access",
+        });
+        const runtime = sessionRuntimeFactory.lastRuntime!;
+        runtime.sendTurnImpl.mockClear();
+        for (const value of ["ultrafast", "default"]) {
+          yield* adapter.sendTurn({
+            threadId,
+            input: "Continue",
+            modelSelection: createModelSelection(
+              ProviderInstanceId.make("codex"),
+              "catalogued-tier-model",
+              [{ id: "serviceTier", value }],
+            ),
+          });
+        }
+        assert.deepEqual(
+          runtime.sendTurnImpl.mock.calls.map(([input]) => input.serviceTier),
+          ["ultrafast", "default"],
+        );
+        for (const [model, value] of [
+          ["catalogued-tier-model", "removed"],
+          ["other-model", "ultrafast"],
+        ]) {
+          const result = yield* Effect.exit(
+            adapter.sendTurn({
+              threadId,
+              input: "Continue",
+              modelSelection: createModelSelection(ProviderInstanceId.make("codex"), model!, [
+                { id: "serviceTier", value: value! },
+              ]),
+            }),
+          );
+          assert.equal(result._tag, "Failure");
+        }
+        assert.equal(runtime.sendTurnImpl.mock.calls.length, 2);
+      }),
+  );
+
   it.effect("uses a transient reader without materializing a session or runtime events", () =>
     Effect.gen(function* () {
       const adapter = yield* CodexAdapter;
@@ -1179,6 +1292,55 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
           new RegExp(sentinel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
         );
       }
+    }),
+  );
+
+  it.effect("preserves explicit native review targets and prohibits active-turn fallback", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("native-review-routing");
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "approval-required",
+      });
+      const runtime = sessionRuntimeFactory.lastRuntime;
+      assert.ok(runtime);
+      runtime.sendTurnImpl.mockClear();
+      const codexReview = { type: "baseBranch" as const, branch: "origin/main" };
+      yield* adapter.sendTurn({
+        threadId,
+        input: "Display-only review description",
+        codexReview,
+        modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-6.1-sol", [
+          { id: "serviceTier", value: "not-advertised" },
+          { id: "reasoningEffort", value: "ultra" },
+        ]),
+        interactionMode: "plan",
+        allowActiveTurnSteerFallback: true,
+        attachments: [],
+      });
+      assert.equal(runtime.sendTurnImpl.mock.calls.length, 1);
+      assert.deepStrictEqual(runtime.sendTurnImpl.mock.calls[0]?.[0]?.codexReview, codexReview);
+      assert.equal(runtime.sendTurnImpl.mock.calls[0]?.[0]?.allowActiveTurnSteerFallback, false);
+      assert.equal(runtime.sendTurnImpl.mock.calls[0]?.[0]?.model, undefined);
+      assert.equal(runtime.sendTurnImpl.mock.calls[0]?.[0]?.effort, undefined);
+      assert.equal(runtime.sendTurnImpl.mock.calls[0]?.[0]?.serviceTier, undefined);
+      assert.equal(runtime.sendTurnImpl.mock.calls[0]?.[0]?.interactionMode, undefined);
+
+      const invalid = yield* Effect.exit(
+        adapter.sendTurn({
+          threadId,
+          input: "Native review",
+          codexReview,
+          modelSelection: createModelSelection(
+            ProviderInstanceId.make("different-account"),
+            "gpt-6.1-sol",
+          ),
+        }),
+      );
+      assert.equal(invalid._tag, "Failure");
+      assert.equal(runtime.sendTurnImpl.mock.calls.length, 1);
     }),
   );
 
@@ -1498,6 +1660,81 @@ function startLifecycleRuntime(subagentRuntimeId?: string) {
 }
 
 lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
+  it.effect(
+    "maps native review items exactly, bounds findings and never completes their turn",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const results = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil((event) => event.eventId === "review-fixture-barrier"),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        const fixtures = [
+          ["item/started", "enteredReviewMode", "Current changes"],
+          ["item/completed", "enteredReviewMode", "Current changes"],
+          ["item/started", "exitedReviewMode", "Working"],
+          ["item/completed", "exitedReviewMode", " Findings\n" + "x".repeat(140_000)],
+        ] as const;
+        for (const [index, [method, type, review]] of fixtures.entries()) {
+          const payload = {
+            threadId: "thread-1",
+            turnId: "review-turn",
+            item: { id: `review-item-${index}`, type, review },
+            ...(method === "item/started" ? { startedAtMs: 1 } : { completedAtMs: 2 }),
+          };
+          // Validate the native fixture before waiting for its mapped stream. A
+          // missing required native timestamp must fail here, not hang the test.
+          assert.equal(
+            method === "item/started" ? isStartedItem(payload) : isCompletedItem(payload),
+            true,
+          );
+          yield* runtime.emit({
+            id: asEventId(`review-${index}`),
+            kind: "notification",
+            provider: ProviderDriverKind.make("codex"),
+            threadId: asThreadId("thread-1"),
+            turnId: asTurnId("review-turn"),
+            itemId: asItemId(`review-item-${index}`),
+            createdAt: "2026-10-05T00:00:00.000Z",
+            method,
+            payload,
+          });
+        }
+        // A real mapped sentinel supplies a FIFO barrier, so restoring the old
+        // dropped-review mapping fails the assertion rather than a timeout.
+        yield* runtime.emit({
+          id: asEventId("review-fixture-barrier"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          createdAt: "2026-10-05T00:00:00.000Z",
+          method: "warning",
+          message: "Review fixture barrier",
+        });
+        const events = Array.from(yield* Fiber.join(results)).filter(
+          (event) => event.eventId !== "review-fixture-barrier",
+        );
+        assert.deepEqual(
+          events.map((event) => event.type),
+          ["item.started", "item.completed", "item.started", "item.completed"],
+        );
+        assert.deepEqual(
+          events.map((event) => ("itemType" in event.payload ? event.payload.itemType : null)),
+          ["review_entered", "review_entered", "review_exited", "review_exited"],
+        );
+        const final = events[3];
+        assert.ok(final?.type === "item.completed");
+        assert.equal(final.payload.detail?.length, 131_072);
+        assert.equal(final.payload.detail?.startsWith(" Findings\n"), true);
+        assert.equal(final.payload.data, undefined);
+        assert.deepEqual(final.raw?.payload, {
+          itemType: "review_exited",
+          reviewTextLength: 140_010,
+        });
+        assert.equal(final.turnId, "review-turn");
+      }),
+  );
   it.effect("preserves the originating runtime on child activity and lifecycle envelopes", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
@@ -5171,6 +5408,45 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
           });
         }
       }),
+  );
+
+  it.effect("maps child accounting to its durable lane without publishing root context usage", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+      const accounting = {
+        scopeId: "12345678-1234-4234-8234-123456789abc",
+        revision: 2,
+        completeness: "partial",
+        models: [
+          {
+            model: "gpt-6.1-sol",
+            inputTokens: 100,
+            cachedInputTokens: 40,
+            cacheWriteInputTokens: 10,
+            outputTokens: 20,
+            reasoningOutputTokens: 5,
+          },
+        ],
+      };
+      yield* runtime.emit({
+        id: asEventId("evt-child-accounting"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "cafecode/childUsageAccounting",
+        payload: accounting,
+      } satisfies ProviderEvent);
+      const first = yield* Fiber.join(firstEventFiber);
+      assert.equal(first._tag, "Some");
+      if (first._tag !== "Some") return;
+      assert.equal(first.value.type, "thread.usage-accounting.updated");
+      assert.deepEqual(first.value.payload, accounting);
+      assert.deepEqual(first.value.raw?.payload, { kind: "child-usage" });
+      assert.equal(first.value.threadId, "thread-1");
+    }),
   );
 
   it.effect("unwraps Codex token usage payloads for context window events", () =>

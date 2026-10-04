@@ -1,4 +1,5 @@
 import { ProviderCompactThreadInput } from "./providerCompaction.ts";
+import { ProviderTaskControlInput, ProviderTaskControlResult } from "./providerTaskControls.ts";
 import * as Schema from "effect/Schema";
 import {
   ProviderRespondToInteractionInput,
@@ -554,6 +555,11 @@ export const ProviderDaemonRpcRequest = Schema.Union([
     payload: ProviderSteerTurnInput,
   }),
   Schema.Struct({
+    method: Schema.Literal("controlTask"),
+    commandId: Schema.optional(ProviderDaemonCommandId),
+    payload: ProviderTaskControlInput,
+  }),
+  Schema.Struct({
     method: Schema.Literal("interruptTurn"),
     commandId: Schema.optional(ProviderDaemonCommandId),
     payload: ProviderInterruptTurnInput,
@@ -661,6 +667,7 @@ export const ProviderDaemonRpcResultByMethod = {
   discardSessionFork: Schema.Void,
   sendTurn: ProviderTurnStartResult,
   steerTurn: ProviderTurnSteerResult,
+  controlTask: ProviderTaskControlResult,
   interruptTurn: Schema.Void,
   respondToRequest: Schema.Void,
   respondToUserInput: Schema.Void,

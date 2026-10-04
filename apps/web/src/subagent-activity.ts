@@ -3,6 +3,10 @@ import type {
   OrchestrationThreadActivity,
   TurnId,
 } from "@cafecode/contracts";
+import { ProviderTaskControlCapability } from "@cafecode/contracts";
+import * as Schema from "effect/Schema";
+
+const isTaskControlCapability = Schema.is(ProviderTaskControlCapability);
 
 export type SubagentRunStatus =
   | "waiting"
@@ -59,6 +63,7 @@ export interface DerivedSubagentActivity {
   historyId?: string;
   /** Opaque native runtime generation; never display it or use it for history routing. */
   runtimeId?: string;
+  taskControl?: ProviderTaskControlCapability;
 }
 
 const DISPLAY_TEXT_LIMIT = 240;
@@ -319,6 +324,9 @@ function upsertStructuredSubagent(
     lifecycleRevision: lifecycleRevision(activity),
     ...(historyId ? { historyId } : {}),
     ...(runtimeId ? { runtimeId } : {}),
+    ...(!terminal && isTaskControlCapability(presentation.taskControl)
+      ? { taskControl: presentation.taskControl }
+      : {}),
     ...(terminal
       ? { completedAt: activity.createdAt }
       : previous?.completedAt && !isRestart

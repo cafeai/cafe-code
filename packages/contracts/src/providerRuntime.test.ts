@@ -4,10 +4,11 @@ import * as Schema from "effect/Schema";
 import { ProviderRuntimeEvent, UsageAccountingSnapshot } from "./providerRuntime.ts";
 
 const decodeRuntimeEvent = Schema.decodeUnknownSync(ProviderRuntimeEvent);
+const decodeAccountingSnapshot = Schema.decodeUnknownSync(UsageAccountingSnapshot);
 
 describe("ProviderRuntimeEvent", () => {
   it("bounds independent billing snapshots and rejects unsafe aggregate counts or identifiers", () => {
-    const decode = Schema.decodeUnknownSync(UsageAccountingSnapshot);
+    const decode = decodeAccountingSnapshot;
     const model = {
       model: "claude-sonnet-5",
       inputTokens: 100,
@@ -29,6 +30,16 @@ describe("ProviderRuntimeEvent", () => {
       { ...snapshot, models: [model, model] },
       { ...snapshot, models: [{ ...model, cachedInputTokens: 101 }] },
       { ...snapshot, models: [{ ...model, model: "/private/account/path" }] },
+      // Separately safe input/output columns must also fit the processed total,
+      // both within one row and when independent model rows are combined.
+      { ...snapshot, models: [{ ...model, inputTokens: Number.MAX_SAFE_INTEGER }] },
+      {
+        ...snapshot,
+        models: [
+          { ...model, inputTokens: Number.MAX_SAFE_INTEGER - 120 },
+          { ...model, model: "claude-haiku-4-5" },
+        ],
+      },
       {
         ...snapshot,
         models: [

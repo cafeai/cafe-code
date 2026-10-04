@@ -33,6 +33,7 @@ const MUTATING_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
   "discardSessionFork",
   "sendTurn",
   "steerTurn",
+  "controlTask",
   "interruptTurn",
   "respondToRequest",
   "respondToUserInput",
@@ -49,7 +50,8 @@ const MUTATING_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
   "finishConversationRollback",
 ]);
 
-const REWIND_PHASE_METHODS = new Set<string>([
+const IDENTITY_BOUND_MUTATING_METHODS = new Set<string>([
+  "controlTask",
   "prepareConversationRollback",
   "commitConversationRollback",
   "finishConversationRollback",
@@ -347,6 +349,8 @@ function toCommandDiagnostic(row: CommandDiagnosticRow): ProviderDaemonCommandDi
 
 export const makeProviderDaemonCommandLedger = (options?: {
   readonly ownerKey?: string;
+  /** Shared task-control journals retain ambiguous claims across reconnects. */
+  readonly recoverAbandonedOnStartup?: boolean;
 }): Effect.Effect<ProviderDaemonCommandLedger, never, SqlClient.SqlClient> =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
@@ -363,7 +367,8 @@ export const makeProviderDaemonCommandLedger = (options?: {
       ),
     );
     const startupCleanupAt = DateTime.formatIso(yield* DateTime.now);
-    yield* sql`
+    if (options?.recoverAbandonedOnStartup !== false)
+      yield* sql`
       UPDATE provider_daemon_commands
       SET
         status = 'failed',
@@ -372,14 +377,14 @@ export const makeProviderDaemonCommandLedger = (options?: {
       WHERE command_id LIKE ${ownerCommandLike}
         AND status = 'running'
     `.pipe(
-      Effect.catchCause((cause) =>
-        Effect.logError("provider daemon command ledger failed startup cleanup", {
-          ownerKey,
-          cause: Cause.pretty(cause),
-        }),
-      ),
-      Effect.orDie,
-    );
+        Effect.catchCause((cause) =>
+          Effect.logError("provider daemon command ledger failed startup cleanup", {
+            ownerKey,
+            cause: Cause.pretty(cause),
+          }),
+        ),
+        Effect.orDie,
+      );
 
     const readCommand = (commandId: string): Effect.Effect<CommandRow | null> =>
       Effect.gen(function* () {
@@ -480,14 +485,14 @@ export const makeProviderDaemonCommandLedger = (options?: {
         }
         const existing = existingExit.value;
         if (existing !== null) {
-          // A phase receipt certifies one exact checkpoint transaction, not
-          // merely a caller-chosen id. Bind both directions: a rewind id cannot
-          // borrow another method's receipt, nor can another method replay a
-          // rewind receipt for a different thread or completion proof. Decode
+          // A mutation receipt certifies one exact request, not merely a
+          // caller-chosen id. Bind both directions: an identity-bound request
+          // cannot borrow another method's receipt, nor can another method replay
+          // its receipt for a different task, thread or completion proof. Decode
           // and re-encode to compare schema-canonical bodies, not JSON key order.
           if (
-            REWIND_PHASE_METHODS.has(request.method) ||
-            REWIND_PHASE_METHODS.has(existing.method)
+            IDENTITY_BOUND_MUTATING_METHODS.has(request.method) ||
+            IDENTITY_BOUND_MUTATING_METHODS.has(existing.method)
           ) {
             let matches = false;
             try {
@@ -503,7 +508,7 @@ export const makeProviderDaemonCommandLedger = (options?: {
             if (!matches)
               return commandError(
                 "ProviderDaemonCommandIdentityMismatch",
-                "The rewind command receipt does not match this exact request; its outcome is unknown.",
+                "The mutation receipt does not match this exact request; its outcome is unknown.",
               );
           }
           if (existing.status === "completed" && existing.responseJson !== null) {

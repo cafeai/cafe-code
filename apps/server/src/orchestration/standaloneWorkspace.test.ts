@@ -83,6 +83,55 @@ const createThread = (threadId: ThreadId, projectId: string | null = null) =>
 
 layer("standalone workspace ownership", (it) => {
   it.effect(
+    "reads only already provisioned workspaces without ownership or permission mutations",
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const thread = ThreadId.make("read-only-skills-workspace");
+        yield* createThread(thread);
+        const store = yield* makeStandaloneWorkspaceStore;
+        assert.isNull(yield* store.readExisting(thread));
+        assert.deepEqual(
+          yield* sql`SELECT * FROM standalone_thread_workspaces WHERE thread_id = ${thread}`,
+          [],
+        );
+        const cwd = yield* store.resolve(thread);
+        const ownershipBefore =
+          yield* sql`SELECT * FROM standalone_thread_workspaces WHERE thread_id = ${thread}`;
+        const rootBefore = yield* sql`SELECT * FROM standalone_workspace_root_identity`;
+        if (process.platform !== "win32") yield* Effect.promise(() => fs.chmod(cwd, 0o750));
+        assert.equal(yield* store.readExisting(thread), cwd);
+        assert.deepEqual(
+          yield* sql`SELECT * FROM standalone_thread_workspaces WHERE thread_id = ${thread}`,
+          ownershipBefore,
+        );
+        assert.deepEqual(yield* sql`SELECT * FROM standalone_workspace_root_identity`, rootBefore);
+        if (process.platform !== "win32")
+          assert.equal((yield* Effect.promise(() => fs.stat(cwd))).mode & 0o777, 0o750);
+        yield* sql`UPDATE projection_threads SET archived_at = '2026-10-05T00:00:00Z' WHERE thread_id = ${thread}`;
+        assert.isNull(yield* store.readExisting(thread));
+        yield* store.remove(thread);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect("rejects an untrusted replacement directory during read-only discovery", () =>
+    Effect.gen(function* () {
+      const thread = ThreadId.make("read-only-replacement-workspace");
+      yield* createThread(thread);
+      const store = yield* makeStandaloneWorkspaceStore;
+      const cwd = yield* store.resolve(thread);
+      const original = `${cwd}-original`;
+      yield* Effect.promise(() => fs.rename(cwd, original));
+      yield* Effect.promise(() => fs.mkdir(cwd));
+      const outcome = yield* Effect.exit(store.readExisting(thread));
+      assert.equal(outcome._tag, "Failure");
+      yield* Effect.promise(() => fs.rmdir(cwd));
+      yield* Effect.promise(() => fs.rename(original, cwd));
+      yield* store.remove(thread);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect(
     "does not chmod or rewrite ownership after cancelled volume admission finishes late",
     (context) =>
       Effect.gen(function* () {

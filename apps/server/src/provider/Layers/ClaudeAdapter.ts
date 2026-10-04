@@ -63,6 +63,7 @@ import {
   type ProviderSessionForkResult,
   type ThreadTokenUsageSnapshot,
   type ProviderSteerTurnInput,
+  type ProviderTaskControlInput,
   type ProviderUserInputAnswers,
   type ProviderElicitation,
   type RuntimeSessionState,
@@ -111,6 +112,11 @@ import { makeProviderSessionTitle } from "../providerSessionTitle.ts";
 import { awaitClaudeDecision } from "../claudeDecision.ts";
 import { recoverClaudeResume } from "../claudeResumeRecovery.ts";
 import { createObservedClaudeQuery } from "../claudeQueryProcess.ts";
+import {
+  supportsClaudeTaskControls,
+  isClaudeDetachedToolResult,
+  admittedClaudeControlIdentity,
+} from "../claudeTaskControls.ts";
 import {
   readClaudeRewindMessageIds,
   readClaudeRewindSnapshot,
@@ -245,7 +251,7 @@ type ClaudeSdkThinkingDisplay = "summarized" | "omitted" | null;
 type ClaudeCommandLifecycleState = "queued" | "started" | "completed" | "cancelled" | "discarded";
 type ClaudePromptLifecycleState = "submitted" | ClaudeCommandLifecycleState;
 type ClaudePromptInput = Pick<ProviderSendTurnInput, "threadId" | "input" | "attachments"> &
-  Partial<Pick<ProviderSendTurnInput, "modelSelection">>;
+  Partial<Pick<ProviderSendTurnInput, "modelSelection" | "deliveryPriority" | "inputOrigin">>;
 // The bundled Claude Code binary can emit newer system subtypes before the
 // installed SDK declarations include them. Keep those known runtime shapes in
 // a narrow local union so handlers stay typed without dropping diagnostics.
@@ -432,7 +438,13 @@ interface PendingUserInput {
 }
 
 interface ToolInFlight {
+  /** Server-minted reference for background-only control before a native task exists. */
+  readonly controlId: string;
+  readonly controlGeneration: string;
   readonly itemId: string;
+  /** Response segments may advance while this exact native call is detached. */
+  readonly turnId?: TurnId;
+  readonly detached?: boolean;
   readonly itemType: CanonicalItemType;
   readonly toolName: string;
   readonly title: string;
@@ -450,7 +462,12 @@ interface ClaudeTaskVisibilityState {
 }
 
 interface ClaudeTaskBinding {
+  readonly retiredToolUseKeys?: ReadonlyArray<string> | undefined;
+  readonly incarnationRequiresToolUseId?: boolean | undefined;
   readonly taskId: RuntimeTaskId;
+  readonly nativeTaskId?: string | undefined;
+  readonly taskGeneration?: string | undefined;
+  readonly backgrounded?: boolean | undefined;
   /** Root turn at first observation; null is authoritative between turns. */
   readonly turnId: TurnId | null;
   /** Shared across every task/tool alias so visibility cannot evict separately. */
@@ -484,6 +501,8 @@ type RuntimeFork = <A, E>(effect: Effect.Effect<A, E, never>) => Fiber.Fiber<A, 
 
 interface ClaudeSessionContext {
   session: ProviderSession;
+  /** Cached actual executable version; SDK package identity is not runtime authority. */
+  taskControlVersion: string | null | undefined;
   /** Immutable native query generation, independent of resumable history. */
   readonly subagentRuntimeId: string;
   /** Frozen per-query environment; never shared or mutated by a sibling chat. */
@@ -590,7 +609,7 @@ function reserveClaudeIdleRetirement(context: ClaudeSessionContext): boolean {
     context.inFlightSdkMessageCount > 0 ||
     context.queryClosureUncertain ||
     Array.from(context.taskBindingsByTaskId.values()).some(
-      (binding) => binding.isSubagent && !context.terminalTaskIds.has(String(binding.taskId)),
+      (binding) => !context.terminalTaskIds.has(String(binding.taskId)),
     )
   )
     return false;
@@ -601,6 +620,8 @@ function reserveClaudeIdleRetirement(context: ClaudeSessionContext): boolean {
 }
 
 interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
+  readonly stopTask?: (taskId: string) => Promise<void>;
+  readonly backgroundTasks?: (toolUseId: string) => Promise<boolean>;
   readonly interrupt: () => Promise<SDKControlInterruptResponse | undefined>;
   // The 0.3.228 runtime implements this control request, but its public Query
   // interface has not exposed the method yet. Keep it optional for older SDKs.
@@ -617,6 +638,7 @@ interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
 }
 
 export interface ClaudeAdapterLiveOptions {
+  readonly getNativeVersion?: () => string | null | undefined;
   /** Cached owning-driver status only; this getter must never launch a probe. */
   readonly getSubagentConcurrencySupport?: () => boolean;
   readonly instanceId?: ProviderInstanceId;
@@ -808,7 +830,12 @@ function rememberBoundedClaudeKey(keys: Set<string>, key: string, limit: number)
 function upsertClaudeTaskBinding(
   context: ClaudeSessionContext,
   input: {
+    readonly retiredToolUseKeys?: ReadonlyArray<string>;
+    readonly incarnationRequiresToolUseId?: boolean;
     readonly taskId: RuntimeTaskId;
+    readonly nativeTaskId?: string | undefined;
+    readonly taskGeneration?: string | undefined;
+    readonly backgrounded?: boolean | undefined;
     readonly toolUseKey?: string | undefined;
     readonly toolUseId?: string | undefined;
     readonly historyId?: string | undefined;
@@ -875,7 +902,11 @@ function upsertClaudeTaskBinding(
   // The first observed clock remains authoritative. Progress snapshots repeat
   // duration metadata and must not make a long-running row jump forward every
   // time Claude reports another update.
-  const startedAt = previous?.startedAt ?? claudeSubagentDisplayLine(input.startedAt, 80);
+  const newIncarnation =
+    input.taskGeneration !== undefined && input.taskGeneration !== previous?.taskGeneration;
+  const startedAt =
+    (newIncarnation ? undefined : previous?.startedAt) ??
+    claudeSubagentDisplayLine(input.startedAt, 80);
   // These identities come from different SDK fields and stay distinct. In
   // particular, never infer an Agent transcript id from a task/tool id.
   const toolUseId = exactClaudeProviderIdentity(input.toolUseId) ?? previous?.toolUseId;
@@ -887,7 +918,7 @@ function upsertClaudeTaskBinding(
   // turn settles. Preserve the first owning turn so a later ambient retraction
   // targets the exact renderer row instead of creating a second cross-turn key.
   const turnId =
-    previous !== undefined
+    previous !== undefined && !newIncarnation
       ? previous.turnId
       : input.turnId !== undefined
         ? input.turnId
@@ -931,7 +962,22 @@ function upsertClaudeTaskBinding(
     taskType === "agent" ||
     taskType === "subagent";
   const binding: ClaudeTaskBinding = {
+    ...((input.incarnationRequiresToolUseId ?? previous?.incarnationRequiresToolUseId)
+      ? { incarnationRequiresToolUseId: true }
+      : {}),
+    ...((input.retiredToolUseKeys ?? previous?.retiredToolUseKeys)
+      ? { retiredToolUseKeys: input.retiredToolUseKeys ?? previous?.retiredToolUseKeys }
+      : {}),
     taskId: input.taskId,
+    ...((input.nativeTaskId ?? previous?.nativeTaskId)
+      ? { nativeTaskId: input.nativeTaskId ?? previous?.nativeTaskId }
+      : {}),
+    ...((input.taskGeneration ?? previous?.taskGeneration)
+      ? { taskGeneration: input.taskGeneration ?? previous?.taskGeneration }
+      : {}),
+    ...(input.backgrounded !== undefined || previous?.backgrounded !== undefined
+      ? { backgrounded: input.backgrounded ?? previous?.backgrounded }
+      : {}),
     turnId,
     visibilityState,
     ...(toolUseId ? { toolUseId } : {}),
@@ -967,7 +1013,7 @@ function upsertClaudeTaskBinding(
       break;
     }
     const forgotten = context.taskBindingsByTaskId.get(oldest);
-    if (forgotten?.isSubagent && !context.terminalTaskIds.has(String(forgotten.taskId))) {
+    if (forgotten && !context.terminalTaskIds.has(String(forgotten.taskId))) {
       context.taskLivenessUncertain = true;
     }
     context.taskBindingsByTaskId.delete(oldest);
@@ -997,6 +1043,11 @@ function restoreClaudeRetainedTaskBinding(
   const toolUseKey = retained.toolUseKey ?? canonicalClaudeToolUseBindingKey(retained.toolUseId);
   return upsertClaudeTaskBinding(context, {
     taskId: retained.taskId,
+    ...(retained.nativeTaskId ? { nativeTaskId: retained.nativeTaskId } : {}),
+    ...(retained.taskGeneration ? { taskGeneration: retained.taskGeneration } : {}),
+    ...(retained.backgrounded !== undefined ? { backgrounded: retained.backgrounded } : {}),
+    ...(retained.retiredToolUseKeys ? { retiredToolUseKeys: retained.retiredToolUseKeys } : {}),
+    ...(retained.incarnationRequiresToolUseId ? { incarnationRequiresToolUseId: true } : {}),
     ...(toolUseKey ? { toolUseKey } : {}),
     ...(retained.toolUseId ? { toolUseId: retained.toolUseId } : {}),
     ...(retained.historyId ? { historyId: retained.historyId } : {}),
@@ -1044,6 +1095,9 @@ function bindClaudeTaskToToolUse(
   if (!taskId) {
     return undefined;
   }
+  const retained = context.backgroundTaskBindings.get(String(taskId));
+  if (retained && !context.taskBindingsByTaskId.has(String(taskId)))
+    restoreClaudeRetainedTaskBinding(context, retained);
   const toolUseKey = canonicalClaudeToolUseBindingKey(input.toolUseId);
   return upsertClaudeTaskBinding(context, {
     taskId,
@@ -1095,11 +1149,28 @@ function prepareClaudeAuthoritativeTaskIdentity(
   context: ClaudeSessionContext,
   rawTaskId: unknown,
   rawToolUseId: unknown,
+  allowNewIncarnation = false,
 ): ClaudeAuthoritativeTaskIdentity | undefined {
   const taskId = canonicalClaudeTaskId(rawTaskId);
   if (!taskId) return undefined;
 
   const toolUseKey = canonicalClaudeToolUseBindingKey(rawToolUseId);
+  const current =
+    context.taskBindingsByTaskId.get(String(taskId)) ??
+    context.backgroundTaskBindings.get(String(taskId));
+  if (!allowNewIncarnation && current?.incarnationRequiresToolUseId && !toolUseKey)
+    return undefined;
+  if (toolUseKey && current?.retiredToolUseKeys?.includes(toolUseKey)) return undefined;
+  // A delayed frame from an earlier incarnation cannot rebind or finish the
+  // replacement. Only a new explicit start after terminal evidence may reuse
+  // the native task id with a different spawning tool.
+  if (
+    current?.toolUseKey &&
+    toolUseKey &&
+    current.toolUseKey !== toolUseKey &&
+    !(allowNewIncarnation && context.terminalTaskIds.has(String(taskId)))
+  )
+    return undefined;
   const correlatedBinding = toolUseKey
     ? context.taskBindingsByToolUseId.get(toolUseKey)
     : undefined;
@@ -3347,6 +3418,8 @@ function buildPromptText(input: ClaudePromptInput, boundInstanceId: ProviderInst
 function buildUserMessage(input: {
   readonly sdkContent: Array<Record<string, unknown>>;
   readonly messageUuid: string;
+  readonly deliveryPriority?: ProviderSendTurnInput["deliveryPriority"];
+  readonly inputOrigin?: ProviderSendTurnInput["inputOrigin"];
 }): SDKUserMessage {
   return {
     type: "user",
@@ -3357,7 +3430,8 @@ function buildUserMessage(input: {
     // explicitly attest human provenance. Leaving origin absent is not a
     // neutral legacy value: strict upstream isHuman() gates fail closed and
     // treat the message as unattributed.
-    origin: { kind: "human" },
+    ...(input.inputOrigin === "scheduled" ? { isSynthetic: true } : { origin: { kind: "human" } }),
+    ...(input.deliveryPriority !== undefined ? { priority: input.deliveryPriority } : {}),
     message: {
       role: "user",
       content: input.sdkContent as unknown as SDKUserMessage["message"]["content"],
@@ -3464,7 +3538,12 @@ const buildUserMessageEffect = Effect.fn("buildUserMessageEffect")(function* (
     );
   }
 
-  return buildUserMessage({ sdkContent, messageUuid: dependencies.messageUuid });
+  return buildUserMessage({
+    sdkContent,
+    messageUuid: dependencies.messageUuid,
+    ...(input.deliveryPriority !== undefined ? { deliveryPriority: input.deliveryPriority } : {}),
+    ...(input.inputOrigin !== undefined ? { inputOrigin: input.inputOrigin } : {}),
+  });
 });
 
 function turnStatusFromResult(result: SDKResultMessage): ProviderRuntimeTurnStatus {
@@ -3853,17 +3932,88 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // current thread here would let a late old-query callback borrow its
     // replacement's generation and falsely reanimate a persisted worker.
     const stamped = { ...event, subagentRuntimeId: context.subagentRuntimeId };
+    const binding =
+      event.type === "task.started" ||
+      event.type === "task.progress" ||
+      event.type === "task.completed"
+        ? context.taskBindingsByTaskId.get(String(event.payload.taskId))
+        : undefined;
+    const taskControl =
+      binding?.taskGeneration &&
+      binding.nativeTaskId &&
+      !binding.provisionalTaskIdentity &&
+      binding.visibilityState.visibility === "visible" &&
+      !context.terminalTaskIds.has(String(binding.taskId)) &&
+      supportsClaudeTaskControls(context.taskControlVersion) &&
+      context.query.stopTask
+        ? {
+            providerInstanceId: boundInstanceId,
+            taskGeneration: binding.taskGeneration,
+            canStop: true,
+            canBackground:
+              !!context.query.backgroundTasks &&
+              !!admittedClaudeControlIdentity(binding.toolUseId) &&
+              binding.backgrounded !== true,
+          }
+        : undefined;
+    const foregroundTool =
+      event.type === "item.started" || event.type === "item.updated"
+        ? Array.from(context.inFlightTools.values()).find((tool) => tool.itemId === event.itemId)
+        : undefined;
+    const toolControl =
+      foregroundTool &&
+      !foregroundTool.detached &&
+      !Array.from(context.taskBindingsByTaskId.values()).some(
+        (task) => task.nativeTaskId && task.toolUseId === foregroundTool.itemId,
+      ) &&
+      admittedClaudeControlIdentity(foregroundTool.itemId) &&
+      supportsClaudeTaskControls(context.taskControlVersion) &&
+      context.query.backgroundTasks
+        ? {
+            taskId: foregroundTool.controlId,
+            runtimeId: context.subagentRuntimeId,
+            capability: {
+              providerInstanceId: boundInstanceId,
+              taskGeneration: foregroundTool.controlGeneration,
+              canStop: false,
+              canBackground: true,
+            },
+          }
+        : undefined;
+    if ((event.type === "item.started" || event.type === "item.updated") && toolControl) {
+      return Queue.offer(runtimeEventQueue, {
+        ...stamped,
+        payload: { ...event.payload, individualTaskControl: toolControl },
+      } as ProviderRuntimeEvent).pipe(Effect.asVoid);
+    }
     return Queue.offer(
       runtimeEventQueue,
       (event.type === "task.started" ||
         event.type === "task.progress" ||
         event.type === "task.completed") &&
-        event.payload.subagent
+        (event.payload.subagent || taskControl)
         ? ({
             ...stamped,
             payload: {
               ...event.payload,
-              subagent: { ...event.payload.subagent, runtimeId: context.subagentRuntimeId },
+              ...(taskControl
+                ? {
+                    individualTaskControl: {
+                      taskId: String(binding!.taskId),
+                      runtimeId: context.subagentRuntimeId,
+                      capability: taskControl,
+                    },
+                  }
+                : {}),
+              ...(event.payload.subagent
+                ? {
+                    subagent: {
+                      ...event.payload.subagent,
+                      runtimeId: context.subagentRuntimeId,
+                      ...(taskControl ? { taskControl } : {}),
+                    },
+                  }
+                : {}),
             },
           } as ProviderRuntimeEvent)
         : stamped,
@@ -4620,6 +4770,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     for (const [blockKey, tool] of context.inFlightTools.entries()) {
+      // A response boundary is not terminal evidence for a detached call. Its
+      // eventual result/notification retains the original item and turn, and
+      // the retained binding continues to prevent unsafe idle rewind.
+      if (tool.detached) continue;
       const toolStamp = yield* makeEventStamp();
       yield* offerRuntimeEvent(context, {
         type: "item.completed",
@@ -4650,8 +4804,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
       context.inFlightTools.delete(blockKey);
     }
-    // Clear any remaining stale entries (e.g. from interrupted content blocks).
-    context.inFlightTools.clear();
 
     // Completion removes its own entry, so iterate a stable copy of the drain.
     for (const block of turnState.assistantTextBlockOrder.slice()) {
@@ -5041,7 +5193,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         Object.keys(toolInput).length > 0 ? toolInputFingerprint(toolInput) : undefined;
 
       const tool: ToolInFlight = {
+        controlId: randomUUID(),
+        controlGeneration: randomUUID(),
         itemId,
+        ...(context.turnState ? { turnId: context.turnState.turnId } : {}),
         itemType,
         toolName,
         title: titleForTool(itemType),
@@ -5148,6 +5303,31 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       }
 
       const [blockKey, tool] = toolEntry;
+      if (isClaudeDetachedToolResult(message.tool_use_result)) {
+        // This is an acknowledgement that the exact call stepped aside, not its
+        // output. Keep its original identity alive across response segments so
+        // a later result can settle it once and idle rewind cannot race it.
+        context.inFlightTools.delete(blockKey);
+        // Stream indices restart at zero in each response. Move this call to
+        // its exact item identity so the next response cannot overwrite it.
+        context.inFlightTools.set(`detached:${tool.itemId}`, { ...tool, detached: true });
+        const detachedStamp = yield* makeEventStamp();
+        yield* offerRuntimeEvent(context, {
+          ...detachedStamp,
+          provider: PROVIDER,
+          threadId: context.session.threadId,
+          turnId: tool.turnId,
+          type: "item.updated",
+          itemId: asRuntimeItemId(tool.itemId),
+          payload: {
+            itemType: tool.itemType,
+            status: "inProgress",
+            title: tool.title,
+            detail: "Continuing in the background",
+          },
+        });
+        continue;
+      }
       const itemStatus = toolResult.isError ? "failed" : "completed";
       const redactedToolResultBlock = quarantineToolResultContent
         ? {
@@ -5173,7 +5353,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         provider: PROVIDER,
         createdAt: updatedStamp.createdAt,
         threadId: context.session.threadId,
-        ...(context.turnState ? { turnId: asCanonicalTurnId(context.turnState.turnId) } : {}),
+        ...(tool.turnId ? { turnId: tool.turnId } : {}),
         itemId: asRuntimeItemId(tool.itemId),
         payload: {
           itemType: tool.itemType,
@@ -5193,7 +5373,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
 
       const streamKind = toolResultStreamKind(tool.itemType);
-      if (streamKind && redactedToolResultText.length > 0 && context.turnState) {
+      if (streamKind && redactedToolResultText.length > 0 && tool.turnId) {
         const deltaStamp = yield* makeEventStamp();
         yield* offerRuntimeEvent(context, {
           type: "content.delta",
@@ -5201,7 +5381,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           provider: PROVIDER,
           createdAt: deltaStamp.createdAt,
           threadId: context.session.threadId,
-          turnId: context.turnState.turnId,
+          turnId: tool.turnId,
           itemId: asRuntimeItemId(tool.itemId),
           payload: {
             streamKind,
@@ -5225,7 +5405,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         provider: PROVIDER,
         createdAt: completedStamp.createdAt,
         threadId: context.session.threadId,
-        ...(context.turnState ? { turnId: asCanonicalTurnId(context.turnState.turnId) } : {}),
+        ...(tool.turnId ? { turnId: tool.turnId } : {}),
         itemId: asRuntimeItemId(tool.itemId),
         payload: {
           itemType: tool.itemType,
@@ -5850,6 +6030,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         return;
       }
       case "init":
+        context.taskControlVersion = message.claude_code_version;
         configureClaudeUsageVersion(context.usageAccounting, message.claude_code_version);
         context.capabilities.clear();
         for (const capability of message.capabilities ?? []) {
@@ -5909,9 +6090,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         return;
       case "background_tasks_changed":
         // This is a level-set signal rather than a start/completion edge: the
-        // payload replaces the CLI process' current background-task set. Cafe
-        // does not own a separate background-task panel, so promote only live
-        // task descriptions into task.progress rows and let task_updated /
+        // payload replaces the CLI process' current background-task set. The
+        // Tasks surfaces consume distinct task.progress rows for visible live
+        // members and retractions; let task_updated /
         // task_notification carry terminal status when Claude emits it.
         const previousBackgroundTaskIds = new Set(context.backgroundTaskIds);
         // Capture the bindings before admitting any replacement members. The
@@ -5998,6 +6179,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           const subagent = claudeSubagentPresentation(retractedBinding, "active");
           yield* offerRuntimeEvent(context, {
             ...base,
+            ...(yield* makeEventStamp()),
             turnId: retractedBinding.turnId ?? undefined,
             type: "task.progress",
             payload: {
@@ -6068,6 +6250,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           const subagent = claudeSubagentPresentation(binding, "active");
           yield* offerRuntimeEvent(context, {
             ...base,
+            ...(yield* makeEventStamp()),
             turnId: binding.turnId ?? undefined,
             type: "task.progress",
             payload: {
@@ -6368,6 +6551,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           context,
           message.task_id,
           message.tool_use_id,
+          true,
         );
         if (!authoritativeIdentity) {
           yield* emitRuntimeWarning(context, "Claude task start was missing a task id.", message);
@@ -6375,8 +6559,32 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         }
         const visibility: RuntimeTaskVisibility =
           message.ambient === true || message.skip_transcript === true ? "ambient" : "visible";
+        const priorBinding = context.taskBindingsByTaskId.get(String(authoritativeIdentity.taskId));
+        const retiredToolUseKeys = [...(priorBinding?.retiredToolUseKeys ?? [])];
+        const reusedNativeTaskId = context.terminalTaskIds.has(
+          String(authoritativeIdentity.taskId),
+        );
+        if (reusedNativeTaskId) {
+          if (priorBinding?.toolUseKey) retiredToolUseKeys.push(priorBinding.toolUseKey);
+          if (retiredToolUseKeys.length > 128) {
+            context.taskLivenessUncertain = true;
+            yield* emitRuntimeWarning(
+              context,
+              "Claude task identity reuse exceeded the safe tracking bound.",
+              message,
+            );
+            return;
+          }
+          // Native task ids may be reused. A new explicit start must not borrow
+          // the previous worker's tool/history identities or control receipt.
+          context.taskBindingsByTaskId.delete(String(authoritativeIdentity.taskId));
+          for (const [key, old] of context.taskBindingsByToolUseId) {
+            if (old.taskId === authoritativeIdentity.taskId)
+              context.taskBindingsByToolUseId.delete(key);
+          }
+        }
         setClaudeTaskFallbackVisibility(context, message.task_id, visibility);
-        const startedBinding = bindClaudeTaskToToolUse(context, {
+        let startedBinding = bindClaudeTaskToToolUse(context, {
           taskId: message.task_id,
           ...(message.tool_use_id ? { toolUseId: message.tool_use_id } : {}),
           description,
@@ -6398,6 +6606,22 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           yield* emitRuntimeWarning(context, "Claude task start was missing a task id.", message);
           return;
         }
+        startedBinding = upsertClaudeTaskBinding(context, {
+          retiredToolUseKeys,
+          incarnationRequiresToolUseId:
+            reusedNativeTaskId || priorBinding?.incarnationRequiresToolUseId === true,
+          taskId: startedBinding.taskId,
+          ...(startedBinding.toolUseKey ? { toolUseKey: startedBinding.toolUseKey } : {}),
+          nativeTaskId: admittedClaudeControlIdentity(message.task_id),
+          taskGeneration:
+            startedBinding.taskGeneration &&
+            !context.terminalTaskIds.has(String(startedBinding.taskId))
+              ? startedBinding.taskGeneration
+              : randomUUID(),
+          backgrounded: taskStartedRecord.is_backgrounded === true,
+          startedAt: base.createdAt,
+          turnId: context.turnState?.turnId ?? null,
+        });
         // An explicit start is the only authoritative indication that Claude
         // intentionally reused a previously terminal task id.
         context.terminalTaskIds.delete(String(startedBinding.taskId));
@@ -6413,6 +6637,25 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           sdkMessage,
         );
         const startedSubagent = claudeSubagentPresentation(startedBinding, "active");
+        // Replace the foreground-tool affordance with the native task's exact
+        // lifecycle once Claude publishes it, without displaying duplicate work.
+        const spawningTool = Array.from(context.inFlightTools.values()).find(
+          (tool) => tool.itemId === startedBinding.toolUseId,
+        );
+        if (spawningTool) {
+          yield* offerRuntimeEvent(context, {
+            ...base,
+            ...(yield* makeEventStamp()),
+            type: "item.updated",
+            turnId: spawningTool.turnId,
+            itemId: asRuntimeItemId(spawningTool.itemId),
+            payload: {
+              itemType: spawningTool.itemType,
+              status: "inProgress",
+              title: spawningTool.title,
+            },
+          });
+        }
         yield* offerRuntimeEvent(context, {
           ...base,
           turnId: startedBinding.turnId ?? undefined,
@@ -6508,6 +6751,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           yield* emitRuntimeWarning(context, "Claude task update was missing a task id.", message);
           return;
         }
+        const patchedToolUseId = patch.tool_use_id ?? record.tool_use_id;
+        if (!prepareClaudeAuthoritativeTaskIdentity(context, taskId, patchedToolUseId)) return;
 
         const skipTranscript = patch.skip_transcript === true || record.skip_transcript === true;
         const ambient = patch.ambient ?? record.ambient;
@@ -6555,6 +6800,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         if (!updatedBinding) {
           return;
         }
+        if (typeof (patch.is_backgrounded ?? record.is_backgrounded) === "boolean") {
+          updatedBinding = upsertClaudeTaskBinding(context, {
+            taskId: updatedBinding.taskId,
+            backgrounded: (patch.is_backgrounded ?? record.is_backgrounded) as boolean,
+          });
+        }
         const usage = boundedClaudeNativeTaskUsage(patch.usage ?? record.usage);
         const terminalStatus = claudeTaskTerminalStatus(patch.status ?? record.status);
         if (
@@ -6572,6 +6823,28 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         const visibility = claudeTaskVisibilityForBinding(context, updatedBinding);
         if (terminalStatus) {
           markClaudeTaskTerminal(context, updatedBinding);
+          const detached = updatedBinding.toolUseId
+            ? Array.from(context.inFlightTools.entries()).find(
+                ([, tool]) => tool.detached && tool.itemId === updatedBinding.toolUseId,
+              )
+            : undefined;
+          if (detached) {
+            const [key, tool] = detached;
+            context.inFlightTools.delete(key);
+            yield* offerRuntimeEvent(context, {
+              ...base,
+              ...(yield* makeEventStamp()),
+              type: "item.completed",
+              turnId: tool.turnId,
+              itemId: asRuntimeItemId(tool.itemId),
+              payload: {
+                itemType: tool.itemType,
+                status: terminalStatus === "completed" ? "completed" : "failed",
+                title: tool.title,
+                ...(patchedSummary ? { detail: patchedSummary } : {}),
+              },
+            });
+          }
           const terminalSubagent = claudeSubagentPresentation(
             updatedBinding,
             claudeSubagentStatus(patch.status ?? record.status),
@@ -6632,9 +6905,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               ? "ambient"
               : "visible"
             : undefined;
-        if (requestedVisibility) {
-          setClaudeTaskFallbackVisibility(context, message.task_id, requestedVisibility);
-        }
         const authoritativeIdentity = prepareClaudeAuthoritativeTaskIdentity(
           context,
           message.task_id,
@@ -6647,6 +6917,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             message,
           );
           return;
+        }
+        if (requestedVisibility) {
+          setClaudeTaskFallbackVisibility(context, message.task_id, requestedVisibility);
         }
         const existingNotificationBinding = findClaudeTaskBinding(context, {
           taskId: message.task_id,
@@ -6707,6 +6980,31 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         );
         const visibility = claudeTaskVisibilityForBinding(context, notificationBinding);
         markClaudeTaskTerminal(context, notificationBinding);
+        // A terminal task notification may be the only completion edge for a
+        // detached tool. Settle its original item exactly once, without touching
+        // the current response's tools or sibling tasks.
+        const detached = notificationBinding.toolUseId
+          ? Array.from(context.inFlightTools.entries()).find(
+              ([, tool]) => tool.detached && tool.itemId === notificationBinding.toolUseId,
+            )
+          : undefined;
+        if (detached) {
+          const [key, tool] = detached;
+          context.inFlightTools.delete(key);
+          yield* offerRuntimeEvent(context, {
+            ...base,
+            ...(yield* makeEventStamp()),
+            type: "item.completed",
+            turnId: tool.turnId,
+            itemId: asRuntimeItemId(tool.itemId),
+            payload: {
+              itemType: tool.itemType,
+              status: message.status === "completed" ? "completed" : "failed",
+              title: tool.title,
+              ...(summary ? { detail: summary } : {}),
+            },
+          });
+        }
         yield* offerRuntimeEvent(context, {
           ...base,
           turnId: notificationBinding.turnId ?? undefined,
@@ -8167,6 +8465,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       };
 
       const context: ClaudeSessionContext = {
+        taskControlVersion: options?.getNativeVersion?.(),
         session,
         subagentRuntimeId,
         environment: sessionEnvironment,
@@ -8451,6 +8750,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   const sendTurn: ClaudeAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
     const context = yield* requireSession(input.threadId);
+    if (
+      input.deliveryPriority !== undefined &&
+      (input.inputOrigin === "scheduled" || !supportsClaudeTaskControls(context.taskControlVersion))
+    ) {
+      return yield* new ProviderAdapterRequestError({
+        provider: PROVIDER,
+        method: "turn/start",
+        detail:
+          "Explicit message priority requires a qualified Claude runtime and a human message.",
+      });
+    }
     const modelSelection =
       input.modelSelection !== undefined && input.modelSelection.instanceId === boundInstanceId
         ? input.modelSelection
@@ -9201,6 +9511,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   ) {
     const context = yield* requireSession(input.threadId);
     const activeTurnId = context.session.activeTurnId ?? context.turnState?.turnId;
+    if (
+      input.deliveryPriority !== undefined &&
+      !supportsClaudeTaskControls(context.taskControlVersion)
+    ) {
+      return yield* new ProviderAdapterRequestError({
+        provider: PROVIDER,
+        method: "turn/steer",
+        detail: "Explicit message priority is not supported by this Claude runtime.",
+      });
+    }
 
     if (context.session.status !== "running" || !context.turnState || !activeTurnId) {
       return yield* new ProviderAdapterRequestError({
@@ -9284,7 +9604,108 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     ).pipe(Effect.tap(() => Queue.shutdown(runtimeEventQueue))),
   );
 
+  const controlTask: NonNullable<ClaudeAdapterShape["controlTask"]> = Effect.fn("controlTask")(
+    function* (input: ProviderTaskControlInput) {
+      const context = yield* requireSession(input.threadId);
+      const foregroundTool = Array.from(context.inFlightTools.values()).find(
+        (tool) => tool.controlId === input.taskId,
+      );
+      if (foregroundTool) {
+        if (
+          input.providerInstanceId !== boundInstanceId ||
+          input.runtimeId !== context.subagentRuntimeId ||
+          input.turnId !== foregroundTool.turnId ||
+          input.taskGeneration !== foregroundTool.controlGeneration ||
+          input.action !== "background" ||
+          !supportsClaudeTaskControls(context.taskControlVersion) ||
+          !context.query.backgroundTasks ||
+          !admittedClaudeControlIdentity(foregroundTool.itemId)
+        ) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "task/control",
+            detail: "The task control no longer matches this exact live task and account.",
+          });
+        }
+        if (
+          foregroundTool.detached ||
+          Array.from(context.taskBindingsByTaskId.values()).some(
+            (task) => task.nativeTaskId && task.toolUseId === foregroundTool.itemId,
+          )
+        )
+          return { status: "not-foreground" as const };
+        const accepted = yield* Effect.tryPromise({
+          try: () => context.query.backgroundTasks!(foregroundTool.itemId),
+          catch: () =>
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "task/control",
+              detail: "The task control outcome is unknown. Wait for a provider status update.",
+            }),
+        });
+        return { status: accepted ? ("accepted" as const) : ("not-foreground" as const) };
+      }
+      const binding = context.taskBindingsByTaskId.get(input.taskId);
+      if (
+        input.providerInstanceId !== boundInstanceId ||
+        input.runtimeId !== context.subagentRuntimeId ||
+        !binding ||
+        binding.turnId !== input.turnId ||
+        binding.taskGeneration !== input.taskGeneration ||
+        !binding.nativeTaskId ||
+        binding.provisionalTaskIdentity ||
+        binding.visibilityState.visibility !== "visible" ||
+        !supportsClaudeTaskControls(context.taskControlVersion)
+      ) {
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "task/control",
+          detail: "The task control no longer matches this exact live task and account.",
+        });
+      }
+      if (context.terminalTaskIds.has(String(binding.taskId)))
+        return { status: "already-terminal" as const };
+      if (input.action === "stop") {
+        if (!context.query.stopTask)
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "task/control",
+            detail: "Stopping individual tasks is unavailable in this runtime.",
+          });
+        yield* Effect.tryPromise({
+          try: () => context.query.stopTask!(binding.nativeTaskId!),
+          catch: () =>
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "task/control",
+              detail: "The task control outcome is unknown. Wait for a provider status update.",
+            }),
+        });
+        return { status: "accepted" as const };
+      }
+      const toolUseId = admittedClaudeControlIdentity(binding.toolUseId);
+      if (!context.query.backgroundTasks || !toolUseId)
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "task/control",
+          detail: "Backgrounding this individual task is unavailable.",
+        });
+      if (binding.backgrounded) return { status: "not-foreground" as const };
+      const accepted = yield* Effect.tryPromise({
+        try: () => context.query.backgroundTasks!(toolUseId),
+        catch: () =>
+          new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "task/control",
+            detail: "The task control outcome is unknown. Wait for a provider status update.",
+          }),
+      });
+      return { status: accepted ? ("accepted" as const) : ("not-foreground" as const) };
+    },
+  );
+
   return {
+    controlTask,
     provider: PROVIDER,
     capabilities: {
       get subagentConcurrency() {

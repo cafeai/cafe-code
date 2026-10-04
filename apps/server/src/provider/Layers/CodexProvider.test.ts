@@ -275,10 +275,11 @@ describe("Codex picker model/list refresh", () => {
             currentValue: "medium",
             options: efforts.map((id) => (id === "medium" ? { id, isDefault: true } : { id })),
           },
+          { id: "serviceTier", type: "select", options: [{ id: "default" }] },
         ],
       },
     });
-    expect(models?.[0]?.capabilities?.optionDescriptors).toHaveLength(1);
+    expect(models?.[0]?.capabilities?.optionDescriptors).toHaveLength(2);
   });
 
   it("reads bounded cursor pages in provider order", async () => {
@@ -354,7 +355,7 @@ describe("Codex picker model/list refresh", () => {
             currentValue: "medium",
             options: efforts.map((id) => (id === "medium" ? { id, isDefault: true } : { id })),
           },
-          { id: "fastMode", type: "boolean" },
+          { id: "serviceTier", type: "select", options: [{ id: "default" }, { id: "priority" }] },
         ],
       },
     });
@@ -378,9 +379,68 @@ describe("Codex picker model/list refresh", () => {
     const models = await Effect.runPromise(requestAllCodexModelsWithClient(client));
     expect(
       models.map((model) =>
-        model.capabilities?.optionDescriptors?.some((option) => option.id === "fastMode"),
+        model.capabilities?.optionDescriptors?.find((option) => option.id === "serviceTier"),
       ),
-    ).toEqual([true, true, false, false]);
+    ).toMatchObject([
+      { options: [{ id: "default" }, { id: "priority" }] },
+      { options: [{ id: "default" }] },
+      { options: [{ id: "default" }, { id: "flex" }] },
+      { options: [{ id: "default" }] },
+    ]);
+  });
+
+  it("bounds and sanitizes advertised tiers without selecting any paid default or borrowing custom model tiers", async () => {
+    const rows = await Effect.runPromise(
+      requestAllCodexModelsWithClient(
+        makeModelListClient(() =>
+          Effect.succeed({
+            data: [
+              {
+                ...makeModel("live-tier-model"),
+                serviceTiers: [
+                  {
+                    id: "ultrafast",
+                    name: "Ultra fast",
+                    description: "ignored native description",
+                  },
+                  { id: "ultrafast", name: "Duplicate", description: "ignored" },
+                  { id: "default", name: "Paid fake standard", description: "ignored" },
+                  { id: "bad id", name: "Fake", description: "ignored" },
+                  { id: "secret", name: "bad\u202ename", description: "ignored" },
+                  ...Array.from({ length: 40 }, (_, index) => ({
+                    id: `tier-${index}`,
+                    name: `Tier ${index}`,
+                    description: "ignored",
+                  })),
+                ],
+              },
+            ],
+          }),
+        ),
+      ),
+    );
+    const tier = rows[0]?.capabilities?.optionDescriptors?.find(
+      (entry) => entry.id === "serviceTier",
+    );
+    expect(tier).not.toHaveProperty("currentValue");
+    expect(tier?.type).toBe("select");
+    if (tier?.type !== "select") throw new Error("Missing advertised tiers");
+    expect(tier.options[0]).toEqual({ id: "default", label: "Standard" });
+    expect(tier.options.filter((option) => option.id === "ultrafast")).toEqual([
+      { id: "ultrafast", label: "Ultra fast" },
+    ]);
+    expect(tier.options.length).toBeLessThanOrEqual(33);
+    expect(
+      tier.options.some(
+        (option) => option.isDefault || option.id === "secret" || option.id === "bad id",
+      ),
+    ).toBe(false);
+    const all = finalizeCodexModelListRefresh(rows, ["custom-unknown-model"]);
+    expect(
+      all
+        ?.find((entry) => entry.slug === "custom-unknown-model")
+        ?.capabilities?.optionDescriptors?.some((entry) => entry.id === "serviceTier"),
+    ).toBe(false);
   });
 
   it("fails closed on repeated cursors and bounded page/model overflow", async () => {
