@@ -2650,8 +2650,28 @@ export function selectSidebarThreadsAcrossEnvironments(state: AppState): Sidebar
   );
 }
 
-export function selectAnyThreadRunning(state: AppState): boolean {
-  for (const [, environmentState] of getEnvironmentEntries(state)) {
+export function selectSidebarThreadsForEnvironment(
+  state: AppState,
+  environmentId: EnvironmentId | null | undefined,
+): SidebarThreadSummary[] {
+  const environmentState = selectEnvironmentState(state, environmentId);
+  return environmentState.threadIds.flatMap((threadId) => {
+    const thread = environmentState.sidebarThreadSummaryById[threadId];
+    return thread && thread.environmentId === environmentId ? [thread] : [];
+  });
+}
+
+export function selectAnyThreadRunning(
+  state: AppState,
+  environmentId?: EnvironmentId | null,
+): boolean {
+  const environments =
+    environmentId === undefined
+      ? getEnvironmentEntries(state)
+      : environmentId
+        ? [[environmentId, selectEnvironmentState(state, environmentId)] as const]
+        : [];
+  for (const [, environmentState] of environments) {
     for (const threadId of environmentState.threadIds) {
       const session =
         environmentState.threadSessionById[threadId] ??

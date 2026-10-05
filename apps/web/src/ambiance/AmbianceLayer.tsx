@@ -9,6 +9,7 @@ import type {
   ThreadId,
 } from "@cafecode/contracts";
 
+import { useWorkspaceEnvironmentId } from "../environments/workspace";
 import { useSettings } from "../hooks/useSettings";
 import { ambianceBackend } from "./ambianceEffects";
 import { useTheme } from "../hooks/useTheme";
@@ -105,8 +106,9 @@ function selectFocusedThreadSignals(
 }
 
 /** Bounded shell-level sweep used only by the slow background poll. */
-function anyThreadHolding(state: AppState): boolean {
-  for (const environmentState of Object.values(state.environmentStateById)) {
+function anyThreadHolding(state: AppState, environmentId: EnvironmentId | null): boolean {
+  const environment = environmentId ? state.environmentStateById[environmentId] : undefined;
+  for (const environmentState of environment ? [environment] : []) {
     for (const threadId of environmentState.threadIds) {
       const summary = environmentState.sidebarThreadSummaryById[threadId];
       if (summary?.hasPendingApprovals || summary?.hasPendingUserInput) {
@@ -173,6 +175,7 @@ function buildEngineConfig(inputs: AmbianceConfigInputs) {
 }
 
 function AmbianceCanvas() {
+  const workspaceEnvironmentId = useWorkspaceEnvironmentId();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const engineRef = useRef<AmbianceEngine | null>(null);
   const { theme, resolvedTheme } = useTheme();
@@ -456,13 +459,13 @@ function AmbianceCanvas() {
 
     const syncAggregate = () => {
       const state = useStore.getState();
-      engine.setSession(selectAnyThreadRunning(state) ? "running" : "idle");
-      engine.setHolding(anyThreadHolding(state));
+      engine.setSession(selectAnyThreadRunning(state, workspaceEnvironmentId) ? "running" : "idle");
+      engine.setHolding(anyThreadHolding(state, workspaceEnvironmentId));
     };
     syncAggregate();
     const interval = window.setInterval(syncAggregate, AGGREGATE_POLL_INTERVAL_MS);
     return () => window.clearInterval(interval);
-  }, [focusedThreadId, reactMode]);
+  }, [focusedThreadId, reactMode, workspaceEnvironmentId]);
 
   // State color + composer ring CSS variables. Written at a slow cadence and
   // only on change; the CSS side owns the smoothing transition.

@@ -35,9 +35,23 @@ The **Workspace server** selector beneath the sidebar logo appears only after a
 remote environment is saved. Remote MCP installation, in-app desktop viewing,
 server-specific help and settings failure feedback apply only to saved remote
 workspaces. Primary-only desktop and browser sessions keep their existing controls,
-wording and settings save behavior. Select a server with the selector. Opening a
-chat selects its server before Desk renders. Each server retains its own Desk
-layout, and drafts retain their environment. A disconnected selected server
+wording and settings save behavior. Selecting a server switches the whole app:
+chat and project lists, search, new chats/projects, Archive, Recycle Bin, task
+activity, unread indicators, provider updates, usage, diagnostics and server-backed
+settings all belong to that server. Emptying the Recycle Bin affects only its
+history. Other connected servers keep their work and cached data, and do not
+appear in the selected server's catalogs or activity indicators.
+
+Switching while in Settings retains the current section; Back returns to the
+selected server's Desk. Opening a new chat deep link selects its server before
+Desk renders. Each server retains its own Desk layout, and drafts retain their
+environment, including repositories with matching identities on multiple servers.
+Light/dark theme choices are remembered separately per saved server on this
+frontend device. Custom sidebar images load and upload using the selected server's
+authenticated connection. The saved connection registry remains available from
+WebUI settings so you can add, remove or reconnect any saved server. Native app
+installation, operating-system permissions and other machine-only controls still
+belong to the computer running the frontend. A disconnected selected server
 cannot fall back to executing a write on the Mac. Reconnect it with the sidebar
 button or manage its saved login in WebUI settings.
 

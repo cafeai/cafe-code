@@ -2,7 +2,6 @@ import { scopedProjectKey, scopeProjectRef } from "@cafecode/client-runtime";
 import { DEFAULT_RUNTIME_MODE, type ScopedProjectRef } from "@cafecode/contracts";
 import { useParams, useRouter } from "@tanstack/react-router";
 import { useCallback, useMemo } from "react";
-import { useShallow } from "zustand/react/shallow";
 import {
   deriveNewChatComposerDefaults,
   type DraftThreadEnvMode,
@@ -16,7 +15,8 @@ import {
   getProjectOrderKey,
   selectProjectGroupingSettings,
 } from "../logicalProject";
-import { selectProjectsAcrossEnvironments, useStore } from "../store";
+import { useStore } from "../store";
+import { useWorkspaceProjects } from "../environments/workspaceData";
 import { createThreadSelectorByRef } from "../storeSelectors";
 import { resolveThreadRouteTarget } from "../threadRoutes";
 import { useUiStateStore } from "../uiStateStore";
@@ -63,7 +63,7 @@ function useNewStandaloneChatHandler() {
 }
 
 function useNewThreadState() {
-  const projects = useStore(useShallow((store) => selectProjectsAcrossEnvironments(store)));
+  const projects = useWorkspaceProjects();
   const projectGroupingSettings = useSettings(selectProjectGroupingSettings);
   const newChatDefaults = useSettings(deriveNewChatComposerDefaults);
   const router = useRouter();
@@ -83,6 +83,7 @@ function useNewThreadState() {
     ): Promise<void> => {
       const {
         getDraftSessionByLogicalProjectKey,
+        getDraftSessionByProjectRef,
         getDraftSession,
         getDraftThread,
         applyStickyState,
@@ -101,7 +102,11 @@ function useNewThreadState() {
       const hasBranchOption = options?.branch !== undefined;
       const hasWorktreePathOption = options?.worktreePath !== undefined;
       const hasEnvModeOption = options?.envMode !== undefined;
-      const storedDraftThread = getDraftSessionByLogicalProjectKey(logicalProjectKey);
+      const logicalDraft = getDraftSessionByLogicalProjectKey(logicalProjectKey);
+      const storedDraftThread =
+        logicalDraft?.environmentId === projectRef.environmentId
+          ? logicalDraft
+          : getDraftSessionByProjectRef(projectRef);
       const latestActiveDraftThread: DraftThreadState | null = currentRouteTarget
         ? currentRouteTarget.kind === "server"
           ? getDraftThread(currentRouteTarget.threadRef)
@@ -136,6 +141,7 @@ function useNewThreadState() {
         latestActiveDraftThread &&
         currentRouteTarget?.kind === "draft" &&
         latestActiveDraftThread.logicalProjectKey === logicalProjectKey &&
+        latestActiveDraftThread.environmentId === projectRef.environmentId &&
         latestActiveDraftThread.promotedTo == null
       ) {
         if (hasBranchOption || hasWorktreePathOption || hasEnvModeOption) {
@@ -212,7 +218,7 @@ export function useHandleNewThread() {
         : useComposerDraftStore.getState().getDraftSession(routeTarget.draftId)
       : null,
   );
-  const projects = useStore(useShallow((store) => selectProjectsAcrossEnvironments(store)));
+  const projects = useWorkspaceProjects();
   const workspaceEnvironmentId = useWorkspaceEnvironmentId();
   const orderedProjects = useMemo(() => {
     return orderItemsByPreferredIds({
@@ -225,8 +231,9 @@ export function useHandleNewThread() {
   const handleNewStandaloneChat = useNewStandaloneChatHandler();
 
   return {
-    activeDraftThread,
-    activeThread,
+    activeDraftThread:
+      activeDraftThread?.environmentId === workspaceEnvironmentId ? activeDraftThread : null,
+    activeThread: activeThread?.environmentId === workspaceEnvironmentId ? activeThread : undefined,
     defaultProjectRef: orderedProjects.find(
       (project) => project.environmentId === workspaceEnvironmentId,
     )

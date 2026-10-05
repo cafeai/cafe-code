@@ -37,15 +37,15 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from "react";
-import { useShallow } from "zustand/react/shallow";
 import { useCommandPaletteStore } from "../commandPaletteStore";
 import { readEnvironmentApi } from "../environmentApi";
-import { readPrimaryEnvironmentDescriptor, usePrimaryEnvironmentId } from "../environments/primary";
+import { usePrimaryEnvironmentId } from "../environments/primary";
 import {
   useWorkspaceEnvironmentId,
   readWorkspaceEnvironmentDescriptor,
+  readWorkspaceEnvironmentId,
 } from "../environments/workspace";
-import { useSavedEnvironmentRegistryStore } from "../environments/runtime/catalog";
+import { useWorkspaceProjects, useWorkspaceSidebarThreads } from "../environments/workspaceData";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useSettings } from "../hooks/useSettings";
 import { readLocalApi } from "../localApi";
@@ -75,11 +75,6 @@ import {
 } from "../lib/projectPaths";
 import { getLatestThreadForProject } from "../lib/threadSort";
 import { cn, isMacPlatform, isWindowsPlatform, newCommandId, newProjectId } from "../lib/utils";
-import {
-  selectProjectsAcrossEnvironments,
-  selectSidebarThreadsAcrossEnvironments,
-  useStore,
-} from "../store";
 import { buildThreadRouteParams } from "../threadRoutes";
 import {
   ADDON_ICON_CLASS,
@@ -97,7 +92,6 @@ import {
   ITEM_ICON_CLASS,
   RECENT_THREAD_LIMIT,
 } from "./CommandPalette.logic";
-import { resolveEnvironmentOptionLabel } from "./BranchToolbar.logic";
 import { CommandPaletteResults } from "./CommandPaletteResults";
 import { AzureDevOpsIcon, BitbucketIcon, GitHubIcon, GitLabIcon } from "./Icons";
 import { ProjectFavicon } from "./ProjectFavicon";
@@ -142,12 +136,6 @@ function getEnvironmentBrowsePlatform(os: string | null | undefined): string {
     return "Linux";
   }
   return typeof navigator === "undefined" ? "" : navigator.platform;
-}
-
-interface AddProjectEnvironmentOption {
-  readonly environmentId: EnvironmentId;
-  readonly label: string;
-  readonly isPrimary: boolean;
 }
 
 type AddProjectRemoteProviderKind = Extract<
@@ -435,8 +423,8 @@ function OpenCommandPaletteDialog() {
     handleNewThread,
     handleNewStandaloneChat,
   } = useHandleNewThread();
-  const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
-  const threads = useStore(useShallow(selectSidebarThreadsAcrossEnvironments));
+  const projects = useWorkspaceProjects();
+  const threads = useWorkspaceSidebarThreads();
   const keybindings = useServerKeybindings();
   const [viewStack, setViewStack] = useState<CommandPaletteView[]>([]);
   const currentView = viewStack.at(-1) ?? null;
@@ -450,36 +438,7 @@ function OpenCommandPaletteDialog() {
   const [isRemoteProjectCloning, setIsRemoteProjectCloning] = useState(false);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const workspaceEnvironmentId = useWorkspaceEnvironmentId();
-  const savedEnvironments = useSavedEnvironmentRegistryStore((s) => s.byId);
-  const primaryEnvironmentLabel = readPrimaryEnvironmentDescriptor()?.label ?? null;
-
-  const addProjectEnvironmentOptions = useMemo(() => {
-    const options: AddProjectEnvironmentOption[] = [];
-
-    if (primaryEnvironmentId) {
-      options.push({
-        environmentId: primaryEnvironmentId,
-        label: resolveEnvironmentOptionLabel({
-          isPrimary: true,
-          environmentId: primaryEnvironmentId,
-          runtimeLabel: primaryEnvironmentLabel,
-        }),
-        isPrimary: true,
-      });
-    }
-
-    for (const record of Object.values(savedEnvironments)) {
-      if (record.environmentId !== primaryEnvironmentId)
-        options.push({
-          environmentId: record.environmentId,
-          label: record.label,
-          isPrimary: false,
-        });
-    }
-    return options;
-  }, [primaryEnvironmentId, primaryEnvironmentLabel, savedEnvironments]);
-  const defaultAddProjectEnvironmentId =
-    workspaceEnvironmentId ?? addProjectEnvironmentOptions[0]?.environmentId ?? null;
+  const defaultAddProjectEnvironmentId = workspaceEnvironmentId;
   const browseEnvironmentId = addProjectEnvironmentId ?? defaultAddProjectEnvironmentId;
   const browseEnvironmentPlatform = useMemo(() => {
     const os = readWorkspaceEnvironmentDescriptor(browseEnvironmentId)?.platform.os ?? null;
@@ -872,41 +831,7 @@ function OpenCommandPaletteDialog() {
     [buildAddProjectSourceGroups],
   );
 
-  const addProjectEnvironmentItems: CommandPaletteActionItem[] = addProjectEnvironmentOptions.map(
-    (option) => ({
-      kind: "action",
-      value: `action:add-project:environment:${option.environmentId}`,
-      searchTerms: [option.label, option.environmentId, option.isPrimary ? "this device" : ""],
-      title: option.label,
-      description: option.isPrimary ? "This device" : option.environmentId,
-      icon: <FolderPlusIcon className={ITEM_ICON_CLASS} />,
-      keepOpen: true,
-      run: async () => {
-        startAddProjectSourceSelection(option.environmentId);
-      },
-    }),
-  );
-
-  const addProjectEnvironmentGroups = useMemo<CommandPaletteView["groups"]>(
-    () => [
-      {
-        value: "environments",
-        label: "Environments",
-        items: addProjectEnvironmentItems,
-      },
-    ],
-    [addProjectEnvironmentItems],
-  );
-
   const openAddProjectFlow = useCallback(() => {
-    if (addProjectEnvironmentOptions.length > 1) {
-      pushPaletteView({
-        addonIcon: <FolderPlusIcon className={ADDON_ICON_CLASS} />,
-        groups: addProjectEnvironmentGroups,
-      });
-      return;
-    }
-
     const environmentId = defaultAddProjectEnvironmentId;
     if (!environmentId) {
       toastManager.add(
@@ -918,14 +843,8 @@ function OpenCommandPaletteDialog() {
       );
       return;
     }
-
     void startAddProjectSourceSelection(environmentId);
-  }, [
-    addProjectEnvironmentGroups,
-    addProjectEnvironmentOptions.length,
-    defaultAddProjectEnvironmentId,
-    startAddProjectSourceSelection,
-  ]);
+  }, [defaultAddProjectEnvironmentId, startAddProjectSourceSelection]);
 
   useLayoutEffect(() => {
     if (openIntent?.kind !== "add-project") {
@@ -1075,6 +994,7 @@ function OpenCommandPaletteDialog() {
         cwd,
       );
       if (existing) {
+        if (readWorkspaceEnvironmentId() !== browseEnvironmentId) return;
         const latestThread = getLatestThreadForProject(
           threads.filter((thread) => thread.environmentId === existing.environmentId),
           existing.id,
@@ -1111,6 +1031,7 @@ function OpenCommandPaletteDialog() {
           },
           createdAt: new Date().toISOString(),
         });
+        if (readWorkspaceEnvironmentId() !== browseEnvironmentId) return;
         await handleNewThread(scopeProjectRef(browseEnvironmentId, projectId), {
           envMode: settings.defaultThreadEnvMode,
         }).catch(() => undefined);

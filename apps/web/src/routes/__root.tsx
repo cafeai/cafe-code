@@ -15,7 +15,11 @@ import { AmbianceLayer } from "../ambiance/AmbianceLayer";
 import { TaskAtriumOverlay } from "../components/atrium/TaskAtriumOverlay";
 import { APP_DISPLAY_NAME } from "../branding";
 import { AppSidebarLayout } from "../components/AppSidebarLayout";
-import { WorkspaceEnvironmentProvider } from "../environments/workspace";
+import {
+  readWorkspaceEnvironmentId,
+  useWorkspaceEnvironmentId,
+  WorkspaceEnvironmentProvider,
+} from "../environments/workspace";
 import { CommandPalette } from "../components/CommandPalette";
 import { InitialBackendBootstrapSurface } from "../components/InitialBackendBootstrapSurface";
 import { OnboardingSurface } from "../components/OnboardingSurface";
@@ -150,6 +154,12 @@ function RootRouteView() {
 
   const appShell = (
     <WorkspaceEnvironmentProvider>
+      <AppearanceSettingsSync />
+      <TaskAtriumOverlay />
+      <AmbianceLayer />
+      <PowerSaveBlockerSync />
+      {primaryEnvironmentAuthenticated ? <ProviderUpdateLaunchNotification /> : null}
+      {primaryEnvironmentAuthenticated ? <DesktopNotificationWatcher /> : null}
       <RemoteDesktopViewerHost />
       <CommandPalette>
         <AppSidebarLayout>
@@ -165,13 +175,7 @@ function RootRouteView() {
         {primaryEnvironmentAuthenticated ? <AuthenticatedTracingBootstrap /> : null}
         {primaryEnvironmentAuthenticated ? <ServerStateBootstrap /> : null}
         <EnvironmentConnectionManagerBootstrap />
-        <AppearanceSettingsSync />
-        <TaskAtriumOverlay />
-        <AmbianceLayer />
-        <PowerSaveBlockerSync />
         {primaryEnvironmentAuthenticated ? <EventRouter /> : null}
-        {primaryEnvironmentAuthenticated ? <ProviderUpdateLaunchNotification /> : null}
-        {primaryEnvironmentAuthenticated ? <DesktopNotificationWatcher /> : null}
         {primaryEnvironmentAuthenticated ? <WebSocketConnectionCoordinator /> : null}
         {primaryEnvironmentAuthenticated ? (
           <WebSocketConnectionSurface>
@@ -321,7 +325,8 @@ function EnvironmentConnectionManagerBootstrap() {
 
 function PowerSaveBlockerSync() {
   const mode = useSettings((settings) => settings.powerSaveBlockerMode);
-  const chatsRunning = useStore(selectAnyThreadRunning);
+  const environmentId = useWorkspaceEnvironmentId();
+  const chatsRunning = useStore((state) => selectAnyThreadRunning(state, environmentId));
 
   useEffect(() => {
     const setPowerSaveBlockerState = window.desktopBridge?.setPowerSaveBlockerState;
@@ -426,7 +431,10 @@ function EventRouter() {
         );
       useUiStateStore.getState().setProjectExpanded(bootstrapProjectKey, true);
 
-      if (readPathname() !== "/") {
+      if (
+        readPathname() !== "/" ||
+        readWorkspaceEnvironmentId() !== payload.environment.environmentId
+      ) {
         return;
       }
       if (handledBootstrapThreadIdRef.current === payload.bootstrapThreadId) {
@@ -453,7 +461,10 @@ function EventRouter() {
         return;
       }
       seenServerConfigUpdateIdRef.current = id;
-      if (source !== "keybindingsUpdated") {
+      if (
+        source !== "keybindingsUpdated" ||
+        readWorkspaceEnvironmentId() !== serverConfig?.environment.environmentId
+      ) {
         return;
       }
 

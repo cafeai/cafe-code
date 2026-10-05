@@ -180,12 +180,15 @@ export function getClientSettings(): ClientSettings {
 
 export function useClientSettingsHydrated(): boolean {
   const serverConfig = useServerConfig();
+  const environmentId = useWorkspaceEnvironmentId();
+  const remote =
+    environmentId && environmentId !== readPrimaryEnvironmentDescriptor()?.environmentId;
   const localHydrated = useSyncExternalStore(
     subscribeClientSettingsHydration,
     getClientSettingsHydratedSnapshot,
     () => false,
   );
-  return serverConfig !== null || localHydrated;
+  return serverConfig !== null || (!remote && localHydrated);
 }
 
 function useLocalClientSettings(): ClientSettings {
@@ -197,6 +200,9 @@ function useLocalClientSettings(): ClientSettings {
 }
 
 export function useSettings<T = UnifiedSettings>(selector?: (s: UnifiedSettings) => T): T {
+  const environmentId = useWorkspaceEnvironmentId();
+  const remote =
+    environmentId && environmentId !== readPrimaryEnvironmentDescriptor()?.environmentId;
   const serverConfig = useServerConfig();
   const serverSettings = useServerSettings();
   const localClientSettings = useLocalClientSettings();
@@ -217,9 +223,9 @@ export function useSettings<T = UnifiedSettings>(selector?: (s: UnifiedSettings)
   const merged = useMemo<UnifiedSettings>(
     () => ({
       ...serverSettings,
-      ...(serverConfig?.clientSettings ?? localClientSettings),
+      ...(serverConfig?.clientSettings ?? (remote ? DEFAULT_CLIENT_SETTINGS : localClientSettings)),
     }),
-    [localClientSettings, serverConfig?.clientSettings, serverSettings],
+    [localClientSettings, remote, serverConfig?.clientSettings, serverSettings],
   );
 
   return useMemo(() => (selector ? selector(merged) : (merged as T)), [merged, selector]);

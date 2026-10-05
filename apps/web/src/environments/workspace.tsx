@@ -1,8 +1,17 @@
 import { EnvironmentId, type ExecutionEnvironmentDescriptor } from "@cafecode/contracts";
 import { useParams } from "@tanstack/react-router";
-import { createContext, useContext, useLayoutEffect, type ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { create } from "zustand";
 import { useComposerDraftStore } from "../composerDraftStore";
+import { useThreadSelectionStore } from "../threadSelectionStore";
+import { useCommandPaletteStore } from "../commandPaletteStore";
 import { readPrimaryEnvironmentDescriptor, usePrimaryEnvironmentId } from "./primary";
 import {
   useSavedEnvironmentRegistryStore,
@@ -64,7 +73,11 @@ export function useWorkspaceContextEnvironmentId(): EnvironmentId | null | undef
 export function WorkspaceEnvironmentProvider({ children }: { children: ReactNode }) {
   const primary = usePrimaryEnvironmentId();
   const selected = useWorkspaceSelection((s) => s.environmentId);
-  const params = useParams({ strict: false }) as { environmentId?: string; draftId?: string };
+  const params = useParams({ strict: false }) as {
+    environmentId?: string;
+    threadId?: string;
+    draftId?: string;
+  };
   const draftEnvironmentId = useComposerDraftStore((s) =>
     params.draftId ? (s.draftThreadsByThreadKey[params.draftId]?.environmentId ?? null) : null,
   );
@@ -72,14 +85,31 @@ export function WorkspaceEnvironmentProvider({ children }: { children: ReactNode
   const routeEnvironmentId = params.environmentId
     ? EnvironmentId.make(params.environmentId)
     : draftEnvironmentId;
+  const routeKey = JSON.stringify([
+    params.environmentId,
+    params.threadId,
+    params.draftId,
+    draftEnvironmentId,
+  ]);
+  const [committedRouteKey, setCommittedRouteKey] = useState<string | null>(null);
   // Resolve the route before rendering children. Waiting for a selection effect
   // would allow the old Desk's route echo to overwrite a remote deep link.
   const environmentId =
-    routeEnvironmentId ??
+    (committedRouteKey !== routeKey ? routeEnvironmentId : null) ??
     (selected && (selected === primary || records[selected]) ? selected : primary);
+  const committedEnvironmentId = useRef(environmentId);
   useLayoutEffect(() => {
+    // A new deep link selects its server. An explicit selector change takes
+    // precedence over the old chat route while navigation clears that route.
+    setCommittedRouteKey(routeKey);
+    if (committedEnvironmentId.current !== environmentId) {
+      committedEnvironmentId.current = environmentId;
+      useThreadSelectionStore.getState().clearSelection();
+      useCommandPaletteStore.getState().setOpen(false);
+      useCommandPaletteStore.getState().clearOpenIntent();
+    }
     selectWorkspaceEnvironment(environmentId);
-  }, [environmentId]);
+  }, [environmentId, routeKey]);
   return <WorkspaceContext.Provider value={environmentId}>{children}</WorkspaceContext.Provider>;
 }
 

@@ -59,6 +59,7 @@ import {
   validSubagentLimit,
 } from "../subagentConcurrency";
 import { useDesktopDebugEnabled } from "~/lib/desktopDebugState";
+import { useWorkspaceProjects, useWorkspaceThreads } from "../environments/workspaceData";
 import { readPrimaryEnvironmentDescriptor, usePrimaryEnvironmentId } from "../environments/primary";
 import { readEnvironmentApi } from "../environmentApi";
 import { NativeCodexReview } from "./chat/NativeCodexReview";
@@ -101,10 +102,8 @@ import {
 } from "../pendingUserInput";
 import {
   selectProjectByRef,
-  selectProjectsAcrossEnvironments,
   selectThreadByRef,
   selectThreadDetailHydratedByRef,
-  selectThreadsAcrossEnvironments,
   useStore,
 } from "../store";
 import { createProjectSelectorByRef, createThreadSelectorByRef } from "../storeSelectors";
@@ -351,7 +350,10 @@ function readComposerHandle(
 
 type ThreadPlanCatalogEntry = Pick<Thread, "id" | "proposedPlans">;
 
-function useThreadPlanCatalog(threadIds: readonly ThreadId[]): ThreadPlanCatalogEntry[] {
+function useThreadPlanCatalog(
+  environmentId: EnvironmentId,
+  threadIds: readonly ThreadId[],
+): ThreadPlanCatalogEntry[] {
   return useStore(
     useMemo(() => {
       let previousThreadIds: readonly ThreadId[] = [];
@@ -387,7 +389,8 @@ function useThreadPlanCatalog(threadIds: readonly ThreadId[]): ThreadPlanCatalog
           let proposedPlanIds: readonly string[] | undefined;
           let proposedPlansById: Record<string, Thread["proposedPlans"][number]> | undefined;
 
-          for (const environmentState of Object.values(state.environmentStateById)) {
+          for (const environmentState of [state.environmentStateById[environmentId]]) {
+            if (!environmentState) continue;
             const matchedShell = environmentState.threadShellById[threadId];
             if (!matchedShell) {
               continue;
@@ -460,7 +463,7 @@ function useThreadPlanCatalog(threadIds: readonly ThreadId[]): ThreadPlanCatalog
         previousResult = nextResult;
         return nextResult;
       };
-    }, [threadIds]),
+    }, [environmentId, threadIds]),
   );
 }
 
@@ -1415,10 +1418,10 @@ export default function ChatView(props: ChatViewProps) {
     composerInteractionMode ?? activeThread?.interactionMode ?? DEFAULT_INTERACTION_MODE;
   const isLocalDraftThread = !isServerThread && localDraftThread !== undefined;
   const canCheckoutPullRequestIntoThread = isLocalDraftThread && activeThread?.projectId != null;
-  // Compute the list of environments this logical project spans, used to
-  // drive the environment picker in BranchToolbar.
-  const allProjects = useStore(useShallow(selectProjectsAcrossEnvironments));
-  const allThreads = useStore(useShallow(selectThreadsAcrossEnvironments));
+  // Catalog and diagnostics belong to this pane's server, including when
+  // another server has imported the same project or thread IDs.
+  const allProjects = useWorkspaceProjects(environmentId);
+  const allThreads = useWorkspaceThreads(environmentId);
   const activeThreadId = activeThread?.id ?? null;
   const recordFollowUpQueueDebugAttempt = useCallback(
     (
@@ -1841,6 +1844,7 @@ export default function ChatView(props: ChatViewProps) {
     pendingSteerInterruptRecoveryByThreadIdRef,
   ]);
   const threadPlanCatalog = useThreadPlanCatalog(
+    environmentId,
     useMemo(() => {
       const threadIds: ThreadId[] = [];
       if (activeThread?.id) {
@@ -1961,7 +1965,11 @@ export default function ChatView(props: ChatViewProps) {
         activeProject,
         projectGroupingSettings,
       );
-      const storedDraftSession = getDraftSessionByLogicalProjectKey(logicalProjectKey);
+      const logicalDraft = getDraftSessionByLogicalProjectKey(logicalProjectKey);
+      const storedDraftSession =
+        logicalDraft?.environmentId === environmentId
+          ? logicalDraft
+          : useComposerDraftStore.getState().getDraftSessionByProjectRef(activeProjectRef);
       if (storedDraftSession) {
         setDraftThreadContext(storedDraftSession.draftId, input);
         setLogicalProjectDraftThreadId(
@@ -1986,6 +1994,7 @@ export default function ChatView(props: ChatViewProps) {
       if (
         !isServerThread &&
         activeDraftSession?.logicalProjectKey === logicalProjectKey &&
+        activeDraftSession.environmentId === environmentId &&
         draftId
       ) {
         setDraftThreadContext(draftId, input);
@@ -2034,6 +2043,7 @@ export default function ChatView(props: ChatViewProps) {
     [
       activeProject,
       draftId,
+      environmentId,
       getDraftSession,
       getDraftSessionByLogicalProjectKey,
       isServerThread,

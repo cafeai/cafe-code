@@ -61,23 +61,21 @@ import {
   type SidebarThreadPreviewCount,
   type SidebarThreadSortOrder,
 } from "@cafecode/contracts/settings";
-import { usePrimaryEnvironmentId } from "../environments/primary";
 import { useWorkspaceEnvironmentId, useIsSavedRemoteEnvironment } from "../environments/workspace";
+import { useWorkspaceProjects, useWorkspaceSidebarThreads } from "../environments/workspaceData";
 import { WorkspaceEnvironmentSelector } from "./WorkspaceEnvironmentSelector";
 import { isElectron } from "../env";
 import { APP_STAGE_LABEL, APP_VERSION } from "../branding";
 import {
   DEFAULT_SIDEBAR_BRAND_IMAGE_SIZES,
   DEFAULT_SIDEBAR_BRAND_IMAGE_SRC_SET,
-  resolveSidebarBrandImageSrc,
+  useSidebarBrandImageSrc,
 } from "../brandingImages";
 import { cn, isMacPlatform, newCommandId, newThreadId } from "../lib/utils";
 import {
   selectBootstrapCompleteForEnvironment,
   selectProjectByRef,
-  selectProjectsAcrossEnvironments,
   selectSidebarThreadsForProjectRefs,
-  selectSidebarThreadsAcrossEnvironments,
   selectThreadByRef,
   useStore,
 } from "../store";
@@ -1496,7 +1494,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       ),
     ),
   );
-  const allProjects = useStore(useShallow(selectProjectsAcrossEnvironments));
+  const allProjects = useWorkspaceProjects();
   const sidebarThreadByKey = useMemo(
     () =>
       new Map(
@@ -3665,6 +3663,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
   } = props;
 
   const addProjectHintAnchorRef = useRef<HTMLButtonElement>(null);
+  const sidebarBrandImageSrc = useSidebarBrandImageSrc(sidebarBrandImage);
 
   const handleProjectSortOrderChange = useCallback(
     (sortOrder: SidebarProjectSortOrder) => {
@@ -3921,7 +3920,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
             draggable={false}
             height={128}
             sizes={DEFAULT_SIDEBAR_BRAND_IMAGE_SIZES}
-            src={resolveSidebarBrandImageSrc(sidebarBrandImage)}
+            src={sidebarBrandImageSrc}
             srcSet={sidebarBrandImage ? undefined : DEFAULT_SIDEBAR_BRAND_IMAGE_SRC_SET}
             width={102}
           />
@@ -3945,7 +3944,6 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
 export default function Sidebar() {
   const desk = useDeskStore((state) => state.desk);
   const deskDispatch = useDeskStore((state) => state.dispatch);
-  const primaryEnvironmentId = usePrimaryEnvironmentId();
   const workspaceEnvironmentId = useWorkspaceEnvironmentId();
   const remoteWorkspace = useIsSavedRemoteEnvironment(workspaceEnvironmentId);
   const primaryEnvironmentBootstrapped = useStore((state) =>
@@ -3962,8 +3960,8 @@ export default function Sidebar() {
     () => new Set(bootstrappedEnvironmentIds),
     [bootstrappedEnvironmentIds],
   );
-  const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
-  const sidebarThreads = useStore(useShallow(selectSidebarThreadsAcrossEnvironments));
+  const projects = useWorkspaceProjects();
+  const sidebarThreads = useWorkspaceSidebarThreads();
   const projectExpandedById = useUiStateStore((store) => store.projectExpandedById);
   const projectOrder = useUiStateStore((store) => store.projectOrder);
   const reorderProjects = useUiStateStore((store) => store.reorderProjects);
@@ -4060,10 +4058,10 @@ export default function Sidebar() {
     return buildSidebarProjectSnapshots({
       projects: orderedProjects,
       settings: projectGroupingSettings,
-      primaryEnvironmentId,
+      primaryEnvironmentId: workspaceEnvironmentId,
       resolveEnvironmentLabel: () => null,
     });
-  }, [orderedProjects, projectGroupingSettings, primaryEnvironmentId]);
+  }, [orderedProjects, projectGroupingSettings, workspaceEnvironmentId]);
 
   const sidebarProjectByKey = useMemo(
     () => new Map(sidebarProjects.map((project) => [project.projectKey, project] as const)),

@@ -18,6 +18,7 @@ import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
 import { useTheme } from "../../hooks/useTheme";
 import { normalizeAccentColor } from "../../themeAccent";
 import { useStore } from "../../store";
+import { useWorkspaceEnvironmentId } from "../../environments/workspace";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { cn, isWindowsPlatform } from "../../lib/utils";
 import { isElectron } from "../../env";
@@ -669,6 +670,7 @@ function areAtriumCardPropsEqual(
 }
 
 export function TaskAtriumBoard() {
+  const environmentId = useWorkspaceEnvironmentId();
   const tint = useAtriumTint();
   const overviewTitleId = useId();
   const dismissedTaskAtriumErrors = useSettings((settings) => settings.dismissedTaskAtriumErrors);
@@ -728,7 +730,14 @@ export function TaskAtriumBoard() {
     const tick = () => {
       const timestamp = Date.now();
       setNow(timestamp);
-      setSnapshot(selectAtriumSnapshot(useStore.getState(), timestamp, dismissedTaskAtriumErrors));
+      setSnapshot(
+        selectAtriumSnapshot(
+          useStore.getState(),
+          timestamp,
+          dismissedTaskAtriumErrors,
+          environmentId,
+        ),
+      );
     };
     const stop = () => {
       if (interval === null) return;
@@ -750,7 +759,7 @@ export function TaskAtriumBoard() {
       stop();
       document.removeEventListener("visibilitychange", syncVisibility);
     };
-  }, [dismissedTaskAtriumErrors]);
+  }, [dismissedTaskAtriumErrors, environmentId]);
 
   const retainedDetailsRef = useRef(new Map<string, () => void>());
   const cardElementsRef = useRef(new Map<string, HTMLElement>());

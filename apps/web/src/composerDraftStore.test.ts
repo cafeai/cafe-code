@@ -1073,6 +1073,20 @@ describe("composerDraftStore project draft thread mapping", () => {
     });
   });
 
+  it("preserves independent unsent drafts when the same repository is selected on another server", () => {
+    const store = useComposerDraftStore.getState();
+    const logicalKey = "repo:same-repository";
+    const otherDraft = DraftId.make("remote-repository-draft");
+    store.setLogicalProjectDraftThreadId(logicalKey, projectRef, draftId, { threadId });
+    store.setPrompt(draftId, "Local unsent work");
+    store.setLogicalProjectDraftThreadId(logicalKey, remoteProjectRef, otherDraft, { threadId });
+    store.setPrompt(otherDraft, "Remote unsent work");
+    expect(store.getDraftSessionByProjectRef(projectRef)?.draftId).toBe(draftId);
+    expect(store.getDraftSessionByProjectRef(remoteProjectRef)?.draftId).toBe(otherDraft);
+    expect(store.getComposerDraft(draftId)?.prompt).toBe("Local unsent work");
+    expect(store.getComposerDraft(otherDraft)?.prompt).toBe("Remote unsent work");
+  });
+
   it("clears branch and worktree context when changing a draft thread project ref", () => {
     const store = useComposerDraftStore.getState();
     store.setProjectDraftThreadId(projectRef, draftId, {

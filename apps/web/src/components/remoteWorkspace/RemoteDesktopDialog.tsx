@@ -4,7 +4,10 @@ import type { EnvironmentId } from "@cafecode/contracts";
 import { DESKTOP_PREVIEW_MAX_BYTES, DESKTOP_PREVIEW_PATH } from "@cafecode/contracts";
 import { fileRequest, readBounded } from "../../attachments/fileAttachments";
 import { requireEnvironmentConnection } from "../../environments/runtime";
-import { readWorkspaceEnvironmentDescriptor } from "../../environments/workspace";
+import {
+  useWorkspaceEnvironmentId,
+  readWorkspaceEnvironmentDescriptor,
+} from "../../environments/workspace";
 import {
   Dialog,
   DialogPopup,
@@ -17,8 +20,13 @@ import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { workspaceRequest } from "./api";
 export function RemoteDesktopViewerHost() {
+  const environmentId = useWorkspaceEnvironmentId();
   const target = useRemoteDesktopViewer((s) => s.target);
-  return target ? (
+  useEffect(() => {
+    if (target && target.environmentId !== environmentId)
+      useRemoteDesktopViewer.setState({ target: null });
+  }, [environmentId, target]);
+  return target && target.environmentId === environmentId ? (
     <RemoteDesktopDialog
       key={`${target.environmentId}:${target.id}`}
       {...target}

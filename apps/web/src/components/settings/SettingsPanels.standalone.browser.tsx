@@ -11,6 +11,10 @@ import { page } from "vitest/browser";
 import { ArchivedThreadsPanel, RecentlyDeletedThreadsPanel } from "./SettingsPanels";
 import { useStore } from "../../store";
 import { writePrimaryEnvironmentDescriptor } from "../../environments/primary";
+import {
+  resetWorkspaceEnvironmentForTests,
+  selectWorkspaceEnvironment,
+} from "../../environments/workspace";
 import { __resetLocalApiForTests } from "../../localApi";
 import {
   useSavedEnvironmentRegistryStore,
@@ -30,6 +34,12 @@ const mocks = vi.hoisted(() => ({
   refreshDeleted: vi.fn(),
   contextMenu: vi.fn(),
   confirm: vi.fn(),
+}));
+vi.mock("../../environments/workspaceApi", () => ({
+  readWorkspaceApi: () => window.nativeApi,
+  ensureWorkspaceApi: () => window.nativeApi,
+  getWorkspaceServerConfig: () => null,
+  patchWorkspaceServerConfig: vi.fn(),
 }));
 vi.mock("../../hooks/useThreadActions", () => ({
   useThreadActions: () => ({
@@ -104,6 +114,9 @@ function snapshot(title: string): OrchestrationShellSnapshot {
 beforeEach(async () => {
   await page.viewport(1100, 800);
   await __resetLocalApiForTests();
+  resetWorkspaceEnvironmentForTests();
+  useSavedEnvironmentRegistryStore.setState({ byId: {} });
+  useSavedEnvironmentRuntimeStore.setState({ byId: {} });
   writePrimaryEnvironmentDescriptor({
     environmentId: primary,
     label: "Fixture primary",
@@ -145,14 +158,53 @@ afterEach(async () => {
 });
 
 describe("standalone history settings", () => {
-  it("queries and unarchives a known connected secondary standalone-only environment", async () => {
+  it("changes history immediately with the selected server and keeps bulk deletion scoped after a delayed confirmation", async () => {
+    registerSecondaryEnvironment(remote, true);
+    mocks.deleted.push({ environmentId: remote, snapshot: snapshot("Remote deleted standalone") });
+    let confirm!: (answer: boolean) => void;
+    mocks.confirm.mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          confirm = resolve;
+        }),
+    );
+    const screen = await render(<RecentlyDeletedThreadsPanel />);
+    try {
+      await expect
+        .element(screen.getByRole("heading", { name: "Deleted standalone", exact: true }))
+        .toBeVisible();
+      await expect
+        .element(screen.getByRole("heading", { name: "Remote deleted standalone", exact: true }))
+        .not.toBeInTheDocument();
+      await screen.getByRole("button", { name: "Empty Recycle Bin", exact: true }).click();
+      selectWorkspaceEnvironment(remote);
+      await expect
+        .element(screen.getByRole("heading", { name: "Remote deleted standalone", exact: true }))
+        .toBeVisible();
+      await expect
+        .element(screen.getByRole("heading", { name: "Deleted standalone", exact: true }))
+        .not.toBeInTheDocument();
+      expect(mocks.deletedEnvironmentIds.at(-1)).toEqual([remote]);
+      confirm(true);
+      await vi.waitFor(() =>
+        expect(mocks.hardDelete).toHaveBeenCalledExactlyOnceWith(
+          { environmentId: primary, threadId },
+          { confirm: false, refresh: false },
+        ),
+      );
+    } finally {
+      await screen.unmount();
+    }
+  });
+  it("queries and unarchives only the selected standalone-only server", async () => {
     registerSecondaryEnvironment(remote, true);
     mocks.archived = [
       { environmentId: remote, snapshot: snapshot("Secondary archived standalone") },
     ];
+    selectWorkspaceEnvironment(remote);
     const screen = await render(<ArchivedThreadsPanel />);
     try {
-      expect(mocks.archivedEnvironmentIds.at(-1)).toEqual([primary, remote]);
+      expect(mocks.archivedEnvironmentIds.at(-1)).toEqual([remote]);
       await expect
         .element(
           screen.getByRole("heading", { name: "Secondary archived standalone", exact: true }),
@@ -165,7 +217,7 @@ describe("standalone history settings", () => {
       await screen.unmount();
     }
   });
-  it("queries and restores secondary standalone history without including unknown or disconnected entries", async () => {
+  it("queries and restores only the selected server without including other connected or offline servers", async () => {
     const disconnected = EnvironmentId.make("history-disconnected-fixture");
     const unknown = EnvironmentId.make("history-unknown-fixture");
     registerSecondaryEnvironment(remote, true);
@@ -177,9 +229,10 @@ describe("standalone history settings", () => {
       { environmentId: unknown, snapshot: snapshot("Unknown history") },
     ];
     mocks.contextMenu.mockResolvedValue("restore");
+    selectWorkspaceEnvironment(remote);
     const screen = await render(<RecentlyDeletedThreadsPanel />);
     try {
-      expect(mocks.deletedEnvironmentIds.at(-1)).toEqual([primary, remote]);
+      expect(mocks.deletedEnvironmentIds.at(-1)).toEqual([remote]);
       await expect
         .element(screen.getByRole("heading", { name: "Disconnected history", exact: true }))
         .not.toBeInTheDocument();
@@ -235,22 +288,17 @@ describe("standalone history settings", () => {
       await screen.unmount();
     }
   });
-  it("includes every real environment in confirmed projectless bulk deletion, even when ids repeat", async () => {
+  it("empties only the selected server Recycle Bin even when other servers reuse its thread ids", async () => {
     registerSecondaryEnvironment(remote, true);
     mocks.deleted.push({ environmentId: remote, snapshot: snapshot("Remote deleted standalone") });
     const screen = await render(<RecentlyDeletedThreadsPanel />);
     try {
       await screen.getByRole("button", { name: "Empty Recycle Bin", exact: true }).click();
-      await vi.waitFor(() => expect(mocks.hardDelete).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect(mocks.hardDelete).toHaveBeenCalledTimes(1));
       expect(mocks.confirm).toHaveBeenCalledOnce();
       expect(mocks.hardDelete).toHaveBeenNthCalledWith(
         1,
         { environmentId: primary, threadId },
-        { confirm: false, refresh: false },
-      );
-      expect(mocks.hardDelete).toHaveBeenNthCalledWith(
-        2,
-        { environmentId: remote, threadId },
         { confirm: false, refresh: false },
       );
       expect(mocks.refreshDeleted).toHaveBeenCalledOnce();

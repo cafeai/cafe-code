@@ -73,14 +73,7 @@ import {
 } from "../../providerInstances";
 import { ensureWorkspaceApi, readWorkspaceApi } from "../../environments/workspaceApi";
 import { getLocalShellCapabilities } from "../../localCapabilities";
-import { useShallow } from "zustand/react/shallow";
-import { selectProjectsAcrossEnvironments, useStore } from "../../store";
-import { usePrimaryEnvironmentId } from "../../environments/primary";
-import {
-  useSavedEnvironmentRegistryStore,
-  useSavedEnvironmentRuntimeStore,
-} from "../../environments/runtime/catalog";
-import { groupThreadHistory, historyEnvironmentIds } from "../sidebar/standaloneNavigation.logic";
+import { groupThreadHistory } from "../sidebar/standaloneNavigation.logic";
 import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
 import { useDeletedThreadSnapshots } from "../../lib/deletedThreadsState";
 import { formatRelativeTime, formatRelativeTimeLabel } from "../../timestampFormat";
@@ -133,7 +126,7 @@ import { openInPreferredEditor } from "../../editorPreferences";
 import {
   DEFAULT_SIDEBAR_BRAND_IMAGE_SIZES,
   DEFAULT_SIDEBAR_BRAND_IMAGE_SRC_SET,
-  resolveSidebarBrandImageSrc,
+  useSidebarBrandImageSrc,
   uploadSidebarBrandImage,
 } from "../../brandingImages";
 import { ColorWheelPicker } from "./ColorWheelPicker";
@@ -653,6 +646,7 @@ export function GeneralSettingsPanel() {
 }
 
 export function AppearanceSettingsPanel() {
+  const environmentId = useWorkspaceEnvironmentId();
   const { theme, setTheme } = useTheme();
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
@@ -662,8 +656,8 @@ export function AppearanceSettingsPanel() {
   const [sidebarImagePreviewUrl, setSidebarImagePreviewUrl] = useState<string | null>(null);
   const [sidebarImageUploading, setSidebarImageUploading] = useState(false);
   const renderedBrandPrefix = settings.brandWordmarkPrefix.trim() || DEFAULT_BRAND_WORDMARK_PREFIX;
-  const sidebarImageSrc =
-    sidebarImagePreviewUrl ?? resolveSidebarBrandImageSrc(settings.sidebarBrandImage);
+  const savedSidebarImageSrc = useSidebarBrandImageSrc(settings.sidebarBrandImage);
+  const sidebarImageSrc = sidebarImagePreviewUrl ?? savedSidebarImageSrc;
   const sidebarImageUsesDefault =
     sidebarImagePreviewUrl === null && settings.sidebarBrandImage === DEFAULT_SIDEBAR_BRAND_IMAGE;
   const sidebarImageSrcSet = sidebarImageUsesDefault
@@ -716,7 +710,7 @@ export function AppearanceSettingsPanel() {
       setTemporarySidebarImagePreviewUrl(file);
       setSidebarImageUploading(true);
       try {
-        const sidebarBrandImage = await uploadSidebarBrandImage(file);
+        const sidebarBrandImage = await uploadSidebarBrandImage(file, environmentId);
         setSidebarImageError(null);
         updateSettings({ sidebarBrandImage, sidebarBrandImageDataUrl: "" });
         clearSidebarImagePreviewUrl();
@@ -729,7 +723,12 @@ export function AppearanceSettingsPanel() {
         setSidebarImageUploading(false);
       }
     },
-    [clearSidebarImagePreviewUrl, setTemporarySidebarImagePreviewUrl, updateSettings],
+    [
+      clearSidebarImagePreviewUrl,
+      environmentId,
+      setTemporarySidebarImagePreviewUrl,
+      updateSettings,
+    ],
   );
 
   return (
@@ -2124,33 +2123,10 @@ export function ProviderSettingsPanel() {
   );
 }
 
-/**
- * History remains reachable when a connected saved environment contains only
- * standalone chats. Project membership is not a proxy for server availability.
- * Only already-known connected catalog entries join the existing primary and
- * project scope: reading Settings never connects arbitrary hosts or providers.
- */
+/** History includes the selected server even when it has no projects. */
 function useThreadHistoryEnvironmentIds() {
-  const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
-  const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const savedEnvironmentIds = useSavedEnvironmentRegistryStore(
-    useShallow((state) => Object.values(state.byId).map((record) => record.environmentId)),
-  );
-  const connectedSavedEnvironmentIds = useSavedEnvironmentRuntimeStore(
-    useShallow((state) =>
-      savedEnvironmentIds.filter(
-        (environmentId) => state.byId[environmentId]?.connectionState === "connected",
-      ),
-    ),
-  );
-  return useMemo(
-    () =>
-      historyEnvironmentIds(primaryEnvironmentId, [
-        ...projects,
-        ...connectedSavedEnvironmentIds.map((environmentId) => ({ environmentId })),
-      ]),
-    [connectedSavedEnvironmentIds, primaryEnvironmentId, projects],
-  );
+  const environmentId = useWorkspaceEnvironmentId();
+  return useMemo(() => (environmentId ? [environmentId] : []), [environmentId]);
 }
 
 export function ArchivedThreadsPanel() {
@@ -2225,7 +2201,7 @@ export function ArchivedThreadsPanel() {
             }
             description={
               isLoadingArchive
-                ? "Checking connected environments."
+                ? "Checking the selected server."
                 : (archiveError ?? "Archived threads will appear here.")
             }
           />
@@ -2455,7 +2431,7 @@ export function RecentlyDeletedThreadsPanel() {
             }
             description={
               isLoadingDeleted
-                ? "Checking connected environments."
+                ? "Checking the selected server."
                 : (deletedError ?? "Threads moved to the Recycle Bin will appear here.")
             }
           />

@@ -70,19 +70,6 @@ export function buildStandaloneCatalog(input: {
   });
 }
 
-/** The primary environment must remain queryable even without any projects. */
-export function historyEnvironmentIds(
-  primaryEnvironmentId: EnvironmentId | null,
-  projects: readonly { environmentId: EnvironmentId }[],
-): EnvironmentId[] {
-  return [
-    ...new Set([
-      ...(primaryEnvironmentId === null ? [] : [primaryEnvironmentId]),
-      ...projects.map((project) => project.environmentId),
-    ]),
-  ];
-}
-
 type HistoryThread = OrchestrationShellSnapshot["threads"][number] & {
   environmentId: EnvironmentId;
 };

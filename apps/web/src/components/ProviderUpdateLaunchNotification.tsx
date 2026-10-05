@@ -3,7 +3,9 @@ import { DownloadIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { type ProviderDriverKind, type ProviderInstanceId } from "@cafecode/contracts";
 
-import { ensureLocalApi } from "../localApi";
+import { ensureWorkspaceApi } from "../environments/workspaceApi";
+import { readWorkspaceEnvironmentId, useWorkspaceEnvironmentId } from "../environments/workspace";
+import { usePrimaryEnvironmentId } from "../environments/primary";
 import { useDismissedProviderUpdateNotificationKeys } from "../providerUpdateDismissal";
 import { useServerProviders } from "../rpc/serverState";
 import { PROVIDER_ICON_BY_PROVIDER } from "./chat/providerIconUtils";
@@ -100,6 +102,8 @@ function isTerminalProviderUpdateToastView(view: ProviderUpdateToastView) {
 }
 
 export function ProviderUpdateLaunchNotification() {
+  const environmentId = useWorkspaceEnvironmentId();
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
   const navigate = useNavigate();
   const providers = useServerProviders();
   const activeToastRef = useRef<ActiveProviderUpdateToast | null>(null);
@@ -107,9 +111,20 @@ export function ProviderUpdateLaunchNotification() {
     useDismissedProviderUpdateNotificationKeys();
 
   const updateProviders = useMemo(() => collectProviderUpdateCandidates(providers), [providers]);
-  const notificationKey = useMemo(
-    () => providerUpdateNotificationKey(updateProviders),
-    [updateProviders],
+  const notificationKey = useMemo(() => {
+    const key = providerUpdateNotificationKey(updateProviders);
+    return key && environmentId !== primaryEnvironmentId
+      ? JSON.stringify([environmentId, key])
+      : key;
+  }, [environmentId, primaryEnvironmentId, updateProviders]);
+
+  useEffect(
+    () => () => {
+      const active = activeToastRef.current;
+      activeToastRef.current = null;
+      if (active) toastManager.close(active.toastId);
+    },
+    [environmentId],
   );
   const oneClickProviders = useMemo(
     () =>
@@ -181,7 +196,7 @@ export function ProviderUpdateLaunchNotification() {
     let updateStarted = false;
     const openSettings = () => openProviderSettings(toastId);
     const dismissPrompt = () => {
-      dismissNotificationKey(notificationKey);
+      if (readWorkspaceEnvironmentId() === environmentId) dismissNotificationKey(notificationKey);
     };
 
     const runUpdates = () => {
@@ -208,7 +223,7 @@ export function ProviderUpdateLaunchNotification() {
 
       void Promise.allSettled(
         oneClickProviders.map(async (provider) =>
-          ensureLocalApi().server.updateProvider({
+          ensureWorkspaceApi(environmentId).server.updateProvider({
             provider: provider.driver,
             instanceId: provider.instanceId,
           }),
@@ -294,6 +309,7 @@ export function ProviderUpdateLaunchNotification() {
     oneClickProviders,
     openProviderSettings,
     updateProviders,
+    environmentId,
   ]);
 
   return null;

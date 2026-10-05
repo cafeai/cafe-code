@@ -1,8 +1,7 @@
 import { useMemo } from "react";
-import { useShallow } from "zustand/react/shallow";
 import { scopedThreadKey, scopeThreadRef } from "@cafecode/client-runtime";
 
-import { selectSidebarThreadsAcrossEnvironments, useStore } from "../../store";
+import { useWorkspaceSidebarThreads } from "../../environments/workspaceData";
 import { useUiStateStore } from "../../uiStateStore";
 import { hasUnseenCompletion, shouldInsetContentSidebarTrigger } from "../Sidebar.logic";
 import { SidebarTrigger, useSidebar } from "../ui/sidebar";
@@ -11,7 +10,7 @@ import { cn } from "~/lib/utils";
 
 /** True when any thread has a completed turn the user hasn't viewed yet. */
 export function useHasUnseenThreadCompletions(): boolean {
-  const threads = useStore(useShallow(selectSidebarThreadsAcrossEnvironments));
+  const threads = useWorkspaceSidebarThreads();
   const lastVisitedById = useUiStateStore((state) => state.threadLastVisitedAtById);
   return useMemo(
     () =>

@@ -19,7 +19,8 @@ import {
   Settings2Icon,
   Trash2Icon,
 } from "lucide-react";
-import { useCanGoBack, useNavigate } from "@tanstack/react-router";
+import { useNavigate } from "@tanstack/react-router";
+import { useSettingsBackNavigation } from "../../hooks/useSettingsBackNavigation";
 import { useWorkspaceEnvironmentId } from "~/environments/workspace";
 import { useVirtualDesktops } from "../virtualDesktop/useVirtualDesktops";
 
@@ -116,7 +117,7 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
   const environmentId = useWorkspaceEnvironmentId();
   const desktops = useVirtualDesktops(environmentId);
   const navigate = useNavigate();
-  const canGoBack = useCanGoBack();
+  const navigateBackWithinApp = useSettingsBackNavigation();
   const { isMobile, setOpenMobile } = useSidebar();
   const handleSectionClick = useCallback(
     (to: SettingsSectionPath) => {
@@ -131,12 +132,8 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
     if (isMobile) {
       setOpenMobile(false);
     }
-    if (canGoBack) {
-      window.history.back();
-      return;
-    }
-    void navigate({ to: "/" });
-  }, [canGoBack, isMobile, navigate, setOpenMobile]);
+    navigateBackWithinApp();
+  }, [isMobile, navigateBackWithinApp, setOpenMobile]);
 
   return (
     <>

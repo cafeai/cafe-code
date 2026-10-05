@@ -1,13 +1,7 @@
 import { RotateCcwIcon } from "lucide-react";
-import {
-  Outlet,
-  createFileRoute,
-  redirect,
-  useCanGoBack,
-  useLocation,
-  useNavigate,
-} from "@tanstack/react-router";
-import { useCallback, useEffect, useState } from "react";
+import { Outlet, createFileRoute, redirect, useLocation } from "@tanstack/react-router";
+import { useEffect, useState } from "react";
+import { useSettingsBackNavigation } from "../hooks/useSettingsBackNavigation";
 
 import { useSettingsRestore } from "../components/settings/SettingsPanels";
 import { Button } from "../components/ui/button";
@@ -35,18 +29,10 @@ function RestoreDefaultsButton({ onRestored }: { onRestored: () => void }) {
 function SettingsContentLayout() {
   const environmentId = useWorkspaceEnvironmentId();
   const location = useLocation();
-  const navigate = useNavigate();
-  const canGoBack = useCanGoBack();
+  const navigateBackWithinApp = useSettingsBackNavigation();
   const [restoreSignal, setRestoreSignal] = useState(0);
   const showRestoreDefaults = SETTINGS_RESTORE_DEFAULTS_PATHS.has(location.pathname);
   const handleRestored = () => setRestoreSignal((value) => value + 1);
-  const navigateBackWithinApp = useCallback(() => {
-    if (canGoBack) {
-      window.history.back();
-      return;
-    }
-    void navigate({ to: "/" });
-  }, [canGoBack, navigate]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {

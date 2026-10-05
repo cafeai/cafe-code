@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useSyncExternalStore } from "react";
+import { useWorkspaceEnvironmentId } from "../environments/workspace";
+import { usePrimaryEnvironmentId } from "../environments/primary";
 
 type Theme = "light" | "dark" | "system";
 type ThemeSnapshot = {
@@ -17,7 +19,7 @@ const THEME_COLOR_META_NAME = "theme-color";
 const DYNAMIC_THEME_COLOR_SELECTOR = `meta[name="${THEME_COLOR_META_NAME}"][data-dynamic-theme-color="true"]`;
 
 let listeners: Array<() => void> = [];
-let lastSnapshot: ThemeSnapshot | null = null;
+const snapshots = new Map<string, ThemeSnapshot>();
 let lastDesktopTheme: Theme | null = null;
 
 function emitChange() {
@@ -32,10 +34,11 @@ function getSystemDark() {
   return typeof window !== "undefined" && window.matchMedia(MEDIA_QUERY).matches;
 }
 
-function getStored(): Theme {
+function getStored(storageKey = STORAGE_KEY): Theme {
   if (!hasThemeStorage()) return DEFAULT_THEME_SNAPSHOT.theme;
-  const raw = localStorage.getItem(STORAGE_KEY);
+  const raw = localStorage.getItem(storageKey);
   if (raw === "light" || raw === "dark" || raw === "system") return raw;
+  if (storageKey !== STORAGE_KEY) return DEFAULT_THEME_SNAPSHOT.theme;
   const legacyRaw = localStorage.getItem(LEGACY_STORAGE_KEY);
   if (legacyRaw === "light" || legacyRaw === "dark" || legacyRaw === "system") {
     localStorage.setItem(STORAGE_KEY, legacyRaw);
@@ -164,39 +167,41 @@ if (typeof document !== "undefined" && hasThemeStorage()) {
   applyTheme(getStored());
 }
 
-function getSnapshot(): ThemeSnapshot {
+function getSnapshot(storageKey: string): ThemeSnapshot {
   if (!hasThemeStorage()) return DEFAULT_THEME_SNAPSHOT;
-  const theme = getStored();
+  const theme = getStored(storageKey);
   const systemDark = theme === "system" ? getSystemDark() : false;
 
+  const lastSnapshot = snapshots.get(storageKey);
   if (lastSnapshot && lastSnapshot.theme === theme && lastSnapshot.systemDark === systemDark) {
     return lastSnapshot;
   }
 
-  lastSnapshot = { theme, systemDark };
-  return lastSnapshot;
+  const snapshot = { theme, systemDark };
+  snapshots.set(storageKey, snapshot);
+  return snapshot;
 }
 
 function getServerSnapshot() {
   return DEFAULT_THEME_SNAPSHOT;
 }
 
-function subscribe(listener: () => void): () => void {
+function subscribe(listener: () => void, storageKey: string): () => void {
   if (typeof window === "undefined") return () => {};
   listeners.push(listener);
 
   // Listen for system preference changes
   const mq = window.matchMedia(MEDIA_QUERY);
   const handleChange = () => {
-    if (getStored() === "system") applyTheme("system", true);
+    if (getStored(storageKey) === "system") applyTheme("system", true);
     emitChange();
   };
   mq.addEventListener("change", handleChange);
 
   // Listen for storage changes from other tabs
   const handleStorage = (e: StorageEvent) => {
-    if (e.key === STORAGE_KEY || e.key === LEGACY_STORAGE_KEY) {
-      applyTheme(getStored(), true);
+    if (e.key === storageKey || (storageKey === STORAGE_KEY && e.key === LEGACY_STORAGE_KEY)) {
+      applyTheme(getStored(storageKey), true);
       emitChange();
     }
   };
@@ -210,19 +215,35 @@ function subscribe(listener: () => void): () => void {
 }
 
 export function useTheme() {
-  const snapshot = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+  const environmentId = useWorkspaceEnvironmentId();
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  // Keep the existing local preference and migration unchanged. A saved
+  // server gets its own renderer theme on this device, like its other views.
+  const storageKey =
+    environmentId && environmentId !== primaryEnvironmentId
+      ? `${STORAGE_KEY}:server:${encodeURIComponent(environmentId)}`
+      : STORAGE_KEY;
+  const subscribeTheme = useCallback(
+    (listener: () => void) => subscribe(listener, storageKey),
+    [storageKey],
+  );
+  const readTheme = useCallback(() => getSnapshot(storageKey), [storageKey]);
+  const snapshot = useSyncExternalStore(subscribeTheme, readTheme, getServerSnapshot);
   const theme = snapshot.theme;
 
   const resolvedTheme: "light" | "dark" =
     theme === "system" ? (snapshot.systemDark ? "dark" : "light") : theme;
 
-  const setTheme = useCallback((next: Theme) => {
-    if (!hasThemeStorage()) return;
-    localStorage.setItem(STORAGE_KEY, next);
-    localStorage.removeItem(LEGACY_STORAGE_KEY);
-    applyTheme(next, true);
-    emitChange();
-  }, []);
+  const setTheme = useCallback(
+    (next: Theme) => {
+      if (!hasThemeStorage()) return;
+      localStorage.setItem(storageKey, next);
+      if (storageKey === STORAGE_KEY) localStorage.removeItem(LEGACY_STORAGE_KEY);
+      applyTheme(next, true);
+      emitChange();
+    },
+    [storageKey],
+  );
 
   // Keep DOM in sync on mount/change
   useEffect(() => {

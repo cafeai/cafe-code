@@ -7,6 +7,7 @@ import { render } from "vitest-browser-react";
 // Electron detection is fixed at module initialization. Keep the browser
 // boundary in its own module graph instead of pretending it changes at runtime.
 vi.mock("../../env", () => ({ isElectron: false }));
+vi.mock("../../environments/workspace", () => ({ useWorkspaceEnvironmentId: () => "fixture" }));
 vi.mock("../../hooks/useSettings", () => ({
   useSettings: () => true,
 }));

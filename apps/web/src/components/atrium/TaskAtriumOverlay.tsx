@@ -7,6 +7,7 @@ import { useSettings } from "../../hooks/useSettings";
 import { cn, isWindowsPlatform } from "../../lib/utils";
 import { TaskAtriumBoard } from "./TaskAtrium";
 import { useTaskAtriumStore } from "./taskAtriumStore";
+import { useWorkspaceEnvironmentId } from "../../environments/workspace";
 
 /**
  * The Task Atrium panel.
@@ -27,6 +28,7 @@ import { useTaskAtriumStore } from "./taskAtriumStore";
  * being stacked above this modal.
  */
 export function TaskAtriumOverlay() {
+  const environmentId = useWorkspaceEnvironmentId();
   const enabled = useSettings((settings) => settings.ambianceAtriumEnabled);
   const open = useTaskAtriumStore((state) => state.open);
   const setOpen = useTaskAtriumStore((state) => state.setOpen);
@@ -70,7 +72,7 @@ export function TaskAtriumOverlay() {
           >
             <X className="size-4" />
           </DialogPrimitive.Close>
-          <TaskAtriumBoard />
+          <TaskAtriumBoard key={environmentId} />
         </DialogPrimitive.Popup>
       </DialogPrimitive.Portal>
     </DialogPrimitive.Root>

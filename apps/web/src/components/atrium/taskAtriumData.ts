@@ -391,6 +391,7 @@ export function selectAtriumSnapshot(
   state: AppState,
   now: number,
   dismissedErrors: ReadonlyArray<TaskAtriumErrorDismissal> = [],
+  selectedEnvironmentId?: EnvironmentId | null,
 ): AtriumSnapshot {
   const cards: AtriumCard[] = [];
   let subagentCount = 0;
@@ -400,6 +401,7 @@ export function selectAtriumSnapshot(
   }
 
   for (const [environmentIdRaw, environment] of Object.entries(state.environmentStateById)) {
+    if (selectedEnvironmentId !== undefined && environmentIdRaw !== selectedEnvironmentId) continue;
     if (!environment) continue;
     const environmentId = environmentIdRaw as EnvironmentId;
 

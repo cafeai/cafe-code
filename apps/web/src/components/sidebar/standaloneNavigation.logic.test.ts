@@ -11,7 +11,6 @@ import type { SidebarThreadSummary } from "../../types";
 import {
   buildStandaloneCatalog,
   groupThreadHistory,
-  historyEnvironmentIds,
   standaloneDraftTitle,
 } from "./standaloneNavigation.logic";
 
@@ -153,13 +152,6 @@ describe("standalone shell catalog", () => {
 });
 
 describe("standalone archive/recycle-bin grouping", () => {
-  it("queries primary even with zero projects and deduplicates only exact environment ids", () => {
-    expect(historyEnvironmentIds(local, [])).toEqual([local]);
-    expect(
-      historyEnvironmentIds(local, [{ environmentId: local }, { environmentId: remote }]),
-    ).toEqual([local, remote]);
-    expect(historyEnvironmentIds(null, [])).toEqual([]);
-  });
   it("groups projectless saved history without fake projects or cross-environment id collisions", () => {
     const groups = groupThreadHistory(
       [

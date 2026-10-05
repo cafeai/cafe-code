@@ -23,6 +23,25 @@ const THREAD = "thread-1" as ThreadId;
 const PROJECT = "project-1" as ProjectId;
 const NOW = Date.UTC(2026, 0, 1, 12, 0, 0);
 
+it("limits cards, counts and provider filters to the selected server when thread IDs collide", () => {
+  const state = buildState({ provider: "codex" });
+  const other = "other-server" as EnvironmentId;
+  const remote = buildState({ provider: "claudeAgent", holding: true }).environmentStateById[ENV]!;
+  state.environmentStateById[other] = remote;
+  const local = selectAtriumSnapshot(state, NOW, [], ENV);
+  expect(local.cards).toHaveLength(1);
+  expect(local.cards[0]?.environmentId).toBe(ENV);
+  expect(local.holdingCount).toBe(0);
+  expect(local.providerCounts).toEqual([["codex", 1]]);
+  const selected = selectAtriumSnapshot(state, NOW, [], other);
+  expect(selected.cards).toHaveLength(1);
+  expect(selected.cards[0]?.environmentId).toBe(other);
+  expect(selected.holdingCount).toBe(1);
+  expect(selected.providerCounts).toEqual([["claudeAgent", 1]]);
+  expect(selectAtriumSnapshot(state, NOW, [], null).cards).toEqual([]);
+  expect(selectAtriumSnapshot(state, NOW, [], "unknown" as EnvironmentId).cards).toEqual([]);
+});
+
 const TURN_CONFIGURATION: ProviderTurnConfiguration = {
   version: 1,
   provider: "codex" as ProviderTurnConfiguration["provider"],

@@ -1,10 +1,10 @@
 import { useEffect, useRef } from "react";
 import { useParams, useRouter } from "@tanstack/react-router";
-import { useShallow } from "zustand/react/shallow";
 import { scopedThreadKey, scopeThreadRef } from "@cafecode/client-runtime";
 import type { TurnId } from "@cafecode/contracts";
 
-import { selectSidebarThreadsAcrossEnvironments, useStore } from "../store";
+import { useWorkspaceSidebarThreads } from "../environments/workspaceData";
+import { useWorkspaceEnvironmentId } from "../environments/workspace";
 import { isElectron } from "../env";
 import { useSettings } from "../hooks/useSettings";
 import { buildThreadRouteParams, resolveThreadRouteTarget } from "../threadRoutes";
@@ -20,7 +20,8 @@ import { shouldNotifyScheduledTurn } from "../lib/scheduledNotification";
  */
 export function DesktopNotificationWatcher() {
   const settings = useSettings();
-  const threads = useStore(useShallow(selectSidebarThreadsAcrossEnvironments));
+  const environmentId = useWorkspaceEnvironmentId();
+  const threads = useWorkspaceSidebarThreads();
   const router = useRouter();
   const routeTarget = useParams({
     strict: false,
@@ -40,12 +41,13 @@ export function DesktopNotificationWatcher() {
 
   useEffect(() => {
     mountedRef.current = true;
+    runningByKeyRef.current = null;
     const pending = pendingByKeyRef.current;
     return () => {
       mountedRef.current = false;
       pending.clear();
     };
-  }, []);
+  }, [environmentId]);
 
   useEffect(() => {
     if (!isElectron) return;
