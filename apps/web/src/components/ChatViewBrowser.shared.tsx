@@ -32,7 +32,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { HttpResponse, http, ws } from "msw";
 import { setupWorker } from "msw/browser";
-import { page, userEvent } from "vitest/browser";
+import { locators, page, userEvent, type Locator } from "vitest/browser";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
@@ -66,6 +66,21 @@ import {
 } from "../../test/wsRpcHarness";
 
 import { DEFAULT_CLIENT_SETTINGS } from "@cafecode/contracts/settings";
+
+declare module "vitest/browser" {
+  interface LocatorSelectors {
+    getByTimelineMessageId(messageId: MessageId): Locator;
+  }
+}
+
+// A generated element locator may use text or row position, both of which can
+// change while a virtualized timeline settles. Keep fixture interactions bound
+// to their explicit message identity through asynchronous browser actions.
+locators.extend({
+  getByTimelineMessageId(messageId) {
+    return `css=[data-message-id="${CSS.escape(messageId)}"]`;
+  },
+});
 
 vi.mock("../lib/gitStatusState", () => ({
   useGitStatus: () => ({ data: null, error: null, cause: null, isPending: false }),
@@ -8117,15 +8132,18 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         useDeskStore.getState().dispatch({ type: "select", tabKey: firstKey });
         const sourcePane = page.getByRole("region", { name: "Main chat group", exact: true });
         const sourceEditor = sourcePane.getByTestId("composer-editor").element();
+        // Initial follow-tail layout can replace the last mounted row between
+        // reading a live `.last()` locator and clicking it. Select one known
+        // fixture message instead so the request identity assertion checks the
+        // same message that the browser was actually asked to fork.
+        const selectedMessageId = initial.threads[0]!.messages.at(-1)!.id;
         const action = sourcePane
-          .getByRole("button", { name: "Fork from this message", exact: true })
-          .last();
+          .getByTimelineMessageId(selectedMessageId)
+          .getByRole("button", { name: "Fork from this message", exact: true });
         await expect.element(action).toBeVisible();
-        const selectedMessageId = action
-          .element()
-          .closest("[data-message-id]")
-          ?.getAttribute("data-message-id");
-        expect(selectedMessageId).toBeTruthy();
+        expect(action.element().closest("[data-message-id]")?.getAttribute("data-message-id")).toBe(
+          selectedMessageId,
+        );
         await action.click();
         const confirm = page.getByRole("button", { name: "Create fork", exact: true });
         await expect.element(confirm).toBeEnabled();
