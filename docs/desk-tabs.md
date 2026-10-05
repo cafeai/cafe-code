@@ -32,8 +32,12 @@ project actions and the chat composer stay in their usual places.
   scaling; menu labels show only actions the corresponding surface supports.
   Escape or choosing an item returns focus to the menu's original control;
   clicking or focusing elsewhere keeps that new destination. Pending layout
-  choices and group renames are discarded if their original Desk layout changes.
+  choices and group-name dialogs are discarded if their original Desk layout changes.
+  Sidebar inline group edits also reject a replaced group or environment, while
+  ordinary clicking away still saves an edit to the same unchanged group.
   Chat actions stay bound to the originally clicked chat, never a newer selection.
+  A delayed delete result does not navigate away from a chat you selected later,
+  even if you switched away and back while deletion was pending.
 - Dividers stop at usable pane sizes, including nested groups. Use the existing
   focus/restore icon to expand one group and return to the split layout. Saved
   ratios that no longer fit are adjusted for display without losing your layout

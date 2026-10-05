@@ -2,7 +2,7 @@ import { parseScopedThreadKey, scopeProjectRef, scopeThreadRef } from "@cafecode
 import { type ScopedThreadRef, ThreadId } from "@cafecode/contracts";
 import { useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "@tanstack/react-router";
-import { useCallback, useRef } from "react";
+import { useCallback, useLayoutEffect, useRef } from "react";
 
 import { getFallbackThreadIdAfterDelete } from "../components/Sidebar.logic";
 import { useComposerDraftStore } from "../composerDraftStore";
@@ -32,6 +32,17 @@ export function useThreadActions() {
     (store) => store.clearProjectDraftThreadById,
   );
   const router = useRouter();
+  // A completed destructive command owns its captured chat, not later route
+  // intent or a replacement mounted action surface. Retire navigation authority
+  // synchronously on unmount without cancelling the already accepted mutation.
+  const navigationOwner = useRef<object | null>(null);
+  useLayoutEffect(() => {
+    const owner = {};
+    navigationOwner.current = owner;
+    return () => {
+      if (navigationOwner.current === owner) navigationOwner.current = null;
+    };
+  }, []);
   const { handleNewThread, handleNewStandaloneChat } = useNewThreadHandler();
   // Keep a ref so archiveThread can call handleNewThread without appearing in
   // its dependency array — handleNewThread is inherently unstable (depends on
@@ -165,6 +176,15 @@ export function useThreadActions() {
         return;
       }
       const { thread, threadRef } = resolved;
+      // Capture before any worktree confirmation or session-stop await. A newer
+      // navigation, including away-and-back to this same URL, must win over this
+      // action's eventual delete ACK. Router locations are immutable snapshots.
+      const originalNavigationOwner = navigationOwner.current;
+      const originalLocation = router.state.location;
+      const originalRouteThreadRef = getCurrentRouteThreadRef();
+      const wasCurrentChat =
+        originalRouteThreadRef?.threadId === threadRef.threadId &&
+        originalRouteThreadRef.environmentId === threadRef.environmentId;
       const state = useStore.getState();
       const threads = selectThreadsForEnvironment(state, threadRef.environmentId);
       const threadProject =
@@ -220,10 +240,6 @@ export function useThreadActions() {
       }
 
       const deletedThreadIds = deletedIds ?? new Set<ThreadId>();
-      const currentRouteThreadRef = getCurrentRouteThreadRef();
-      const shouldNavigateToFallback =
-        currentRouteThreadRef?.threadId === threadRef.threadId &&
-        currentRouteThreadRef.environmentId === threadRef.environmentId;
       const fallbackThreadId = getFallbackThreadIdAfterDelete({
         threads,
         deletedThreadId: threadRef.threadId,
@@ -244,7 +260,15 @@ export function useThreadActions() {
           threadRef,
         );
 
-      if (shouldNavigateToFallback) {
+      const currentRouteThreadRef = getCurrentRouteThreadRef();
+      if (
+        wasCurrentChat &&
+        originalNavigationOwner !== null &&
+        navigationOwner.current === originalNavigationOwner &&
+        router.state.location === originalLocation &&
+        currentRouteThreadRef?.threadId === threadRef.threadId &&
+        currentRouteThreadRef.environmentId === threadRef.environmentId
+      ) {
         if (fallbackThreadId) {
           const fallbackThread = selectThreadByRef(
             useStore.getState(),

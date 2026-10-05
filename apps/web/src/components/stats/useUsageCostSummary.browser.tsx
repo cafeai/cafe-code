@@ -2,9 +2,10 @@ import "../../index.css";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
-import type { UsageStatsGetResult } from "@cafecode/contracts";
+import type { EnvironmentId, UsageStatsGetResult } from "@cafecode/contracts";
 
 const usageHarness = vi.hoisted(() => ({
+  environmentId: "usage-fixture" as EnvironmentId,
   getUsageStats: vi.fn<() => Promise<UsageStatsGetResult>>(),
   connectionOpenedListener: null as
     | ((event: { readonly openCount: number; readonly reconnected: boolean }) => void)
@@ -21,13 +22,28 @@ const usageHarness = vi.hoisted(() => ({
   ),
 }));
 
+// Exercise the resource's selected-workspace path while keeping host bootstrap,
+// account settings and native persistence outside this synthetic usage fixture.
+// Both the hook and diagnostics resolve the same exact controlled resource.
+vi.mock("~/environments/workspace", () => ({
+  useWorkspaceEnvironmentId: () => usageHarness.environmentId,
+  readWorkspaceEnvironmentId: () => usageHarness.environmentId,
+}));
+
 vi.mock("~/environments/runtime", () => ({
-  getPrimaryEnvironmentConnection: () => ({
-    client: {
-      server: { getUsageStats: usageHarness.getUsageStats },
-      subscribeConnectionOpened: usageHarness.subscribeConnectionOpened,
-    },
-  }),
+  requireEnvironmentConnection: (environmentId: EnvironmentId) => {
+    if (environmentId !== usageHarness.environmentId)
+      throw new Error("Unexpected usage fixture workspace");
+    return {
+      client: {
+        server: { getUsageStats: usageHarness.getUsageStats },
+        subscribeConnectionOpened: usageHarness.subscribeConnectionOpened,
+      },
+    };
+  },
+  getPrimaryEnvironmentConnection: () => {
+    throw new Error("Usage fixture must use its selected workspace");
+  },
 }));
 
 vi.mock("../../hooks/useSettings", () => ({

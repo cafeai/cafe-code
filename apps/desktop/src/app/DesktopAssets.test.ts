@@ -1,3 +1,4 @@
+import * as nodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -8,6 +9,14 @@ import * as Option from "effect/Option";
 import * as DesktopAssets from "./DesktopAssets.ts";
 import * as DesktopConfig from "./DesktopConfig.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
+
+// Only the icon-selection policy is simulated across platforms. The injected
+// Node Path service still uses the execution host's path rules. Supply absolute
+// host-native paths just as Electron does: a root-relative `/repo` on Windows
+// stays drive-less in join(), while resolve() adds a drive, so the exact mock
+// existence lookup would otherwise describe two different fixture locations.
+// No fixture files are created or read; resource availability is explicit below.
+const fixtureRoot = nodePath.resolve("desktop-assets-fixture");
 
 const resolvePng = (input: {
   platform: NodeJS.Platform;
@@ -37,14 +46,14 @@ const resolvePng = (input: {
   }).pipe(
     Effect.provide(
       DesktopEnvironment.layer({
-        dirname: "/repo/apps/desktop/dist-electron",
-        homeDirectory: "/fixture-home",
+        dirname: nodePath.join(fixtureRoot, "repo", "apps", "desktop", "dist-electron"),
+        homeDirectory: nodePath.join(fixtureRoot, "home"),
         platform: input.platform,
         processArch: "arm64",
         appVersion: "1.2.3",
-        appPath: "/fixture-app",
+        appPath: nodePath.join(fixtureRoot, "app"),
         isPackaged: input.packaged ?? false,
-        resourcesPath: "/fixture-resources",
+        resourcesPath: nodePath.join(fixtureRoot, "resources"),
         runningUnderArm64Translation: false,
       }).pipe(
         Layer.provide(NodeServices.layer),

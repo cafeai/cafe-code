@@ -5,6 +5,10 @@ import { render } from "vitest-browser-react";
 
 // No links are activated and no backend/provider exists in this fixture.
 vi.mock("../localApi", () => ({ readLocalApi: () => undefined }));
+// Whitespace rendering has no workspace owner. Stop at the selector boundary
+// rather than importing workspace bootstrap and its native persistence graph.
+// Markdown parsing, streamed rendering and link construction remain real.
+vi.mock("../environments/workspace", () => ({ useWorkspaceEnvironmentId: () => null }));
 
 import ChatMarkdown from "./ChatMarkdown";
 

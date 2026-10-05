@@ -101,6 +101,18 @@ async function setup() {
   return { screen, onNavigate, onNewChat };
 }
 
+function deferredMenu() {
+  let answer!: (action: string | null) => void;
+  const promise = new Promise<string | null>((resolve) => {
+    answer = resolve;
+  });
+  return { promise, answer };
+}
+
+function openRowMenu(element: Element) {
+  element.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+}
+
 describe("Desk sidebar", () => {
   it("offers exact-chat actions on right-click without activating the row", async () => {
     const { screen, onNavigate } = await setup();
@@ -134,6 +146,116 @@ describe("Desk sidebar", () => {
     await expect.element(screen.getByRole("textbox", { name: "Chat title" })).toBeVisible();
     expect(onNavigate).not.toHaveBeenCalled();
     await userEvent.keyboard("{Escape}");
+  });
+
+  it.each(["close", "rename"])(
+    "discards a delayed %s choice after the tab was closed and reopened",
+    async (action) => {
+      const { screen } = await setup();
+      const reply = deferredMenu();
+      mocks.showMenu.mockReturnValueOnce(reply.promise);
+      openRowMenu(screen.getByRole("button", { name: "Chat fixture", exact: true }).element());
+      await expect.poll(() => mocks.showMenu.mock.calls.length).toBe(1);
+      // Use the real navigation reducer: the same ID is a new open-tab intent,
+      // even if React has not yet committed the intermediate row removal.
+      useDeskStore.getState().dispatch({ type: "close", tabKey: deskTabKey(chat) });
+      useDeskStore.getState().dispatch({ type: "reopen" });
+      const reopened = useDeskStore.getState().desk;
+      reply.answer(action);
+      await reply.promise;
+      expect(useDeskStore.getState().desk).toBe(reopened);
+      expect(reopened.groups.g1?.tabs).toContain(deskTabKey(chat));
+      await expect
+        .element(screen.getByRole("textbox", { name: "Chat title" }))
+        .not.toBeInTheDocument();
+      expect(mocks.rename).not.toHaveBeenCalled();
+    },
+  );
+
+  it("discards a delayed close after the same environment's persisted layout is rebound", async () => {
+    const { screen } = await setup();
+    const reply = deferredMenu();
+    mocks.showMenu.mockReturnValueOnce(reply.promise);
+    openRowMenu(screen.getByRole("button", { name: "Chat fixture", exact: true }).element());
+    useDeskStore.getState().bindEnvironment(null);
+    useDeskStore.getState().bindEnvironment(environmentId);
+    const restored = useDeskStore.getState().desk;
+    reply.answer("close");
+    await reply.promise;
+    expect(useDeskStore.getState().desk).toBe(restored);
+    expect(restored.groups.g1?.tabs).toContain(deskTabKey(chat));
+  });
+
+  it("accepts only the latest row's menu and preserves an unchanged close choice", async () => {
+    const { screen, onNavigate } = await setup();
+    const first = deferredMenu();
+    const second = deferredMenu();
+    mocks.showMenu.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    openRowMenu(screen.getByRole("button", { name: "Chat fixture", exact: true }).element());
+    openRowMenu(screen.getByRole("button", { name: "New chat", exact: true }).element());
+    const original = useDeskStore.getState().desk;
+    first.answer("close");
+    await first.promise;
+    expect(useDeskStore.getState().desk).toBe(original);
+    second.answer("close");
+    await second.promise;
+    expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual([deskTabKey(chat)]);
+    expect(mocks.archive).not.toHaveBeenCalled();
+    expect(mocks.delete).not.toHaveBeenCalled();
+    expect(onNavigate).not.toHaveBeenCalled();
+  });
+
+  it.each(["row", "sidebar"])(
+    "revokes an unanswered chat mutation when its %s unmounts",
+    async (unmount) => {
+      const { screen } = await setup();
+      const reply = deferredMenu();
+      mocks.showMenu.mockReturnValueOnce(reply.promise);
+      openRowMenu(screen.getByRole("button", { name: "Chat fixture", exact: true }).element());
+      if (unmount === "sidebar") await screen.unmount();
+      else {
+        useDeskStore.getState().dispatch({ type: "close", tabKey: deskTabKey(chat) });
+        await expect
+          .element(screen.getByRole("button", { name: "Chat fixture", exact: true }))
+          .not.toBeInTheDocument();
+      }
+      reply.answer("delete-forever");
+      await reply.promise;
+      expect(mocks.confirm).not.toHaveBeenCalled();
+      expect(mocks.delete).not.toHaveBeenCalled();
+      expect(mocks.hardDelete).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps a directly started rename after an older menu answers", async () => {
+    const { screen } = await setup();
+    const reply = deferredMenu();
+    mocks.showMenu.mockReturnValueOnce(reply.promise);
+    const row = screen.getByRole("button", { name: "Chat fixture", exact: true });
+    openRowMenu(row.element());
+    row.element().focus();
+    await userEvent.keyboard("{F2}");
+    const original = useDeskStore.getState().desk;
+    reply.answer("close");
+    await reply.promise;
+    expect(useDeskStore.getState().desk).toBe(original);
+    await expect.element(screen.getByRole("textbox", { name: "Chat title" })).toBeVisible();
+    await userEvent.keyboard("{Escape}");
+  });
+
+  it("keeps server chat actions bound to the clicked chat after another tab is selected", async () => {
+    const { screen } = await setup();
+    await screen.getByRole("button", { name: "Chat fixture", exact: true }).click();
+    const reply = deferredMenu();
+    mocks.showMenu.mockReturnValueOnce(reply.promise);
+    openRowMenu(screen.getByRole("button", { name: "Chat fixture", exact: true }).element());
+    useDeskStore.getState().dispatch({ type: "select", tabKey: deskTabKey(draft) });
+    reply.answer("delete-forever");
+    await reply.promise;
+    await expect.poll(() => mocks.hardDelete.mock.calls.length).toBe(1);
+    expect(mocks.confirm).toHaveBeenCalledOnce();
+    expect(mocks.delete).toHaveBeenCalledExactlyOnceWith(chat.threadRef);
+    expect(mocks.hardDelete).toHaveBeenCalledExactlyOnceWith(chat.threadRef, { confirm: false });
   });
 
   it("requires permanent-delete consent before any existing lifecycle action and preserves exact scope", async () => {
@@ -427,6 +549,63 @@ describe("Desk sidebar", () => {
       await screen.unmount();
       localStorage.removeItem(`cafe-code:desk:v1:${otherEnvironmentId}`);
     }
+  });
+
+  it.each(["Enter", "blur"])(
+    "discards a group edit on %s after rebinding the same persisted layout",
+    async (finish) => {
+      const { screen } = await setup();
+      screen.getByRole("button", { name: "Activate group Main" }).element().focus();
+      await userEvent.keyboard("{F2}");
+      const input = screen.getByRole("textbox", { name: "Group name" });
+      await input.fill("Old edit");
+      useDeskStore.getState().bindEnvironment(null);
+      useDeskStore.getState().bindEnvironment(environmentId);
+      const restored = useDeskStore.getState().desk;
+      if (finish === "Enter") await userEvent.keyboard("{Enter}");
+      else (input.element() as HTMLInputElement).blur();
+      await expect.element(input).not.toBeInTheDocument();
+      expect(useDeskStore.getState().desk).toBe(restored);
+      expect(restored.groups.g1?.name).toBe("Main");
+    },
+  );
+
+  it("refuses to start an edit from a heading before its rebound incarnation renders", async () => {
+    const { screen } = await setup();
+    const heading = screen.getByRole("button", { name: "Activate group Main" }).element();
+    useDeskStore.getState().bindEnvironment(null);
+    useDeskStore.getState().bindEnvironment(environmentId);
+    heading.dispatchEvent(new KeyboardEvent("keydown", { key: "F2", bubbles: true }));
+    await expect
+      .element(screen.getByRole("textbox", { name: "Group name" }))
+      .not.toBeInTheDocument();
+    // Once the new heading renders, its own explicit edit still works.
+    await screen.getByRole("button", { name: "Activate group Main" }).click();
+    await userEvent.keyboard("{F2}");
+    await expect.element(screen.getByRole("textbox", { name: "Group name" })).toBeVisible();
+    await userEvent.keyboard("{Escape}");
+  });
+
+  it("saves an unchanged group's edit on blur after unrelated pane activation", async () => {
+    const { screen } = await setup();
+    useDeskStore.getState().dispatch({
+      type: "split",
+      tabKey: deskTabKey(draft),
+      targetGroupId: "g1",
+      edge: "right",
+    });
+    useDeskStore.getState().dispatch({ type: "activateGroup", groupId: "g1" });
+    screen.getByRole("button", { name: "Activate group Main" }).element().focus();
+    await userEvent.keyboard("{F2}");
+    const input = screen.getByRole("textbox", { name: "Group name" });
+    await input.fill("Keep this edit");
+    const group = useDeskStore.getState().desk.groups.g1;
+    useDeskStore.getState().dispatch({ type: "activateGroup", groupId: "g2" });
+    expect(useDeskStore.getState().desk.groups.g1).toBe(group);
+    await screen.getByRole("button", { name: "New chat in active tab group" }).click();
+    await expect.element(input).not.toBeInTheDocument();
+    expect(useDeskStore.getState().desk.groups.g1?.name).toBe("Keep this edit");
+    expect(useDeskStore.getState().desk.activeGroupId).toBe("g2");
   });
 
   it("opens existing server and draft views using their exact targets", async () => {

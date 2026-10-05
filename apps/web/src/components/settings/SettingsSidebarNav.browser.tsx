@@ -14,14 +14,20 @@ import { SidebarProvider } from "../ui/sidebar";
 import { SettingsSidebarNav } from "./SettingsSidebarNav";
 
 const harness = vi.hoisted(() => ({ supported: undefined as boolean | undefined }));
-vi.mock("~/environments/primary", () => ({ usePrimaryEnvironmentId: () => "local" }));
+// Settings now follows the selected workspace, not necessarily the primary
+// transport. Supply that presentation input directly; this navigation fixture
+// must not bootstrap a server or read native saved-environment persistence.
+vi.mock("~/environments/workspace", () => ({ useWorkspaceEnvironmentId: () => "local" }));
 vi.mock("../virtualDesktop/useVirtualDesktops", () => ({
-  useVirtualDesktops: () => ({
-    data:
-      harness.supported === undefined
-        ? undefined
-        : { supported: harness.supported, available: false },
-  }),
+  useVirtualDesktops: (environmentId: string) => {
+    if (environmentId !== "local") throw new Error("Unexpected fixture workspace");
+    return {
+      data:
+        harness.supported === undefined
+          ? undefined
+          : { supported: harness.supported, available: false },
+    };
+  },
 }));
 let mounted: Awaited<ReturnType<typeof render>> | undefined;
 afterEach(async () => {

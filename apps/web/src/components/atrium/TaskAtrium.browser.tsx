@@ -314,6 +314,13 @@ vi.mock("../../environmentApi", () => ({
       : undefined,
 }));
 vi.mock("../../localApi", () => ({ readLocalApi: () => undefined }));
+// Lazy worker details render real Markdown, whose workspace selector must use
+// this fixture's exact environment without importing saved-host bootstrap or
+// native persistence. Detail retrieval still uses the exact environment API
+// fixture above, preserving the owner/history assertions in these tests.
+vi.mock("../../environments/workspace", () => ({
+  useWorkspaceEnvironmentId: () => atriumHarness.useStore.getState().activeEnvironmentId,
+}));
 
 vi.mock("../../environments/runtime/service", () => ({
   retainThreadDetailSubscription: atriumHarness.retainThreadDetailSubscription,

@@ -5,7 +5,7 @@ repository checks and synthetic browser coverage passed on native macOS.
 
 Created: 2026-09-29 11:53:43 JST (UTC+0900).
 
-Last updated: 2026-10-05 16:58:09 JST (UTC+0900).
+Last updated: 2026-10-06 02:23:23 JST (UTC+0900).
 
 ## Context and scope
 
@@ -65,16 +65,29 @@ These interactions only change local navigation state, never provider state.
 Desk sidebar group headings show their chat count at rest and an inline-rename
 pencil on hover/keyboard focus. Enter or blur commits, Escape cancels, and IME
 composition is not submission. Edits are scoped to the original environment and
-group; switching environments cannot apply a stale name to another layout.
+group incarnation; switching environments, resetting, or rebinding the same
+environment cannot apply a stale name to a replacement group with reused IDs.
+Inline blur saves remain valid when unrelated pane activation leaves the exact
+original group object intact. This implements the existing original-group
+authority without cancelling ordinary click-away editing.
 
 Native secondary-pointer gestures on tabs must not activate their containing
 pane or transfer focus before the context menu opens. Primary-pointer, keyboard
 and ordinary focus navigation retain their existing behavior. Pending menu
 layout actions require the same immutable Desk snapshot and latest menu owner;
-group-name submissions also recheck the snapshot, not merely reusable group IDs.
+group-name dialog submissions also recheck the snapshot, not merely reusable group IDs.
 Environment replacement, reset, intervening layout changes or a newer menu
 invalidate that authority. Server chat actions retain their separate captured
 environment/chat identity and existing confirmation/admission checks.
+Sidebar rows share a latest-menu owner, retired synchronously on row/sidebar
+unmount; a pending choice cannot revive after closing and reopening the same tab.
+
+The shared chat delete action separately captures its mounted action owner and
+immutable router location before its worktree-confirmation or session-stop await. After the delete
+acknowledgement, fallback navigation requires that same owner, location and exact
+chat/environment. Navigating away and back is new intent, not renewed authority.
+This fences only post-delete navigation: accepted deletion and draft cleanup
+still target the original chat, and existing confirmations remain mandatory.
 
 Shared menu cleanup restores the opener for Escape or selection, but never
 after an outside press/focus transfer. Replacing a menu transfers its original
@@ -158,6 +171,12 @@ provider verification. Reproduce with the repository checks in `AGENTS.md` and
 `yarn workspace @cafecode/web test:browser` targeting the ChatView navigation,
 layout, composer and desk suites, `components/desk`, ChatPaneRuntime, SessionRail,
 ComposerTaskProgress and SidebarFooterNavigation.
+`components/ThreadActions.browser.tsx` exercises the real shared action hook
+with synthetic transport/router boundaries, including late acknowledgements,
+unmount, cross-environment navigation, session-stop waits and normal fallback.
+Sidebar cases exercise the real Desk store for replacement and unchanged-group
+edits. The same browser fixtures run in the cross-platform CI subset; no native
+provider or real account is required.
 
 The tradeoff is bounded multi-pane rendering cost and a larger UI ownership
 surface. Keep unselected tabs as references, not hidden ChatViews. The only
