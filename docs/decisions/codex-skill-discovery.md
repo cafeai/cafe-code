@@ -1,9 +1,9 @@
 # Bounded, account-scoped Codex skill discovery
 
 Created: 2026-10-05 06:47:48 JST (UTC+0900)
-Last updated: 2026-10-05 07:12:05 JST (UTC+0900)
+Last updated: 2026-10-05 16:58:09 JST (UTC+0900)
 Decision status: Accepted within the authorized provider-parity implementation
-Implementation status: Implemented; focused qualification passed, integrated release gates pending
+Implementation status: Implemented and released; integrated local and exact-head platform CI gates verified on 36c64874.
 
 ## User behavior
 
@@ -86,5 +86,8 @@ after same-id workspace/configuration changes, no periodic metadata-triggered
 reprobes and redacted unavailable states.
 
 These tests do not claim live account permission/skill execution qualification.
-The combined release must still pass formatting, lint, typecheck, the full tests
-and the final forced desktop build, followed by exact-head platform CI.
+The integrated release at `36c64874fce05cb037d69737b4833ccf7c37f52d` passed
+formatting, lint, typecheck, 6,599 default tests, 934 browser tests, two isolated
+native fixtures and the final forced desktop build. [Exact-head CI](https://github.com/cafeai/cafe-code/actions/runs/37258417302)
+passed all seven applicable quality/artifact jobs and produced four nonempty
+platform artifacts. Later software changes require fresh release verification.

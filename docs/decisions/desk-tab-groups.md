@@ -5,7 +5,7 @@ repository checks and synthetic browser coverage passed on native macOS.
 
 Created: 2026-09-29 11:53:43 JST (UTC+0900).
 
-Last updated: 2026-09-29 12:35:49 JST (UTC+0900).
+Last updated: 2026-10-05 16:58:09 JST (UTC+0900).
 
 ## Context and scope
 
@@ -66,6 +66,21 @@ Desk sidebar group headings show their chat count at rest and an inline-rename
 pencil on hover/keyboard focus. Enter or blur commits, Escape cancels, and IME
 composition is not submission. Edits are scoped to the original environment and
 group; switching environments cannot apply a stale name to another layout.
+
+Native secondary-pointer gestures on tabs must not activate their containing
+pane or transfer focus before the context menu opens. Primary-pointer, keyboard
+and ordinary focus navigation retain their existing behavior. Pending menu
+layout actions require the same immutable Desk snapshot and latest menu owner;
+group-name submissions also recheck the snapshot, not merely reusable group IDs.
+Environment replacement, reset, intervening layout changes or a newer menu
+invalidate that authority. Server chat actions retain their separate captured
+environment/chat identity and existing confirmation/admission checks.
+
+Shared menu cleanup restores the opener for Escape or selection, but never
+after an outside press/focus transfer. Replacing a menu transfers its original
+focus destination without briefly refocusing another pane; retired cleanup
+cannot steal focus from its successor. These are local navigation fences, not
+new provider mutation permissions.
 
 Each group has an independently persisted session-rail preference. An unset
 group preference inherits the existing global preference; pin/unpin creates

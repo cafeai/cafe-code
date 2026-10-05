@@ -20,7 +20,8 @@ project actions and the chat composer stay in their usual places.
 - Right-click an open chat in the Desk sidebar, or press Shift+F10 / the keyboard
   menu key while its row or tab is focused, to rename, archive, move it to the
   Recycle Bin, delete it permanently, or close its tab. Opening this menu does
-  not select another sidebar row. Uncreated drafts keep only tab/layout actions.
+  not select another sidebar row or activate an inactive pane/tab. Uncreated
+  drafts keep only tab/layout actions.
   Archive stays unavailable while the chat is working; permanent deletion always
   asks for confirmation before changing anything and reuses the existing chat
   shutdown and cleanup path. If a final purge fails, check Recently Deleted
@@ -29,6 +30,10 @@ project actions and the chat composer stay in their usual places.
   the browser, with icon rows, grouped separators, keyboard navigation, and
   Escape/outside dismissal. They follow Cafe's current colors and interface
   scaling; menu labels show only actions the corresponding surface supports.
+  Escape or choosing an item returns focus to the menu's original control;
+  clicking or focusing elsewhere keeps that new destination. Pending layout
+  choices and group renames are discarded if their original Desk layout changes.
+  Chat actions stay bound to the originally clicked chat, never a newer selection.
 - Dividers stop at usable pane sizes, including nested groups. Use the existing
   focus/restore icon to expand one group and return to the split layout. Saved
   ratios that no longer fit are adjusted for display without losing your layout

@@ -2,8 +2,8 @@
 
 Decision status: Accepted within the user's provider-parity implementation request
 Created: 2026-10-05 06:18:59 JST (UTC+0900)
-Last updated: 2026-10-05 07:12:05 JST (UTC+0900)
-Implementation status: Implemented; focused qualification passed, integrated release gates pending
+Last updated: 2026-10-05 16:58:09 JST (UTC+0900)
+Implementation status: Implemented and released; integrated local and exact-head platform CI gates verified on 36c64874.
 Supersedes: None; extends the existing Fast selection without changing its meaning.
 
 ## Decision and authority
@@ -52,7 +52,10 @@ Focused macOS arm64 qualification on the pinned Node 24.21.0/Corepack Yarn 4.17.
 toolchain: the combined skill-discovery/service-tier server selection passed 241 tests (one existing
 platform-specific skip), web presentation/composer selection passed 76, shared
 model selection passed 17, owner/context RPC selection passed 3, and the skill/tier
-browser selection passed 9. Server and web typecheck passed. Final integrated
-counts, formatting/lint, full-suite/build and CI remain release gates; the private
-implementation checkpoint tracks the exact source-bound release evidence.
+browser selection passed 9. Server and web typecheck passed. The integrated
+release at `36c64874fce05cb037d69737b4833ccf7c37f52d` subsequently passed formatting,
+lint, typecheck, 6,599 default tests, 934 browser tests, two isolated native
+fixtures and the final forced desktop build. [Exact-head CI](https://github.com/cafeai/cafe-code/actions/runs/37258417302)
+passed all seven applicable quality/artifact jobs with four nonempty platform
+artifacts. Later changes require fresh release verification.
 The [picker guide](../codex-model-and-skill-picker.md) describes user-visible behavior.

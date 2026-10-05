@@ -1,6 +1,7 @@
 import {
   Fragment,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -45,6 +46,7 @@ import {
   type DeskAction,
   type DeskGroup,
   type DeskLayout,
+  type DeskState,
 } from "../../deskModel";
 import { usePrimaryEnvironmentId } from "../../environments/primary";
 import {
@@ -64,6 +66,7 @@ import { useCommandPaletteStore } from "../../commandPaletteStore";
 import { useUiStateStore } from "../../uiStateStore";
 import { readLocalApi } from "../../localApi";
 import { useRenameChat } from "../../hooks/useRenameChat";
+import { isMacPlatform } from "../../lib/utils";
 import { useDeskTabMetadata, readDeskTabMetadata } from "./useDeskTabMetadata";
 import { useDeskChatActions } from "./useDeskChatActions";
 import {
@@ -94,6 +97,14 @@ const rectStyle = (r: DeskRect): CSSProperties => ({
   width: `${r.width * 100}%`,
   height: `${r.height * 100}%`,
 });
+
+function isTabContextMenuGesture(event: { button: number; ctrlKey: boolean }): boolean {
+  // macOS presents Control-primary-click as a secondary menu gesture while
+  // retaining button=0. Other hosts keep their ordinary primary-click policy.
+  return (
+    event.button === 2 || (event.button === 0 && event.ctrlKey && isMacPlatform(navigator.platform))
+  );
+}
 
 function focusTabAfterSelection(tabKey: string) {
   // Selected chats have stable identity keys, so changing tabs replaces their
@@ -302,6 +313,13 @@ function ChatTab({
       className="desk-tab-cell"
       data-selected={selected}
       data-dragging={drag.isDragging}
+      onPointerDownCapture={(event) => {
+        // A native secondary click can focus its button before contextmenu.
+        // Keep the existing composer/tab focus so Pane's ordinary keyboard
+        // focus activation cannot select this menu's otherwise inactive group.
+        // Cancelling pointerdown does not cancel the subsequent contextmenu.
+        if (isTabContextMenuGesture(event)) event.preventDefault();
+      }}
       onContextMenu={(event) => {
         event.preventDefault();
         onMenu(tabKey, { x: event.clientX, y: event.clientY });
@@ -523,7 +541,12 @@ function Pane({
       style={rectStyle(rect)}
       aria-label={`${group.name} chat group`}
       data-active={active}
-      onPointerDownCapture={() => dispatch({ type: "activateGroup", groupId: group.id })}
+      onPointerDownCapture={(event) => {
+        // Only a primary gesture selects the pane. Opening a tab's secondary
+        // menu must retain the active chat, route and composer ownership.
+        if (event.button === 0 && !isTabContextMenuGesture(event))
+          dispatch({ type: "activateGroup", groupId: group.id });
+      }}
       onFocusCapture={() => dispatch({ type: "activateGroup", groupId: group.id })}
     >
       {children}
@@ -635,7 +658,11 @@ export default function DeskWorkspace() {
   const dispatch = useDeskStore((s) => s.dispatch);
   const defaultDocked = useUiStateStore((s) => s.sessionRailDocked);
   const { openRenameChat, renameChatDialog } = useRenameChat();
-  const [renameGroup, setRenameGroup] = useState<string | null>(null);
+  const [renameGroup, setRenameGroup] = useState<{
+    groupId: string;
+    desk: DeskState;
+  } | null>(null);
+  const menuOwner = useRef<symbol | null>(null);
   const [groupName, setGroupName] = useState("");
   const [overflow, setOverflow] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
@@ -653,6 +680,15 @@ export default function DeskWorkspace() {
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor),
+  );
+  useLayoutEffect(
+    () => () => {
+      // A native menu may answer after its workspace has unmounted. Revoking
+      // during the unmount commit prevents that answer from affecting a new
+      // mount even before passive effects have been flushed.
+      menuOwner.current = null;
+    },
+    [],
   );
   useEffect(() => {
     const el = root.current;
@@ -743,9 +779,12 @@ export default function DeskWorkspace() {
   ) => {
     const current = useDeskStore.getState().desk;
     const group = current.groups[groupId];
-    if (!group) return;
+    if (!group || current.environmentId !== primaryEnvironmentId) return;
     const key = tabKey ?? group.activeTabKey;
+    if (key && !group.tabs.includes(key)) return;
     const target = key ? current.targets[key] : null;
+    const owner = Symbol();
+    menuOwner.current = owner;
     const items: ContextMenuItem[] = [];
     const actions = new Map<string, DeskAction>();
     const item = (id: string, label: string, action: DeskAction, disabled = false) => {
@@ -823,11 +862,20 @@ export default function DeskWorkspace() {
       docked: !railDocked,
     });
     const clicked = await readLocalApi()?.contextMenu.show(items, position);
-    if (clicked && target && (await chatActions.run(clicked, target))) return;
+    if (!clicked || menuOwner.current !== owner) return;
+    // Chat mutations retain their captured environment/chat authority and
+    // perform their existing metadata/confirmation checks independently of
+    // navigation. Never resolve them from whichever tab is now active.
+    if (target && (await chatActions.run(clicked, target))) return;
+    // Local actions contain reusable group IDs and relative tab/layout intent.
+    // Bind that consent to the exact immutable Desk snapshot, not its IDs or
+    // environment string: a reset/reload can replace both under the same names.
+    // Recheck after the awaited chat-action discriminator as well as the menu.
+    if (menuOwner.current !== owner || useDeskStore.getState().desk !== current) return;
     if (clicked === "rename-chat" && target) rename(target);
     else if (clicked === "rename-group") {
       setGroupName(group.name);
-      setRenameGroup(groupId);
+      setRenameGroup({ groupId, desk: current });
     } else if (clicked && actions.has(clicked)) dispatch(actions.get(clicked)!);
   };
 
@@ -1078,7 +1126,7 @@ export default function DeskWorkspace() {
                           onRename={rename}
                           onRenameGroup={() => {
                             setGroupName(group.name);
-                            setRenameGroup(groupId);
+                            setRenameGroup({ groupId, desk: useDeskStore.getState().desk });
                           }}
                           onOverflow={() => {
                             setFilter("");
@@ -1123,7 +1171,14 @@ export default function DeskWorkspace() {
               onSubmit={(e) => {
                 e.preventDefault();
                 if (renameGroup && groupName.trim()) {
-                  dispatch({ type: "renameGroup", groupId: renameGroup, name: groupName });
+                  // The dialog is another asynchronous consent boundary: a
+                  // recycled group ID cannot inherit an earlier rename form.
+                  if (useDeskStore.getState().desk === renameGroup.desk)
+                    dispatch({
+                      type: "renameGroup",
+                      groupId: renameGroup.groupId,
+                      name: groupName,
+                    });
                   setRenameGroup(null);
                 }
               }}

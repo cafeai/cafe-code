@@ -1,10 +1,19 @@
 # Decision: explicit Claude delivery and exact-task controls
 
 Decision status: Accepted within the user's provider-parity implementation request.
-Implementation status: Implemented with focused synthetic qualification; integrated release gates remain open.
+Implementation status: Implemented and released; integrated local and exact-head platform CI gates verified on 36c64874.
 Created: 2026-10-05 06:19:58 JST (UTC+0900)
-Last updated: 2026-10-05 07:15:36 JST (UTC+0900)
+Last updated: 2026-10-05 16:58:09 JST (UTC+0900)
 Supersedes: no prior decision. Preserves [runtime observation](subagent-runtime-observation.md), [prepared rewinds](claude-conversation-rewind.md) and [idle-only scheduling](scheduled-followups.md).
+
+## Released qualification
+
+The integrated release at `36c64874fce05cb037d69737b4833ccf7c37f52d` passed
+formatting, lint, typecheck, 6,599 default tests, 934 browser tests, two isolated
+native fixtures and the final forced desktop build. [Exact-head CI](https://github.com/cafeai/cafe-code/actions/runs/37258417302)
+passed all seven applicable quality/artifact jobs and produced four nonempty
+platform artifacts. This is source-bound fixture/build evidence, not a live paid
+provider claim; later changes require fresh release verification.
 
 ## Decision and authority
 

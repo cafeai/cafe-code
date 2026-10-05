@@ -189,12 +189,14 @@ jobs:
         if: runner.os != 'Linux'
         run: corepack yarn workspace @cafecode/web exec playwright install chromium
 
-      - name: Cross-platform Markdown, timeline and file action browser tests
+      - name: Cross-platform Markdown, timeline, menus and file action browser tests
         # These shared parser/preference changes need real browser coverage on
         # the other hosts too. Linux retains its full browser suite above; this
         # focused subset does not claim native file-manager/editor UI success.
+        # Menu focus, secondary-pointer and Desk layout ownership also require
+        # real browser events on each host, including macOS Control-click.
         if: runner.os != 'Linux'
-        run: corepack yarn workspace @cafecode/web test:browser src/components/ChatMarkdown.browser.tsx src/components/MermaidBlock.browser.tsx src/components/MermaidPreview.browser.tsx src/components/MermaidRendering.browser.tsx src/components/MermaidSecurity.browser.tsx src/components/chat/MessagesTimelineRealList.browser.tsx src/components/settings/SettingsPanels.browser.tsx --maxWorkers=2
+        run: corepack yarn workspace @cafecode/web test:browser src/components/ChatMarkdown.browser.tsx src/components/MermaidBlock.browser.tsx src/components/MermaidPreview.browser.tsx src/components/MermaidRendering.browser.tsx src/components/MermaidSecurity.browser.tsx src/components/chat/MessagesTimelineRealList.browser.tsx src/components/settings/SettingsPanels.browser.tsx src/components/ContextMenu.browser.tsx src/components/desk/DeskWorkspace.browser.tsx src/components/ChatView.desk.browser.tsx --maxWorkers=2
 
       - name: Isolated MCP bridge artifacts
         if: runner.os == 'Linux'

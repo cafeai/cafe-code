@@ -8307,8 +8307,12 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         );
         await vi.waitFor(() => expect(scroller.scrollTop).toBeGreaterThan(1000));
         await waitForLayout();
+        // Synthetic wheel events have no native scrolling default action, so
+        // deliver the physical movement in the same gesture. Yielding frames
+        // between them can let ChatView correctly settle the unmoved wheel as
+        // a no-op at the tail, leaving the later programmatic scroll without
+        // any user review intent under a busy browser's frame scheduling.
         scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -600, bubbles: true }));
-        await waitForLayout();
         scroller.scrollTop = 300;
         scroller.dispatchEvent(new Event("scroll"));
         await waitForLayout();

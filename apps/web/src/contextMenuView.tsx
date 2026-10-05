@@ -65,9 +65,13 @@ const rowClass =
 function MenuEntries<T extends string>({
   items,
   select,
+  registerPopup,
+  canRestoreSubmenuFocus,
 }: {
   readonly items: readonly ContextMenuItem<T>[];
   readonly select: (id: T) => void;
+  readonly registerPopup: (element: HTMLDivElement | null) => (() => void) | undefined;
+  readonly canRestoreSubmenuFocus: () => boolean;
 }) {
   const pressed = useRef(new Set<T>());
   return items.map((item, index) => {
@@ -84,8 +88,20 @@ function MenuEntries<T extends string>({
               <Icon aria-hidden="true" />
               <span className="min-w-0 flex-1 truncate">{item.label}</span>
             </MenuSubTrigger>
-            <MenuSubPopup className={panelClass} positionerClassName="z-[10000]">
-              <MenuEntries items={children} select={select} />
+            <MenuSubPopup
+              ref={registerPopup}
+              // Submenu-only dismissal may return to its parent item, but a
+              // whole-menu retirement must not run another focus restoration.
+              finalFocus={canRestoreSubmenuFocus}
+              className={panelClass}
+              positionerClassName="z-[10000]"
+            >
+              <MenuEntries
+                items={children}
+                select={select}
+                registerPopup={registerPopup}
+                canRestoreSubmenuFocus={canRestoreSubmenuFocus}
+              />
             </MenuSubPopup>
           </MenuSub>
         ) : (
@@ -114,7 +130,13 @@ function MenuEntries<T extends string>({
   });
 }
 
-let dismissCurrent: (() => void) | undefined;
+type ContextMenuSession = {
+  readonly previousFocus: HTMLElement | null;
+  readonly containsFocus: (element: Element | null) => boolean;
+  readonly dismiss: () => void;
+};
+
+let currentMenu: ContextMenuSession | undefined;
 
 /** The shell owns only one menu at a time. Base UI supplies keyboard traversal,
  * submenus, focus management and viewport collision handling. A resolved item
@@ -123,10 +145,20 @@ export function showContextMenu<T extends string>(
   items: readonly ContextMenuItem<T>[],
   position?: { x: number; y: number },
 ): Promise<T | null> {
-  dismissCurrent?.();
-  if (items.length === 0) return Promise.resolve(null);
+  const previousMenu = currentMenu;
+  const activeElement = document.activeElement;
+  const inheritedFocus = previousMenu?.containsFocus(activeElement) ? activeElement : null;
+  // Replacement menus inherit the original opener only when focus still
+  // belongs to that menu. A newly focused outside control is its own opener.
+  // Keep ownership explicit because submenus render through separate portals.
   const previousFocus =
-    document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    previousMenu && inheritedFocus
+      ? previousMenu.previousFocus
+      : activeElement instanceof HTMLElement
+        ? activeElement
+        : null;
+  previousMenu?.dismiss();
+  if (items.length === 0) return Promise.resolve(null);
   const host = document.createElement("div");
   host.dataset.contextMenuHost = "true";
   document.body.appendChild(host);
@@ -145,34 +177,59 @@ export function showContextMenu<T extends string>(
   );
   const anchor = { getBoundingClientRect: () => DOMRect.fromRect({ x, y, width: 0, height: 0 }) };
   return new Promise((resolve) => {
+    const popups = new Set<HTMLDivElement>();
+    const registerPopup = (element: HTMLDivElement | null) => {
+      if (!element) return;
+      popups.add(element);
+      return () => {
+        popups.delete(element);
+      };
+    };
+    const containsFocus = (element: Element | null) =>
+      element !== null &&
+      // React may not mount this menu before another replacement arrives. Keep
+      // the single inherited focused node as a temporary ownership witness,
+      // only while it remains connected; never retain a chain of old sessions.
+      ((element === inheritedFocus && element.isConnected) ||
+        Array.from(popups).some((popup) => popup.contains(element)));
     let resolved = false;
-    const finish = (id: T | null) => {
+    const finish = (id: T | null, restoreFocus = false) => {
       if (resolved) return;
       resolved = true;
-      if (dismissCurrent === dismiss) dismissCurrent = undefined;
       // Defer unmount until the library has finished its current event/update.
       queueMicrotask(() => {
+        const focusWasInside = containsFocus(document.activeElement);
         root.unmount();
         host.remove();
-        if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
+        // A retired menu must not reactivate its pane after an outside press,
+        // focus transfer or replacement. Escape and selection return to the
+        // opener only while this exact menu still owns both focus and cleanup.
+        if (currentMenu === menu) {
+          currentMenu = undefined;
+          if (restoreFocus && focusWasInside && previousFocus?.isConnected) {
+            previousFocus.focus({ preventScroll: true });
+          }
+        }
         resolve(id);
       });
     };
     const dismiss = () => finish(null);
-    dismissCurrent = dismiss;
+    const menu = { previousFocus, containsFocus, dismiss };
+    currentMenu = menu;
     root.render(
       <Menu
         defaultOpen
         defaultTriggerId={triggerId}
         modal={false}
-        onOpenChange={(open) => {
-          if (!open) dismiss();
+        onOpenChange={(open, details) => {
+          if (!open) finish(null, details.reason === "escape-key");
         }}
       >
         {/* The registered trigger supplies Base UI's floating-tree identity even
           though this imperative menu is anchored to the original gesture. */}
         <MenuTrigger id={triggerId} hidden tabIndex={-1} aria-hidden="true" />
         <MenuPopup
+          ref={registerPopup}
           aria-label="Actions"
           className={panelClass}
           positionerClassName="z-[10000]"
@@ -182,7 +239,16 @@ export function showContextMenu<T extends string>(
           sideOffset={0}
           finalFocus={false}
         >
-          <MenuEntries items={items} select={finish} />
+          <MenuEntries
+            items={items}
+            select={(id) => finish(id, true)}
+            registerPopup={registerPopup}
+            canRestoreSubmenuFocus={() =>
+              currentMenu === menu &&
+              !resolved &&
+              (containsFocus(document.activeElement) || document.activeElement === document.body)
+            }
+          />
         </MenuPopup>
       </Menu>,
     );

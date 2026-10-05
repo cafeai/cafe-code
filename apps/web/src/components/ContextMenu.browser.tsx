@@ -1,5 +1,6 @@
 import "../index.css";
-import { afterEach, describe, expect, it } from "vitest";
+import { useState } from "react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { render } from "vitest-browser-react";
 import { showContextMenuFallback } from "../contextMenuFallback";
@@ -10,6 +11,27 @@ afterEach(async () => {
   document.documentElement.classList.remove("dark");
   applyInterfaceScalePercent(100);
 });
+
+function ContextMenuPaneFixture() {
+  const [active, setActive] = useState("first");
+  return (
+    <div>
+      <p role="status">Active pane: {active}</p>
+      <section
+        onPointerDownCapture={() => setActive("first")}
+        onFocusCapture={() => setActive("first")}
+      >
+        <input aria-label="First composer" />
+      </section>
+      <section
+        onPointerDownCapture={() => setActive("second")}
+        onFocusCapture={() => setActive("second")}
+      >
+        <p>Second pane transcript</p>
+      </section>
+    </div>
+  );
+}
 
 // These real-browser cases replace the former fake-DOM tests: focus, menu
 // collision layout, SVG escaping and portal dismissal need the actual browser.
@@ -113,6 +135,148 @@ describe("shared context menu", () => {
     await expect.element(page.getByRole("menuitem", { name: "New action" })).toBeVisible();
     await screen.getByRole("button", { name: "Outside" }).click();
     await expect(current).resolves.toBeNull();
+  });
+
+  it.each(["pointer", "programmatic"] as const)(
+    "preserves %s outside input focus without briefly refocusing the original composer",
+    async (transfer) => {
+      const firstFocus = vi.fn();
+      const secondFocus = vi.fn();
+      const screen = await render(
+        <div>
+          <input aria-label="First composer" onFocus={firstFocus} />
+          <input aria-label="Second composer" onFocus={secondFocus} />
+        </div>,
+      );
+      await screen.getByRole("textbox", { name: "First composer" }).click();
+      const pending = showContextMenuFallback([{ id: "rename", label: "Rename" }], {
+        x: 300,
+        y: 200,
+      });
+      await expect
+        .poll(() => page.getByRole("menu").element().contains(document.activeElement))
+        .toBe(true);
+      const second = screen.getByRole("textbox", { name: "Second composer" });
+      if (transfer === "pointer") {
+        await second.click();
+      } else {
+        // Focus may leave through keyboard navigation or another UI control,
+        // without the pointer event that normally dismisses the menu first.
+        // Escape must not steal that new focus even if the menu is still open.
+        second.element().focus();
+        await userEvent.keyboard("{Escape}");
+      }
+      await expect(pending).resolves.toBeNull();
+      await expect.element(second).toHaveFocus();
+      // A transient return to the first composer can activate its pane even if
+      // the browser subsequently focuses the actual pointer target again.
+      expect(firstFocus).toHaveBeenCalledTimes(1);
+      expect(secondFocus).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("preserves an outside pane activation when its transcript is not focusable", async () => {
+    const screen = await render(<ContextMenuPaneFixture />);
+    await screen.getByRole("textbox", { name: "First composer" }).click();
+    const pending = showContextMenuFallback([{ id: "rename", label: "Rename" }], {
+      x: 300,
+      y: 200,
+    });
+    await expect
+      .poll(() => page.getByRole("menu").element().contains(document.activeElement))
+      .toBe(true);
+    await screen.getByText("Second pane transcript", { exact: true }).click();
+    await expect(pending).resolves.toBeNull();
+    await expect.element(screen.getByRole("status")).toHaveTextContent("Active pane: second");
+    await expect.element(screen.getByRole("textbox", { name: "First composer" })).not.toHaveFocus();
+  });
+
+  it.each(["escape", "selection"] as const)(
+    "restores the original opener after replacement menu %s without a focus flash",
+    async (close) => {
+      const openerFocus = vi.fn();
+      const screen = await render(
+        <button type="button" onFocus={openerFocus}>
+          Original opener
+        </button>,
+      );
+      const opener = screen.getByRole("button", { name: "Original opener" });
+      await opener.click();
+      const previous = showContextMenuFallback([{ id: "old", label: "Old action" }]);
+      await expect
+        .poll(() => page.getByRole("menu").element().contains(document.activeElement))
+        .toBe(true);
+      const current = showContextMenuFallback([{ id: "new", label: "New action" }]);
+      await expect(previous).resolves.toBeNull();
+      await expect.element(page.getByRole("menuitem", { name: "New action" })).toBeVisible();
+      await expect
+        .poll(() => page.getByRole("menu").element().contains(document.activeElement))
+        .toBe(true);
+      expect(openerFocus).toHaveBeenCalledTimes(1);
+      await userEvent.keyboard(close === "escape" ? "{Escape}" : "{Home}{Enter}");
+      await expect(current).resolves.toBe(close === "escape" ? null : "new");
+      await expect.element(opener).toHaveFocus();
+      expect(openerFocus).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("retains the opener across rapid replacements of a focused portalled submenu", async () => {
+    const openerFocus = vi.fn();
+    const screen = await render(
+      <button type="button" onFocus={openerFocus}>
+        Original opener
+      </button>,
+    );
+    const opener = screen.getByRole("button", { name: "Original opener" });
+    await opener.click();
+    const previous = showContextMenuFallback([
+      {
+        id: "move",
+        label: "Move chat",
+        children: [{ id: "move:first", label: "First project" }],
+      },
+    ]);
+    await expect
+      .poll(() => page.getByRole("menu").element().contains(document.activeElement))
+      .toBe(true);
+    await userEvent.keyboard("{Home}{ArrowRight}");
+    await expect.element(page.getByRole("menuitem", { name: "First project" })).toHaveFocus();
+    const intermediate = showContextMenuFallback([{ id: "middle", label: "Middle action" }]);
+    const current = showContextMenuFallback([{ id: "new", label: "New action" }]);
+    await expect(previous).resolves.toBeNull();
+    await expect(intermediate).resolves.toBeNull();
+    await expect.element(page.getByRole("menuitem", { name: "New action" })).toBeVisible();
+    await expect
+      .poll(() => page.getByRole("menu").element().contains(document.activeElement))
+      .toBe(true);
+    expect(openerFocus).toHaveBeenCalledTimes(1);
+    await userEvent.keyboard("{Escape}");
+    await expect(current).resolves.toBeNull();
+    await expect.element(opener).toHaveFocus();
+    expect(openerFocus).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns keyboard focus to the parent item when only a submenu closes", async () => {
+    const pending = showContextMenuFallback([
+      {
+        id: "move",
+        label: "Move chat",
+        children: [{ id: "move:first", label: "First project" }],
+      },
+    ]);
+    const parent = page.getByRole("menuitem", { name: "Move chat" });
+    await expect
+      .poll(() => page.getByRole("menu").element().contains(document.activeElement))
+      .toBe(true);
+    await userEvent.keyboard("{Home}{ArrowRight}");
+    await expect.element(page.getByRole("menuitem", { name: "First project" })).toHaveFocus();
+    await userEvent.keyboard("{ArrowLeft}");
+    await expect.element(parent).toHaveFocus();
+    await expect
+      .element(page.getByRole("menuitem", { name: "First project" }))
+      .not.toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+    await expect(pending).resolves.toBeNull();
   });
 
   it.each([80, 100, 130])(

@@ -1,11 +1,20 @@
 # Decision: prospective, bounded Codex child usage accounting
 
 Decision status: Accepted within the authorized provider-parity implementation
-Implementation status: Implemented; focused qualification and independent review passed, integrated release gates pending
+Implementation status: Implemented and released; integrated local and exact-head platform CI gates verified on 36c64874.
 Created: 2026-10-05 06:28:00 JST (UTC+0900)
-Last updated: 2026-10-05 07:12:05 JST (UTC+0900)
+Last updated: 2026-10-05 16:58:09 JST (UTC+0900)
 Authority: the user's request to implement all medium-priority provider-parity items.
 Supersedes: primary-only Codex throughput coverage, not primary context occupancy.
+
+## Released qualification
+
+The integrated release at `36c64874fce05cb037d69737b4833ccf7c37f52d` passed
+formatting, lint, typecheck, 6,599 default tests, 934 browser tests, two isolated
+native fixtures and the final forced desktop build. [Exact-head CI](https://github.com/cafeai/cafe-code/actions/runs/37258417302)
+passed all seven applicable quality/artifact jobs and produced four nonempty
+platform artifacts. This is source-bound fixture/build evidence, not a live paid
+provider claim; later changes require fresh release verification.
 
 ## Native evidence
 

@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => ({
   hardDelete: vi.fn(async () => undefined),
   confirm: vi.fn(async () => true),
   palette: vi.fn(),
+  macPlatform: false,
   // Synthetic authoritative inventory and reactive route parameters exercise
   // route echo reconciliation without providers, transports or user profiles.
   params: {} as Record<string, string>,
@@ -119,7 +120,7 @@ vi.mock("../ui/toast", () => ({
 vi.mock("../../lib/utils", () => ({
   cn: (...values: unknown[]) => values.flat().filter(Boolean).join(" "),
   newCommandId: () => "fixture-command",
-  isMacPlatform: () => false,
+  isMacPlatform: () => mocks.macPlatform,
 }));
 vi.mock("./useDeskTabMetadata", () => {
   const projectName = "Fixture project";
@@ -189,6 +190,7 @@ beforeEach(async () => {
   useDeskStore.setState({ desk: createDeskState(environmentId) });
   mocks.params = {};
   mocks.primaryEnvironmentId = environmentId;
+  mocks.macPlatform = false;
   mocks.composer.draftThreadsByThreadKey = {};
   mocks.environment = {
     bootstrapComplete: true,
@@ -204,6 +206,11 @@ beforeEach(async () => {
     for (const notify of mocks.routeListeners) notify();
   });
   mocks.rename.mockClear();
+  mocks.archive.mockClear();
+  mocks.recycle.mockClear();
+  mocks.delete.mockClear();
+  mocks.hardDelete.mockClear();
+  mocks.confirm.mockClear();
   mocks.palette.mockClear();
 });
 afterEach(() => {
@@ -224,6 +231,20 @@ async function setup(ids = ["one", "two", "three"]) {
       await screen.unmount();
       host.remove();
     },
+  };
+}
+
+function deferMenu() {
+  let resolveMenu!: (choice: string | undefined) => void;
+  const result = new Promise<string | undefined>((resolve) => {
+    resolveMenu = resolve;
+  });
+  mocks.showMenu.mockImplementationOnce(() => result);
+  return async (choice: string | undefined) => {
+    resolveMenu(choice);
+    // Observe the continuation and the React commit it can schedule. This is
+    // a browser frame boundary, not a retry of the action under test.
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
   };
 }
 
@@ -1088,10 +1109,7 @@ describe("Desk workspace navigation chrome", () => {
     try {
       await screen.getByRole("tab", { name: "Chat two", exact: true }).click();
       mocks.showMenu.mockResolvedValueOnce("right");
-      screen
-        .getByRole("tab", { name: "Chat two", exact: true })
-        .element()
-        .dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 250, clientY: 25 }));
+      await screen.getByRole("tab", { name: "Chat two", exact: true }).click({ button: "right" });
       await vi.waitFor(() =>
         expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual([key("one"), key("two")]),
       );
@@ -1119,6 +1137,255 @@ describe("Desk workspace navigation chrome", () => {
         .element(screen.getByRole("tab", { name: "Chat two", exact: true }))
         .toBeVisible();
       expect(mocks.rename).not.toHaveBeenCalled();
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it.each(["one", "two"])(
+    "keeps active chat, route and composer focus when native right-click opens inactive tab %s",
+    async (clickedChat) => {
+      const { screen, host, cleanup } = await setup();
+      try {
+        useDeskStore.getState().dispatch({
+          type: "split",
+          tabKey: key("three"),
+          targetGroupId: "g1",
+          edge: "right",
+        });
+        const composer = screen.getByRole("textbox", { name: "Existing composer three" });
+        await composer.fill("Keep this group's unsent input");
+        await expect.element(composer).toHaveFocus();
+        await vi.waitFor(() => expect(mocks.params.threadId).toBe("three"));
+        const before = useDeskStore.getState().desk;
+        const finish = deferMenu();
+        // This includes native pointerdown/mousedown/focus/contextmenu/up.
+        // Dispatching contextmenu alone cannot reproduce the focus regression.
+        await screen
+          .getByRole("tab", { name: `Chat ${clickedChat}`, exact: true })
+          .click({ button: "right" });
+        expect(mocks.showMenu).toHaveBeenCalledOnce();
+        expect(useDeskStore.getState().desk).toBe(before);
+        expect(mocks.params.threadId).toBe("three");
+        await expect.element(composer).toHaveFocus();
+        await expect.element(composer).toHaveValue("Keep this group's unsent input");
+        expect(
+          host.querySelector('[data-mock-chat="three"]')?.getAttribute("data-pane-active"),
+        ).toBe("true");
+        await finish(undefined);
+        expect(useDeskStore.getState().desk).toBe(before);
+        await expect.element(composer).toHaveFocus();
+        // Ordinary pointer selection and keyboard pane focus still activate.
+        await screen.getByRole("tab", { name: "Chat one", exact: true }).click();
+        await vi.waitFor(() => expect(mocks.params.threadId).toBe("one"));
+        (composer.element() as HTMLTextAreaElement).focus();
+        await vi.waitFor(() => expect(mocks.params.threadId).toBe("three"));
+      } finally {
+        await cleanup();
+      }
+    },
+  );
+
+  it("preserves the native host's Control-click menu or primary selection semantics", async () => {
+    const { screen, cleanup } = await setup();
+    try {
+      // Unlike a foreign-platform policy simulation, Chromium generates the
+      // actual host's complete native input sequence here. macOS emits its
+      // context menu; Windows/Linux retain their primary tab selection.
+      mocks.macPlatform = /mac|iphone|ipad|ipod/i.test(navigator.platform);
+      useDeskStore.getState().dispatch({
+        type: "split",
+        tabKey: key("three"),
+        targetGroupId: "g1",
+        edge: "right",
+      });
+      const composer = screen.getByRole("textbox", { name: "Existing composer three" });
+      await composer.click();
+      await vi.waitFor(() => expect(mocks.params.threadId).toBe("three"));
+      const before = useDeskStore.getState().desk;
+      await screen
+        .getByRole("tab", { name: "Chat one", exact: true })
+        .click({ modifiers: ["Control"] });
+      if (mocks.macPlatform) {
+        expect(mocks.showMenu).toHaveBeenCalledOnce();
+        expect(useDeskStore.getState().desk).toBe(before);
+        expect(mocks.params.threadId).toBe("three");
+        await expect.element(composer).toHaveFocus();
+      } else {
+        expect(mocks.showMenu).not.toHaveBeenCalled();
+        await vi.waitFor(() => expect(mocks.params.threadId).toBe("one"));
+        expect(useDeskStore.getState().desk.groups.g1?.activeTabKey).toBe(key("one"));
+      }
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it.each([
+    ["environment", "close"],
+    ["environment", "close-group"],
+    ["environment", "close-all"],
+    ["environment", "session-rail"],
+    ["environment", "rename-group"],
+    ["same-environment", "close"],
+    ["same-environment", "close-group"],
+    ["same-environment", "close-all"],
+    ["same-environment", "session-rail"],
+    ["same-environment", "rename-group"],
+  ] as const)(
+    "rejects delayed %s replacement menu action %s even when group/chat IDs are reused",
+    async (replacementKind, choice) => {
+      const { screen, cleanup } = await setup();
+      const replacementEnvironment = EnvironmentId.make("menu-replacement-fixture");
+      try {
+        const finish = deferMenu();
+        await screen.getByRole("button", { name: "Main tab actions", exact: true }).click();
+        expect(mocks.showMenu).toHaveBeenCalledOnce();
+        const nextEnvironment =
+          replacementKind === "environment" ? replacementEnvironment : environmentId;
+        if (replacementKind === "environment") {
+          mocks.primaryEnvironmentId = nextEnvironment;
+          mocks.params = {};
+          for (const notify of mocks.routeListeners) notify();
+          await vi.waitFor(() =>
+            expect(useDeskStore.getState().desk.environmentId).toBe(nextEnvironment),
+          );
+        } else {
+          useDeskStore.setState({ desk: createDeskState(nextEnvironment) });
+        }
+        for (const id of ["one", "two", "three"]) {
+          useDeskStore.getState().dispatch({
+            type: "open",
+            target: {
+              kind: "server",
+              threadRef: { environmentId: nextEnvironment, threadId: ThreadId.make(id) },
+            },
+          });
+        }
+        await vi.waitFor(() => {
+          expect(mocks.params.environmentId).toBe(nextEnvironment);
+          expect(mocks.params.threadId).toBe("three");
+        });
+        const replacement = useDeskStore.getState().desk;
+        expect(replacement.groups.g1?.tabs).toHaveLength(3);
+        await finish(choice);
+        expect(useDeskStore.getState().desk).toBe(replacement);
+        await expect.element(screen.getByRole("dialog")).not.toBeInTheDocument();
+        expect(mocks.rename).not.toHaveBeenCalled();
+        expect(mocks.archive).not.toHaveBeenCalled();
+        expect(mocks.delete).not.toHaveBeenCalled();
+      } finally {
+        await cleanup();
+        localStorage.removeItem(`cafe-code:desk:v1:${replacementEnvironment}`);
+      }
+    },
+  );
+
+  it.each(["close-group", "others", "right", "split-right", "move-g2", "merge-g2", "swap-g2"])(
+    "rejects delayed %s after the clicked tab changes group ownership",
+    async (choice) => {
+      const { screen, cleanup } = await setup();
+      try {
+        useDeskStore.getState().dispatch({
+          type: "split",
+          tabKey: key("three"),
+          targetGroupId: "g1",
+          edge: "right",
+        });
+        await expect
+          .element(screen.getByRole("region", { name: "Group 2 chat group" }))
+          .toBeVisible();
+        const finish = deferMenu();
+        await screen.getByRole("tab", { name: "Chat one", exact: true }).click({ button: "right" });
+        useDeskStore
+          .getState()
+          .dispatch({ type: "move", tabKey: key("one"), groupId: "g2", index: 1 });
+        await vi.waitFor(() => expect(mocks.params.threadId).toBe("one"));
+        const moved = useDeskStore.getState().desk;
+        await finish(choice);
+        expect(useDeskStore.getState().desk).toBe(moved);
+        expect(moved.groups.g1?.tabs).toEqual([key("two")]);
+        expect(moved.groups.g2?.tabs).toEqual([key("three"), key("one")]);
+      } finally {
+        await cleanup();
+      }
+    },
+  );
+
+  it("retires an older menu while allowing its same-layout successor to act", async () => {
+    const { screen, cleanup } = await setup();
+    try {
+      const first = deferMenu();
+      await screen.getByRole("button", { name: "Main tab actions", exact: true }).click();
+      const second = deferMenu();
+      await screen.getByRole("button", { name: "Main tab actions", exact: true }).click();
+      const before = useDeskStore.getState().desk;
+      await first("close-all");
+      expect(useDeskStore.getState().desk).toBe(before);
+      await second("session-rail");
+      expect(useDeskStore.getState().desk.groups.g1?.sessionRailDocked).toBe(false);
+      expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual(before.groups.g1?.tabs);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("does not let an unmounted workspace's menu act on an identical remount", async () => {
+    const first = await setup();
+    const finish = deferMenu();
+    await first.screen.getByRole("button", { name: "Main tab actions", exact: true }).click();
+    await first.cleanup();
+    const second = await setup([]);
+    try {
+      const before = useDeskStore.getState().desk;
+      await finish("close-all");
+      expect(useDeskStore.getState().desk).toBe(before);
+      await expect
+        .element(second.screen.getByRole("tab", { name: "Chat three", exact: true }))
+        .toBeVisible();
+    } finally {
+      await second.cleanup();
+    }
+  });
+
+  it.each(["archive", "delete", "delete-forever"])(
+    "retains the captured chat target for delayed %s after a different chat is selected",
+    async (choice) => {
+      const { screen, cleanup } = await setup();
+      try {
+        const finish = deferMenu();
+        await screen.getByRole("tab", { name: "Chat one", exact: true }).click({ button: "right" });
+        await screen.getByRole("tab", { name: "Chat two", exact: true }).click();
+        await finish(choice);
+        const expectedRef = { environmentId, threadId: ThreadId.make("one") };
+        const action =
+          choice === "archive" ? mocks.archive : choice === "delete" ? mocks.recycle : mocks.delete;
+        expect(action).toHaveBeenCalledExactlyOnceWith(expectedRef);
+        if (choice === "delete-forever") {
+          expect(mocks.confirm).toHaveBeenCalledOnce();
+          expect(mocks.hardDelete).toHaveBeenCalledExactlyOnceWith(expectedRef, { confirm: false });
+        }
+        expect(useDeskStore.getState().desk.groups.g1?.activeTabKey).toBe(key("two"));
+      } finally {
+        await cleanup();
+      }
+    },
+  );
+
+  it("rejects a group rename form after a same-environment layout reset", async () => {
+    const { screen, cleanup } = await setup();
+    try {
+      mocks.showMenu.mockResolvedValueOnce("rename-group");
+      await screen.getByRole("button", { name: "Main tab actions", exact: true }).click();
+      const input = screen.getByRole("textbox", { name: "Group name" });
+      await input.fill("Stale group name");
+      // Equal persisted values do not prove the same owner incarnation.
+      useDeskStore.setState({ desk: structuredClone(useDeskStore.getState().desk) });
+      const replacement = useDeskStore.getState().desk;
+      await screen.getByRole("button", { name: "Save", exact: true }).click();
+      expect(useDeskStore.getState().desk).toBe(replacement);
+      expect(replacement.groups.g1?.name).toBe("Main");
+      await expect.element(screen.getByRole("dialog")).not.toBeInTheDocument();
     } finally {
       await cleanup();
     }
