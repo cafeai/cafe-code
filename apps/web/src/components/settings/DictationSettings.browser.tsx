@@ -1,3 +1,8 @@
+vi.mock("~/environments/workspace", () => ({
+  useWorkspaceEnvironmentId: () => PRIMARY_ENVIRONMENT_ID,
+  useIsSavedRemoteEnvironment: () => false,
+}));
+vi.mock("~/environments/workspaceApi", () => ({ patchWorkspaceServerConfig: vi.fn() }));
 import "../../index.css";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -262,6 +267,13 @@ describe("DictationSettings", () => {
     await renderSettings();
     await expect
       .element(page.getByRole("heading", { name: "Dictate anywhere on Mac" }))
+      .toBeVisible();
+    await expect
+      .element(
+        page.getByText(
+          "Open a floating recorder from another Mac app. Review and edit the text before choosing Copy, Save, or Insert. Insertion needs macOS Accessibility permission.",
+        ),
+      )
       .toBeVisible();
     await expect
       .element(page.getByRole("switch", { name: "Enable Mac global dictation" }))

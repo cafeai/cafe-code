@@ -37,7 +37,12 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { __resetLocalApiForTests, ensureLocalApi } from "../../localApi";
 import { AppAtomRegistryProvider, resetAppAtomRegistryForTests } from "../../rpc/atomRegistry";
-import { resetServerStateForTests, setServerConfigSnapshot } from "../../rpc/serverState";
+import {
+  getServerConfig,
+  resetServerStateForTests,
+  setServerConfigSnapshot,
+} from "../../rpc/serverState";
+import { toastManager } from "../ui/toast";
 import { useUiStateStore } from "../../uiStateStore";
 import { ConnectionsSettings } from "./ConnectionsSettings";
 import { DiagnosticsSettingsPanel } from "./DiagnosticsSettings";
@@ -1100,6 +1105,34 @@ describe("settings panels", () => {
     await vi.waitFor(() => {
       expect(updateClientSettings).toHaveBeenCalledWith({ powerSaveBlockerMode: "during-chats" });
     });
+  });
+
+  it("preserves primary settings optimistic behavior and failure feedback", async () => {
+    const desktopBridge = createDesktopBridgeStub();
+    window.desktopBridge = desktopBridge;
+    const { updateClientSettings } = installClientSettingsNativeApi(desktopBridge);
+    const failure = new Error("fixture write failure");
+    updateClientSettings.mockRejectedValueOnce(failure);
+    setServerConfigSnapshot(createBaseServerConfig());
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const toast = vi.spyOn(toastManager, "add");
+    try {
+      mounted = await renderWithTestRouter(
+        <AppAtomRegistryProvider>
+          <SystemSettingsPanel />
+        </AppAtomRegistryProvider>,
+      );
+      await page.getByLabelText("Keep awake").click();
+      await page.getByText("During chats", { exact: true }).click();
+      await vi.waitFor(() =>
+        expect(errorLog).toHaveBeenCalledWith("[CLIENT_SETTINGS] client update failed", failure),
+      );
+      expect(getServerConfig()?.clientSettings.powerSaveBlockerMode).toBe("during-chats");
+      expect(toast).not.toHaveBeenCalled();
+    } finally {
+      errorLog.mockRestore();
+      toast.mockRestore();
+    }
   });
 
   it("persists the chat selection copy preference from Chat settings", async () => {

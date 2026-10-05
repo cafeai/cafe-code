@@ -2,12 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   bootstrapRemoteBearerSession,
+  bootstrapRemotePasswordBearerSession,
   fetchRemoteEnvironmentDescriptor,
   fetchRemoteSessionState,
   issueRemoteWebSocketToken,
   resolveRemoteWebSocketConnectionUrl,
 } from "./api";
-import { resolveRemotePairingTarget } from "./target";
+import { resolveRemotePairingTarget, resolveRemoteServerTarget } from "./target";
 
 const originalFetch = globalThis.fetch;
 
@@ -116,6 +117,9 @@ describe("remote environment api", () => {
 
     expect(fetchMock).toHaveBeenCalledWith("https://remote.example.com/api/auth/bootstrap/bearer", {
       method: "POST",
+      credentials: "omit",
+      redirect: "error",
+      signal: expect.any(AbortSignal),
       headers: {
         "content-type": "application/json",
       },
@@ -139,6 +143,74 @@ describe("remote environment api", () => {
 
     await expect(request).rejects.toThrow("Remote auth request failed (401).");
     await expect(request).rejects.not.toThrow("secret-token-value");
+  });
+
+  it.each([
+    "https://remote.example.com:3775/path?token=discard#discard",
+    "wss://remote.example.com:3775/",
+  ])("normalizes a password login host without carrying URL secrets: %s", (host) => {
+    expect(resolveRemoteServerTarget(host)).toEqual({
+      httpBaseUrl: "https://remote.example.com:3775/",
+      wsBaseUrl: "wss://remote.example.com:3775/",
+    });
+  });
+
+  it.each(["file:///tmp/cafe", "https://user:secret@remote.example.com/"])(
+    "rejects unsafe password login hosts: %s",
+    (host) => {
+      expect(() => resolveRemoteServerTarget(host)).toThrow();
+    },
+  );
+
+  it.each([undefined, "workstation-user"])(
+    "exchanges a password only in the bearer bootstrap body (username: %s)",
+    async (username) => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(
+          new Response(JSON.stringify({ sessionToken: "password-session", role: "owner" })),
+        );
+      globalThis.fetch = fetchMock as typeof fetch;
+
+      await expect(
+        bootstrapRemotePasswordBearerSession({
+          httpBaseUrl: "https://remote.example.com/",
+          password: "admin-secret",
+          ...(username !== undefined ? { username } : {}),
+        }),
+      ).resolves.toMatchObject({ sessionToken: "password-session", role: "owner" });
+
+      expect(fetchMock).toHaveBeenCalledExactlyOnceWith(
+        "https://remote.example.com/api/auth/bootstrap/password/bearer",
+        {
+          method: "POST",
+          credentials: "omit",
+          redirect: "error",
+          signal: expect.any(AbortSignal),
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            ...(username !== undefined ? { username } : {}),
+            password: "admin-secret",
+          }),
+        },
+      );
+    },
+  );
+
+  it("does not expose or retry a rejected password response", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: "Rejected admin-secret for workstation-user" }), {
+        status: 401,
+      }),
+    );
+    globalThis.fetch = fetchMock as typeof fetch;
+    await expect(
+      bootstrapRemotePasswordBearerSession({
+        httpBaseUrl: "https://remote.example.com/",
+        password: "admin-secret",
+      }),
+    ).rejects.toThrow("Remote auth request failed (401).");
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it("loads remote session state and websocket tokens over bearer auth", async () => {
@@ -222,17 +294,26 @@ describe("remote environment api", () => {
       "https://remote.example.com/.well-known/cafe-code/environment",
       {
         method: "GET",
+        credentials: "omit",
+        redirect: "error",
+        signal: expect.any(AbortSignal),
         headers: {},
       },
     );
     expect(fetchMock).toHaveBeenNthCalledWith(2, "https://remote.example.com/api/auth/session", {
       method: "GET",
+      credentials: "omit",
+      redirect: "error",
+      signal: expect.any(AbortSignal),
       headers: {
         authorization: "Bearer bearer-token",
       },
     });
     expect(fetchMock).toHaveBeenNthCalledWith(3, "https://remote.example.com/api/auth/ws-token", {
       method: "POST",
+      credentials: "omit",
+      redirect: "error",
+      signal: expect.any(AbortSignal),
       headers: {
         authorization: "Bearer bearer-token",
       },

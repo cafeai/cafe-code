@@ -48,7 +48,7 @@ import {
   type DeskLayout,
   type DeskState,
 } from "../../deskModel";
-import { usePrimaryEnvironmentId } from "../../environments/primary";
+import { useWorkspaceEnvironmentId } from "~/environments/workspace";
 import {
   DraftId,
   finalizePromotedDraftThreadByRef,
@@ -127,7 +127,7 @@ function focusTabAfterSelection(tabKey: string) {
  * A route echo must never reopen a tab the user has just closed. */
 export function useDeskRouteSync() {
   const navigate = useNavigate();
-  const environmentId = usePrimaryEnvironmentId();
+  const environmentId = useWorkspaceEnvironmentId();
   const target = useParams({ strict: false, select: resolveThreadRouteTarget });
   const routeKey = target ? deskTabKey(target) : "";
   const desk = useDeskStore((s) => s.desk);
@@ -672,7 +672,7 @@ export default function DeskWorkspace() {
   const root = useRef<HTMLDivElement>(null);
   const lastTarget = useRef<ThreadRouteTarget | null>(null);
   const drafts = useComposerDraftStore((s) => s.draftThreadsByThreadKey);
-  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const primaryEnvironmentId = useWorkspaceEnvironmentId();
   const shells = useStore((s) => selectEnvironmentState(s, primaryEnvironmentId).threadShellById);
   const bootstrapped = useStore(
     (s) => selectEnvironmentState(s, primaryEnvironmentId).bootstrapComplete,

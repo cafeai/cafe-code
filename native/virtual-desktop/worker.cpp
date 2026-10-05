@@ -154,6 +154,7 @@ class Worker {
   int action_peer = -1, viewer_peer = -1;
   int64_t action_request = 0;
   int64_t next_step = 0, capture_started = 0, last_capture = 0, sequence = 0;
+  bool remote_human = false;
   bool human = false, capture_failed = false, viewer_enabled = true,
        control_enabled = true;
   int capture_stage = 0;
@@ -742,9 +743,10 @@ class Worker {
     put(j.get(), "swayPid", int64_t(sway_pid));
     return j;
   }
-  void change_control(bool human_owner) {
+  void change_control(bool human_owner, bool remote = false) {
     cancel_action("input_cancelled");
     human = human_owner;
+    remote_human = human_owner && remote;
     ++control_epoch;
     // Publish immediately, independent of frame capture. Viewer input already
     // queued under the old epoch cannot reacquire control or release new keys.
@@ -915,7 +917,7 @@ class Worker {
     if (!(is_viewer ? viewer_enabled : control_enabled))
       throw std::runtime_error("control_disabled");
     auto kind = str(j, "kind");
-    if (is_viewer && (!human || integer(j, "controlEpoch", -1) != control_epoch)) {
+    if (is_viewer && (!human || remote_human != (peers.at(fd).role == "manager") || integer(j, "controlEpoch", -1) != control_epoch)) {
       reply(fd, error("viewer_control_required"));
       return;
     }
@@ -1090,6 +1092,19 @@ class Worker {
       begin_capture();
       return;
     }
+    // Remote viewers remain authenticated by the manager. They use human
+    // input fences, never model authority or a desktop capability.
+    if (!viewer && (method == "human-take-control" || method == "human-return-control")) {
+      if (!viewer_enabled || integer(j, "controlEpoch", -1) != control_epoch)
+        throw std::runtime_error("observation_required");
+      change_control(method == "human-take-control", true);
+      reply(fd, status());
+      return;
+    }
+    if (!viewer && method == "human-act") {
+      action(fd, j, true);
+      return;
+    }
     if (method == "act") {
       action(fd, j, viewer);
       return;
@@ -1139,6 +1154,7 @@ class Worker {
       throw std::runtime_error("not_authorized");
     if (method == "policy") {
       viewer_enabled = boolean(j, "viewerEnabled");
+      if (!viewer_enabled && remote_human) change_control(false);
       control_enabled = boolean(j, "controlEnabled");
       if (!control_enabled && !human)
         cancel_action("control_disabled");

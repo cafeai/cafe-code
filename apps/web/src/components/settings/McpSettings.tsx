@@ -3,9 +3,11 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckIcon, PlugIcon, RefreshCwIcon } from "lucide-react";
 import type { CafeMcpClientUpdate } from "@cafecode/contracts";
 
-import { usePrimaryEnvironmentId } from "~/environments/primary";
+import { useWorkspaceEnvironmentId, useIsSavedRemoteEnvironment } from "~/environments/workspace";
 import { getEnvironmentHttpBaseUrl, requireEnvironmentConnection } from "~/environments/runtime";
 import { applySettingsUpdated, useServerSettings } from "~/rpc/serverState";
+import { patchWorkspaceServerConfig } from "~/environments/workspaceApi";
+import { readPrimaryEnvironmentDescriptor } from "~/environments/primary";
 import { Button } from "../ui/button";
 import { Badge } from "../ui/badge";
 import { Switch } from "../ui/switch";
@@ -22,7 +24,8 @@ export function isLocalMcpEnvironment(backendUrl: string | null | undefined): bo
 }
 
 export function McpSettings() {
-  const environmentId = usePrimaryEnvironmentId();
+  const environmentId = useWorkspaceEnvironmentId();
+  const remote = useIsSavedRemoteEnvironment(environmentId);
   const queryClient = useQueryClient();
   const settings = useServerSettings();
   const [pending, setPending] = useState<string | null>(null);
@@ -41,7 +44,7 @@ export function McpSettings() {
   const local = isLocalMcpEnvironment(
     environmentId ? getEnvironmentHttpBaseUrl(environmentId) : null,
   );
-  const canInstall = local && status.data?.canInstall === true;
+  const canInstall = (local || remote) && status.data?.canInstall === true;
 
   async function updateEnabled(enabled: boolean) {
     if (!environmentId || pending || !status.data?.canManage) return;
@@ -52,7 +55,9 @@ export function McpSettings() {
         mcpEnabled: enabled,
       });
       // Do not display a successful security toggle until the backend persisted it.
-      applySettingsUpdated(next);
+      if (environmentId === readPrimaryEnvironmentDescriptor()?.environmentId)
+        applySettingsUpdated(next);
+      else patchWorkspaceServerConfig(environmentId, { settings: next });
       await queryClient.invalidateQueries({ queryKey });
     } catch {
       setFeedback({
@@ -173,7 +178,9 @@ export function McpSettings() {
         ) : null}
         {status.data && !canInstall ? (
           <p className="px-5 pb-4 text-sm text-muted-foreground">
-            Open this page in the local Cafe Code desktop app to install provider connections.
+            {remote
+              ? "This server must be running in desktop mode with an owner connection over HTTPS to install provider connections."
+              : "Open this page in the local Cafe Code desktop app to install provider connections."}
           </p>
         ) : null}
         {canInstall
@@ -233,7 +240,9 @@ export function McpSettings() {
         status.data?.clients.some((client) => client.status === "installed") &&
         !status.data.bridgeReady ? (
           <p role="alert" className="px-5 py-3 text-sm text-destructive">
-            The local connection needs repair. Reinstall one of the provider connections.
+            {remote
+              ? "This server's MCP connection needs repair. Reinstall one of its provider connections."
+              : "The local connection needs repair. Reinstall one of the provider connections."}
           </p>
         ) : null}
       </SettingsSection>

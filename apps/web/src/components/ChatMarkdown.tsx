@@ -43,6 +43,7 @@ import {
 } from "../markdown-links";
 import { readLocalApi } from "../localApi";
 import { getLocalShellCapabilities } from "../localCapabilities";
+import { useWorkspaceEnvironmentId } from "../environments/workspace";
 import { cn, isMacPlatform, isWindowsPlatform } from "../lib/utils";
 import { normalizeChatMarkdownMath } from "../lib/chatMarkdownMath";
 import { getChatCodeHighlighter } from "../lib/chatCodeHighlighter";
@@ -501,7 +502,8 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
   theme,
   className,
 }: MarkdownFileLinkProps) {
-  const localShellCapabilities = getLocalShellCapabilities();
+  const environmentId = useWorkspaceEnvironmentId();
+  const localShellCapabilities = getLocalShellCapabilities(environmentId);
   const canOpenLocalEditor = localShellCapabilities.canOpenLocalEditor;
   const canRevealLocalPath = localShellCapabilities.canOpenLocalPath;
   const handleCopy = useCallback((value: string, title: string) => {

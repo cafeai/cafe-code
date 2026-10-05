@@ -21,7 +21,10 @@ import { createThreadSelectorByRef } from "../storeSelectors";
 import { resolveThreadRouteTarget } from "../threadRoutes";
 import { useUiStateStore } from "../uiStateStore";
 import { useSettings } from "./useSettings";
-import { readPrimaryEnvironmentDescriptor } from "../environments/primary";
+import {
+  readWorkspaceEnvironmentDescriptor,
+  useWorkspaceEnvironmentId,
+} from "../environments/workspace";
 import { useDeskStore } from "../deskStore";
 import { toastManager } from "../components/ui/toast";
 
@@ -33,7 +36,7 @@ function useNewStandaloneChatHandler() {
   const router = useRouter();
   const newChatDefaults = useSettings(deriveNewChatComposerDefaults);
   return useCallback(async () => {
-    const descriptor = readPrimaryEnvironmentDescriptor();
+    const descriptor = readWorkspaceEnvironmentDescriptor();
     if (!descriptor?.capabilities.standaloneChats) {
       toastManager.add({
         type: "error",
@@ -210,6 +213,7 @@ export function useHandleNewThread() {
       : null,
   );
   const projects = useStore(useShallow((store) => selectProjectsAcrossEnvironments(store)));
+  const workspaceEnvironmentId = useWorkspaceEnvironmentId();
   const orderedProjects = useMemo(() => {
     return orderItemsByPreferredIds({
       items: projects,
@@ -223,8 +227,13 @@ export function useHandleNewThread() {
   return {
     activeDraftThread,
     activeThread,
-    defaultProjectRef: orderedProjects[0]
-      ? scopeProjectRef(orderedProjects[0].environmentId, orderedProjects[0].id)
+    defaultProjectRef: orderedProjects.find(
+      (project) => project.environmentId === workspaceEnvironmentId,
+    )
+      ? scopeProjectRef(
+          workspaceEnvironmentId!,
+          orderedProjects.find((project) => project.environmentId === workspaceEnvironmentId)!.id,
+        )
       : null,
     handleNewThread,
     handleNewStandaloneChat,

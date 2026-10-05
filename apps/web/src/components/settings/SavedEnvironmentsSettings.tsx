@@ -291,11 +291,13 @@ function SavedEnvironmentRow({
 
 function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActions }) {
   const [isOpen, setIsOpen] = useState(false);
-  const [tab, setTab] = useState<"url" | "code">("url");
+  const [tab, setTab] = useState<"url" | "code" | "login">("url");
   const [label, setLabel] = useState("");
   const [pairingUrl, setPairingUrl] = useState("");
   const [host, setHost] = useState("");
   const [pairingCode, setPairingCode] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -305,6 +307,18 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
     setPairingUrl("");
     setHost("");
     setPairingCode("");
+    setUsername("");
+    setPassword("");
+    setError(null);
+  };
+
+  const changeTab = (next: typeof tab) => {
+    setTab(next);
+    // Discard bootstrap secrets when their inputs leave the screen as well as
+    // on submission/close. A retry always requires fresh, explicit input.
+    setPairingUrl("");
+    setPairingCode("");
+    setPassword("");
     setError(null);
   };
 
@@ -324,25 +338,37 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
     const submittedUrl = pairingUrl;
     const submittedHost = host;
     const submittedCode = pairingCode;
+    const submittedUsername = username;
+    const submittedPassword = password;
     const submittedTab = tab;
 
     setPairingUrl("");
     setPairingCode("");
+    setPassword("");
     try {
       if (submittedTab === "url") {
         await actions.add({ label: submittedLabel, pairingUrl: submittedUrl });
-      } else {
+      } else if (submittedTab === "code") {
         await actions.add({
           label: submittedLabel,
           host: submittedHost,
           pairingCode: submittedCode,
+        });
+      } else {
+        await actions.add({
+          label: submittedLabel,
+          host: submittedHost,
+          username: submittedUsername,
+          password: submittedPassword,
         });
       }
       resetForm();
       setIsOpen(false);
     } catch {
       setError(
-        "Could not add this environment. Check the server address and pairing credential, then try again.",
+        submittedTab === "login"
+          ? "Could not sign in. Check the server address and admin password, then try again."
+          : "Could not add this environment. Check the server address and pairing credential, then try again.",
       );
     } finally {
       setIsSubmitting(false);
@@ -366,23 +392,20 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
         </TooltipTrigger>
         <TooltipPopup>Add environment</TooltipPopup>
       </Tooltip>
-      <DialogPopup showCloseButton={!isSubmitting}>
-        <DialogHeader>
+      <DialogPopup showCloseButton={!isSubmitting} className="max-h-[calc(100dvh-3rem)]">
+        <DialogHeader className="shrink-0">
           <DialogTitle>Add saved environment</DialogTitle>
           <DialogDescription>Remote Cafe Code server</DialogDescription>
         </DialogHeader>
-        <form onSubmit={handleSubmit}>
+        <form onSubmit={handleSubmit} className="flex min-h-0 flex-col">
           <DialogPanel className="flex flex-col gap-4">
-            <Group className="w-full" aria-label="Pairing method">
+            <Group className="w-full" aria-label="Connection method">
               <Button
                 type="button"
                 variant={tab === "url" ? "secondary" : "outline"}
                 className="flex-1"
                 aria-pressed={tab === "url"}
-                onClick={() => {
-                  setTab("url");
-                  setError(null);
-                }}
+                onClick={() => changeTab("url")}
                 disabled={isSubmitting}
               >
                 Pairing URL
@@ -392,13 +415,20 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
                 variant={tab === "code" ? "secondary" : "outline"}
                 className="flex-1"
                 aria-pressed={tab === "code"}
-                onClick={() => {
-                  setTab("code");
-                  setError(null);
-                }}
+                onClick={() => changeTab("code")}
                 disabled={isSubmitting}
               >
                 Host + Code
+              </Button>
+              <Button
+                type="button"
+                variant={tab === "login" ? "secondary" : "outline"}
+                className="flex-1"
+                aria-pressed={tab === "login"}
+                onClick={() => changeTab("login")}
+                disabled={isSubmitting}
+              >
+                Host + Login
               </Button>
             </Group>
 
@@ -445,27 +475,61 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
                     disabled={isSubmitting}
                   />
                 </div>
-                <div className="flex flex-col gap-2">
-                  <label htmlFor="env-code" className="text-sm font-medium">
-                    Pairing code
-                  </label>
-                  <Input
-                    id="env-code"
-                    value={pairingCode}
-                    onChange={(event) => setPairingCode(event.target.value)}
-                    placeholder="Pairing code"
-                    required
-                    disabled={isSubmitting}
-                    autoComplete="off"
-                  />
-                </div>
+                {tab === "login" ? (
+                  <>
+                    <p className="text-sm text-muted-foreground">
+                      Use the server’s admin password. Username is optional and labels this session.
+                    </p>
+                    <div className="flex flex-col gap-2">
+                      <label htmlFor="env-username" className="text-sm font-medium">
+                        Username (optional)
+                      </label>
+                      <Input
+                        id="env-username"
+                        value={username}
+                        onChange={(event) => setUsername(event.target.value)}
+                        autoComplete="username"
+                        disabled={isSubmitting}
+                      />
+                    </div>
+                    <div className="flex flex-col gap-2">
+                      <label htmlFor="env-password" className="text-sm font-medium">
+                        Admin password
+                      </label>
+                      <Input
+                        id="env-password"
+                        type="password"
+                        value={password}
+                        onChange={(event) => setPassword(event.target.value)}
+                        autoComplete="current-password"
+                        required
+                        disabled={isSubmitting}
+                      />
+                    </div>
+                  </>
+                ) : (
+                  <div className="flex flex-col gap-2">
+                    <label htmlFor="env-code" className="text-sm font-medium">
+                      Pairing code
+                    </label>
+                    <Input
+                      id="env-code"
+                      value={pairingCode}
+                      onChange={(event) => setPairingCode(event.target.value)}
+                      placeholder="Pairing code"
+                      required
+                      disabled={isSubmitting}
+                      autoComplete="off"
+                    />
+                  </div>
+                )}
               </>
             )}
 
             {error ? <p className="text-sm text-destructive">{error}</p> : null}
           </DialogPanel>
 
-          <DialogFooter>
+          <DialogFooter className="shrink-0">
             <Button
               type="button"
               variant="outline"

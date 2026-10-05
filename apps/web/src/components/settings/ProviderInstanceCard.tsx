@@ -28,7 +28,7 @@ import {
 import { cn } from "../../lib/utils";
 import { ProviderUsageResetButton } from "../ProviderUsageResetButton";
 import { ProviderAccountQuotaDetails } from "../ProviderAccountQuotaDetails";
-import { ensureLocalApi } from "../../localApi";
+import { ensureWorkspaceApi } from "../../environments/workspaceApi";
 import {
   formatCodexRateLimitPresentation,
   shouldSurfaceProviderAccountRateLimits,
@@ -1146,7 +1146,7 @@ export function ProviderInstanceCard({
             {accountQuota ? (
               <ProviderUsageResetButton
                 provider={liveProvider}
-                request={(input) => ensureLocalApi().server.usageReset(input)}
+                request={(input) => ensureWorkspaceApi().server.usageReset(input)}
               />
             ) : null}
             {onRestartRuntime ? (

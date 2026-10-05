@@ -9,47 +9,60 @@ import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
 import { useCallback } from "react";
 
-import { ensureLocalApi } from "../localApi";
+import { EnvironmentId } from "@cafecode/contracts";
+import { ensureWorkspaceApi } from "../environments/workspaceApi";
+import { readWorkspaceEnvironmentId, useWorkspaceEnvironmentId } from "../environments/workspace";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 
 const PROCESS_DIAGNOSTICS_STALE_TIME_MS = 2_000;
 const PROCESS_DIAGNOSTICS_IDLE_TTL_MS = 5 * 60_000;
 const PROCESS_RESOURCE_HISTORY_STALE_TIME_MS = 5_000;
-const PROCESS_RESOURCE_HISTORY_INPUT_SEPARATOR = ":";
 
-const processDiagnosticsAtom = Atom.make(
-  Effect.promise(() => ensureLocalApi().server.getProcessDiagnostics()),
-).pipe(
-  Atom.swr({
-    staleTime: PROCESS_DIAGNOSTICS_STALE_TIME_MS,
-    revalidateOnMount: true,
-  }),
-  Atom.setIdleTTL(PROCESS_DIAGNOSTICS_IDLE_TTL_MS),
-  Atom.withLabel("process-diagnostics"),
+const processDiagnosticsAtom = Atom.family((environmentKey: string) =>
+  Atom.make(
+    Effect.promise(() =>
+      ensureWorkspaceApi(
+        environmentKey ? EnvironmentId.make(environmentKey) : null,
+      ).server.getProcessDiagnostics(),
+    ),
+  ).pipe(
+    Atom.swr({
+      staleTime: PROCESS_DIAGNOSTICS_STALE_TIME_MS,
+      revalidateOnMount: true,
+    }),
+    Atom.setIdleTTL(PROCESS_DIAGNOSTICS_IDLE_TTL_MS),
+    Atom.withLabel(`process-diagnostics:${environmentKey}`),
+  ),
 );
 
-function formatProcessResourceHistoryKey(input: {
-  readonly windowMs: number;
-  readonly bucketMs: number;
-}): string {
-  return `${input.windowMs}${PROCESS_RESOURCE_HISTORY_INPUT_SEPARATOR}${input.bucketMs}`;
+function formatProcessResourceHistoryKey(
+  environmentId: EnvironmentId | null,
+  input: {
+    readonly windowMs: number;
+    readonly bucketMs: number;
+  },
+): string {
+  return JSON.stringify([environmentId, input.windowMs, input.bucketMs]);
 }
 
 function parseProcessResourceHistoryKey(key: string): {
-  readonly windowMs: number;
-  readonly bucketMs: number;
+  environmentId: EnvironmentId | null;
+  windowMs: number;
+  bucketMs: number;
 } {
-  const [windowMs = "0", bucketMs = "0"] = key.split(PROCESS_RESOURCE_HISTORY_INPUT_SEPARATOR);
-  return {
-    windowMs: Number(windowMs),
-    bucketMs: Number(bucketMs),
-  };
+  const [id, windowMs, bucketMs] = JSON.parse(key) as [EnvironmentId | null, number, number];
+  return { environmentId: id, windowMs, bucketMs };
 }
 
 const processResourceHistoryAtom = Atom.family((key: string) => {
   const input = parseProcessResourceHistoryKey(key);
   return Atom.make(
-    Effect.promise(() => ensureLocalApi().server.getProcessResourceHistory(input)),
+    Effect.promise(() =>
+      ensureWorkspaceApi(input.environmentId).server.getProcessResourceHistory({
+        windowMs: input.windowMs,
+        bucketMs: input.bucketMs,
+      }),
+    ),
   ).pipe(
     Atom.swr({
       staleTime: PROCESS_RESOURCE_HISTORY_STALE_TIME_MS,
@@ -100,16 +113,17 @@ function readProcessResourceHistoryError(
   return formatProcessDiagnosticsError(squashed);
 }
 
-export function refreshProcessDiagnostics(): void {
-  appAtomRegistry.refresh(processDiagnosticsAtom);
+export function refreshProcessDiagnostics(environmentId = readWorkspaceEnvironmentId()): void {
+  appAtomRegistry.refresh(processDiagnosticsAtom(environmentId ?? ""));
 }
 
 export function useProcessDiagnostics(): ProcessDiagnosticsState {
-  const result = useAtomValue(processDiagnosticsAtom);
+  const environmentId = useWorkspaceEnvironmentId();
+  const result = useAtomValue(processDiagnosticsAtom(environmentId ?? ""));
   const data = Option.getOrNull(AsyncResult.value(result));
   const refresh = useCallback(() => {
-    refreshProcessDiagnostics();
-  }, []);
+    refreshProcessDiagnostics(environmentId);
+  }, [environmentId]);
 
   return {
     data,
@@ -123,7 +137,8 @@ export function useProcessResourceHistory(input: {
   readonly windowMs: number;
   readonly bucketMs: number;
 }): ProcessResourceHistoryState {
-  const atom = processResourceHistoryAtom(formatProcessResourceHistoryKey(input));
+  const environmentId = useWorkspaceEnvironmentId();
+  const atom = processResourceHistoryAtom(formatProcessResourceHistoryKey(environmentId, input));
   const result = useAtomValue(atom);
   const data = Option.getOrNull(AsyncResult.value(result));
 

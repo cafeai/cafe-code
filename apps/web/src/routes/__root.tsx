@@ -1,3 +1,4 @@
+import { RemoteDesktopViewerHost } from "../components/remoteWorkspace/RemoteDesktopDialog";
 import { type ServerLifecycleWelcomePayload } from "@cafecode/contracts";
 import { scopedProjectKey, scopeProjectRef } from "@cafecode/client-runtime";
 import {
@@ -14,6 +15,7 @@ import { AmbianceLayer } from "../ambiance/AmbianceLayer";
 import { TaskAtriumOverlay } from "../components/atrium/TaskAtriumOverlay";
 import { APP_DISPLAY_NAME } from "../branding";
 import { AppSidebarLayout } from "../components/AppSidebarLayout";
+import { WorkspaceEnvironmentProvider } from "../environments/workspace";
 import { CommandPalette } from "../components/CommandPalette";
 import { InitialBackendBootstrapSurface } from "../components/InitialBackendBootstrapSurface";
 import { OnboardingSurface } from "../components/OnboardingSurface";
@@ -147,11 +149,14 @@ function RootRouteView() {
   }
 
   const appShell = (
-    <CommandPalette>
-      <AppSidebarLayout>
-        <Outlet />
-      </AppSidebarLayout>
-    </CommandPalette>
+    <WorkspaceEnvironmentProvider>
+      <RemoteDesktopViewerHost />
+      <CommandPalette>
+        <AppSidebarLayout>
+          <Outlet />
+        </AppSidebarLayout>
+      </CommandPalette>
+    </WorkspaceEnvironmentProvider>
   );
 
   return (

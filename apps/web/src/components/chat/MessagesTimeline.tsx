@@ -2405,6 +2405,7 @@ function capitalizePhrase(value: string): string {
 }
 
 function openFileWithPreferredEditor(input: {
+  readonly environmentId: EnvironmentId;
   readonly filePath: string;
   readonly workspaceRoot: string | undefined;
   readonly defaultEditor: DefaultEditorSelection;
@@ -2418,7 +2419,7 @@ function openFileWithPreferredEditor(input: {
   if (!api) {
     return;
   }
-  if (!getLocalShellCapabilities().canOpenLocalEditor) {
+  if (!getLocalShellCapabilities(input.environmentId).canOpenLocalEditor) {
     void copyTextToClipboard(absolutePath).catch((error: unknown) => {
       console.warn("Failed to copy file path", error);
     });
@@ -2471,9 +2472,11 @@ const OrdinaryWorkEntryContent = memo(function OrdinaryWorkEntryContent(props: {
   workspaceRoot: string | undefined;
 }) {
   const { workEntry, workspaceRoot } = props;
+  const { activeThreadEnvironmentId } = use(TimelineRowCtx);
   const defaultEditor = useSettings((settings) => settings.defaultEditor);
   const availableEditors = useServerAvailableEditors();
-  const canOpenLocalEditor = getLocalShellCapabilities().canOpenLocalEditor;
+  const canOpenLocalEditor =
+    getLocalShellCapabilities(activeThreadEnvironmentId).canOpenLocalEditor;
   const iconConfig = workToneIcon(workEntry.tone);
   const EntryIcon = workEntryIcon(workEntry);
   const heading = toolWorkEntryHeading(workEntry);
@@ -2495,12 +2498,13 @@ const OrdinaryWorkEntryContent = memo(function OrdinaryWorkEntryContent(props: {
   const openResolvedFile = useCallback(
     (filePath: string) =>
       openFileWithPreferredEditor({
+        environmentId: activeThreadEnvironmentId,
         filePath,
         workspaceRoot,
         defaultEditor,
         availableEditors,
       }),
-    [availableEditors, defaultEditor, workspaceRoot],
+    [activeThreadEnvironmentId, availableEditors, defaultEditor, workspaceRoot],
   );
   const commandPathTokens = useMemo(
     () =>

@@ -1,3 +1,8 @@
+vi.mock("../../environments/workspace", () => ({
+  useWorkspaceEnvironmentId: () => null,
+  useIsSavedRemoteEnvironment: () => false,
+  readWorkspaceEnvironmentId: () => null,
+}));
 import "../../index.css";
 
 import { page } from "vitest/browser";
@@ -99,6 +104,8 @@ const usageHarness = vi.hoisted(() => {
 });
 
 vi.mock("../../environments/runtime", () => ({
+  readEnvironmentConnection: () => undefined,
+  requireEnvironmentConnection: () => undefined,
   getPrimaryEnvironmentConnection: () => ({
     client: {
       server: {

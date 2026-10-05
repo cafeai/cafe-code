@@ -15,6 +15,7 @@ import { OpenInPicker } from "./OpenInPicker";
 
 const openEditor = vi.fn().mockResolvedValue(undefined);
 vi.mock("../../localApi", () => ({
+  ensureLocalApi: () => ({ persistence: {} }),
   readLocalApi: () => ({ shell: { openInEditor: openEditor } }),
 }));
 

@@ -13,6 +13,7 @@ import { Atom } from "effect/unstable/reactivity";
 import { readPrimaryEnvironmentDescriptor } from "../environments/primary";
 import { readEnvironmentConnection } from "../environments/runtime";
 import { readLocalApi } from "../localApi";
+import { readWorkspaceEnvironmentId, useWorkspaceEnvironmentId } from "../environments/workspace";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 
 const SOURCE_CONTROL_DISCOVERY_TARGET = { key: "primary" } as const;
@@ -26,7 +27,8 @@ interface SourceControlDiscoveryTargetInput {
 function sourceControlDiscoveryTarget(
   input?: SourceControlDiscoveryTargetInput,
 ): SourceControlDiscoveryTarget {
-  const environmentId = input?.environmentId ?? null;
+  const environmentId =
+    (input === undefined ? readWorkspaceEnvironmentId() : input.environmentId) ?? null;
   if (!environmentId) {
     return SOURCE_CONTROL_DISCOVERY_TARGET;
   }
@@ -93,9 +95,11 @@ export function resetSourceControlDiscoveryStateForTests(): void {
 export function useSourceControlDiscovery(
   input?: SourceControlDiscoveryTargetInput,
 ): SourceControlDiscoveryState {
+  const workspaceId = useWorkspaceEnvironmentId();
   const targetKey =
-    getSourceControlDiscoveryTargetKey(sourceControlDiscoveryTarget(input)) ??
-    SOURCE_CONTROL_DISCOVERY_TARGET.key;
+    getSourceControlDiscoveryTargetKey(
+      sourceControlDiscoveryTarget(input ?? { environmentId: workspaceId }),
+    ) ?? SOURCE_CONTROL_DISCOVERY_TARGET.key;
 
   useAtomValue(sourceControlDiscoveryAutoRefreshAtom(targetKey));
 

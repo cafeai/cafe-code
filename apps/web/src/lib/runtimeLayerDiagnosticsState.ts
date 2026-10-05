@@ -6,7 +6,9 @@ import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
 import { useCallback } from "react";
 
-import { ensureLocalApi } from "../localApi";
+import { EnvironmentId } from "@cafecode/contracts";
+import { ensureWorkspaceApi } from "../environments/workspaceApi";
+import { readWorkspaceEnvironmentId, useWorkspaceEnvironmentId } from "../environments/workspace";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 
 const RUNTIME_LAYER_DIAGNOSTICS_STALE_TIME_MS = 5_000;
@@ -16,17 +18,21 @@ const RUNTIME_LAYER_DIAGNOSTICS_INPUT = {
   bucketMs: 60_000,
 } as const;
 
-const runtimeLayerDiagnosticsAtom = Atom.make(
-  Effect.promise(() =>
-    ensureLocalApi().server.getRuntimeLayerDiagnostics(RUNTIME_LAYER_DIAGNOSTICS_INPUT),
+const runtimeLayerDiagnosticsAtom = Atom.family((environmentKey: string) =>
+  Atom.make(
+    Effect.promise(() =>
+      ensureWorkspaceApi(
+        environmentKey ? EnvironmentId.make(environmentKey) : null,
+      ).server.getRuntimeLayerDiagnostics(RUNTIME_LAYER_DIAGNOSTICS_INPUT),
+    ),
+  ).pipe(
+    Atom.swr({
+      staleTime: RUNTIME_LAYER_DIAGNOSTICS_STALE_TIME_MS,
+      revalidateOnMount: true,
+    }),
+    Atom.setIdleTTL(RUNTIME_LAYER_DIAGNOSTICS_IDLE_TTL_MS),
+    Atom.withLabel(`runtime-layer-diagnostics:${environmentKey}`),
   ),
-).pipe(
-  Atom.swr({
-    staleTime: RUNTIME_LAYER_DIAGNOSTICS_STALE_TIME_MS,
-    revalidateOnMount: true,
-  }),
-  Atom.setIdleTTL(RUNTIME_LAYER_DIAGNOSTICS_IDLE_TTL_MS),
-  Atom.withLabel("runtime-layer-diagnostics"),
 );
 
 export interface RuntimeLayerDiagnosticsState {
@@ -51,16 +57,17 @@ function readRuntimeLayerDiagnosticsError(
   return formatRuntimeLayerDiagnosticsError(squashed);
 }
 
-export function refreshRuntimeLayerDiagnostics(): void {
-  appAtomRegistry.refresh(runtimeLayerDiagnosticsAtom);
+export function refreshRuntimeLayerDiagnostics(environmentId = readWorkspaceEnvironmentId()): void {
+  appAtomRegistry.refresh(runtimeLayerDiagnosticsAtom(environmentId ?? ""));
 }
 
 export function useRuntimeLayerDiagnostics(): RuntimeLayerDiagnosticsState {
-  const result = useAtomValue(runtimeLayerDiagnosticsAtom);
+  const environmentId = useWorkspaceEnvironmentId();
+  const result = useAtomValue(runtimeLayerDiagnosticsAtom(environmentId ?? ""));
   const data = Option.getOrNull(AsyncResult.value(result));
   const refresh = useCallback(() => {
-    refreshRuntimeLayerDiagnostics();
-  }, []);
+    refreshRuntimeLayerDiagnostics(environmentId);
+  }, [environmentId]);
 
   return {
     data,

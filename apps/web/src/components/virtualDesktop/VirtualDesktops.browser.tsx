@@ -18,6 +18,8 @@ import {
 import { DesktopPicker, VirtualDesktopList } from "./VirtualDesktops";
 import { ThreadGoalFooterButton } from "../chat/ThreadGoalControl";
 import { VirtualDesktopSettings } from "./VirtualDesktopSettings";
+import { useSavedEnvironmentRegistryStore } from "../../environments/runtime/catalog";
+import { useRemoteDesktopViewer } from "../remoteWorkspace/remoteViewerState";
 
 const harness = vi.hoisted(() => ({
   status: vi.fn(),
@@ -26,12 +28,25 @@ const harness = vi.hoisted(() => ({
   settings: null as ServerSettings | null,
   url: "http://127.0.0.1:3774/",
 }));
-vi.mock("~/environments/primary", () => ({ usePrimaryEnvironmentId: () => "local" }));
+vi.mock("~/localApi", () => ({
+  ensureLocalApi: () => ({ persistence: {} }),
+  readLocalApi: () => undefined,
+}));
+vi.mock("~/environments/workspaceApi", () => ({ patchWorkspaceServerConfig: vi.fn() }));
+vi.mock("~/environments/primary", () => ({
+  usePrimaryEnvironmentId: () => "local",
+  readPrimaryEnvironmentDescriptor: () => ({ environmentId: "local" }),
+  getPrimaryKnownEnvironment: () => null,
+}));
 vi.mock("~/environments/runtime", () => ({
   getEnvironmentHttpBaseUrl: () => harness.url,
   requireEnvironmentConnection: () => ({
     client: { server: { virtualDesktop: harness.status, updateSettings: harness.update } },
   }),
+  readEnvironmentConnection: () => ({
+    client: { server: { virtualDesktop: harness.status, updateSettings: harness.update } },
+  }),
+  subscribeEnvironmentConnections: () => () => {},
 }));
 vi.mock("~/rpc/serverState", async () => {
   const { DEFAULT_SERVER_SETTINGS } = await import("@cafecode/contracts");
@@ -208,6 +223,8 @@ describe("virtual desktops", () => {
 
   beforeEach(() => {
     state = initial;
+    useSavedEnvironmentRegistryStore.setState({ byId: {} });
+    useRemoteDesktopViewer.setState({ target: null });
     vi.clearAllMocks();
     harness.settings = {
       ...DEFAULT_SERVER_SETTINGS,
@@ -255,6 +272,8 @@ describe("virtual desktops", () => {
   afterEach(async () => {
     await mounted?.unmount();
     mounted = undefined;
+    useSavedEnvironmentRegistryStore.setState({ byId: {} });
+    useRemoteDesktopViewer.setState({ target: null });
     if (originalBridge) window.desktopBridge = originalBridge;
     else delete window.desktopBridge;
   });
@@ -509,6 +528,45 @@ describe("virtual desktops", () => {
     await expect
       .element(page.getByRole("button", { name: "Open desktop", exact: true }))
       .toBeDisabled();
+    expect(open).not.toHaveBeenCalled();
+  });
+  it("preserves primary browser viewer controls and help", async () => {
+    delete window.desktopBridge;
+    mounted = await mount(<VirtualDesktopList environmentId={environmentId} live={false} />);
+    await expect
+      .element(page.getByRole("button", { name: "Open desktop", exact: true }))
+      .toBeDisabled();
+    await expect
+      .element(
+        page.getByText(
+          "Manage desktops here. Open a viewer from the Cafe Linux app on this computer.",
+        ),
+      )
+      .toBeVisible();
+    expect(useRemoteDesktopViewer.getState().target).toBeNull();
+  });
+  it("opens the in-app viewer only for an explicitly saved remote server", async () => {
+    delete window.desktopBridge;
+    const remote = EnvironmentId.make("remote");
+    harness.url = "https://pc.example/";
+    useSavedEnvironmentRegistryStore.setState({
+      byId: {
+        [remote]: {
+          environmentId: remote,
+          label: "PC",
+          httpBaseUrl: harness.url,
+          wsBaseUrl: "wss://pc.example/",
+          createdAt: "fixture",
+          lastConnectedAt: null,
+        },
+      },
+    });
+    mounted = await mount(<VirtualDesktopList environmentId={remote} live={false} />);
+    await expect
+      .element(page.getByRole("button", { name: "Open desktop", exact: true }))
+      .toBeEnabled();
+    await page.getByRole("button", { name: "Open desktop", exact: true }).click();
+    expect(useRemoteDesktopViewer.getState().target).toEqual({ environmentId: remote, id });
     expect(open).not.toHaveBeenCalled();
   });
   it("enables the picker and desktop tools together, preserving off-state cleanup", async () => {

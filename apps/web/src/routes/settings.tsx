@@ -14,6 +14,7 @@ import { Button } from "../components/ui/button";
 import { SidebarInset } from "../components/ui/sidebar";
 import { ContentSidebarTriggerWithUnreadDot } from "../components/sidebar/unseenCompletions";
 import { isElectron } from "../env";
+import { useWorkspaceEnvironmentId } from "../environments/workspace";
 
 function RestoreDefaultsButton({ onRestored }: { onRestored: () => void }) {
   const { changedSettingLabels, restoreDefaults } = useSettingsRestore(onRestored);
@@ -32,6 +33,7 @@ function RestoreDefaultsButton({ onRestored }: { onRestored: () => void }) {
 }
 
 function SettingsContentLayout() {
+  const environmentId = useWorkspaceEnvironmentId();
   const location = useLocation();
   const navigate = useNavigate();
   const canGoBack = useCanGoBack();
@@ -92,7 +94,7 @@ function SettingsContentLayout() {
           </div>
         )}
 
-        <div key={restoreSignal} className="min-h-0 flex flex-1 flex-col">
+        <div key={`${environmentId}:${restoreSignal}`} className="min-h-0 flex flex-1 flex-col">
           <Outlet />
         </div>
       </div>

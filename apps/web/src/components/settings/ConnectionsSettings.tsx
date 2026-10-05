@@ -66,20 +66,19 @@ import {
 import { Textarea } from "../ui/textarea";
 import { setPairingTokenOnUrl } from "../../pairingUrl";
 import {
-  clearServerAdminPassword,
-  createServerPairingCredential,
-  fetchServerAdminPasswordStatus,
-  fetchSessionState,
-  revokeOtherServerClientSessions,
-  revokeServerClientSession,
-  revokeServerPairingLink,
-  setServerAdminPassword,
   isLoopbackHostname,
   type ServerClientSessionRecord,
   type ServerPairingLinkRecord,
 } from "~/environments/primary";
 import type { WsRpcClient } from "~/rpc/wsRpcClient";
-import { getPrimaryEnvironmentConnection } from "~/environments/runtime";
+import {
+  getEnvironmentHttpBaseUrl,
+  getPrimaryEnvironmentConnection,
+  readEnvironmentConnection,
+} from "~/environments/runtime";
+import { useWorkspaceEnvironmentId } from "~/environments/workspace";
+import { readPrimaryEnvironmentDescriptor } from "~/environments/primary";
+import { createWorkspaceAuthApi } from "~/environments/workspaceAuth";
 import { useUiStateStore } from "~/uiStateStore";
 import { resolveServerConfigVersionMismatch } from "~/versionSkew";
 import { useServerConfig } from "~/rpc/serverState";
@@ -709,12 +708,16 @@ const ConnectedClientListRow = memo(function ConnectedClientListRow({
 });
 
 type AuthorizedClientsHeaderActionProps = {
+  createPairingCredential: ReturnType<
+    typeof createWorkspaceAuthApi
+  >["createServerPairingCredential"];
   clientSessions: ReadonlyArray<ServerClientSessionRecord>;
   isRevokingOtherClients: boolean;
   onRevokeOtherClients: () => void;
 };
 
 const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderAction({
+  createPairingCredential,
   clientSessions,
   isRevokingOtherClients,
   onRevokeOtherClients,
@@ -726,7 +729,7 @@ const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderActio
   const handleCreatePairingLink = useCallback(async () => {
     setIsCreatingPairingLink(true);
     try {
-      await createServerPairingCredential(pairingLabel);
+      await createPairingCredential(pairingLabel);
       setPairingLabel("");
       setDialogOpen(false);
     } catch (error) {
@@ -741,7 +744,7 @@ const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderActio
     } finally {
       setIsCreatingPairingLink(false);
     }
-  }, [pairingLabel]);
+  }, [pairingLabel, createPairingCredential]);
 
   return (
     <div className="flex items-center gap-2">
@@ -1213,7 +1216,21 @@ function NetworkAccessDescription({
 }
 
 export function ConnectionsSettings() {
-  const desktopBridge = window.desktopBridge;
+  const environmentId = useWorkspaceEnvironmentId();
+  const isPrimary =
+    !environmentId || environmentId === readPrimaryEnvironmentDescriptor()?.environmentId;
+  const auth = useMemo(() => createWorkspaceAuthApi(environmentId), [environmentId]);
+  const {
+    clearServerAdminPassword,
+    createServerPairingCredential,
+    fetchServerAdminPasswordStatus,
+    fetchSessionState,
+    revokeOtherServerClientSessions,
+    revokeServerClientSession,
+    revokeServerPairingLink,
+    setServerAdminPassword,
+  } = auth;
+  const desktopBridge = isPrimary ? window.desktopBridge : undefined;
   const [currentSessionRole, setCurrentSessionRole] = useState<"owner" | "client" | null>(
     desktopBridge ? "owner" : null,
   );
@@ -1527,63 +1544,64 @@ export function ConnectionsSettings() {
     type AuthAccessEvent = Parameters<
       Parameters<WsRpcClient["server"]["subscribeAuthAccess"]>[0]
     >[0];
-    const unsubscribeAuthAccess =
-      getPrimaryEnvironmentConnection().client.server.subscribeAuthAccess(
-        (event: AuthAccessEvent) => {
-          if (cancelled) {
-            return;
-          }
+    const unsubscribeAuthAccess = (
+      environmentId ? readEnvironmentConnection(environmentId) : getPrimaryEnvironmentConnection()
+    )?.client.server.subscribeAuthAccess(
+      (event: AuthAccessEvent) => {
+        if (cancelled) {
+          return;
+        }
 
-          switch (event.type) {
-            case "snapshot":
-              setDesktopPairingLinks(
-                sortDesktopPairingLinks(
-                  event.payload.pairingLinks.map((pairingLink: AuthPairingLink) =>
-                    toDesktopPairingLinkRecord(pairingLink),
-                  ),
+        switch (event.type) {
+          case "snapshot":
+            setDesktopPairingLinks(
+              sortDesktopPairingLinks(
+                event.payload.pairingLinks.map((pairingLink: AuthPairingLink) =>
+                  toDesktopPairingLinkRecord(pairingLink),
                 ),
-              );
-              setDesktopClientSessions(
-                sortDesktopClientSessions(
-                  event.payload.clientSessions.map((clientSession: AuthClientSession) =>
-                    toDesktopClientSessionRecord(clientSession),
-                  ),
+              ),
+            );
+            setDesktopClientSessions(
+              sortDesktopClientSessions(
+                event.payload.clientSessions.map((clientSession: AuthClientSession) =>
+                  toDesktopClientSessionRecord(clientSession),
                 ),
-              );
-              break;
-            case "pairingLinkUpserted":
-              setDesktopPairingLinks((current) =>
-                upsertDesktopPairingLink(current, toDesktopPairingLinkRecord(event.payload)),
-              );
-              break;
-            case "pairingLinkRemoved":
-              setDesktopPairingLinks((current) =>
-                removeDesktopPairingLink(current, event.payload.id),
-              );
-              break;
-            case "clientUpserted":
-              setDesktopClientSessions((current) =>
-                upsertDesktopClientSession(current, toDesktopClientSessionRecord(event.payload)),
-              );
-              break;
-            case "clientRemoved":
-              setDesktopClientSessions((current) =>
-                removeDesktopClientSession(current, event.payload.sessionId),
-              );
-              break;
-          }
+              ),
+            );
+            break;
+          case "pairingLinkUpserted":
+            setDesktopPairingLinks((current) =>
+              upsertDesktopPairingLink(current, toDesktopPairingLinkRecord(event.payload)),
+            );
+            break;
+          case "pairingLinkRemoved":
+            setDesktopPairingLinks((current) =>
+              removeDesktopPairingLink(current, event.payload.id),
+            );
+            break;
+          case "clientUpserted":
+            setDesktopClientSessions((current) =>
+              upsertDesktopClientSession(current, toDesktopClientSessionRecord(event.payload)),
+            );
+            break;
+          case "clientRemoved":
+            setDesktopClientSessions((current) =>
+              removeDesktopClientSession(current, event.payload.sessionId),
+            );
+            break;
+        }
 
-          setDesktopAccessManagementError(null);
-          setIsLoadingDesktopAccessManagement(false);
+        setDesktopAccessManagementError(null);
+        setIsLoadingDesktopAccessManagement(false);
+      },
+      {
+        onResubscribe: () => {
+          if (!cancelled) {
+            setIsLoadingDesktopAccessManagement(true);
+          }
         },
-        {
-          onResubscribe: () => {
-            if (!cancelled) {
-              setIsLoadingDesktopAccessManagement(true);
-            }
-          },
-        },
-      );
+      },
+    );
     if (desktopBridge) {
       void desktopBridge
         .getServerExposureState()
@@ -1617,7 +1635,7 @@ export function ConnectionsSettings() {
 
     return () => {
       cancelled = true;
-      unsubscribeAuthAccess();
+      unsubscribeAuthAccess?.();
     };
   }, [canManageLocalBackend, desktopBridge]);
 
@@ -1702,7 +1720,13 @@ export function ConnectionsSettings() {
         </div>
       ) : null}
       <PairingClientsList
-        endpointUrl={desktopServerExposureState?.endpointUrl}
+        endpointUrl={
+          isPrimary
+            ? desktopServerExposureState?.endpointUrl
+            : environmentId
+              ? getEnvironmentHttpBaseUrl(environmentId)
+              : null
+        }
         endpoints={visibleDesktopNetworkAdvertisedEndpoints}
         defaultEndpointKey={defaultDesktopAdvertisedEndpointKey}
         presentation={presentation}
@@ -1815,7 +1839,7 @@ export function ConnectionsSettings() {
       <SavedEnvironmentsSettings />
       {canManageLocalBackend ? (
         <>
-          <SettingsSection title="Manage local backend">
+          <SettingsSection title={isPrimary ? "Manage local backend" : "Manage selected server"}>
             {primaryVersionMismatch ? (
               <SettingsRow
                 title="Version drift"
@@ -1853,6 +1877,7 @@ export function ConnectionsSettings() {
               title="Authorized clients"
               headerAction={
                 <AuthorizedClientsHeaderAction
+                  createPairingCredential={createServerPairingCredential}
                   clientSessions={desktopClientSessions}
                   isRevokingOtherClients={isRevokingOtherDesktopClients}
                   onRevokeOtherClients={handleRevokeOtherDesktopClients}

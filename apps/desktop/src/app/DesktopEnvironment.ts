@@ -254,7 +254,7 @@ const makeDesktopEnvironment = Effect.fn("desktop.environment.make")(function* (
       rootDir,
       "assets",
       "app-icon",
-      "cafe-code-app-icon-1024.png",
+      "cafe-code-app-icon-macos-1024.png",
     ),
   });
 });

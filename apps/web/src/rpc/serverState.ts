@@ -4,6 +4,7 @@ import {
   DEFAULT_SERVER_SETTINGS,
   type ClientSettings,
   type EditorId,
+  type EnvironmentId,
   type ServerConfig,
   type ServerConfigStreamEvent,
   type ServerConfigUpdatedPayload,
@@ -19,6 +20,9 @@ import { useCallback, useRef } from "react";
 
 import type { WsRpcClient } from "./wsRpcClient";
 import { appAtomRegistry, resetAppAtomRegistryForTests } from "./atomRegistry";
+import { usePrimaryEnvironmentId } from "../environments/primary";
+import { useSavedEnvironmentRuntimeStore } from "../environments/runtime/catalog";
+import { useWorkspaceContextEnvironmentId } from "../environments/workspace";
 
 export type ServerConfigUpdateSource = ServerConfigStreamEvent["type"];
 
@@ -307,40 +311,52 @@ function useLatestAtomSubscription<A>(
   useAtomSubscribe(atom, stableListener, { immediate: true });
 }
 
-export function useServerConfig(): ServerConfig | null {
-  return useAtomValue(serverConfigAtom);
+export function useServerConfig(environmentId?: EnvironmentId | null): ServerConfig | null {
+  const primaryConfig = useAtomValue(serverConfigAtom);
+  const primaryId = usePrimaryEnvironmentId();
+  const workspaceId = useWorkspaceContextEnvironmentId();
+  const targetId = environmentId !== undefined ? environmentId : workspaceId;
+  const savedConfig = useSavedEnvironmentRuntimeStore((s) =>
+    targetId ? (s.byId[targetId]?.serverConfig ?? null) : null,
+  );
+  return targetId === undefined ||
+    targetId === null ||
+    targetId === primaryId ||
+    targetId === primaryConfig?.environment.environmentId
+    ? primaryConfig
+    : savedConfig;
 }
 
 export function useServerSettings(): ServerSettings {
-  return useAtomValue(serverConfigAtom, selectSettings);
+  return selectSettings(useServerConfig());
 }
 
 export function useServerClientSettings(): ClientSettings {
-  return useAtomValue(serverConfigAtom, selectClientSettings);
+  return selectClientSettings(useServerConfig());
 }
 
 export function useServerProviders(): ReadonlyArray<ServerProvider> {
-  return useAtomValue(serverConfigAtom, selectProviders);
+  return selectProviders(useServerConfig());
 }
 
 export function useServerKeybindings(): ServerConfig["keybindings"] {
-  return useAtomValue(serverConfigAtom, selectKeybindings);
+  return selectKeybindings(useServerConfig());
 }
 
 export function useServerAvailableEditors(): ReadonlyArray<EditorId> {
-  return useAtomValue(serverConfigAtom, selectAvailableEditors);
+  return selectAvailableEditors(useServerConfig());
 }
 
 export function useServerTerminal(): TerminalAvailability {
-  return useAtomValue(serverConfigAtom, selectTerminal);
+  return selectTerminal(useServerConfig());
 }
 
 export function useServerKeybindingsConfigPath(): string | null {
-  return useAtomValue(serverConfigAtom, selectKeybindingsConfigPath);
+  return selectKeybindingsConfigPath(useServerConfig());
 }
 
 export function useServerObservability(): ServerConfig["observability"] | null {
-  return useAtomValue(serverConfigAtom, selectObservability);
+  return selectObservability(useServerConfig());
 }
 
 export function useServerWelcomeSubscription(

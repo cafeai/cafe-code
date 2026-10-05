@@ -2,9 +2,11 @@ import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { MonitorIcon } from "lucide-react";
 import type { ServerSettingsPatch } from "@cafecode/contracts";
-import { usePrimaryEnvironmentId } from "~/environments/primary";
+import { useWorkspaceEnvironmentId } from "~/environments/workspace";
 import { requireEnvironmentConnection } from "~/environments/runtime";
 import { applySettingsUpdated, useServerSettings } from "~/rpc/serverState";
+import { patchWorkspaceServerConfig } from "~/environments/workspaceApi";
+import { readPrimaryEnvironmentDescriptor } from "~/environments/primary";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "../settings/settingsLayout";
 import { Switch } from "../ui/switch";
 import { Input } from "../ui/input";
@@ -20,7 +22,7 @@ import {
 } from "./DesktopResolutionFields";
 
 export function VirtualDesktopSettings() {
-  const environmentId = usePrimaryEnvironmentId();
+  const environmentId = useWorkspaceEnvironmentId();
   const status = useVirtualDesktops(environmentId);
   const settings = useServerSettings();
   const cache = useQueryClient();
@@ -44,7 +46,9 @@ export function VirtualDesktopSettings() {
     try {
       const next =
         await requireEnvironmentConnection(environmentId).client.server.updateSettings(patch);
-      applySettingsUpdated(next);
+      if (environmentId === readPrimaryEnvironmentDescriptor()?.environmentId)
+        applySettingsUpdated(next);
+      else patchWorkspaceServerConfig(environmentId, { settings: next });
       await cache.invalidateQueries({ queryKey: ["virtual-desktops", environmentId] });
       if (patch.desktopObservationRetention !== undefined) setRetentionDraft(null);
       if (patch.desktopDefaultResolution !== undefined) setResolutionDraft(null);

@@ -1,3 +1,6 @@
+vi.mock("../../environments/workspaceApi", () => ({
+  ensureWorkspaceApi: () => api.ensureLocalApi(),
+}));
 import "../../index.css";
 
 import {

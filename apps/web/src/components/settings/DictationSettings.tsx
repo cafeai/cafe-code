@@ -1,3 +1,4 @@
+import { usePrimaryEnvironmentId } from "../../environments/primary";
 import {
   CheckCircle2Icon,
   KeyRoundIcon,
@@ -14,7 +15,7 @@ import {
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 
-import { usePrimaryEnvironmentId } from "~/environments/primary";
+import { useWorkspaceEnvironmentId, useIsSavedRemoteEnvironment } from "~/environments/workspace";
 import { requireEnvironmentConnection } from "~/environments/runtime";
 import { readDictationRpcErrorCode } from "~/dictation/errors";
 import { dictationQueryKeys, dictationStatusQueryOptions } from "~/lib/dictationReactQuery";
@@ -146,7 +147,9 @@ function statusBadge(input: {
 }
 
 export function DictationSettings() {
-  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const primaryEnvironmentId = useWorkspaceEnvironmentId();
+  const remote = useIsSavedRemoteEnvironment(primaryEnvironmentId);
+  const localEnvironmentId = usePrimaryEnvironmentId();
   const queryClient = useQueryClient();
   const statusQuery = useQuery(dictationStatusQueryOptions(primaryEnvironmentId));
   const [newApiKey, setNewApiKey] = useState("");
@@ -163,6 +166,10 @@ export function DictationSettings() {
     typeof window !== "undefined" &&
     Boolean(window.desktopBridge) &&
     isMacPlatform(navigator.platform);
+
+  const localStatusQuery = useQuery(
+    dictationStatusQueryOptions(isMacDesktop && remote ? localEnvironmentId : null),
+  );
 
   useEffect(() => {
     if (!isMacDesktop) return;
@@ -467,7 +474,11 @@ export function DictationSettings() {
         >
           <SettingsRow
             title="Global dictation shortcut"
-            description="Open a floating recorder from another Mac app. Review and edit the text before choosing Copy, Save, or Insert. Insertion needs macOS Accessibility permission."
+            description={
+              remote
+                ? "This Mac uses its local Cafe dictation credential for the floating recorder. The credential above belongs to the selected workspace and is used for chat dictation there. Review recorded text before Copy, Save, or Insert; insertion needs macOS Accessibility permission."
+                : "Open a floating recorder from another Mac app. Review and edit the text before choosing Copy, Save, or Insert. Insertion needs macOS Accessibility permission."
+            }
             status={
               <span
                 aria-live="polite"
@@ -486,7 +497,11 @@ export function DictationSettings() {
               <Switch
                 aria-label="Enable Mac global dictation"
                 checked={globalSettings?.enabled ?? false}
-                disabled={!globalSettings || globalSettingsPending || !configured}
+                disabled={
+                  !globalSettings ||
+                  globalSettingsPending ||
+                  (remote ? localStatusQuery.data?.configured !== true : !configured)
+                }
                 onCheckedChange={(enabled) => void updateGlobalEnabled(enabled)}
               />
             }

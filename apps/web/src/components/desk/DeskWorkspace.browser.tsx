@@ -1,3 +1,4 @@
+import { selectWorkspaceEnvironment } from "../../environments/workspace";
 import "../../index.css";
 import type { CDPSession } from "@vitest/browser-playwright";
 
@@ -66,6 +67,8 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
 });
 vi.mock("../../environments/primary", () => ({
   usePrimaryEnvironmentId: () => mocks.primaryEnvironmentId,
+  readPrimaryEnvironmentDescriptor: () => ({ environmentId: mocks.primaryEnvironmentId }),
+  getPrimaryKnownEnvironment: () => null,
 }));
 vi.mock("../../store", () => ({
   useStore: (selector: (state: object) => unknown) => selector({}),
@@ -94,6 +97,7 @@ vi.mock("../../localApi", () => ({
   ensureLocalApi: () => ({
     contextMenu: { show: mocks.showMenu },
     dialogs: { confirm: mocks.confirm },
+    persistence: {},
   }),
 }));
 vi.mock("../../hooks/useThreadActions", () => ({
@@ -104,10 +108,10 @@ vi.mock("../../hooks/useThreadActions", () => ({
     hardDeleteThread: mocks.hardDelete,
   }),
 }));
-vi.mock("../../hooks/useSettings", async (importOriginal) => {
+vi.mock("../../hooks/useSettings", async () => {
   const { DEFAULT_UNIFIED_SETTINGS } = await import("@cafecode/contracts/settings");
   return {
-    ...(await importOriginal<typeof import("../../hooks/useSettings")>()),
+    getClientSettings: () => DEFAULT_UNIFIED_SETTINGS,
     useSettings: (select: (settings: typeof DEFAULT_UNIFIED_SETTINGS) => unknown) =>
       select(DEFAULT_UNIFIED_SETTINGS),
   };
@@ -186,6 +190,7 @@ const target = (id: string): ThreadRouteTarget => ({
 });
 const key = (id: string) => deskTabKey(target(id));
 beforeEach(async () => {
+  selectWorkspaceEnvironment(null);
   await page.viewport(1440, 900);
   useDeskStore.setState({ desk: createDeskState(environmentId) });
   mocks.params = {};
@@ -214,6 +219,8 @@ beforeEach(async () => {
   mocks.palette.mockClear();
 });
 afterEach(() => {
+  selectWorkspaceEnvironment(null);
+  localStorage.removeItem("cafe-code:desk:v1:remote-workspace-fixture");
   useDeskStore.setState({ desk: createDeskState() });
   localStorage.removeItem(`cafe-code:desk:v1:${environmentId}`);
 });
@@ -1857,6 +1864,44 @@ describe("Desk workspace navigation chrome", () => {
         .toBeVisible();
       expect(host.scrollWidth).toBeLessThanOrEqual(host.clientWidth + 1);
       expect(useDeskStore.getState().desk.focusedGroupId).toBeNull();
+    } finally {
+      await cleanup();
+    }
+  });
+  it("keeps separate Desk layouts for local and remote servers with colliding thread IDs", async () => {
+    const { screen, cleanup } = await setup();
+    try {
+      const remote = EnvironmentId.make("remote-workspace-fixture");
+      mocks.params = {};
+      for (const listener of mocks.routeListeners) listener();
+      selectWorkspaceEnvironment(remote);
+      await vi.waitFor(() => expect(useDeskStore.getState().desk.environmentId).toBe(remote));
+      expect(
+        Object.values(useDeskStore.getState().desk.groups).flatMap((group) => group.tabs),
+      ).toEqual([]);
+      const remoteTarget: ThreadRouteTarget = {
+        kind: "server",
+        threadRef: { environmentId: remote, threadId: ThreadId.make("one") },
+      };
+      useDeskStore.getState().dispatch({ type: "open", target: remoteTarget });
+      await expect
+        .element(screen.getByRole("tab", { name: "Chat one", exact: true }))
+        .toBeVisible();
+      expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual([deskTabKey(remoteTarget)]);
+      mocks.params = {};
+      for (const listener of mocks.routeListeners) listener();
+      selectWorkspaceEnvironment(environmentId);
+      await vi.waitFor(() =>
+        expect(useDeskStore.getState().desk.environmentId).toBe(environmentId),
+      );
+      expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual([
+        key("one"),
+        key("two"),
+        key("three"),
+      ]);
+      await expect
+        .element(screen.getByRole("tab", { name: "Chat two", exact: true }))
+        .toBeVisible();
     } finally {
       await cleanup();
     }

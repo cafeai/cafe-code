@@ -48,7 +48,10 @@ import { useShallow } from "zustand/react/shallow";
 import { useGitStatus } from "~/lib/gitStatusState";
 import { supportsStandaloneChats } from "../lib/standaloneChats";
 import { subagentConcurrencyAdmissionError } from "../lib/subagentConcurrencyAdmission";
-import { getSavedEnvironmentRuntimeState } from "../environments/runtime/catalog";
+import {
+  getSavedEnvironmentRuntimeState,
+  useSavedEnvironmentRuntimeStore,
+} from "../environments/runtime/catalog";
 import {
   configuredInstanceSubagentLimit,
   deriveSubagentConcurrencyPresentation,
@@ -1867,9 +1870,25 @@ export default function ChatView(props: ChatViewProps) {
 
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const primaryEnvironmentLabel = readPrimaryEnvironmentDescriptor()?.label ?? null;
-  const activeEnvironmentUnavailable = false;
-  const activeEnvironmentUnavailableLabel: string | null = null;
-  const activeEnvironmentUnavailableState: EnvironmentUnavailableState | null = null;
+  const savedRuntime = useSavedEnvironmentRuntimeStore((s) => s.byId[environmentId]);
+  const activeEnvironmentUnavailable =
+    environmentId !== primaryEnvironmentId && savedRuntime?.connectionState !== "connected";
+  const activeEnvironmentUnavailableLabel = activeEnvironmentUnavailable
+    ? (savedRuntime?.descriptor?.label ?? "remote server")
+    : null;
+  const activeEnvironmentUnavailableState: EnvironmentUnavailableState | null =
+    activeEnvironmentUnavailable
+      ? {
+          environmentId,
+          label: activeEnvironmentUnavailableLabel!,
+          connectionState:
+            savedRuntime?.connectionState === "connecting"
+              ? "connecting"
+              : savedRuntime?.connectionState === "error"
+                ? "error"
+                : "disconnected",
+        }
+      : null;
   const projectGroupingSettings = useSettings(selectProjectGroupingSettings);
   const logicalProjectEnvironments = useMemo(() => {
     if (!activeProject) return [];
@@ -2073,7 +2092,7 @@ export default function ChatView(props: ChatViewProps) {
     selectedProvider: selectedProviderByThreadId,
     threadProvider,
   });
-  const primaryServerConfig = useServerConfig();
+  const primaryServerConfig = useServerConfig(environmentId);
   const serverConfig = primaryServerConfig;
   const versionMismatch = resolveServerConfigVersionMismatch(serverConfig);
   const versionMismatchDismissKey =
@@ -2735,7 +2754,12 @@ export default function ChatView(props: ChatViewProps) {
           ),
     [],
   );
-  const isThreadEnvironmentUnavailable = useCallback((_thread: Thread): boolean => false, []);
+  const isThreadEnvironmentUnavailable = useCallback(
+    (thread: Thread): boolean =>
+      thread.environmentId !== primaryEnvironmentId &&
+      getSavedEnvironmentRuntimeState(thread.environmentId)?.connectionState !== "connected",
+    [primaryEnvironmentId],
+  );
   const activeFollowUpQueue = useMemo(
     () =>
       activeThreadId !== null

@@ -41,6 +41,11 @@ import { useShallow } from "zustand/react/shallow";
 import { useCommandPaletteStore } from "../commandPaletteStore";
 import { readEnvironmentApi } from "../environmentApi";
 import { readPrimaryEnvironmentDescriptor, usePrimaryEnvironmentId } from "../environments/primary";
+import {
+  useWorkspaceEnvironmentId,
+  readWorkspaceEnvironmentDescriptor,
+} from "../environments/workspace";
+import { useSavedEnvironmentRegistryStore } from "../environments/runtime/catalog";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useSettings } from "../hooks/useSettings";
 import { readLocalApi } from "../localApi";
@@ -444,6 +449,8 @@ function OpenCommandPaletteDialog() {
   const [isRemoteProjectLookingUp, setIsRemoteProjectLookingUp] = useState(false);
   const [isRemoteProjectCloning, setIsRemoteProjectCloning] = useState(false);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const workspaceEnvironmentId = useWorkspaceEnvironmentId();
+  const savedEnvironments = useSavedEnvironmentRegistryStore((s) => s.byId);
   const primaryEnvironmentLabel = readPrimaryEnvironmentDescriptor()?.label ?? null;
 
   const addProjectEnvironmentOptions = useMemo(() => {
@@ -461,15 +468,21 @@ function OpenCommandPaletteDialog() {
       });
     }
 
+    for (const record of Object.values(savedEnvironments)) {
+      if (record.environmentId !== primaryEnvironmentId)
+        options.push({
+          environmentId: record.environmentId,
+          label: record.label,
+          isPrimary: false,
+        });
+    }
     return options;
-  }, [primaryEnvironmentId, primaryEnvironmentLabel]);
-  const defaultAddProjectEnvironmentId = addProjectEnvironmentOptions[0]?.environmentId ?? null;
+  }, [primaryEnvironmentId, primaryEnvironmentLabel, savedEnvironments]);
+  const defaultAddProjectEnvironmentId =
+    workspaceEnvironmentId ?? addProjectEnvironmentOptions[0]?.environmentId ?? null;
   const browseEnvironmentId = addProjectEnvironmentId ?? defaultAddProjectEnvironmentId;
   const browseEnvironmentPlatform = useMemo(() => {
-    const os =
-      browseEnvironmentId && primaryEnvironmentId && browseEnvironmentId === primaryEnvironmentId
-        ? (readPrimaryEnvironmentDescriptor()?.platform.os ?? null)
-        : null;
+    const os = readWorkspaceEnvironmentDescriptor(browseEnvironmentId)?.platform.os ?? null;
     return getEnvironmentBrowsePlatform(os);
   }, [browseEnvironmentId, primaryEnvironmentId]);
   const isRemoteProjectCloneFlow = addProjectCloneFlow !== null;
@@ -480,7 +493,7 @@ function OpenCommandPaletteDialog() {
   const getAddProjectInitialQueryForEnvironment = useCallback(
     (environmentId: EnvironmentId | null): string => {
       const environmentSettings =
-        environmentId && primaryEnvironmentId && environmentId === primaryEnvironmentId
+        environmentId && workspaceEnvironmentId && environmentId === workspaceEnvironmentId
           ? settings
           : null;
       const baseDirectory = environmentSettings?.addProjectBaseDirectory?.trim() ?? "";
@@ -489,7 +502,7 @@ function OpenCommandPaletteDialog() {
       }
       return ensureBrowseDirectoryPath(baseDirectory);
     },
-    [primaryEnvironmentId, settings],
+    [workspaceEnvironmentId, settings],
   );
 
   const projectCwdById = useMemo(

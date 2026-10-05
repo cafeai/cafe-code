@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { UsageStatsGetResult, UsageStatsSnapshot } from "@cafecode/contracts";
 
-import { getPrimaryEnvironmentConnection } from "~/environments/runtime";
+import { getPrimaryEnvironmentConnection, readEnvironmentConnection } from "~/environments/runtime";
+import { useWorkspaceEnvironmentId } from "~/environments/workspace";
 import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
 import { ActivityHeatmap } from "../stats/ActivityHeatmap";
 import { useUsageStatsDetail } from "../stats/usageStatsDetailResource";
@@ -260,6 +261,7 @@ function TokenBreakdownSection({
 }
 
 export function UsageStatsPanel() {
+  const environmentId = useWorkspaceEnvironmentId();
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
   const detail = useUsageStatsDetail(true);
@@ -278,7 +280,11 @@ export function UsageStatsPanel() {
 
   useEffect(() => {
     let cancelled = false;
-    const connection = getPrimaryEnvironmentConnection();
+    setSnapshot(null);
+    const connection = environmentId
+      ? readEnvironmentConnection(environmentId)
+      : getPrimaryEnvironmentConnection();
+    if (!connection) return;
     const unsubscribe = connection.client.server.subscribeUsageStats((event) => {
       if (!cancelled) {
         setSnapshot((current) =>
@@ -290,7 +296,7 @@ export function UsageStatsPanel() {
       cancelled = true;
       unsubscribe();
     };
-  }, []);
+  }, [environmentId]);
 
   const totals = useLiveTotals(selected, snapshot, range);
   const generating = (totals?.activeSessionCount ?? 0) > 0 && (totals?.collectionEnabled ?? false);

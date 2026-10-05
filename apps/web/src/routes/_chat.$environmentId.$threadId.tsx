@@ -3,6 +3,10 @@ import { useEffect } from "react";
 
 import { useComposerDraftStore } from "../composerDraftStore";
 import { usePrimaryEnvironmentId } from "../environments/primary";
+import {
+  hasSavedEnvironmentRegistryHydrated,
+  useSavedEnvironmentRegistryStore,
+} from "../environments/runtime/catalog";
 import { selectEnvironmentState, selectThreadExistsByRef, useStore } from "../store";
 import { resolveThreadRouteRef } from "../threadRoutes";
 
@@ -12,10 +16,9 @@ function ChatThreadRouteView() {
     select: (params) => resolveThreadRouteRef(params),
   });
   const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const routeMatchesPrimaryEnvironment =
-    threadRef !== null &&
-    primaryEnvironmentId !== null &&
-    threadRef.environmentId === primaryEnvironmentId;
+  const savedEnvironmentExists = useSavedEnvironmentRegistryStore((s) =>
+    threadRef ? Boolean(s.byId[threadRef.environmentId]) : false,
+  );
   const bootstrapComplete = useStore(
     (store) => selectEnvironmentState(store, threadRef?.environmentId ?? null).bootstrapComplete,
   );
@@ -46,10 +49,16 @@ function ChatThreadRouteView() {
   }, [bootstrapComplete, environmentHasAnyThreads, navigate, routeThreadExists, threadRef]);
 
   useEffect(() => {
-    if (threadRef !== null && primaryEnvironmentId !== null && !routeMatchesPrimaryEnvironment) {
+    if (
+      threadRef !== null &&
+      primaryEnvironmentId !== null &&
+      hasSavedEnvironmentRegistryHydrated() &&
+      threadRef.environmentId !== primaryEnvironmentId &&
+      !savedEnvironmentExists
+    ) {
       void navigate({ to: "/", replace: true });
     }
-  }, [navigate, primaryEnvironmentId, routeMatchesPrimaryEnvironment, threadRef]);
+  }, [navigate, primaryEnvironmentId, savedEnvironmentExists, threadRef]);
 
   // The shared chat layout owns pane mounts and draft promotion. Route guards
   // remain here, but navigation must not create a second view/queue dispatcher.

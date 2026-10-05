@@ -147,6 +147,132 @@ describe("SavedEnvironmentsSettings", () => {
     await expect.element(page.getByText(/secret-pairing-token/u)).not.toBeInTheDocument();
   });
 
+  it("submits login credentials once, clears the password while pending, and closes on success", async () => {
+    let resolveAdd!: (record: SavedEnvironmentRecord) => void;
+    runtimeMocks.addSavedEnvironment.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveAdd = resolve;
+      }),
+    );
+    mounted = await render(<SavedEnvironmentsSettings actions={actions} />);
+    await page.getByRole("button", { name: "Add environment" }).click();
+    await page.getByRole("button", { name: "Host + Login" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabelText("Host").fill("https://pc.example:3775");
+    await dialog.getByLabelText("Username (optional)").fill("PC user");
+    await dialog.getByLabelText("Admin password").fill("admin-secret");
+    const passwordInput = document.querySelector<HTMLInputElement>("#env-password");
+    expect(passwordInput?.type).toBe("password");
+    const submitButton = getDialogButton("dialog", "Add environment");
+    submitButton.click();
+    await vi.waitFor(() => {
+      expect(passwordInput?.value).toBe("");
+      expect(submitButton.disabled).toBe(true);
+    });
+    expect(runtimeMocks.addSavedEnvironment).toHaveBeenCalledExactlyOnceWith({
+      label: "",
+      host: "https://pc.example:3775",
+      username: "PC user",
+      password: "admin-secret",
+    });
+    resolveAdd({
+      environmentId: EnvironmentId.make("pc"),
+      label: "PC",
+      httpBaseUrl: "https://pc.example:3775/",
+      wsBaseUrl: "wss://pc.example:3775/",
+      createdAt: new Date().toISOString(),
+      lastConnectedAt: null,
+    });
+    await vi.waitFor(() => {
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+    });
+  });
+
+  it("sanitizes login failures and requires a fresh password for retry", async () => {
+    runtimeMocks.addSavedEnvironment.mockRejectedValue(
+      new Error("Rejected admin-secret for PC user at https://pc.example/private"),
+    );
+    mounted = await render(<SavedEnvironmentsSettings actions={actions} />);
+    await page.getByRole("button", { name: "Add environment" }).click();
+    await page.getByRole("button", { name: "Host + Login" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabelText("Host").fill("https://pc.example");
+    await dialog.getByLabelText("Admin password").fill("admin-secret");
+    clickDialogButton("dialog", "Add environment");
+    await expect
+      .element(
+        page.getByText(
+          "Could not sign in. Check the server address and admin password, then try again.",
+        ),
+      )
+      .toBeVisible();
+    expect(document.querySelector<HTMLInputElement>("#env-password")?.value).toBe("");
+    expect(document.body.textContent).not.toMatch(/admin-secret|PC user|\/private/);
+    clickDialogButton("dialog", "Add environment");
+    expect(runtimeMocks.addSavedEnvironment).toHaveBeenCalledOnce();
+    await dialog.getByLabelText("Admin password").fill("fresh-secret");
+    clickDialogButton("dialog", "Add environment");
+    await vi.waitFor(() => {
+      expect(runtimeMocks.addSavedEnvironment).toHaveBeenCalledTimes(2);
+    });
+    expect(runtimeMocks.addSavedEnvironment).toHaveBeenLastCalledWith({
+      label: "",
+      host: "https://pc.example",
+      username: "",
+      password: "fresh-secret",
+    });
+  });
+
+  it("discards login and pairing secrets when switching methods or closing", async () => {
+    mounted = await render(<SavedEnvironmentsSettings actions={actions} />);
+    await page.getByRole("button", { name: "Add environment" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabelText("Pairing URL").fill("https://pc.example/pair#token=secret");
+    await page.getByRole("button", { name: "Host + Login" }).click();
+    await dialog.getByLabelText("Admin password").fill("admin-secret");
+    await page.getByRole("button", { name: "Pairing URL", exact: true }).click();
+    await expect.element(dialog.getByLabelText("Pairing URL")).toHaveValue("");
+    await page.getByRole("button", { name: "Host + Login" }).click();
+    await expect.element(dialog.getByLabelText("Admin password")).toHaveValue("");
+    await dialog.getByLabelText("Admin password").fill("second-secret");
+    await dialog.getByRole("button", { name: "Cancel" }).click();
+    await vi.waitFor(() => {
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+    });
+    await page.getByRole("button", { name: "Add environment" }).click();
+    await page.getByRole("button", { name: "Host + Login" }).click();
+    await expect.element(page.getByLabelText("Admin password")).toHaveValue("");
+    expect(runtimeMocks.addSavedEnvironment).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [320, 640],
+    [1100, 780],
+  ])("keeps login actions visible at %s × %s", async (width, height) => {
+    const previous = { width: window.innerWidth, height: window.innerHeight };
+    await page.viewport(width, height);
+    try {
+      mounted = await render(<SavedEnvironmentsSettings actions={actions} />);
+      await page.getByRole("button", { name: "Add environment" }).click();
+      await page.getByRole("button", { name: "Host + Login" }).click();
+      await vi.waitFor(() => {
+        for (const name of ["Cancel", "Add environment"]) {
+          const bounds = getDialogButton("dialog", name).getBoundingClientRect();
+          expect(bounds.top).toBeGreaterThanOrEqual(0);
+          expect(bounds.bottom).toBeLessThanOrEqual(height);
+          expect(bounds.left).toBeGreaterThanOrEqual(0);
+          expect(bounds.right).toBeLessThanOrEqual(width);
+        }
+      });
+      await page.getByRole("dialog").getByRole("button", { name: "Cancel" }).click();
+      await vi.waitFor(() => {
+        expect(document.querySelector('[role="dialog"]')).toBeNull();
+      });
+    } finally {
+      await page.viewport(previous.width, previous.height);
+    }
+  });
+
   it("handles reconnect and remove actions", async () => {
     const environmentId = EnvironmentId.make("env-123");
     useSavedEnvironmentRegistryStore.setState({

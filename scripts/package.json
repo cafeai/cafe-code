@@ -21,6 +21,7 @@
   "devDependencies": {
     "@effect/language-service": "catalog:",
     "@effect/vitest": "catalog:",
+    "@napi-rs/canvas": "1.0.8",
     "typescript": "catalog:",
     "vite": "catalog:",
     "vitest": "catalog:"

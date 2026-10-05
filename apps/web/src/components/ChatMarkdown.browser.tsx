@@ -1,4 +1,5 @@
 import "../index.css";
+import { EnvironmentId } from "@cafecode/contracts";
 
 import { useState } from "react";
 import { page } from "vitest/browser";
@@ -25,6 +26,11 @@ const {
     },
     contextMenu: { show: showContextMenuMock },
   })),
+}));
+
+const workspaceFixture = vi.hoisted(() => ({ environmentId: null as EnvironmentId | null }));
+vi.mock("../environments/workspace", () => ({
+  useWorkspaceEnvironmentId: () => workspaceFixture.environmentId,
 }));
 
 function installDesktopCapabilityStub() {
@@ -82,6 +88,7 @@ import ChatMarkdown, { sanitizeHighlightedCodeHtml } from "./ChatMarkdown";
 
 describe("ChatMarkdown", () => {
   afterEach(() => {
+    workspaceFixture.environmentId = null;
     confirmMock.mockClear();
     openInPreferredEditorMock.mockClear();
     readLocalApiMock.mockClear();
@@ -927,6 +934,26 @@ describe("ChatMarkdown", () => {
         expect(writeText).toHaveBeenCalledWith(filePath);
       });
       expect(openInPreferredEditorMock).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("copies remote file paths even when a local desktop editor is available", async () => {
+    workspaceFixture.environmentId = EnvironmentId.make("remote-pc");
+    const copyText = vi.fn(async () => undefined);
+    installDesktopCapabilityStub();
+    window.desktopBridge!.copyText = copyText;
+    const filePath = "/remote/repo/src/file.ts";
+    const screen = await render(
+      <ChatMarkdown text={`[file.ts](${filePath})`} cwd="/remote/repo" />,
+    );
+    try {
+      await page.getByRole("link", { name: "file.ts", exact: true }).click();
+      await vi.waitFor(() => expect(copyText).toHaveBeenCalledWith(filePath));
+      expect(openInPreferredEditorMock).not.toHaveBeenCalled();
+      expect(revealPathMock).not.toHaveBeenCalled();
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
     } finally {
       await screen.unmount();
     }

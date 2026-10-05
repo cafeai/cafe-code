@@ -20,7 +20,7 @@ import {
   Trash2Icon,
 } from "lucide-react";
 import { useCanGoBack, useNavigate } from "@tanstack/react-router";
-import { usePrimaryEnvironmentId } from "~/environments/primary";
+import { useWorkspaceEnvironmentId } from "~/environments/workspace";
 import { useVirtualDesktops } from "../virtualDesktop/useVirtualDesktops";
 
 import {
@@ -113,7 +113,7 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<SettingsNavGroup> = [
 ];
 
 export function SettingsSidebarNav({ pathname }: { pathname: string }) {
-  const environmentId = usePrimaryEnvironmentId();
+  const environmentId = useWorkspaceEnvironmentId();
   const desktops = useVirtualDesktops(environmentId);
   const navigate = useNavigate();
   const canGoBack = useCanGoBack();

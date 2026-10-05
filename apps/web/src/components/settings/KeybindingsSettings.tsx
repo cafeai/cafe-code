@@ -1,3 +1,4 @@
+import { useWorkspaceEnvironmentId } from "../../environments/workspace";
 import {
   ChevronDownIcon,
   CircleXIcon,
@@ -34,7 +35,7 @@ import { isElectron } from "../../env";
 import { openInPreferredEditor } from "../../editorPreferences";
 import { formatShortcutLabel } from "../../keybindings";
 import { cn } from "../../lib/utils";
-import { ensureLocalApi } from "../../localApi";
+import { ensureWorkspaceApi } from "../../environments/workspaceApi";
 import { getLocalShellCapabilities } from "../../localCapabilities";
 import { useServerKeybindings, useServerKeybindingsConfigPath } from "../../rpc/serverState";
 import { Button } from "../ui/button";
@@ -1064,7 +1065,8 @@ function NewKeybindingTableRow({
 export function KeybindingsSettingsPanel() {
   const keybindings = useServerKeybindings();
   const keybindingsConfigPath = useServerKeybindingsConfigPath();
-  const canOpenLocalEditor = getLocalShellCapabilities().canOpenLocalEditor;
+  const nativeEnvironmentId = useWorkspaceEnvironmentId();
+  const canOpenLocalEditor = getLocalShellCapabilities(nativeEnvironmentId).canOpenLocalEditor;
   const [query, setQuery] = useState("");
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -1123,14 +1125,16 @@ export function KeybindingsSettingsPanel() {
         );
       return;
     }
-    void openInPreferredEditor(ensureLocalApi(), keybindingsConfigPath).catch((error: unknown) => {
-      toastManager.add({
-        title: "Unable to open keybindings file",
-        description:
-          error instanceof Error ? error.message : "The keybindings file was not opened.",
-        type: "error",
-      });
-    });
+    void openInPreferredEditor(ensureWorkspaceApi(), keybindingsConfigPath).catch(
+      (error: unknown) => {
+        toastManager.add({
+          title: "Unable to open keybindings file",
+          description:
+            error instanceof Error ? error.message : "The keybindings file was not opened.",
+          type: "error",
+        });
+      },
+    );
   }, [canOpenLocalEditor, keybindingsConfigPath]);
 
   const saveKeybinding = useCallback((input: ServerUpsertKeybindingInput) => {
@@ -1141,7 +1145,7 @@ export function KeybindingsSettingsPanel() {
       ...(input.when?.trim() ? { when: input.when.trim() } : {}),
       ...(input.replace ? { replace: input.replace } : {}),
     };
-    void ensureLocalApi()
+    void ensureWorkspaceApi()
       .server.upsertKeybinding(payload)
       .then(() => {
         setIsAddingBinding(false);
@@ -1160,7 +1164,7 @@ export function KeybindingsSettingsPanel() {
 
   const removeKeybinding = useCallback((row: KeybindingRow) => {
     setSavingCommand(row.command);
-    void ensureLocalApi()
+    void ensureWorkspaceApi()
       .server.removeKeybinding(rowKeybindingTarget(row))
       .catch((error: unknown) => {
         toastManager.add({

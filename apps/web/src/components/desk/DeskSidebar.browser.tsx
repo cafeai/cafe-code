@@ -34,11 +34,10 @@ vi.mock("../../hooks/useThreadActions", () => ({
     hardDeleteThread: mocks.hardDelete,
   }),
 }));
-vi.mock("../../hooks/useSettings", async (importOriginal) => {
+vi.mock("../../hooks/useSettings", async () => {
   const { DEFAULT_UNIFIED_SETTINGS } = await import("@cafecode/contracts/settings");
   const settings = { ...DEFAULT_UNIFIED_SETTINGS, confirmThreadArchive: true };
   return {
-    ...(await importOriginal<typeof import("../../hooks/useSettings")>()),
     getClientSettings: () => settings,
     useSettings: (select: (value: typeof settings) => unknown) => select(settings),
   };

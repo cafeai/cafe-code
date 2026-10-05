@@ -6,21 +6,29 @@ import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
 import { useCallback } from "react";
 
-import { ensureLocalApi } from "../localApi";
+import { EnvironmentId } from "@cafecode/contracts";
+import { ensureWorkspaceApi } from "../environments/workspaceApi";
+import { readWorkspaceEnvironmentId, useWorkspaceEnvironmentId } from "../environments/workspace";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 
 const TRACE_DIAGNOSTICS_STALE_TIME_MS = 5_000;
 const TRACE_DIAGNOSTICS_IDLE_TTL_MS = 5 * 60_000;
 
-const traceDiagnosticsAtom = Atom.make(
-  Effect.promise(() => ensureLocalApi().server.getTraceDiagnostics()),
-).pipe(
-  Atom.swr({
-    staleTime: TRACE_DIAGNOSTICS_STALE_TIME_MS,
-    revalidateOnMount: true,
-  }),
-  Atom.setIdleTTL(TRACE_DIAGNOSTICS_IDLE_TTL_MS),
-  Atom.withLabel("trace-diagnostics"),
+const traceDiagnosticsAtom = Atom.family((environmentKey: string) =>
+  Atom.make(
+    Effect.promise(() =>
+      ensureWorkspaceApi(
+        environmentKey ? EnvironmentId.make(environmentKey) : null,
+      ).server.getTraceDiagnostics(),
+    ),
+  ).pipe(
+    Atom.swr({
+      staleTime: TRACE_DIAGNOSTICS_STALE_TIME_MS,
+      revalidateOnMount: true,
+    }),
+    Atom.setIdleTTL(TRACE_DIAGNOSTICS_IDLE_TTL_MS),
+    Atom.withLabel(`trace-diagnostics:${environmentKey}`),
+  ),
 );
 
 export interface TraceDiagnosticsState {
@@ -45,16 +53,17 @@ function readTraceDiagnosticsError(
   return formatTraceDiagnosticsError(squashed);
 }
 
-export function refreshTraceDiagnostics(): void {
-  appAtomRegistry.refresh(traceDiagnosticsAtom);
+export function refreshTraceDiagnostics(environmentId = readWorkspaceEnvironmentId()): void {
+  appAtomRegistry.refresh(traceDiagnosticsAtom(environmentId ?? ""));
 }
 
 export function useTraceDiagnostics(): TraceDiagnosticsState {
-  const result = useAtomValue(traceDiagnosticsAtom);
+  const environmentId = useWorkspaceEnvironmentId();
+  const result = useAtomValue(traceDiagnosticsAtom(environmentId ?? ""));
   const data = Option.getOrNull(AsyncResult.value(result));
   const refresh = useCallback(() => {
-    refreshTraceDiagnostics();
-  }, []);
+    refreshTraceDiagnostics(environmentId);
+  }, [environmentId]);
 
   return {
     data,

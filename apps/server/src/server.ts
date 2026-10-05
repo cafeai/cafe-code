@@ -15,6 +15,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { ServerConfig } from "./config.ts";
 import { fileAttachmentRouteLayer } from "./fileAttachmentHttp.ts";
 import { desktopObservationRouteLayer } from "./virtualDesktop/observationHttp.ts";
+import { remoteWorkspaceRouteLayer } from "./remoteWorkspace/http.ts";
 import { desktopPreviewRouteLayer } from "./virtualDesktop/previewHttp.ts";
 import {
   attachmentsRouteLayer,
@@ -362,6 +363,7 @@ export const makeRoutesLayer = Layer.mergeAll(
   fileAttachmentRouteLayer,
   desktopObservationRouteLayer,
   desktopPreviewRouteLayer,
+  remoteWorkspaceRouteLayer,
   brandingSidebarImageServeRouteLayer,
   brandingSidebarImageUploadRouteLayer,
   clientDebugLogRouteLayer,

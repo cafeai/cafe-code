@@ -1,3 +1,8 @@
+vi.mock("~/environments/workspace", () => ({
+  useWorkspaceEnvironmentId: () => (harness.remote ? "test-remote" : "test-local"),
+  useIsSavedRemoteEnvironment: () => harness.remote,
+}));
+vi.mock("~/environments/workspaceApi", () => ({ patchWorkspaceServerConfig: vi.fn() }));
 vi.mock("../../attachments/fileAttachments", () => ({
   fileRequest: vi.fn(
     async () =>
@@ -37,9 +42,13 @@ const harness = vi.hoisted(() => ({
   desktopStatus: vi.fn(),
   settings: null as ServerSettings | null,
   backendUrl: "http://127.0.0.1:3774/",
+  remote: false,
 }));
 
-vi.mock("~/environments/primary", () => ({ usePrimaryEnvironmentId: () => "test-local" }));
+vi.mock("~/environments/primary", () => ({
+  usePrimaryEnvironmentId: () => "test-local",
+  readPrimaryEnvironmentDescriptor: () => ({ environmentId: "test-local" }),
+}));
 vi.mock("~/environments/runtime", () => ({
   getEnvironmentHttpBaseUrl: () => harness.backendUrl,
   requireEnvironmentConnection: () => ({
@@ -98,6 +107,7 @@ describe("MCP settings", () => {
     harness.settings = DEFAULT_SERVER_SETTINGS;
     harness.desktopStatus.mockResolvedValue({ supported: false });
     harness.backendUrl = "http://127.0.0.1:3774/";
+    harness.remote = false;
     harness.getStatus.mockResolvedValue(status);
     harness.updateClient.mockResolvedValue({
       ...status,
@@ -199,37 +209,36 @@ describe("MCP settings", () => {
     expect(harness.desktopStatus).not.toHaveBeenCalled();
   });
 
-  it("keeps installation out of browsers and connections to another environment", async () => {
+  it("keeps installation unavailable for primary browser sessions", async () => {
     delete window.desktopBridge;
     mounted = await mount();
+    await expect
+      .element(page.getByRole("button", { name: "Install Cafe MCP for Codex", exact: true }))
+      .not.toBeInTheDocument();
     await expect
       .element(
         page.getByText(
           "Open this page in the local Cafe Code desktop app to install provider connections.",
+          { exact: true },
         ),
       )
       .toBeVisible();
+    expect(harness.updateClient).not.toHaveBeenCalled();
+  });
+
+  it("uses the server's installation capability for saved remote owners", async () => {
+    harness.remote = true;
+    delete window.desktopBridge;
+    mounted = await mount();
     await expect
       .element(page.getByRole("button", { name: "Install Cafe MCP for Codex", exact: true }))
-      .not.toBeInTheDocument();
-    await expect
-      .element(page.getByRole("heading", { name: "Chat scheduling · built in", exact: true }))
-      .toBeVisible();
+      .toBeEnabled();
     await mounted.unmount();
-    window.desktopBridge = {
-      getLocalEnvironmentBootstrap: () => ({
-        label: "Local",
-        wsBaseUrl: "ws://127.0.0.1:9999/",
-        httpBaseUrl: "http://127.0.0.1:9999/",
-      }),
-    } as DesktopBridge;
+    harness.getStatus.mockResolvedValue({ ...status, canInstall: false });
     mounted = await mount();
     await expect
       .element(page.getByRole("button", { name: "Install Cafe MCP for Codex", exact: true }))
       .not.toBeInTheDocument();
-    await expect
-      .element(page.getByRole("heading", { name: "Chat scheduling · built in", exact: true }))
-      .toBeVisible();
     expect(harness.updateClient).not.toHaveBeenCalled();
   });
 

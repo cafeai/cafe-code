@@ -1,5 +1,6 @@
 import type {
   AuthBearerBootstrapResult,
+  AuthPasswordBootstrapInput,
   AuthSessionState,
   AuthWebSocketTokenResult,
   ExecutionEnvironmentDescriptor,
@@ -30,7 +31,7 @@ function remoteEndpointUrl(httpBaseUrl: string, pathname: string): string {
   return url.toString();
 }
 
-async function fetchRemoteJson<T>(input: {
+export async function fetchRemoteJson<T>(input: {
   readonly httpBaseUrl: string;
   readonly pathname: string;
   readonly method?: "GET" | "POST";
@@ -42,14 +43,19 @@ async function fetchRemoteJson<T>(input: {
   try {
     response = await fetch(requestUrl, {
       method: input.method ?? "GET",
+      // Saved servers authenticate independently of primary/browser cookies.
+      // Never forward a bootstrap POST body through a server-supplied redirect.
+      credentials: "omit",
+      redirect: "error",
+      signal: AbortSignal.timeout(15_000),
       headers: {
         ...(input.body !== undefined ? { "content-type": "application/json" } : {}),
         ...(input.bearerToken ? { authorization: `Bearer ${input.bearerToken}` } : {}),
       },
       ...(input.body !== undefined ? { body: JSON.stringify(input.body) } : {}),
     });
-  } catch (error) {
-    throw new Error("Could not reach the remote Cafe Code server.", { cause: error });
+  } catch {
+    throw new Error("Could not reach the remote Cafe Code server.");
   }
 
   if (!response.ok) {
@@ -59,7 +65,11 @@ async function fetchRemoteJson<T>(input: {
     );
   }
 
-  return (await response.json()) as T;
+  try {
+    return (await response.json()) as T;
+  } catch {
+    throw new Error("The remote Cafe server returned an invalid response.");
+  }
 }
 
 export async function bootstrapRemoteBearerSession(input: {
@@ -72,6 +82,22 @@ export async function bootstrapRemoteBearerSession(input: {
     method: "POST",
     body: {
       credential: input.credential,
+    },
+  });
+}
+
+export async function bootstrapRemotePasswordBearerSession(
+  input: AuthPasswordBootstrapInput & { readonly httpBaseUrl: string },
+): Promise<AuthBearerBootstrapResult> {
+  // Use the bearer endpoint rather than the primary server's cookie login.
+  // Only the resulting session is retained; passwords never enter saved metadata.
+  return fetchRemoteJson<AuthBearerBootstrapResult>({
+    httpBaseUrl: input.httpBaseUrl,
+    pathname: "/api/auth/bootstrap/password/bearer",
+    method: "POST",
+    body: {
+      ...(input.username !== undefined ? { username: input.username } : {}),
+      password: input.password,
     },
   });
 }

@@ -1,3 +1,4 @@
+import { useRemoteDesktopViewer } from "../remoteWorkspace/remoteViewerState";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import {
@@ -7,6 +8,7 @@ import {
   type VirtualDesktopRequest,
 } from "@cafecode/contracts";
 import { getEnvironmentHttpBaseUrl, requireEnvironmentConnection } from "~/environments/runtime";
+import { useIsSavedRemoteEnvironment } from "~/environments/workspace";
 
 export function useVirtualDesktops(
   environmentId: EnvironmentId | null,
@@ -14,6 +16,7 @@ export function useVirtualDesktops(
   live = false,
   enabled = true,
 ) {
+  const remote = useIsSavedRemoteEnvironment(environmentId);
   const client = useQueryClient();
   const [busy, setBusy] = useState(false);
   const [pendingId, setPendingId] = useState<string | null>(null);
@@ -77,7 +80,11 @@ export function useVirtualDesktops(
     /* no matching local client */
   }
   async function connect(id: string) {
-    if (!local || !environmentUrl || busy) return;
+    if (!environmentId || !environmentUrl || busy || (!local && !remote)) return;
+    if (!local) {
+      useRemoteDesktopViewer.setState({ target: { environmentId, id } });
+      return;
+    }
     setBusy(true);
     setPendingId(id);
     setError(null);
@@ -114,5 +121,6 @@ export function useVirtualDesktops(
     change,
     connect,
     local,
+    remote,
   };
 }

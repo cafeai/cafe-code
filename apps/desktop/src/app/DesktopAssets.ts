@@ -49,7 +49,17 @@ const resolveIconPath = Effect.fn("desktop.assets.resolveIconPath")(function* (
 > {
   const fileSystem = yield* FileSystem.FileSystem;
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
-  if (environment.isDevelopment && process.platform === "darwin" && ext === "png") {
+  if (environment.platform === "darwin" && ext === "png") {
+    // Source launches also include a generic Linux PNG. Prefer the inset Mac
+    // resource so `app.dock.setIcon` cannot replace the bundle's correctly sized
+    // ICNS with that full-bleed artwork. Packaged Mac builds stage the same inset
+    // artwork as icon.png and fall back to it below.
+    const macDockIcon = yield* resolveResourcePath("icon-macos.png");
+    if (Option.isSome(macDockIcon)) {
+      return macDockIcon;
+    }
+  }
+  if (environment.isDevelopment && environment.platform === "darwin" && ext === "png") {
     const developmentDockIconPath = environment.developmentDockIconPath;
     const developmentDockIconExists = yield* fileSystem
       .exists(developmentDockIconPath)

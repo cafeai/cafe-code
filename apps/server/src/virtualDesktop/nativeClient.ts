@@ -77,7 +77,10 @@ export function nativeRequest(
     };
     const method =
       typeof request === "object" && request !== null && "method" in request ? request.method : "";
-    const timer = setTimeout(fail, method === "act" ? 45_000 : method === "observe" ? 5000 : 2500);
+    const timer = setTimeout(
+      fail,
+      method === "act" || method === "human-act" ? 45_000 : method === "observe" ? 5000 : 2500,
+    );
     const abort = () => fail();
     signal?.addEventListener("abort", abort, { once: true });
     child.once("error", fail);

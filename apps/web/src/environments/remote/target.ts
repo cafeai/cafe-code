@@ -6,6 +6,14 @@ export interface ResolvedRemotePairingTarget {
   readonly wsBaseUrl: string;
 }
 
+export function resolveRemoteServerTarget(host: string): {
+  readonly httpBaseUrl: string;
+  readonly wsBaseUrl: string;
+} {
+  const url = normalizeRemoteBaseUrl(host);
+  return { httpBaseUrl: toHttpBaseUrl(url), wsBaseUrl: toWsBaseUrl(url) };
+}
+
 const REMOTE_PROTOCOLS = new Set(["http:", "https:", "ws:", "wss:"]);
 
 function validateRemoteBaseUrl(url: URL): URL {
@@ -92,10 +100,8 @@ export function resolveRemotePairingTarget(input: {
     throw new Error("Enter a pairing code.");
   }
 
-  const normalizedHost = normalizeRemoteBaseUrl(host);
   return {
     credential: pairingCode,
-    httpBaseUrl: toHttpBaseUrl(normalizedHost),
-    wsBaseUrl: toWsBaseUrl(normalizedHost),
+    ...resolveRemoteServerTarget(host),
   };
 }

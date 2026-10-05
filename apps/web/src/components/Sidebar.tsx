@@ -62,6 +62,8 @@ import {
   type SidebarThreadSortOrder,
 } from "@cafecode/contracts/settings";
 import { usePrimaryEnvironmentId } from "../environments/primary";
+import { useWorkspaceEnvironmentId, useIsSavedRemoteEnvironment } from "../environments/workspace";
+import { WorkspaceEnvironmentSelector } from "./WorkspaceEnvironmentSelector";
 import { isElectron } from "../env";
 import { APP_STAGE_LABEL, APP_VERSION } from "../branding";
 import {
@@ -3232,13 +3234,16 @@ const SidebarProjectListRow = memo(function SidebarProjectListRow(props: Sidebar
   );
 });
 
-function CafeCodeWordmark() {
+function CafeCodeWordmark({ className }: { className?: string }) {
   const prefix = useSettings((s) => {
     const raw = s.brandWordmarkPrefix?.trim();
     return raw || DEFAULT_BRAND_WORDMARK_PREFIX;
   });
   return (
-    <span aria-label={`${prefix} Code`} className="shrink-0 text-sm text-foreground">
+    <span
+      aria-label={`${prefix} Code`}
+      className={cn("shrink-0 text-sm text-foreground", className)}
+    >
       <span className="font-bold">{prefix}</span>
       <span className="font-medium text-muted-foreground"> Code</span>
     </span>
@@ -3436,14 +3441,21 @@ function SortableProjectItem({
   );
 }
 
-const SidebarChromeHeader = memo(function SidebarChromeHeader({
+export const SidebarChromeHeader = memo(function SidebarChromeHeader({
   isElectron,
 }: {
   isElectron: boolean;
 }) {
+  const { isMobile } = useSidebar();
+  const isMacDesktop = isElectron && !isMobile && isMacPlatform(navigator.platform);
   const wordmark = (
-    <div className="flex min-w-0 flex-1 items-center gap-2">
-      <SidebarTriggerWithUnreadDot />
+    <div
+      className={cn(
+        "flex min-w-0 flex-1 items-center gap-2",
+        isMacDesktop && "@container/sidebar-header",
+      )}
+    >
+      <SidebarTriggerWithUnreadDot className={cn(isMacDesktop && "order-last ml-auto")} />
       <Tooltip>
         <TooltipTrigger
           render={
@@ -3453,9 +3465,19 @@ const SidebarChromeHeader = memo(function SidebarChromeHeader({
             // whereas an <a>/<button> would opt out via `.drag-region a`.
             // On the web it stays a link back to the threads home.
             isElectron ? (
-              <span className="ml-1 flex min-w-0 items-center gap-1">
-                <CafeCodeWordmark />
-                <span className="rounded-full bg-muted/50 px-1.5 py-0.5 text-[8px] font-medium uppercase tracking-[0.18em] text-muted-foreground/60">
+              <span
+                className={cn(
+                  "ml-1 flex min-w-0 items-center gap-1",
+                  isMacDesktop && "ml-0 flex-1 overflow-hidden",
+                )}
+              >
+                <CafeCodeWordmark className={cn(isMacDesktop && "min-w-0 shrink truncate")} />
+                <span
+                  className={cn(
+                    "rounded-full bg-muted/50 px-1.5 py-0.5 text-[8px] font-medium uppercase tracking-[0.18em] text-muted-foreground/60",
+                    isMacDesktop && "shrink-0 @max-[150px]/sidebar-header:hidden",
+                  )}
+                >
                   {APP_STAGE_LABEL}
                 </span>
               </span>
@@ -3924,8 +3946,10 @@ export default function Sidebar() {
   const desk = useDeskStore((state) => state.desk);
   const deskDispatch = useDeskStore((state) => state.dispatch);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const workspaceEnvironmentId = useWorkspaceEnvironmentId();
+  const remoteWorkspace = useIsSavedRemoteEnvironment(workspaceEnvironmentId);
   const primaryEnvironmentBootstrapped = useStore((state) =>
-    selectBootstrapCompleteForEnvironment(state, primaryEnvironmentId),
+    selectBootstrapCompleteForEnvironment(state, workspaceEnvironmentId),
   );
   const bootstrappedEnvironmentIds = useStore(
     useShallow((state) =>
@@ -4157,11 +4181,13 @@ export default function Sidebar() {
           stackedThreadToast({
             type: "error",
             title: "Could not create chat",
-            description: "Reconnect to a compatible local Cafe environment before trying again.",
+            description: remoteWorkspace
+              ? "Reconnect to a compatible Cafe server before trying again."
+              : "Reconnect to a compatible local Cafe environment before trying again.",
           }),
         );
       });
-  }, [clearSelection, handleNewStandaloneChat, isMobile, setOpenMobile]);
+  }, [clearSelection, handleNewStandaloneChat, isMobile, setOpenMobile, remoteWorkspace]);
   const openStandaloneTarget = useCallback(
     (target: ThreadRouteTarget) => {
       deskDispatch({ type: "open", target });
@@ -4257,17 +4283,17 @@ export default function Sidebar() {
     [sidebarThreads],
   );
   const standaloneDrafts = useComposerDraftStore(
-    useShallow((state) => selectStandaloneDraftSessions(state, primaryEnvironmentId)),
+    useShallow((state) => selectStandaloneDraftSessions(state, workspaceEnvironmentId)),
   );
   const standaloneCatalog = useMemo(
     () =>
       buildStandaloneCatalog({
         threads: sidebarThreads,
         drafts: standaloneDrafts,
-        primaryEnvironmentId,
+        primaryEnvironmentId: workspaceEnvironmentId,
         sortOrder: sidebarThreadSortOrder,
       }),
-    [primaryEnvironmentId, sidebarThreads, sidebarThreadSortOrder, standaloneDrafts],
+    [workspaceEnvironmentId, sidebarThreads, sidebarThreadSortOrder, standaloneDrafts],
   );
   const [standaloneCatalogExpanded, setStandaloneCatalogExpanded] = useState(false);
   const sortedProjects = useMemo(() => {
@@ -4681,6 +4707,7 @@ export default function Sidebar() {
   return (
     <>
       <SidebarChromeHeader isElectron={isElectron} />
+      <WorkspaceEnvironmentSelector />
 
       {isOnSettings ? (
         <div className="flex min-h-0 flex-1 flex-col">

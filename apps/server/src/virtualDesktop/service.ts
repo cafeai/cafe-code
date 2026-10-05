@@ -26,6 +26,14 @@ export const DesktopInternalRequest = Schema.Union([
   Schema.Struct({ operation: Schema.Literal("terminate-all") }),
   Schema.Struct({ operation: Schema.Literal("manage"), input: VirtualDesktopRequest }),
   Schema.Struct({ operation: Schema.Literal("preview"), id: VirtualDesktopId }),
+  Schema.Struct({
+    operation: Schema.Literal("remote-viewer"),
+    id: VirtualDesktopId,
+    owner: Schema.String,
+    command: Schema.String,
+    lease: Schema.optionalKey(Schema.String),
+    action: Schema.optionalKey(Schema.Unknown),
+  }),
   Schema.Struct({ operation: Schema.Literal("policy"), policy: Flags }),
   Schema.Struct({
     operation: Schema.Literal("connect"),
@@ -70,6 +78,8 @@ export async function dispatchDesktopRequest(
       return manager.manage(input.input);
     case "preview":
       return manager.preview(input.id, signal);
+    case "remote-viewer":
+      return manager.remoteViewer(input.owner, input.id, input.command, input.lease, input.action);
     case "policy":
       await manager.setPolicy(input.policy);
       return {};

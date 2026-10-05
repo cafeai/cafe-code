@@ -20,7 +20,8 @@ import type {
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 
-import { ensureLocalApi } from "../../localApi";
+import { ensureWorkspaceApi } from "../../environments/workspaceApi";
+import { useWorkspaceEnvironmentId } from "../../environments/workspace";
 import { getLocalShellCapabilities } from "../../localCapabilities";
 import { cn } from "../../lib/utils";
 import { copyTextToClipboard } from "../../lib/copyToClipboard";
@@ -1348,7 +1349,8 @@ function ProviderSupervisorTable({
 export function DiagnosticsSettingsPanel() {
   const observability = useServerObservability();
   const availableEditors = useServerAvailableEditors();
-  const canOpenLocalEditor = getLocalShellCapabilities().canOpenLocalEditor;
+  const environmentId = useWorkspaceEnvironmentId();
+  const canOpenLocalEditor = getLocalShellCapabilities(environmentId).canOpenLocalEditor;
   const [resourceWindowMs, setResourceWindowMs] = useState(15 * 60_000);
   const selectedResourceWindow =
     RESOURCE_HISTORY_WINDOWS.find((option) => option.windowMs === resourceWindowMs) ??
@@ -1411,7 +1413,7 @@ export function DiagnosticsSettingsPanel() {
 
     setIsOpeningLogsDirectory(true);
     setOpenLogsDirectoryError(null);
-    void ensureLocalApi()
+    void ensureWorkspaceApi()
       .shell.openInEditor(logsDirectoryPath, editor)
       .catch((error: unknown) => {
         setOpenLogsDirectoryError(
@@ -1436,7 +1438,7 @@ export function DiagnosticsSettingsPanel() {
       }
 
       setSignalingPid(pid);
-      void ensureLocalApi()
+      void ensureWorkspaceApi()
         .server.signalProcess({ pid, signal })
         .then((result) => {
           if (!result.signaled) {

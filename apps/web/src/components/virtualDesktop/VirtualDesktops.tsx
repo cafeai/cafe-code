@@ -9,7 +9,7 @@ import {
   RefreshCwIcon,
 } from "lucide-react";
 import type { EnvironmentId, ThreadId, VirtualDesktopSnapshot } from "@cafecode/contracts";
-import { usePrimaryEnvironmentId } from "~/environments/primary";
+import { useWorkspaceEnvironmentId } from "~/environments/workspace";
 import { useServerSettings } from "~/rpc/serverState";
 import { useStore } from "~/store";
 import { Button } from "../ui/button";
@@ -62,7 +62,8 @@ function DesktopRow({
       ? state.environmentStateById[environmentId]?.threadShellById[desktop.controllingThreadId]
       : undefined,
   );
-  const canOpen = controls.local && controls.data?.enabled && desktop.state === "ready";
+  const canOpen =
+    (controls.local || controls.remote) && controls.data?.enabled && desktop.state === "ready";
   return (
     <article className="overflow-hidden rounded-xl border border-border bg-card">
       <DesktopPreview
@@ -154,7 +155,13 @@ function DesktopRow({
             size="sm"
             variant="outline"
             disabled={controls.busy || !canOpen}
-            title={!controls.local ? "Open from the local Cafe Linux app" : undefined}
+            title={
+              !controls.local
+                ? controls.remote
+                  ? "View and control this desktop in Cafe"
+                  : "Open from the local Cafe Linux app"
+                : undefined
+            }
             onClick={() => void controls.connect(desktop.id)}
           >
             {controls.pendingId === desktop.id ? "Opening / updating…" : "Open desktop"}
@@ -292,7 +299,9 @@ export function VirtualDesktopList({
       )}
       {!controls.local && (
         <p className="text-xs text-muted-foreground">
-          Manage desktops here. Open a viewer from the Cafe Linux app on this computer.
+          {controls.remote
+            ? "View and control desktops here. The desktop runtime stays on the Linux server."
+            : "Manage desktops here. Open a viewer from the Cafe Linux app on this computer."}
         </p>
       )}
       {controls.error && (
@@ -369,7 +378,7 @@ export function VirtualDesktopsNavigation() {
   ) : null;
 }
 function EnabledVirtualDesktopsNavigation() {
-  const environmentId = usePrimaryEnvironmentId();
+  const environmentId = useWorkspaceEnvironmentId();
   const [open, setOpen] = useState(false);
   const status = useVirtualDesktops(environmentId, null, false);
   if (!status.data?.supported) return null;
@@ -499,7 +508,9 @@ export function DesktopPicker({
           <MenuSeparator />
           {viewing && (
             <MenuItem
-              disabled={controls.busy || !controls.local || viewing.state !== "ready"}
+              disabled={
+                controls.busy || (!controls.local && !controls.remote) || viewing.state !== "ready"
+              }
               onClick={() => void controls.connect(viewing.id)}
             >
               <ArrowUpRightIcon />
@@ -544,7 +555,9 @@ export function DesktopPicker({
           variant="ghost"
           aria-label={`Open desktop: ${viewing.name}`}
           title={`Open ${viewing.name} · ${desktopStatus(viewing)}`}
-          disabled={controls.busy || !controls.local || viewing.state !== "ready"}
+          disabled={
+            controls.busy || (!controls.local && !controls.remote) || viewing.state !== "ready"
+          }
           onClick={() => void controls.connect(viewing.id)}
         >
           <ArrowUpRightIcon className="size-3.5" />

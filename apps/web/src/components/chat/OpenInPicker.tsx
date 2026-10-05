@@ -1,5 +1,6 @@
 import {
   EditorId,
+  type EnvironmentId,
   type ResolvedKeybindingsConfig,
   type TerminalAvailability,
 } from "@cafecode/contracts";
@@ -15,22 +16,28 @@ import { readLocalApi } from "~/localApi";
 import { toastManager } from "../ui/toast";
 import { useChatPane } from "../../chatPaneContext";
 
+import { usePrimaryEnvironmentId } from "../../environments/primary";
+
 function openFailureMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
 export const OpenInPicker = memo(function OpenInPicker({
+  environmentId,
   keybindings,
   availableEditors,
   terminal,
   openInCwd,
 }: {
+  environmentId?: EnvironmentId;
   keybindings: ResolvedKeybindingsConfig;
   availableEditors: ReadonlyArray<EditorId>;
   terminal: TerminalAvailability;
   openInCwd: string | null;
 }) {
   const pane = useChatPane();
+  const primary = usePrimaryEnvironmentId();
+  const remote = Boolean(environmentId && environmentId !== primary);
   const [preferredEditor, setPreferredEditor] = usePreferredEditor(availableEditors);
   const options = useMemo(
     () => resolveEditorOpenOptions(navigator.platform, availableEditors),
@@ -42,7 +49,7 @@ export const OpenInPicker = memo(function OpenInPicker({
   const openInEditor = useCallback(
     (editorId: EditorId | null) => {
       const api = readLocalApi();
-      if (!api || !openInCwd) return;
+      if (remote || !api || !openInCwd) return;
       const editor = editorId ?? preferredEditor;
       if (!editor) return;
       void api.shell.openInEditor(openInCwd, editor).catch((error: unknown) => {
@@ -54,12 +61,12 @@ export const OpenInPicker = memo(function OpenInPicker({
       });
       setPreferredEditor(editor);
     },
-    [preferredEditor, openInCwd, setPreferredEditor],
+    [remote, preferredEditor, openInCwd, setPreferredEditor],
   );
 
   const openTerminal = useCallback(() => {
     const api = readLocalApi();
-    if (!api || !openInCwd || !terminal.available) return;
+    if (remote || !api || !openInCwd || !terminal.available) return;
     void api.shell.openTerminal(openInCwd).catch((error: unknown) => {
       toastManager.add({
         title: `Unable to open ${terminal.label}`,
@@ -67,7 +74,7 @@ export const OpenInPicker = memo(function OpenInPicker({
         type: "error",
       });
     });
-  }, [openInCwd, terminal.available, terminal.label]);
+  }, [remote, openInCwd, terminal.available, terminal.label]);
 
   const openFavoriteEditorShortcutLabel = useMemo(
     () => shortcutLabelForCommand(keybindings, "editor.openFavorite"),
@@ -76,7 +83,7 @@ export const OpenInPicker = memo(function OpenInPicker({
 
   useEffect(() => {
     const handler = (e: globalThis.KeyboardEvent) => {
-      if (!pane.active || !pane.visible || e.defaultPrevented) return;
+      if (remote || !pane.active || !pane.visible || e.defaultPrevented) return;
       const api = readLocalApi();
       if (!isOpenFavoriteEditorShortcut(e, keybindings)) return;
       if (!api || !openInCwd) return;
@@ -93,8 +100,9 @@ export const OpenInPicker = memo(function OpenInPicker({
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [preferredEditor, keybindings, openInCwd, pane.active, pane.visible]);
+  }, [remote, preferredEditor, keybindings, openInCwd, pane.active, pane.visible]);
 
+  if (remote) return null;
   return (
     <Group aria-label="Subscription actions">
       <Button

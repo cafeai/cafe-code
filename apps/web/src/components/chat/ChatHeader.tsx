@@ -119,6 +119,7 @@ export const ChatHeader = memo(function ChatHeader({
         <ConnectionStatusIndicator environmentId={activeThreadEnvironmentId} />
         {showOpenInPicker && (
           <OpenInPicker
+            environmentId={activeThreadEnvironmentId}
             keybindings={keybindings}
             availableEditors={availableEditors}
             terminal={terminal}

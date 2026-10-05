@@ -87,7 +87,7 @@ describe("DesktopEnvironment", () => {
       assert.equal(environment.backendCwd, environment.appRoot);
       assert.equal(
         environment.developmentDockIconPath,
-        path.join(environment.rootDir, "assets", "app-icon", "cafe-code-app-icon-1024.png"),
+        path.join(environment.rootDir, "assets", "app-icon", "cafe-code-app-icon-macos-1024.png"),
       );
       assert.equal(environment.appUserModelId, "com.cafeai.cafecode.dev");
       assert.equal(environment.linuxWmClass, "cafecode-dev");

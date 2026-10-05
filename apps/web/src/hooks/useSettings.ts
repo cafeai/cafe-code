@@ -1,3 +1,4 @@
+import { toastManager } from "../components/ui/toast";
 /**
  * Unified settings hook.
  *
@@ -19,10 +20,17 @@ import {
   UnifiedSettings,
 } from "@cafecode/contracts/settings";
 import { ensureLocalApi } from "~/localApi";
+import {
+  ensureWorkspaceApi,
+  getWorkspaceServerConfig,
+  patchWorkspaceServerConfig,
+} from "~/environments/workspaceApi";
+import { useWorkspaceEnvironmentId } from "~/environments/workspace";
+import { readPrimaryEnvironmentDescriptor } from "~/environments/primary";
 import * as Struct from "effect/Struct";
 import * as Equal from "effect/Equal";
-import { applyClientSettingsPatch } from "@cafecode/shared/clientSettings";
 import { applyServerSettingsPatch } from "@cafecode/shared/serverSettings";
+import { applyClientSettingsPatch } from "@cafecode/shared/clientSettings";
 import {
   applyClientSettingsUpdated,
   applySettingsUpdated,
@@ -122,6 +130,15 @@ function reportSettingsWriteFailure(scope: "server" | "client", error: unknown):
   console.error(`${CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE} ${scope} update failed`, error);
 }
 
+function reportRemoteSettingsWriteFailure(scope: "server" | "client"): void {
+  console.error(`${CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE} ${scope} update failed`);
+  toastManager.add({
+    type: "error",
+    title: "Settings were not saved",
+    description: "Check the selected server connection and owner access before trying again.",
+  });
+}
+
 // ── Key sets for routing patches ─────────────────────────────────────
 
 const SERVER_SETTINGS_KEYS = new Set<string>(Struct.keys(ServerSettings.fields));
@@ -188,6 +205,10 @@ export function useSettings<T = UnifiedSettings>(selector?: (s: UnifiedSettings)
     if (serverConfig === null) {
       return;
     }
+    if (
+      serverConfig.environment.environmentId !== readPrimaryEnvironmentDescriptor()?.environmentId
+    )
+      return;
     void maybeImportLocalClientSettingsToServer().catch((error) => {
       console.error(`${CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE} import failed`, error);
     });
@@ -211,48 +232,93 @@ export function useSettings<T = UnifiedSettings>(selector?: (s: UnifiedSettings)
  * persisted via RPC. Client keys go through client persistence.
  */
 export function useUpdateSettings() {
-  const updateSettings = useCallback((patch: Partial<UnifiedSettings>) => {
-    const { serverPatch, clientPatch } = splitPatch(patch);
-
-    if (Object.keys(serverPatch).length > 0) {
-      const currentServerConfig = getServerConfig();
-      if (currentServerConfig) {
-        applySettingsUpdated(applyServerSettingsPatch(currentServerConfig.settings, serverPatch));
-      }
-      // Fire-and-forget RPC — push will reconcile on success
-      try {
-        void ensureLocalApi()
-          .server.updateSettings(serverPatch)
-          .catch((error) => {
+  const environmentId = useWorkspaceEnvironmentId();
+  const updateSettings = useCallback(
+    (patch: Partial<UnifiedSettings>) => {
+      const { serverPatch, clientPatch } = splitPatch(patch);
+      if (
+        !environmentId ||
+        environmentId === readPrimaryEnvironmentDescriptor()?.environmentId ||
+        environmentId === getServerConfig()?.environment.environmentId
+      ) {
+        // Preserve the primary server's existing optimistic updates, persistence
+        // fallback and failure feedback. Remote behavior is an explicit branch.
+        if (Object.keys(serverPatch).length > 0) {
+          const currentServerConfig = getServerConfig();
+          if (currentServerConfig) {
+            applySettingsUpdated(
+              applyServerSettingsPatch(currentServerConfig.settings, serverPatch),
+            );
+          }
+          // Fire-and-forget RPC — push will reconcile on success
+          try {
+            void ensureLocalApi()
+              .server.updateSettings(serverPatch)
+              .catch((error) => {
+                reportSettingsWriteFailure("server", error);
+              });
+          } catch (error) {
             reportSettingsWriteFailure("server", error);
-          });
-      } catch (error) {
-        reportSettingsWriteFailure("server", error);
-      }
-    }
-
-    if (Object.keys(clientPatch).length > 0) {
-      const currentServerConfig = getServerConfig();
-      if (currentServerConfig) {
-        const nextClientSettings = applyClientSettingsPatch(
-          currentServerConfig.clientSettings,
-          clientPatch,
-        );
-        applyClientSettingsUpdated(nextClientSettings);
-        try {
-          void ensureLocalApi()
-            .server.updateClientSettings(clientPatch)
-            .catch((error) => {
-              reportSettingsWriteFailure("client", error);
-            });
-        } catch (error) {
-          reportSettingsWriteFailure("client", error);
+          }
         }
-      } else {
-        persistClientSettings(applyClientSettingsPatch(getClientSettingsSnapshot(), clientPatch));
+
+        if (Object.keys(clientPatch).length > 0) {
+          const currentServerConfig = getServerConfig();
+          if (currentServerConfig) {
+            const nextClientSettings = applyClientSettingsPatch(
+              currentServerConfig.clientSettings,
+              clientPatch,
+            );
+            applyClientSettingsUpdated(nextClientSettings);
+            try {
+              void ensureLocalApi()
+                .server.updateClientSettings(clientPatch)
+                .catch((error) => {
+                  reportSettingsWriteFailure("client", error);
+                });
+            } catch (error) {
+              reportSettingsWriteFailure("client", error);
+            }
+          } else {
+            persistClientSettings(
+              applyClientSettingsPatch(getClientSettingsSnapshot(), clientPatch),
+            );
+          }
+        }
+        return;
       }
-    }
-  }, []);
+      try {
+        // Capture and validate the saved connection before any optimistic change.
+        const api = ensureWorkspaceApi(environmentId);
+        const current = getWorkspaceServerConfig(environmentId);
+        if (Object.keys(serverPatch).length) {
+          const settings = current ? applyServerSettingsPatch(current.settings, serverPatch) : null;
+          if (settings) patchWorkspaceServerConfig(environmentId, { settings });
+          void api.server.updateSettings(serverPatch).catch(() => {
+            if (
+              current &&
+              settings &&
+              getWorkspaceServerConfig(environmentId)?.settings === settings
+            )
+              patchWorkspaceServerConfig(environmentId, { settings: current.settings });
+            reportRemoteSettingsWriteFailure("server");
+          });
+        }
+        if (current && Object.keys(clientPatch).length) {
+          const clientSettings = applyClientSettingsPatch(current.clientSettings, clientPatch);
+          patchWorkspaceServerConfig(environmentId, { clientSettings });
+          void api.server.updateClientSettings(clientPatch).catch(() => {
+            if (getWorkspaceServerConfig(environmentId)?.clientSettings === clientSettings)
+              patchWorkspaceServerConfig(environmentId, { clientSettings: current.clientSettings });
+            reportRemoteSettingsWriteFailure("client");
+          });
+        }
+      } catch {
+        reportRemoteSettingsWriteFailure("server");
+      }
+    },
+    [environmentId],
+  );
 
   const resetSettings = useCallback(() => {
     updateSettings(DEFAULT_UNIFIED_SETTINGS);

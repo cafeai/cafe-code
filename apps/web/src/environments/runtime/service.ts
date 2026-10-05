@@ -35,12 +35,13 @@ import { providerQueryKeys } from "~/lib/providerReactQuery";
 import { getPrimaryKnownEnvironment } from "../primary";
 import {
   bootstrapRemoteBearerSession,
+  bootstrapRemotePasswordBearerSession,
   fetchRemoteEnvironmentDescriptor,
   fetchRemoteSessionState,
   isRemoteEnvironmentAuthHttpError,
   resolveRemoteWebSocketConnectionUrl,
 } from "../remote/api";
-import { resolveRemotePairingTarget } from "../remote/target";
+import { resolveRemotePairingTarget, resolveRemoteServerTarget } from "../remote/target";
 import {
   getSavedEnvironmentRecord,
   hasSavedEnvironmentRegistryHydrated,
@@ -974,7 +975,7 @@ function getRuntimeErrorFields(error: unknown) {
       /credential.*(?:expired|missing)|missing.*credential/iu.test(error.message));
   return {
     lastError: isAuthError
-      ? "Saved environment credential is missing or expired. Pair it again."
+      ? "Saved environment credential is missing or expired. Add it again to sign in."
       : "Saved environment connection failed.",
     lastErrorAt: new Date().toISOString(),
   } as const;
@@ -1590,7 +1591,7 @@ async function ensureSavedEnvironmentConnection(
             throw error;
           }
           await removeSavedEnvironmentBearerToken(activeRecord.environmentId);
-          throw new Error("Saved environment credential expired. Pair it again.", {
+          throw new Error("Saved environment credential expired. Add it again to sign in.", {
             cause: error,
           });
         }
@@ -1786,12 +1787,29 @@ export async function addSavedEnvironment(input: {
   readonly pairingUrl?: string;
   readonly host?: string;
   readonly pairingCode?: string;
+  readonly username?: string;
+  readonly password?: string;
 }): Promise<SavedEnvironmentRecord> {
-  const resolvedTarget = resolveRemotePairingTarget({
-    ...(input.pairingUrl !== undefined ? { pairingUrl: input.pairingUrl } : {}),
-    ...(input.host !== undefined ? { host: input.host } : {}),
-    ...(input.pairingCode !== undefined ? { pairingCode: input.pairingCode } : {}),
-  });
+  const password = input.password?.trim();
+  if (password !== undefined && !password) {
+    throw new Error("Enter the server admin password.");
+  }
+  if (
+    password !== undefined &&
+    (input.pairingUrl !== undefined || input.pairingCode !== undefined)
+  ) {
+    throw new Error("Choose one remote sign-in method.");
+  }
+  const username = input.username?.trim();
+  const pairingTarget =
+    password === undefined
+      ? resolveRemotePairingTarget({
+          ...(input.pairingUrl !== undefined ? { pairingUrl: input.pairingUrl } : {}),
+          ...(input.host !== undefined ? { host: input.host } : {}),
+          ...(input.pairingCode !== undefined ? { pairingCode: input.pairingCode } : {}),
+        })
+      : null;
+  const resolvedTarget = pairingTarget ?? resolveRemoteServerTarget(input.host ?? "");
   const descriptor = await fetchRemoteEnvironmentDescriptor({
     httpBaseUrl: resolvedTarget.httpBaseUrl,
   });
@@ -1799,10 +1817,18 @@ export async function addSavedEnvironment(input: {
   const registrySnapshot = snapshotSavedEnvironmentRegistry([environmentId]);
   const existingRecord = getSavedEnvironmentRecord(environmentId);
 
-  const bearerSession = await bootstrapRemoteBearerSession({
-    httpBaseUrl: resolvedTarget.httpBaseUrl,
-    credential: resolvedTarget.credential,
-  });
+  // Both bootstrap methods converge on the existing encrypted bearer lifecycle.
+  // Reconnects mint new WebSocket tokens without retaining or replaying passwords.
+  const bearerSession = pairingTarget
+    ? await bootstrapRemoteBearerSession({
+        httpBaseUrl: resolvedTarget.httpBaseUrl,
+        credential: pairingTarget.credential,
+      })
+    : await bootstrapRemotePasswordBearerSession({
+        httpBaseUrl: resolvedTarget.httpBaseUrl,
+        password: password!,
+        ...(username ? { username } : {}),
+      });
 
   const record: SavedEnvironmentRecord = {
     environmentId,

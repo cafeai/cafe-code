@@ -1,4 +1,8 @@
 import {
+  useWorkspaceEnvironmentId,
+  useIsSavedRemoteEnvironment,
+} from "../../environments/workspace";
+import {
   ArchiveIcon,
   ArchiveX,
   CopyIcon,
@@ -67,7 +71,7 @@ import {
   deriveProviderInstanceEntries,
   sortProviderInstanceEntries,
 } from "../../providerInstances";
-import { ensureLocalApi, readLocalApi } from "../../localApi";
+import { ensureWorkspaceApi, readWorkspaceApi } from "../../environments/workspaceApi";
 import { getLocalShellCapabilities } from "../../localCapabilities";
 import { useShallow } from "zustand/react/shallow";
 import { selectProjectsAcrossEnvironments, useStore } from "../../store";
@@ -493,8 +497,8 @@ export function useSettingsRestore(onRestored?: () => void) {
 
   const restoreDefaults = useCallback(async () => {
     if (changedSettingLabels.length === 0) return;
-    const api = readLocalApi();
-    const confirmed = await (api ?? ensureLocalApi()).dialogs.confirm(
+    const api = readWorkspaceApi();
+    const confirmed = await (api ?? ensureWorkspaceApi()).dialogs.confirm(
       ["Restore default settings?", `This will reset: ${changedSettingLabels.join(", ")}.`].join(
         "\n",
       ),
@@ -1118,13 +1122,14 @@ export function ChatSettingsPanel() {
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
   const [isOpeningSystemPromptFile, setIsOpeningSystemPromptFile] = useState(false);
-  const canOpenLocalEditor = getLocalShellCapabilities().canOpenLocalEditor;
+  const nativeEnvironmentId = useWorkspaceEnvironmentId();
+  const canOpenLocalEditor = getLocalShellCapabilities(nativeEnvironmentId).canOpenLocalEditor;
 
   const openSystemPromptFile = useCallback(() => {
     setIsOpeningSystemPromptFile(true);
     void Promise.resolve()
       .then(() => {
-        const api = ensureLocalApi();
+        const api = ensureWorkspaceApi();
         return api.server.openSystemPromptFile().then(async ({ path }) => {
           if (!canOpenLocalEditor) {
             await copyTextToClipboard(path);
@@ -1556,6 +1561,8 @@ export function SystemSettingsPanel() {
 }
 
 export function ProviderSettingsPanel() {
+  const environmentId = useWorkspaceEnvironmentId();
+  const remote = useIsSavedRemoteEnvironment(environmentId);
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
   const serverProviders = useServerProviders();
@@ -1596,7 +1603,7 @@ export function ProviderSettingsPanel() {
     if (refreshingRef.current) return;
     refreshingRef.current = true;
     setIsRefreshingProviders(true);
-    void ensureLocalApi()
+    void ensureWorkspaceApi()
       .server.refreshProviders()
       .catch((error: unknown) => {
         console.warn("Failed to refresh providers", error);
@@ -1623,7 +1630,7 @@ export function ProviderSettingsPanel() {
     }
 
     try {
-      await ensureLocalApi().server.updateProvider({
+      await ensureWorkspaceApi().server.updateProvider({
         provider: candidate.driver,
         instanceId: candidate.instanceId,
       });
@@ -1667,14 +1674,15 @@ export function ProviderSettingsPanel() {
       }
 
       try {
-        const confirmed = await ensureLocalApi().dialogs.confirm(
+        const api = ensureWorkspaceApi();
+        const confirmed = await api.dialogs.confirm(
           `Restart the ${input.displayName} provider runtime?\n\nActive turns for this provider may be interrupted. Future messages will reconnect using saved session state.`,
         );
         if (!confirmed) {
           return;
         }
 
-        const result = await ensureLocalApi().server.restartProviderRuntime({
+        const result = await api.server.restartProviderRuntime({
           instanceId: input.instanceId,
         });
         toastManager.add({
@@ -1727,13 +1735,15 @@ export function ProviderSettingsPanel() {
       }
 
       try {
-        await ensureLocalApi().server.loginProvider({
+        await ensureWorkspaceApi().server.loginProvider({
           instanceId: input.instanceId,
         });
         toastManager.add({
           type: "success",
           title: `${input.displayName} login opened`,
-          description: "Complete the provider login in the PowerShell window, then refresh status.",
+          description: remote
+            ? "Complete provider sign-in in the PowerShell window on the server PC, then refresh status."
+            : "Complete the provider login in the PowerShell window, then refresh status.",
         });
       } catch (error) {
         toastManager.add(
@@ -1757,7 +1767,7 @@ export function ProviderSettingsPanel() {
         });
       }
     },
-    [],
+    [remote],
   );
 
   interface InstanceRow {
@@ -2160,7 +2170,7 @@ export function ArchivedThreadsPanel() {
 
   const handleArchivedThreadContextMenu = useCallback(
     async (threadRef: ScopedThreadRef, position: { x: number; y: number }) => {
-      const api = readLocalApi();
+      const api = readWorkspaceApi();
       if (!api) return;
       const clicked = await api.contextMenu.show(
         [
@@ -2310,7 +2320,7 @@ export function RecentlyDeletedThreadsPanel() {
 
   const handleDeletedThreadContextMenu = useCallback(
     async (threadRef: ScopedThreadRef, position: { x: number; y: number }) => {
-      const api = readLocalApi();
+      const api = readWorkspaceApi();
       if (!api) return;
       const clicked = await api.contextMenu.show(
         [
@@ -2358,7 +2368,7 @@ export function RecentlyDeletedThreadsPanel() {
       return;
     }
 
-    const api = readLocalApi();
+    const api = readWorkspaceApi();
     if (!api) return;
 
     const confirmed = await api.dialogs.confirm(

@@ -5,9 +5,13 @@ export interface LocalShellCapabilities {
   readonly canPickLocalFolder: boolean;
 }
 
-export function getLocalShellCapabilities(): LocalShellCapabilities {
+export function getLocalShellCapabilities(
+  environmentId?: EnvironmentId | null,
+): LocalShellCapabilities {
   const hasDesktopBridge =
-    typeof window !== "undefined" && Boolean(window.desktopBridge || window.nativeApi);
+    typeof window !== "undefined" &&
+    Boolean(window.desktopBridge || window.nativeApi) &&
+    (!environmentId || environmentId === readPrimaryEnvironmentDescriptor()?.environmentId);
   return {
     canOpenLocalEditor: hasDesktopBridge,
     canOpenLocalTerminal: hasDesktopBridge,
@@ -15,3 +19,5 @@ export function getLocalShellCapabilities(): LocalShellCapabilities {
     canPickLocalFolder: hasDesktopBridge,
   };
 }
+import type { EnvironmentId } from "@cafecode/contracts";
+import { readPrimaryEnvironmentDescriptor } from "./environments/primary";

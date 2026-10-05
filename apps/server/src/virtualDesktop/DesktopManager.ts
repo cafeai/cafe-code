@@ -42,6 +42,7 @@ import {
 } from "./swayTools.ts";
 import { boundedSwayResult, describeSwayTree, swaySubtree } from "./swayState.ts";
 import { checkDesktopPrerequisites } from "./prerequisites.ts";
+import { desktopAction, decodeDesktopInput } from "./interactionSchema.ts";
 import { DesktopInteraction, compactWindows } from "./interaction.ts";
 import { desktopToolResult } from "./toolResult.ts";
 import { launchOutcome } from "./launchOutcome.ts";
@@ -97,6 +98,11 @@ export class DesktopManager {
   private closed = false;
   private accessEpoch = 0;
   private previewReads = 0;
+  private remoteViewers = new Map<
+    string,
+    { owner: string; id: string; incarnation: string; epoch: number; touched: number }
+  >();
+  private viewerTimer: ReturnType<typeof setTimeout> | undefined;
   private helper: string;
   private readonly bridgePath: string;
   private readonly supported: boolean;
@@ -683,6 +689,88 @@ export class DesktopManager {
       this.previewReads--;
     }
   }
+  /** A browser owner claims human control explicitly. Epoch/incarnation fencing
+   * rejects stale input after agent/native-viewer takeover, disable or restart. */
+  private scheduleViewerExpiry() {
+    if (this.viewerTimer) return;
+    this.viewerTimer = setTimeout(() => {
+      this.viewerTimer = undefined;
+      void this.serial(async () => {
+        for (const [token, binding] of this.remoteViewers) {
+          if (Date.now() - binding.touched < 30_000) continue;
+          this.remoteViewers.delete(token);
+          const r = this.desktops.get(binding.id);
+          if (!r || r.definition.incarnation !== binding.incarnation) continue;
+          await this.request(r, {
+            method: "human-return-control",
+            controlEpoch: binding.epoch,
+          }).catch(() => undefined);
+        }
+        if (!this.closed && this.remoteViewers.size) this.scheduleViewerExpiry();
+      }).catch(() => undefined);
+    }, 10_000).unref();
+  }
+  async remoteViewer(
+    owner: string,
+    id: string,
+    operation: string,
+    lease?: string,
+    action?: unknown,
+  ) {
+    await this.initialize();
+    return this.serial(async () => {
+      if (this.closed || !this.options.policy.virtualDesktopsEnabled)
+        throw desktopError("feature_disabled", "Desktop viewing is disabled.");
+      const r = this.require(id);
+      if (r.snapshot.state !== "ready") throw desktopError("unavailable", "Desktop is not ready.");
+      const state = await this.request(r, { method: "status" });
+      if (operation === "take-control") {
+        if (this.remoteViewers.size >= 16) throw desktopError("busy", "Too many viewers.");
+        const result = await this.request(r, {
+          method: "human-take-control",
+          controlEpoch: state.controlEpoch,
+        });
+        const token = randomUUID();
+        for (const [key, value] of this.remoteViewers)
+          if (value.id === id) this.remoteViewers.delete(key);
+        this.remoteViewers.set(token, {
+          owner,
+          id,
+          incarnation: r.definition.incarnation,
+          epoch: Number(result.controlEpoch),
+          touched: Date.now(),
+        });
+        this.scheduleViewerExpiry();
+        return { lease: token, resolution: resolution(result) };
+      }
+      const binding = lease ? this.remoteViewers.get(lease) : undefined;
+      if (
+        !binding ||
+        binding.owner !== owner ||
+        binding.id !== id ||
+        binding.incarnation !== r.definition.incarnation ||
+        binding.epoch !== state.controlEpoch ||
+        !state.humanControl
+      ) {
+        if (lease && binding?.owner === owner) this.remoteViewers.delete(lease);
+        throw desktopError(
+          "not_authorized",
+          "Control changed. Take control again before sending input.",
+        );
+      }
+      binding.touched = Date.now();
+      if (operation === "heartbeat") return {};
+      if (operation === "return-control") {
+        this.remoteViewers.delete(lease!);
+        await this.request(r, { method: "human-return-control", controlEpoch: binding.epoch });
+        return {};
+      }
+      if (operation !== "act") throw desktopError("invalid_request", "Invalid viewer operation.");
+      const step = decodeDesktopInput(desktopAction, action);
+      await this.request(r, { method: "human-act", controlEpoch: binding.epoch, ...step });
+      return {};
+    });
+  }
   async connect(
     id: string,
     hostEnvironment: Readonly<Record<string, string>>,
@@ -1218,6 +1306,8 @@ export class DesktopManager {
     });
   }
   async close() {
+    clearTimeout(this.viewerTimer);
+    this.remoteViewers.clear();
     this.closed = true;
     for (const b of this.bindings.values()) await this.revoke(b);
     this.bindings.clear();
