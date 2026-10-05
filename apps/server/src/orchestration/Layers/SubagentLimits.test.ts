@@ -143,6 +143,7 @@ describe("durable subagent policy projections", () => {
         });
         await system.dispatch({
           type: "thread.fork.commit",
+          sourceVersion: await system.read(system.query.getThreadForkSourceVersion(threadId)),
           commandId: CommandId.make("fork-limits"),
           sourceThreadId: threadId,
           targetThreadId: forkId,

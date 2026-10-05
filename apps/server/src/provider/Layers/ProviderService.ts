@@ -1,4 +1,5 @@
 import { ProviderCompactThreadInput } from "@cafecode/contracts";
+import { sameForkWorkspace } from "../sameForkWorkspace.ts";
 /**
  * ProviderServiceLive - Cross-provider orchestration layer.
  *
@@ -12,6 +13,7 @@ import { ProviderCompactThreadInput } from "@cafecode/contracts";
  */
 import {
   EventId,
+  MessageId,
   ModelSelection,
   MaxConcurrentSubagents,
   NonNegativeInt,
@@ -468,6 +470,21 @@ function readPersistedAdditionalDirectories(
     (entry): entry is string => typeof entry === "string" && entry.trim().length > 0,
   );
   return directories.length > 0 ? directories : [];
+}
+
+function readPersistedForkMessageIds(payload: unknown): ReadonlyArray<MessageId> {
+  const value =
+    typeof payload === "object" && payload !== null
+      ? Reflect.get(payload, "forkRetainedMessageIds")
+      : undefined;
+  if (
+    !Array.isArray(value) ||
+    value.length > 2000 ||
+    new Set(value).size !== value.length ||
+    value.some((id) => typeof id !== "string" || id.length === 0 || id.length > 1024)
+  )
+    return [];
+  return value.map((id: string) => MessageId.make(id));
 }
 
 function readPersistedString(
@@ -1918,6 +1935,17 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         yield* directory.getBinding(input.targetThreadId),
       );
       if (existingTarget) {
+        if (
+          input.expectedCwd !== undefined &&
+          !(yield* Effect.promise(() =>
+            sameForkWorkspace(input.expectedCwd!, readPersistedCwd(existingTarget.runtimePayload)),
+          ))
+        ) {
+          return yield* toValidationError(
+            "ProviderService.forkSession",
+            "The prepared fork workspace no longer matches the source context.",
+          );
+        }
         const forkedFromThreadId = readPersistedString(
           existingTarget.runtimePayload,
           "forkedFromThreadId",
@@ -1933,6 +1961,20 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         if (
           forkedFromThreadId !== input.sourceThreadId ||
           forkOperationId !== input.operationId ||
+          (typeof existingTarget.runtimePayload === "object" &&
+          existingTarget.runtimePayload !== null
+            ? (Reflect.get(existingTarget.runtimePayload, "forkSourceVersion") ?? null)
+            : null) !== (input.sourceVersion ?? null) ||
+          JSON.stringify(
+            typeof existingTarget.runtimePayload === "object" &&
+              existingTarget.runtimePayload !== null
+              ? (Reflect.get(existingTarget.runtimePayload, "forkMessageCutoff") ?? null)
+              : null,
+          ) !== JSON.stringify(input.messageCutoff ?? null) ||
+          (input.messageCutoff !== undefined &&
+            !readPersistedForkMessageIds(existingTarget.runtimePayload).includes(
+              input.messageCutoff.sourceMessageId,
+            )) ||
           existingTarget.resumeCursor === null ||
           existingTarget.resumeCursor === undefined
         ) {
@@ -1948,6 +1990,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         return {
           operationId: input.operationId,
           sourceThreadId: input.sourceThreadId,
+          ...(input.messageCutoff ? { messageCutoff: input.messageCutoff } : {}),
+          ...(input.messageCutoff
+            ? { retainedMessageIds: readPersistedForkMessageIds(existingTarget.runtimePayload) }
+            : {}),
           targetThreadId: input.targetThreadId,
           provider: existingTarget.provider,
           providerInstanceId,
@@ -1990,9 +2036,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       const routed = yield* resolveRoutableSession({
         threadId: input.sourceThreadId,
         operation: "ProviderService.forkSession",
-        allowRecovery: true,
+        // Reading a selected-message snapshot must not start a native query:
+        // resume can wake deferred provider work before admission is known.
+        allowRecovery: input.messageCutoff === undefined,
       });
       if (
+        (input.messageCutoff !== undefined && routed.adapter.provider !== "claudeAgent") ||
         routed.adapter.capabilities.sessionFork !== "supported" ||
         routed.adapter.forkSession === undefined ||
         routed.adapter.discardSessionFork === undefined
@@ -2006,6 +2055,15 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       const liveSession = (yield* routed.adapter.listSessions()).find(
         (session) => session.threadId === input.sourceThreadId,
       );
+      if (
+        input.expectedCwd !== undefined &&
+        !(yield* Effect.promise(() => sameForkWorkspace(input.expectedCwd!, liveSession?.cwd)))
+      ) {
+        return yield* toValidationError(
+          "ProviderService.forkSession",
+          "Resume the source in its current workspace before forking.",
+        );
+      }
       if (
         !liveSession ||
         liveSession.status === "connecting" ||
@@ -2028,8 +2086,25 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
       const adapterFork = yield* routed.adapter.forkSession(input);
       if (
+        input.expectedCwd !== undefined &&
+        !(yield* Effect.promise(() => sameForkWorkspace(input.expectedCwd!, adapterFork.cwd)))
+      ) {
+        return yield* toValidationError(
+          "ProviderService.forkSession",
+          "The native fork workspace does not match its prepared source context.",
+        );
+      }
+      if (
         adapterFork.operationId !== input.operationId ||
         adapterFork.sourceThreadId !== input.sourceThreadId ||
+        JSON.stringify(adapterFork.messageCutoff ?? null) !==
+          JSON.stringify(input.messageCutoff ?? null) ||
+        (input.messageCutoff !== undefined &&
+          (!adapterFork.retainedMessageIds ||
+            !adapterFork.retainedMessageIds.includes(input.messageCutoff.sourceMessageId) ||
+            new Set(adapterFork.retainedMessageIds).size !==
+              adapterFork.retainedMessageIds.length ||
+            adapterFork.retainedMessageIds.some((id) => !input.sourceMessageIds?.includes(id)))) ||
         adapterFork.targetThreadId !== input.targetThreadId ||
         adapterFork.provider !== routed.adapter.provider ||
         adapterFork.resumeCursor === null ||
@@ -2055,7 +2130,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         resumeCursor: fork.resumeCursor,
         runtimePayload: {
           forkOperationId: fork.operationId,
+          forkSourceVersion: input.sourceVersion ?? null,
           forkedFromThreadId: fork.sourceThreadId,
+          forkMessageCutoff: fork.messageCutoff ?? null,
+          forkRetainedMessageIds: fork.retainedMessageIds ?? null,
           cwd: fork.cwd ?? null,
           additionalDirectories: fork.additionalDirectories ?? null,
           model: fork.model ?? null,
@@ -2091,11 +2169,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       binding,
     );
     if (
+      binding.status !== "stopped" ||
       providerInstanceId !== input.fork.providerInstanceId ||
       binding.provider !== input.fork.provider ||
       readPersistedString(binding.runtimePayload, "forkOperationId") !== input.fork.operationId ||
       readPersistedString(binding.runtimePayload, "forkedFromThreadId") !==
-        input.fork.sourceThreadId
+        input.fork.sourceThreadId ||
+      JSON.stringify(binding.resumeCursor) !== JSON.stringify(input.fork.resumeCursor) ||
+      readPersistedCwd(binding.runtimePayload) !== input.fork.cwd
     ) {
       return yield* toValidationError(
         "ProviderService.discardSessionFork",

@@ -28,6 +28,7 @@ import { makeClaudeTextGeneration } from "../../textGeneration/ClaudeTextGenerat
 import { ServerConfig } from "../../config.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeClaudeAdapter } from "../Layers/ClaudeAdapter.ts";
+import { claudeCommandsConfigurationKey } from "../claudeCommands.ts";
 import {
   checkClaudeProviderStatus,
   makePendingClaudeProvider,
@@ -214,6 +215,11 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         undefined,
       );
       const adapterOptions = {
+        commandCatalogConfigurationKey: claudeCommandsConfigurationKey({
+          config,
+          environment,
+          enabled,
+        }),
         getNativeVersion: () => observedCliVersion,
         getSubagentConcurrencySupport: () =>
           supportsSubagentConcurrency("claudeAgent", observedCliVersion),

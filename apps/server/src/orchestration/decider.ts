@@ -19,6 +19,7 @@ import {
   requireThreadNotArchived,
 } from "./commandInvariants.ts";
 import { projectEvent } from "./projector.ts";
+import { resolveThreadForkMessageCutoff } from "./threadForkCutoff.ts";
 import { SESSION_LIFECYCLE_SUPERSEDED, sessionLifecycleSnapshot } from "./sessionLifecycle.ts";
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
@@ -359,6 +360,34 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           detail: `Thread '${command.sourceThreadId}' is in the Recycle Bin and cannot be forked.`,
         });
       }
+      if (command.messageCutoff) {
+        const boundary = yield* Effect.try({
+          try: () =>
+            resolveThreadForkMessageCutoff(sourceThread, command.messageCutoff!.sourceMessageId),
+          catch: () =>
+            new OrchestrationCommandInvariantError({
+              commandType: command.type,
+              detail: "The selected fork message is no longer available.",
+            }),
+        });
+        if (
+          JSON.stringify(boundary) !== JSON.stringify(command.messageCutoff) ||
+          !command.retainedMessageIds ||
+          !command.retainedMessageIds.includes(command.messageCutoff.sourceMessageId) ||
+          new Set(command.retainedMessageIds).size !== command.retainedMessageIds.length ||
+          command.retainedMessageIds.some(
+            (id) => !sourceThread.messages.some((message) => message.id === id),
+          ) ||
+          sourceThread.session?.providerName !== "claudeAgent" ||
+          sourceThread.session.providerInstanceId !== command.session.providerInstanceId ||
+          sourceThread.modelSelection.instanceId !== command.session.providerInstanceId
+        ) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: "The selected fork account or message boundary changed.",
+          });
+        }
+      }
       if (
         sourceThread.latestTurn?.state === "running" ||
         sourceThread.session?.status === "starting" ||
@@ -420,6 +449,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           type: "thread.forked" as const,
           payload: {
             sourceThreadId: command.sourceThreadId,
+            ...(command.messageCutoff ? { messageCutoff: command.messageCutoff } : {}),
+            ...(command.retainedMessageIds
+              ? { retainedMessageIds: command.retainedMessageIds }
+              : {}),
             targetThreadId: command.targetThreadId,
             forkedAt: command.createdAt,
           },

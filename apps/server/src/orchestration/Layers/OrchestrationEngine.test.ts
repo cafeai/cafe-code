@@ -53,6 +53,10 @@ import {
   type OrchestrationProjectionPipelineShape,
 } from "../Services/ProjectionPipeline.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import {
+  readThreadForkSourceVersion,
+  threadForkSourceVersionStatement,
+} from "../threadForkSourceVersion.ts";
 import { ServerConfig } from "../../config.ts";
 import { makeRuntimeRecoveryBarrierReader } from "../providerRuntimeRecovery.ts";
 import { seedScheduledFollowUp } from "../scheduledFollowUp.testSupport.ts";
@@ -93,6 +97,7 @@ async function createOrchestrationSystem() {
   return {
     engine,
     sql,
+    snapshotQuery,
     readRuntimeRecoveryBarrier,
     readModel: () => runtime.runPromise(snapshotQuery.getSnapshot()),
     run: <A, E>(effect: Effect.Effect<A, E>) => runtime.runPromise(effect),
@@ -1361,6 +1366,8 @@ describe("OrchestrationEngine", () => {
               threads: [],
               updatedAt: projectionSnapshot.updatedAt,
             }),
+          getThreadForkSourceVersion: () => Effect.succeed(0),
+          getThreadForkMessageCount: () => Effect.succeed(0),
           getSnapshotSequence: () =>
             Effect.succeed({ snapshotSequence: projectionSnapshot.snapshotSequence }),
           getCounts: () => Effect.succeed({ projectCount: 1, threadCount: 1 }),
@@ -2572,6 +2579,167 @@ describe("OrchestrationEngine", () => {
     await system.dispose();
   });
 
+  it("rejects delayed native-fork publication after source or project authority changes", async () => {
+    const system = await createOrchestrationSystem();
+    const source = ThreadId.make("fork-race-source");
+    const project = ProjectId.make("fork-race-project");
+    const createdAt = now();
+    const instanceId = ProviderInstanceId.make("claudeAgent");
+    const dispatch = (command: OrchestrationCommand) => system.run(system.engine.dispatch(command));
+    try {
+      await dispatch({
+        type: "project.create",
+        commandId: CommandId.make("fork-race-project"),
+        projectId: project,
+        title: "Project",
+        workspaceRoot: "/fixture/root",
+        createdAt,
+      });
+      await dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("fork-race-source"),
+        threadId: source,
+        projectId: project,
+        title: "Source",
+        modelSelection: { instanceId, model: "sonnet" },
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdAt,
+      });
+      const [versionSql, versionParameters] = threadForkSourceVersionStatement(
+        system.sql,
+        source,
+      ).compile();
+      const queryPlan = await system.run(
+        system.sql.unsafe<{ detail: string }>(
+          `EXPLAIN QUERY PLAN ${versionSql}`,
+          versionParameters,
+        ),
+      );
+      expect(
+        queryPlan.filter((row) =>
+          row.detail.includes(
+            "SEARCH orchestration_events USING COVERING INDEX idx_orch_events_stream_sequence (aggregate_kind=? AND stream_id=?)",
+          ),
+        ),
+      ).toHaveLength(2);
+      expect(
+        queryPlan.some((row) => /SCAN orchestration_events|USE TEMP B-TREE/.test(row.detail)),
+      ).toBe(false);
+      const mutations: ReadonlyArray<OrchestrationCommand> = [
+        {
+          type: "thread.meta.update",
+          commandId: CommandId.make("fork-race-worktree"),
+          threadId: source,
+          worktreePath: "/fixture/other",
+          branch: "other",
+        },
+        {
+          type: "thread.meta.update",
+          commandId: CommandId.make("fork-race-model"),
+          threadId: source,
+          modelSelection: { instanceId, model: "opus" },
+        },
+        {
+          type: "thread.runtime-mode.set",
+          commandId: CommandId.make("fork-race-runtime"),
+          threadId: source,
+          runtimeMode: "full-access",
+          createdAt,
+        },
+        {
+          type: "thread.interaction-mode.set",
+          commandId: CommandId.make("fork-race-mode"),
+          threadId: source,
+          interactionMode: "plan",
+          createdAt,
+        },
+        {
+          type: "thread.meta.update",
+          commandId: CommandId.make("fork-race-limits"),
+          threadId: source,
+          subagentLimits: { claude: 2 },
+        },
+        {
+          type: "project.meta.update",
+          commandId: CommandId.make("fork-race-project-root"),
+          projectId: project,
+          workspaceRoot: "/fixture/moved",
+        },
+        {
+          type: "project.meta.update",
+          commandId: CommandId.make("fork-race-extra-root"),
+          projectId: project,
+          additionalWorkspaceRoots: ["/fixture/extra"],
+        },
+        {
+          type: "thread.meta.update",
+          commandId: CommandId.make("fork-race-project-detach"),
+          threadId: source,
+          projectId: null,
+        },
+        {
+          type: "thread.turn.start",
+          commandId: CommandId.make("fork-race-prompt"),
+          threadId: source,
+          message: {
+            messageId: MessageId.make("fork-race-prompt"),
+            role: "user",
+            text: "A newer source message",
+            attachments: [],
+          },
+          interactionMode: "default",
+          runtimeMode: "full-access",
+          createdAt,
+        },
+      ];
+      for (const [index, mutation] of mutations.entries()) {
+        const sourceVersion = await system.run(readThreadForkSourceVersion(system.sql, source));
+        await dispatch(mutation);
+        const target = ThreadId.make(`fork-race-target-${index}`);
+        const result = await system.run(
+          system.engine
+            .dispatch({
+              type: "thread.fork.commit",
+              commandId: CommandId.make(`fork-race-commit-${index}`),
+              sourceThreadId: source,
+              targetThreadId: target,
+              sourceVersion,
+              title: "Fork",
+              createdAt,
+              session: {
+                threadId: target,
+                status: "stopped",
+                providerName: "claudeAgent",
+                providerInstanceId: instanceId,
+                runtimeMode: "approval-required",
+                activeTurnId: null,
+                lastError: null,
+                updatedAt: createdAt,
+              },
+            })
+            .pipe(Effect.exit),
+        );
+        expect(result._tag).toBe("Failure");
+        expect((await system.readModel()).threads.some((thread) => thread.id === target)).toBe(
+          false,
+        );
+      }
+      await system.run(system.sql`WITH RECURSIVE entries(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM entries WHERE n < 2001)
+        INSERT INTO projection_thread_messages (message_id, thread_id, turn_id, role, text, attachments_json, is_streaming, created_at, updated_at)
+        SELECT 'old-fork-message-' || n, ${source}, 'old-turn', 'assistant', 'Synthetic', '[]', 0, ${createdAt}, ${createdAt} FROM entries`);
+      expect(await system.run(system.snapshotQuery.getThreadForkMessageCount(source))).toBe(2001);
+      expect(
+        Option.getOrThrow(await system.run(system.snapshotQuery.getThreadDetailById(source)))
+          .messages,
+      ).toHaveLength(2000);
+    } finally {
+      await system.dispose();
+    }
+  });
+
   it("commits a provider-native fork as one same-workspace thread transaction", async () => {
     const system = await createOrchestrationSystem();
     const { engine } = system;
@@ -2643,9 +2811,28 @@ describe("OrchestrationEngine", () => {
         createdAt: "2026-08-21T12:00:00.750Z",
       }),
     );
+    const sourceVersion = await system.run(readThreadForkSourceVersion(system.sql, sourceThreadId));
+    // Other conversations may stream or change while a native fork prepares.
+    // Only events for this source or its project invalidate its authority.
+    await system.run(
+      engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("unrelated-fork-thread"),
+        threadId: ThreadId.make("unrelated-fork-thread"),
+        projectId: null,
+        title: "Unrelated",
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.5" },
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdAt,
+      }),
+    );
     await system.run(
       engine.dispatch({
         type: "thread.fork.commit",
+        sourceVersion,
         commandId: CommandId.make("cmd-native-fork-commit"),
         sourceThreadId,
         targetThreadId,

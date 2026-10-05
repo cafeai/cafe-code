@@ -1923,7 +1923,14 @@ describe("TaskAtriumOverlay", () => {
     const { host, screen } = await mountOverlay();
     try {
       useTaskAtriumStore.getState().setOpen(true);
-      await vi.waitFor(() => expect(overlay()).not.toBeNull());
+      // Base UI transfers initial focus on the next animation frame, after
+      // the popup enters the DOM. Dismiss only after that transfer: otherwise
+      // Escape can close it while the opener still has its original focus,
+      // which does not exercise the no-return-focus contract below.
+      await vi.waitFor(() => {
+        expect(overlay()).not.toBeNull();
+        expect(overlay()?.contains(document.activeElement)).toBe(true);
+      });
       document.activeElement?.dispatchEvent(
         new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
       );

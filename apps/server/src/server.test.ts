@@ -107,6 +107,7 @@ import {
 } from "./provider/Services/ProviderRegistry.ts";
 import { ProviderService, type ProviderServiceShape } from "./provider/Services/ProviderService.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "./provider/providerMaintenance.ts";
+import { claudeCommandsConfigurationKey } from "./provider/claudeCommands.ts";
 import { ServerLifecycleEvents, type ServerLifecycleEventsShape } from "./serverLifecycleEvents.ts";
 import { ServerRuntimeStartup, type ServerRuntimeStartupShape } from "./serverRuntimeStartup.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "./serverSettings.ts";
@@ -953,6 +954,8 @@ const buildAppUnderTest = (options?: {
               updatedAt: "1970-01-01T00:00:00.000Z",
             }),
           getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 0 }),
+          getThreadForkSourceVersion: () => Effect.succeed(0),
+          getThreadForkMessageCount: () => Effect.succeed(0),
           getProjectShellById: (projectId) => {
             const project = makeDefaultOrchestrationReadModel().projects.find(
               (project) => project.id === projectId,
@@ -3047,6 +3050,132 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       );
       assert.equal(calls, 0);
     }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
+  );
+
+  it.effect(
+    "streams only an owner-authorized exact Claude query catalog and refreshes after reconnect",
+    () =>
+      Effect.gen(function* () {
+        const instanceId = ProviderInstanceId.make("claudeAgent");
+        const runtimeId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        const now = "2026-10-05T00:00:00.000Z";
+        const path = yield* Path.Path;
+        const cwd = path.join(process.cwd(), "catalog-worktree");
+        let name = "plugin:Original";
+        let inventoryReads = 0;
+        yield* buildAppUnderTest({
+          layers: {
+            providerService: {
+              listSessions: () =>
+                Effect.sync(() => {
+                  inventoryReads++;
+                  return [
+                    {
+                      threadId: defaultThreadId,
+                      provider: ProviderDriverKind.make("claudeAgent"),
+                      providerInstanceId: instanceId,
+                      subagentRuntimeId: runtimeId,
+                      cwd,
+                      status: "ready" as const,
+                      runtimeMode: "full-access" as const,
+                      createdAt: now,
+                      updatedAt: now,
+                      commandCatalog: { status: "available" as const, commands: [{ name }] },
+                      commandCatalogConfigurationKey: claudeCommandsConfigurationKey({
+                        config: DEFAULT_SERVER_SETTINGS.providers.claudeAgent,
+                        enabled: true,
+                      }),
+                    },
+                  ];
+                }),
+            },
+            projectionSnapshotQuery: {
+              getThreadShellById: (id) =>
+                Effect.succeed(
+                  id === defaultThreadId
+                    ? Option.some(
+                        makeDefaultOrchestrationThreadShell({
+                          worktreePath: cwd,
+                          modelSelection: { instanceId, model: "claude-sonnet-5" },
+                          session: {
+                            threadId: defaultThreadId,
+                            providerName: "claudeAgent",
+                            providerInstanceId: instanceId,
+                            subagentRuntimeId: runtimeId,
+                            status: "ready",
+                            runtimeMode: "full-access",
+                            activeTurnId: null,
+                            lastError: null,
+                            updatedAt: now,
+                          },
+                        }),
+                      )
+                    : Option.none(),
+                ),
+            },
+          },
+        });
+        const ownerCookie = yield* getAuthenticatedSessionCookieHeader();
+        const wsUrl = appendSessionCookieToWsUrl(
+          yield* getWsServerUrl("/ws", { authenticated: false }),
+          ownerCookie,
+        );
+        const input = { threadId: defaultThreadId, instanceId, runtimeId };
+        for (const expected of ["plugin:Original", "plugin:Renamed"]) {
+          name = expected;
+          yield* Effect.scoped(
+            withWsRpcClient(wsUrl, (client) =>
+              Effect.gen(function* () {
+                const result = yield* client[WS_METHODS.serverSubscribeProviderCommands](
+                  input,
+                ).pipe(Stream.take(1), Stream.runCollect);
+                assert.deepEqual(Array.from(result), [
+                  { status: "available", commands: [{ name: expected }] },
+                ]);
+                for (const wrong of [
+                  { ...input, runtimeId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" },
+                  { ...input, instanceId: ProviderInstanceId.make("other-account") },
+                ]) {
+                  assert.deepEqual(
+                    Array.from(
+                      yield* client[WS_METHODS.serverSubscribeProviderCommands](wrong).pipe(
+                        Stream.take(1),
+                        Stream.runCollect,
+                      ),
+                    ),
+                    [{ status: "unavailable", commands: [] }],
+                  );
+                }
+              }),
+            ),
+          );
+        }
+        assert.equal(inventoryReads, 2);
+        const pairing = yield* HttpClient.post("/api/auth/pairing-token", {
+          headers: { cookie: ownerCookie },
+        });
+        const { credential } = (yield* pairing.json) as { credential: string };
+        const guestUrl = appendSessionCookieToWsUrl(
+          yield* getWsServerUrl("/ws", { authenticated: false }),
+          yield* getAuthenticatedSessionCookieHeader(credential),
+        );
+        yield* Effect.scoped(
+          withWsRpcClient(guestUrl, (client) =>
+            Effect.gen(function* () {
+              assert.deepEqual(
+                Array.from(
+                  yield* client[WS_METHODS.serverSubscribeProviderCommands](input).pipe(
+                    Stream.take(1),
+                    Stream.runCollect,
+                  ),
+                ),
+                [{ status: "unavailable", commands: [] }],
+              );
+            }),
+          ),
+        );
+        assert.equal(inventoryReads, 2);
+      }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
   );
 
   it.effect("routes owner usage-reset confirmations only to the mocked provider action", () =>

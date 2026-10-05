@@ -54,6 +54,7 @@ import { createEmptyReadModel, projectEvent } from "../projector.ts";
 import { SESSION_LIFECYCLE_SUPERSEDED } from "../sessionLifecycle.ts";
 import { purgeHardDeletedThreadPersistence } from "../threadHardDelete.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
+import { readThreadForkSourceVersion } from "../threadForkSourceVersion.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
   OrchestrationEngineService,
@@ -532,6 +533,8 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           envelope.command.expectedControlSequence !== undefined
             ? envelope.command
             : undefined;
+        const guardedForkCommand =
+          envelope.command.type === "thread.fork.commit" ? envelope.command : undefined;
         const decide = (scheduledFollowUpVerified = false) =>
           decideOrchestrationCommand({
             command: envelope.command,
@@ -549,12 +552,30 @@ const makeOrchestrationEngine = Effect.gen(function* () {
         // its original revert intent must remain the newest durable control.
         // Defer its decision until that authority is checked under the writer.
         const ordinaryEventBase =
-          scheduledCommand === undefined && guardedRevertCommand === undefined
+          scheduledCommand === undefined &&
+          guardedRevertCommand === undefined &&
+          guardedForkCommand === undefined
             ? yield* decide()
             : undefined;
         const committedCommand = yield* sql
           .withTransaction(
             Effect.gen(function* () {
+              if (guardedForkCommand !== undefined) {
+                // Reserve the SQLite writer before reading exact source and
+                // project authority. This closes same-thread/project races
+                // across both queued commands and other database connections.
+                yield* sql`UPDATE projection_threads SET updated_at = updated_at
+                  WHERE thread_id = ${guardedForkCommand.sourceThreadId}`;
+                if (
+                  (yield* readThreadForkSourceVersion(sql, guardedForkCommand.sourceThreadId)) !==
+                  guardedForkCommand.sourceVersion
+                ) {
+                  return yield* new OrchestrationCommandInvariantError({
+                    commandType: guardedForkCommand.type,
+                    detail: "The source context changed during native fork preparation. Try again.",
+                  });
+                }
+              }
               if (guardedRevertCommand !== undefined) {
                 // A deferred SQLite transaction is not yet a writer. Take the
                 // writer before reading authority so a second connection cannot

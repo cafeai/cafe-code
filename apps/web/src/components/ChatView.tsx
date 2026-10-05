@@ -59,6 +59,7 @@ import { useDesktopDebugEnabled } from "~/lib/desktopDebugState";
 import { readPrimaryEnvironmentDescriptor, usePrimaryEnvironmentId } from "../environments/primary";
 import { readEnvironmentApi } from "../environmentApi";
 import { NativeCodexReview } from "./chat/NativeCodexReview";
+import { MessageForkDialog } from "./chat/MessageForkDialog";
 import { isElectron } from "../env";
 import { readLocalApi } from "../localApi";
 import {
@@ -136,6 +137,11 @@ import { ChevronDownIcon, TriangleAlertIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { newCommandId, newDraftId, newMessageId, newThreadId } from "~/lib/utils";
+import {
+  claimMessageFork,
+  messageForkAdmissionKey,
+  useMessageForkAdmission,
+} from "../lib/messageForkAdmission";
 import { getProviderModelCapabilities, resolveSelectableProvider } from "../providerModels";
 import { useSettings } from "../hooks/useSettings";
 import { getWsConnectionDiagnostics } from "../rpc/wsConnectionState";
@@ -6957,6 +6963,114 @@ export default function ChatView(props: ChatViewProps) {
     void onRevertToTurnCountRef.current(targetTurnCount);
   }, []);
 
+  const [messageForkSelection, setMessageForkSelection] = useState<{
+    environmentId: EnvironmentId;
+    threadId: ThreadId;
+    instanceId: ProviderInstanceId;
+    messageId: MessageId;
+  } | null>(null);
+  const currentForkOwner = useRef({
+    thread: activeThread,
+    foreground: pane.active && pane.visible,
+  });
+  currentForkOwner.current = { thread: activeThread, foreground: pane.active && pane.visible };
+  const forkOwnerMounted = useRef(true);
+  useEffect(() => {
+    forkOwnerMounted.current = true;
+    // A closed pane's late acknowledgement has no navigation authority.
+    return () => {
+      forkOwnerMounted.current = false;
+    };
+  }, []);
+  const isForkingMessage = useMessageForkAdmission((pending) =>
+    activeThread
+      ? pending.has(messageForkAdmissionKey(activeThread.environmentId, activeThread.id))
+      : false,
+  );
+  const onSelectForkMessage = useCallback((messageId: MessageId) => {
+    const { thread, foreground } = currentForkOwner.current;
+    if (
+      !foreground ||
+      !thread ||
+      thread.session?.provider !== "claudeAgent" ||
+      useMessageForkAdmission
+        .getState()
+        .has(messageForkAdmissionKey(thread.environmentId, thread.id))
+    )
+      return;
+    setMessageForkSelection({
+      environmentId: thread.environmentId,
+      threadId: thread.id,
+      instanceId: thread.modelSelection.instanceId,
+      messageId,
+    });
+  }, []);
+  const onForkSelectedMessage = useCallback(
+    async (messageId: MessageId) => {
+      const selection = messageForkSelection;
+      if (!selection || selection.messageId !== messageId)
+        throw new Error("Fork selection changed.");
+      const sourceRef = scopeThreadRef(selection.environmentId, selection.threadId);
+      // Re-read current ownership at the gesture, not the dialog's earlier render.
+      // Provider-native validation remains the authority for historical messages.
+      const source = selectThreadByRef(useStore.getState(), sourceRef);
+      const api = readEnvironmentApi(selection.environmentId);
+      const owner = currentForkOwner.current;
+      if (
+        !forkOwnerMounted.current ||
+        !owner.foreground ||
+        owner.thread?.id !== selection.threadId ||
+        owner.thread.environmentId !== selection.environmentId ||
+        !api ||
+        !source ||
+        source.session?.provider !== "claudeAgent" ||
+        source.modelSelection.instanceId !== selection.instanceId ||
+        !isLatestTurnSettled(source.latestTurn, source.session)
+      )
+        throw new Error("Fork source is unavailable.");
+      const targetThreadId = newThreadId();
+      const release = claimMessageFork(
+        messageForkAdmissionKey(selection.environmentId, selection.threadId),
+      );
+      if (!release) throw new Error("A fork is already pending.");
+      try {
+        await api.orchestration.dispatchCommand({
+          type: "thread.fork",
+          commandId: newCommandId(),
+          sourceThreadId: selection.threadId,
+          sourceMessageId: messageId,
+          targetThreadId,
+          title: truncate(`${source.title} (fork)`),
+          createdAt: new Date().toISOString(),
+        });
+        // A slow response must not navigate a different pane/chat the owner opened
+        // while this operation was in flight. The committed fork remains in Desk.
+        const { thread: current, foreground } = currentForkOwner.current;
+        if (
+          forkOwnerMounted.current &&
+          foreground &&
+          current?.id === selection.threadId &&
+          current.environmentId === selection.environmentId &&
+          current.modelSelection.instanceId === selection.instanceId
+        ) {
+          await navigate({
+            to: "/$environmentId/$threadId",
+            params: {
+              environmentId: selection.environmentId,
+              threadId: targetThreadId,
+            },
+          });
+        }
+      } finally {
+        release();
+      }
+    },
+    [messageForkSelection, navigate],
+  );
+  useEffect(() => {
+    setMessageForkSelection(null);
+  }, [activeThread?.environmentId, activeThread?.id, activeThread?.modelSelection.instanceId]);
+
   // Empty state: no active thread
   useLayoutEffect(() => {
     if (!sharedChatRuntime) return;
@@ -7059,6 +7173,28 @@ export default function ChatView(props: ChatViewProps) {
         />
       </header>
       {props.navigationSlot}
+      {pane.active &&
+      pane.visible &&
+      messageForkSelection &&
+      messageForkSelection.environmentId === activeThread.environmentId &&
+      messageForkSelection.threadId === activeThread.id &&
+      messageForkSelection.instanceId === activeThread.modelSelection.instanceId ? (
+        <MessageForkDialog
+          key={`${activeThread.environmentId}:${activeThread.id}:${activeThread.modelSelection.instanceId}:${messageForkSelection.messageId}`}
+          messageId={messageForkSelection.messageId}
+          accountLabel={activeProviderStatus?.displayName ?? "this Claude account"}
+          busy={isForkingMessage}
+          disabled={
+            activeEnvironmentUnavailable || isWorking || !latestTurnSettled || isRevertingCheckpoint
+          }
+          onClose={() =>
+            setMessageForkSelection((current) =>
+              current === messageForkSelection ? null : current,
+            )
+          }
+          onFork={onForkSelectedMessage}
+        />
+      ) : null}
 
       {/* Error banner */}
       <ProviderStatusBanner status={activeProviderStatus} />
@@ -7094,6 +7230,12 @@ export default function ChatView(props: ChatViewProps) {
               activeThreadEnvironmentId={activeThread.environmentId}
               revertTurnCountByUserMessageId={revertTurnCountByUserMessageId}
               onRevertUserMessage={onRevertUserMessage}
+              onForkMessage={
+                isServerThread && activeThread.session?.provider === "claudeAgent"
+                  ? onSelectForkMessage
+                  : undefined
+              }
+              messageForkDisabled={activeEnvironmentUnavailable || !latestTurnSettled}
               isRevertingCheckpoint={isRevertingCheckpoint}
               onImageExpand={onExpandTimelineImage}
               activeProvider={activeThread.session?.provider ?? null}

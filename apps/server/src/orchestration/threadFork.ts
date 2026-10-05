@@ -11,6 +11,9 @@ import type { ProjectionSnapshotQueryShape } from "./Services/ProjectionSnapshot
 import type { ProviderServiceShape } from "../provider/Services/ProviderService.ts";
 import type { makeStandaloneWorkspaceStore } from "./standaloneWorkspace.ts";
 import { threadHasUnsettledTurnStart } from "./decider.ts";
+import { resolveThreadForkMessageCutoff } from "./threadForkCutoff.ts";
+import type { OrchestrationDispatchError } from "./Errors.ts";
+import { resolveThreadWorkspaceCwd } from "../checkpointing/Utils.ts";
 
 type ThreadForkCommand = Extract<ClientOrchestrationCommand, { readonly type: "thread.fork" }>;
 
@@ -30,19 +33,72 @@ export const dispatchProviderNativeThreadFork = Effect.fn("dispatchProviderNativ
   function* (input: {
     readonly command: ThreadForkCommand;
     readonly orchestrationEngine: Pick<OrchestrationEngineShape, "dispatch">;
-    readonly projectionSnapshotQuery: Pick<ProjectionSnapshotQueryShape, "getThreadDetailById">;
+    readonly projectionSnapshotQuery: Pick<
+      ProjectionSnapshotQueryShape,
+      | "getThreadDetailById"
+      | "getThreadForkSourceVersion"
+      | "getThreadForkMessageCount"
+      | "getProjectShellById"
+    >;
     readonly providerService: Pick<ProviderServiceShape, "forkSession" | "discardSessionFork">;
     readonly standaloneWorkspaces?: Effect.Success<typeof makeStandaloneWorkspaceStore>;
   }) {
+    // Fence the entire persisted source context, including project metadata
+    // outside the thread row. Unrelated conversations do not invalidate this
+    // authority, but source events do, even if they undo an earlier change.
+    const sourceVersion = yield* input.projectionSnapshotQuery.getThreadForkSourceVersion(
+      input.command.sourceThreadId,
+    );
     const source = Option.getOrUndefined(
       yield* input.projectionSnapshotQuery.getThreadDetailById(input.command.sourceThreadId),
     );
+    const projectedMessageCount =
+      input.command.sourceMessageId !== undefined
+        ? yield* input.projectionSnapshotQuery.getThreadForkMessageCount(
+            input.command.sourceThreadId,
+          )
+        : undefined;
+    const project = source?.projectId
+      ? Option.getOrUndefined(
+          yield* input.projectionSnapshotQuery.getProjectShellById(source.projectId),
+        )
+      : undefined;
+    if (
+      (yield* input.projectionSnapshotQuery.getThreadForkSourceVersion(
+        input.command.sourceThreadId,
+      )) !== sourceVersion
+    )
+      return yield* forkDispatchError(
+        "The source context changed while preparing the fork. Try again.",
+      );
     if (!source || source.deletedAt !== null || source.archivedAt !== null) {
       return yield* forkDispatchError("The source thread is unavailable and cannot be forked.");
+    }
+    if (
+      projectedMessageCount !== undefined &&
+      (projectedMessageCount > 2000 || projectedMessageCount !== source.messages.length)
+    ) {
+      return yield* forkDispatchError(
+        "The selected fork cannot prove a complete message boundary for this conversation's retained history.",
+      );
     }
     if (source.latestTurn?.state === "running" || threadHasUnsettledTurnStart(source)) {
       return yield* forkDispatchError("Wait for the current turn to finish before forking.");
     }
+    const messageCutoff =
+      input.command.sourceMessageId === undefined
+        ? undefined
+        : yield* Effect.try({
+            try: () => {
+              if (source.session?.providerName !== "claudeAgent")
+                throw new Error("Selected-message native forks require a Claude conversation.");
+              return resolveThreadForkMessageCutoff(source, input.command.sourceMessageId!);
+            },
+            catch: () =>
+              forkDispatchError(
+                "The selected Claude message has no available persisted fork boundary.",
+              ),
+          });
 
     // A native fork intentionally retains the exact execution context. Bind
     // shared neutral ownership before provider I/O and compensate only this
@@ -51,6 +107,11 @@ export const dispatchProviderNativeThreadFork = Effect.fn("dispatchProviderNativ
     if (source.projectId === null && standalone === undefined) {
       return yield* forkDispatchError("Standalone chat fork ownership is unavailable.");
     }
+    const expectedCwd = standalone
+      ? yield* standalone.readExisting(source.id)
+      : resolveThreadWorkspaceCwd({ thread: source, projects: project ? [project] : [] });
+    if (!expectedCwd)
+      return yield* forkDispatchError("The source workspace is unavailable for native forking.");
     const discardStandaloneOwnership = () =>
       (
         standalone?.discardFork(input.command.targetThreadId, input.command.commandId) ??
@@ -77,13 +138,32 @@ export const dispatchProviderNativeThreadFork = Effect.fn("dispatchProviderNativ
     const fork = yield* input.providerService.forkSession({
       operationId: input.command.commandId,
       sourceThreadId: input.command.sourceThreadId,
+      sourceVersion,
+      expectedCwd,
+      ...(messageCutoff
+        ? { messageCutoff, sourceMessageIds: source.messages.map((message) => message.id) }
+        : {}),
       targetThreadId: input.command.targetThreadId,
       title: input.command.title,
     });
+    if (
+      messageCutoff &&
+      (!fork.retainedMessageIds ||
+        !fork.retainedMessageIds.includes(messageCutoff.sourceMessageId) ||
+        new Set(fork.retainedMessageIds).size !== fork.retainedMessageIds.length ||
+        fork.retainedMessageIds.some((id) => !source.messages.some((message) => message.id === id)))
+    ) {
+      return yield* forkDispatchError(
+        "The provider returned an unbound selected-message fork prefix.",
+      );
+    }
     const commit = {
       type: "thread.fork.commit",
       commandId: input.command.commandId,
       sourceThreadId: input.command.sourceThreadId,
+      sourceVersion,
+      ...(messageCutoff ? { messageCutoff } : {}),
+      ...(fork.retainedMessageIds ? { retainedMessageIds: fork.retainedMessageIds } : {}),
       targetThreadId: input.command.targetThreadId,
       title: input.command.title,
       createdAt: input.command.createdAt,
@@ -103,8 +183,17 @@ export const dispatchProviderNativeThreadFork = Effect.fn("dispatchProviderNativ
     } satisfies OrchestrationCommand;
 
     return yield* input.orchestrationEngine.dispatch(commit).pipe(
-      Effect.onError(() =>
-        input.providerService.discardSessionFork({ fork }).pipe(
+      Effect.catch((error): Effect.Effect<never, OrchestrationDispatchError> => {
+        // dispatch queues work on an independent engine fiber. Cancellation,
+        // defects and persistence failures are NOT proof that its transaction
+        // did not commit. Preserve recovery evidence on every unknown outcome.
+        // Only the engine's explicit pre-commit rejection authorizes deletion.
+        if (
+          error._tag !== "OrchestrationCommandInvariantError" &&
+          error._tag !== "OrchestrationCommandPreviouslyRejectedError"
+        )
+          return Effect.fail(error);
+        return input.providerService.discardSessionFork({ fork }).pipe(
           // Filesystem authority is released only after exact native provider
           // compensation settles successfully. Failure/interruption retains the
           // private durable reference for later ownership reconciliation.
@@ -120,8 +209,9 @@ export const dispatchProviderNativeThreadFork = Effect.fn("dispatchProviderNativ
               // fixed operation metadata, never raw commit/cleanup causes.
             }),
           ),
-        ),
-      ),
+          Effect.andThen(Effect.fail(error)),
+        );
+      }),
     );
   },
 );

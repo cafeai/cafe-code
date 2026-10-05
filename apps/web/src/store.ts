@@ -45,6 +45,7 @@ import { sanitizeThreadErrorMessage } from "./rpc/transportError";
 import { getThreadFromEnvironmentState } from "./threadDerivation";
 import { readTurnConfiguration } from "./turnConfiguration";
 import { subagentLimitsEqual } from "./subagentConcurrency";
+import { threadForkPrefix } from "./lib/threadForkPrefix";
 const isProviderDriverKindValue = Schema.is(ProviderDriverKind);
 
 export interface EnvironmentState {
@@ -2028,7 +2029,15 @@ function applyEnvironmentOrchestrationEvent(
     }
 
     case "thread.forked": {
-      const sourceThread = getThreadFromEnvironmentState(state, event.payload.sourceThreadId);
+      const originalSource = getThreadFromEnvironmentState(state, event.payload.sourceThreadId);
+      const sourceThread =
+        originalSource && event.payload.messageCutoff
+          ? threadForkPrefix(
+              originalSource,
+              event.payload.messageCutoff,
+              event.payload.retainedMessageIds,
+            )
+          : originalSource;
       const targetThread = getThreadFromEnvironmentState(state, event.payload.targetThreadId);
       const targetSummary = state.sidebarThreadSummaryById[event.payload.targetThreadId];
       if (!sourceThread || !targetThread || !targetSummary) {

@@ -36,7 +36,12 @@ export function providerSkillsScopeRevision(input: {
 }): string {
   const explicit = input.settings.providerInstances[input.instanceId];
   const configuration =
-    explicit ?? (input.instanceId === "codex" ? input.settings.providers.codex : undefined);
+    explicit ??
+    (input.instanceId === "codex"
+      ? input.settings.providers.codex
+      : input.instanceId === "claudeAgent"
+        ? input.settings.providers.claudeAgent
+        : undefined);
   return JSON.stringify([
     input.cwd,
     configurationIdentity(configuration),

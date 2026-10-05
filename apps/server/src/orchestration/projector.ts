@@ -39,6 +39,7 @@ import {
 } from "./Schemas.ts";
 import { isStaleProvisionalSessionReplay } from "./sessionLifecycle.ts";
 import { materializedSubagentLimitFields } from "./sessionSubagentLimits.ts";
+import { threadForkPrefix } from "./threadForkCutoff.ts";
 
 type ThreadPatch = Partial<Omit<OrchestrationThread, "id">>;
 const MAX_THREAD_MESSAGES = 2_000;
@@ -463,7 +464,9 @@ export function projectEvent(
           return nextBase;
         }
         const copiedThread = cloneThreadContextForDuplicate({
-          sourceThread,
+          sourceThread: payload.messageCutoff
+            ? threadForkPrefix(sourceThread, payload.messageCutoff, payload.retainedMessageIds)
+            : sourceThread,
           targetThread,
           duplicatedAt: payload.forkedAt,
         });

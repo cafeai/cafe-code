@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -26,8 +27,10 @@ import type {
   SessionMessage,
   SessionStoreEntry,
 } from "@anthropic-ai/claude-agent-sdk";
+import { forkSession as forkClaudeSdkSession } from "@anthropic-ai/claude-agent-sdk";
 import {
   ApprovalRequestId,
+  MessageId,
   ClaudeSettings,
   ProviderDriverKind,
   ProviderItemId,
@@ -73,6 +76,7 @@ class ClaudeAdapter extends Context.Service<ClaudeAdapter, ClaudeAdapterShape>()
 ) {}
 
 class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
+  public supportedCommands?: () => Promise<unknown>;
   private readonly queue: Array<SDKMessage> = [];
   private readonly waiters: Array<{
     readonly resolve: (value: IteratorResult<SDKMessage>) => void;
@@ -567,6 +571,173 @@ describe("Claude project directory encoding", () => {
 });
 
 describe("ClaudeAdapterLive", () => {
+  it.effect(
+    "replaces live commands after add/remove/rename and rejects foreign-session pushes without rebinding",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const initialized = yield* Deferred.make<void>();
+        const catalogs: unknown[] = [];
+        const nativeThreads: string[] = [];
+        yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.gen(function* () {
+            if (event.type === "session.configured" && event.raw?.method === "claude/system/init")
+              yield* Deferred.succeed(initialized, undefined);
+            if (event.type === "session.configured" && event.payload.commandCatalogChanged) {
+              catalogs.push(event);
+              assert.deepEqual(event.payload, { config: {}, commandCatalogChanged: true });
+            }
+            if (event.type === "thread.started" && event.payload.providerThreadId !== undefined)
+              nativeThreads.push(event.payload.providerThreadId);
+          }),
+        ).pipe(Effect.forkScoped);
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        harness.query.emit({
+          type: "system",
+          subtype: "init",
+          session_id: "native-commands",
+          uuid: "init-commands",
+          capabilities: [],
+        } as unknown as SDKMessage);
+        yield* Deferred.await(initialized);
+        const push = (names: string[], session = "native-commands") =>
+          harness.query.emit({
+            type: "system",
+            subtype: "commands_changed",
+            session_id: session,
+            uuid: "commands-change",
+            commands: names.map((name) => ({ name, description: name, argumentHint: "" })),
+          } as unknown as SDKMessage);
+        push(["first"]);
+        push(["first", "second"]);
+        push(["renamed"]);
+        yield* TestClock.adjust(100);
+        assert.deepEqual(
+          (yield* adapter.listSessions())[0]?.commandCatalog?.commands.map(
+            (command) => command.name,
+          ),
+          ["renamed"],
+        );
+        assert.lengthOf(catalogs, 1);
+        push(["foreign"], "unrelated-native-session");
+        yield* TestClock.adjust(100);
+        const afterForeign = (yield* adapter.listSessions())[0];
+        assert.deepEqual(
+          afterForeign?.commandCatalog?.commands.map((command) => command.name),
+          ["renamed"],
+        );
+        assert.deepEqual(nativeThreads, ["native-commands"]);
+        push([]);
+        yield* TestClock.adjust(100);
+        assert.deepEqual((yield* adapter.listSessions())[0]?.commandCatalog, {
+          status: "empty",
+          commands: [],
+        });
+        assert.equal(harness.createInputs.length, 1);
+        assert.lengthOf(harness.query.interruptCalls, 0);
+        assert.equal(harness.query.closeCalls, 0);
+      }).pipe(Effect.scoped, Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect("retains repeated pre-init changes and fences a slower initialization catalog", () => {
+    const harness = makeHarness();
+    let resolveInitial!: (value: unknown) => void;
+    harness.query.supportedCommands = () =>
+      new Promise((resolve) => {
+        resolveInitial = resolve;
+      });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const initialized = yield* Deferred.make<void>();
+      yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        event.type === "session.configured" && event.raw?.method === "claude/system/init"
+          ? Deferred.succeed(initialized, undefined)
+          : Effect.void,
+      ).pipe(Effect.forkScoped);
+      for (const name of ["old", "plugin:Current"])
+        harness.query.emit({
+          type: "system",
+          subtype: "commands_changed",
+          session_id: "preinit-native",
+          uuid: name,
+          commands: [{ name, description: "", argumentHint: "" }],
+        } as unknown as SDKMessage);
+      // Include frames already buffered before the stream fiber is started.
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* TestClock.adjust(100);
+      assert.equal((yield* adapter.listSessions())[0]?.commandCatalog?.status, "unavailable");
+      harness.query.emit({
+        type: "system",
+        subtype: "commands_changed",
+        session_id: "x".repeat(1025),
+        uuid: "oversized-session",
+        commands: [{ name: "must-not-replace-pending" }],
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "init",
+        session_id: "preinit-native",
+        uuid: "init",
+        capabilities: [],
+      } as unknown as SDKMessage);
+      yield* Deferred.await(initialized);
+      resolveInitial([{ name: "stale-init", description: "", argumentHint: "" }]);
+      yield* TestClock.adjust(100);
+      assert.deepEqual(
+        (yield* adapter.listSessions())[0]?.commandCatalog?.commands.map((command) => command.name),
+        ["plugin:Current"],
+      );
+    }).pipe(Effect.scoped, Effect.provide(harness.layer));
+  });
+
+  it.effect(
+    "bounds failing/slow initialization without blocking the session or restoring an old query",
+    () => {
+      const harness = makeHarness({ newQueryPerSession: true });
+      let resolveInitial!: (value: unknown) => void;
+      harness.query.supportedCommands = () =>
+        new Promise((resolve) => {
+          resolveInitial = resolve;
+        });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        assert.equal((yield* adapter.listSessions())[0]?.status, "ready");
+        yield* TestClock.adjust(8_100);
+        assert.deepEqual((yield* adapter.listSessions())[0]?.commandCatalog, {
+          status: "unavailable",
+          commands: [],
+        });
+        yield* adapter.stopSession(THREAD_ID);
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        resolveInitial([{ name: "old-query-private-command" }]);
+        yield* TestClock.adjust(100);
+        assert.deepEqual((yield* adapter.listSessions())[0]?.commandCatalog, {
+          status: "unavailable",
+          commands: [],
+        });
+      }).pipe(Effect.scoped, Effect.provide(harness.layer));
+    },
+  );
+
   for (const toolName of ["WebFetch", "WebSearch", "mcp__test__lookup"]) {
     it.effect(
       `retains detached ${toolName} through response boundaries and settles the original item exactly once`,
@@ -11154,6 +11325,361 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  for (const selectedIndex of [0, 1, 2, 4]) {
+    it.effect(
+      `forks exact selected Claude message ${selectedIndex} inclusively after restart without changing the source`,
+      () => {
+        const homePath = mkdtempSync(path.join(os.tmpdir(), "claude-selected-fork-"));
+        const cwd = path.join(homePath, "workspace");
+        const sessionId = "76000000-0000-4000-8000-000000000001";
+        const ids = Array.from(
+          { length: 5 },
+          (_, index) => `76000000-0000-4000-8000-00000000000${index + 2}`,
+        );
+        const turnIds = [ids[0]!, ids[0]!, ids[0]!, ids[3]!, ids[3]!];
+        const entries = ids.map((uuid, index) => ({
+          type: index === 0 || index === 3 ? "user" : "assistant",
+          uuid,
+          parentUuid: ids[index - 1] ?? null,
+          sessionId,
+          isSidechain: false,
+          message:
+            index === 0 || index === 3
+              ? { role: "user", content: `prompt ${index}` }
+              : { role: "assistant", content: [{ type: "text", text: `answer block ${index}` }] },
+        }));
+        const directory = claudeProjectDirectoryForTest(homePath, cwd);
+        mkdirSync(directory, { recursive: true });
+        const sourcePath = path.join(directory, `${sessionId}.jsonl`);
+        const sourceBytes = entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n";
+        writeFileSync(sourcePath, sourceBytes, { mode: 0o600 });
+        const forkMessageIds = Object.fromEntries(
+          ids.map((nativeId, index) => [
+            `selected-message-${index}`,
+            { nativeId, turnId: turnIds[index], turnCount: index < 3 ? 1 : 2 },
+          ]),
+        );
+        const harness = makeHarness({
+          newQueryPerSession: true,
+          environment: {},
+          cwd,
+          claudeConfig: { homePath },
+          forkNativeSession: forkClaudeSdkSession,
+        });
+        return Effect.gen(function* () {
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => rmSync(homePath, { recursive: true, force: true })),
+          );
+          const adapter = yield* ClaudeAdapter;
+          yield* adapter.startSession({
+            threadId: RESUME_THREAD_ID,
+            cwd,
+            runtimeMode: "full-access",
+            resumeCursor: {
+              threadId: RESUME_THREAD_ID,
+              resume: sessionId,
+              turnCount: 2,
+              forkMessageIds,
+            },
+          });
+          const targetThreadId = ThreadId.make(`selected-target-${selectedIndex}`);
+          const cutoff = {
+            sourceMessageId: MessageId.make(`selected-message-${selectedIndex}`),
+            turnId: TurnId.make(turnIds[selectedIndex]!),
+            retainedTurnCount: selectedIndex < 3 ? 1 : 2,
+            includesCompleteTurn: selectedIndex === 2 || selectedIndex === 4,
+          };
+          const fork = yield* adapter.forkSession!({
+            operationId: `selected-fork-${selectedIndex}`,
+            sourceThreadId: RESUME_THREAD_ID,
+            targetThreadId,
+            title: "Selected branch",
+            messageCutoff: cutoff,
+            sourceMessageIds: ids
+              .map((_, index) => MessageId.make(`selected-message-${index}`))
+              .reverse(),
+          });
+          const cursor = fork.resumeCursor as {
+            resume: string;
+            turnCount: number;
+            forkMessageIds: Record<string, { nativeId: string; turnId: string }>;
+          };
+          assert.equal(cursor.turnCount, cutoff.retainedTurnCount);
+          assert.deepEqual(fork.messageCutoff, cutoff);
+          assert.deepEqual(
+            new Set(fork.retainedMessageIds),
+            new Set(ids.slice(0, selectedIndex + 1).map((_, index) => `selected-message-${index}`)),
+          );
+          assert.equal(readFileSync(sourcePath, "utf8"), sourceBytes);
+          const copied = readFileSync(path.join(directory, `${cursor.resume}.jsonl`), "utf8")
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line) as SessionStoreEntry);
+          assert.deepEqual(
+            copied
+              .filter((entry) => entry.type === "user" || entry.type === "assistant")
+              .map((entry) => (entry.forkedFrom as { messageUuid: string }).messageUuid),
+            ids.slice(0, selectedIndex + 1),
+          );
+          assert.equal(
+            copied.some((entry) => entry.type === "cost-state"),
+            false,
+          );
+          assert.equal(harness.query.closeCalls, 0);
+          assert.equal(harness.query.interruptCalls.length, 0);
+          assert.equal(harness.createInputs.length, 1);
+          // A restarted target uses the durable remapping, including another fork
+          // at the same original selected native block under copied Cafe IDs.
+          yield* adapter.startSession({
+            threadId: targetThreadId,
+            cwd,
+            runtimeMode: "full-access",
+            resumeCursor: cursor,
+          });
+          const second = yield* adapter.forkSession!({
+            operationId: `selected-fork-again-${selectedIndex}`,
+            sourceThreadId: targetThreadId,
+            targetThreadId: ThreadId.make(`selected-target-again-${selectedIndex}`),
+            title: "Second branch",
+            messageCutoff: {
+              ...cutoff,
+              sourceMessageId: MessageId.make(`copy:${targetThreadId}:${cutoff.sourceMessageId}`),
+              turnId: TurnId.make(`copy:${targetThreadId}:${cutoff.turnId}`),
+            },
+            sourceMessageIds: fork.retainedMessageIds!.map((id) =>
+              MessageId.make(`copy:${targetThreadId}:${id}`),
+            ),
+          });
+          assert.notEqual((second.resumeCursor as { resume: string }).resume, cursor.resume);
+          assert.equal(readFileSync(sourcePath, "utf8"), sourceBytes);
+          if (selectedIndex === 2) {
+            const wholeThreadId = ThreadId.make("whole-then-selected");
+            const whole = yield* adapter.forkSession!({
+              operationId: "whole-before-selected",
+              sourceThreadId: RESUME_THREAD_ID,
+              targetThreadId: wholeThreadId,
+              title: "Whole branch",
+            });
+            yield* adapter.startSession({
+              threadId: wholeThreadId,
+              cwd,
+              runtimeMode: "full-access",
+              resumeCursor: whole.resumeCursor,
+            });
+            const selectedAfterWhole = yield* adapter.forkSession!({
+              operationId: "selected-after-whole",
+              sourceThreadId: wholeThreadId,
+              targetThreadId: ThreadId.make("selected-after-whole"),
+              title: "Selected after whole fork",
+              messageCutoff: {
+                ...cutoff,
+                sourceMessageId: MessageId.make(`copy:${wholeThreadId}:${cutoff.sourceMessageId}`),
+                turnId: TurnId.make(`copy:${wholeThreadId}:${cutoff.turnId}`),
+              },
+              sourceMessageIds: ids.map((_, index) =>
+                MessageId.make(`copy:${wholeThreadId}:selected-message-${index}`),
+              ),
+            });
+            assert.equal(selectedAfterWhole.retainedMessageIds?.length, 3);
+            assert.equal(readFileSync(sourcePath, "utf8"), sourceBytes);
+          }
+        }).pipe(Effect.provide(harness.layer));
+      },
+    );
+  }
+
+  it.effect(
+    "refuses selected Claude forks for unmapped, wrong-turn, compacted, active and moving sources",
+    () => {
+      const homePath = mkdtempSync(path.join(os.tmpdir(), "claude-selected-fork-refusal-"));
+      const cwd = path.join(homePath, "workspace");
+      const sessionId = "77000000-0000-4000-8000-000000000001";
+      const nativeId = "77000000-0000-4000-8000-000000000002";
+      const directory = claudeProjectDirectoryForTest(homePath, cwd);
+      mkdirSync(directory, { recursive: true });
+      const sourcePath = path.join(directory, `${sessionId}.jsonl`);
+      const bytes =
+        JSON.stringify({
+          type: "user",
+          uuid: nativeId,
+          parentUuid: null,
+          sessionId,
+          isSidechain: false,
+          message: { role: "user", content: "retained source" },
+        }) + "\n";
+      writeFileSync(sourcePath, bytes, { mode: 0o600 });
+      let nativeCalls = 0;
+      const harness = makeHarness({
+        environment: {},
+        cwd,
+        claudeConfig: { homePath },
+        forkNativeSession: async (id, options) => {
+          nativeCalls += 1;
+          // A background writer waking between admission and publication must
+          // invalidate the snapshot, without interrupting its source query.
+          writeFileSync(
+            sourcePath,
+            bytes + JSON.stringify({ type: "system", subtype: "notification" }) + "\n",
+          );
+          return forkClaudeSdkSession(id, options);
+        },
+      });
+      return Effect.gen(function* () {
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => rmSync(homePath, { recursive: true, force: true })),
+        );
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: RESUME_THREAD_ID,
+          cwd,
+          runtimeMode: "full-access",
+          resumeCursor: {
+            threadId: RESUME_THREAD_ID,
+            resume: sessionId,
+            turnCount: 1,
+            forkMessageIds: {
+              exact: { nativeId, turnId: nativeId, turnCount: 1 },
+              compacted: {
+                nativeId: "77000000-0000-4000-8000-000000000099",
+                turnId: nativeId,
+                turnCount: 1,
+              },
+            },
+          },
+        });
+        for (const [messageId, turnId] of [
+          ["unmapped", nativeId],
+          ["exact", "wrong-turn"],
+          ["compacted", nativeId],
+          ["exact", nativeId],
+        ]) {
+          const result = yield* adapter.forkSession!({
+            operationId: `refuse-${messageId}-${turnId}`,
+            sourceThreadId: RESUME_THREAD_ID,
+            targetThreadId: ThreadId.make("selected-refused"),
+            title: "Refused",
+            sourceMessageIds: [MessageId.make(messageId!)],
+            messageCutoff: {
+              sourceMessageId: MessageId.make(messageId!),
+              turnId: TurnId.make(turnId!),
+              retainedTurnCount: 1,
+              includesCompleteTurn: false,
+            },
+          }).pipe(Effect.flip);
+          assert.equal(result._tag, "ProviderAdapterValidationError");
+        }
+        assert.equal(nativeCalls, 1);
+        assert.equal(harness.query.closeCalls, 0);
+        assert.equal(harness.query.interruptCalls.length, 0);
+        const started = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "task.started"),
+          Stream.runHead,
+          Effect.forkChild,
+        );
+        harness.query.emit({
+          type: "system",
+          subtype: "task_started",
+          task_id: "late-fork-child",
+          tool_use_id: "late-fork-tool",
+          task_type: "local_agent",
+          description: "Still working",
+          session_id: sessionId,
+          uuid: "77000000-0000-4000-8000-000000000098",
+        } as unknown as SDKMessage);
+        yield* Fiber.join(started);
+        const active = yield* adapter.forkSession!({
+          operationId: "active-child-refusal",
+          sourceThreadId: RESUME_THREAD_ID,
+          targetThreadId: ThreadId.make("active-refused"),
+          title: "Refused",
+          sourceMessageIds: [MessageId.make("exact")],
+          messageCutoff: {
+            sourceMessageId: MessageId.make("exact"),
+            turnId: TurnId.make(nativeId),
+            retainedTurnCount: 1,
+            includesCompleteTurn: false,
+          },
+        }).pipe(Effect.flip);
+        assert.equal(active._tag, "ProviderAdapterValidationError");
+        assert.equal(nativeCalls, 1);
+        assert.equal(harness.query.closeCalls, 0);
+        assert.equal(harness.query.interruptCalls.length, 0);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect(
+    "persists distinct native wrapper cutoffs for multiple assistant blocks in one Cafe turn",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "full-access" });
+        const turn = yield* adapter.sendTurn({
+          threadId: THREAD_ID,
+          messageId: MessageId.make("mapped-user"),
+          input: "hello",
+        });
+        const completedFiber = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "turn.completed"),
+          Stream.runHead,
+          Effect.forkChild,
+        );
+        const sessionId = "78000000-0000-4000-8000-000000000001";
+        const nativeIds = [
+          "78000000-0000-4000-8000-000000000002",
+          "78000000-0000-4000-8000-000000000003",
+        ];
+        for (const [index, uuid] of nativeIds.entries())
+          harness.query.emit({
+            type: "assistant",
+            session_id: sessionId,
+            uuid,
+            parent_tool_use_id: null,
+            message: {
+              id: "one-shared-native-api-message",
+              content: [{ type: "text", text: `separate block ${index}` }],
+            },
+          } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          errors: [],
+          session_id: sessionId,
+          uuid: "78000000-0000-4000-8000-000000000004",
+        } as unknown as SDKMessage);
+        const completed = yield* Fiber.join(completedFiber);
+        assert.equal(completed._tag, "Some");
+        if (completed._tag !== "Some" || completed.value.type !== "turn.completed") return;
+        const cursor = (
+          completed.value.payload as unknown as {
+            resumeCursor: {
+              forkMessageIds: Record<
+                string,
+                { nativeId: string; turnId: string; turnCount: number }
+              >;
+            };
+          }
+        ).resumeCursor;
+        assert.deepEqual(cursor.forkMessageIds["mapped-user"], {
+          nativeId: turn.turnId,
+          turnId: turn.turnId,
+          turnCount: 1,
+        });
+        const assistants = Object.entries(cursor.forkMessageIds).filter(([key]) =>
+          key.startsWith("assistant:"),
+        );
+        assert.equal(assistants.length, 2);
+        assert.deepEqual(
+          assistants.map(([, value]) => value.nativeId),
+          nativeIds,
+        );
+        assert.isTrue(assistants.every(([, value]) => value.turnId === turn.turnId));
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
   it.effect("forks and deletes a same-workspace Claude transcript through the SDK store", () => {
     const homePath = mkdtempSync(path.join(os.tmpdir(), "claude-native-fork-home-"));
     const cwd = path.join(homePath, "workspace");
@@ -11167,6 +11693,7 @@ describe("ClaudeAdapterLive", () => {
     writeFileSync(
       sourcePath,
       `${JSON.stringify({ type: "user", uuid: "550e8400-e29b-41d4-a716-446655440012" })}\n`,
+      { mode: 0o600 },
     );
 
     let observedTitle: string | undefined;
@@ -11231,21 +11758,132 @@ describe("ClaudeAdapterLive", () => {
       assert.equal(harness.createInputs[1]?.options.resume, targetSessionId);
       assert.equal(harness.createInputs[1]?.options.env?.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS, "7");
       assert.equal(harness.createInputs[0]?.options.env?.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS, "7");
+      const publication = (
+        fork.resumeCursor as {
+          forkPublication: { configurationDirectory: string; commitment: string };
+        }
+      ).forkPublication;
+      assert.match(publication.commitment, /^[a-f0-9]{64}$/);
       assert.deepEqual(fork.resumeCursor, {
         threadId: ThreadId.make("thread-claude-fork-target"),
         resume: targetSessionId,
         turnCount: 3,
+        forkPublication: publication,
       });
       assert.equal(existsSync(targetPath), true);
       if (process.platform !== "win32") {
         assert.equal(statSync(targetPath).mode & 0o777, 0o600);
       }
 
+      assert.equal((yield* adapter.discardSessionFork!(fork).pipe(Effect.result))._tag, "Failure");
+      assert.equal(existsSync(targetPath), true);
+      yield* adapter.stopSession(fork.targetThreadId);
       yield* adapter.discardSessionFork!(fork);
       assert.equal(existsSync(targetPath), false);
       assert.equal(existsSync(sourcePath), true);
     }).pipe(Effect.provide(harness.layer));
   });
+
+  for (const replacement of ["file", "namespace", "profile"] as const) {
+    it.effect(
+      `preserves a Claude fork when its compensation ${replacement} identity changes`,
+      () => {
+        const root = mkdtempSync(path.join(os.tmpdir(), "claude-fork-compensation-"));
+        const homePath = path.join(root, "original-profile");
+        const cwd = path.join(root, "workspace");
+        const sourceSessionId = "59000000-0000-4000-8000-000000000001";
+        const targetSessionId = "59000000-0000-4000-8000-000000000002";
+        const projectKey = claudeProjectDirectoryName(path, cwd);
+        const directory = claudeProjectDirectoryForTest(homePath, cwd);
+        const targetPath = path.join(directory, `${targetSessionId}.jsonl`);
+        const sourcePath = path.join(directory, `${sourceSessionId}.jsonl`);
+        const contents = `${JSON.stringify({ type: "user", uuid: "59000000-0000-4000-8000-000000000003" })}\n`;
+        mkdirSync(directory, { recursive: true });
+        writeFileSync(sourcePath, contents, { mode: 0o600 });
+        const deleteNativeSession: NonNullable<
+          ClaudeAdapterLiveOptions["deleteNativeSession"]
+        > = async (sessionId, options) => {
+          const store = options.sessionStore;
+          assert.isDefined(store);
+          await store.delete!({ projectKey, sessionId });
+        };
+        const harness = makeHarness({
+          environment: {},
+          cwd,
+          claudeConfig: { homePath },
+          deleteNativeSession,
+          forkNativeSession: async (_sessionId, options) => {
+            const store = options.sessionStore;
+            assert.isDefined(store);
+            await store.append(
+              { projectKey, sessionId: targetSessionId },
+              (await store.load({ projectKey, sessionId: sourceSessionId }))!,
+            );
+            return { sessionId: targetSessionId };
+          },
+        });
+        return Effect.gen(function* () {
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => rmSync(root, { recursive: true, force: true })),
+          );
+          const adapter = yield* ClaudeAdapter;
+          yield* adapter.startSession({
+            threadId: RESUME_THREAD_ID,
+            cwd,
+            runtimeMode: "full-access",
+            resumeCursor: { resume: sourceSessionId, turnCount: 1 },
+          });
+          const fork = yield* adapter.forkSession!({
+            operationId: `cleanup-${replacement}`,
+            sourceThreadId: RESUME_THREAD_ID,
+            targetThreadId: ThreadId.make("cleanup-target"),
+            title: "Cleanup fixture",
+          });
+          let preservedPath = targetPath;
+          if (replacement === "namespace") {
+            renameSync(directory, `${directory}-original`);
+            mkdirSync(directory);
+            writeFileSync(targetPath, contents, { mode: 0o600 });
+          } else if (replacement === "file") {
+            renameSync(targetPath, `${targetPath}.original`);
+            writeFileSync(targetPath, contents, { mode: 0o600 });
+          }
+          const result =
+            replacement === "profile"
+              ? yield* Effect.gen(function* () {
+                  const otherHome = path.join(root, "replacement-profile");
+                  const otherDirectory = claudeProjectDirectoryForTest(otherHome, cwd);
+                  mkdirSync(otherDirectory, { recursive: true });
+                  preservedPath = path.join(otherDirectory, `${targetSessionId}.jsonl`);
+                  writeFileSync(preservedPath, contents, { mode: 0o600 });
+                  const replacementHarness = makeHarness({
+                    environment: {},
+                    cwd,
+                    claudeConfig: { homePath: otherHome },
+                    deleteNativeSession,
+                  });
+                  return yield* Effect.gen(function* () {
+                    return yield* (yield* ClaudeAdapter).discardSessionFork!(fork).pipe(
+                      Effect.result,
+                    );
+                  }).pipe(Effect.provide(replacementHarness.layer));
+                })
+              : yield* adapter.discardSessionFork!(fork).pipe(Effect.result);
+          assert.equal(result._tag, "Failure");
+          assert.equal(readFileSync(preservedPath, "utf8"), contents);
+          assert.equal(
+            readFileSync(
+              replacement === "namespace"
+                ? path.join(`${directory}-original`, `${sourceSessionId}.jsonl`)
+                : sourcePath,
+              "utf8",
+            ),
+            contents,
+          );
+        }).pipe(Effect.provide(harness.layer));
+      },
+    );
+  }
 
   it.effect("refuses to overwrite a symlinked Claude fork transcript", () => {
     const homePath = mkdtempSync(path.join(os.tmpdir(), "claude-native-fork-symlink-home-"));
@@ -11258,7 +11896,7 @@ describe("ClaudeAdapterLive", () => {
     const targetPath = path.join(projectDirectory, `${targetSessionId}.jsonl`);
     const victimPath = path.join(homePath, "victim.txt");
     mkdirSync(projectDirectory, { recursive: true });
-    writeFileSync(sourcePath, `${JSON.stringify({ type: "user" })}\n`);
+    writeFileSync(sourcePath, `${JSON.stringify({ type: "user" })}\n`, { mode: 0o600 });
     writeFileSync(victimPath, "do not overwrite");
     try {
       symlinkSync(victimPath, targetPath);

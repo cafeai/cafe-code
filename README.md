@@ -157,6 +157,7 @@ notifications, limits, and recovery behavior.
 Codex supports [workspace-scoped skill discovery and advertised service tiers](docs/codex-model-and-skill-picker.md),
 plus an explicit [native code-review action](docs/codex-native-review.md).
 Qualified Claude sessions support [Now / Next / Later delivery and individual task controls](docs/claude-task-controls.md).
+Claude also supports [forking from a selected message and live slash-command suggestions](docs/claude-conversation-actions.md).
 Controls preserve the selected account and native permission boundaries; missing
 capabilities fail visibly instead of silently changing providers or paid tiers.
 See [usage statistics](docs/usage-statistics.md) for the limits of prospective

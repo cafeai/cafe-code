@@ -40,7 +40,11 @@ import { useCommandPaletteStore } from "../commandPaletteStore";
 import { createDeskState, deskTabKey } from "../deskModel";
 import { useDeskStore } from "../deskStore";
 import { useComposerDraftStore, DraftId } from "../composerDraftStore";
-import { __resetEnvironmentApiOverridesForTests } from "../environmentApi";
+import {
+  __resetEnvironmentApiOverridesForTests,
+  __setEnvironmentApiOverrideForTests,
+  readEnvironmentApi,
+} from "../environmentApi";
 import { isMacPlatform } from "../lib/utils";
 import { resetSourceControlDiscoveryStateForTests } from "../lib/sourceControlDiscoveryState";
 import { __resetLocalApiForTests } from "../localApi";
@@ -8060,6 +8064,208 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       return queue;
     };
 
+    it("does not let a late message-fork acknowledgement navigate an inactive mounted pane", async () => {
+      const initial = createSnapshotForTargetUser({
+        targetMessageId: MessageId.make("desk-fork-source"),
+        targetText: "Fork source",
+        provider: "claudeAgent",
+      });
+      const snapshot = withSecondThread({
+        ...initial,
+        threads: initial.threads.map((thread) => ({
+          ...thread,
+          latestTurn: {
+            turnId: "desk-fork-completed" as TurnId,
+            state: "completed" as const,
+            requestedAt: isoAt(1),
+            startedAt: isoAt(2),
+            completedAt: isoAt(130),
+            assistantMessageId: thread.messages.at(-1)!.id,
+          },
+        })),
+      });
+      let release!: (value: { sequence: number }) => void;
+      const pending = new Promise<{ sequence: number }>((resolve) => {
+        release = resolve;
+      });
+      const mounted = await mountChatView({
+        viewport: { ...DEFAULT_VIEWPORT, width: 1800 },
+        snapshot,
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+            ? body.type === "thread.fork"
+              ? pending
+              : { sequence: 2 }
+            : undefined,
+      });
+      const forks = () => wsRequests.filter((request) => request.type === "thread.fork");
+      const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+      const dispatchCommand = api.orchestration.dispatchCommand;
+      let forkAcknowledged = false;
+      const dispatchSpy = vi
+        .spyOn(api.orchestration, "dispatchCommand")
+        .mockImplementation(async (command) => {
+          const result = await dispatchCommand(command);
+          if (command.type === "thread.fork") forkAcknowledged = true;
+          return result;
+        });
+      // Observe completion of the actual wire call, not just release of the
+      // server fixture promise, before asserting that navigation stayed put.
+      __setEnvironmentApiOverrideForTests(LOCAL_ENVIRONMENT_ID, api);
+      try {
+        await splitChats();
+        useDeskStore.getState().dispatch({ type: "select", tabKey: firstKey });
+        const sourcePane = page.getByRole("region", { name: "Main chat group", exact: true });
+        const sourceEditor = sourcePane.getByTestId("composer-editor").element();
+        const action = sourcePane
+          .getByRole("button", { name: "Fork from this message", exact: true })
+          .last();
+        await expect.element(action).toBeVisible();
+        const selectedMessageId = action
+          .element()
+          .closest("[data-message-id]")
+          ?.getAttribute("data-message-id");
+        expect(selectedMessageId).toBeTruthy();
+        await action.click();
+        const confirm = page.getByRole("button", { name: "Create fork", exact: true });
+        await expect.element(confirm).toBeEnabled();
+        await confirm.click();
+        await vi.waitFor(() => expect(forks()).toHaveLength(1));
+        expect(forks()[0]).toMatchObject({
+          sourceThreadId: THREAD_ID,
+          sourceMessageId: selectedMessageId,
+        });
+        // External navigation can activate another group while the modal is
+        // pending; the source ChatView remains mounted in the split layout.
+        useDeskStore.getState().dispatch({ type: "select", tabKey: secondKey });
+        await vi.waitFor(() =>
+          expect(mounted.router.state.location.pathname).toBe(serverThreadPath(secondId)),
+        );
+        await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+        expect(sourceEditor.isConnected).toBe(true);
+        // Returning to the same mounted source must not reset its in-flight
+        // guard just because the foreground-only confirmation was remounted.
+        useDeskStore.getState().dispatch({ type: "select", tabKey: firstKey });
+        await vi.waitFor(() =>
+          expect(mounted.router.state.location.pathname).toBe(serverThreadPath(THREAD_ID)),
+        );
+        await expect
+          .element(page.getByRole("button", { name: "Creating fork…", exact: true }))
+          .toBeDisabled();
+        await expect
+          .element(page.getByRole("button", { name: "Cancel", exact: true }))
+          .toBeDisabled();
+        expect(forks()).toHaveLength(1);
+        useDeskStore.getState().dispatch({ type: "select", tabKey: secondKey });
+        await vi.waitFor(() =>
+          expect(mounted.router.state.location.pathname).toBe(serverThreadPath(secondId)),
+        );
+        await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+        const ownerBeforeAck = useDeskStore.getState().desk.activeGroupId;
+        release({ sequence: 2 });
+        await vi.waitFor(() => expect(forkAcknowledged).toBe(true));
+        await waitForLayout();
+        await waitForLayout();
+        expect(mounted.router.state.location.pathname).toBe(serverThreadPath(secondId));
+        expect(useDeskStore.getState().desk.activeGroupId).toBe(ownerBeforeAck);
+        expect(sourceEditor.isConnected).toBe(true);
+        expect(forks()).toHaveLength(1);
+      } finally {
+        release({ sequence: 2 });
+        dispatchSpy.mockRestore();
+        await mounted.cleanup();
+        __resetEnvironmentApiOverridesForTests();
+      }
+    });
+
+    it("retains pending fork admission after closing and reopening the source pane", async () => {
+      const initial = createSnapshotForTargetUser({
+        targetMessageId: MessageId.make("desk-reopened-fork-source"),
+        targetText: "Reopened fork source",
+        provider: "claudeAgent",
+      });
+      const snapshot = withSecondThread({
+        ...initial,
+        threads: initial.threads.map((thread) => ({
+          ...thread,
+          latestTurn: {
+            turnId: "desk-reopened-fork-completed" as TurnId,
+            state: "completed" as const,
+            requestedAt: isoAt(1),
+            startedAt: isoAt(2),
+            completedAt: isoAt(130),
+            assistantMessageId: thread.messages.at(-1)!.id,
+          },
+        })),
+      });
+      let release!: (value: { sequence: number }) => void;
+      const pending = new Promise<{ sequence: number }>((resolve) => {
+        release = resolve;
+      });
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot,
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+            ? body.type === "thread.fork"
+              ? pending
+              : { sequence: 2 }
+            : undefined,
+      });
+      const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+      const dispatchCommand = api.orchestration.dispatchCommand;
+      let acknowledged = false;
+      const dispatchSpy = vi
+        .spyOn(api.orchestration, "dispatchCommand")
+        .mockImplementation(async (command) => {
+          const result = await dispatchCommand(command);
+          if (command.type === "thread.fork") acknowledged = true;
+          return result;
+        });
+      __setEnvironmentApiOverrideForTests(LOCAL_ENVIRONMENT_ID, api);
+      const forks = () => wsRequests.filter((request) => request.type === "thread.fork");
+      try {
+        useDeskStore.getState().dispatch({ type: "open", target: secondTarget });
+        useDeskStore.getState().dispatch({ type: "select", tabKey: firstKey });
+        const originalEditor = await waitForComposerEditor();
+        await page
+          .getByRole("button", { name: "Fork from this message", exact: true })
+          .last()
+          .click();
+        await page.getByRole("button", { name: "Create fork", exact: true }).click();
+        await vi.waitFor(() => expect(forks()).toHaveLength(1));
+        useDeskStore.getState().dispatch({ type: "close", tabKey: firstKey });
+        await vi.waitFor(() => expect(originalEditor.isConnected).toBe(false));
+        await vi.waitFor(() =>
+          expect(mounted.router.state.location.pathname).toBe(serverThreadPath(secondId)),
+        );
+        useDeskStore.getState().dispatch({ type: "open", target: firstTarget });
+        await vi.waitFor(() =>
+          expect(mounted.router.state.location.pathname).toBe(serverThreadPath(THREAD_ID)),
+        );
+        const reopenedEditor = await waitForComposerEditor();
+        expect(reopenedEditor).not.toBe(originalEditor);
+        await page
+          .getByRole("button", { name: "Fork from this message", exact: true })
+          .last()
+          .click();
+        await waitForLayout();
+        await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+        expect(forks()).toHaveLength(1);
+        release({ sequence: 2 });
+        await vi.waitFor(() => expect(acknowledged).toBe(true));
+        await waitForLayout();
+        expect(mounted.router.state.location.pathname).toBe(serverThreadPath(THREAD_ID));
+        expect(reopenedEditor.isConnected).toBe(true);
+        expect(forks()).toHaveLength(1);
+      } finally {
+        release({ sequence: 2 });
+        dispatchSpy.mockRestore();
+        await mounted.cleanup();
+        __resetEnvironmentApiOverridesForTests();
+      }
+    });
+
     it("restores a detached timeline review position after selecting another tab", async () => {
       const mounted = await mountChatView({
         viewport: DEFAULT_VIEWPORT,
@@ -10942,6 +11148,94 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           },
           { timeout: 8_000, interval: 16 },
         );
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("uses the live Claude query catalog in the real composer and removes renamed commands", async () => {
+      const instanceId = ProviderInstanceId.make("claudeAgent");
+      const runtimeId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+      const initial = createSnapshotForTargetUser({
+        targetMessageId: "msg-claude-catalog" as MessageId,
+        targetText: "catalog chat",
+      });
+      const snapshot = {
+        ...initial,
+        threads: initial.threads.map((thread) => ({
+          ...thread,
+          modelSelection: createModelSelection(instanceId, "claude-sonnet-5"),
+          session: {
+            threadId: thread.id,
+            providerName: "claudeAgent",
+            providerInstanceId: instanceId,
+            subagentRuntimeId: runtimeId,
+            status: "ready" as const,
+            runtimeMode: "full-access" as const,
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: NOW_ISO,
+          },
+        })),
+      };
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot,
+        configureFixture: (next) => {
+          next.serverConfig = {
+            ...next.serverConfig,
+            providers: [
+              {
+                ...next.serverConfig.providers[0]!,
+                driver: ProviderDriverKind.make("claudeAgent"),
+                instanceId,
+                slashCommands: [{ name: "wrong-global-project" }],
+              },
+            ],
+          };
+        },
+      });
+      try {
+        await waitForComposerEditor();
+        await page.getByTestId("composer-editor").fill("/");
+        await vi.waitFor(() =>
+          expect(
+            wsRequests.filter(
+              (request) => request._tag === WS_METHODS.serverSubscribeProviderCommands,
+            ),
+          ).toEqual([
+            {
+              _tag: WS_METHODS.serverSubscribeProviderCommands,
+              threadId: THREAD_ID,
+              instanceId,
+              runtimeId,
+            },
+          ]),
+        );
+        rpcHarness.emitStreamValue(WS_METHODS.serverSubscribeProviderCommands, {
+          status: "available",
+          commands: [{ name: "plugin:Before" }],
+        });
+        await waitForComposerMenuItem("provider-slash-command:claudeAgent:plugin:Before");
+        expect(
+          document.querySelector(
+            '[data-composer-item-id="provider-slash-command:claudeAgent:wrong-global-project"]',
+          ),
+        ).toBeNull();
+        rpcHarness.emitStreamValue(WS_METHODS.serverSubscribeProviderCommands, {
+          status: "available",
+          commands: [{ name: "plugin:After" }],
+        });
+        const updated = await waitForComposerMenuItem(
+          "provider-slash-command:claudeAgent:plugin:After",
+        );
+        expect(
+          document.querySelector(
+            '[data-composer-item-id="provider-slash-command:claudeAgent:plugin:Before"]',
+          ),
+        ).toBeNull();
+        await updated.click();
+        await waitForComposerText("/plugin:After ");
       } finally {
         await mounted.cleanup();
       }

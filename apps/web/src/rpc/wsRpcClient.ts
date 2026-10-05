@@ -122,6 +122,9 @@ export interface WsRpcClient {
       input?: RpcInput<typeof WS_METHODS.serverRefreshProviders>,
     ) => ReturnType<RpcUnaryMethod<typeof WS_METHODS.serverRefreshProviders>>;
     readonly listProviderSkills: RpcUnaryMethod<typeof WS_METHODS.serverListProviderSkills>;
+    readonly subscribeProviderCommands: RpcInputStreamMethod<
+      typeof WS_METHODS.serverSubscribeProviderCommands
+    >;
     readonly loginProvider: RpcUnaryMethod<typeof WS_METHODS.serverLoginProvider>;
     readonly updateProvider: RpcUnaryMethod<typeof WS_METHODS.serverUpdateProvider>;
     readonly restartProviderRuntime: RpcUnaryMethod<typeof WS_METHODS.serverRestartProviderRuntime>;
@@ -299,6 +302,12 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
         transport.request((client) => client[WS_METHODS.serverRefreshProviders](input ?? {})),
       listProviderSkills: (input) =>
         transport.request((client) => client[WS_METHODS.serverListProviderSkills](input)),
+      subscribeProviderCommands: (input, listener, options) =>
+        transport.subscribe(
+          (client) => client[WS_METHODS.serverSubscribeProviderCommands](input),
+          listener,
+          { ...options, tag: WS_METHODS.serverSubscribeProviderCommands },
+        ),
       loginProvider: (input) =>
         transport.request((client) => client[WS_METHODS.serverLoginProvider](input)),
       updateProvider: (input) =>

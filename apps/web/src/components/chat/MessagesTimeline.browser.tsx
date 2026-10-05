@@ -222,6 +222,42 @@ function buildLongUserMessageText(tail = "deep hidden detail only after expand")
   ).join("\n");
 }
 
+it("offers exact selected-message forks on finished Claude user and assistant messages only", async () => {
+  const onForkMessage = vi.fn();
+  const entries = [buildUserTimelineEntry("First prompt"), buildAssistantTimelineEntry()];
+  const props = { ...buildProps(), onForkMessage, timelineEntries: entries };
+  const view = await render(
+    <MessagesTimeline {...props} activeProvider={ProviderDriverKind.make("claudeAgent")} />,
+  );
+  const buttons = page.getByRole("button", { name: "Fork from this message", exact: true });
+  await expect.element(buttons.nth(0)).toBeEnabled();
+  await buttons.nth(0).click();
+  expect(onForkMessage).toHaveBeenLastCalledWith(entries[0]!.message.id);
+  await buttons.nth(1).click();
+  expect(onForkMessage).toHaveBeenLastCalledWith(entries[1]!.message.id);
+  await view.rerender(
+    <MessagesTimeline
+      {...props}
+      activeProvider={ProviderDriverKind.make("claudeAgent")}
+      messageForkDisabled
+    />,
+  );
+  await expect.element(buttons.nth(0)).toBeDisabled();
+  await expect.element(buttons.nth(1)).toBeDisabled();
+  await view.rerender(
+    <MessagesTimeline {...props} activeProvider={ProviderDriverKind.make("codex")} />,
+  );
+  await expect.element(buttons).not.toBeInTheDocument();
+  await view.rerender(
+    <MessagesTimeline
+      {...props}
+      activeProvider={ProviderDriverKind.make("claudeAgent")}
+      timelineEntries={[buildAssistantTimelineEntry({ streaming: true })]}
+    />,
+  );
+  await expect.element(buttons).not.toBeInTheDocument();
+});
+
 function buildUserTimelineEntry(text: string) {
   return {
     id: "entry-1",

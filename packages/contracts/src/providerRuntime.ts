@@ -300,6 +300,8 @@ export type SessionStartedPayload = typeof SessionStartedPayload.Type;
 
 const SessionConfiguredPayload = Schema.Struct({
   config: UnknownRecordSchema,
+  // Content-free invalidation only: catalogs remain volatile session metadata.
+  commandCatalogChanged: Schema.optional(Schema.Boolean),
 });
 export type SessionConfiguredPayload = typeof SessionConfiguredPayload.Type;
 

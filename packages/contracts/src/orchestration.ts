@@ -915,10 +915,21 @@ const ThreadForkCommand = Schema.Struct({
   type: Schema.Literal("thread.fork"),
   commandId: CommandId,
   sourceThreadId: ThreadId,
+  /** Exact Cafe message; native UUIDs are resolved only by the provider owner. */
+  sourceMessageId: Schema.optional(MessageId),
   targetThreadId: ThreadId,
   title: TrimmedNonEmptyString,
   createdAt: IsoDateTime,
 });
+
+/** Server-resolved projection boundary, never accepted from the client. */
+export const ThreadForkMessageCutoff = Schema.Struct({
+  sourceMessageId: MessageId,
+  turnId: TurnId,
+  retainedTurnCount: PositiveInt,
+  includesCompleteTurn: Schema.Boolean,
+});
+export type ThreadForkMessageCutoff = typeof ThreadForkMessageCutoff.Type;
 
 const ThreadDeleteCommand = Schema.Struct({
   type: Schema.Literal("thread.delete"),
@@ -1320,6 +1331,10 @@ const ThreadForkCommitCommand = Schema.Struct({
   type: Schema.Literal("thread.fork.commit"),
   commandId: CommandId,
   sourceThreadId: ThreadId,
+  // Server-observed sequence, never accepted from the public fork command.
+  sourceVersion: NonNegativeInt,
+  messageCutoff: Schema.optional(ThreadForkMessageCutoff),
+  retainedMessageIds: Schema.optional(Schema.Array(MessageId).check(Schema.isMaxLength(2000))),
   targetThreadId: ThreadId,
   title: TrimmedNonEmptyString,
   session: OrchestrationSession,
@@ -1526,6 +1541,8 @@ export const ThreadDuplicatedPayload = Schema.Struct({
 
 export const ThreadForkedPayload = Schema.Struct({
   sourceThreadId: ThreadId,
+  messageCutoff: Schema.optional(ThreadForkMessageCutoff),
+  retainedMessageIds: Schema.optional(Schema.Array(MessageId).check(Schema.isMaxLength(2000))),
   targetThreadId: ThreadId,
   forkedAt: IsoDateTime,
 });

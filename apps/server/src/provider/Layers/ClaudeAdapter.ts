@@ -7,8 +7,8 @@
  * @module ClaudeAdapterLive
  */
 import { createHash, randomUUID } from "node:crypto";
-import { constants as fsConstants, realpathSync } from "node:fs";
-import { lstat, mkdir, open, opendir, readFile, rm, writeFile } from "node:fs/promises";
+import { constants as fsConstants, lstatSync, realpathSync, unlinkSync } from "node:fs";
+import { lstat, open, opendir } from "node:fs/promises";
 
 import {
   deleteSession,
@@ -37,6 +37,7 @@ import {
   type SessionMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import { parseCliArgs } from "@cafecode/shared/cliArgs";
+import { publicClaudeCommands, UNAVAILABLE_COMMAND_CATALOG } from "../claudeCommands.ts";
 import { resolveConfiguredSubagentLimit } from "../Drivers/SubagentConcurrency.ts";
 import {
   getSafeInteractionUrl,
@@ -52,6 +53,7 @@ import {
   type ModelSelection,
   type ModelCapabilities,
   type ProviderApprovalDecision,
+  type ProviderCommandCatalog,
   ProviderDriverKind,
   type ProviderInteractionMode,
   ProviderInstanceId,
@@ -125,6 +127,12 @@ import {
   selectClaudeRewindCutoff,
   type ClaudeRewindMessageIds,
 } from "../claudeConversationRewind.ts";
+import {
+  readClaudeForkMessageIds,
+  rememberClaudeForkMessage,
+  remapClaudeForkMessageIds,
+  type ClaudeForkMessageIds,
+} from "../claudeForkMessageIds.ts";
 import { readClaudeUsageBaseline } from "../claudeUsageBaseline.ts";
 import { prepareFileAttachmentPrompt } from "../fileAttachmentPrompt.ts";
 import {
@@ -359,6 +367,8 @@ interface ClaudeResumeState {
   readonly turnCount?: number;
   readonly rewindMessageIds?: ClaudeRewindMessageIds;
   readonly rewindMessageIdsInvalid?: true;
+  readonly forkMessageIds?: ClaudeForkMessageIds;
+  readonly forkMessageIdsInvalid?: true;
 }
 
 interface ClaudeTurnState {
@@ -511,12 +521,20 @@ interface ClaudeSessionContext {
   taskLivenessUncertain: boolean;
   /** SDK messages consumed from the iterator but not fully projected. */
   inFlightSdkMessageCount: number;
+  /** Changes at iterator ingress, before asynchronous normalization. */
+  sdkMessageRevision: number;
   /** Native close threw; never admit another owner until explicit recovery. */
   queryClosureUncertain: boolean;
   /** A rewind's exact-exit requirement survives later explicit stop attempts. */
   rewindRetirementUncertain: boolean;
   readonly promptQueue: Queue.Queue<PromptQueueItem>;
   readonly query: ClaudeQueryRuntime;
+  /** A push supersedes initialization even while that cached SDK read awaits init. */
+  commandCatalogPushRevision: number;
+  commandCatalogPublishPending: boolean;
+  pendingCommandCatalog:
+    | { readonly sessionId: string; readonly catalog: ProviderCommandCatalog }
+    | undefined;
   /** Exact query-owned scheduling authority; never shared with a resumed query. */
   readonly schedulingBinding: SchedulingSessionBinding | undefined;
   readonly runFork: RuntimeFork;
@@ -530,6 +548,7 @@ interface ClaudeSessionContext {
   resumeCursorDurable: boolean;
   resumeBaseTurnCount: number;
   rewindMessageIds: ClaudeRewindMessageIds | undefined;
+  forkMessageIds: ClaudeForkMessageIds;
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
   readonly turns: Array<{
@@ -592,7 +611,7 @@ interface ClaudeSessionContext {
 }
 
 /** Provider visibility is not liveness authority: ambient children count too. */
-function reserveClaudeIdleRetirement(context: ClaudeSessionContext): boolean {
+function isClaudeTreeIdle(context: ClaudeSessionContext): boolean {
   if (
     context.stopped ||
     context.session.status !== "ready" ||
@@ -613,6 +632,11 @@ function reserveClaudeIdleRetirement(context: ClaudeSessionContext): boolean {
     )
   )
     return false;
+  return true;
+}
+
+function reserveClaudeIdleRetirement(context: ClaudeSessionContext): boolean {
+  if (!isClaudeTreeIdle(context)) return false;
   // Synchronous check and reservation: no stream callback/send can interleave
   // before stopped=true. Teardown happens later with this exact reservation.
   context.stopped = true;
@@ -620,6 +644,7 @@ function reserveClaudeIdleRetirement(context: ClaudeSessionContext): boolean {
 }
 
 interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
+  readonly supportedCommands?: () => Promise<unknown>;
   readonly stopTask?: (taskId: string) => Promise<void>;
   readonly backgroundTasks?: (toolUseId: string) => Promise<boolean>;
   readonly interrupt: () => Promise<SDKControlInterruptResponse | undefined>;
@@ -638,6 +663,7 @@ interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
 }
 
 export interface ClaudeAdapterLiveOptions {
+  readonly commandCatalogConfigurationKey?: string;
   readonly getNativeVersion?: () => string | null | undefined;
   /** Cached owning-driver status only; this getter must never launch a probe. */
   readonly getSubagentConcurrencySupport?: () => boolean;
@@ -2761,6 +2787,7 @@ function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undef
     resumeSessionAt?: unknown;
     turnCount?: unknown;
     rewindMessageIds?: unknown;
+    forkMessageIds?: unknown;
   };
 
   const threadIdCandidate = typeof cursor.threadId === "string" ? cursor.threadId : undefined;
@@ -2780,6 +2807,13 @@ function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undef
   const turnCountValue = typeof cursor.turnCount === "number" ? cursor.turnCount : undefined;
   let rewindMessageIds: ClaudeRewindMessageIds | undefined;
   let rewindMessageIdsInvalid = false;
+  let forkMessageIds: ClaudeForkMessageIds | undefined;
+  let forkMessageIdsInvalid = false;
+  try {
+    forkMessageIds = readClaudeForkMessageIds(cursor.forkMessageIds);
+  } catch {
+    forkMessageIdsInvalid = true;
+  }
   try {
     rewindMessageIds = readClaudeRewindMessageIds(cursor.rewindMessageIds);
   } catch {
@@ -2792,6 +2826,8 @@ function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undef
     ...(resumeSessionAt ? { resumeSessionAt } : {}),
     ...(rewindMessageIds ? { rewindMessageIds } : {}),
     ...(rewindMessageIdsInvalid ? { rewindMessageIdsInvalid: true as const } : {}),
+    ...(forkMessageIds && Object.keys(forkMessageIds).length > 0 ? { forkMessageIds } : {}),
+    ...(forkMessageIdsInvalid ? { forkMessageIdsInvalid: true as const } : {}),
     ...(turnCountValue !== undefined && Number.isInteger(turnCountValue) && turnCountValue >= 0
       ? { turnCount: turnCountValue }
       : {}),
@@ -2913,62 +2949,70 @@ function makeClaudeForkSessionStore(input: {
   readonly path: Path.Path;
   readonly env: NodeJS.ProcessEnv;
   readonly cwd: string;
+  readonly publication: { readonly configurationDirectory: string; readonly commitment: string };
+  readonly sessionId: string;
 }): SessionStore {
   const projectKey = claudeSessionStoreProjectKey(input.path, input.cwd);
-  const projectDirectory = input.path.join(
-    resolveClaudeConfigDirectory(input.path, input.env),
-    "projects",
-    projectKey,
-  );
+  const configurationDirectory = resolveClaudeConfigDirectory(input.path, input.env);
+  if (configurationDirectory !== input.publication.configurationDirectory)
+    throw new Error("Claude fork compensation profile changed.");
+  const projectsDirectory = input.path.join(configurationDirectory, "projects");
+  const projectDirectory = input.path.join(projectsDirectory, projectKey);
 
   const sessionPath = (key: { readonly projectKey: string; readonly sessionId: string }) => {
-    if (key.projectKey !== projectKey || !isUuid(key.sessionId)) {
+    if (
+      key.projectKey !== projectKey ||
+      !isUuid(key.sessionId) ||
+      key.sessionId !== input.sessionId
+    ) {
       throw new Error("Claude fork session store received an invalid project/session key.");
     }
     return input.path.join(projectDirectory, `${key.sessionId}.jsonl`);
   };
 
   return {
-    load: async (key) => {
-      if (key.subpath !== undefined) {
-        throw new Error("Claude fork session store does not accept subagent paths.");
-      }
-      const filePath = sessionPath(key);
-      const info = await lstat(filePath);
-      if (!info.isFile() || info.isSymbolicLink()) {
-        throw new Error("Claude source transcript is not a regular private file.");
-      }
-      const contents = await readFile(filePath, "utf8");
-      const entries = contents
-        .split(/\r?\n/u)
-        .filter((line) => line.trim().length > 0)
-        .map((line) => JSON.parse(line) as SessionStoreEntry);
-      return entries.length > 0 ? entries : null;
+    load: async () => {
+      throw new Error("Claude fork compensation cannot load history.");
     },
-    append: async (key, entries) => {
-      if (key.subpath !== undefined) {
-        throw new Error("Claude fork session store does not accept subagent paths.");
-      }
-      await mkdir(projectDirectory, { recursive: true, mode: 0o700 });
-      const contents = `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`;
-      // The SDK allocates a fresh UUID, so exclusive creation both preserves
-      // idempotency and prevents a compromised local path from overwriting an
-      // unrelated transcript. Transcript files remain user-private.
-      await writeFile(sessionPath(key), contents, {
-        encoding: "utf8",
-        flag: "wx",
-        mode: 0o600,
-      });
+    append: async () => {
+      throw new Error("Claude fork compensation cannot publish history.");
     },
     delete: async (key) => {
       if (key.subpath !== undefined) {
         throw new Error("Claude fork session store does not accept subagent paths.");
       }
-      await rm(sessionPath(key), { force: true });
-      await rm(input.path.join(projectDirectory, key.sessionId), {
-        recursive: true,
-        force: true,
+      // The public disk fork creates only its exclusive transcript. It never
+      // starts a target query or creates subagent storage, so a neighboring
+      // same-named directory is not compensation authority.
+      const current = await readClaudeRewindSnapshot({
+        filePath: sessionPath(key),
+        directories: [configurationDirectory, projectsDirectory, projectDirectory],
       });
+      if (current.commitment !== input.publication.commitment)
+        throw new Error("Claude fork compensation publication changed.");
+      // No asynchronous Cafe callback can replace the checked namespace before
+      // unlink. Node does not expose portable unlink-by-held-handle; a separate
+      // same-user writer can still race these native calls. Private directory
+      // ownership remains the existing trust boundary, not an atomicity claim.
+      for (const expected of current.directoryIdentities) {
+        const latest = lstatSync(expected.path, { bigint: true });
+        if (
+          !latest.isDirectory() ||
+          latest.isSymbolicLink() ||
+          latest.dev !== expected.dev ||
+          latest.ino !== expected.ino
+        )
+          throw new Error("Claude fork compensation namespace changed.");
+      }
+      const leaf = lstatSync(sessionPath(key), { bigint: true });
+      if (
+        !leaf.isFile() ||
+        leaf.isSymbolicLink() ||
+        `${leaf.dev}:${leaf.ino}:${leaf.size}:${leaf.mtimeNs}:${leaf.ctimeNs}` !==
+          current.fileIdentity
+      )
+        throw new Error("Claude fork compensation leaf changed.");
+      unlinkSync(sessionPath(key));
     },
   };
 }
@@ -4181,6 +4225,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       ...(context.resumeSessionId ? { resume: context.resumeSessionId } : {}),
       turnCount: context.resumeBaseTurnCount + context.turns.length,
       ...(context.rewindMessageIds ? { rewindMessageIds: context.rewindMessageIds } : {}),
+      ...(Object.keys(context.forkMessageIds).length > 0
+        ? { forkMessageIds: { ...context.forkMessageIds } }
+        : {}),
     };
 
     context.session = {
@@ -4409,6 +4456,26 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       if (pendingIndex >= 0) {
         turnState.pendingAssistantSnapshots.splice(pendingIndex, 1);
       }
+      // A public SDK wrapper UUID identifies this exact native content block.
+      // Bind only a unique single-block frame whose emitted prefix matches;
+      // text similarity, API message.id and completion alone are not authority.
+      if (
+        snapshotTextBlocks.length === 1 &&
+        message.session_id === context.resumeSessionId &&
+        entry.block.streamedTextLength <= text.length &&
+        createHash("sha256")
+          .update(Buffer.from(text.slice(0, entry.block.streamedTextLength), "utf16le"))
+          .digest("hex") === entry.block.streamedTextHash.copy().digest("hex") &&
+        (!entry.block.completionEmitted || entry.block.streamedTextLength === text.length)
+      ) {
+        rememberClaudeForkMessage({
+          ids: context.forkMessageIds,
+          messageId: `assistant:${entry.block.itemId}`,
+          nativeId: message.uuid,
+          turnId: turnState.turnId,
+          turnCount: context.resumeBaseTurnCount + context.turns.length + 1,
+        });
+      }
       if (entry.block.completionEmitted) {
         // Older producers can deliver the snapshot after block_stop. Its exact
         // item has already closed; do not create a duplicate or mutate another.
@@ -4466,7 +4533,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return;
     }
     const nextThreadId = message.session_id;
-    if (context.resumeSessionId !== message.session_id) context.rewindMessageIds = undefined;
+    if (context.resumeSessionId !== undefined && context.resumeSessionId !== nextThreadId) {
+      context.commandCatalogPushRevision += 1;
+      context.pendingCommandCatalog = undefined;
+      setCommandCatalog(context, UNAVAILABLE_COMMAND_CATALOG);
+    }
+    if (context.resumeSessionId !== message.session_id) {
+      context.rewindMessageIds = undefined;
+      if (context.resumeSessionId !== undefined) context.forkMessageIds = Object.create(null);
+    }
     context.resumeSessionId = message.session_id;
     yield* updateResumeCursor(context);
 
@@ -5890,6 +5965,32 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
   });
 
+  const setCommandCatalog = (context: ClaudeSessionContext, catalog: ProviderCommandCatalog) => {
+    if (context.stopped || sessions.get(context.session.threadId) !== context) return;
+    context.session = { ...context.session, commandCatalog: catalog };
+    if (context.commandCatalogPublishPending) return;
+    context.commandCatalogPublishPending = true;
+    // The SDK pushes full levels. Keep one pending publication and publish the
+    // newest level after this finite window, rather than queueing every plugin
+    // reload edge or postponing forever under a continuous event storm.
+    context.runFork(
+      Effect.gen(function* () {
+        yield* Effect.sleep(50);
+        context.commandCatalogPublishPending = false;
+        if (context.stopped || sessions.get(context.session.threadId) !== context) return;
+        const stamp = yield* makeEventStamp();
+        yield* offerRuntimeEvent(context, {
+          ...stamp,
+          type: "session.configured",
+          provider: PROVIDER,
+          threadId: context.session.threadId,
+          payload: { config: {}, commandCatalogChanged: true },
+          providerRefs: {},
+        });
+      }),
+    );
+  };
+
   const handleSystemMessage = Effect.fn("handleSystemMessage")(function* (
     context: ClaudeSessionContext,
     sdkMessage: SDKMessage,
@@ -6030,6 +6131,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         return;
       }
       case "init":
+        if (context.pendingCommandCatalog) {
+          const pending = context.pendingCommandCatalog;
+          context.pendingCommandCatalog = undefined;
+          setCommandCatalog(
+            context,
+            pending.sessionId === message.session_id
+              ? pending.catalog
+              : UNAVAILABLE_COMMAND_CATALOG,
+          );
+        }
         context.taskControlVersion = message.claude_code_version;
         configureClaudeUsageVersion(context.usageAccounting, message.claude_code_version);
         context.capabilities.clear();
@@ -6082,11 +6193,29 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         }
         return;
       case "commands_changed":
-        // Claude Agent SDK 0.3.191 and later emit this when slash-command metadata
-        // changes. Cafe does not currently render Claude slash commands from
-        // the SDK stream; provider capabilities are refreshed through the
-        // settings/status path instead, while the raw native event remains
-        // available for diagnostics.
+        // SDK 0.3.288 explicitly documents a complete replacement payload;
+        // supportedCommands() caches this same push. No reinitialize, process
+        // restart, metadata probe, or model request belongs on this path.
+        if (
+          typeof message.session_id !== "string" ||
+          !message.session_id ||
+          message.session_id.length > 1024 ||
+          (context.resumeSessionId !== undefined && message.session_id !== context.resumeSessionId)
+        )
+          return;
+        context.commandCatalogPushRevision += 1;
+        if (!context.resumeSessionId) {
+          context.pendingCommandCatalog = {
+            sessionId: message.session_id,
+            catalog: publicClaudeCommands(message.commands),
+          };
+          // Retain only one pre-init level, but do not claim it current before
+          // the native init establishes the matching session identity. This is
+          // unavailable (not unbounded loading) if no init ever arrives.
+          setCommandCatalog(context, UNAVAILABLE_COMMAND_CATALOG);
+        } else if (message.session_id === context.resumeSessionId) {
+          setCommandCatalog(context, publicClaudeCommands(message.commands));
+        }
         return;
       case "background_tasks_changed":
         // This is a level-set signal rather than a start/completion edge: the
@@ -7273,7 +7402,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     message: SDKMessage,
   ) {
     yield* logNativeSdkMessage(context, message);
-    yield* ensureThreadId(context, message);
+    // Command telemetry cannot establish or replace native conversation
+    // identity. In particular a pre-init push must await the authoritative
+    // init frame and a foreign-session push must not rebind this query.
+    if (!(message.type === "system" && message.subtype === "commands_changed")) {
+      yield* ensureThreadId(context, message);
+    }
     yield* recordTurnSdkMessage(context, message);
 
     const rawMessageType = sdkMessageType(message);
@@ -7393,7 +7527,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               const message = await iterator.next();
               // Count before stream batching or logger/normalizer awaits can
               // hide a consumed task_started edge from idle retirement.
-              if (!message.done) context.inFlightSdkMessageCount += 1;
+              if (!message.done) {
+                context.inFlightSdkMessageCount += 1;
+                context.sdkMessageRevision += 1;
+              }
               return message;
             },
             ...(iterator.return ? { return: () => iterator.return!() } : {}),
@@ -7722,7 +7859,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
       const startedAt = yield* nowIso;
       const resumeState = readClaudeResumeState(input.resumeCursor);
-      if (resumeState?.rewindMessageIdsInvalid) {
+      if (resumeState?.rewindMessageIdsInvalid || resumeState?.forkMessageIdsInvalid) {
         return yield* new ProviderAdapterValidationError({
           provider: PROVIDER,
           operation: "startSession",
@@ -8442,12 +8579,22 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               ...(durableResumeState?.rewindMessageIds
                 ? { rewindMessageIds: durableResumeState.rewindMessageIds }
                 : {}),
+              ...(durableResumeState?.forkMessageIds
+                ? { forkMessageIds: durableResumeState.forkMessageIds }
+                : {}),
             }
           : undefined;
       const subagentRuntimeId = randomUUID();
       const session: ProviderSession = {
         threadId,
         provider: PROVIDER,
+        commandCatalog: {
+          status: queryRuntime.supportedCommands ? "loading" : "unavailable",
+          commands: [],
+        },
+        ...(options?.commandCatalogConfigurationKey
+          ? { commandCatalogConfigurationKey: options.commandCatalogConfigurationKey }
+          : {}),
         subagentRuntimeId,
         providerInstanceId: boundInstanceId,
         status: "ready",
@@ -8471,10 +8618,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         environment: sessionEnvironment,
         taskLivenessUncertain: false,
         inFlightSdkMessageCount: 0,
+        sdkMessageRevision: 0,
         queryClosureUncertain: false,
         rewindRetirementUncertain: false,
         promptQueue,
         query: queryRuntime,
+        commandCatalogPushRevision: 0,
+        commandCatalogPublishPending: false,
+        pendingCommandCatalog: undefined,
         schedulingBinding,
         runFork,
         streamFiber: undefined,
@@ -8487,6 +8638,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         resumeCursorDurable: existingResumeSessionId !== undefined,
         resumeBaseTurnCount,
         rewindMessageIds: durableResumeState?.rewindMessageIds,
+        forkMessageIds: durableResumeState?.forkMessageIds ?? Object.create(null),
         pendingApprovals,
         pendingUserInputs,
         turns: [],
@@ -8568,6 +8720,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         providerRefs: {},
       });
 
+      // Capture before starting the stream: a buffered pre-init push may be
+      // consumed synchronously as the stream fiber starts.
+      const initialCommandCatalogRevision = context.commandCatalogPushRevision;
       let streamFiber: Fiber.Fiber<void, never>;
       streamFiber = runFork(
         Effect.exit(runSdkStream(context)).pipe(
@@ -8583,6 +8738,21 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ),
       );
       context.streamFiber = streamFiber;
+      if (queryRuntime.supportedCommands) {
+        // supportedCommands waits for the query's cached initialize response;
+        // it does not send a user prompt or reinitialize the CLI. Initialization
+        // is deliberately independent of turn startup and cannot block it.
+        runFork(
+          Effect.gen(function* () {
+            const commands = yield* Effect.tryPromise(() => queryRuntime.supportedCommands!()).pipe(
+              Effect.timeout(8_000),
+              Effect.catchCause(() => Effect.succeed(undefined)),
+            );
+            if (context.commandCatalogPushRevision !== initialCommandCatalogRevision) return;
+            setCommandCatalog(context, publicClaudeCommands(commands));
+          }),
+        );
+      }
       streamFiber.addObserver(() => {
         if (context.streamFiber === streamFiber) {
           context.streamFiber = undefined;
@@ -8650,54 +8820,186 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
     }
 
-    const artifactStatus = yield* Effect.promise((signal) =>
-      recoverClaudeResume({
-        configDirectory: resolveClaudeConfigDirectory(path, source.environment),
-        projectKey:
-          source.environment.CLAUDE_CODE_PROJECT_DIR_NAME?.trim() ||
-          claudeProjectDirectoryName(path, cwd),
-        sessionId: source.resumeSessionId!,
-        signal,
-      }),
-    );
-    if (artifactStatus.status !== "found") {
-      return yield* new ProviderAdapterValidationError({
+    const cutoff = input.messageCutoff;
+    const sessionId = source.resumeSessionId;
+    const refusal = () =>
+      new ProviderAdapterValidationError({
         provider: PROVIDER,
         operation: "forkSession",
-        issue: "Claude source transcript is unavailable in this workspace.",
+        issue:
+          "The selected Claude message has no safe current native boundary. Resume an idle source chat and select an available message; no source history or files were changed.",
       });
-    }
-
-    const sessionStore = makeClaudeForkSessionStore({
-      path,
-      env: source.environment,
-      cwd,
+    const native = cutoff ? source.forkMessageIds[cutoff.sourceMessageId] : undefined;
+    const revision = source.sdkMessageRevision;
+    const turnCount = source.resumeBaseTurnCount + source.turns.length;
+    if (
+      !isUuid(sessionId) ||
+      !isClaudeTreeIdle(source) ||
+      (cutoff &&
+        (!native ||
+          native.turnId !== cutoff.turnId ||
+          native.turnCount !== cutoff.retainedTurnCount ||
+          !input.sourceMessageIds ||
+          input.sourceMessageIds.length > 2000 ||
+          !input.sourceMessageIds.includes(cutoff.sourceMessageId) ||
+          new Set(input.sourceMessageIds).size !== input.sourceMessageIds.length ||
+          input.sourceMessageIds.some((id) => !source.forkMessageIds[id]) ||
+          cutoff.retainedTurnCount > turnCount))
+    )
+      return yield* refusal();
+    const projectKey = claudeSessionStoreProjectKey(path, cwd);
+    if (
+      source.environment.CLAUDE_CODE_PROJECT_DIR_NAME?.trim() &&
+      source.environment.CLAUDE_CODE_PROJECT_DIR_NAME.trim() !== projectKey
+    )
+      return yield* refusal();
+    const configDirectory = resolveClaudeConfigDirectory(path, source.environment);
+    const projectsDirectory = path.join(configDirectory, "projects");
+    const projectDirectory = path.join(projectsDirectory, projectKey);
+    const snapshotInput = {
+      filePath: path.join(projectDirectory, `${sessionId}.jsonl`),
+      directories: [configDirectory, projectsDirectory, projectDirectory],
+    };
+    const snapshot = yield* Effect.tryPromise({
+      try: () => readClaudeRewindSnapshot(snapshotInput),
+      catch: refusal,
     });
+    const assertUnchanged = async () => {
+      if (
+        sessions.get(input.sourceThreadId) !== source ||
+        source.resumeSessionId !== sessionId ||
+        source.sdkMessageRevision !== revision ||
+        !isClaudeTreeIdle(source)
+      )
+        throw refusal();
+      const current = await readClaudeRewindSnapshot(snapshotInput);
+      if (
+        current.commitment !== snapshot.commitment ||
+        source.sdkMessageRevision !== revision ||
+        !isClaudeTreeIdle(source)
+      )
+        throw refusal();
+    };
+    const matching = native
+      ? snapshot.entries.filter((entry) => entry.uuid === native.nativeId)
+      : [];
+    const entry = matching[0];
+    if (
+      cutoff &&
+      (matching.length !== 1 ||
+        !entry ||
+        entry.sessionId !== sessionId ||
+        entry.isSidechain === true ||
+        entry.isMeta === true ||
+        (entry.type !== "user" && entry.type !== "assistant"))
+    )
+      return yield* refusal();
+    const frozenStore: SessionStore = {
+      load: async (key) => {
+        if (
+          key.projectKey !== projectKey ||
+          key.sessionId !== sessionId ||
+          key.subpath !== undefined
+        )
+          throw refusal();
+        return structuredClone(snapshot.entries);
+      },
+      append: async () => {
+        throw refusal();
+      },
+    };
+    if (native && entry) {
+      const messages = yield* Effect.tryPromise({
+        try: () => getSessionMessages(sessionId, { dir: cwd, sessionStore: frozenStore }),
+        catch: refusal,
+      });
+      if (
+        !messages.some((message) => message.uuid === native.nativeId && message.type === entry.type)
+      )
+        return yield* refusal();
+    }
+    let publishedId: string | undefined;
+    let publishedEntries: SessionStoreEntry[] | undefined;
+    const publicationStore: SessionStore = {
+      ...frozenStore,
+      append: async (key, entries) => {
+        if (
+          publishedId !== undefined ||
+          key.projectKey !== projectKey ||
+          key.subpath !== undefined ||
+          !isUuid(key.sessionId) ||
+          key.sessionId === sessionId
+        )
+          throw refusal();
+        // SDK 0.3.288 consumes this immutable in-memory source and slices the
+        // exact wrapper UUID inclusively. It cannot reread a moving native
+        // transcript. Whole-tree/ingress checks bracket its bounded snapshot;
+        // fork never closes, interrupts or resumes the source query.
+        await assertUnchanged();
+        publishedId = key.sessionId;
+        publishedEntries = structuredClone(entries);
+        await publishClaudeRewindCandidate({
+          filePath: path.join(projectDirectory, `${key.sessionId}.jsonl`),
+          snapshot,
+          entries,
+        });
+      },
+    };
     const forked = yield* Effect.tryPromise({
       try: () =>
-        forkNativeSession(source.resumeSessionId as string, {
+        forkNativeSession(sessionId, {
           dir: cwd,
           title: input.title,
-          sessionStore,
+          ...(native ? { upToMessageId: native.nativeId } : {}),
+          sessionStore: publicationStore,
         }),
-      catch: (cause) =>
-        new ProviderAdapterRequestError({
-          provider: PROVIDER,
-          method: "session/fork",
-          detail: toMessage(cause, "Claude failed to fork the persisted session."),
-          cause,
-        }),
+      catch: refusal,
     });
-
-    const resumeCursor = {
-      threadId: input.targetThreadId,
-      resume: forked.sessionId,
-      turnCount: source.resumeBaseTurnCount + source.turns.length,
-    };
+    if (!publishedEntries || publishedId !== forked.sessionId) return yield* refusal();
+    const forkMessageIds = yield* Effect.try({
+      try: () =>
+        Object.keys(source.forkMessageIds).length === 0
+          ? (Object.create(null) as ClaudeForkMessageIds)
+          : remapClaudeForkMessageIds({
+              ids: source.forkMessageIds,
+              entries: publishedEntries!,
+              sourceSessionId: sessionId,
+              targetSessionId: forked.sessionId,
+              targetThreadId: input.targetThreadId,
+            }),
+      catch: refusal,
+    });
+    if (cutoff && !forkMessageIds[`copy:${input.targetThreadId}:${cutoff.sourceMessageId}`])
+      return yield* refusal();
+    // The SDK's retained lineage decides membership. Cafe receive times can
+    // tie and random item IDs are not native ordering authority; filtering
+    // the source projection by these IDs cannot copy a later native block.
+    const retainedMessageIds = cutoff
+      ? input.sourceMessageIds!.filter(
+          (id) => forkMessageIds[`copy:${input.targetThreadId}:${id}`] !== undefined,
+        )
+      : undefined;
+    let forkPublicationCommitment: string | undefined;
+    yield* Effect.tryPromise({
+      try: async () => {
+        await assertUnchanged();
+        const candidate = await readClaudeRewindSnapshot({
+          ...snapshotInput,
+          filePath: path.join(projectDirectory, `${forked.sessionId}.jsonl`),
+        });
+        if (JSON.stringify(candidate.entries) !== JSON.stringify(publishedEntries)) throw refusal();
+        if (source.sdkMessageRevision !== revision || !isClaudeTreeIdle(source)) throw refusal();
+        forkPublicationCommitment = candidate.commitment;
+      },
+      catch: refusal,
+    });
+    // Any uncertain publication preserves its private candidate for recovery;
+    // it never grants authority to delete or retry against the source.
     return {
       operationId: input.operationId,
       sourceThreadId: input.sourceThreadId,
       targetThreadId: input.targetThreadId,
+      ...(cutoff ? { messageCutoff: cutoff, retainedMessageIds } : {}),
       provider: PROVIDER,
       providerInstanceId: boundInstanceId,
       runtimeMode: source.session.runtimeMode,
@@ -8713,37 +9015,82 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       ...(source.session.modelSelection !== undefined
         ? { modelSelection: source.session.modelSelection }
         : {}),
-      resumeCursor,
+      resumeCursor: {
+        threadId: input.targetThreadId,
+        resume: forked.sessionId,
+        forkPublication: {
+          configurationDirectory: configDirectory,
+          commitment: forkPublicationCommitment,
+        },
+        turnCount: cutoff?.retainedTurnCount ?? turnCount,
+        ...(Object.keys(forkMessageIds).length > 0 ? { forkMessageIds } : {}),
+      },
     } satisfies ProviderSessionForkResult;
   });
 
   const discardProviderSessionFork: NonNullable<ClaudeAdapterShape["discardSessionFork"]> =
     Effect.fn("discardSessionFork")(function* (fork) {
       const resumeState = readClaudeResumeState(fork.resumeCursor);
-      if (!resumeState?.resume || !fork.cwd) {
+      const publication =
+        typeof fork.resumeCursor === "object" && fork.resumeCursor !== null
+          ? (Reflect.get(fork.resumeCursor, "forkPublication") as unknown)
+          : undefined;
+      const publicationDirectory =
+        typeof publication === "object" && publication !== null
+          ? (Reflect.get(publication, "configurationDirectory") as unknown)
+          : undefined;
+      const publicationCommitment =
+        typeof publication === "object" && publication !== null
+          ? (Reflect.get(publication, "commitment") as unknown)
+          : undefined;
+      const cleanupCwd = fork.cwd;
+      if (
+        !resumeState?.resume ||
+        !isUuid(resumeState.resume) ||
+        !cleanupCwd ||
+        typeof publicationDirectory !== "string" ||
+        typeof publicationCommitment !== "string" ||
+        !/^[a-f0-9]{64}$/.test(publicationCommitment) ||
+        sessions.has(fork.targetThreadId)
+      ) {
         return yield* new ProviderAdapterValidationError({
           provider: PROVIDER,
           operation: "discardSessionFork",
           issue: "Claude fork resume state is invalid.",
         });
       }
-      const sessionStore = makeClaudeForkSessionStore({
-        path,
-        env: claudeEnvironment,
-        cwd: fork.cwd,
+      const cleanupSessionId = resumeState.resume;
+      const sessionStore = yield* Effect.try({
+        try: () =>
+          makeClaudeForkSessionStore({
+            path,
+            env: claudeEnvironment,
+            cwd: cleanupCwd,
+            sessionId: cleanupSessionId,
+            publication: {
+              configurationDirectory: publicationDirectory,
+              commitment: publicationCommitment,
+            },
+          }),
+        catch: () =>
+          new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "discardSessionFork",
+            issue: "Claude fork cleanup authority changed; recovery evidence was preserved.",
+          }),
       });
       yield* Effect.tryPromise({
         try: () =>
-          deleteNativeSession(resumeState.resume as string, {
+          deleteNativeSession(cleanupSessionId, {
             ...(fork.cwd !== undefined ? { dir: fork.cwd } : {}),
             sessionStore,
           }),
-        catch: (cause) =>
+        catch: () =>
           new ProviderAdapterRequestError({
             provider: PROVIDER,
             method: "session/fork/delete",
-            detail: toMessage(cause, "Claude failed to discard the uncommitted session fork."),
-            cause,
+            detail:
+              "Claude could not verify and discard the uncommitted fork; recovery evidence was preserved.",
           }),
       });
     });
@@ -8886,6 +9233,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       ),
     );
     context.hasSubmittedUserPrompt = true;
+    rememberClaudeForkMessage({
+      ids: context.forkMessageIds,
+      messageId: input.messageId,
+      nativeId: turnId,
+      turnId,
+      turnCount: context.resumeBaseTurnCount + context.turns.length + 1,
+    });
     turnState.promptQueuedAt = yield* nowIso;
     scheduleClaudeTurnStartWatchdog(context, turnState);
 
@@ -9387,6 +9741,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         }),
       catch: () => new ProviderAdapterRewindOutcomeUnknownError(),
     });
+    const retainedForkMessageIds = yield* Effect.try({
+      try: () =>
+        Object.keys(context.forkMessageIds).length > 0
+          ? remapClaudeForkMessageIds({
+              ids: context.forkMessageIds,
+              entries: publishedEntries!,
+              sourceSessionId: sessionId,
+              targetSessionId: forked.sessionId,
+            })
+          : undefined,
+      catch: () => new ProviderAdapterRewindOutcomeUnknownError(),
+    });
     // Validate the exact durable candidate and recheck the original after
     // SDK work. A concurrent external writer cannot be hidden by a successful
     // fork acknowledgement. Both files remain available on ambiguous error.
@@ -9412,6 +9778,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         resume: forked.sessionId,
         turnCount: boundary.retainedTurnCount,
         rewindMessageIds,
+        ...(retainedForkMessageIds ? { forkMessageIds: retainedForkMessageIds } : {}),
       },
     };
   });
@@ -9568,6 +9935,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     );
 
     context.hasSubmittedUserPrompt = true;
+    rememberClaudeForkMessage({
+      ids: context.forkMessageIds,
+      messageId: input.messageId,
+      nativeId: messageUuid,
+      turnId: activeTurnId,
+      turnCount: context.resumeBaseTurnCount + context.turns.length + 1,
+    });
     context.turnState.promptTextBytes =
       (context.turnState.promptTextBytes ?? 0) +
       Buffer.byteLength(input.input?.trim() ?? "", "utf8");

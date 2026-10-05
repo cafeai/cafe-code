@@ -5,6 +5,7 @@ import {
 } from "./virtualDesktop.ts";
 import * as Schema from "effect/Schema";
 import { ProviderSkillsInput, ProviderSkillsResult } from "./providerSkills.ts";
+import { ProviderCommandCatalog, ProviderCommandsInput } from "./providerCommands.ts";
 import {
   ScheduledFollowupListInput,
   ScheduledFollowupListResult,
@@ -175,6 +176,7 @@ export const WS_METHODS = {
   serverUpdateMcpClient: "server.updateMcpClient",
   serverRefreshProviders: "server.refreshProviders",
   serverListProviderSkills: "server.listProviderSkills",
+  serverSubscribeProviderCommands: "server.subscribeProviderCommands",
   serverUsageReset: "server.usageReset",
   serverLoginProvider: "server.loginProvider",
   serverUpdateProvider: "server.updateProvider",
@@ -281,6 +283,15 @@ export const WsServerListProviderSkillsRpc = Rpc.make(WS_METHODS.serverListProvi
   payload: ProviderSkillsInput,
   success: ProviderSkillsResult,
 });
+
+export const WsServerSubscribeProviderCommandsRpc = Rpc.make(
+  WS_METHODS.serverSubscribeProviderCommands,
+  {
+    payload: ProviderCommandsInput,
+    success: ProviderCommandCatalog,
+    stream: true,
+  },
+);
 
 export const WsServerUsageResetRpc = Rpc.make(WS_METHODS.serverUsageReset, {
   payload: ProviderUsageResetInput,
@@ -701,6 +712,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerUpdateMcpClientRpc,
   WsServerRefreshProvidersRpc,
   WsServerListProviderSkillsRpc,
+  WsServerSubscribeProviderCommandsRpc,
   WsServerUsageResetRpc,
   WsServerLoginProviderRpc,
   WsServerUpdateProviderRpc,

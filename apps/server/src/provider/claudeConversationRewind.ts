@@ -24,6 +24,8 @@ export interface ClaudeRewindSnapshot {
   readonly entries: SessionStoreEntry[];
   /** Content and filesystem identity, never exposed in user diagnostics. */
   readonly commitment: string;
+  /** Last held leaf identity, for synchronous compensation revalidation. */
+  readonly fileIdentity: string;
   readonly directoryIdentities: ReadonlyArray<{
     readonly path: string;
     readonly dev: bigint;
@@ -166,6 +168,7 @@ export async function readClaudeRewindSnapshot(input: {
     }
     return {
       entries,
+      fileIdentity: identity(held),
       directoryIdentities: directories.map((info, index) => ({
         path: input.directories[index]!,
         dev: info.dev,

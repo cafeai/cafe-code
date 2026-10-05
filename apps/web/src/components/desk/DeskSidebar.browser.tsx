@@ -11,23 +11,64 @@ import { useDeskStore } from "../../deskStore";
 import type { ThreadRouteTarget } from "../../threadRoutes";
 import { DeskSidebar } from "./DeskSidebar";
 
-const mocks = vi.hoisted(() => ({ rename: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  rename: vi.fn(),
+  archive: vi.fn(),
+  recycle: vi.fn(),
+  delete: vi.fn(),
+  hardDelete: vi.fn(),
+  showMenu: vi.fn(),
+  confirm: vi.fn(),
+  working: false,
+}));
 vi.mock("../../threadRename", () => ({ renameThread: mocks.rename }));
+vi.mock("../ui/toast", () => ({
+  toastManager: { add: vi.fn() },
+  stackedThreadToast: (value: unknown) => value,
+}));
+vi.mock("../../hooks/useThreadActions", () => ({
+  useThreadActions: () => ({
+    archiveThread: mocks.archive,
+    confirmAndDeleteThread: mocks.recycle,
+    deleteThread: mocks.delete,
+    hardDeleteThread: mocks.hardDelete,
+  }),
+}));
+vi.mock("../../hooks/useSettings", async (importOriginal) => {
+  const { DEFAULT_UNIFIED_SETTINGS } = await import("@cafecode/contracts/settings");
+  const settings = { ...DEFAULT_UNIFIED_SETTINGS, confirmThreadArchive: true };
+  return {
+    ...(await importOriginal<typeof import("../../hooks/useSettings")>()),
+    getClientSettings: () => settings,
+    useSettings: (select: (value: typeof settings) => unknown) => select(settings),
+  };
+});
+vi.mock("../../localApi", () => ({
+  readLocalApi: () => ({
+    contextMenu: { show: mocks.showMenu },
+    dialogs: { confirm: mocks.confirm },
+  }),
+  ensureLocalApi: () => ({
+    contextMenu: { show: mocks.showMenu },
+    dialogs: { confirm: mocks.confirm },
+  }),
+}));
 // Canonical summary rendering is independent of the layout. The row must pass
 // its full route target to navigation and its scoped identity to metadata
 // actions; it must never infer either identity from its display title.
-vi.mock("./useDeskTabMetadata", () => ({
-  useDeskTabMetadata: (target: ThreadRouteTarget) => ({
+vi.mock("./useDeskTabMetadata", () => {
+  const metadata = (target: ThreadRouteTarget) => ({
     title: target.kind === "draft" ? "New chat" : `Chat ${target.threadRef.environmentId}`,
     projectName: "Fixture project",
     activityAt: new Date(Date.now() - (2 * 24 * 60 + 5) * 60_000).toISOString(),
     threadRef: target.kind === "server" ? target.threadRef : null,
     exists: true,
-    working: false,
+    working: mocks.working,
     attention: false,
     status: null,
-  }),
-}));
+  });
+  return { useDeskTabMetadata: metadata, readDeskTabMetadata: metadata };
+});
 
 const environmentId = EnvironmentId.make("fixture");
 const chat: ThreadRouteTarget = {
@@ -41,6 +82,11 @@ beforeEach(async () => {
   useDeskStore.setState({ desk: createDeskState(environmentId) });
   mocks.rename.mockReset();
   mocks.rename.mockResolvedValue(undefined);
+  for (const action of [mocks.archive, mocks.recycle, mocks.delete, mocks.hardDelete])
+    action.mockReset().mockResolvedValue(undefined);
+  mocks.showMenu.mockReset().mockResolvedValue(null);
+  mocks.confirm.mockReset().mockResolvedValue(true);
+  mocks.working = false;
 });
 afterEach(() => {
   useDeskStore.setState({ desk: createDeskState() });
@@ -57,6 +103,176 @@ async function setup() {
 }
 
 describe("Desk sidebar", () => {
+  it("offers exact-chat actions on right-click without activating the row", async () => {
+    const { screen, onNavigate } = await setup();
+    const before = useDeskStore.getState().desk;
+    const row = screen.getByRole("button", { name: "Chat fixture", exact: true });
+    row.element().dispatchEvent(
+      new MouseEvent("contextmenu", {
+        bubbles: true,
+        cancelable: true,
+        clientX: 50,
+        clientY: 60,
+      }),
+    );
+    await expect.poll(() => mocks.showMenu.mock.calls.length).toBe(1);
+    expect(mocks.showMenu.mock.calls[0]?.[0].map((item: { id: string }) => item.id)).toEqual([
+      "rename",
+      "archive",
+      "delete",
+      "delete-forever",
+      "close",
+    ]);
+    expect(onNavigate).not.toHaveBeenCalled();
+    expect(useDeskStore.getState().desk).toBe(before);
+  });
+
+  it("opens with Shift+F10 and renames the requested row inline", async () => {
+    const { screen, onNavigate } = await setup();
+    mocks.showMenu.mockResolvedValueOnce("rename");
+    screen.getByRole("button", { name: "Chat fixture", exact: true }).element().focus();
+    await userEvent.keyboard("{Shift>}{F10}{/Shift}");
+    await expect.element(screen.getByRole("textbox", { name: "Chat title" })).toBeVisible();
+    expect(onNavigate).not.toHaveBeenCalled();
+    await userEvent.keyboard("{Escape}");
+  });
+
+  it("requires permanent-delete consent before any existing lifecycle action and preserves exact scope", async () => {
+    const { screen } = await setup();
+    const row = screen.getByRole("button", { name: "Chat fixture", exact: true });
+    const open = () =>
+      row
+        .element()
+        .dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+    mocks.showMenu.mockResolvedValue("delete-forever");
+    mocks.confirm.mockResolvedValueOnce(false);
+    open();
+    await expect.poll(() => mocks.confirm.mock.calls.length).toBe(1);
+    expect(mocks.delete).not.toHaveBeenCalled();
+    expect(mocks.hardDelete).not.toHaveBeenCalled();
+    expect(useDeskStore.getState().desk.targets[deskTabKey(chat)]).toEqual(chat);
+    open();
+    await expect.poll(() => mocks.hardDelete.mock.calls.length).toBe(1);
+    expect(mocks.delete).toHaveBeenCalledExactlyOnceWith(
+      chat.kind === "server" ? chat.threadRef : null,
+    );
+    expect(mocks.hardDelete).toHaveBeenCalledExactlyOnceWith(
+      chat.kind === "server" ? chat.threadRef : null,
+      { confirm: false },
+    );
+    expect(mocks.delete.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.hardDelete.mock.invocationCallOrder[0]!,
+    );
+    await expect
+      .poll(() => Object.values(useDeskStore.getState().desk.groups).flatMap((group) => group.tabs))
+      .not.toContain(deskTabKey(chat));
+  });
+
+  it("keeps drafts view-only and refuses archive after the chat becomes busy", async () => {
+    const { screen } = await setup();
+    const draftRow = screen.getByRole("button", { name: "New chat", exact: true });
+    draftRow
+      .element()
+      .dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+    await expect.poll(() => mocks.showMenu.mock.calls.length).toBe(1);
+    expect(mocks.showMenu.mock.calls[0]?.[0]).toEqual([{ id: "close", label: "Close tab" }]);
+    mocks.working = true;
+    mocks.showMenu.mockResolvedValueOnce("archive");
+    screen
+      .getByRole("button", { name: "Chat fixture", exact: true })
+      .element()
+      .dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+    await expect.poll(() => mocks.showMenu.mock.calls.length).toBe(2);
+    expect(mocks.showMenu.mock.calls[1]?.[0]).toContainEqual({
+      id: "archive",
+      label: "Archive chat",
+      disabled: true,
+    });
+    expect(mocks.archive).not.toHaveBeenCalled();
+    expect(mocks.confirm).not.toHaveBeenCalled();
+  });
+
+  it("deduplicates permanent deletion while consent or the purge acknowledgement is pending", async () => {
+    const { screen } = await setup();
+    const row = screen.getByRole("button", { name: "Chat fixture", exact: true });
+    const open = () =>
+      row
+        .element()
+        .dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+    let consent!: (accepted: boolean) => void;
+    mocks.confirm.mockImplementationOnce(
+      () =>
+        new Promise<boolean>((resolve) => {
+          consent = resolve;
+        }),
+    );
+    mocks.showMenu.mockResolvedValue("delete-forever");
+    open();
+    await expect.poll(() => mocks.confirm.mock.calls.length).toBe(1);
+    open();
+    await expect.poll(() => mocks.showMenu.mock.calls.length).toBe(2);
+    expect(mocks.confirm).toHaveBeenCalledOnce();
+    expect(mocks.delete).not.toHaveBeenCalled();
+    consent(false);
+    await vi.waitFor(() => expect(mocks.confirm.mock.results[0]?.value).resolves.toBe(false));
+    let finishPurge!: () => void;
+    mocks.hardDelete.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishPurge = resolve;
+        }),
+    );
+    open();
+    await expect.poll(() => mocks.hardDelete.mock.calls.length).toBe(1);
+    open();
+    await expect.poll(() => mocks.showMenu.mock.calls.length).toBe(4);
+    expect(mocks.delete).toHaveBeenCalledOnce();
+    expect(mocks.hardDelete).toHaveBeenCalledOnce();
+    finishPurge();
+    await expect
+      .poll(() => Object.values(useDeskStore.getState().desk.groups).flatMap((group) => group.tabs))
+      .not.toContain(deskTabKey(chat));
+  });
+
+  it("reuses archive consent and recycle-bin actions for the exact unselected chat", async () => {
+    const { screen, onNavigate } = await setup();
+    const row = screen.getByRole("button", { name: "Chat fixture", exact: true });
+    const open = () =>
+      row
+        .element()
+        .dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+    mocks.showMenu.mockResolvedValueOnce("archive");
+    mocks.confirm.mockResolvedValueOnce(false);
+    open();
+    await expect.poll(() => mocks.confirm.mock.calls.length).toBe(1);
+    expect(mocks.archive).not.toHaveBeenCalled();
+    mocks.showMenu.mockResolvedValueOnce("delete");
+    open();
+    await expect.poll(() => mocks.recycle.mock.calls.length).toBe(1);
+    expect(mocks.recycle).toHaveBeenCalledExactlyOnceWith(
+      chat.kind === "server" ? chat.threadRef : null,
+    );
+    expect(mocks.hardDelete).not.toHaveBeenCalled();
+    expect(onNavigate).not.toHaveBeenCalled();
+  });
+
+  it("rechecks archive idleness after confirmation finishes", async () => {
+    const { screen } = await setup();
+    mocks.showMenu.mockResolvedValueOnce("archive");
+    mocks.confirm.mockImplementationOnce(async () => {
+      mocks.working = true;
+      return true;
+    });
+    screen
+      .getByRole("button", { name: "Chat fixture", exact: true })
+      .element()
+      .dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+    await expect.poll(() => mocks.confirm.mock.calls.length).toBe(1);
+    expect(mocks.archive).not.toHaveBeenCalled();
+    expect(
+      Object.values(useDeskStore.getState().desk.groups).flatMap((group) => group.tabs),
+    ).toContain(deskTabKey(chat));
+  });
   it("swaps the group count for a pencil on hover or keyboard focus without shifting the name", async () => {
     const { screen } = await setup();
     try {

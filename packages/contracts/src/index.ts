@@ -7,6 +7,7 @@ export * from "./remoteAccess.ts";
 export * from "./ipc.ts";
 export * from "./provider.ts";
 export * from "./providerSkills.ts";
+export * from "./providerCommands.ts";
 export * from "./providerTaskControls.ts";
 export * from "./providerGoal.ts";
 export * from "./providerInstance.ts";

@@ -1,5 +1,9 @@
 import { DesktopPicker } from "../virtualDesktop/VirtualDesktops";
 import { providerSkillsScopeRevision, useProviderSkills } from "./useProviderSkills";
+import { useProviderCommands } from "./useProviderCommands";
+import { useWsConnectionStatus } from "../../rpc/wsConnectionState";
+import { usePrimaryEnvironmentId } from "../../environments/primary";
+import { useSavedEnvironmentRuntimeStore } from "../../environments/runtime";
 import type { ScheduledFollowupsContext } from "./ScheduledFollowups";
 import type { ProviderTasksContext } from "./ProviderTasks";
 import { resolveComposerThreadId } from "~/composerDraftStore";
@@ -12,6 +16,7 @@ import type {
   ProjectEntry,
   ProjectId,
   ProviderSkillsInput,
+  ProviderCommandsInput,
   ProviderApprovalDecision,
   ProviderInteractionMode,
   ResolvedKeybindingsConfig,
@@ -1641,6 +1646,54 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   );
   const selectedProviderSkills =
     selectedProvider === "codex" ? discoveredSkills.skills : (selectedProviderStatus?.skills ?? []);
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const connectionStatus = useWsConnectionStatus();
+  const savedConnectionState = useSavedEnvironmentRuntimeStore(
+    (state) => state.byId[environmentId]?.connectionState,
+  );
+  const commandsConnected =
+    environmentId === primaryEnvironmentId
+      ? connectionStatus.phase === "connected"
+      : savedConnectionState === "connected";
+  const commandsRuntimeId = activeThread?.session?.subagentRuntimeId;
+  const commandsInput = useMemo<ProviderCommandsInput | null>(
+    () =>
+      selectedProvider === "claudeAgent" &&
+      isServerThread &&
+      activeThreadId &&
+      commandsRuntimeId &&
+      activeThread?.session?.providerInstanceId === selectedInstanceId
+        ? { threadId: activeThreadId, instanceId: selectedInstanceId, runtimeId: commandsRuntimeId }
+        : null,
+    [
+      selectedProvider,
+      isServerThread,
+      activeThreadId,
+      commandsRuntimeId,
+      activeThread?.session?.providerInstanceId,
+      selectedInstanceId,
+    ],
+  );
+  const commandsScopeRevision =
+    selectedProvider === "claudeAgent"
+      ? providerSkillsScopeRevision({
+          cwd: gitCwd,
+          instanceId: selectedInstanceId,
+          settings,
+          snapshot: selectedProviderStatus,
+        })
+      : "";
+  const discoveredCommands = useProviderCommands(
+    environmentId,
+    commandsInput,
+    composerTriggerKind === "slash-command" && selectedProvider === "claudeAgent",
+    commandsScopeRevision,
+    commandsConnected,
+  );
+  const selectedProviderCommands =
+    selectedProvider === "claudeAgent"
+      ? discoveredCommands.commands
+      : (selectedProviderStatus?.slashCommands ?? []);
   const pathTriggerQuery = composerTrigger?.kind === "path" ? composerTrigger.query : "";
   const isPathTrigger = composerTriggerKind === "path";
   const [debouncedPathQuery, composerPathQueryDebouncer] = useDebouncedValue(
@@ -1718,7 +1771,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             ]
           : []),
       ] satisfies ReadonlyArray<Extract<ComposerCommandItem, { type: "slash-command" }>>;
-      const providerSlashCommandItems = (selectedProviderStatus?.slashCommands ?? [])
+      const providerSlashCommandItems = selectedProviderCommands
         .filter(
           (command) =>
             !(
@@ -1760,6 +1813,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     goalControlsSupported,
     selectedProvider,
     selectedProviderStatus,
+    selectedProviderCommands,
     selectedProviderSkills,
     workspaceEntries,
   ]);
@@ -3417,6 +3471,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     composerTrigger.query.trim().length === 0
                   }
                   emptyStateText={composerMenuEmptyState}
+                  statusText={
+                    composerTriggerKind === "slash-command" && selectedProvider === "claudeAgent"
+                      ? commandsInput === null
+                        ? "Claude commands are available after this chat connects. You can type a command manually."
+                        : discoveredCommands.status === "loading"
+                          ? "Refreshing Claude commands…"
+                          : discoveredCommands.status === "unavailable"
+                            ? "Claude commands unavailable. Reopen the picker to retry, or type a command manually."
+                            : undefined
+                      : undefined
+                  }
                   activeItemId={activeComposerMenuItem?.id ?? null}
                   onHighlightedItemChange={onComposerMenuItemHighlighted}
                   onSelect={onSelectComposerItem}

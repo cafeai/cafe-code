@@ -104,9 +104,8 @@ function createBrowserLocalApi(rpcClient?: WsRpcClient): LocalApi {
         items: readonly ContextMenuItem<T>[],
         position?: { x: number; y: number },
       ): Promise<T | null> => {
-        if (window.desktopBridge) {
-          return window.desktopBridge.showContextMenu(items, position) as Promise<T | null>;
-        }
+        // Shared in-app menus retain Cafe's theme, icon rows and keyboard
+        // behavior on Electron as well as browser clients.
         return showContextMenuFallback(items, position);
       },
     },

@@ -16,6 +16,11 @@ const mocks = vi.hoisted(() => ({
   navigate: vi.fn<(options: { to: string; params?: Record<string, string> }) => Promise<void>>(),
   showMenu: vi.fn<(items: ContextMenuItem[]) => Promise<string | undefined>>(),
   rename: vi.fn(async () => undefined),
+  archive: vi.fn(async () => undefined),
+  recycle: vi.fn(async () => undefined),
+  delete: vi.fn(async () => undefined),
+  hardDelete: vi.fn(async () => undefined),
+  confirm: vi.fn(async () => true),
   palette: vi.fn(),
   // Synthetic authoritative inventory and reactive route parameters exercise
   // route echo reconciliation without providers, transports or user profiles.
@@ -81,9 +86,36 @@ vi.mock("../../commandPaletteStore", () => ({
   useCommandPaletteStore: { getState: () => ({ setOpen: mocks.palette }) },
 }));
 vi.mock("../../localApi", () => ({
-  readLocalApi: () => ({ contextMenu: { show: mocks.showMenu } }),
+  readLocalApi: () => ({
+    contextMenu: { show: mocks.showMenu },
+    dialogs: { confirm: mocks.confirm },
+  }),
+  ensureLocalApi: () => ({
+    contextMenu: { show: mocks.showMenu },
+    dialogs: { confirm: mocks.confirm },
+  }),
 }));
+vi.mock("../../hooks/useThreadActions", () => ({
+  useThreadActions: () => ({
+    archiveThread: mocks.archive,
+    confirmAndDeleteThread: mocks.recycle,
+    deleteThread: mocks.delete,
+    hardDeleteThread: mocks.hardDelete,
+  }),
+}));
+vi.mock("../../hooks/useSettings", async (importOriginal) => {
+  const { DEFAULT_UNIFIED_SETTINGS } = await import("@cafecode/contracts/settings");
+  return {
+    ...(await importOriginal<typeof import("../../hooks/useSettings")>()),
+    useSettings: (select: (settings: typeof DEFAULT_UNIFIED_SETTINGS) => unknown) =>
+      select(DEFAULT_UNIFIED_SETTINGS),
+  };
+});
 vi.mock("../../threadRename", () => ({ renameThread: mocks.rename }));
+vi.mock("../ui/toast", () => ({
+  toastManager: { add: vi.fn() },
+  stackedThreadToast: (value: unknown) => value,
+}));
 vi.mock("../../lib/utils", () => ({
   cn: (...values: unknown[]) => values.flat().filter(Boolean).join(" "),
   newCommandId: () => "fixture-command",

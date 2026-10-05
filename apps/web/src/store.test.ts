@@ -36,6 +36,7 @@ import {
 } from "./store";
 import { deriveActiveSubagentWorkEntries, deriveSubagentWorkEntries } from "./session-logic";
 import { DEFAULT_INTERACTION_MODE, DEFAULT_RUNTIME_MODE, type Thread } from "./types";
+import { threadForkPrefix } from "./lib/threadForkPrefix";
 
 const localEnvironmentId = EnvironmentId.make("environment-local");
 const remoteEnvironmentId = EnvironmentId.make("environment-remote");
@@ -265,6 +266,93 @@ function projectsOf(state: AppState) {
 function threadsOf(state: AppState) {
   return selectThreadsAcrossEnvironments(state);
 }
+
+describe("selected native message fork projection", () => {
+  it.each([0, 1, 2, 3])(
+    "retains exactly the inclusive message prefix at %s without later task/checkpoint state",
+    (index) => {
+      const turn1 = TurnId.make("first");
+      const turn2 = TurnId.make("second");
+      const at = "2026-10-05T00:00:00.000Z";
+      const source = makeThread({
+        messages: ["user", "assistant", "assistant", "assistant"].map((role, i) => ({
+          id: MessageId.make(`message-${i}`),
+          role: role as "user" | "assistant",
+          text: `text-${i}`,
+          turnId: i < 3 ? turn1 : turn2,
+          createdAt: at,
+          completedAt: at,
+          streaming: false,
+        })),
+        turnDiffSummaries: [turn1, turn2].map((turnId, i) => ({
+          turnId,
+          checkpointTurnCount: i + 1,
+          assistantMessageId: MessageId.make(`message-${i === 0 ? 2 : 3}`),
+          completedAt: at,
+          files: [],
+        })),
+        activities: [
+          ...[turn1, turn2].map((turnId, i) =>
+            makeTurnConfigurationActivity({ id: `activity-${i}`, turnId }),
+          ),
+          ...["approval.requested", "user-input.requested"].map((kind) => ({
+            ...makeTurnConfigurationActivity({ id: kind, turnId: turn1 }),
+            kind,
+          })),
+        ],
+      });
+      const before = JSON.stringify(source);
+      const includesCompleteTurn = index >= 2;
+      const prefix = threadForkPrefix(
+        source,
+        {
+          sourceMessageId: MessageId.make(`message-${index}`),
+          turnId: index < 3 ? turn1 : turn2,
+          retainedTurnCount: index < 3 ? 1 : 2,
+          includesCompleteTurn,
+        },
+        source.messages.slice(0, index + 1).map((message) => message.id),
+      );
+      expect(prefix?.messages.map((message) => message.id)).toEqual(
+        source.messages.slice(0, index + 1).map((message) => message.id),
+      );
+      expect(prefix?.turnDiffSummaries).toHaveLength(index < 2 ? 0 : index === 2 ? 1 : 2);
+      expect(prefix?.activities).toHaveLength(index < 2 ? 0 : index === 2 ? 1 : 2);
+      expect(prefix?.latestTurn?.state).toBe("interrupted");
+      expect(JSON.stringify(source)).toBe(before);
+      expect(
+        threadForkPrefix(
+          source,
+          {
+            sourceMessageId: MessageId.make("absent"),
+            turnId: turn1,
+            retainedTurnCount: 1,
+            includesCompleteTurn: true,
+          },
+          [],
+        ),
+      ).toBeNull();
+      // Same-clock rows can sort lexically before the selected message despite
+      // being later natively. The event's proven membership excludes that row.
+      const outOfOrder = {
+        ...source,
+        messages: [source.messages[3]!, ...source.messages.slice(0, 3)],
+      };
+      expect(
+        threadForkPrefix(
+          outOfOrder,
+          {
+            sourceMessageId: source.messages[1]!.id,
+            turnId: turn1,
+            retainedTurnCount: 1,
+            includesCompleteTurn: false,
+          },
+          [source.messages[0]!.id, source.messages[1]!.id],
+        )?.messages.map((message) => message.id),
+      ).toEqual([source.messages[0]!.id, source.messages[1]!.id]);
+    },
+  );
+});
 
 describe("thread concurrency projection", () => {
   it.each(["thread.duplicated", "thread.forked"] as const)(

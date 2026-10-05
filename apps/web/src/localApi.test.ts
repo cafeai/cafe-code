@@ -655,14 +655,16 @@ describe("wsApi", () => {
     });
   });
 
-  it("forwards context menu metadata to the desktop bridge", async () => {
+  it("uses the shared themed context menu even on desktop", async () => {
     const showContextMenu = vi.fn().mockResolvedValue("delete");
     getWindowForTest().desktopBridge = makeDesktopBridge({ showContextMenu });
     const api = createLocalApi(rpcClientMock as never);
     const items = [{ id: "delete", label: "Delete" }] as const;
+    showContextMenuFallbackMock.mockResolvedValue("delete");
 
     await expect(api.contextMenu.show(items)).resolves.toBe("delete");
-    expect(showContextMenu).toHaveBeenCalledWith(items, undefined);
+    expect(showContextMenuFallbackMock).toHaveBeenCalledWith(items, undefined);
+    expect(showContextMenu).not.toHaveBeenCalled();
   });
 
   it("forwards reveal path requests to the desktop bridge", async () => {

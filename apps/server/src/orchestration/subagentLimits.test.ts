@@ -112,6 +112,7 @@ describe("subagent policy orchestration", () => {
             }
           : {
               type: "thread.fork.commit",
+              sourceVersion: next.snapshotSequence,
               commandId: CommandId.make("limits-fork"),
               sourceThreadId: threadId,
               targetThreadId,

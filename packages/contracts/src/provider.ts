@@ -5,6 +5,7 @@ import {
   EventId,
   IsoDateTime,
   MessageId,
+  NonNegativeInt,
   ProviderItemId,
   SubagentRuntimeId,
   ThreadId,
@@ -22,11 +23,13 @@ import {
   ProviderSandboxMode,
   ProviderUserInputAnswers,
   RuntimeMode,
+  ThreadForkMessageCutoff,
 } from "./orchestration.ts";
 import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
 import { MaxConcurrentSubagents } from "./subagentLimits.ts";
 import { CodexReviewTarget } from "./codexReview.ts";
 import { ProviderDeliveryPriority } from "./providerTaskControls.ts";
+import { ProviderCommandCatalog } from "./providerCommands.ts";
 
 const ProviderSessionStatus = Schema.Literals([
   "connecting",
@@ -38,6 +41,11 @@ const ProviderSessionStatus = Schema.Literals([
 
 export const ProviderSession = Schema.Struct({
   provider: ProviderDriverKind,
+  // Volatile metadata from this exact query, never an account-global catalog.
+  commandCatalog: Schema.optional(ProviderCommandCatalog),
+  commandCatalogConfigurationKey: Schema.optional(
+    Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+  ),
   // Minted by the actual native context. Omission is legacy unknown, never a
   // claim that saved task progress belongs to the currently connected runtime.
   subagentRuntimeId: Schema.optional(SubagentRuntimeId),
@@ -144,6 +152,13 @@ export const ProviderSessionForkInput = Schema.Struct({
   /** Stable idempotency/ownership key supplied by the initiating command. */
   operationId: TrimmedNonEmptyString,
   sourceThreadId: ThreadId,
+  /** Exact server-observed source/project event authority; binds retries. */
+  sourceVersion: Schema.optional(NonNegativeInt),
+  /** Server-resolved source workspace; not supplied by the public fork API. */
+  expectedCwd: Schema.optional(TrimmedNonEmptyString),
+  messageCutoff: Schema.optional(ThreadForkMessageCutoff),
+  /** Authenticated projection candidates; never native IDs or client authority. */
+  sourceMessageIds: Schema.optional(Schema.Array(MessageId).check(Schema.isMaxLength(2000))),
   targetThreadId: ThreadId,
   title: TrimmedNonEmptyString,
 });
@@ -152,6 +167,8 @@ export type ProviderSessionForkInput = typeof ProviderSessionForkInput.Type;
 export const ProviderSessionForkResult = Schema.Struct({
   operationId: TrimmedNonEmptyString,
   sourceThreadId: ThreadId,
+  messageCutoff: Schema.optional(ThreadForkMessageCutoff),
+  retainedMessageIds: Schema.optional(Schema.Array(MessageId).check(Schema.isMaxLength(2000))),
   targetThreadId: ThreadId,
   provider: ProviderDriverKind,
   providerInstanceId: ProviderInstanceId,

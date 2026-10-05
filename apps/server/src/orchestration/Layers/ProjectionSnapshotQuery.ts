@@ -38,6 +38,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Struct from "effect/Struct";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
+import { readThreadForkSourceVersion } from "../threadForkSourceVersion.ts";
 
 import {
   isPersistenceError,
@@ -4749,6 +4750,22 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getArchivedShellSnapshot,
     getDeletedShellSnapshot,
     getSnapshotSequence,
+    getThreadForkSourceVersion: (threadId) =>
+      readThreadForkSourceVersion(sql, threadId).pipe(
+        Effect.mapError(
+          toPersistenceSqlError("ProjectionSnapshotQuery.getThreadForkSourceVersion"),
+        ),
+      ),
+    getThreadForkMessageCount: (threadId) =>
+      sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM (
+        SELECT 1 FROM projection_thread_messages INDEXED BY idx_projection_thread_messages_thread_created_id
+        WHERE thread_id = ${threadId} LIMIT 2001
+      )
+    `.pipe(
+        Effect.map((rows) => rows[0]!.count),
+        Effect.mapError(toPersistenceSqlError("ProjectionSnapshotQuery.getThreadForkMessageCount")),
+      ),
     getCounts,
     getActiveProjectByWorkspaceRoot,
     getProjectShellById,

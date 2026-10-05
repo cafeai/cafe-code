@@ -62,6 +62,15 @@ import {
 } from "./observability/RpcInstrumentation.ts";
 import { ProviderRegistry } from "./provider/Services/ProviderRegistry.ts";
 import { ProviderService } from "./provider/Services/ProviderService.ts";
+import {
+  readBoundProviderCommands,
+  subscribeProviderCommands,
+  type ProviderCommandsAuthority,
+} from "./provider/providerCommandsSubscription.ts";
+import {
+  claudeCommandsConfigurationKey,
+  UNAVAILABLE_COMMAND_CATALOG,
+} from "./provider/claudeCommands.ts";
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
 import * as ProviderLoginLauncher from "./provider/providerLoginLauncher.ts";
 import { ServerLifecycleEvents } from "./serverLifecycleEvents.ts";
@@ -1179,6 +1188,84 @@ const makeWsRpcLayer = (
             ).pipe(Effect.map((providers) => ({ providers }))),
             { "rpc.aggregate": "server" },
           ),
+        [WS_METHODS.serverSubscribeProviderCommands]: (input) => {
+          if (currentSession.role !== "owner") return Stream.make(UNAVAILABLE_COMMAND_CATALOG);
+          const resolveAuthority = Effect.gen(function* () {
+            const found = yield* projectionSnapshotQuery.getThreadShellById(input.threadId);
+            if (Option.isNone(found)) return undefined;
+            const thread = found.value;
+            if (
+              thread.archivedAt !== null ||
+              thread.deletedAt !== null ||
+              thread.modelSelection.instanceId !== input.instanceId ||
+              thread.session?.providerName !== "claudeAgent" ||
+              thread.session.providerInstanceId !== input.instanceId ||
+              thread.session.subagentRuntimeId !== input.runtimeId
+            )
+              return undefined;
+            const settings = yield* serverSettings.getSettings;
+            const explicit = settings.providerInstances[input.instanceId];
+            const legacy =
+              !explicit && input.instanceId === "claudeAgent"
+                ? settings.providers.claudeAgent
+                : undefined;
+            if (
+              (!explicit && !legacy) ||
+              explicit?.enabled === false ||
+              legacy?.enabled === false ||
+              (explicit && explicit.driver !== "claudeAgent")
+            )
+              return undefined;
+            const configuration = claudeCommandsConfigurationKey({
+              config: explicit ? (explicit.config ?? {}) : legacy,
+              enabled: explicit?.enabled ?? legacy?.enabled,
+              ...(explicit?.environment ? { environment: explicit.environment } : {}),
+            });
+            const project =
+              thread.projectId === null
+                ? undefined
+                : Option.getOrUndefined(
+                    yield* projectionSnapshotQuery.getProjectShellById(thread.projectId),
+                  );
+            const cwd =
+              thread.projectId === null
+                ? yield* standaloneWorkspaces.readExisting(thread.id)
+                : project
+                  ? (thread.worktreePath ?? project.workspaceRoot)
+                  : undefined;
+            return cwd ? ({ cwd, configuration } satisfies ProviderCommandsAuthority) : undefined;
+          }).pipe(Effect.catchCause(() => Effect.succeed(undefined)));
+          return observeRpcStream(
+            WS_METHODS.serverSubscribeProviderCommands,
+            subscribeProviderCommands(
+              readBoundProviderCommands(input, resolveAuthority, providerService.listSessions()),
+              [
+                providerService.streamEvents.pipe(
+                  Stream.filter(
+                    (event) =>
+                      event.threadId === input.threadId &&
+                      (event.type === "session.configured" ||
+                        event.type === "session.started" ||
+                        event.type === "session.exited"),
+                  ),
+                ),
+                serverSettings.streamChanges,
+                orchestrationEngine.streamDomainEvents.pipe(
+                  Stream.filter(
+                    (event) =>
+                      event.aggregateKind === "project" ||
+                      (event.aggregateId === input.threadId &&
+                        (event.type === "thread.session-set" ||
+                          event.type === "thread.meta-updated" ||
+                          event.type === "thread.deleted" ||
+                          event.type === "thread.archived")),
+                  ),
+                ),
+              ],
+            ),
+            { "rpc.aggregate": "server" },
+          );
+        },
         [WS_METHODS.serverListProviderSkills]: (input) =>
           observeRpcEffect(
             WS_METHODS.serverListProviderSkills,

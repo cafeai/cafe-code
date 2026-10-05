@@ -1208,7 +1208,16 @@ export const withCodexMetadataClient = <A, E, R>(
       ),
       (child) =>
         Effect.gen(function* () {
-          const clientContext = yield* Layer.build(CodexClient.layerChildProcess(child));
+          const clientContext = yield* Layer.build(
+            CodexClient.layerChildProcess(child, {
+              // The protocol's default decoder diagnostic includes rejected wire
+              // JSON even with incoming logging disabled. Metadata may contain
+              // private skill paths or account fields; keep this disposable path
+              // content-free on success AND malformed responses. Callers retain
+              // their fixed phase/outcome diagnostics without provider payloads.
+              logger: () => Effect.void,
+            }),
+          );
           const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
             Effect.provide(clientContext),
           );

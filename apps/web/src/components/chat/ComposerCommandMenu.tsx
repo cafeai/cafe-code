@@ -110,6 +110,7 @@ export const ComposerCommandMenu = memo(function ComposerCommandMenu(props: {
   triggerKind: ComposerTriggerKind | null;
   groupSlashCommandSections?: boolean;
   emptyStateText?: string;
+  statusText?: string | undefined;
   activeItemId: string | null;
   onHighlightedItemChange: (itemId: string | null) => void;
   onSelect: (item: ComposerCommandItem) => void;
@@ -167,7 +168,12 @@ export const ComposerCommandMenu = memo(function ComposerCommandMenu(props: {
             </div>
           ))}
         </CommandList>
-        {props.items.length === 0 ? (
+        {props.statusText ? (
+          <p role="status" className="px-3 py-2 text-muted-foreground/70 text-xs">
+            {props.statusText}
+          </p>
+        ) : null}
+        {props.items.length === 0 && !props.statusText ? (
           <div className="px-3 py-2">
             {props.triggerKind === "skill" ? (
               <CommandGroup>

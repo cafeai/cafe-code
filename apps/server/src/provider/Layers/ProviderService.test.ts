@@ -1808,14 +1808,31 @@ nativeFork.layer("ProviderServiceLive native session forks", (it) => {
 
       const request = {
         operationId: "cmd-native-fork",
+        sourceVersion: 42,
+        expectedCwd: "/repo/native-fork/.",
         sourceThreadId,
         targetThreadId,
         title: "Fork target",
       } as const;
+      const mismatchedWorkspace = yield* provider
+        .forkSession({ ...request, expectedCwd: "/repo/other-workspace" })
+        .pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(mismatchedWorkspace));
+      assert.equal(nativeFork.codex.forkSession.mock.calls.length, 0);
       const first = yield* provider.forkSession(request);
       const retry = yield* provider.forkSession(request);
 
       assert.deepEqual(retry, first);
+      assert.equal(nativeFork.codex.forkSession.mock.calls.length, 1);
+
+      const changedWorkspace = yield* provider
+        .forkSession({ ...request, expectedCwd: "/repo/other-workspace" })
+        .pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(changedWorkspace));
+      const changedSource = yield* provider
+        .forkSession({ ...request, sourceVersion: 43 })
+        .pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(changedSource));
       assert.equal(nativeFork.codex.forkSession.mock.calls.length, 1);
       const binding = Option.getOrThrow(yield* directory.getBinding(targetThreadId));
       assert.equal(binding.status, "stopped");
@@ -1834,6 +1851,11 @@ nativeFork.layer("ProviderServiceLive native session forks", (it) => {
       assert.equal(Exit.isFailure(conflictingExit), true);
       assert.equal(nativeFork.codex.forkSession.mock.calls.length, 1);
 
+      const forgedDiscard = yield* provider
+        .discardSessionFork({ fork: { ...first, resumeCursor: { opaque: "unrelated-source" } } })
+        .pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(forgedDiscard));
+      assert.equal(nativeFork.codex.discardSessionFork.mock.calls.length, 0);
       yield* provider.discardSessionFork({ fork: first });
       assert.equal(nativeFork.codex.discardSessionFork.mock.calls.length, 1);
       assert.equal(Option.isNone(yield* directory.getBinding(targetThreadId)), true);

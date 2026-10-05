@@ -53,6 +53,137 @@ const exists = (filePath: string) =>
 
 const BaseTestLayer = makeProjectionPipelinePrefixedTestLayer("t3-projection-pipeline-test-");
 
+it.layer(makeProjectionPipelinePrefixedTestLayer("selected-message-fork-projection-"))(
+  "Selected-message fork projection",
+  (it) => {
+    it.effect(
+      "copies only the inclusive message prefix and retires an intermediate turn without its checkpoint",
+      () =>
+        Effect.gen(function* () {
+          const pipeline = yield* OrchestrationProjectionPipeline;
+          const events = yield* OrchestrationEventStore;
+          const sql = yield* SqlClient.SqlClient;
+          const now = "2026-10-05T00:00:00.000Z";
+          const source = ThreadId.make("selected-source");
+          const target = ThreadId.make("selected-target");
+          for (const threadId of [source, target])
+            yield* events.append({
+              type: "thread.created",
+              eventId: EventId.make(`create-${threadId}`),
+              aggregateKind: "thread",
+              aggregateId: threadId,
+              occurredAt: now,
+              commandId: null,
+              causationEventId: null,
+              correlationId: null,
+              metadata: {},
+              payload: {
+                threadId,
+                projectId: null,
+                title: "Selected fixture",
+                modelSelection: {
+                  instanceId: ProviderInstanceId.make("claudeAgent"),
+                  model: "sonnet",
+                },
+                runtimeMode: "full-access",
+                branch: null,
+                worktreePath: null,
+                createdAt: now,
+                updatedAt: now,
+              },
+            });
+          yield* pipeline.bootstrap;
+          for (const [index, messageId] of [
+            "a-user",
+            "b-block",
+            "a-later-native-final",
+            "d-later",
+          ].entries()) {
+            yield* sql`INSERT INTO projection_thread_messages (message_id, thread_id, turn_id, role, text, attachments_json, is_streaming, created_at, updated_at)
+          VALUES (${messageId}, ${source}, ${index < 3 ? "turn-one" : "turn-two"}, ${index === 0 || index === 3 ? "user" : "assistant"}, ${messageId}, '[]', 0, ${now}, ${now})`;
+          }
+          for (const [index, turnId] of ["turn-one", "turn-two"].entries()) {
+            yield* sql`INSERT INTO projection_turns (thread_id, turn_id, state, requested_at, started_at, completed_at,
+          checkpoint_turn_count, checkpoint_ref, checkpoint_status, checkpoint_files_json, assistant_message_id)
+          VALUES (${source}, ${turnId}, 'completed', ${now}, ${now}, ${now}, ${index + 1}, ${`refs/fixture/${index}`}, 'ready', '[]', 'c-final')`;
+            yield* sql`INSERT INTO projection_thread_activities (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at)
+          VALUES (${`activity-${index}`}, ${source}, ${turnId}, 'info', 'task.completed', 'History', '{}', ${index + 1}, ${now})`;
+          }
+          yield* sql`UPDATE projection_threads SET has_actionable_proposed_plan = 1 WHERE thread_id = ${source}`;
+          yield* sql`INSERT INTO projection_thread_proposed_plans
+        (plan_id, thread_id, turn_id, plan_markdown, implemented_at, implementation_thread_id, created_at, updated_at)
+        VALUES ('later-selected-plan', ${source}, 'turn-one', 'A plan from after the cutoff', NULL, NULL, ${now}, ${now})`;
+          const fork = yield* events.append({
+            type: "thread.forked",
+            eventId: EventId.make("selected-fork-event"),
+            aggregateKind: "thread",
+            aggregateId: target,
+            occurredAt: now,
+            commandId: null,
+            causationEventId: null,
+            correlationId: null,
+            metadata: {},
+            payload: {
+              sourceThreadId: source,
+              targetThreadId: target,
+              forkedAt: now,
+              retainedMessageIds: [MessageId.make("a-user"), MessageId.make("b-block")],
+              messageCutoff: {
+                sourceMessageId: MessageId.make("b-block"),
+                turnId: TurnId.make("turn-one"),
+                retainedTurnCount: 1,
+                includesCompleteTurn: false,
+              },
+            },
+          });
+          yield* pipeline.projectEvent(fork);
+          yield* pipeline.projectEvent(fork);
+          assert.deepEqual(
+            yield* sql`SELECT message_id FROM projection_thread_messages WHERE thread_id = ${target} ORDER BY message_id`,
+            [
+              { message_id: "copy:selected-target:a-user" },
+              { message_id: "copy:selected-target:b-block" },
+            ],
+          );
+          assert.deepEqual(
+            yield* sql`SELECT turn_id, state, checkpoint_turn_count, checkpoint_ref, checkpoint_files_json, assistant_message_id FROM projection_turns WHERE thread_id = ${target}`,
+            [
+              {
+                turn_id: "copy:selected-target:turn-one",
+                state: "interrupted",
+                checkpoint_turn_count: null,
+                checkpoint_ref: null,
+                checkpoint_files_json: "[]",
+                assistant_message_id: "copy:selected-target:b-block",
+              },
+            ],
+          );
+          assert.deepEqual(
+            yield* sql`SELECT activity_id FROM projection_thread_activities WHERE thread_id = ${target}`,
+            [],
+          );
+          assert.deepEqual(
+            yield* sql`SELECT latest_turn_id FROM projection_threads WHERE thread_id = ${target}`,
+            [{ latest_turn_id: "copy:selected-target:turn-one" }],
+          );
+          assert.deepEqual(
+            yield* sql`SELECT has_actionable_proposed_plan FROM projection_threads WHERE thread_id = ${target}`,
+            [{ has_actionable_proposed_plan: 0 }],
+          );
+          assert.deepEqual(
+            yield* sql`SELECT plan_id FROM projection_thread_proposed_plans WHERE thread_id = ${target}`,
+            [],
+          );
+          assert.equal(
+            (yield* sql`SELECT message_id FROM projection_thread_messages WHERE thread_id = ${source}`)
+              .length,
+            4,
+          );
+        }),
+    );
+  },
+);
+
 it.layer(makeProjectionPipelinePrefixedTestLayer("activity-order-test-"))(
   "Activity append ordering",
   (it) => {

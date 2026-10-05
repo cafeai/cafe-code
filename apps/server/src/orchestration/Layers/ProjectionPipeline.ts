@@ -2,6 +2,8 @@ import {
   ApprovalRequestId,
   type ChatAttachment,
   type OrchestrationEvent,
+  type ThreadForkMessageCutoff,
+  type MessageId,
   ThreadId,
   type TurnId,
 } from "@cafecode/contracts";
@@ -571,6 +573,8 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       readonly sourceThreadId: ThreadId;
       readonly targetThreadId: ThreadId;
       readonly duplicatedAt: string;
+      readonly messageCutoff?: ThreadForkMessageCutoff;
+      readonly retainedMessageIds?: ReadonlyArray<MessageId>;
     }) {
       const copyPrefix = `copy:${input.targetThreadId}:`;
 
@@ -789,6 +793,59 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           updated_at = ${input.duplicatedAt}
         WHERE thread_id = ${input.targetThreadId}
       `;
+      if (input.messageCutoff) {
+        const cutoff = input.messageCutoff;
+        // SDK-proven membership wins over timestamps and lexical item IDs.
+        // JSON supplies one bounded structured SQL parameter, avoiding a bind
+        // count explosion while retaining SQLite's exact string comparisons.
+        yield* sql`
+          DELETE FROM projection_thread_messages
+          WHERE thread_id = ${input.targetThreadId}
+          AND message_id NOT IN (
+            SELECT ${copyPrefix} || value FROM json_each(${JSON.stringify(input.retainedMessageIds ?? [])})
+          )
+        `;
+        yield* sql`
+          DELETE FROM projection_turns WHERE thread_id = ${input.targetThreadId}
+            AND ((checkpoint_turn_count IS NULL AND turn_id != ${copyPrefix + cutoff.turnId})
+              OR checkpoint_turn_count > ${cutoff.retainedTurnCount})
+        `;
+        // Partial turns retain their displayed messages and an interrupted
+        // lifecycle, but never claim the later filesystem checkpoint or plan.
+        if (!cutoff.includesCompleteTurn) {
+          yield* sql`
+            UPDATE projection_turns SET state = 'interrupted',
+              checkpoint_turn_count = NULL, checkpoint_ref = NULL,
+              checkpoint_status = NULL, checkpoint_files_json = '[]',
+              assistant_message_id = CASE WHEN EXISTS (
+                SELECT 1 FROM projection_thread_messages
+                WHERE thread_id = ${input.targetThreadId}
+                  AND message_id = ${copyPrefix + cutoff.sourceMessageId} AND role = 'assistant'
+              ) THEN ${copyPrefix + cutoff.sourceMessageId} ELSE NULL END,
+              completed_at = (SELECT updated_at FROM projection_thread_messages
+                WHERE thread_id = ${input.targetThreadId} AND message_id = ${copyPrefix + cutoff.sourceMessageId})
+            WHERE thread_id = ${input.targetThreadId} AND turn_id = ${copyPrefix + cutoff.turnId}
+          `;
+        }
+        yield* sql`UPDATE projection_turns SET state = 'interrupted'
+          WHERE thread_id = ${input.targetThreadId} AND turn_id = ${copyPrefix + cutoff.turnId}`;
+        yield* sql`
+          DELETE FROM projection_thread_activities WHERE thread_id = ${input.targetThreadId}
+            AND (kind IN ('approval.requested', 'user-input.requested') OR turn_id IS NULL OR turn_id NOT IN (SELECT turn_id FROM projection_turns
+              WHERE thread_id = ${input.targetThreadId} AND checkpoint_turn_count IS NOT NULL))
+        `;
+        yield* sql`
+          DELETE FROM projection_thread_proposed_plans WHERE thread_id = ${input.targetThreadId}
+            AND (turn_id IS NULL OR turn_id NOT IN (SELECT turn_id FROM projection_turns
+              WHERE thread_id = ${input.targetThreadId} AND checkpoint_turn_count IS NOT NULL))
+        `;
+        yield* sql`
+          UPDATE projection_threads SET latest_turn_id = ${copyPrefix + cutoff.turnId},
+            latest_user_message_at = (SELECT MAX(created_at) FROM projection_thread_messages
+              WHERE thread_id = ${input.targetThreadId} AND role = 'user')
+          WHERE thread_id = ${input.targetThreadId}
+        `;
+      }
     });
 
     const applyProjectsProjection: ProjectorDefinition["apply"] = Effect.fn(
@@ -943,6 +1000,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             sourceThreadId: event.payload.sourceThreadId,
             targetThreadId: event.payload.targetThreadId,
             duplicatedAt: event.payload.forkedAt,
+            ...(event.payload.messageCutoff ? { messageCutoff: event.payload.messageCutoff } : {}),
+            ...(event.payload.retainedMessageIds
+              ? { retainedMessageIds: event.payload.retainedMessageIds }
+              : {}),
           }).pipe(
             Effect.mapError(
               toPersistenceSqlError("ProjectionPipeline.copyThreadContextProjectionRows:query"),

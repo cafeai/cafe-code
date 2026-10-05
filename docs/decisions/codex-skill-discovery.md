@@ -64,6 +64,14 @@ The dedicated transport schema cannot serialize native paths, icon paths, prompt
 dependencies or raw provider errors. Scope and optional plugin provenance remain
 inert presentation metadata. Ordinary browser escaping still applies.
 
+The disposable metadata client explicitly disables protocol payload logging,
+including malformed-response diagnostics. The protocol's default decode-failure
+logger otherwise retains rejected wire JSON even when normal incoming logging
+is off. Picker failures retain only the caller's fixed phase/outcome diagnostics;
+private paths and account metadata must not enter logs or tracer annotations.
+`CodexMetadataPrivacy.test.ts` drives the actual decoder with an isolated in-memory
+child and a private sentinel; restoring the old logger behavior makes it fail.
+
 ## Qualification
 
 Synthetic mapper/protocol tests cover exact cwd, reference injection, disabled and

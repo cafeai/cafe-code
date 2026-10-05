@@ -43,6 +43,7 @@ import {
   CheckIcon,
   CircleAlertIcon,
   EyeIcon,
+  GitForkIcon,
   GlobeIcon,
   HammerIcon,
   ChevronDownIcon,
@@ -143,12 +144,14 @@ interface TimelineRowSharedState {
   activeThreadEnvironmentId: EnvironmentId;
   onHistoricalWorkLogPresenceResolved: (turnId: TurnId, hasWorkLog: boolean) => void;
   onRevertUserMessage: (messageId: MessageId) => void;
+  onForkMessage?: ((messageId: MessageId) => void) | undefined;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   onOpenSubagentDetail: (workEntry: WorkLogEntry, trigger: HTMLButtonElement) => void;
 }
 
 interface TimelineRowActivityState {
   isWorking: boolean;
+  messageForkDisabled: boolean;
   isRevertingCheckpoint: boolean;
   subagentDetailOpen: boolean;
 }
@@ -187,6 +190,9 @@ const TIMELINE_REVIEW_VISIBLE_CONTENT_POSITION = {
 // ---------------------------------------------------------------------------
 
 interface MessagesTimelineProps {
+  /** Explicit selected-message native fork. Omitted for unsupported providers. */
+  onForkMessage?: ((messageId: MessageId) => void) | undefined;
+  messageForkDisabled?: boolean;
   /** Live saved follow-ups are visible without opening the separate Tasks rail. */
   scheduledFollowups?: ScheduledFollowupsContext;
   /** Missing session evidence is explicitly unknown, never implicitly live. */
@@ -234,6 +240,8 @@ interface MessagesTimelineProps {
 // ---------------------------------------------------------------------------
 
 export const MessagesTimeline = memo(function MessagesTimeline({
+  onForkMessage,
+  messageForkDisabled = false,
   scheduledFollowups,
   isThreadHistoryHydrating = false,
   isWorking,
@@ -949,6 +957,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       activeProvider,
       subagentRuntimeSession,
       onRevertUserMessage,
+      onForkMessage,
       onImageExpand,
       onOpenSubagentDetail: openSubagentDetail,
     }),
@@ -964,6 +973,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       activeProvider,
       subagentRuntimeSession,
       onRevertUserMessage,
+      onForkMessage,
       onImageExpand,
       openSubagentDetail,
     ],
@@ -971,10 +981,11 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const activityState = useMemo<TimelineRowActivityState>(
     () => ({
       isWorking,
+      messageForkDisabled,
       isRevertingCheckpoint,
       subagentDetailOpen: isSubagentDetailOpen,
     }),
-    [isRevertingCheckpoint, isSubagentDetailOpen, isWorking],
+    [isRevertingCheckpoint, isSubagentDetailOpen, isWorking, messageForkDisabled],
   );
 
   // Stable renderItem — no closure deps. Row components read shared state
@@ -1288,6 +1299,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
               <div className="flex items-center gap-1.5 opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover:opacity-100">
                 {copyText && <MessageCopyButton text={copyText} />}
                 {canRevertAgentWork && <RevertUserMessageButton messageId={row.message.id} />}
+                {!row.message.streaming && <ForkMessageButton messageId={row.message.id} />}
               </div>
               <p className="text-right text-xs text-muted-foreground/50">
                 {formatTimestamp(row.message.createdAt, ctx.timestampFormat)}
@@ -1314,6 +1326,31 @@ function RevertUserMessageButton({ messageId }: { messageId: MessageId }) {
       title="Revert to this message"
     >
       <Undo2Icon className="size-3" />
+    </Button>
+  );
+}
+
+function ForkMessageButton({ messageId }: { messageId: MessageId }) {
+  const ctx = use(TimelineRowCtx);
+  const activity = use(TimelineRowActivityCtx);
+  if (ctx.activeProvider !== "claudeAgent" || !ctx.onForkMessage) return null;
+  return (
+    <Button
+      type="button"
+      size="icon-xs"
+      variant="ghost"
+      aria-label="Fork from this message"
+      title={
+        activity.messageForkDisabled
+          ? "Wait for this chat and its background work to finish"
+          : "Fork from this message"
+      }
+      disabled={
+        activity.messageForkDisabled || activity.isWorking || activity.isRevertingCheckpoint
+      }
+      onClick={() => ctx.onForkMessage?.(messageId)}
+    >
+      <GitForkIcon className="size-3" />
     </Button>
   );
 }
@@ -1485,6 +1522,7 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
           )}
         </p>
         <AssistantCopyButton row={row} />
+        {!row.message.streaming && <ForkMessageButton messageId={row.message.id} />}
       </div>
     </div>
   );

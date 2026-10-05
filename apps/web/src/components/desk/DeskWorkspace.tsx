@@ -65,6 +65,7 @@ import { useUiStateStore } from "../../uiStateStore";
 import { readLocalApi } from "../../localApi";
 import { useRenameChat } from "../../hooks/useRenameChat";
 import { useDeskTabMetadata, readDeskTabMetadata } from "./useDeskTabMetadata";
+import { useDeskChatActions } from "./useDeskChatActions";
 import {
   deskDropEdge,
   deskInsertionIndex,
@@ -733,6 +734,7 @@ export default function DeskWorkspace() {
     const meta = readDeskTabMetadata(target);
     if (meta.threadRef) openRenameChat(meta.threadRef, meta.title);
   };
+  const chatActions = useDeskChatActions();
 
   const showMenu = async (
     groupId: string,
@@ -756,6 +758,7 @@ export default function DeskWorkspace() {
         label: "Rename chat…",
         disabled: !readDeskTabMetadata(target).threadRef,
       });
+      items.push(...chatActions.items(target));
       item("close", "Close tab", { type: "close", tabKey: key });
       item(
         "others",
@@ -820,6 +823,7 @@ export default function DeskWorkspace() {
       docked: !railDocked,
     });
     const clicked = await readLocalApi()?.contextMenu.show(items, position);
+    if (clicked && target && (await chatActions.run(clicked, target))) return;
     if (clicked === "rename-chat" && target) rename(target);
     else if (clicked === "rename-group") {
       setGroupName(group.name);

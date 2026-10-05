@@ -5,23 +5,27 @@ import { memo, useEffect, useRef, useState } from "react";
 import { DESK_LIMITS, deskGroupIds } from "../../deskModel";
 import { useDeskStore } from "../../deskStore";
 import { renameThread } from "../../threadRename";
+import { readLocalApi } from "../../localApi";
 import type { ThreadRouteTarget } from "../../threadRoutes";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
 import { resolveThreadRowClassName } from "../Sidebar.logic";
 import { ThreadStatusLabel } from "../ThreadStatusIndicators";
 import { SidebarMenuSub, SidebarMenuSubButton, SidebarMenuSubItem } from "../ui/sidebar";
 import { useDeskTabMetadata } from "./useDeskTabMetadata";
+import { useDeskChatActions } from "./useDeskChatActions";
 
 const DeskSidebarRow = memo(function DeskSidebarRow({
   target,
   selected,
   onActivate,
   onClose,
+  chatActions,
 }: {
   target: ThreadRouteTarget;
   selected: boolean;
   onActivate: () => void;
   onClose: () => void;
+  chatActions: ReturnType<typeof useDeskChatActions>;
 }) {
   const metadata = useDeskTabMetadata(target);
   const [editing, setEditing] = useState(false);
@@ -111,8 +115,31 @@ const DeskSidebarRow = memo(function DeskSidebarRow({
       if (renameRef.current === edit || renameRef.current === null) setSaving(false);
     }
   };
+  const showMenu = async (position: { x: number; y: number }) => {
+    if (editing || savingRef.current) return;
+    const action = await readLocalApi()?.contextMenu.show(
+      [
+        ...(metadata.threadRef && metadata.exists ? [{ id: "rename", label: "Rename chat…" }] : []),
+        ...chatActions.items(target),
+        { id: "close", label: "Close tab" },
+      ],
+      position,
+    );
+    if (action === "rename") beginRename();
+    else if (action === "close") onClose();
+    else if (action) await chatActions.run(action, target);
+  };
   return (
-    <SidebarMenuSubItem className="group/desk-row w-full" data-desk-chat-row>
+    <SidebarMenuSubItem
+      className="group/desk-row w-full"
+      data-desk-chat-row
+      onContextMenu={(event) => {
+        if (editing) return;
+        event.preventDefault();
+        event.stopPropagation();
+        void showMenu({ x: event.clientX, y: event.clientY });
+      }}
+    >
       {/* Use Projects' row primitive and state classes, including its full-width
           selected background. Time and actions share one reserved trailing slot;
           hovering swaps them without shifting or retruncating the title. */}
@@ -136,6 +163,13 @@ const DeskSidebarRow = memo(function DeskSidebarRow({
               }
               onClick={onActivate}
               onKeyDown={(event) => {
+                if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  void showMenu({ x: rect.left, y: rect.bottom });
+                  return;
+                }
                 if (event.key === "F2" && metadata.threadRef && metadata.exists) {
                   event.preventDefault();
                   beginRename();
@@ -362,6 +396,7 @@ export function DeskSidebar({
 }) {
   const desk = useDeskStore((state) => state.desk);
   const dispatch = useDeskStore((state) => state.dispatch);
+  const chatActions = useDeskChatActions();
   return (
     <section aria-label="Desk open chats" className="px-2 py-2">
       <div className="mb-1 flex items-center justify-between pl-2 pr-1.5">
@@ -413,6 +448,7 @@ export function DeskSidebar({
                   <DeskSidebarRow
                     key={tabKey}
                     target={target}
+                    chatActions={chatActions}
                     selected={desk.activeGroupId === groupId && group.activeTabKey === tabKey}
                     onActivate={() => {
                       dispatch({ type: "select", tabKey });

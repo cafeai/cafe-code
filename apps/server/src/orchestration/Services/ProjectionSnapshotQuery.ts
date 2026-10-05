@@ -239,6 +239,15 @@ export interface ProjectionSnapshotQueryShape {
     ProjectionRepositoryError
   >;
 
+  /** Exact source-thread and associated-project event authority for native fork CAS. */
+  readonly getThreadForkSourceVersion: (
+    threadId: ThreadId,
+  ) => Effect.Effect<number, ProjectionRepositoryError>;
+  /** Capped at 2001; proves a selected fork's bounded candidate list is complete. */
+  readonly getThreadForkMessageCount: (
+    threadId: ThreadId,
+  ) => Effect.Effect<number, ProjectionRepositoryError>;
+
   /**
    * Read aggregate projection counts without hydrating the full read model.
    */
