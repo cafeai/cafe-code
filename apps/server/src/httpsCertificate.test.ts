@@ -3,6 +3,21 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import { X509Certificate } from "node:crypto";
+import { afterEach, vi } from "vitest";
+
+const interfaces = vi.hoisted(() => vi.fn());
+vi.mock("node:os", async (importOriginal) => {
+  const original = await importOriginal<typeof import("node:os")>();
+  return {
+    ...original,
+    networkInterfaces: () =>
+      interfaces.getMockImplementation() ? interfaces() : original.networkInterfaces(),
+  };
+});
+afterEach(() => {
+  interfaces.mockReset();
+});
 
 import {
   ensureHttpsCertificateMaterial,
@@ -11,6 +26,33 @@ import {
 } from "./httpsCertificate.ts";
 
 it.layer(NodeServices.layer)("ensureHttpsCertificateMaterial", (it) => {
+  it.effect(
+    "refreshes a Cafe-generated certificate after the LAN address changes, then reuses it",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const baseDir = yield* fs.makeTempDirectoryScoped({
+          prefix: "cafe-dhcp-certificate-test-",
+        });
+        const config = {
+          host: "0.0.0.0",
+          httpsCertPath: path.join(baseDir, "server-cert.pem"),
+          httpsKeyPath: path.join(baseDir, "server-key.pem"),
+        };
+        interfaces.mockReturnValue({ lan: [{ address: "10.0.0.187" }] });
+        const first = yield* ensureHttpsCertificateMaterial(config);
+        assert.ok(new X509Certificate(first.cert).checkIP("10.0.0.187"));
+        assert.equal(new X509Certificate(first.cert).checkIP("10.0.0.108"), undefined);
+        interfaces.mockReturnValue({ lan: [{ address: "10.0.0.108" }] });
+        const changed = yield* ensureHttpsCertificateMaterial(config);
+        assert.notEqual(changed.cert, first.cert);
+        assert.ok(new X509Certificate(changed.cert).checkIP("10.0.0.108"));
+        const reused = yield* ensureHttpsCertificateMaterial(config);
+        assert.equal(reused.cert, changed.cert);
+        assert.equal(reused.key, changed.key);
+      }).pipe(Effect.scoped),
+  );
   it.effect("resolves Git for Windows OpenSSL when it is installed outside PATH", () =>
     Effect.promise(async () => {
       const expected = "C:\\Program Files\\Git\\usr\\bin\\openssl.exe";

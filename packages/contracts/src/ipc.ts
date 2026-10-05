@@ -353,6 +353,16 @@ export const PersistedSavedEnvironmentRecordSchema = Schema.Struct({
 });
 export type PersistedSavedEnvironmentRecord = typeof PersistedSavedEnvironmentRecordSchema.Type;
 
+export const RemoteCertificatePreparationSchema = Schema.Literals([
+  "approved",
+  "unchanged",
+  "declined",
+  "invalid-certificate",
+  "unreachable",
+  "storage-error",
+]);
+export type RemoteCertificatePreparation = typeof RemoteCertificatePreparationSchema.Type;
+
 export const DesktopDebugEndpointStateSchema = Schema.Struct({
   enabled: Schema.Boolean,
   url: Schema.NullOr(Schema.String),
@@ -409,6 +419,8 @@ export interface DesktopBridge {
   getSavedEnvironmentSecret: (environmentId: EnvironmentId) => Promise<string | null>;
   setSavedEnvironmentSecret: (environmentId: EnvironmentId, secret: string) => Promise<boolean>;
   removeSavedEnvironmentSecret: (environmentId: EnvironmentId) => Promise<void>;
+  /** Explicit saved-server enrollment only; never called by background reconnects. */
+  prepareRemoteCertificate?: (httpBaseUrl: string) => Promise<RemoteCertificatePreparation>;
   getServerExposureState: () => Promise<DesktopServerExposureState>;
   setServerExposureMode: (mode: DesktopServerExposureMode) => Promise<DesktopServerExposureState>;
   setServerHttpsEnabled: (enabled: boolean) => Promise<DesktopServerExposureState>;

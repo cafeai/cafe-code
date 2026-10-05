@@ -227,42 +227,41 @@ describe("direct saved environments", () => {
     expect(mockUpsert).not.toHaveBeenCalled();
   });
 
-  it.each(["  workstation-user  ", "   "])(
-    "saves only the bearer session from a password login (username: %s)",
-    async (username) => {
-      mockWriteSavedEnvironmentBearerToken.mockResolvedValue(true);
-      const { addSavedEnvironment, reconnectSavedEnvironment } = await import("./service");
-      await addSavedEnvironment({
-        label: "PC",
-        host: "https://remote.example.com",
-        username,
-        password: " admin-secret ",
-      });
+  it("saves only the bearer session from a password login", async () => {
+    mockWriteSavedEnvironmentBearerToken.mockResolvedValue(true);
+    const { addSavedEnvironment, reconnectSavedEnvironment } = await import("./service");
+    await addSavedEnvironment({
+      label: "PC",
+      host: "https://remote.example.com",
+      password: " admin-secret ",
+    });
 
-      expect(mockBootstrapRemotePasswordBearerSession).toHaveBeenCalledExactlyOnceWith({
-        httpBaseUrl: "https://remote.example.com/",
-        ...(username.trim() ? { username: username.trim() } : {}),
-        password: "admin-secret",
-      });
-      expect(mockBootstrapRemoteBearerSession).not.toHaveBeenCalled();
-      expect(mockResolveRemotePairingTarget).not.toHaveBeenCalled();
-      expect(mockWriteSavedEnvironmentBearerToken).toHaveBeenCalledWith(
-        EnvironmentId.make("environment-1"),
-        "password-bearer-token",
-      );
-      expect(JSON.stringify(mockPersistSavedEnvironmentRecord.mock.calls)).not.toMatch(
-        /admin-secret|workstation-user/,
-      );
+    expect(mockBootstrapRemotePasswordBearerSession).toHaveBeenCalledExactlyOnceWith({
+      httpBaseUrl: "https://remote.example.com/",
+      password: "admin-secret",
+    });
+    expect(mockBootstrapRemoteBearerSession).not.toHaveBeenCalled();
+    expect(mockResolveRemotePairingTarget).not.toHaveBeenCalled();
+    expect(mockFetchRemoteEnvironmentDescriptor).toHaveBeenCalledExactlyOnceWith({
+      httpBaseUrl: "https://remote.example.com/",
+      approveCertificate: true,
+    });
+    expect(mockWriteSavedEnvironmentBearerToken).toHaveBeenCalledWith(
+      EnvironmentId.make("environment-1"),
+      "password-bearer-token",
+    );
+    expect(JSON.stringify(mockPersistSavedEnvironmentRecord.mock.calls)).not.toMatch(
+      /admin-secret|workstation-user/,
+    );
 
-      mockReadSavedEnvironmentBearerToken.mockResolvedValue("password-bearer-token");
-      await reconnectSavedEnvironment(EnvironmentId.make("environment-1"));
-      expect(mockBootstrapRemotePasswordBearerSession).toHaveBeenCalledOnce();
-      expect(mockFetchRemoteSessionState).toHaveBeenLastCalledWith({
-        httpBaseUrl: "https://remote.example.com/",
-        bearerToken: "password-bearer-token",
-      });
-    },
-  );
+    mockReadSavedEnvironmentBearerToken.mockResolvedValue("password-bearer-token");
+    await reconnectSavedEnvironment(EnvironmentId.make("environment-1"));
+    expect(mockBootstrapRemotePasswordBearerSession).toHaveBeenCalledOnce();
+    expect(mockFetchRemoteSessionState).toHaveBeenLastCalledWith({
+      httpBaseUrl: "https://remote.example.com/",
+      bearerToken: "password-bearer-token",
+    });
+  });
 
   it("does not persist or retry failed password authentication", async () => {
     mockBootstrapRemotePasswordBearerSession.mockRejectedValueOnce(

@@ -1787,7 +1787,6 @@ export async function addSavedEnvironment(input: {
   readonly pairingUrl?: string;
   readonly host?: string;
   readonly pairingCode?: string;
-  readonly username?: string;
   readonly password?: string;
 }): Promise<SavedEnvironmentRecord> {
   const password = input.password?.trim();
@@ -1800,7 +1799,6 @@ export async function addSavedEnvironment(input: {
   ) {
     throw new Error("Choose one remote sign-in method.");
   }
-  const username = input.username?.trim();
   const pairingTarget =
     password === undefined
       ? resolveRemotePairingTarget({
@@ -1812,6 +1810,7 @@ export async function addSavedEnvironment(input: {
   const resolvedTarget = pairingTarget ?? resolveRemoteServerTarget(input.host ?? "");
   const descriptor = await fetchRemoteEnvironmentDescriptor({
     httpBaseUrl: resolvedTarget.httpBaseUrl,
+    approveCertificate: true,
   });
   const environmentId = descriptor.environmentId;
   const registrySnapshot = snapshotSavedEnvironmentRegistry([environmentId]);
@@ -1827,7 +1826,6 @@ export async function addSavedEnvironment(input: {
     : await bootstrapRemotePasswordBearerSession({
         httpBaseUrl: resolvedTarget.httpBaseUrl,
         password: password!,
-        ...(username ? { username } : {}),
       });
 
   const record: SavedEnvironmentRecord = {

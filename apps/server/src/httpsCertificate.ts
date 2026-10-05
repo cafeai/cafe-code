@@ -124,7 +124,11 @@ export const resolveOpenSslExecutable = async (
 export const openSslGenerationTimeoutMs = (platform: NodeJS.Platform = process.platform): number =>
   platform === "win32" ? WINDOWS_OPENSSL_GENERATION_TIMEOUT_MS : OPENSSL_GENERATION_TIMEOUT_MS;
 
-const certificateIsFresh = async (certPath: string, keyPath: string): Promise<boolean> => {
+const certificateIsFresh = async (
+  certPath: string,
+  keyPath: string,
+  host: string | undefined,
+): Promise<boolean> => {
   try {
     const [certPem, keyPem] = await Promise.all([
       fs.readFile(certPath, "utf8"),
@@ -136,7 +140,25 @@ const certificateIsFresh = async (certPath: string, keyPath: string): Promise<bo
 
     const certificate = new X509Certificate(certPem);
     const validToMs = Date.parse(certificate.validTo);
-    return Number.isFinite(validToMs) && validToMs > Date.now() + CERT_RENEWAL_WINDOW_MS;
+    if (!Number.isFinite(validToMs) || validToMs <= Date.now() + CERT_RENEWAL_WINDOW_MS)
+      return false;
+    // Cafe-generated certificates include the current LAN addresses. DHCP or
+    // interface changes must not leave a long-lived certificate bound only to
+    // yesterday's address. Keep externally provisioned identities unchanged.
+    if (
+      certificate.subject === "CN=Cafe Code Local HTTPS" &&
+      certificate.issuer === certificate.subject &&
+      certificate.verify(certificate.publicKey)
+    ) {
+      return collectSubjectAltNames(host)
+        .split(",")
+        .every((name) =>
+          name.startsWith("IP:")
+            ? Boolean(certificate.checkIP(name.slice(3)))
+            : Boolean(certificate.checkHost(name.slice(4), { subject: "never" })),
+        );
+    }
+    return true;
   } catch {
     return false;
   }
@@ -210,7 +232,7 @@ export const ensureHttpsCertificateMaterial = (
 ): Effect.Effect<HttpsCertificateMaterial, HttpsCertificateError> =>
   Effect.tryPromise({
     try: async () => {
-      if (!(await certificateIsFresh(config.httpsCertPath, config.httpsKeyPath))) {
+      if (!(await certificateIsFresh(config.httpsCertPath, config.httpsKeyPath, config.host))) {
         await generateCertificate({
           certPath: config.httpsCertPath,
           keyPath: config.httpsKeyPath,

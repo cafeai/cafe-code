@@ -35,6 +35,7 @@ import * as DesktopPowerSaveBlocker from "./app/DesktopPowerSaveBlocker.ts";
 import * as DesktopServerExposure from "./backend/DesktopServerExposure.ts";
 import * as DesktopClientSettings from "./settings/DesktopClientSettings.ts";
 import * as DesktopSavedEnvironments from "./settings/DesktopSavedEnvironments.ts";
+import * as DesktopRemoteCertificates from "./settings/DesktopRemoteCertificates.ts";
 import * as DesktopAppSettings from "./settings/DesktopAppSettings.ts";
 import * as DesktopShellEnvironment from "./shell/DesktopShellEnvironment.ts";
 import * as DesktopState from "./app/DesktopState.ts";
@@ -101,6 +102,7 @@ const desktopFoundationLayer = Layer.mergeAll(
   DesktopAppSettings.layer,
   DesktopClientSettings.layer,
   DesktopSavedEnvironments.layer,
+  DesktopRemoteCertificates.layer,
   DesktopAssets.layer,
   DesktopObservability.layer,
   DesktopPowerSaveBlocker.layer,

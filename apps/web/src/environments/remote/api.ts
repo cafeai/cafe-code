@@ -1,11 +1,28 @@
 import type {
   AuthBearerBootstrapResult,
-  AuthPasswordBootstrapInput,
   AuthSessionState,
   AuthWebSocketTokenResult,
   ExecutionEnvironmentDescriptor,
 } from "@cafecode/contracts";
 import { ENVIRONMENT_ENDPOINT_PATHS } from "@cafecode/shared/environmentEndpoint";
+
+class RemoteEnvironmentConnectionError extends Error {}
+class RemoteEnvironmentNetworkError extends RemoteEnvironmentConnectionError {}
+
+export function remoteEnvironmentErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof RemoteEnvironmentConnectionError) return error.message;
+  if (isRemoteEnvironmentAuthHttpError(error)) {
+    if (error.status === 401 || error.status === 403) {
+      return "The server rejected the sign-in credential. Check the admin password or pairing credential, then try again.";
+    }
+    if (error.status === 404) {
+      return "This server does not support this sign-in method. Update Cafe Code on the server or use a pairing code.";
+    }
+    if (error.status === 429) return "Too many sign-in attempts. Wait a moment, then try again.";
+    return "The remote server could not complete this request. Try again shortly.";
+  }
+  return fallback;
+}
 
 class RemoteEnvironmentAuthHttpError extends Error {
   readonly status: number;
@@ -55,7 +72,9 @@ export async function fetchRemoteJson<T>(input: {
       ...(input.body !== undefined ? { body: JSON.stringify(input.body) } : {}),
     });
   } catch {
-    throw new Error("Could not reach the remote Cafe Code server.");
+    throw new RemoteEnvironmentNetworkError(
+      "Could not reach the remote Cafe Code server. Check the address, network access, and HTTPS certificate trust.",
+    );
   }
 
   if (!response.ok) {
@@ -68,7 +87,9 @@ export async function fetchRemoteJson<T>(input: {
   try {
     return (await response.json()) as T;
   } catch {
-    throw new Error("The remote Cafe server returned an invalid response.");
+    throw new RemoteEnvironmentConnectionError(
+      "The remote Cafe Code server returned an invalid response. Check the server address and port.",
+    );
   }
 }
 
@@ -86,9 +107,10 @@ export async function bootstrapRemoteBearerSession(input: {
   });
 }
 
-export async function bootstrapRemotePasswordBearerSession(
-  input: AuthPasswordBootstrapInput & { readonly httpBaseUrl: string },
-): Promise<AuthBearerBootstrapResult> {
+export async function bootstrapRemotePasswordBearerSession(input: {
+  readonly password: string;
+  readonly httpBaseUrl: string;
+}): Promise<AuthBearerBootstrapResult> {
   // Use the bearer endpoint rather than the primary server's cookie login.
   // Only the resulting session is retained; passwords never enter saved metadata.
   return fetchRemoteJson<AuthBearerBootstrapResult>({
@@ -96,7 +118,6 @@ export async function bootstrapRemotePasswordBearerSession(
     pathname: "/api/auth/bootstrap/password/bearer",
     method: "POST",
     body: {
-      ...(input.username !== undefined ? { username: input.username } : {}),
       password: input.password,
     },
   });
@@ -115,6 +136,7 @@ export async function fetchRemoteSessionState(input: {
 
 export async function fetchRemoteEnvironmentDescriptor(input: {
   readonly httpBaseUrl: string;
+  readonly approveCertificate?: boolean;
 }): Promise<ExecutionEnvironmentDescriptor> {
   let lastError: unknown;
   for (const pathname of ENVIRONMENT_ENDPOINT_PATHS) {
@@ -124,6 +146,35 @@ export async function fetchRemoteEnvironmentDescriptor(input: {
         pathname,
       });
     } catch (error) {
+      // Only enrollment may ask for native trust, before sending any credential.
+      // Retry the public GET once; bootstrap POSTs are never replayed.
+      const prepare = window.desktopBridge?.prepareRemoteCertificate;
+      if (
+        input.approveCertificate &&
+        prepare &&
+        error instanceof RemoteEnvironmentNetworkError &&
+        new URL(input.httpBaseUrl).protocol === "https:"
+      ) {
+        const result = await prepare(input.httpBaseUrl);
+        if (result === "approved") {
+          return fetchRemoteJson<ExecutionEnvironmentDescriptor>({
+            httpBaseUrl: input.httpBaseUrl,
+            pathname,
+          });
+        }
+        const messages = {
+          declined: "Certificate approval was cancelled. No sign-in credential was sent.",
+          "invalid-certificate":
+            "The server’s HTTPS certificate is expired, does not match its address, or cannot be trusted. Update and restart Cafe Code on the server, then try again.",
+          unreachable:
+            "Could not reach the remote Cafe Code server. Check the address and network access.",
+          "storage-error":
+            "Could not save certificate approval. Check that Cafe Code can write its local app data, then try again.",
+          unchanged:
+            "The server’s HTTPS certificate is valid, but the request failed. Check the server’s network access and cross-origin configuration.",
+        };
+        throw new RemoteEnvironmentConnectionError(messages[result]);
+      }
       lastError = error;
     }
   }

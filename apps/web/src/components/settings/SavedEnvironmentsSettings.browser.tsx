@@ -156,10 +156,10 @@ describe("SavedEnvironmentsSettings", () => {
     );
     mounted = await render(<SavedEnvironmentsSettings actions={actions} />);
     await page.getByRole("button", { name: "Add environment" }).click();
-    await page.getByRole("button", { name: "Host + Login" }).click();
+    await page.getByRole("button", { name: "Host + Password" }).click();
     const dialog = page.getByRole("dialog");
     await dialog.getByLabelText("Host").fill("https://pc.example:3775");
-    await dialog.getByLabelText("Username (optional)").fill("PC user");
+    expect(document.querySelector("#env-username")).toBeNull();
     await dialog.getByLabelText("Admin password").fill("admin-secret");
     const passwordInput = document.querySelector<HTMLInputElement>("#env-password");
     expect(passwordInput?.type).toBe("password");
@@ -172,7 +172,6 @@ describe("SavedEnvironmentsSettings", () => {
     expect(runtimeMocks.addSavedEnvironment).toHaveBeenCalledExactlyOnceWith({
       label: "",
       host: "https://pc.example:3775",
-      username: "PC user",
       password: "admin-secret",
     });
     resolveAdd({
@@ -194,7 +193,7 @@ describe("SavedEnvironmentsSettings", () => {
     );
     mounted = await render(<SavedEnvironmentsSettings actions={actions} />);
     await page.getByRole("button", { name: "Add environment" }).click();
-    await page.getByRole("button", { name: "Host + Login" }).click();
+    await page.getByRole("button", { name: "Host + Password" }).click();
     const dialog = page.getByRole("dialog");
     await dialog.getByLabelText("Host").fill("https://pc.example");
     await dialog.getByLabelText("Admin password").fill("admin-secret");
@@ -218,7 +217,6 @@ describe("SavedEnvironmentsSettings", () => {
     expect(runtimeMocks.addSavedEnvironment).toHaveBeenLastCalledWith({
       label: "",
       host: "https://pc.example",
-      username: "",
       password: "fresh-secret",
     });
   });
@@ -228,11 +226,11 @@ describe("SavedEnvironmentsSettings", () => {
     await page.getByRole("button", { name: "Add environment" }).click();
     const dialog = page.getByRole("dialog");
     await dialog.getByLabelText("Pairing URL").fill("https://pc.example/pair#token=secret");
-    await page.getByRole("button", { name: "Host + Login" }).click();
+    await page.getByRole("button", { name: "Host + Password" }).click();
     await dialog.getByLabelText("Admin password").fill("admin-secret");
     await page.getByRole("button", { name: "Pairing URL", exact: true }).click();
     await expect.element(dialog.getByLabelText("Pairing URL")).toHaveValue("");
-    await page.getByRole("button", { name: "Host + Login" }).click();
+    await page.getByRole("button", { name: "Host + Password" }).click();
     await expect.element(dialog.getByLabelText("Admin password")).toHaveValue("");
     await dialog.getByLabelText("Admin password").fill("second-secret");
     await dialog.getByRole("button", { name: "Cancel" }).click();
@@ -240,7 +238,7 @@ describe("SavedEnvironmentsSettings", () => {
       expect(document.querySelector('[role="dialog"]')).toBeNull();
     });
     await page.getByRole("button", { name: "Add environment" }).click();
-    await page.getByRole("button", { name: "Host + Login" }).click();
+    await page.getByRole("button", { name: "Host + Password" }).click();
     await expect.element(page.getByLabelText("Admin password")).toHaveValue("");
     expect(runtimeMocks.addSavedEnvironment).not.toHaveBeenCalled();
   });
@@ -254,7 +252,7 @@ describe("SavedEnvironmentsSettings", () => {
     try {
       mounted = await render(<SavedEnvironmentsSettings actions={actions} />);
       await page.getByRole("button", { name: "Add environment" }).click();
-      await page.getByRole("button", { name: "Host + Login" }).click();
+      await page.getByRole("button", { name: "Host + Password" }).click();
       await vi.waitFor(() => {
         for (const name of ["Cancel", "Add environment"]) {
           const bounds = getDialogButton("dialog", name).getBoundingClientRect();

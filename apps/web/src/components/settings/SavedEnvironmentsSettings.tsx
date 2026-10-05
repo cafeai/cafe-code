@@ -15,6 +15,7 @@ import {
   useSavedEnvironmentRuntimeStore,
 } from "~/environments/runtime/catalog";
 import { resolveServerConfigVersionMismatch } from "~/versionSkew";
+import { remoteEnvironmentErrorMessage } from "~/environments/remote/api";
 import {
   AlertDialog,
   AlertDialogClose,
@@ -296,7 +297,6 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
   const [pairingUrl, setPairingUrl] = useState("");
   const [host, setHost] = useState("");
   const [pairingCode, setPairingCode] = useState("");
-  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -307,7 +307,6 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
     setPairingUrl("");
     setHost("");
     setPairingCode("");
-    setUsername("");
     setPassword("");
     setError(null);
   };
@@ -338,7 +337,6 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
     const submittedUrl = pairingUrl;
     const submittedHost = host;
     const submittedCode = pairingCode;
-    const submittedUsername = username;
     const submittedPassword = password;
     const submittedTab = tab;
 
@@ -358,17 +356,19 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
         await actions.add({
           label: submittedLabel,
           host: submittedHost,
-          username: submittedUsername,
           password: submittedPassword,
         });
       }
       resetForm();
       setIsOpen(false);
-    } catch {
+    } catch (error) {
       setError(
-        submittedTab === "login"
-          ? "Could not sign in. Check the server address and admin password, then try again."
-          : "Could not add this environment. Check the server address and pairing credential, then try again.",
+        remoteEnvironmentErrorMessage(
+          error,
+          submittedTab === "login"
+            ? "Could not sign in. Check the server address and admin password, then try again."
+            : "Could not add this environment. Check the server address and pairing credential, then try again.",
+        ),
       );
     } finally {
       setIsSubmitting(false);
@@ -428,7 +428,7 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
                 onClick={() => changeTab("login")}
                 disabled={isSubmitting}
               >
-                Host + Login
+                Host + Password
               </Button>
             </Group>
 
@@ -478,20 +478,8 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
                 {tab === "login" ? (
                   <>
                     <p className="text-sm text-muted-foreground">
-                      Use the server’s admin password. Username is optional and labels this session.
+                      Use the server’s admin password.
                     </p>
-                    <div className="flex flex-col gap-2">
-                      <label htmlFor="env-username" className="text-sm font-medium">
-                        Username (optional)
-                      </label>
-                      <Input
-                        id="env-username"
-                        value={username}
-                        onChange={(event) => setUsername(event.target.value)}
-                        autoComplete="username"
-                        disabled={isSubmitting}
-                      />
-                    </div>
                     <div className="flex flex-col gap-2">
                       <label htmlFor="env-password" className="text-sm font-medium">
                         Admin password

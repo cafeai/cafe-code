@@ -1,9 +1,8 @@
 # Remote workspaces
 
 Add a reachable Cafe server in Settings → WebUI → Saved environments → Add
-environment. Use **Pairing URL**, **Host + Code**, or **Host + Login**. Login uses
-the target server's Cafe admin password. Username is an optional session label,
-not a separate account or the PC's operating-system login. Bare hosts default to
+environment. Use **Pairing URL**, **Host + Code**, or **Host + Password**. Password login uses
+the target server's Cafe admin password and does not require a username. Bare hosts default to
 HTTPS; include an explicit scheme and port when needed.
 
 Password login calls `/api/auth/bootstrap/password/bearer` and grants the same
@@ -14,6 +13,23 @@ resulting bearer encrypted with Electron safeStorage in its private registry.
 Browser local storage contains connection metadata; bearer sessions live in
 session storage. Reconnect uses the bearer and mints a fresh short-lived WS token.
 An expired or revoked session requires signing in again.
+
+For a self-signed HTTPS server, the desktop app asks for certificate approval
+before sending a sign-in credential. Compare the displayed SHA-256 fingerprint
+with the server's public certificate. Approval applies only to that HTTPS/WSS
+origin (including its port) and certificate, is stored privately in the local
+Cafe app data, and does not change operating-system trust. A changed certificate
+needs new approval. Expired certificates, wrong addresses and other TLS failures
+cannot be overridden. Pure browser clients use their browser/OS certificate trust.
+Approval is offered only when explicitly adding a saved environment; background
+reconnects never display trust prompts or replay a password.
+
+Cafe refreshes its generated self-signed certificate on backend startup when
+the current LAN addresses are missing from it. After a DHCP address change,
+restart/update Cafe on the server before connecting to the new address. That
+refresh changes its fingerprint, so saved desktop clients need to add the server
+again and approve its new certificate. Externally provisioned certificates keep
+their existing identity policy.
 
 The **Workspace server** selector beneath the sidebar logo appears only after a
 remote environment is saved. Remote MCP installation, in-app desktop viewing,
@@ -63,6 +79,13 @@ removed file and terminal operations, and viewer lease takeover, incarnation and
 expiry. Browser fixtures cover remote routes/drafts and selection, Desk navigation,
 settings, provider controls, usage, MCP, dictation, secret clearing and constrained
 layout. The default test suite does not start real providers or use user credentials.
+
+The certificate policy, approval/cancel/persistence behavior and DHCP refresh
+have default regressions. Qualify the real Electron HTTPS/WSS event boundary with
+`CAFE_CODE_REMOTE_TLS_E2E=1 yarn workspace @cafecode/desktop test src/settings/RemoteCertificateElectron.e2e.test.ts`.
+This opt-in test uses an isolated desktop profile, synthetic localhost TLS/WS
+peers and the checked-in test-only certificate; it never connects to a user's
+server or uses credentials. It requires a native graphical Electron runtime.
 
 The implementation was checked on macOS. A separate Linux PC, real remote provider
 authentication, production certificates and the Linux native viewer's new human-input

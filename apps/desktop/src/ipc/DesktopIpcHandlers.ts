@@ -25,6 +25,7 @@ import {
 } from "./methods/updates.ts";
 import { checkSourceUpdate, getSourceUpdateState } from "./methods/sourceUpdates.ts";
 import { setPowerSaveBlockerState } from "./methods/powerSaveBlocker.ts";
+import { prepareRemoteCertificate } from "./methods/remoteCertificates.ts";
 import { getDebugEndpointState, publishDebugSnapshot } from "./methods/debug.ts";
 import {
   copyText,
@@ -56,6 +57,7 @@ export const installDesktopIpcHandlers = Effect.gen(function* () {
   yield* ipc.handle(getSavedEnvironmentSecret);
   yield* ipc.handle(setSavedEnvironmentSecret);
   yield* ipc.handle(removeSavedEnvironmentSecret);
+  yield* ipc.handle(prepareRemoteCertificate);
 
   yield* ipc.handle(getServerExposureState);
   yield* ipc.handle(setServerExposureMode);

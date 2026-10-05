@@ -7,6 +7,7 @@ import {
   fetchRemoteSessionState,
   issueRemoteWebSocketToken,
   resolveRemoteWebSocketConnectionUrl,
+  remoteEnvironmentErrorMessage,
 } from "./api";
 import { resolveRemotePairingTarget, resolveRemoteServerTarget } from "./target";
 
@@ -25,6 +26,105 @@ beforeEach(() => {
 });
 
 describe("remote environment api", () => {
+  it("approves a desktop certificate before retrying only the public descriptor", async () => {
+    const prepareRemoteCertificate = vi.fn().mockResolvedValue("approved");
+    window.desktopBridge = { prepareRemoteCertificate } as unknown as NonNullable<
+      typeof window.desktopBridge
+    >;
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError("secret network cause"))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ environmentId: "pc" })));
+    globalThis.fetch = fetchMock;
+    await expect(
+      fetchRemoteEnvironmentDescriptor({
+        httpBaseUrl: "https://pc.example:3775/",
+        approveCertificate: true,
+      }),
+    ).resolves.toEqual({ environmentId: "pc" });
+    expect(prepareRemoteCertificate).toHaveBeenCalledExactlyOnceWith("https://pc.example:3775/");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(
+      fetchMock.mock.calls.every(
+        ([, options]) => options.method === "GET" && options.body === undefined,
+      ),
+    ).toBe(true);
+  });
+
+  it.each(["declined", "invalid-certificate", "unreachable", "storage-error", "unchanged"])(
+    "stops before authentication when certificate preparation is %s",
+    async (status) => {
+      window.desktopBridge = {
+        prepareRemoteCertificate: vi.fn().mockResolvedValue(status),
+      } as unknown as NonNullable<typeof window.desktopBridge>;
+      const fetchMock = vi.fn().mockRejectedValue(new TypeError("private network detail"));
+      globalThis.fetch = fetchMock;
+      const error = await fetchRemoteEnvironmentDescriptor({
+        httpBaseUrl: "https://pc.example/",
+        approveCertificate: true,
+      }).catch((error: unknown) => error);
+      expect(remoteEnvironmentErrorMessage(error, "fallback")).not.toMatch(/private|fallback/);
+      expect(fetchMock).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("never asks for trust or replays password POSTs during network failure", async () => {
+    const prepareRemoteCertificate = vi.fn().mockResolvedValue("approved");
+    window.desktopBridge = { prepareRemoteCertificate } as unknown as NonNullable<
+      typeof window.desktopBridge
+    >;
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError("private network detail"));
+    globalThis.fetch = fetchMock;
+    await expect(
+      bootstrapRemotePasswordBearerSession({
+        httpBaseUrl: "https://pc.example/",
+        password: "secret",
+      }),
+    ).rejects.toThrow("HTTPS certificate trust");
+    expect(prepareRemoteCertificate).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledOnce();
+    await expect(
+      fetchRemoteEnvironmentDescriptor({ httpBaseUrl: "https://pc.example/" }),
+    ).rejects.toThrow("HTTPS certificate trust");
+    expect(prepareRemoteCertificate).not.toHaveBeenCalled();
+  });
+
+  it("leaves browser and cleartext enrollment on their normal network policy", async () => {
+    const prepareRemoteCertificate = vi.fn();
+    window.desktopBridge = { prepareRemoteCertificate } as unknown as NonNullable<
+      typeof window.desktopBridge
+    >;
+    globalThis.fetch = vi.fn().mockRejectedValue(new TypeError("private detail"));
+    await expect(
+      fetchRemoteEnvironmentDescriptor({
+        httpBaseUrl: "http://pc.example/",
+        approveCertificate: true,
+      }),
+    ).rejects.toThrow("Could not reach");
+    expect(prepareRemoteCertificate).not.toHaveBeenCalled();
+    delete window.desktopBridge;
+    await expect(
+      fetchRemoteEnvironmentDescriptor({
+        httpBaseUrl: "https://pc.example/",
+        approveCertificate: true,
+      }),
+    ).rejects.toThrow("HTTPS certificate trust");
+    expect(prepareRemoteCertificate).not.toHaveBeenCalled();
+  });
+
+  it("distinguishes rejected credentials from certificate/network failures without exposing bodies", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(new Response("private password rejected", { status: 401 }));
+    const error = await bootstrapRemotePasswordBearerSession({
+      httpBaseUrl: "https://pc.example/",
+      password: "secret",
+    }).catch((error: unknown) => error);
+    expect(remoteEnvironmentErrorMessage(error, "fallback")).toContain(
+      "server rejected the sign-in credential",
+    );
+    expect(remoteEnvironmentErrorMessage(new Error("private secret"), "fallback")).toBe("fallback");
+  });
   it("derives backend urls and token from a pairing url", () => {
     expect(
       resolveRemotePairingTarget({
@@ -162,40 +262,35 @@ describe("remote environment api", () => {
     },
   );
 
-  it.each([undefined, "workstation-user"])(
-    "exchanges a password only in the bearer bootstrap body (username: %s)",
-    async (username) => {
-      const fetchMock = vi
-        .fn()
-        .mockResolvedValue(
-          new Response(JSON.stringify({ sessionToken: "password-session", role: "owner" })),
-        );
-      globalThis.fetch = fetchMock as typeof fetch;
-
-      await expect(
-        bootstrapRemotePasswordBearerSession({
-          httpBaseUrl: "https://remote.example.com/",
-          password: "admin-secret",
-          ...(username !== undefined ? { username } : {}),
-        }),
-      ).resolves.toMatchObject({ sessionToken: "password-session", role: "owner" });
-
-      expect(fetchMock).toHaveBeenCalledExactlyOnceWith(
-        "https://remote.example.com/api/auth/bootstrap/password/bearer",
-        {
-          method: "POST",
-          credentials: "omit",
-          redirect: "error",
-          signal: expect.any(AbortSignal),
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            ...(username !== undefined ? { username } : {}),
-            password: "admin-secret",
-          }),
-        },
+  it("exchanges a password only in the bearer bootstrap body", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ sessionToken: "password-session", role: "owner" })),
       );
-    },
-  );
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    await expect(
+      bootstrapRemotePasswordBearerSession({
+        httpBaseUrl: "https://remote.example.com/",
+        password: "admin-secret",
+      }),
+    ).resolves.toMatchObject({ sessionToken: "password-session", role: "owner" });
+
+    expect(fetchMock).toHaveBeenCalledExactlyOnceWith(
+      "https://remote.example.com/api/auth/bootstrap/password/bearer",
+      {
+        method: "POST",
+        credentials: "omit",
+        redirect: "error",
+        signal: expect.any(AbortSignal),
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          password: "admin-secret",
+        }),
+      },
+    );
+  });
 
   it("does not expose or retry a rejected password response", async () => {
     const fetchMock = vi.fn().mockResolvedValue(

@@ -45,6 +45,8 @@ if (process.isMainFrame === true) {
       }),
     removeSavedEnvironmentSecret: (environmentId) =>
       ipcRenderer.invoke(IpcChannels.REMOVE_SAVED_ENVIRONMENT_SECRET_CHANNEL, environmentId),
+    prepareRemoteCertificate: (httpBaseUrl) =>
+      ipcRenderer.invoke(IpcChannels.PREPARE_REMOTE_CERTIFICATE_CHANNEL, httpBaseUrl),
     getServerExposureState: () => ipcRenderer.invoke(IpcChannels.GET_SERVER_EXPOSURE_STATE_CHANNEL),
     setServerExposureMode: (mode) =>
       ipcRenderer.invoke(IpcChannels.SET_SERVER_EXPOSURE_MODE_CHANNEL, mode),

@@ -57,6 +57,14 @@ describe("desktop preload capability boundary", () => {
       IpcChannels.OPEN_EXTERNAL_CHANNEL,
       "https://example.com/",
     );
+    electron.invoke.mockResolvedValueOnce("approved");
+    await expect(bridge.prepareRemoteCertificate?.("https://pc.example:3775/")).resolves.toBe(
+      "approved",
+    );
+    expect(electron.invoke).toHaveBeenLastCalledWith(
+      IpcChannels.PREPARE_REMOTE_CERTIFICATE_CHANNEL,
+      "https://pc.example:3775/",
+    );
   });
 
   it.each([false, undefined])(
