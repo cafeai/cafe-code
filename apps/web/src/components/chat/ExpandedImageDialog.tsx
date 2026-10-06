@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { ChevronLeftIcon, ChevronRightIcon, XIcon } from "lucide-react";
 import { Button } from "../ui/button";
 import type { ExpandedImagePreview } from "./ExpandedImagePreview";
@@ -57,9 +58,12 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
   }, [navigateImage, onClose, preview.images.length, pane.active, pane.visible]);
 
   const item = preview.images[preview.index];
-  if (!item) return null;
+  if (!item || !pane.visible) return null;
 
-  return (
+  // A chat pane may clip its content or establish a fixed-position containing
+  // block. Keep this full-window viewer outside that layout while retaining
+  // the pane's React ownership and keyboard guards.
+  return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 px-4 py-6 [-webkit-app-region:no-drag]"
       role="dialog"
@@ -84,7 +88,7 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
           <ChevronLeftIcon className="size-5" />
         </Button>
       )}
-      <div className="relative isolate z-10 max-h-[92vh] max-w-[92vw]">
+      <div className="relative isolate z-10 flex max-h-full min-h-0 min-w-0 max-w-full flex-col items-center">
         <Button
           type="button"
           size="icon-xs"
@@ -98,10 +102,10 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
         <img
           src={item.src}
           alt={item.name}
-          className="max-h-[86vh] max-w-[92vw] select-none rounded-lg border border-border/70 bg-background object-contain shadow-2xl"
+          className="max-h-[min(86dvh,calc(100dvh_-_5rem))] max-w-full select-none rounded-lg border border-border/70 bg-background object-contain shadow-2xl"
           draggable={false}
         />
-        <p className="mt-2 max-w-[92vw] truncate text-center text-xs text-muted-foreground/80">
+        <p className="mt-2 max-w-full shrink-0 truncate text-center text-xs text-muted-foreground/80">
           {item.name}
           {preview.images.length > 1 ? ` (${preview.index + 1}/${preview.images.length})` : ""}
         </p>
@@ -118,6 +122,7 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
           <ChevronRightIcon className="size-5" />
         </Button>
       )}
-    </div>
+    </div>,
+    document.body,
   );
 });
