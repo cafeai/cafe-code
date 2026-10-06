@@ -714,39 +714,39 @@ function ensureThreadRegistered(
     };
   }
 
-  if (previousProjectId !== nextProjectId) {
-    let threadIdsByProjectId = nextState.threadIdsByProjectId;
-    if (previousProjectId) {
-      const previousIds = threadIdsByProjectId[previousProjectId] ?? EMPTY_THREAD_IDS;
-      const nextIds = removeId(previousIds, threadId);
-      if (nextIds.length === 0) {
-        const { [previousProjectId]: _removed, ...rest } = threadIdsByProjectId;
-        threadIdsByProjectId = rest as Record<ProjectId, ThreadId[]>;
-      } else if (!arraysEqual(previousIds, nextIds)) {
-        threadIdsByProjectId = {
-          ...threadIdsByProjectId,
-          [previousProjectId]: nextIds,
-        };
-      }
-    }
-    // Standalone shells live in the environment catalog without fabricating a
-    // project index key. Project rows and project-scoped actions remain exact.
-    if (nextProjectId !== null) {
-      const projectThreadIds = threadIdsByProjectId[nextProjectId] ?? EMPTY_THREAD_IDS;
-      const nextProjectThreadIds = appendId(projectThreadIds, threadId);
-      if (!arraysEqual(projectThreadIds, nextProjectThreadIds)) {
-        threadIdsByProjectId = {
-          ...threadIdsByProjectId,
-          [nextProjectId]: nextProjectThreadIds,
-        };
-      }
-    }
-    if (threadIdsByProjectId !== nextState.threadIdsByProjectId) {
-      nextState = {
-        ...nextState,
-        threadIdsByProjectId,
+  let threadIdsByProjectId = nextState.threadIdsByProjectId;
+  if (previousProjectId !== nextProjectId && previousProjectId) {
+    const previousIds = threadIdsByProjectId[previousProjectId] ?? EMPTY_THREAD_IDS;
+    const nextIds = removeId(previousIds, threadId);
+    if (nextIds.length === 0) {
+      const { [previousProjectId]: _removed, ...rest } = threadIdsByProjectId;
+      threadIdsByProjectId = rest as Record<ProjectId, ThreadId[]>;
+    } else if (!arraysEqual(previousIds, nextIds)) {
+      threadIdsByProjectId = {
+        ...threadIdsByProjectId,
+        [previousProjectId]: nextIds,
       };
     }
+  }
+  // Shell snapshots rebuild the indices while retaining prior shells for
+  // policy reconciliation. An unchanged project association therefore does
+  // not prove membership is already indexed, including for open Desk chats.
+  // Standalone shells remain catalog-only without a synthetic project key.
+  if (nextProjectId !== null) {
+    const projectThreadIds = threadIdsByProjectId[nextProjectId] ?? EMPTY_THREAD_IDS;
+    const nextProjectThreadIds = appendId(projectThreadIds, threadId);
+    if (!arraysEqual(projectThreadIds, nextProjectThreadIds)) {
+      threadIdsByProjectId = {
+        ...threadIdsByProjectId,
+        [nextProjectId]: nextProjectThreadIds,
+      };
+    }
+  }
+  if (threadIdsByProjectId !== nextState.threadIdsByProjectId) {
+    nextState = {
+      ...nextState,
+      threadIdsByProjectId,
+    };
   }
 
   return nextState;
