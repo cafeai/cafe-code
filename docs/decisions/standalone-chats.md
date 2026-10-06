@@ -74,8 +74,11 @@ The macOS device-number durability assumption above is superseded by
 [stable workspace volume identity](standalone-workspace-volume-identity.md),
 which preserves the remaining ownership and cleanup rules.
 
-New standalone chats default to approval-required; existing project defaults are
-unchanged. This is not an OS sandbox, tool-free policy, credential isolation from
+New standalone chats share the Full access default used by project chats.
+Creation honors the selected runtime mode, including explicit Supervised and
+Auto-accept edits choices. Saved chats and drafts retain their selected mode,
+and plan implementation in a new chat inherits the current composer selection.
+This is not an OS sandbox, tool-free policy, credential isolation from
 an explicitly full-access agent, or separate ChatGPT service. User/provider-level
 instructions, tools, MCP and existing permission behavior still apply. Do not
 claim a scratch directory removes every globally configured tool or hook.

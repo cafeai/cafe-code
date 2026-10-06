@@ -592,7 +592,7 @@ describe("composerDraftStore project draft thread mapping", () => {
     expect(store.getDraftSession(first)).toMatchObject({
       projectId: null,
       logicalProjectKey: null,
-      runtimeMode: "approval-required",
+      runtimeMode: "full-access",
       branch: null,
       worktreePath: null,
       envMode: "local",
@@ -643,10 +643,11 @@ describe("composerDraftStore project draft thread mapping", () => {
     ).toEqual([]);
   });
 
-  it("round-trips standalone catalog identities, unsent content, and account choices", () => {
+  it("round-trips standalone catalog identities, unsent content, account and access choices", () => {
     const store = useComposerDraftStore.getState();
     store.createStandaloneDraftSession(draftId, TEST_ENVIRONMENT_ID, threadId);
     store.createStandaloneDraftSession(otherDraftId, TEST_ENVIRONMENT_ID, otherThreadId);
+    store.setDraftThreadContext(draftId, { runtimeMode: "approval-required" });
     store.setPrompt(draftId, "kept across reload");
     store.setModelSelection(
       draftId,
@@ -665,6 +666,7 @@ describe("composerDraftStore project draft thread mapping", () => {
       environmentId: TEST_ENVIRONMENT_ID,
       projectId: null,
       logicalProjectKey: null,
+      runtimeMode: "approval-required",
     });
     expect(store.getComposerDraft(draftId)).toMatchObject({
       prompt: "kept across reload",
@@ -673,6 +675,19 @@ describe("composerDraftStore project draft thread mapping", () => {
     expect(
       useComposerDraftStore.getState().logicalProjectDraftThreadKeyByLogicalProjectKey,
     ).toEqual({});
+  });
+
+  it("uses Full access when a persisted standalone draft has no access selection", () => {
+    const store = useComposerDraftStore.getState();
+    store.createStandaloneDraftSession(draftId, TEST_ENVIRONMENT_ID, threadId);
+    const persistence = useComposerDraftStore.persist.getOptions();
+    const persisted = JSON.parse(
+      JSON.stringify(persistence.partialize!(useComposerDraftStore.getState())),
+    );
+    delete persisted.draftThreadsByThreadKey[draftId].runtimeMode;
+    resetComposerDraftStore();
+    useComposerDraftStore.setState(persistence.merge!(persisted, useComposerDraftStore.getState()));
+    expect(store.getDraftSession(draftId)?.runtimeMode).toBe("full-access");
   });
 
   it("does not hydrate stale project workspace authority into a standalone draft", () => {

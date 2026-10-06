@@ -266,48 +266,52 @@ describe("Cafe Code MCP server", () => {
     });
   });
 
-  it("creates and detaches standalone chats with no project lookup or permissive default", async () => {
-    const dispatched: Array<Parameters<CafeMcpDependencies["orchestrationEngine"]["dispatch"]>[0]> =
-      [];
-    const dependencies = makeDependencies({ dispatched });
-    const projectLookup = vi.fn(dependencies.projectionSnapshotQuery.getProjectShellById);
-    await withClient(
-      {
-        ...dependencies,
-        projectionSnapshotQuery: {
-          ...dependencies.projectionSnapshotQuery,
-          getProjectShellById: projectLookup,
+  it.each([undefined, "approval-required", "auto-accept-edits", "full-access"] as const)(
+    "creates and detaches standalone chats with no project lookup and access mode %s",
+    async (runtimeMode) => {
+      const dispatched: Array<
+        Parameters<CafeMcpDependencies["orchestrationEngine"]["dispatch"]>[0]
+      > = [];
+      const dependencies = makeDependencies({ dispatched });
+      const projectLookup = vi.fn(dependencies.projectionSnapshotQuery.getProjectShellById);
+      await withClient(
+        {
+          ...dependencies,
+          projectionSnapshotQuery: {
+            ...dependencies.projectionSnapshotQuery,
+            getProjectShellById: projectLookup,
+          },
         },
-      },
-      async (client) => {
-        expect(
-          (
-            await client.callTool({
-              name: "create_thread",
-              arguments: { title: "Standalone", runtimeMode: "full-access" },
-            })
-          ).isError,
-        ).not.toBe(true);
-        expect(
-          (
-            await client.callTool({
-              name: "update_thread",
-              arguments: { threadId, projectId: null },
-            })
-          ).isError,
-        ).not.toBe(true);
-      },
-    );
-    expect(projectLookup).not.toHaveBeenCalled();
-    expect(dispatched[0]).toMatchObject({
-      type: "thread.create",
-      projectId: null,
-      runtimeMode: "approval-required",
-      branch: null,
-      worktreePath: null,
-    });
-    expect(dispatched[1]).toMatchObject({ type: "thread.meta.update", projectId: null });
-  });
+        async (client) => {
+          expect(
+            (
+              await client.callTool({
+                name: "create_thread",
+                arguments: { title: "Standalone", ...(runtimeMode ? { runtimeMode } : {}) },
+              })
+            ).isError,
+          ).not.toBe(true);
+          expect(
+            (
+              await client.callTool({
+                name: "update_thread",
+                arguments: { threadId, projectId: null },
+              })
+            ).isError,
+          ).not.toBe(true);
+        },
+      );
+      expect(projectLookup).not.toHaveBeenCalled();
+      expect(dispatched[0]).toMatchObject({
+        type: "thread.create",
+        projectId: null,
+        runtimeMode: runtimeMode ?? "full-access",
+        branch: null,
+        worktreePath: null,
+      });
+      expect(dispatched[1]).toMatchObject({ type: "thread.meta.update", projectId: null });
+    },
+  );
 
   it("redacts provider secrets from tool results", async () => {
     const secretSettings: ServerSettings = {

@@ -267,10 +267,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(command.subagentLimits !== undefined
             ? { subagentLimits: command.subagentLimits }
             : {}),
-          // Standalone admission is approval-required even when a legacy or
-          // malicious client supplies the project's more permissive default.
-          // Subsequent explicit runtime-mode changes retain their normal policy.
-          runtimeMode: command.projectId === null ? "approval-required" : command.runtimeMode,
+          runtimeMode: command.runtimeMode,
           interactionMode: command.interactionMode,
           branch: command.branch,
           worktreePath: command.worktreePath,

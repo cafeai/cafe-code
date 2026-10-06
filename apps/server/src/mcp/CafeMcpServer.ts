@@ -832,7 +832,7 @@ function registerThreadTools(server: McpServer, dependencies: CafeMcpDependencie
           projectId: project?.id ?? null,
           title,
           modelSelection: selection,
-          runtimeMode: projectId === null ? "approval-required" : selectedRuntimeMode,
+          runtimeMode: selectedRuntimeMode,
           interactionMode: selectedInteractionMode,
           branch,
           worktreePath,

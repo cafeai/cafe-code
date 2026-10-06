@@ -20,7 +20,10 @@ The composer, attachments, model/account controls, messages, compact tabs and
 per-group task/context/quota pinning remain unchanged. Standalone chats omit
 repository-specific branch, worktree, editor, Git and project-file controls.
 
-New standalone chats start with approval-required permissions. Providers use a
+New chats default to **Full access**, including standalone chats. Choose
+**Supervised** or **Auto-accept edits** in the composer's model-options menu to
+use a different access mode. Existing chats and saved drafts retain their selected
+access mode. Providers use a
 private server-managed working directory rather than a previously opened
 project or the backend's working directory. This is not a tool-free sandbox:
 your provider's ordinary tools, global instructions and permission controls

@@ -6754,8 +6754,7 @@ export default function ChatView(props: ChatViewProps) {
     });
     const nextThreadTitle = truncate(buildPlanImplementationThreadTitle(planMarkdown));
     const nextThreadModelSelection: ModelSelection = ctxSelectedModelSelection;
-    const nextRuntimeMode: RuntimeMode =
-      activeThread.projectId === null ? "approval-required" : runtimeMode;
+    const nextRuntimeMode = runtimeMode;
 
     setSendInFlight(true);
     beginLocalDispatch({ preparingWorktree: false });

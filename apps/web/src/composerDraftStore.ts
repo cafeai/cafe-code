@@ -1498,9 +1498,7 @@ function normalizePersistedDraftThreads(
             : new Date().toISOString(),
         runtimeMode: isRuntimeMode(candidateDraftThread.runtimeMode)
           ? candidateDraftThread.runtimeMode
-          : projectId === null
-            ? "approval-required"
-            : DEFAULT_RUNTIME_MODE,
+          : DEFAULT_RUNTIME_MODE,
         interactionMode:
           candidateDraftThread.interactionMode === "plan" ||
           candidateDraftThread.interactionMode === "auto" ||
@@ -2182,7 +2180,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                   projectId: null,
                   logicalProjectKey: null,
                   createdAt: createdAt ?? new Date().toISOString(),
-                  runtimeMode: "approval-required",
+                  runtimeMode: DEFAULT_RUNTIME_MODE,
                   interactionMode: DEFAULT_INTERACTION_MODE,
                   branch: null,
                   worktreePath: null,

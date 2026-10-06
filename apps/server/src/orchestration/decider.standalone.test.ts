@@ -108,17 +108,25 @@ async function apply(command: OrchestrationCommand, readModel: OrchestrationRead
 }
 
 describe("standalone orchestration admission", () => {
-  it("creates a genuine standalone thread with zero projects and a conservative default", async () => {
+  it("creates a genuine standalone thread with zero projects and Full access", async () => {
     const result = await apply(create(), createEmptyReadModel(now));
     expect(result.projects).toEqual([]);
     expect(result.threads).toHaveLength(1);
     expect(result.threads[0]).toMatchObject({
       projectId: null,
-      runtimeMode: "approval-required",
+      runtimeMode: "full-access",
       branch: null,
       worktreePath: null,
     });
   });
+
+  it.each(["approval-required", "auto-accept-edits", "full-access"] as const)(
+    "honors the selected %s access mode for standalone creation",
+    async (runtimeMode) => {
+      const result = await apply({ ...create(), runtimeMode }, createEmptyReadModel(now));
+      expect(result.threads[0]?.runtimeMode).toBe(runtimeMode);
+    },
+  );
 
   it("does not change an explicitly project-associated creation's permission mode", async () => {
     expect(await decide(create(projectId))).toMatchObject({

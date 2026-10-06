@@ -7351,9 +7351,13 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           await mounted.cleanup();
         }
       });
-      it.each([false, true])(
-        "admits plan implementation in a new chat only after supported policy or explicit reset (supported=%s)",
-        async (supported) => {
+      it.each([
+        { supported: false, projectId: PROJECT_ID },
+        { supported: true, projectId: PROJECT_ID },
+        { supported: true, projectId: null },
+      ])(
+        "admits plan implementation in a new chat only after supported policy or explicit reset (supported=$supported, projectId=$projectId)",
+        async ({ supported, projectId }) => {
           const base = createSnapshotWithPlanFollowUpPrompt();
           const requested = { codex: 6, claude: 8 };
           const mounted = await mountChatView({
@@ -7362,6 +7366,8 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
               ...base,
               threads: base.threads.map((thread) => ({
                 ...thread,
+                projectId,
+                ...(projectId === null ? { branch: null, worktreePath: null } : {}),
                 subagentLimits: requested,
               })),
             },
@@ -7389,6 +7395,8 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
                 const created = fixture.snapshot.threads.find((thread) => thread.id === nextId)!;
                 const thread = {
                   ...created,
+                  projectId,
+                  ...(projectId === null ? { branch: null, worktreePath: null } : {}),
                   subagentLimits: supported ? requested : { claude: 8 },
                 };
                 fixture.snapshot = {
@@ -7461,12 +7469,13 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
               const turn = wsRequests.find((body) => body.type === "thread.turn.start");
               const expected = supported ? requested : { claude: 8 };
               expect(create).toMatchObject({
-                projectId: PROJECT_ID,
+                projectId,
                 runtimeMode: "full-access",
                 subagentLimits: expected,
               });
               expect(turn).toMatchObject({
                 threadId: create?.threadId,
+                runtimeMode: "full-access",
                 subagentLimits: expected,
                 sourceProposedPlan: { threadId: THREAD_ID, planId: "plan-follow-up-browser-test" },
               });
@@ -7746,7 +7755,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         expect(useComposerDraftStore.getState().getDraftSession(second)).toMatchObject({
           projectId: null,
           logicalProjectKey: null,
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
           worktreePath: null,
           branch: null,
         });
@@ -7773,7 +7782,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           );
           expect(request).toMatchObject({
             threadId: firstThreadId,
-            runtimeMode: "approval-required",
+            runtimeMode: "full-access",
             subagentLimits: { codex: 5 },
             bootstrap: {
               createThread: {
@@ -7883,7 +7892,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
               ? {
                   ...thread,
                   projectId: null,
-                  runtimeMode: "approval-required",
+                  runtimeMode: "full-access",
                   branch: null,
                   worktreePath: null,
                 }
@@ -9562,7 +9571,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         const draftId = draftIdFromPath(mounted.router.state.location.pathname);
         expect(useComposerDraftStore.getState().getDraftSession(draftId)).toMatchObject({
           projectId: null,
-          runtimeMode: "approval-required",
+          runtimeMode: "full-access",
         });
         expect(Object.keys(useComposerDraftStore.getState().draftThreadsByThreadKey)).toHaveLength(
           1,
