@@ -167,6 +167,7 @@ import {
   canonicalizeProviderSubagentActivities,
   type ProviderSubagentActivityInput,
 } from "../subagentDetail.ts";
+import { subagentCommandDetail, subagentFileDetail } from "../subagentActivityDetail.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.UnknownFromJsonString);
 const decodeUnknownJsonStringExit = Schema.decodeUnknownExit(Schema.UnknownFromJsonString);
@@ -3728,7 +3729,7 @@ function extractClaudeSubagentSessionMessageText(message: SessionMessage): strin
   return text.trim().length > 0 ? text : undefined;
 }
 
-/** Fixed categories from explicit tool-use blocks, never arguments or output. */
+/** Project only known native fields; server/MCP/unknown payloads remain private. */
 function* claudeSubagentActivities(
   messages: ReadonlyArray<SessionMessage>,
 ): Iterable<ProviderSubagentActivityInput> {
@@ -3753,7 +3754,18 @@ function* claudeSubagentActivities(
               : block.name === "SendMessage"
                 ? "agent_message"
                 : "tool";
-      yield { kind };
+      const input = recordValue(block.input);
+      const detail =
+        block.name === "Bash"
+          ? subagentCommandDetail(input?.command)
+          : block.name === "Read" || block.name === "Edit" || block.name === "Write"
+            ? subagentFileDetail(input?.file_path)
+            : block.name === "NotebookEdit"
+              ? subagentFileDetail(input?.notebook_path)
+              : block.name === "Glob" || block.name === "Grep"
+                ? subagentFileDetail(input?.path)
+                : undefined;
+      yield { kind, ...(detail !== undefined ? { detail } : {}) };
     }
   }
 }

@@ -156,6 +156,7 @@ const makePublicProviderDaemonSubagentDetail = (input: unknown) =>
             activities: detail.activities.map((activity) => ({
               key: activity.key,
               kind: activity.kind,
+              ...(activity.detail !== undefined ? { detail: activity.detail } : {}),
               ...(activity.timestamp !== undefined ? { timestamp: activity.timestamp } : {}),
             })),
           }

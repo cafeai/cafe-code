@@ -398,7 +398,7 @@ it.effect.each(["darwin", "linux"] as const)(
     }),
 );
 
-const makeNativePeerFixture = () =>
+const makeNativePeerFixture = (executableSource: "copied" | "current" = "copied") =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -408,13 +408,18 @@ const makeNativePeerFixture = () =>
     const fixtureRoot = yield* fs.realPath(temporaryRoot);
     const binaryDir = path.join(fixtureRoot, "native executable & fixtures");
     yield* fs.makeDirectory(binaryDir);
-    const executable = path.join(binaryDir, "mock codex.EXE");
+    const executable =
+      executableSource === "copied" ? path.join(binaryDir, "mock codex.EXE") : process.execPath;
     const peer = path.join(fixtureRoot, "mock peer.ts");
-    // A copy guarantees a spaced native executable path on every runner,
-    // without Windows symlink privileges or any installed-provider lookup.
-    yield* fs.copyFile(process.execPath, executable);
-    if (process.platform !== "win32") {
-      yield* fs.chmod(executable, 0o700);
+    if (executableSource === "copied") {
+      // The dedicated launcher cases still qualify a spaced native executable
+      // path on every runner without symlinks or installed-provider lookup.
+      // Protocol-semantics coverage uses the already-running Node executable:
+      // it needs real IPC, not another full binary copy and cold image launch.
+      yield* fs.copyFile(process.execPath, executable);
+      if (process.platform !== "win32") {
+        yield* fs.chmod(executable, 0o700);
+      }
     }
     yield* fs.copyFile(yield* mockPeerPath, peer);
     const homeDrive = process.platform === "win32" ? path.parse(fixtureRoot).root.slice(0, 2) : "";
@@ -460,7 +465,7 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
   const makeHandle = () =>
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-      const { fixtureRoot, executable, peer, fixtureEnv } = yield* makeNativePeerFixture();
+      const { fixtureRoot, executable, peer, fixtureEnv } = yield* makeNativePeerFixture("current");
       const command = ChildProcess.make(executable, [peer], {
         cwd: fixtureRoot,
         env: fixtureEnv,
@@ -469,6 +474,38 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
       });
       return yield* spawner.spawn(command);
     });
+
+  it.effect("reuses the current executable only for the isolated semantic peer", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const peerSource = yield* mockPeerPath;
+      const copies: Array<readonly [string, string]> = [];
+      const chmods: Array<readonly [string, number]> = [];
+      // Keep real filesystem-minted scoped paths and cleanup. Observe only the
+      // materialization policy; never replace it with a fake broad root or
+      // permit an accidental chmod/copy of the installed Node executable.
+      const fixture = yield* makeNativePeerFixture("current").pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          copyFile: (from, to) => {
+            if (from !== peerSource) return Effect.die("Semantic peer must copy only its script.");
+            return Effect.sync(() => copies.push([from, to])).pipe(
+              Effect.andThen(fs.copyFile(from, to)),
+            );
+          },
+          chmod: (target, mode) => Effect.sync(() => void chmods.push([target, mode])),
+        }),
+      );
+      assert.equal(fixture.executable, process.execPath);
+      assert.deepEqual(copies, [[peerSource, fixture.peer]]);
+      assert.deepEqual(chmods, []);
+      assert.equal(fixture.fixtureEnv.HOME, fixture.fixtureRoot);
+      assert.equal(fixture.fixtureEnv.CODEX_HOME, fixture.fixtureRoot);
+      assert.equal(fixture.fixtureEnv.NODE_OPTIONS, "");
+      assert.equal(fixture.fixtureEnv.OPENAI_API_KEY, undefined);
+      assert.equal(fixture.fixtureEnv.ANTHROPIC_API_KEY, undefined);
+    }),
+  );
 
   it.effect("keeps typed account reads and both notification streams usable for new plans", () =>
     Effect.gen(function* () {
@@ -638,6 +675,7 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
       const userInputRequests = yield* Ref.make<Array<unknown>>([]);
       const nativeRequestIds = yield* Ref.make<Array<string | number>>([]);
       const messageDeltas = yield* Ref.make<Array<unknown>>([]);
+      const notificationHandled = yield* Deferred.make<void>();
       const handle = yield* makeHandle();
       const scope = yield* Scope.make();
       // Layer construction can fail before the normal request-region ensuring
@@ -669,7 +707,10 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
           Effect.fail(CodexError.CodexAppServerRequestError.internalError("test handler failed")),
         );
         yield* client.handleServerNotification("item/agentMessage/delta", (payload) =>
-          Ref.update(messageDeltas, (current) => [...current, payload]),
+          Ref.update(messageDeltas, (current) => [...current, payload]).pipe(
+            Effect.andThen(Deferred.succeed(notificationHandled, undefined)),
+            Effect.asVoid,
+          ),
         );
 
         const initialized = yield* client.request("initialize", {
@@ -700,6 +741,11 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
         });
         assert.equal(skills.data.length, 1);
         assert.equal(skills.data[0]?.cwd, process.cwd());
+
+        // Typed notifications run in their own scoped fibers. A later request
+        // response is not an acknowledgement that this handler has completed;
+        // wait for its explicit signal before closing and interrupting scope.
+        yield* Deferred.await(notificationHandled);
 
         return {
           account,

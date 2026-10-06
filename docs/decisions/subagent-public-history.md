@@ -8,6 +8,7 @@ Decision authority: implementation choice within the user's request to fix spars
 Supersedes: none; supplements existing lifecycle retention and immutable history ownership
 Partially superseded by: [Codex history ancestry](codex-history-ancestry.md), which corrects the stored-thread session-ID interpretation while preserving this decision's other boundaries.
 Supplemented by: [bounded child activity](provider-aware-composer-and-child-activity.md), which adds content-free operation categories without exposing the raw tool history excluded here.
+Partially superseded by: [useful activity details](subagent-activity-details.md), which admits separately bounded sanitized file/command descriptions only; raw tool payloads, private output and all history-authorization boundaries remain unchanged.
 
 ## Context
 

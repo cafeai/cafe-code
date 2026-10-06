@@ -3,17 +3,23 @@ import {
   THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES,
   THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_BYTES,
   THREAD_TURN_SUBAGENT_DETAIL_MAX_ACTIVITIES,
+  SubagentActivityDetail,
   type SubagentDetailActivity,
   type SubagentDetailActivityKind,
 } from "@cafecode/contracts";
+import * as Schema from "effect/Schema";
 
 import type {
   ProviderSubagentDetail,
   ProviderSubagentDetailMessage,
 } from "./Services/ProviderAdapter.ts";
 
+const isSubagentActivityDetail = Schema.is(SubagentActivityDetail);
+
 export interface ProviderSubagentActivityInput {
   readonly kind: SubagentDetailActivityKind;
+  /** Already projected by the narrow native file/command summary extractor. */
+  readonly detail?: string | undefined;
   readonly timestamp?: string | undefined;
   /** Reader-owned digest for sliding native windows; never a native ID. */
   readonly identityDigest?: string | undefined;
@@ -21,8 +27,8 @@ export interface ProviderSubagentActivityInput {
 
 /**
  * Retain only a finite recent tail. Native payloads never enter this helper:
- * adapters map a typed operation to an enum before calling it. Reconstruct
- * every entry so no private keys can ride alongside public categories.
+ * adapters project typed operations before calling it. Reconstruct every entry
+ * so no private keys can ride alongside categories and admitted summaries.
  */
 export function canonicalizeProviderSubagentActivities(
   input: Iterable<ProviderSubagentActivityInput>,
@@ -42,6 +48,12 @@ export function canonicalizeProviderSubagentActivities(
           ? `a${activity.identityDigest.slice(0, 24)}`
           : indexKey,
       kind: activity.kind,
+      ...(activity.detail !== undefined &&
+      activity.kind !== "tool" &&
+      activity.kind !== "agent_message" &&
+      isSubagentActivityDetail(activity.detail)
+        ? { detail: activity.detail }
+        : {}),
       ...(isCanonicalPublicTimestamp(activity.timestamp) ? { timestamp: activity.timestamp } : {}),
     });
     if (activities.length > THREAD_TURN_SUBAGENT_DETAIL_MAX_ACTIVITIES) {

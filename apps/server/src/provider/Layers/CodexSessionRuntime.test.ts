@@ -1594,10 +1594,20 @@ describe("Codex subagent thread ownership validation", () => {
         const items: EffectCodexSchema.V2ThreadItemsListResponse__ThreadItem[] = [
           command("PRIVATE_COMMAND_ID", []),
           command("PRIVATE_READ_ID", [
-            { type: "read", command: "PRIVATE_READ", name: "PRIVATE_NAME", path: "/PRIVATE_PATH" },
+            {
+              type: "read",
+              command: "PRIVATE_READ",
+              name: "PRIVATE_NAME",
+              path: "/.ssh/PRIVATE_PATH",
+            },
           ]),
           command("PRIVATE_MIXED_ID", [
-            { type: "read", command: "PRIVATE_READ", name: "PRIVATE_NAME", path: "/PRIVATE_PATH" },
+            {
+              type: "read",
+              command: "PRIVATE_READ",
+              name: "PRIVATE_NAME",
+              path: "/.ssh/PRIVATE_PATH",
+            },
             { type: "unknown", command: "PRIVATE_WRITE" },
           ]),
           {
@@ -1605,7 +1615,7 @@ describe("Codex subagent thread ownership validation", () => {
             id: "PRIVATE_EDIT_ID",
             status: "completed",
             changes: [
-              { path: "/PRIVATE_EDIT_PATH", kind: { type: "update" }, diff: "PRIVATE_DIFF" },
+              { path: "/.ssh/PRIVATE_EDIT_PATH", kind: { type: "update" }, diff: "PRIVATE_DIFF" },
             ],
           },
           {
@@ -1657,7 +1667,7 @@ describe("Codex subagent thread ownership validation", () => {
             query: "PRIVATE_QUERY",
             results: ["PRIVATE_RESULT"],
           },
-          { type: "imageView", id: "PRIVATE_IMAGE_ID", path: "/PRIVATE_IMAGE_PATH" },
+          { type: "imageView", id: "PRIVATE_IMAGE_ID", path: "/.ssh/PRIVATE_IMAGE_PATH" },
           {
             type: "reasoning",
             id: "PRIVATE_REASONING_ID",
@@ -1707,6 +1717,102 @@ describe("Codex subagent thread ownership validation", () => {
   );
 
   effectIt.effect(
+    "projects useful typed and structured file-command details through the public adapter",
+    () =>
+      Effect.gen(function* () {
+        const items: EffectCodexSchema.V2ThreadItemsListResponse__ThreadItem[] = [
+          {
+            type: "commandExecution",
+            id: "native-command",
+            command: "/bin/zsh -lc 'git status --short'",
+            cwd: "/PRIVATE_CWD",
+            commandActions: [],
+            status: "completed",
+            aggregatedOutput: "PRIVATE_OUTPUT",
+          },
+          {
+            type: "commandExecution",
+            id: "native-read",
+            command: "PRIVATE_RAW_COMMAND",
+            cwd: "/PRIVATE_CWD",
+            commandActions: [
+              {
+                type: "read",
+                command: "PRIVATE_READ_COMMAND",
+                name: "PRIVATE_NAME",
+                path: "src/Some File.ts",
+              },
+            ],
+            status: "completed",
+          },
+          {
+            type: "fileChange",
+            id: "native-edit",
+            status: "completed",
+            changes: [{ path: "src/auth.ts", kind: { type: "update" }, diff: "PRIVATE_DIFF" }],
+          },
+          { type: "imageView", id: "native-image", path: "assets/日本語.png" },
+          {
+            type: "dynamicToolCall",
+            id: "native-exec",
+            tool: "exec_command",
+            arguments: { cmd: "corepack yarn test", private: "PRIVATE_ARGS" },
+            contentItems: [],
+            status: "completed",
+          },
+          {
+            type: "dynamicToolCall",
+            id: "native-file",
+            tool: "read_file",
+            arguments: { path: "src/provider.ts", private: "PRIVATE_ARGS" },
+            contentItems: [],
+            status: "completed",
+          },
+          {
+            type: "dynamicToolCall",
+            id: "native-code",
+            tool: "exec",
+            arguments: { cmd: "PRIVATE_CODE", code: "PRIVATE_SOURCE" },
+            contentItems: [],
+            status: "completed",
+          },
+          {
+            type: "dynamicToolCall",
+            id: "native-unstructured",
+            tool: "exec_command",
+            arguments: "PRIVATE_RAW_ARGUMENTS",
+            contentItems: [],
+            status: "completed",
+          },
+        ];
+        const snapshot = yield* readPublicHistoryFixture(() =>
+          Effect.succeed({
+            data: items.map((item) => ({ turnId: "PRIVATE_TURN", item })).toReversed(),
+            nextCursor: null,
+          }),
+        );
+        const detail = canonicalizeCodexSubagentDetail(snapshot);
+        assert.deepEqual(
+          detail.activities?.map(({ kind, detail: text }) => ({ kind, detail: text })),
+          [
+            { kind: "command", detail: "git status --short" },
+            { kind: "file_read", detail: "src/Some File.ts" },
+            { kind: "file_edit", detail: "src/auth.ts" },
+            { kind: "file_read", detail: "assets/日本語.png" },
+            { kind: "command", detail: "corepack yarn test" },
+            { kind: "file_read", detail: "src/provider.ts" },
+            { kind: "tool", detail: undefined },
+            { kind: "command", detail: undefined },
+          ],
+        );
+        assert.doesNotMatch(
+          JSON.stringify(detail),
+          /PRIVATE_|native-|arguments|aggregatedOutput|identityDigest/,
+        );
+      }),
+  );
+
+  effectIt.effect(
     "retains the newest bounded activity tail in chronology without counting overlap twice",
     () =>
       Effect.gen(function* () {
@@ -1726,7 +1832,7 @@ describe("Codex subagent thread ownership validation", () => {
                 item: {
                   type: "imageView" as const,
                   id: `PRIVATE_ITEM_${sequence}`,
-                  path: "/PRIVATE_IMAGE",
+                  path: "/.ssh/PRIVATE_IMAGE",
                 },
               };
             }),
@@ -1770,7 +1876,7 @@ describe("Codex subagent thread ownership validation", () => {
                 item: {
                   type: "imageView" as const,
                   id: `PRIVATE_STABLE_${newest - offset - index}`,
-                  path: "/PRIVATE_IMAGE",
+                  path: "/.ssh/PRIVATE_IMAGE",
                 },
               })),
               nextCursor: offset + count > newest ? null : String(offset + count),

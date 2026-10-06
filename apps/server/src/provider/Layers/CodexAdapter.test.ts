@@ -223,6 +223,7 @@ it("forwards safe activity summaries with fresh local keys and no private fields
     publicActivities: [
       {
         kind: "command" as const,
+        detail: "git status --short",
         timestamp: "2026-10-07T00:00:00.000Z",
         nativeId: "PRIVATE_ACTIVITY_ID",
         command: "PRIVATE_COMMAND",
@@ -240,7 +241,12 @@ it("forwards safe activity summaries with fresh local keys and no private fields
   };
   const detail = canonicalizeCodexSubagentDetail(snapshot);
   assert.deepEqual(detail.activities, [
-    { key: "a0", kind: "command", timestamp: "2026-10-07T00:00:00.000Z" },
+    {
+      key: "a0",
+      kind: "command",
+      detail: "git status --short",
+      timestamp: "2026-10-07T00:00:00.000Z",
+    },
     { key: "a1", kind: "agent_message" },
     { key: "a2", kind: "file_read" },
   ]);

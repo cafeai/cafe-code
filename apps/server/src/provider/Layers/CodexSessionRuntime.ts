@@ -31,6 +31,11 @@ import {
 } from "@cafecode/contracts";
 import { normalizeModelSlug } from "@cafecode/shared/model";
 import type { ProviderSubagentActivityInput } from "../subagentDetail.ts";
+import {
+  subagentCommandDetail,
+  subagentFileDetail,
+  subagentFilesDetail,
+} from "../subagentActivityDetail.ts";
 import { CODEX_HISTORY_RECOVERY_REQUIRED_MESSAGE } from "@cafecode/shared/codexHistorySafety";
 import {
   codexHistoryFailureBelongsToRoot,
@@ -5158,7 +5163,7 @@ function publicHistoryTimestamp(value: number | null | undefined): number | unde
     : undefined;
 }
 
-/** Only typed operation categories leave the reader; never inspect shell text. */
+/** Operation categories remain independent of optional display summaries. */
 export function codexSubagentActivityKind(
   item: CodexThreadItem,
 ): SubagentDetailActivityKind | undefined {
@@ -5195,6 +5200,35 @@ export function codexSubagentActivityKind(
     case "mcpToolCall":
     case "webSearch":
       return "tool";
+    default:
+      return undefined;
+  }
+}
+
+/** Only known file/command fields are eligible; arbitrary tool payloads stay private. */
+function codexSubagentActivityDetail(item: CodexThreadItem): string | undefined {
+  switch (item.type) {
+    case "commandExecution": {
+      const reads = item.commandActions.filter((action) => action.type === "read");
+      return reads.length > 0 && reads.length === item.commandActions.length
+        ? subagentFilesDetail(reads.map((action) => action.path))
+        : subagentCommandDetail(item.command);
+    }
+    case "fileChange":
+      return subagentFilesDetail(item.changes.map((change) => change.path));
+    case "imageView":
+      return subagentFileDetail(item.path);
+    case "dynamicToolCall": {
+      // The two known structured native tool arguments are projected narrowly.
+      // Freeform patches, Code Mode source and arbitrary/MCP tools never enter
+      // the literal command parser, even if they have similarly named fields.
+      if (!item.arguments || typeof item.arguments !== "object" || Array.isArray(item.arguments))
+        return undefined;
+      const input = item.arguments as Record<string, unknown>;
+      if (item.tool === "exec_command") return subagentCommandDetail(input.cmd);
+      if (item.tool === "read_file") return subagentFileDetail(input.path);
+      return undefined;
+    }
     default:
       return undefined;
   }
@@ -5255,8 +5289,10 @@ const readCodexSubagentPublicHistoryWithClient = Effect.fn(
       if (activityKind !== undefined) {
         if (descendingActivities.length < THREAD_TURN_SUBAGENT_DETAIL_MAX_ACTIVITIES) {
           const timestampMs = publicHistoryTimestamp(entry.completedAtMs ?? entry.startedAtMs);
+          const detail = codexSubagentActivityDetail(item);
           descendingActivities.push({
             kind: activityKind,
+            ...(detail !== undefined ? { detail } : {}),
             identityDigest: identity,
             ...(timestampMs !== undefined && timestampMs <= 253_402_300_799_999
               ? { timestamp: new Date(timestampMs).toISOString() }

@@ -5,10 +5,16 @@ progress and status, available public messages, and an **Activity** section for
 verified Codex and Claude histories.
 
 Activity labels summarize command, file-read, file-edit, agent-message and other
-tool operations. They are not raw command/output logs and do not imply that an
-operation succeeded. Private reasoning, tool payloads and recipient identities
-remain hidden. Cafe does not copy the parent chat's model settings onto a child
-as if they were verified child execution settings.
+tool operations. Recognized file operations include their target path; commands
+include a conservative command description beneath the label. These selectable,
+wrapping details are limited to 512 UTF-8 bytes. Sensitive arguments, environment
+values and unsupported script content are hidden. Missing or unsupported native
+metadata retains the category-only fallback instead of inventing a detail.
+
+These are not raw command/output logs and do not imply that an operation
+succeeded. Private reasoning, tool payloads, output and recipient identities
+remain hidden. The text cannot execute commands or open files. Cafe does not copy
+the parent chat's model settings onto a child as verified child execution settings.
 
 The list keeps the newest 128 available operations. A notice identifies earlier
 activity outside the retrieval window. Activity and public messages are separate
@@ -21,4 +27,5 @@ not claim that old data is current. Native indexed history can lag active work.
 Normal restart of the rebuilt backend is required to receive the updated detail
 fields from its daemon. No provider session is restarted merely to view history.
 
-See [the activity and ownership decision](decisions/provider-aware-composer-and-child-activity.md).
+See [the activity detail decision](decisions/subagent-activity-details.md) and
+[the preserved ownership decision](decisions/provider-aware-composer-and-child-activity.md).

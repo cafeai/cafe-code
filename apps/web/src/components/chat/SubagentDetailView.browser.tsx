@@ -51,9 +51,15 @@ function selection(historyId = "history-a", revision = "one"): SubagentDetailSel
   };
 }
 
-function DetailFixture({ selected = selection() }: { selected?: SubagentDetailSelection }) {
+function DetailFixture({
+  selected = selection(),
+  width = 540,
+}: {
+  selected?: SubagentDetailSelection;
+  width?: number;
+}) {
   return (
-    <div className="relative h-[420px] w-[540px]">
+    <div className="relative h-[420px]" style={{ width }}>
       <SubagentDetailView
         selection={selected}
         environmentId={environmentId}
@@ -80,6 +86,74 @@ afterEach(() => {
 });
 
 describe("subagent activity detail", () => {
+  it("shows admitted file paths and commands as readable text beside their activity category", async () => {
+    const command = "rg -n 'subagent' apps/web/src";
+    const readPath = "apps/web/src/components/chat/SubagentDetailView.tsx";
+    const editPath = "apps/web/src/components/chat/SubagentDetailView.browser.tsx";
+    installRead(async () => ({
+      provider: ProviderDriverKind.make("codex"),
+      messages: [],
+      gaps: [],
+      truncated: false,
+      activities: [
+        { key: "a1", kind: "command", timestamp, detail: command },
+        { key: "a2", kind: "file_read", detail: readPath },
+        { key: "a3", kind: "file_edit", detail: editPath },
+      ],
+    }));
+    const view = await render(<DetailFixture />);
+    try {
+      await expect.element(page.getByText(command, { exact: true })).toBeVisible();
+      await expect.element(page.getByText(readPath, { exact: true })).toBeVisible();
+      await expect.element(page.getByText(editPath, { exact: true })).toBeVisible();
+      const rows = Array.from(document.querySelectorAll("[data-subagent-detail-activity]"));
+      expect(rows.map((row) => row.querySelector("span")?.textContent)).toEqual([
+        "Command",
+        "File read",
+        "File edit",
+      ]);
+      expect(rows[0]?.querySelector("time")?.getAttribute("datetime")).toBe(timestamp);
+      expect(rows.flatMap((row) => Array.from(row.querySelectorAll("a,button")))).toEqual([]);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  it("keeps long hostile-looking details literal, fully available, and within the detail pane", async () => {
+    // Exercise the admitted single-line 512-byte limit, including one long
+    // token. These strings are display data, never HTML or link instructions.
+    const detail = (
+      '<script>alert("not executed")</script> <img src="invalid" onerror="alert(1)"> ' +
+      "[open](javascript:alert(1)) https://example.invalid/"
+    ).padEnd(512, "x");
+    installRead(async () => ({
+      provider: ProviderDriverKind.make("claudeAgent"),
+      messages: [],
+      gaps: [],
+      truncated: false,
+      activities: [{ key: "a1", kind: "command", detail }],
+    }));
+    const view = await render(<DetailFixture width={320} />);
+    try {
+      await vi.waitFor(() =>
+        expect(document.querySelector("[data-subagent-detail-activity-detail]")?.textContent).toBe(
+          detail,
+        ),
+      );
+      const row = document.querySelector<HTMLElement>("[data-subagent-detail-activity]")!;
+      const detailNode = row.querySelector<HTMLElement>("[data-subagent-detail-activity-detail]")!;
+      const scroller = document.querySelector<HTMLElement>("[data-subagent-detail-scroll]")!;
+      expect(row.querySelector("script,img,a,button,iframe")).toBeNull();
+      expect(detailNode.textContent).toBe(detail);
+      expect(getComputedStyle(detailNode).whiteSpace).toBe("pre-wrap");
+      expect(getComputedStyle(detailNode).overflowWrap).toBe("anywhere");
+      expect(detailNode.scrollWidth).toBeLessThanOrEqual(detailNode.clientWidth + 1);
+      expect(scroller.scrollWidth).toBeLessThanOrEqual(scroller.clientWidth + 1);
+    } finally {
+      await view.unmount();
+    }
+  });
+
   it("shows fixed activity categories and bounded-history disclosure without raw tool fields", async () => {
     const activities = [
       { key: "a1", kind: "command" as const, timestamp, args: "PRIVATE_COMMAND" },
@@ -118,6 +192,7 @@ describe("subagent activity detail", () => {
         "Tool use",
       ]);
       expect(rows[0]?.querySelector("time")?.getAttribute("datetime")).toBe(timestamp);
+      expect(document.querySelector("[data-subagent-detail-activity-detail]")).toBeNull();
       expect(document.body.textContent).not.toContain("PRIVATE_");
       expect(document.body.textContent).not.toContain("No public subagent messages were saved");
       await expect
@@ -191,6 +266,38 @@ describe("subagent activity detail", () => {
     }
   });
 
+  it("counts changed detail on the same activity without moving a reader away from older content", async () => {
+    let detail = "src/before.ts";
+    installRead(async () => ({
+      provider: ProviderDriverKind.make("codex"),
+      messages: [],
+      gaps: [],
+      truncated: false,
+      activities: Array.from({ length: 80 }, (_, index) => ({
+        key: `a${index.toString(36)}`,
+        kind: "file_read" as const,
+        detail: index === 79 ? detail : `src/unchanged-${index}.ts`,
+      })),
+    }));
+    const view = await render(<DetailFixture />);
+    try {
+      await expect.element(page.getByText("src/before.ts", { exact: true })).toBeVisible();
+      const scroller = document.querySelector<HTMLDivElement>("[data-subagent-detail-scroll]")!;
+      scroller.scrollTop = 0;
+      scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+      detail = "src/after.ts";
+      await view.rerender(<DetailFixture selected={selection("history-a", "two")} />);
+      await expect.element(page.getByText("src/after.ts", { exact: true })).toBeInTheDocument();
+      expect(document.querySelectorAll("[data-subagent-detail-activity]")).toHaveLength(80);
+      expect(scroller.scrollTop).toBe(0);
+      await expect
+        .element(page.getByRole("button", { name: "1 new update · Jump to latest" }))
+        .toBeVisible();
+    } finally {
+      await view.unmount();
+    }
+  });
+
   it("clears activity immediately when the same worker row selects a different history", async () => {
     let resolveReplacement!: (value: Detail) => void;
     const replacement = new Promise<Detail>((resolve) => {
@@ -204,7 +311,7 @@ describe("subagent activity detail", () => {
             messages: [],
             gaps: [],
             truncated: false,
-            activities: [{ key: "a1", kind: "command" }],
+            activities: [{ key: "a1", kind: "command", detail: "rg old-history src" }],
           },
     );
     const view = await render(<DetailFixture />);
@@ -212,14 +319,18 @@ describe("subagent activity detail", () => {
       await expect.element(page.getByText("Command", { exact: true })).toBeVisible();
       await view.rerender(<DetailFixture selected={selection("history-b")} />);
       expect(document.querySelector("[data-subagent-detail-activity]")).toBeNull();
+      expect(document.body.textContent).not.toContain("rg old-history src");
       resolveReplacement({
         provider: ProviderDriverKind.make("claudeAgent"),
         messages: [],
         gaps: [],
         truncated: false,
-        activities: [{ key: "a2", kind: "file_edit" }],
+        activities: [{ key: "a2", kind: "file_edit", detail: "src/replacement-history.ts" }],
       });
       await expect.element(page.getByText("File edit", { exact: true })).toBeVisible();
+      await expect
+        .element(page.getByText("src/replacement-history.ts", { exact: true }))
+        .toBeVisible();
       expect(document.querySelector('[data-subagent-detail-activity="command"]')).toBeNull();
     } finally {
       await view.unmount();

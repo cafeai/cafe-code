@@ -713,7 +713,7 @@ export const OrchestrationThreadTurnSubagentDetailGap = Schema.Struct({
 export type OrchestrationThreadTurnSubagentDetailGap =
   typeof OrchestrationThreadTurnSubagentDetailGap.Type;
 
-/** Content-free operation categories, never native tools, arguments or results. */
+/** Fixed operation categories; optional detail is a conservative display summary. */
 export const SubagentDetailActivityKind = Schema.Literals([
   "command",
   "file_read",
@@ -722,9 +722,21 @@ export const SubagentDetailActivityKind = Schema.Literals([
   "tool",
 ]);
 export type SubagentDetailActivityKind = typeof SubagentDetailActivityKind.Type;
+export const SUBAGENT_ACTIVITY_DETAIL_MAX_BYTES = 512;
+export const SubagentActivityDetail = Schema.String.check(
+  Schema.isMinLength(1),
+  Schema.isPattern(/^[^\p{Cc}\p{Cs}\p{Bidi_Control}\u2028\u2029]+$/u),
+  Schema.makeFilter(
+    (text) =>
+      text === text.trim() &&
+      threadTurnSubagentUtf8ByteLength(text) <= SUBAGENT_ACTIVITY_DETAIL_MAX_BYTES,
+    { expected: "single-line activity detail of at most 512 UTF-8 bytes" },
+  ),
+);
 export const SubagentDetailActivity = Schema.Struct({
   key: Schema.String.check(Schema.isPattern(/^a[0-9a-z]{1,32}$/)),
   kind: SubagentDetailActivityKind,
+  detail: Schema.optional(SubagentActivityDetail),
   timestamp: Schema.optional(ThreadTurnSubagentDetailTimestamp),
 });
 export type SubagentDetailActivity = typeof SubagentDetailActivity.Type;
@@ -775,6 +787,17 @@ export function orchestrationThreadTurnSubagentDetailBodyIssues(
   const issues: Array<Schema.FilterIssue> = [];
   const activityKeys = new Set<string>();
   for (const [index, activity] of (detail.activities ?? []).entries()) {
+    if (
+      activity.detail !== undefined &&
+      activity.kind !== "command" &&
+      activity.kind !== "file_read" &&
+      activity.kind !== "file_edit"
+    ) {
+      issues.push({
+        path: ["activities", index, "detail"],
+        issue: "only file and command activities may carry display detail",
+      });
+    }
     if (activityKeys.has(activity.key)) {
       issues.push({ path: ["activities", index, "key"], issue: "activity keys must be unique" });
     }

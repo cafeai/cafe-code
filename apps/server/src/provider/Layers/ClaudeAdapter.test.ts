@@ -7422,7 +7422,7 @@ describe("ClaudeAdapterLive", () => {
                 name,
                 input: {
                   command: "PRIVATE_COMMAND",
-                  file_path: "/PRIVATE_PATH",
+                  file_path: "/.ssh/PRIVATE_PATH",
                   recipient: "PRIVATE_RECIPIENT",
                   content: "PRIVATE_AGENT_MESSAGE",
                 },
@@ -7508,6 +7508,200 @@ describe("ClaudeAdapterLive", () => {
   );
 
   it.effect(
+    "shows admitted Claude file and command details without forwarding arbitrary tool content",
+    () => {
+      const sessionId = "00000000-0000-4000-8000-000000000987";
+      const historyId = "agent-descriptive-activity-987";
+      const cwd = process.cwd();
+      // Distinct native fields prove that we project the requested operation,
+      // not whichever string happens to appear first in a provider payload.
+      // The harmless-looking paths in unsupported schemas must stay hidden too.
+      const toolCases = [
+        {
+          name: "Read",
+          input: {
+            file_path: "apps/server/src/provider/Layers/ClaudeAdapter.ts",
+            content: "PRIVATE_READ_CONTENT",
+          },
+          activity: {
+            kind: "file_read",
+            detail: "apps/server/src/provider/Layers/ClaudeAdapter.ts",
+          },
+        },
+        {
+          name: "Edit",
+          input: {
+            file_path: "apps/web/src/components/chat/SubagentDetailView.tsx",
+            old_string: "PRIVATE_OLD_SOURCE",
+            new_string: "PRIVATE_NEW_SOURCE",
+          },
+          activity: {
+            kind: "file_edit",
+            detail: "apps/web/src/components/chat/SubagentDetailView.tsx",
+          },
+        },
+        {
+          name: "Write",
+          input: { file_path: "docs/subagent-activity.md", content: "PRIVATE_WRITTEN_CONTENT" },
+          activity: { kind: "file_edit", detail: "docs/subagent-activity.md" },
+        },
+        {
+          name: "NotebookEdit",
+          input: {
+            notebook_path: "analysis/activity.ipynb",
+            file_path: "PRIVATE_WRONG_NOTEBOOK_FIELD",
+            new_source: "PRIVATE_NOTEBOOK_SOURCE",
+            cell_id: "PRIVATE_CELL_ID",
+          },
+          activity: { kind: "file_edit", detail: "analysis/activity.ipynb" },
+        },
+        {
+          name: "Glob",
+          input: {
+            path: "apps/server/src/provider",
+            file_path: "PRIVATE_WRONG_GLOB_FIELD",
+            pattern: "PRIVATE_GLOB_PATTERN",
+          },
+          activity: { kind: "file_read", detail: "apps/server/src/provider" },
+        },
+        {
+          name: "Grep",
+          input: {
+            path: "apps/web/src/components",
+            file_path: "PRIVATE_WRONG_GREP_FIELD",
+            pattern: "PRIVATE_SEARCH_PATTERN",
+          },
+          activity: { kind: "file_read", detail: "apps/web/src/components" },
+        },
+        {
+          name: "Bash",
+          input: { command: "git status --short", description: "PRIVATE_COMMAND_DESCRIPTION" },
+          activity: { kind: "command", detail: "git status --short" },
+        },
+        {
+          name: "Bash",
+          input: { command: "corepack yarn test", env: { VALUE: "PRIVATE_ENV_VALUE" } },
+          activity: { kind: "command", detail: "corepack yarn test" },
+        },
+        {
+          name: "Bash",
+          input: { command: "rg -n 'PRIVATE_COMMAND_PATTERN' apps/server/src" },
+          activity: { kind: "command", detail: "rg -n [pattern hidden] apps/server/src" },
+        },
+        {
+          name: "SendMessage",
+          input: {
+            recipient: "PRIVATE_RECIPIENT",
+            content: "PRIVATE_AGENT_MESSAGE",
+            command: "git status",
+            file_path: "docs/agent-message-target.md",
+          },
+          activity: { kind: "agent_message" },
+        },
+        {
+          name: "InspectWorkspace",
+          input: { command: "git status", file_path: "docs/unknown-tool-target.md" },
+          activity: { kind: "tool" },
+        },
+      ] as const;
+      const historyMessages: SessionMessage[] = [
+        {
+          type: "assistant",
+          uuid: "00000000-0000-4000-8000-000000000988",
+          session_id: sessionId,
+          parent_tool_use_id: "PRIVATE_PARENT_TOOL",
+          parent_agent_id: null,
+          message: {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "PRIVATE_REASONING" },
+              { type: "text", text: "Inspected files and ran the requested checks." },
+              ...toolCases.map(({ name, input }, index) => ({
+                type: "tool_use",
+                id: `PRIVATE_TOOL_ID_${index}`,
+                name,
+                input: { ...input, unrelated: { text: "PRIVATE_ARBITRARY_INPUT" } },
+              })),
+              {
+                type: "server_tool_use",
+                id: "PRIVATE_SERVER_TOOL_ID",
+                name: "Read",
+                input: { file_path: "docs/server-tool-target.md", content: "PRIVATE_SERVER_BODY" },
+              },
+              {
+                type: "mcp_tool_use",
+                id: "PRIVATE_MCP_TOOL_ID",
+                name: "Bash",
+                server_name: "PRIVATE_MCP_SERVER",
+                input: { command: "git status", content: "PRIVATE_MCP_BODY" },
+              },
+            ],
+          },
+        },
+        {
+          type: "user",
+          uuid: "00000000-0000-4000-8000-000000000989",
+          session_id: sessionId,
+          parent_tool_use_id: "PRIVATE_PARENT_TOOL",
+          parent_agent_id: null,
+          message: {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "PRIVATE_TOOL_ID_6",
+                content: "PRIVATE_COMMAND_OUTPUT",
+              },
+            ],
+          },
+        },
+      ];
+      let historyReadCount = 0;
+      const harness = makeHarness({
+        listNativeSubagents: async (requestedSessionId, options) => {
+          assert.equal(requestedSessionId, sessionId);
+          assert.equal(options?.dir, cwd);
+          return [historyId];
+        },
+        getNativeSubagentMessages: async (requestedSessionId, requestedHistoryId, options) => {
+          assert.equal(requestedSessionId, sessionId);
+          assert.equal(requestedHistoryId, historyId);
+          assert.equal(options?.dir, cwd);
+          historyReadCount += 1;
+          return historyMessages;
+        },
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        assert.ok(adapter.readSubagentDetail);
+        const detail = yield* adapter.readSubagentDetail(THREAD_ID, "task-descriptive-987", {
+          resumeCursor: { resume: sessionId, turnCount: 1 },
+          historyId,
+          cwd,
+        });
+        assert.equal(historyReadCount, 1);
+        assert.deepEqual(
+          detail.activities,
+          [
+            ...toolCases.map(({ activity }) => activity),
+            { kind: "tool" as const },
+            { kind: "tool" as const },
+          ].map((activity, index) => ({ key: `a${index.toString(36)}`, ...activity })),
+        );
+        assert.deepEqual(
+          detail.messages.map(({ role, text }) => ({ role, text })),
+          [{ role: "assistant", text: "Inspected files and ran the requested checks." }],
+        );
+        assert.equal(detail.activityHistoryIncomplete, undefined);
+        assert.equal(JSON.stringify(detail).includes("PRIVATE_"), false);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect(
     "keeps only the most recent bounded Claude activity tail without dropping public messages",
     () => {
       const sessionId = "00000000-0000-4000-8000-000000000984";
@@ -7527,7 +7721,7 @@ describe("ClaudeAdapterLive", () => {
                 type: "tool_use",
                 id: `PRIVATE_NATIVE_${index}`,
                 name: index === 0 ? "Bash" : "Read",
-                input: { file_path: "/PRIVATE_PATH" },
+                input: { file_path: "/.ssh/PRIVATE_PATH" },
               })),
             ],
           },

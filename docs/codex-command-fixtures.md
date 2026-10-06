@@ -20,6 +20,13 @@ ownership must not replace the long-running session's existing cleanup policy.
   protocol peer into a scoped directory with spaces/metacharacters. They assert
   literal arguments, synthetic home/cwd/environment and retirement of the exact
   owned child, including a deliberate client construction failure.
+- The separate typed initialization/account/skills test launches the current
+  pinned Node executable directly with a scoped synthetic peer and the same
+  isolated home/environment. It exercises real subprocess protocol I/O without
+  duplicating executable-copy qualification. Detached notification handlers must
+  signal completion before their client scope closes; a completed request alone
+  does not prove those handlers have finished. Its original timeout and exact
+  protocol assertions remain intact.
 - Registry reconciliation tests use absent absolute fixture executables and one
   explicit direct home across settings generations. A narrow spawner guard
   rejects unrelated providers. Filesystem guards reject shadow-home directory

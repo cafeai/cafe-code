@@ -163,9 +163,11 @@ function useDetailNow(enabled: boolean): string {
  *
  * The server validates the opaque child id against this exact Cafe
  * thread/turn before it reads Codex or Claude history. The browser receives
- * only bounded public user/assistant text and fixed activity categories;
- * provider reasoning, tool payloads, commands, paths, recipients, and raw
- * errors never cross this boundary. Category labels do not assert success.
+ * only bounded public user/assistant text, fixed activity categories, and
+ * optional sanitized operation details admitted by the server. Details are
+ * inert display text, never Markdown, navigable paths, or executable commands.
+ * Provider reasoning, raw tool payloads/results, recipients, and raw errors
+ * remain excluded. Category labels do not assert success.
  */
 export function SubagentDetailView(props: SubagentDetailViewProps) {
   // The durable tuple, not the visible row/name or latest parent provider,
@@ -636,8 +638,9 @@ function BoundSubagentDetailView({
               </h3>
               {/* Provider times can be absent. Keep this bounded activity tail
                   in its supplied order instead of inventing chronology among
-                  the separately retained public messages above. Never render
-                  tool-owned labels, arguments, outputs, paths, or recipients. */}
+                  the separately retained public messages above. The optional
+                  detail is a separately bounded, sanitized display projection,
+                  never a raw tool payload or authority to open/run anything. */}
               <ol className="space-y-1" aria-label="Recorded activity">
                 {activities.map((activity) => {
                   const { label, icon: Icon } = SUBAGENT_ACTIVITY_PRESENTATION[activity.kind];
@@ -645,21 +648,34 @@ function BoundSubagentDetailView({
                     <li
                       key={activity.key}
                       data-subagent-detail-activity={activity.kind}
-                      className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-3 gap-y-1 py-1.5 text-xs text-muted-foreground/80"
+                      className="min-w-0 py-1.5 text-xs text-muted-foreground/80"
                     >
-                      <span className="inline-flex min-w-0 items-center gap-2">
-                        <Icon aria-hidden="true" className="size-3.5 shrink-0 opacity-70" />
-                        {label}
-                      </span>
-                      {activity.timestamp ? (
-                        <time
-                          dateTime={activity.timestamp}
-                          className="max-w-full text-right font-mono text-[10px] leading-4 tabular-nums break-words text-muted-foreground/55"
+                      <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                        <span className="inline-flex min-w-0 items-center gap-2">
+                          <Icon aria-hidden="true" className="size-3.5 shrink-0 opacity-70" />
+                          {label}
+                        </span>
+                        {activity.timestamp ? (
+                          <time
+                            dateTime={activity.timestamp}
+                            className="max-w-full text-right font-mono text-[10px] leading-4 tabular-nums break-words text-muted-foreground/55"
+                          >
+                            {SUBAGENT_MESSAGE_TIMESTAMP_FORMATTER.format(
+                              new Date(activity.timestamp),
+                            )}
+                          </time>
+                        ) : null}
+                      </div>
+                      {activity.detail ? (
+                        // Preserve the full bounded detail for selection and
+                        // assistive technology. Wrapping long tokens avoids a
+                        // nested scrollbar or a hover-only truncated command.
+                        <code
+                          data-subagent-detail-activity-detail="true"
+                          className="mt-1 block min-w-0 pl-5.5 font-mono text-[11px] leading-5 whitespace-pre-wrap text-foreground/85 [overflow-wrap:anywhere]"
                         >
-                          {SUBAGENT_MESSAGE_TIMESTAMP_FORMATTER.format(
-                            new Date(activity.timestamp),
-                          )}
-                        </time>
+                          {activity.detail}
+                        </code>
                       ) : null}
                     </li>
                   );

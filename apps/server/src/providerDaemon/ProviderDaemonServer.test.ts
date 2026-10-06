@@ -950,6 +950,7 @@ describe("ProviderDaemonServer", () => {
             {
               key: "a0",
               kind: "command" as const,
+              detail: "git status --short",
               timestamp: "2026-10-06T23:59:59.000Z",
               command: privateFieldSentinel,
               toJSON: () => ({ leaked: activityToJsonSentinel }),
@@ -1019,7 +1020,14 @@ describe("ProviderDaemonServer", () => {
               phase: "final_answer",
             },
           ],
-          activities: [{ key: "a0", kind: "command", timestamp: "2026-10-06T23:59:59.000Z" }],
+          activities: [
+            {
+              key: "a0",
+              kind: "command",
+              detail: "git status --short",
+              timestamp: "2026-10-06T23:59:59.000Z",
+            },
+          ],
           activityHistoryIncomplete: true,
           historyIncomplete: true,
           gaps: [],

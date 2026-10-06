@@ -3203,6 +3203,15 @@ routing.layer("ProviderServiceLive routing", (it) => {
       const nestedToJsonSentinel = "provider-service-message-to-json-must-not-cross";
       const privateFieldSentinel = "provider-service-private-field-must-not-cross";
       const providerOwnedDetail = {
+        activities: [
+          {
+            key: "a0",
+            kind: "file_read" as const,
+            detail: "src/provider.ts",
+            rawInput: privateFieldSentinel,
+            toJSON: () => ({ leaked: nestedToJsonSentinel }),
+          },
+        ],
         messages: [
           {
             key: "m0",
@@ -3237,6 +3246,9 @@ routing.layer("ProviderServiceLive routing", (it) => {
 
       assert.equal(detail.provider, CODEX_DRIVER);
       assert.equal(detail.providerInstanceId, codexInstanceId);
+      assert.deepEqual(detail.activities, [
+        { key: "a0", kind: "file_read", detail: "src/provider.ts" },
+      ]);
       assert.deepEqual(detail.messages, [
         { key: "m0", role: "user", text: "Assignment for provider-child-completed" },
         {
