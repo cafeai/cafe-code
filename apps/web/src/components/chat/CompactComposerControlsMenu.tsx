@@ -12,6 +12,7 @@ import {
   ListTodoIcon,
   LockIcon,
   LockOpenIcon,
+  NetworkIcon,
   PenLineIcon,
   ShieldCheckIcon,
   TargetIcon,
@@ -99,6 +100,8 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
   onToggleInteractionMode: () => void;
   onNativePermissionModeChange: (mode: ClaudePermissionMode) => void;
   onTogglePlanSidebar: () => void;
+  /** Opens the read-only workflow panel. Absent for draft threads. */
+  onOpenWorkflowObservatory?: (() => void) | undefined;
   onRuntimeModeChange: (mode: RuntimeMode) => void;
   onOpenGoal?: () => void;
 }) {
@@ -236,6 +239,24 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
               {props.planSidebarOpen
                 ? `Hide ${props.planSidebarLabel.toLowerCase()} sidebar`
                 : `Show ${props.planSidebarLabel.toLowerCase()} sidebar`}
+            </MenuItem>
+          </>
+        ) : null}
+        {props.onOpenWorkflowObservatory ? (
+          <>
+            {hasTraits ||
+            props.showInteractionModeToggle ||
+            showAccessControls ||
+            props.showGoalControl ||
+            props.showPlanSidebar ? (
+              <MenuDivider />
+            ) : null}
+            <MenuItem
+              data-testid="compact-open-workflow-observatory"
+              onClick={props.onOpenWorkflowObservatory}
+            >
+              <NetworkIcon className="size-4 shrink-0" />
+              Show workflow
             </MenuItem>
           </>
         ) : null}
