@@ -38,6 +38,13 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
   useParams: () => ({}),
 }));
 
+// These canvas fixtures have no selected workspace or thread. Keep that input
+// explicit so the workspace hook cannot load saved-host bootstrap/persistence
+// through this fixture's intentionally isolated settings and store modules.
+vi.mock("../environments/workspace", () => ({
+  useWorkspaceEnvironmentId: () => null,
+}));
+
 // The app is built with the React Compiler, which memoizes AmbianceCanvas, so a
 // parent re-render alone never reaches it. The mock has to be a real
 // subscribable store for a settings change to propagate the way it does live.

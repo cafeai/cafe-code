@@ -89,6 +89,13 @@ const harness = vi.hoisted(() => {
   };
 });
 
+// Bind the real board to the exact synthetic environment above. Workspace
+// selection is an input to this layout fixture; importing its saved-host
+// bootstrap graph would escape the isolated runtime/settings modules below.
+vi.mock("../../environments/workspace", () => ({
+  useWorkspaceEnvironmentId: () => harness.state.activeEnvironmentId,
+}));
+
 vi.mock("../../hooks/useSettings", () => ({
   useSettings: (selector: (settings: typeof harness.settings) => unknown) =>
     selector(harness.settings),
