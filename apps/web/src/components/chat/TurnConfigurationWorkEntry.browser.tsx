@@ -30,6 +30,29 @@ afterEach(() => {
 
 describe("turn configuration work-log row", () => {
   it.each([
+    ["default", "Fast off", "Standard"],
+    ["priority", "Fast on", "Fast"],
+    ["ultrafast", "Fast on", "Ultra fast"],
+  ])(
+    "shows inherited native %s routing without provider-default ambiguity",
+    async (tier, fast, label) => {
+      const { fastMode: _fast, ...inherited } = configuration;
+      const view = await render(
+        <TurnConfigurationWorkEntry configuration={{ ...inherited, resolvedServiceTier: tier }} />,
+      );
+      try {
+        await expect.element(page.getByText(fast)).toBeVisible();
+        await expect.element(page.getByText(`Service tier: ${label}`)).toBeVisible();
+        expect(
+          document.querySelector("[data-turn-configuration-settings]")?.textContent,
+        ).not.toContain("provider default");
+      } finally {
+        await view.unmount();
+      }
+    },
+  );
+
+  it.each([
     { width: 240, scale: 80, longLabels: false },
     { width: 240, scale: 130, longLabels: false },
     { width: 320, scale: 100, longLabels: false },

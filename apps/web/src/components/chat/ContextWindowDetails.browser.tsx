@@ -24,7 +24,7 @@ describe("ContextWindowDetails reset availability", () => {
   });
 
   it.each(["popover", "panel"] as const)(
-    "shows selected, current, and pending concurrency without guessing provider enforcement in %s layout",
+    "shows the saved limit immediately and omits unknown limits in %s layout",
     async (layout) => {
       mounted = await render(
         <ContextWindowDetails
@@ -43,20 +43,8 @@ describe("ContextWindowDetails reset availability", () => {
       );
       expect(details).not.toBeNull();
       expect(details?.textContent?.match(/Subagent limit/g)).toHaveLength(1);
-      await expect
-        .element(page.getByText("Selected for this chat: 12 at once", { exact: true }))
-        .toBeVisible();
-      await expect
-        .element(page.getByText("Current session: 3 at once", { exact: true }))
-        .toBeVisible();
-      await expect
-        .element(
-          page.getByText(
-            "Waiting to apply — applies before a new turn when the session can safely restart.",
-            { exact: true },
-          ),
-        )
-        .toBeVisible();
+      await expect.element(page.getByText("Subagent limit: 12", { exact: true })).toBeVisible();
+      expect(details?.textContent).toBe("Subagent limit: 12");
       await mounted.rerender(
         <ContextWindowDetails
           usage={null}
@@ -69,34 +57,29 @@ describe("ContextWindowDetails reset availability", () => {
           }}
         />,
       );
-      await expect
-        .element(page.getByText("Account setting: 5 at once", { exact: true }))
-        .toBeVisible();
-      await expect
-        .element(page.getByText("Current session: Provider-managed", { exact: true }))
-        .toBeVisible();
-      await expect.element(page.getByText(/^Waiting to apply/)).toBeVisible();
-      await mounted.rerender(
-        <ContextWindowDetails
-          usage={null}
-          layout={layout}
-          subagentConcurrency={{
-            requested: undefined,
-            configured: undefined,
-            source: "Provider / inherited default",
-            pending: false,
-          }}
-        />,
+      await expect.element(page.getByText("Subagent limit: 5", { exact: true })).toBeVisible();
+      expect(document.querySelector("[data-subagent-concurrency-details]")?.textContent).toBe(
+        "Subagent limit: 5",
       );
-      await expect
-        .element(page.getByText("Selected limit: Provider-managed", { exact: true }))
-        .toBeVisible();
-      await expect
-        .element(page.getByText("Current session: Not recorded", { exact: true }))
-        .toBeVisible();
-      await expect.element(page.getByText(/^Waiting to apply/)).not.toBeInTheDocument();
-      expect(document.body.textContent).not.toContain("Source:");
-      expect(document.body.textContent).not.toContain("Native effective limit is not verified.");
+      for (const configured of [undefined, null, 8]) {
+        await mounted.rerender(
+          <ContextWindowDetails
+            usage={null}
+            layout={layout}
+            subagentConcurrency={{
+              requested: undefined,
+              configured,
+              source: "Provider / inherited default",
+              pending: configured === 8,
+            }}
+          />,
+        );
+        expect(document.querySelector("[data-subagent-concurrency-details]")).toBeNull();
+        await expect
+          .element(page.getByRole("heading", { name: "Subagent limit", exact: false }))
+          .not.toBeInTheDocument();
+        await expect.element(page.getByText("Waiting for usage from this thread.")).toBeVisible();
+      }
     },
   );
 

@@ -34,8 +34,13 @@ Cafe bounds and validates identifiers and inert labels, preserving exact wire id
 Custom models do not inherit another model's advertised service-tier eligibility.
 
 The existing versioned accepted-turn snapshot gains an optional bounded tier id.
-Work logs and Atrium use that frozen submitted setting, never today's selection.
-It is explicitly not proof of the effective paid routing or billing. Older Fast
+Work logs and Atrium use frozen submitted settings plus an optional
+`resolvedServiceTier` from the exact native runtime at turn admission, never
+today's selection. Start/resume responses expose this experimental field outside
+the stable generated schema; null is Standard, absence is unknown. Root settings
+notifications update only their own runtime, and delayed ACKs cannot overwrite
+newer observations. Explicit turn overrides take precedence over inherited native
+routing. This is configured routing, not downstream execution or billing proof. Older Fast
 snapshots remain readable. No storage migration, credential/configuration edit,
 provider restart, permission change, or new dependency is introduced.
 

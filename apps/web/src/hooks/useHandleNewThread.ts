@@ -1,9 +1,10 @@
-import { scopedProjectKey, scopeProjectRef } from "@cafecode/client-runtime";
+import { scopedProjectKey, scopeProjectRef, scopeThreadRef } from "@cafecode/client-runtime";
 import { DEFAULT_RUNTIME_MODE, type ScopedProjectRef } from "@cafecode/contracts";
 import { useParams, useRouter } from "@tanstack/react-router";
 import { useCallback, useMemo } from "react";
 import {
   deriveNewChatComposerDefaults,
+  selectStandaloneDraftSessions,
   type DraftThreadEnvMode,
   type DraftThreadState,
   useComposerDraftStore,
@@ -15,7 +16,7 @@ import {
   getProjectOrderKey,
   selectProjectGroupingSettings,
 } from "../logicalProject";
-import { useStore } from "../store";
+import { selectThreadExistsByRef, useStore } from "../store";
 import { useWorkspaceProjects } from "../environments/workspaceData";
 import { createThreadSelectorByRef } from "../storeSelectors";
 import { resolveThreadRouteTarget } from "../threadRoutes";
@@ -27,6 +28,7 @@ import {
 } from "../environments/workspace";
 import { useDeskStore } from "../deskStore";
 import { toastManager } from "../components/ui/toast";
+import { isChatSendInFlight } from "../chatPaneContext";
 
 /**
  * Global creation captures its environment and Desk destination synchronously.
@@ -49,15 +51,34 @@ function useNewStandaloneChatHandler() {
     const deskStore = useDeskStore.getState();
     deskStore.bindEnvironment(environmentId);
     const groupId = useDeskStore.getState().desk.activeGroupId;
-    const draftId = newDraftId();
     const drafts = useComposerDraftStore.getState();
-    drafts.createStandaloneDraftSession(draftId, environmentId, newThreadId());
-    drafts.applyStickyState(draftId, newChatDefaults);
-    // Explicit creation requests Desk even if the project catalog was open.
-    // Layout changes precede navigation, preserving the captured group through
-    // asynchronous route commits and the later exact draft promotion.
-    deskStore.dispatch({ type: "open", target: { kind: "draft", draftId }, groupId });
-    deskStore.dispatch({ type: "sidebarMode", mode: "desk" });
+    const params = router.state.matches[router.state.matches.length - 1]?.params ?? {};
+    const currentTarget = resolveThreadRouteTarget(params);
+    const preferredId =
+      currentTarget?.kind === "draft" ? currentTarget.draftId : deskStore.activeDraftId;
+    const reusable = selectStandaloneDraftSessions(drafts, environmentId)
+      .filter(
+        (draft) =>
+          !isChatSendInFlight(environmentId, draft.threadId) &&
+          !selectThreadExistsByRef(
+            useStore.getState(),
+            scopeThreadRef(environmentId, draft.threadId),
+          ),
+      )
+      .toSorted(
+        (left, right) =>
+          Number(right.draftId === preferredId) - Number(left.draftId === preferredId) ||
+          right.createdAt.localeCompare(left.createdAt) ||
+          left.draftId.localeCompare(right.draftId),
+      )[0];
+    const draftId = reusable?.draftId ?? newDraftId();
+    if (!reusable) {
+      drafts.createStandaloneDraftSession(draftId, environmentId, newThreadId());
+      drafts.applyStickyState(draftId, newChatDefaults);
+    }
+    // This is an editor destination, not an open-chat tab. Keep the sidebar
+    // mode and existing saved tabs until the first send materializes a thread.
+    deskStore.showDraftEditor(draftId, groupId);
     await router.navigate({ to: "/draft/$draftId", params: { draftId } });
   }, [newChatDefaults, router]);
 }

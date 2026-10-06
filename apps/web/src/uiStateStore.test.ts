@@ -16,6 +16,7 @@ import {
   setProjectExpanded,
   setSessionRailDocked,
   setThreadPlanSidebarOpen,
+  setCodeReviewCollapsed,
   syncProjects,
   syncThreads,
   type UiState,
@@ -27,6 +28,7 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
     projectOrder: [],
     threadLastVisitedAtById: {},
     threadPlanSidebarOpenById: {},
+    codeReviewCollapsed: false,
     defaultAdvertisedEndpointKey: null,
     navigationSidebarOpen: true,
     sessionRailDocked: false,
@@ -35,6 +37,28 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
 }
 
 describe("uiStateStore pure functions", () => {
+  it("keeps the editor-wide review preference when chats or servers are removed", () => {
+    const local = "environment-local:thread-1";
+    const remote = "environment-remote:thread-1";
+    const state = setCodeReviewCollapsed(
+      makeUiState({ threadPlanSidebarOpenById: { [local]: true, [remote]: false } }),
+      true,
+    );
+    expect(state.codeReviewCollapsed).toBe(true);
+    expect(setCodeReviewCollapsed(state, true)).toBe(state);
+    expect(clearThreadUi(state, remote).codeReviewCollapsed).toBe(true);
+    expect(syncThreads(state, [{ key: local }]).codeReviewCollapsed).toBe(true);
+    expect(syncThreads(state, []).codeReviewCollapsed).toBe(true);
+    expect(
+      removeThreadUiForNonPrimaryEnvironment(state, EnvironmentId.make("environment-local"))
+        .codeReviewCollapsed,
+    ).toBe(true);
+    const expanded = setCodeReviewCollapsed(state, false);
+    expect(expanded.codeReviewCollapsed).toBe(false);
+    expect(setCodeReviewCollapsed(expanded, false)).toBe(expanded);
+    expect(expanded.threadPlanSidebarOpenById).toEqual({ [local]: true, [remote]: false });
+  });
+
   it("markThreadVisited stores the provided server timestamp", () => {
     const threadId = ThreadId.make("thread-1");
     const initialState = makeUiState();
@@ -486,6 +510,53 @@ describe("uiStateStore persistence round-trip", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("restores the global review choice on reload and stops writing per-thread preferences", () => {
+    for (const collapsed of [true, false]) {
+      persistState(setCodeReviewCollapsed(makeUiState(), collapsed));
+      const persisted = JSON.parse(
+        localStorageStub.getItem(PERSISTED_STATE_KEY)!,
+      ) as PersistedUiState;
+      expect(hydratePersistedUiState(persisted).codeReviewCollapsed).toBe(collapsed);
+      expect(persisted).not.toHaveProperty("threadCodeReviewCollapsedById");
+    }
+    expect(hydratePersistedUiState({}).codeReviewCollapsed).toBe(false);
+    for (const invalid of [null, "true", 1, {}, []]) {
+      expect(
+        hydratePersistedUiState({ codeReviewCollapsed: invalid } as PersistedUiState)
+          .codeReviewCollapsed,
+      ).toBe(false);
+    }
+  });
+
+  it("migrates a valid minimized thread without overriding a new global choice", () => {
+    const key = "environment-local:thread-1";
+    const legacy = { threadCodeReviewCollapsedById: { [key]: true } };
+    expect(hydratePersistedUiState(legacy).codeReviewCollapsed).toBe(true);
+    expect(
+      hydratePersistedUiState({ ...legacy, codeReviewCollapsed: false }).codeReviewCollapsed,
+    ).toBe(false);
+    expect(
+      hydratePersistedUiState({ ...legacy, codeReviewCollapsed: true }).codeReviewCollapsed,
+    ).toBe(true);
+    expect(
+      hydratePersistedUiState({
+        threadCodeReviewCollapsedById: {
+          "unscoped-thread": true,
+          "environment-local:expanded": false,
+          [`environment-local:${"x".repeat(512)}`]: true,
+        },
+      }).codeReviewCollapsed,
+    ).toBe(false);
+    const tooManyInvalid = Object.fromEntries(
+      Array.from({ length: 10_000 }, (_, index) => [`invalid-${index}`, true]),
+    );
+    expect(
+      hydratePersistedUiState({
+        threadCodeReviewCollapsedById: { ...tooManyInvalid, [key]: true },
+      }).codeReviewCollapsed,
+    ).toBe(false);
   });
 
   it("preserves all-collapsed project state across restart", () => {

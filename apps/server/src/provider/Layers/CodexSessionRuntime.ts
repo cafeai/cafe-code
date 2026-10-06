@@ -59,6 +59,12 @@ import * as SchemaIssue from "effect/SchemaIssue";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import * as CodexClient from "effect-codex-app-server/client";
 import { codexCommandUsesShell } from "effect-codex-app-server/command";
+import {
+  acknowledgeCodexServiceTier,
+  observeCodexServiceTier,
+  resolveCodexTurnServiceTier,
+  type CodexServiceTierSnapshot,
+} from "../codexServiceTier.ts";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexRpc from "effect-codex-app-server/rpc";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
@@ -208,12 +214,23 @@ const CodexTurnStartParamsWithExperimentalFields = EffectCodexSchema.V2TurnStart
 const decodeCodexTurnStartParamsWithExperimentalFields = Schema.decodeUnknownEffect(
   CodexTurnStartParamsWithExperimentalFields,
 );
-const decodeV2ThreadStartResponse = Schema.decodeUnknownEffect(
-  EffectCodexSchema.V2ThreadStartResponse,
+// Codex 0.160.0 (a956835d020762cb2b570053af06f643a11c0ecc),
+// app-server/src/request_processors/thread_processor.rs returns the native
+// config snapshot's service_tier on start/resume. Stable generated schemas
+// omit this experimental response field. Preserve only that narrow setting:
+// null means standard, omission means unknown, and neither is billing evidence.
+const CodexThreadStartResponse = EffectCodexSchema.V2ThreadStartResponse.pipe(
+  Schema.fieldsAssign({
+    serviceTier: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
+  }),
 );
-const decodeV2ThreadResumeResponse = Schema.decodeUnknownEffect(
-  EffectCodexSchema.V2ThreadResumeResponse,
+const CodexThreadResumeResponse = EffectCodexSchema.V2ThreadResumeResponse.pipe(
+  Schema.fieldsAssign({
+    serviceTier: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
+  }),
 );
+const decodeV2ThreadStartResponse = Schema.decodeUnknownEffect(CodexThreadStartResponse);
+const decodeV2ThreadResumeResponse = Schema.decodeUnknownEffect(CodexThreadResumeResponse);
 // Codex 0.151 exposes bounded resume hydration as an experimental response
 // field that is intentionally absent from its stable generated top-level
 // schema. Keep this compatibility schema deliberately narrow: Cafe asks for
@@ -2631,8 +2648,8 @@ export function isRecoverableThreadResumeError(error: unknown): boolean {
 }
 
 type CodexThreadOpenResponse =
-  | CodexRpc.ClientRequestResponsesByMethod["thread/start"]
-  | CodexRpc.ClientRequestResponsesByMethod["thread/resume"];
+  | typeof CodexThreadStartResponse.Type
+  | typeof CodexThreadResumeResponse.Type;
 
 type CodexThreadOpenMethod = "thread/start" | "thread/resume";
 type CodexThreadOpenPayloadByMethod = {
@@ -2653,7 +2670,7 @@ const requestCodexThreadOpen = <M extends CodexThreadOpenMethod>(
   client: CodexThreadOpenClient,
   method: M,
   payload: CodexThreadOpenPayloadByMethod[M],
-): Effect.Effect<CodexRpc.ClientRequestResponsesByMethod[M], CodexErrors.CodexAppServerError> =>
+): Effect.Effect<CodexThreadOpenResponse, CodexErrors.CodexAppServerError> =>
   client.raw.request(method, payload).pipe(
     Effect.flatMap((rawResponse) => {
       if (method === "thread/start") {
@@ -2661,10 +2678,7 @@ const requestCodexThreadOpen = <M extends CodexThreadOpenMethod>(
           Effect.mapError((error) =>
             toProtocolParseError("Invalid thread/start response payload", error),
           ),
-        ) as Effect.Effect<
-          CodexRpc.ClientRequestResponsesByMethod[M],
-          CodexErrors.CodexAppServerError
-        >;
+        );
       }
       return Effect.all({
         response: decodeV2ThreadResumeResponse(rawResponse),
@@ -2689,10 +2703,7 @@ const requestCodexThreadOpen = <M extends CodexThreadOpenMethod>(
         Effect.mapError((error) =>
           toProtocolParseError("Invalid thread/resume response payload", error),
         ),
-      ) as Effect.Effect<
-        CodexRpc.ClientRequestResponsesByMethod[M],
-        CodexErrors.CodexAppServerError
-      >;
+      );
     }),
   );
 
@@ -3916,6 +3927,7 @@ export const admitCodexTurnStartLifecycleBoundary = Effect.fn(
   readonly reasoningEffortSnapshotRef?:
     | Ref.Ref<CodexReasoningEffortSnapshot | undefined>
     | undefined;
+  readonly serviceTierSnapshotRef?: Ref.Ref<CodexServiceTierSnapshot | undefined> | undefined;
   readonly expectedCompletedRootTurnId?: TurnId | undefined;
   readonly allowActiveTurnSteerFallback?: boolean | undefined;
 }) {
@@ -3996,6 +4008,10 @@ export const admitCodexTurnStartLifecycleBoundary = Effect.fn(
           requestToken,
           supersededAggregateTurnId: completion?.turnId,
           reasoningEffortSnapshot,
+          serviceTierSnapshot:
+            input.serviceTierSnapshotRef !== undefined
+              ? yield* Ref.get(input.serviceTierSnapshotRef)
+              : undefined,
         };
       }),
     ),
@@ -5499,6 +5515,7 @@ export const makeCodexSessionRuntime = (
     const reasoningEffortSnapshotRef = yield* Ref.make<CodexReasoningEffortSnapshot | undefined>(
       undefined,
     );
+    const serviceTierSnapshotRef = yield* Ref.make<CodexServiceTierSnapshot | undefined>(undefined);
     const offerEvent = (event: ProviderEvent) =>
       Queue.offer(events, runtimeGeneration.stampEvent(event)).pipe(Effect.asVoid);
 
@@ -7365,7 +7382,20 @@ export const makeCodexSessionRuntime = (
                 currentProviderThreadId: providerThreadId,
                 notification: payload,
               }),
-            ).pipe(Effect.andThen(updateSession(sessionRef, { model }))),
+            ).pipe(
+              Effect.andThen(
+                providerThreadId === payload.threadId
+                  ? Ref.update(serviceTierSnapshotRef, (current) =>
+                      observeCodexServiceTier({
+                        current,
+                        providerThreadId,
+                        serviceTier: payload.threadSettings.serviceTier,
+                      }),
+                    )
+                  : Effect.void,
+              ),
+              Effect.andThen(updateSession(sessionRef, { model })),
+            ),
           );
         }),
       ),
@@ -7782,6 +7812,15 @@ export const makeCodexSessionRuntime = (
       yield* Ref.update(reasoningEffortSnapshotRef, (current) =>
         observeCodexThreadOpenReasoningEffort({ current, opened }),
       );
+      yield* Ref.update(serviceTierSnapshotRef, (current) =>
+        current?.providerThreadId === opened.thread.id
+          ? current
+          : observeCodexServiceTier({
+              current,
+              providerThreadId: opened.thread.id,
+              serviceTier: opened.serviceTier,
+            }),
+      );
       const activeSnapshotTurn = selectCodexActiveSnapshotTurn(opened.thread);
       const activeSnapshotTurnId = activeSnapshotTurn
         ? TurnId.make(activeSnapshotTurn.id)
@@ -8066,6 +8105,7 @@ export const makeCodexSessionRuntime = (
             requestToken,
             supersededAggregateTurnId,
             reasoningEffortSnapshot: admittedReasoningEffortSnapshot,
+            serviceTierSnapshot: admittedServiceTierSnapshot,
           } = yield* admitCodexTurnStartLifecycleBoundary({
             semaphore: aggregateLifecycleSemaphore,
             completionsRef: aggregateRootCompletionsRef,
@@ -8076,6 +8116,7 @@ export const makeCodexSessionRuntime = (
             closedRef,
             sessionRef,
             ...(!reviewParams ? { reasoningEffortSnapshotRef } : {}),
+            ...(!reviewParams ? { serviceTierSnapshotRef } : {}),
             // A native review is always idle-only; internal recovery evidence
             // cannot grant it permission to supersede a child-owning aggregate.
             expectedCompletedRootTurnId: reviewParams
@@ -8134,6 +8175,13 @@ export const makeCodexSessionRuntime = (
                 ),
               );
           const turnId = TurnId.make(response.turn.id);
+          const resolvedServiceTier = reviewParams
+            ? undefined
+            : resolveCodexTurnServiceTier({
+                providerThreadId,
+                snapshot: admittedServiceTierSnapshot,
+                requestedTier: input.serviceTier,
+              });
           if (!reviewParams)
             yield* aggregateLifecycleSemaphore.withPermits(1)(
               Effect.gen(function* () {
@@ -8147,6 +8195,16 @@ export const makeCodexSessionRuntime = (
                     requestedEffort: input.effort,
                   }),
                 );
+                if ((yield* Ref.get(nativeTurnStartRequestRef)) === requestToken) {
+                  yield* Ref.update(serviceTierSnapshotRef, (current) =>
+                    acknowledgeCodexServiceTier({
+                      current,
+                      admitted: admittedServiceTierSnapshot,
+                      providerThreadId,
+                      requestedTier: input.serviceTier,
+                    }),
+                  );
+                }
               }),
             );
           yield* recordTurnStartObservation({
@@ -8231,6 +8289,7 @@ export const makeCodexSessionRuntime = (
           return {
             threadId: options.threadId,
             turnId,
+            ...(resolvedServiceTier !== undefined ? { resolvedServiceTier } : {}),
             ...(resumedProviderThreadId
               ? { resumeCursor: { threadId: resumedProviderThreadId } }
               : {}),

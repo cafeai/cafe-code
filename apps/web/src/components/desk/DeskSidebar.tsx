@@ -1,5 +1,5 @@
 import type { EnvironmentId, ScopedThreadRef } from "@cafecode/contracts";
-import { PencilIcon, PlusIcon, XIcon } from "lucide-react";
+import { PencilIcon, XIcon } from "lucide-react";
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { DESK_LIMITS, deskGroupIds, type DeskGroup, type DeskState } from "../../deskModel";
@@ -13,6 +13,7 @@ import { ThreadStatusLabel } from "../ThreadStatusIndicators";
 import { SidebarMenuSub, SidebarMenuSubButton, SidebarMenuSubItem } from "../ui/sidebar";
 import { useDeskTabMetadata } from "./useDeskTabMetadata";
 import { useDeskChatActions } from "./useDeskChatActions";
+import { SidebarNewChatButton } from "../sidebar/SidebarNewChatButton";
 
 type SidebarMenuOwnership = {
   readonly claim: () => symbol;
@@ -478,15 +479,7 @@ export function DeskSidebar({
         <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground/60">
           Open chats
         </span>
-        <button
-          type="button"
-          aria-label="New chat in active tab group"
-          title="New chat"
-          className="inline-flex size-5 items-center justify-center rounded-md text-muted-foreground/60 hover:bg-accent hover:text-foreground"
-          onClick={onNewChat}
-        >
-          <PlusIcon className="size-3.5" />
-        </button>
+        <SidebarNewChatButton label="New chat in active tab group" onClick={onNewChat} />
       </div>
       {deskGroupIds(desk.layout).map((groupId) => {
         const group = desk.groups[groupId];

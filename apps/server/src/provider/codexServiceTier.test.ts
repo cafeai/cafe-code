@@ -4,7 +4,12 @@ import {
   type ModelSelection,
   type ServerProviderModel,
 } from "@cafecode/contracts";
-import { resolveCodexServiceTier } from "./codexServiceTier.ts";
+import {
+  acknowledgeCodexServiceTier,
+  observeCodexServiceTier,
+  resolveCodexServiceTier,
+  resolveCodexTurnServiceTier,
+} from "./codexServiceTier.ts";
 const instance = ProviderInstanceId.make("codex-personal");
 const models: ServerProviderModel[] = [
   {
@@ -31,6 +36,93 @@ const selection = (options: ModelSelection["options"], model = "sol"): ModelSele
   instanceId: instance,
   model,
   ...(options ? { options } : {}),
+});
+
+describe("native Codex turn routing evidence", () => {
+  it.each([
+    [null, "default"],
+    [undefined, undefined],
+    ["priority", "priority"],
+    ["ultrafast", "ultrafast"],
+    ["future_tier", "future_tier"],
+    ["priority\nforged", undefined],
+    ["a".repeat(65), undefined],
+  ])("distinguishes native %s from absent or invalid evidence", (serviceTier, expected) => {
+    const snapshot = observeCodexServiceTier({
+      current: undefined,
+      providerThreadId: "root",
+      serviceTier,
+    });
+    expect(
+      resolveCodexTurnServiceTier({ providerThreadId: "root", snapshot, requestedTier: undefined }),
+    ).toBe(expected);
+    expect(
+      resolveCodexTurnServiceTier({
+        providerThreadId: "other",
+        snapshot,
+        requestedTier: undefined,
+      }),
+    ).toBeUndefined();
+    expect(
+      resolveCodexTurnServiceTier({ providerThreadId: "root", snapshot, requestedTier: "default" }),
+    ).toBe("default");
+  });
+
+  it("preserves inherited Fast across absent settings but clears it on explicit native standard", () => {
+    const fast = observeCodexServiceTier({
+      current: undefined,
+      providerThreadId: "root",
+      serviceTier: "priority",
+    });
+    expect(
+      observeCodexServiceTier({ current: fast, providerThreadId: "root", serviceTier: undefined }),
+    ).toBe(fast);
+    const standard = observeCodexServiceTier({
+      current: fast,
+      providerThreadId: "root",
+      serviceTier: null,
+    });
+    expect(standard.serviceTier).toBe("default");
+    expect(
+      observeCodexServiceTier({
+        current: fast,
+        providerThreadId: "replacement",
+        serviceTier: undefined,
+      }).serviceTier,
+    ).toBeUndefined();
+    expect(
+      acknowledgeCodexServiceTier({
+        current: standard,
+        admitted: fast,
+        providerThreadId: "root",
+        requestedTier: "ultrafast",
+      }),
+    ).toBe(standard);
+  });
+
+  it("retains an accepted explicit override for later inherited turns without rewriting the frozen snapshot", () => {
+    const fast = observeCodexServiceTier({
+      current: undefined,
+      providerThreadId: "root",
+      serviceTier: "priority",
+    });
+    const standard = acknowledgeCodexServiceTier({
+      current: fast,
+      admitted: fast,
+      providerThreadId: "root",
+      requestedTier: "default",
+    });
+    expect(standard?.serviceTier).toBe("default");
+    expect(fast.serviceTier).toBe("priority");
+    expect(
+      acknowledgeCodexServiceTier({
+        current: fast,
+        admitted: fast,
+        providerThreadId: "root",
+        requestedTier: undefined,
+      }),
+    ).toBe(fast);
+  });
 });
 describe("exact Codex service tier admission", () => {
   it.each(["default", "priority", "ultrafast"])(

@@ -78,6 +78,15 @@ older unreferenced history is not inferred completed.
 
 ## Presentation and security
 
+The editor, context popover and pinned rail display one saved numeric
+**Subagent limit: N**, including while native application is pending. They omit
+the limit status when no numeric chat/account setting is known, rather than
+showing a provider-managed or unrecorded placeholder. A reset follows the current
+inherited setting instead of retaining the previous session's numeric label.
+Saved choices and materialized process policy remain separate internally; the
+display is not an applied-state or enforcement claim. The editor and accessible
+info tooltip explain the safe application boundary without extra pending rows.
+
 The saved-policy editor uses the exact environment/thread/account identity and
 the acknowledged command sequence, not arrival order. Canonical policy authority
 is committed atomically with the map in the shared store for both shell and detail

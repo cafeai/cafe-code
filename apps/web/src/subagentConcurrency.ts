@@ -72,41 +72,14 @@ export interface SubagentConcurrencyPresentation {
 }
 
 /**
- * Human-readable labels shared by the editor, context popover and pinned rail.
- * This formats recorded evidence only: the selected policy is not a verified
- * provider-enforced cap, and missing process evidence is not a native default.
+ * Show the saved numeric choice immediately, including while a session still
+ * uses its previous policy. An inherited provider default has no known number.
+ * The label describes a setting, not independently verified native enforcement.
  */
-export function formatSubagentConcurrencyDetails(presentation: SubagentConcurrencyPresentation): {
-  readonly selected: string;
-  readonly currentSession: string;
-  readonly pending: string | null;
-} {
-  const selectionLabel =
-    presentation.requested === undefined
-      ? "Selected limit"
-      : presentation.source === "Chat override"
-        ? "Selected for this chat"
-        : presentation.source === "Legacy instance configuration"
-          ? "Account setting"
-          : "Selected limit";
-  const selected =
-    presentation.requested === undefined ? "Provider-managed" : `${presentation.requested} at once`;
-  const currentSession =
-    presentation.configured === undefined
-      ? "Not recorded"
-      : presentation.configured === null
-        ? "Provider-managed"
-        : `${presentation.configured} at once`;
-  return {
-    selected: `${selectionLabel}: ${selected}`,
-    currentSession: `Current session: ${currentSession}`,
-    // Idleness alone cannot prove the native child inventory is complete. A
-    // new send still needs the existing safe-restart checks; do not promise a
-    // timer-based application or imply that this setting interrupts live work.
-    pending: presentation.pending
-      ? "Waiting to apply — applies before a new turn when the session can safely restart."
-      : null,
-  };
+export function formatSubagentConcurrencyLimit(
+  presentation: SubagentConcurrencyPresentation | null | undefined,
+): string | null {
+  return presentation?.requested === undefined ? null : `Subagent limit: ${presentation.requested}`;
 }
 
 export function deriveSubagentConcurrencyPresentation(input: {

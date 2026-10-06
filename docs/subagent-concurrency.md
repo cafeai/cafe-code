@@ -15,18 +15,23 @@ unknown. Sends preserve the prompt and refuse an unsupported selected-driver
 numeric policy, including queued sends; they never silently discard it on an
 older server. Another driver's remembered value does not block the current one.
 
-## Requested versus configured
+## Saved limit and session configuration
 
-The context popover, pinned rail and limit editor show **Selected for this chat**
-(or an inherited **Account setting**) separately from **Current session**. Both
-numeric labels describe Cafe's settings, not an independently verified hard cap.
-**Provider-managed** means Cafe has not set a numeric override for that session;
-**Not recorded** means there is no known process-policy evidence. Neither means
-a known numeric provider default. A mismatched known setting shows **Waiting to
-apply**, conditional on a new turn and a safe session restart. The enforcement
-caveat is available through the labelled **About subagent limits** info tooltip,
-not a permanent extra line. These labels use the same shared presentation in all
-three surfaces and do not add provider calls or change runtime policy.
+The context popover, pinned rail and limit editor show one **Subagent limit: N**
+label for the saved numeric chat setting or an inherited numeric account setting.
+The label updates with the acknowledged saved choice, even while the current
+provider session still uses its previous configuration. It describes a setting,
+not an independently verified hard cap or confirmation that a change has applied.
+If no numeric setting is known, the label and its section are omitted; Cafe never
+guesses a provider default. Reset removes the chat override and shows an inherited
+numeric account setting, or hides the label if that inherited number is unknown.
+The editor remains available without a status label.
+
+Separate selected/current-session rows and a pending-state row are not displayed.
+The labelled **About subagent limits** info tooltip explains the saved-setting
+semantics, safe application boundary and enforcement caveat. The editor also
+explains when changes take effect. All three surfaces share this presentation;
+it does not add provider calls or change runtime policy.
 
 Saving during work changes durable chat metadata
 only. Cafe applies a changed process limit at the next safe idle send boundary;
@@ -38,8 +43,10 @@ children absent from that runtime's bounded metadata.
 
 Resolution is chat override, then an existing explicit account runtime override,
 then native configuration/environment. Reset does not edit global provider files.
-An inherited limit is not a claim that Cafe knows the provider's effective
-number. Old snapshots with no recorded process policy remain unknown. Requested
+An inherited provider default is not a known numeric limit. Internally, a null
+session policy records the absence of a Cafe override, while an omitted policy
+records unknown process evidence; neither is a numeric default. Old snapshots
+with no recorded process policy remain unknown. Requested
 values survive restart, fork, and duplicate without restoring a cleared override.
 Configured process evidence survives restart and native fork; a duplicate is
 intentionally session-unbound until its first send.

@@ -27,6 +27,21 @@ const EFFORT_LABELS: Readonly<Record<string, string>> = {
   ultra: "Ultra",
 };
 
+function presentServiceTier(tier: string): string {
+  switch (tier) {
+    case "default":
+      return "Fast off · Service tier: Standard";
+    case "priority":
+    case "fast":
+      return "Fast on · Service tier: Fast";
+    case "ultrafast":
+      return "Fast on · Service tier: Ultra fast";
+    default:
+      // Future native ids stay exact; their speed/cost semantics are unknown.
+      return `Service tier: ${tier}`;
+  }
+}
+
 /** Plain text only: these labels are never Markdown, HTML, or link targets. */
 export function presentTurnConfiguration(configuration: ProviderTurnConfiguration): {
   readonly settings: string;
@@ -44,14 +59,15 @@ export function presentTurnConfiguration(configuration: ProviderTurnConfiguratio
             ? EFFORT_LABELS[configuration.effort]
             : configuration.effort
         }`;
-  // Absence is not false. An inherited provider preference may enable Fast, so
-  // the row must not claim Normal/Fast off without an explicit frozen value.
+  // Prefer routing captured from the exact native start over submitted options.
+  // Old snapshots stay unknown rather than borrowing today's session settings.
   const fast =
-    configuration.provider === "codex" && configuration.serviceTier !== undefined
-      ? `Service tier: ${configuration.serviceTier === "default" ? "Standard" : configuration.serviceTier}`
+    configuration.provider === "codex" &&
+    (configuration.resolvedServiceTier ?? configuration.serviceTier) !== undefined
+      ? presentServiceTier((configuration.resolvedServiceTier ?? configuration.serviceTier)!)
       : configuration.provider === "codex" || configuration.provider === "claudeAgent"
         ? configuration.fastMode === undefined
-          ? "Fast: provider default"
+          ? "Fast status not recorded"
           : configuration.fastMode
             ? "Fast on"
             : "Fast off"
@@ -76,8 +92,11 @@ export function presentTurnConfiguration(configuration: ProviderTurnConfiguratio
         ? "Submitted settings"
         : "Existing session settings",
     sourceDescription:
-      configuration.settingsSource === "submitted"
+      (configuration.settingsSource === "submitted"
         ? "Settings Cafe submitted for this accepted turn. Provider defaults may be inherited; this is not independent execution or billing confirmation."
-        : "Settings of the existing session that accepted this input. Provider defaults may be inherited; this is not independent execution or billing confirmation.",
+        : "Settings of the existing session that accepted this input. Provider defaults may be inherited; this is not independent execution or billing confirmation.") +
+      (configuration.provider === "codex" && configuration.resolvedServiceTier !== undefined
+        ? " Fast mode uses the native session routing captured for this turn."
+        : ""),
   };
 }

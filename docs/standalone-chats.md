@@ -4,14 +4,25 @@ Cafe chats can exist without a project or repository. **Desk** organizes open
 tabs; **Projects** contains the saved project/chat catalog. A tab's group does
 not determine its project association.
 
-- Choose **New chat** above the Desk/Projects switch, or the plus beside Desk's
-  **Open chats**, to start a standalone conversation in the active tab group.
+- Click the new-thread icon beside **Chats** in Projects, or beside **Open chats**
+  in Desk, to open a standalone editor. The selected sidebar view stays selected.
   No folder is required, even when you have no projects.
 - To create a project-associated chat, use that project's existing New chat
-  action. Global New chat does not automatically choose the current project.
-- Find standalone conversations and saved unsent drafts in **Projects → Chats**.
-  Saved conversations also appear in search. Opening an existing conversation
-  selects its tab rather than duplicating it.
+  action. The standalone new-thread icons do not choose the current project.
+- A new chat stays in a pending editor until you press **Send**, just like a
+  project draft. It adds no tab, Open chats row/count or saved Chats entry before
+  that send. Pressing the icon again reopens your unfinished draft with its text,
+  attachments and selected settings. A draft whose first send is still pending
+  keeps its own identity, so another new-thread action opens a fresh editor.
+- After first send creates the conversation, its tab opens in the captured group
+  and it appears in the saved Chats list. A background send finishing does not
+  switch away from the newer editor you are using.
+- Find saved standalone conversations in **Projects → Chats** and search.
+  Opening an existing conversation selects its tab rather than duplicating it.
+- In **Projects → Chats**, hover a saved row or focus it with the keyboard to
+  reveal its archive action. Touch screens show it directly. Archived chats can
+  be restored from **Settings → Archived threads**. Move to Recycle Bin remains
+  available in the row's context menu, with restore in **Recently Deleted**.
 - Closing a Desk tab is view-only. It does not delete or archive the chat, stop
   the agent, or discard saved input. Rename and archive use the familiar sidebar
   controls; restore archived/deleted conversations through existing Settings.

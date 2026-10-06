@@ -26,6 +26,9 @@ export interface PersistedUiState {
   navigationSidebarOpen?: boolean;
   threadLastVisitedAtById?: Record<string, string>;
   threadPlanSidebarOpenById?: Record<string, boolean>;
+  codeReviewCollapsed?: boolean;
+  /** Legacy per-thread preferences, read only when migrating to the global choice. */
+  threadCodeReviewCollapsedById?: Record<string, boolean>;
   sessionRailDocked?: boolean;
 }
 
@@ -43,6 +46,11 @@ export interface UiThreadState {
    * choices and must survive new task updates for that thread.
    */
   threadPlanSidebarOpenById: Record<string, boolean>;
+}
+
+export interface UiCodeReviewState {
+  /** One editor-wide preference shared by every chat, server and pane. */
+  codeReviewCollapsed: boolean;
 }
 
 export interface UiEndpointState {
@@ -64,7 +72,13 @@ export interface UiSessionRailState {
 }
 
 export interface UiState
-  extends UiProjectState, UiThreadState, UiEndpointState, UiNavigationState, UiSessionRailState {}
+  extends
+    UiProjectState,
+    UiThreadState,
+    UiCodeReviewState,
+    UiEndpointState,
+    UiNavigationState,
+    UiSessionRailState {}
 
 export interface SyncProjectInput {
   /** Physical project key (env + cwd). Used for manual sort order. */
@@ -84,6 +98,7 @@ const initialState: UiState = {
   projectOrder: [],
   threadLastVisitedAtById: {},
   threadPlanSidebarOpenById: {},
+  codeReviewCollapsed: false,
   defaultAdvertisedEndpointKey: null,
   navigationSidebarOpen: true,
   sessionRailDocked: false,
@@ -110,6 +125,7 @@ let legacyKeysCleanedUp = false;
 const MAX_PERSISTED_THREAD_VISIT_ENTRIES = 10_000;
 const MAX_PERSISTED_THREAD_KEY_LENGTH = 512;
 const MAX_PERSISTED_TIMESTAMP_LENGTH = 64;
+const MAX_LEGACY_CODE_REVIEW_COLLAPSE_ENTRIES = 10_000;
 
 function readPersistedState(): UiState {
   if (typeof window === "undefined") {
@@ -176,6 +192,24 @@ function sanitizeBooleanRecord(input: unknown): Record<string, boolean> {
   );
 }
 
+function hasLegacyCodeReviewCollapsed(input: unknown): boolean {
+  if (input === null || typeof input !== "object" || Array.isArray(input)) return false;
+  let inspected = 0;
+  for (const threadKey in input as Record<string, unknown>) {
+    if (inspected >= MAX_LEGACY_CODE_REVIEW_COLLAPSE_ENTRIES) break;
+    inspected += 1;
+    if (
+      Object.hasOwn(input, threadKey) &&
+      threadKey.length <= MAX_PERSISTED_THREAD_KEY_LENGTH &&
+      parseScopedThreadKey(threadKey) !== null &&
+      (input as Record<string, unknown>)[threadKey] === true
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Decode the durable renderer preferences used during a fresh application
  * startup. In particular, completed-turn read cursors must be restored before
@@ -195,6 +229,13 @@ export function hydratePersistedUiState(parsed: PersistedUiState): UiState {
       typeof parsed.navigationSidebarOpen === "boolean" ? parsed.navigationSidebarOpen : true,
     threadLastVisitedAtById: sanitizeThreadVisitRecord(parsed.threadLastVisitedAtById),
     threadPlanSidebarOpenById: sanitizeBooleanRecord(parsed.threadPlanSidebarOpenById),
+    // The old format recorded only minimized threads, without an ordering of
+    // gestures. Preserve any valid minimized choice on upgrade; an explicit
+    // new global value (including false) always wins over legacy records.
+    codeReviewCollapsed:
+      typeof parsed.codeReviewCollapsed === "boolean"
+        ? parsed.codeReviewCollapsed
+        : hasLegacyCodeReviewCollapsed(parsed.threadCodeReviewCollapsedById),
     sessionRailDocked: parsed.sessionRailDocked === true,
   };
 }
@@ -249,6 +290,7 @@ export function persistState(state: UiState): void {
         navigationSidebarOpen: state.navigationSidebarOpen,
         threadLastVisitedAtById: state.threadLastVisitedAtById,
         threadPlanSidebarOpenById: state.threadPlanSidebarOpenById,
+        codeReviewCollapsed: state.codeReviewCollapsed,
         sessionRailDocked: state.sessionRailDocked,
       } satisfies PersistedUiState),
     );
@@ -556,6 +598,14 @@ export function setThreadPlanSidebarOpen(state: UiState, threadId: string, open:
   };
 }
 
+export function setCodeReviewCollapsed(state: UiState, collapsed: boolean): UiState {
+  if (state.codeReviewCollapsed === collapsed) return state;
+  return {
+    ...state,
+    codeReviewCollapsed: collapsed,
+  };
+}
+
 export function setDefaultAdvertisedEndpointKey(state: UiState, key: string | null): UiState {
   const nextKey = key && key.length > 0 ? key : null;
   if (state.defaultAdvertisedEndpointKey === nextKey) {
@@ -661,6 +711,7 @@ interface UiStateStore extends UiState {
   markThreadVisited: (threadId: string, visitedAt?: string) => void;
   clearThreadUi: (threadId: string) => void;
   setThreadPlanSidebarOpen: (threadId: string, open: boolean) => void;
+  setCodeReviewCollapsed: (collapsed: boolean) => void;
   setDefaultAdvertisedEndpointKey: (key: string | null) => void;
   setNavigationSidebarOpen: (open: boolean) => void;
   setSessionRailDocked: (docked: boolean) => void;
@@ -683,6 +734,7 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
   clearThreadUi: (threadId) => set((state) => clearThreadUi(state, threadId)),
   setThreadPlanSidebarOpen: (threadId, open) =>
     set((state) => setThreadPlanSidebarOpen(state, threadId, open)),
+  setCodeReviewCollapsed: (collapsed) => set((state) => setCodeReviewCollapsed(state, collapsed)),
   setDefaultAdvertisedEndpointKey: (key) =>
     set((state) => setDefaultAdvertisedEndpointKey(state, key)),
   setNavigationSidebarOpen: (open) => set((state) => setNavigationSidebarOpen(state, open)),

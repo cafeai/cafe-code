@@ -21,6 +21,10 @@ describe("ProviderTurnConfiguration", () => {
     expect(decode(snapshot)).toEqual(snapshot);
     const { effort: _effort, fastMode: _fastMode, ...defaults } = snapshot;
     expect(decode(defaults)).toEqual(defaults);
+    expect(decode({ ...defaults, resolvedServiceTier: "default" })).toEqual({
+      ...defaults,
+      resolvedServiceTier: "default",
+    });
   });
 
   it("rejects oversized, multiline, control/bidi and unsupported envelopes", () => {
@@ -36,6 +40,9 @@ describe("ProviderTurnConfiguration", () => {
       { ...snapshot, effort: "ultra\u0000" },
       { ...snapshot, settingsSource: "guessed" },
       { ...snapshot, fastMode: "false" },
+      { ...snapshot, resolvedServiceTier: null },
+      { ...snapshot, resolvedServiceTier: "priority\nforged" },
+      { ...snapshot, resolvedServiceTier: "a".repeat(65) },
     ]) {
       expect(() => decode(invalid)).toThrow();
     }

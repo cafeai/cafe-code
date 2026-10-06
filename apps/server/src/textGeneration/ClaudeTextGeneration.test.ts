@@ -120,6 +120,8 @@ function withFakeClaudeEnv<A, E, R>(
     argsMustNotContain?: string;
     stdinMustContain?: string;
     homeMustBe?: string;
+    resolveEnvironment?: Effect.Effect<NodeJS.ProcessEnv>;
+    selectedEnvironmentMustBe?: NodeJS.ProcessEnv;
     claudeConfig?: Partial<ClaudeSettings>;
   },
   effectFn: (textGeneration: TextGenerationShape) => Effect.Effect<A, E, R>,
@@ -163,18 +165,54 @@ function withFakeClaudeEnv<A, E, R>(
         if (input.homeMustBe !== undefined) {
           expect(command.options.env?.HOME).toBe(input.homeMustBe);
         }
+        if (input.selectedEnvironmentMustBe !== undefined) {
+          expect(command.options.env).toBe(input.selectedEnvironmentMustBe);
+        }
         return makeClaudeHandle(input);
       }),
     );
-    const textGeneration = yield* makeClaudeTextGeneration(config, {
-      PATH: "/test/bin",
-      HOME: "/test/home",
-    }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
+    const textGeneration = yield* makeClaudeTextGeneration(
+      config,
+      {
+        PATH: "/test/bin",
+        HOME: "/test/home",
+      },
+      input.resolveEnvironment,
+    ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
     return yield* effectFn(textGeneration);
   });
 }
 
 it.layer(ClaudeTextGenerationTestLayer)("ClaudeTextGeneration", (it) => {
+  it.effect("uses the shared login selection when a metadata command is launched", () => {
+    const selectedEnvironment = Object.freeze({ CAFE_TEST_LOGIN_SELECTION: "selected" });
+    let resolutions = 0;
+    return withFakeClaudeEnv(
+      {
+        output: '{"structured_output":{"title":"Selected login"}}',
+        selectedEnvironmentMustBe: selectedEnvironment,
+        resolveEnvironment: Effect.sync(() => {
+          resolutions++;
+          return selectedEnvironment;
+        }),
+      },
+      (textGeneration) =>
+        Effect.gen(function* () {
+          expect(resolutions).toBe(0);
+          const result = yield* textGeneration.generateThreadTitle({
+            cwd: process.cwd(),
+            message: "title this thread",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("claudeAgent"),
+              model: "claude-sonnet-4-6",
+            },
+          });
+          expect(result.title).toBe("Selected login");
+          expect(resolutions).toBe(1);
+        }),
+    );
+  });
+
   for (const testCase of [
     { exitCode: 1, output: "private-helper-sentinel" },
     { exitCode: 0, output: "private-helper-sentinel" },

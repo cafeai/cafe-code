@@ -53,6 +53,9 @@ export function createChatPaneRuntimeRegistry() {
       resources.set(key, { value, ...(dispose ? { dispose: () => dispose(value) } : {}) });
       return value;
     },
+    readResource<T>(key: string): T | undefined {
+      return resources.get(key)?.value as T | undefined;
+    },
     register(owner: symbol, value: RuntimeOwner) {
       owners.set(owner, value);
       notify();
@@ -80,15 +83,33 @@ export function createChatPaneRuntimeRegistry() {
 }
 
 const RuntimeContext = createContext<ReturnType<typeof createChatPaneRuntimeRegistry> | null>(null);
+const mountedChatRuntimes = new Set<ReturnType<typeof createChatPaneRuntimeRegistry>>();
+
+/** The sidebar lives outside the chat layout's context. It may observe an
+ * existing send gate to avoid draft reuse, but never creates a runtime or owns
+ * its mutable gate. Environment/thread identity stays exact on every read. */
+export function isChatSendInFlight(environment: string, thread: string): boolean {
+  for (const runtime of mountedChatRuntimes) {
+    const gates = runtime.readResource<Map<string, { current: boolean }>>(
+      `chat-runtime:${environment}:send-gates`,
+    );
+    if (gates?.get(thread)?.current) return true;
+  }
+  return false;
+}
 
 export function ChatPaneRuntimeProvider({ children }: { children: ReactNode }) {
   const [registry] = useState(createChatPaneRuntimeRegistry);
   const disposal = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
+    mountedChatRuntimes.add(registry);
     // React's development effect replay must not dispose still-mounted queues.
     if (disposal.current !== null) clearTimeout(disposal.current);
     return () => {
-      disposal.current = setTimeout(() => registry.dispose(), 0);
+      disposal.current = setTimeout(() => {
+        mountedChatRuntimes.delete(registry);
+        registry.dispose();
+      }, 0);
     };
   }, [registry]);
   return <RuntimeContext value={registry}>{children}</RuntimeContext>;

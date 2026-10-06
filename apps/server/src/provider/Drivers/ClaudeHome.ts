@@ -17,6 +17,7 @@ export const resolveClaudeHomePath = Effect.fn("resolveClaudeHomePath")(function
 export const makeClaudeEnvironment = Effect.fn("makeClaudeEnvironment")(function* (
   config: Pick<ClaudeSettings, "homePath" | "maxConcurrentSubagents">,
   baseEnv: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
 ): Effect.fn.Return<NodeJS.ProcessEnv, never, Path.Path> {
   const path = yield* Path.Path;
   const resolvedHomePath = yield* resolveClaudeHomePath(config);
@@ -42,17 +43,17 @@ export const makeClaudeEnvironment = Effect.fn("makeClaudeEnvironment")(function
     );
   }
 
-  // Claude Code currently supports both HOME-derived config discovery and
-  // CLAUDE_CONFIG_DIR. Cafe sets the latter explicitly so SDK launches match a
-  // verified CLI command such as `CLAUDE_CONFIG_DIR=/Users/me/.claude claude`
-  // instead of depending on subtle process-launch HOME behavior.
-  return {
+  // On macOS, even CLAUDE_CONFIG_DIR=$HOME/.claude selects a different Keychain
+  // entry from an ordinary terminal launch with the variable unset. Build the
+  // terminal candidate for the default home; the owning driver's shared
+  // ClaudeAuthenticationEnvironment resolver preserves Cafe's existing login
+  // first and selects this candidate only after conclusive local status checks.
+  // Explicit config directories and custom account homes retain their selection.
+  // https://code.claude.com/docs/en/authentication#credential-management
+  // https://github.com/anthropics/claude-code/issues/92252
+  const env: NodeJS.ProcessEnv = {
     ...baseEnv,
     HOME: resolvedHomePath,
-    CLAUDE_CONFIG_DIR:
-      configuredConfigDir && configuredConfigDir.length > 0
-        ? path.resolve(configuredConfigDir)
-        : path.join(resolvedHomePath, ".claude"),
     // Omission preserves user-owned inherited configuration. Explicit instance
     // settings win only for newly created environments; they cannot change a
     // running query or a sibling instance that shares the same base object.
@@ -60,6 +61,14 @@ export const makeClaudeEnvironment = Effect.fn("makeClaudeEnvironment")(function
       ? { CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: String(maxConcurrentSubagents) }
       : {}),
   };
+  if (configuredConfigDir) {
+    env.CLAUDE_CONFIG_DIR = path.resolve(configuredConfigDir);
+  } else if (platform === "darwin" && config.homePath.trim().length === 0) {
+    delete env.CLAUDE_CONFIG_DIR;
+  } else {
+    env.CLAUDE_CONFIG_DIR = path.join(resolvedHomePath, ".claude");
+  }
+  return env;
 });
 
 export const makeClaudeContinuationGroupKey = Effect.fn("makeClaudeContinuationGroupKey")(

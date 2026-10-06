@@ -757,6 +757,10 @@ export function FollowUpQueueShelf(props: {
 // --------------------------------------------------------------------------
 
 export interface ChatComposerProps extends ComposerInteractionCallbacks {
+  /** An explicit review action attached to this composer's frame, outside its editor. */
+  codeReviewAction?: ReactNode;
+  codeReviewCollapsed?: boolean;
+  codeReviewDisabled?: boolean;
   composerDraftTarget: ScopedThreadRef | DraftId;
   environmentId: EnvironmentId;
   routeKind: "server" | "draft";
@@ -894,6 +898,9 @@ export interface ChatComposerProps extends ComposerInteractionCallbacks {
 
 export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps) {
   const {
+    codeReviewAction,
+    codeReviewCollapsed,
+    codeReviewDisabled,
     composerDraftTarget,
     environmentId,
     routeKind,
@@ -3212,7 +3219,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       />
       <div
         className={cn(
-          "group rounded-[22px] p-px transition-colors duration-200",
+          "group relative isolate rounded-[22px] p-px transition-[color,background-color,border-color,margin-top] duration-200 motion-reduce:transition-none",
+          codeReviewAction &&
+            !codeReviewDisabled &&
+            (codeReviewCollapsed ? "mt-5 pointer-coarse:mt-7" : "mt-9 pointer-coarse:mt-12"),
           composerProviderState.composerFrameClassName ??
             (ambianceComposerRing ? "cafe-ambiance-composer-frame" : undefined),
         )}
@@ -3221,6 +3231,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         onDragLeave={onComposerDragLeave}
         onDrop={onComposerDrop}
       >
+        {codeReviewAction ? (
+          <div
+            data-chat-composer-review-tab="true"
+            className="absolute inset-x-6 bottom-full -z-10 -mb-1 flex justify-end"
+          >
+            {codeReviewAction}
+          </div>
+        ) : null}
         <div
           ref={composerSurfaceRef}
           data-chat-composer-mobile-collapsed={isComposerCollapsedMobile ? "true" : "false"}

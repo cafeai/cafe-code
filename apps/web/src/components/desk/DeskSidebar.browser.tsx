@@ -78,7 +78,11 @@ const draft: ThreadRouteTarget = { kind: "draft", draftId: "draft-1" as DraftId 
 
 beforeEach(async () => {
   await page.viewport(1100, 800);
-  useDeskStore.setState({ desk: createDeskState(environmentId) });
+  useDeskStore.setState({
+    desk: createDeskState(environmentId),
+    draftEditors: {},
+    activeDraftId: null,
+  });
   mocks.rename.mockReset();
   mocks.rename.mockResolvedValue(undefined);
   for (const action of [mocks.archive, mocks.recycle, mocks.delete, mocks.hardDelete])
@@ -88,7 +92,7 @@ beforeEach(async () => {
   mocks.working = false;
 });
 afterEach(() => {
-  useDeskStore.setState({ desk: createDeskState() });
+  useDeskStore.setState({ desk: createDeskState(), draftEditors: {}, activeDraftId: null });
   localStorage.removeItem(`cafe-code:desk:v1:${environmentId}`);
 });
 

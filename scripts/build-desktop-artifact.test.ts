@@ -249,7 +249,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     });
   });
 
-  it("declares why packaged macOS builds request microphone access", () => {
+  it("declares why packaged macOS builds request microphone and local network access", () => {
     assert.deepStrictEqual(resolveMacDesktopBuildConfig("dmg", false), {
       extraResources: [
         {
@@ -264,6 +264,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         extendInfo: {
           NSMicrophoneUsageDescription:
             "Cafe Code uses microphone audio only when you start dictation.",
+          NSLocalNetworkUsageDescription:
+            "Cafe Code connects to Cafe servers you select on your local network.",
         },
         identity: null,
         hardenedRuntime: false,

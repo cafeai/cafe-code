@@ -64,6 +64,7 @@ const decodeClaudeOutputEnvelope = Schema.decodeEffect(Schema.fromJsonString(Cla
 export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(function* (
   claudeSettings: ClaudeSettings,
   environment: NodeJS.ProcessEnv = process.env,
+  resolveEnvironment?: Effect.Effect<NodeJS.ProcessEnv>,
 ) {
   const commandSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const auxiliaryUsage = yield* Effect.serviceOption(AuxiliaryUsage);
@@ -164,6 +165,7 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
         : undefined;
 
     const runClaudeCommand = Effect.fn("runClaudeJson.runClaudeCommand")(function* () {
+      const commandEnvironment = resolveEnvironment ? yield* resolveEnvironment : claudeEnvironment;
       const command = ChildProcess.make(
         claudeSettings.binaryPath || "claude",
         [
@@ -193,7 +195,7 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
           "default",
         ],
         {
-          env: claudeEnvironment,
+          env: commandEnvironment,
           cwd,
           shell: process.platform === "win32",
           stdin: {

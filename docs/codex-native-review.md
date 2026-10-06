@@ -1,11 +1,24 @@
 # Native Codex review
 
-In an idle Codex chat, select **Native review** above the composer. Choose one of:
+In an idle Codex chat, select the lighter **Code review** tab tucked behind the
+composer's top edge. Hover over the tab or focus it with the keyboard for an explanation;
+select it to open the review options. Choose one of:
 
 - **Uncommitted changes** in the chat's workspace.
 - **Changes against a base branch**, such as `main` or `origin/main`.
 - **A specific commit**, using its hexadecimal SHA rather than a shell command.
 - **Custom review instructions**.
+
+The down caret minimizes the tab to a short handle with an up caret to expand
+it again. Cafe saves one editor-wide choice across all chats, servers and open
+panes, including across tab switches and app reloads. Minimizing it in one chat
+minimizes it everywhere; expanding it in any chat restores it everywhere.
+Minimizing or expanding does not start a review or submit the composer draft.
+
+The tab appears only when a review can start: the saved Codex account matches a
+ready session, the server is connected, and the chat is idle. Cafe hides it while
+work, a send, a connection, or a checkpoint restore is in progress. When it returns,
+it keeps the editor's saved minimized state.
 
 Review runs in that exact Cafe chat and Codex account. The confirmation names the
 account and explains its permission behavior. Native review uses the existing
@@ -22,7 +35,7 @@ cancels the native turn. A busy chat rejects a new review rather than sending it
 as an instruction to the current task.
 
 For a separate review, create or open another Cafe-owned Codex chat in the desired
-workspace and use its Native review action after its session is ready. Cafe does
+workspace and use its Code review action after its session is ready. Cafe does
 not create or adopt deprecated detached native review threads. Claude and Grok
 do not expose this Codex-specific action. Asking any model to review code in an
 ordinary message still works as an ordinary conversation request.

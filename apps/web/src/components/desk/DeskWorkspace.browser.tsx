@@ -3,6 +3,7 @@ import "../../index.css";
 import type { CDPSession } from "@vitest/browser-playwright";
 
 import { EnvironmentId, ThreadId, type ContextMenuItem } from "@cafecode/contracts";
+import { DraftId } from "../../composerDraftStore";
 import { cdp, page, userEvent } from "vitest/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
@@ -41,6 +42,7 @@ const mocks = vi.hoisted(() => ({
       {
         environmentId: string;
         threadId: string;
+        projectId?: string | null;
         promotedTo?: { environmentId: string; threadId: string };
       }
     >,
@@ -192,7 +194,11 @@ const key = (id: string) => deskTabKey(target(id));
 beforeEach(async () => {
   selectWorkspaceEnvironment(null);
   await page.viewport(1440, 900);
-  useDeskStore.setState({ desk: createDeskState(environmentId) });
+  useDeskStore.setState({
+    desk: createDeskState(environmentId),
+    draftEditors: {},
+    activeDraftId: null,
+  });
   mocks.params = {};
   mocks.primaryEnvironmentId = environmentId;
   mocks.macPlatform = false;
@@ -221,7 +227,7 @@ beforeEach(async () => {
 afterEach(() => {
   selectWorkspaceEnvironment(null);
   localStorage.removeItem("cafe-code:desk:v1:remote-workspace-fixture");
-  useDeskStore.setState({ desk: createDeskState() });
+  useDeskStore.setState({ desk: createDeskState(), draftEditors: {}, activeDraftId: null });
   localStorage.removeItem(`cafe-code:desk:v1:${environmentId}`);
 });
 
@@ -371,6 +377,130 @@ function expectUsablePanes(host: HTMLElement, count: number) {
 }
 
 describe("Desk workspace navigation chrome", () => {
+  it("keeps the chat selected through Focus group when a hidden editor's first send completes", async () => {
+    const draftId = DraftId.make("sending-editor");
+    const draft = {
+      environmentId,
+      threadId: "three",
+      projectId: null,
+      promotedTo: { environmentId, threadId: "three" },
+    };
+    mocks.composer.draftThreadsByThreadKey = { [draftId]: draft };
+    for (const id of ["one", "two"])
+      useDeskStore.getState().dispatch({ type: "open", target: target(id) });
+    useDeskStore.getState().dispatch({
+      type: "split",
+      tabKey: key("two"),
+      targetGroupId: "g1",
+      edge: "right",
+    });
+    useDeskStore.getState().showDraftEditor(draftId, "g2");
+    mocks.params = { draftId };
+    const { screen, host, cleanup } = await setup([]);
+    try {
+      await expect
+        .element(screen.getByRole("textbox", { name: "Existing composer three" }))
+        .toBeVisible();
+      const editor = useDeskStore.getState().draftEditors[draftId];
+      mocks.showMenu.mockResolvedValueOnce("focus");
+      await screen.getByRole("tab", { name: "Chat one", exact: true }).click({ button: "right" });
+      expect(mocks.showMenu.mock.lastCall?.[0]).toContainEqual({
+        id: "focus",
+        label: "Focus group",
+        disabled: false,
+      });
+      await vi.waitFor(() => {
+        expect(useDeskStore.getState().activeDraftId).toBeNull();
+        expect(useDeskStore.getState().desk.activeGroupId).toBe("g1");
+        expect(useDeskStore.getState().desk.focusedGroupId).toBe("g1");
+        expect(mocks.params).toEqual({ environmentId, threadId: "one" });
+      });
+      expect(useDeskStore.getState().draftEditors[draftId]).toBe(editor);
+      const hiddenComposer = host.querySelector<HTMLTextAreaElement>(
+        '[data-mock-draft="sending-editor"] textarea',
+      );
+      expect(hiddenComposer).not.toBeNull();
+      expect(hiddenComposer?.closest("[hidden][inert]")).not.toBeNull();
+      expect(mocks.composer.draftThreadsByThreadKey[draftId]).toBe(draft);
+      const navigations = mocks.navigate.mock.calls.length;
+      // Model the first-send ownership handoff to the canonical saved chat.
+      mocks.composer.draftThreadsByThreadKey = {};
+      expect(
+        useDeskStore.getState().promoteDraftEditor(draftId, {
+          environmentId,
+          threadId: ThreadId.make("three"),
+        }),
+      ).toBe(true);
+      await vi.waitFor(() => {
+        expect(useDeskStore.getState().desk.groups.g2?.tabs).toContain(key("three"));
+        expect(useDeskStore.getState().desk.groups.g2?.activeTabKey).toBe(key("two"));
+        expect(useDeskStore.getState().desk.groups.g1?.activeTabKey).toBe(key("one"));
+        expect(useDeskStore.getState().desk.activeGroupId).toBe("g1");
+        expect(useDeskStore.getState().desk.focusedGroupId).toBe("g1");
+        expect(mocks.params).toEqual({ environmentId, threadId: "one" });
+        expect(
+          host.querySelector('[data-mock-chat="one"][data-pane-active="true"]'),
+        ).not.toBeNull();
+      });
+      expect(mocks.navigate.mock.calls).toHaveLength(navigations);
+      expect(useDeskStore.getState().draftEditors[draftId]).toBeUndefined();
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it.each(["empty", "saved", "legacy-draft"] as const)(
+    "renders the standalone editor without an open-chat tab from a %s Desk",
+    async (mode) => {
+      const draftId = DraftId.make("standalone-editor");
+      const draft = { environmentId, threadId: "future-chat", projectId: null };
+      mocks.composer.draftThreadsByThreadKey = { [draftId]: draft };
+      mocks.params = { draftId };
+      if (mode === "legacy-draft")
+        useDeskStore.getState().dispatch({ type: "open", target: { kind: "draft", draftId } });
+      const { host, cleanup } = await setup(mode === "empty" ? [] : ["one"]);
+      try {
+        await vi.waitFor(() => {
+          expect(useDeskStore.getState().activeDraftId).toBe(draftId);
+          expect(useDeskStore.getState().desk.sidebarMode).toBe("projects");
+          expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual(
+            mode === "empty" ? [] : [key("one")],
+          );
+          expect(
+            host.querySelector('[data-mock-draft="standalone-editor"][data-pane-active="true"]'),
+          ).not.toBeNull();
+          expect(
+            Array.from(host.querySelectorAll<HTMLElement>("[data-desk-tab-key]")).some(
+              (tab) => tab.dataset.deskTabKey === deskTabKey({ kind: "draft", draftId }),
+            ),
+          ).toBe(false);
+        });
+        const composer = host.querySelector<HTMLTextAreaElement>(
+          'textarea[aria-label="Existing composer future-chat"]',
+        );
+        expect(composer).not.toBeNull();
+        composer!.focus();
+        expect(useDeskStore.getState().activeDraftId).toBe(draftId);
+        expect(mocks.composer.draftThreadsByThreadKey[draftId]).toBe(draft);
+        if (mode !== "empty") {
+          const tab = Array.from(
+            host.querySelectorAll<HTMLButtonElement>("[data-desk-tab-key]"),
+          ).find((button) => button.dataset.deskTabKey === key("one"));
+          await userEvent.click(tab!);
+          await vi.waitFor(() => {
+            expect(useDeskStore.getState().activeDraftId).toBeNull();
+            expect(
+              host.querySelector('[data-mock-chat="one"][data-pane-active="true"]'),
+            ).not.toBeNull();
+          });
+          expect(mocks.composer.draftThreadsByThreadKey[draftId]).toBe(draft);
+        }
+      } finally {
+        await cleanup();
+      }
+    },
+  );
+
   it.each(["cold", "last-selected"] as const)(
     "keeps a hidden queue host when the %s server candidate still belongs to a pending draft",
     async (mode) => {
@@ -1258,7 +1388,11 @@ describe("Desk workspace navigation chrome", () => {
             expect(useDeskStore.getState().desk.environmentId).toBe(nextEnvironment),
           );
         } else {
-          useDeskStore.setState({ desk: createDeskState(nextEnvironment) });
+          useDeskStore.setState({
+            desk: createDeskState(nextEnvironment),
+            draftEditors: {},
+            activeDraftId: null,
+          });
         }
         for (const id of ["one", "two", "three"]) {
           useDeskStore.getState().dispatch({
@@ -1588,7 +1722,7 @@ describe("Desk workspace navigation chrome", () => {
       useDeskStore.getState().dispatch({ type: "sessionRail", groupId: "g1", docked: true });
       useDeskStore.getState().dispatch({ type: "sessionRail", groupId: "g2", docked: false });
       const saved = localStorage.getItem(`cafe-code:desk:v1:${environmentId}`);
-      useDeskStore.setState({ desk: createDeskState() });
+      useDeskStore.setState({ desk: createDeskState(), draftEditors: {}, activeDraftId: null });
       useDeskStore.getState().bindEnvironment(environmentId);
       const hydrated = useDeskStore.getState().desk;
       const { screen, host, cleanup } = await setup([]);

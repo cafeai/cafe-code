@@ -2,10 +2,12 @@
 
 Decision status: Accepted by the user's explicit approval of the proposed design.
 Implementation status: Implemented.
-Verification status: Pinned repository checks and 75 focused browser tests pass
-on macOS; native Windows/Linux and live-provider qualification remain separate.
+Verification status: The initial implementation passed pinned repository checks
+and 75 focused browser tests on macOS. The latest pending-editor/sidebar follow-up has
+updated regression fixtures; test execution is deferred at the user’s request.
+Native Windows/Linux and live-provider qualification remain separate.
 Created: 2026-10-03 13:39:38 JST (UTC+0900).
-Last updated: 2026-10-03 14:31:17 JST (UTC+0900).
+Last updated: 2026-10-06 (pending-editor/sidebar follow-up).
 Supersedes: No prior decision in full. Supplements the project-only creation
 scope of [Desk tab groups](desk-tab-groups.md); all its navigation, queue,
 subscription, composer and per-group rail ownership rules remain in force.
@@ -25,18 +27,42 @@ project association. A project provides optional repository/folder execution
 context; Desk is a client-local open-view arrangement, never the owner of chat
 history. Project IDs remain genuine IDs, with no sentinel or synthetic project.
 
-Global New chat and Desk's Open chats plus share an independent standalone-draft
-creation action. Capture the primary environment and active group before any
-asynchronous navigation. Existing project New chat actions stay project-scoped.
-Independent standalone drafts must not share the one-draft-per-logical-project
-index. Preserve saved composer content and exact draft-to-thread promotion.
+The new-thread icons in Projects' Chats heading and Desk's Open chats heading,
+along with the existing global shortcut, share one pending-editor action. There
+is no full-width New chat button and creation never switches the sidebar mode.
+Capture the primary environment and active group before asynchronous navigation.
+Reuse the current or most recent unpromoted standalone draft in that environment,
+preserving input, attachments and explicit settings. Exclude a canonical server
+identity and any draft owned by the existing first-send gate. The sidebar lives
+outside the chat layout's React context, so it observes that gate through a
+read-only registry lookup rather than creating a competing gate. Existing project
+New chat actions stay project-scoped; standalone drafts do not use the logical
+project index.
 
-Projects view presents a separate Chats catalog for projectless thread shells
-and recoverable standalone drafts. Desk remains only open views. Closing a tab
-does not archive, delete, stop, clear input or clear its queue. The catalog reuses
-the existing inline rename/archive conventions and shell summaries, without
-eager detail subscriptions. Archive/deleted/search/Atrium must include standalone
-identities even when the environment has no projects.
+Pending editors live in ephemeral, environment-bound Desk view ownership outside
+saved tabs, target preferences, counts, sidebar rows and reopen history. Draft
+content and routing metadata remain in the existing persisted composer store.
+A draft route renders its editor in the captured group without opening a chat.
+When the exact first-send server identity is ready, register one canonical tab
+in that group before retiring the draft. Background promotion preserves the
+current group, selected saved tab, newer editor and route. Keep in-flight editors
+mounted as hidden dispatch owners; idle recovered drafts do not mount controllers.
+An unavailable tab slot keeps its pending ownership until a slot becomes free.
+Legacy standalone draft-tab preferences are retired as views, preserving draft
+content; project draft-tab behavior is unchanged.
+
+Projects view presents a separate Chats catalog for canonical projectless
+thread shells only, matching project rows. New chats remain local drafts until
+first send atomically bootstraps the server thread; New chat does not dispatch
+thread creation or add an unsent draft to the saved catalog. Draft text and
+attachments remain recoverable through the pending editor and composer storage.
+Desk remains only open views. Closing a tab does not archive, delete, stop,
+clear input or clear its queue. The catalog reuses the existing inline
+rename/archive conventions and shell summaries, without eager detail
+subscriptions or subscriptions to local draft content. Archive is the row action;
+Move to Recycle Bin remains in the context menu and uses the shared confirmed
+flow. Archive/deleted/search/Atrium must include standalone identities even
+when the environment has no projects.
 
 Repository-only actions are unavailable for standalone chats: project scripts,
 worktree/branch setup, project file browsing, Git operations and checkpoints.

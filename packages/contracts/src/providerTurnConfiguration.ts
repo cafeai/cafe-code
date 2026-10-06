@@ -23,8 +23,9 @@ const EffortLabel = SingleLineLabel.check(Schema.isMaxLength(80));
  * when no new selection/mode is submitted. An explicit mode change remains
  * `submitted` even if its model options are inherited from that session.
  * Steering retains the original start snapshot rather than publishing anew.
- * Missing effort/Fast delegates to the provider; it must not be rendered as
- * known Medium/Off. No credentials, auth identifiers, paths or arbitrary model
+ * Missing effort/Fast delegates to the provider. resolvedServiceTier records
+ * native Codex routing at start when known, independently of submitted options.
+ * No credentials, auth identifiers, paths or arbitrary model
  * option maps belong in this deliberately narrow public envelope.
  */
 export const ProviderTurnConfiguration = Schema.Struct({
@@ -37,6 +38,9 @@ export const ProviderTurnConfiguration = Schema.Struct({
   effort: Schema.optional(EffortLabel),
   fastMode: Schema.optional(Schema.Boolean),
   serviceTier: Schema.optional(EffortLabel),
+  resolvedServiceTier: Schema.optional(
+    Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9_-]{0,63}$/)),
+  ),
   runtimeMode: RuntimeMode,
   interactionMode: Schema.optional(ProviderInteractionMode),
   settingsSource: Schema.Literals(["submitted", "session"]),

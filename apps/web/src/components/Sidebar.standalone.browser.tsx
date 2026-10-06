@@ -13,11 +13,16 @@ import { SidebarStandaloneChats } from "./Sidebar";
 const mocks = vi.hoisted(() => ({
   archive: vi.fn(),
   delete: vi.fn(),
+  confirmDelete: vi.fn(),
   rename: vi.fn(),
   gitStatus: vi.fn(),
 }));
 vi.mock("../hooks/useThreadActions", () => ({
-  useThreadActions: () => ({ archiveThread: mocks.archive, deleteThread: mocks.delete }),
+  useThreadActions: () => ({
+    archiveThread: mocks.archive,
+    deleteThread: mocks.delete,
+    confirmAndDeleteThread: mocks.confirmDelete,
+  }),
 }));
 vi.mock("../threadRename", () => ({ renameThread: mocks.rename }));
 vi.mock("../hooks/useSettings", async () => {
@@ -57,53 +62,43 @@ const saved: SidebarThreadSummary = {
   hasActionableProposedPlan: false,
 };
 const draftId = DraftId.make("unsent-standalone-draft");
-function entries() {
-  return buildStandaloneCatalog({
-    threads: [saved],
-    primaryEnvironmentId: environmentId,
-    sortOrder: "updated_at",
-    drafts: [
-      {
-        draftId,
-        threadId: ThreadId.make("future-chat"),
-        environmentId,
-        projectId: null,
-        logicalProjectKey: null,
-        createdAt: "2026-09-03T00:00:00Z",
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        branch: null,
-        worktreePath: null,
-        envMode: "local",
-      },
-    ],
-  });
-}
 beforeEach(async () => {
   await page.viewport(1100, 800);
   mocks.archive.mockReset();
   mocks.archive.mockResolvedValue(undefined);
   mocks.delete.mockReset();
   mocks.delete.mockResolvedValue(undefined);
+  mocks.confirmDelete.mockReset();
+  mocks.confirmDelete.mockResolvedValue(undefined);
   mocks.rename.mockReset();
   mocks.rename.mockResolvedValue(undefined);
   mocks.gitStatus.mockReset();
   mocks.gitStatus.mockReturnValue({ data: null });
   useThreadSelectionStore.getState().clearSelection();
   useComposerDraftStore.setState({ draftsByThreadKey: {}, draftThreadsByThreadKey: {} });
+  useComposerDraftStore
+    .getState()
+    .createStandaloneDraftSession(
+      draftId,
+      environmentId,
+      ThreadId.make("future-chat"),
+      "2026-09-03T00:00:00Z",
+    );
 });
 afterEach(() => {
   useThreadSelectionStore.getState().clearSelection();
   useComposerDraftStore.setState({ draftsByThreadKey: {}, draftThreadsByThreadKey: {} });
 });
 
-async function setup() {
+async function setup(threads: readonly SidebarThreadSummary[] = [saved]) {
   const onOpen = vi.fn();
   const onExpansionChange = vi.fn();
+  const onNewChat = vi.fn();
   const screen = await render(
     <div className="w-72">
       <SidebarStandaloneChats
-        entries={entries()}
+        onNewChat={onNewChat}
+        entries={buildStandaloneCatalog({ threads, sortOrder: "updated_at" })}
         previewCount={8}
         expanded={false}
         activeTarget={null}
@@ -113,19 +108,61 @@ async function setup() {
       />
     </div>,
   );
-  return { screen, onOpen };
+  return { screen, onOpen, onNewChat };
 }
 
 describe("standalone Chats catalog", () => {
+  it("offers archive without an inline delete action or row navigation", async () => {
+    const { screen, onOpen } = await setup();
+    try {
+      const row = screen.getByTestId(`thread-row-${saved.id}`);
+      await row.hover();
+      await expect
+        .element(screen.getByRole("button", { name: `Delete ${saved.title}`, exact: true }))
+        .not.toBeInTheDocument();
+      const archive = screen.getByRole("button", { name: `Archive ${saved.title}`, exact: true });
+      await expect.element(archive).toBeVisible();
+      (archive.element() as HTMLElement).focus();
+      await userEvent.keyboard("{Enter}");
+      expect(mocks.archive).toHaveBeenCalledExactlyOnceWith(
+        scopeThreadRef(environmentId, saved.id),
+      );
+      expect(mocks.delete).not.toHaveBeenCalled();
+      expect(mocks.confirmDelete).not.toHaveBeenCalled();
+      expect(onOpen).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+  it("keeps unsent drafts out of the saved Chats catalog without discarding content", async () => {
+    useComposerDraftStore.getState().setPrompt(draftId, "Keep this unsent message");
+    const original = useComposerDraftStore.getState().getDraftSession(draftId);
+    const { screen, onOpen, onNewChat } = await setup([]);
+    try {
+      await expect.element(screen.getByText("No standalone chats yet")).toBeVisible();
+      await screen.getByRole("button", { name: "New chat", exact: true }).click();
+      expect(onNewChat).toHaveBeenCalledTimes(1);
+      expect(document.querySelector('[data-testid^="thread-row-"]')).toBeNull();
+      await expect.element(screen.getByText("Keep this unsent message")).not.toBeInTheDocument();
+      expect(useComposerDraftStore.getState().getDraftSession(draftId)).toBe(original);
+      expect(useComposerDraftStore.getState().getComposerDraft(draftId)?.prompt).toBe(
+        "Keep this unsent message",
+      );
+      expect(mocks.archive).not.toHaveBeenCalled();
+      expect(mocks.delete).not.toHaveBeenCalled();
+      expect(onOpen).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
   it("never treats forged standalone branch/worktree metadata as repository authority", async () => {
     const forged = buildStandaloneCatalog({
       threads: [{ ...saved, branch: "foreign-branch", worktreePath: "/private/foreign-project" }],
-      drafts: [],
-      primaryEnvironmentId: environmentId,
       sortOrder: "updated_at",
     });
     const screen = await render(
       <SidebarStandaloneChats
+        onNewChat={vi.fn()}
         entries={forged}
         previewCount={8}
         expanded={false}
@@ -142,27 +179,6 @@ describe("standalone Chats catalog", () => {
       await screen.unmount();
     }
   });
-  it("reopens an exact unsent draft without server mutations and updates only its bounded local preview", async () => {
-    const { screen, onOpen } = await setup();
-    try {
-      await screen.getByRole("button", { name: /^New chat draft, created/ }).click();
-      expect(onOpen).toHaveBeenCalledExactlyOnceWith({ kind: "draft", draftId });
-      expect(mocks.archive).not.toHaveBeenCalled();
-      expect(mocks.rename).not.toHaveBeenCalled();
-      useComposerDraftStore
-        .getState()
-        .setPrompt(draftId, "Distinct unsent idea\nLater private details");
-      await expect
-        .element(screen.getByRole("button", { name: /^Distinct unsent idea draft, created/ }))
-        .toBeVisible();
-      await expect.element(screen.getByText("Later private details")).not.toBeInTheDocument();
-      expect(useComposerDraftStore.getState().getComposerDraft(draftId)?.prompt).toBe(
-        "Distinct unsent idea\nLater private details",
-      );
-    } finally {
-      await screen.unmount();
-    }
-  });
   it("reuses saved-row hover actions, inline F2 rename, exact scoped archive and timestamps", async () => {
     const { screen, onOpen } = await setup();
     try {
@@ -175,7 +191,7 @@ describe("standalone Chats catalog", () => {
       const rename = screen.getByRole("button", { name: `Rename ${saved.title}`, exact: true });
       const archive = screen.getByTestId(`thread-archive-${saved.id}`);
       (row.element() as HTMLElement).blur();
-      await screen.getByRole("button", { name: /^New chat draft, created/ }).hover();
+      await screen.getByText("Chats", { exact: true }).hover();
       const cluster = rename.element().parentElement!;
       const timestamp = cluster.parentElement!.lastElementChild!;
       await vi.waitFor(() => expect(getComputedStyle(cluster).opacity).toBe("0"));

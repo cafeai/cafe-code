@@ -669,6 +669,8 @@ export interface ClaudeAdapterLiveOptions {
   readonly getSubagentConcurrencySupport?: () => boolean;
   readonly instanceId?: ProviderInstanceId;
   readonly environment?: NodeJS.ProcessEnv;
+  /** Owning-instance login selection; existing query environments remain snapshots. */
+  readonly resolveEnvironment?: Effect.Effect<NodeJS.ProcessEnv>;
   /** Read only the owning driver's already-observed initialization metadata. */
   readonly getModelCapabilities?: (model: string) => Effect.Effect<ModelCapabilities>;
   readonly createQuery?: (input: {
@@ -7783,7 +7785,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           homePath: claudeSettings.homePath,
           ...(maxConcurrentSubagents !== null ? { maxConcurrentSubagents } : {}),
         },
-        options?.environment,
+        options?.resolveEnvironment ? yield* options.resolveEnvironment : options?.environment,
       ).pipe(Effect.provideService(Path.Path, path));
       if (existingContext) {
         yield* Effect.logWarning("claude.session.replacing", {

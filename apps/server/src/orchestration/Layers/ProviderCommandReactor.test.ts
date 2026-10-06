@@ -3498,6 +3498,36 @@ describe("ProviderCommandReactor", () => {
         .find((thread) => thread.id === "thread-1")
         ?.activities.filter((entry) => entry.kind === "provider.turn.configuration") ?? [];
 
+    it.each(["default", "priority", "ultrafast"])(
+      "records native %s routing on the exact accepted turn without an override",
+      async (resolvedServiceTier) => {
+        const harness = await createHarness();
+        harness.sendTurn.mockImplementation((input) =>
+          Effect.succeed({
+            threadId: input.threadId,
+            turnId: asTurnId("native-routing-turn"),
+            resolvedServiceTier,
+          }),
+        );
+        await startTurn(
+          harness,
+          "native-routing",
+          createModelSelection(ProviderInstanceId.make("codex"), "gpt-6.1-sol", [
+            { id: "reasoningEffort", value: "xhigh" },
+          ]),
+        );
+        await waitFor(async () => (await configurations(harness)).length === 1);
+        const rows = await configurations(harness);
+        expect(rows[0]).toMatchObject({
+          turnId: "native-routing-turn",
+          payload: { turnConfiguration: { resolvedServiceTier, effort: "xhigh" } },
+        });
+        expect(rows[0]?.payload).not.toHaveProperty("turnConfiguration.fastMode");
+        expect(rows[0]?.payload).not.toHaveProperty("turnConfiguration.serviceTier");
+        expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+      },
+    );
+
     it("records every accepted same-account turn with its frozen name/settings", async () => {
       const names = new Map([["codex", "Codex Personal"]]);
       const harness = await createHarness({ providerDisplayNames: names });

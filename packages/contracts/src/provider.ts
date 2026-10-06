@@ -245,6 +245,11 @@ export type ProviderSteerTurnInput = typeof ProviderSteerTurnInput.Type;
 export const ProviderTurnStartResult = Schema.Struct({
   threadId: ThreadId,
   turnId: TurnId,
+  // Native Codex session routing frozen at this start's admission. Optional
+  // for older daemons/providers; standard must be explicit, never guessed.
+  resolvedServiceTier: Schema.optional(
+    Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9_-]{0,63}$/)),
+  ),
   // Content-free routing evidence from ProviderService, not from an upstream
   // adapter. A start request can race an already-active session and be
   // accepted through native steering even when no correlation token exists.

@@ -1,3 +1,5 @@
+import "../index.css";
+
 import { useSyncExternalStore } from "react";
 import {
   EnvironmentId,
@@ -8,6 +10,7 @@ import {
   type ServerConfig,
 } from "@cafecode/contracts";
 import { beforeEach, expect, it, vi } from "vitest";
+import { page, userEvent } from "vitest/browser";
 import { render } from "vitest-browser-react";
 const fixture = vi.hoisted(() => ({
   params: {} as { environmentId?: string; threadId?: string; draftId?: string },
@@ -211,7 +214,8 @@ it("keeps Settings on its section when switching, isolates themes and returns to
   );
   try {
     await expect.element(screen.getByTestId("theme")).toHaveTextContent("light");
-    await screen.getByRole("combobox", { name: "Workspace server" }).selectOptions(remote);
+    await screen.getByRole("combobox", { name: "Workspace server" }).click();
+    await page.getByRole("option", { name: "PC (offline)", exact: true }).click();
     expect(fixture.navigate).not.toHaveBeenCalled();
     await expect.element(screen.getByTestId("theme")).toHaveTextContent("dark");
     await screen.getByRole("button", { name: "Use light" }).click();
@@ -221,7 +225,8 @@ it("keeps Settings on its section when switching, isolates themes and returns to
     await screen.getByRole("button", { name: "Back", exact: true }).click();
     expect(fixture.navigate).toHaveBeenCalledWith({ to: "/" });
     expect(historyBack).not.toHaveBeenCalled();
-    await screen.getByRole("combobox", { name: "Workspace server" }).selectOptions(local);
+    await screen.getByRole("combobox", { name: "Workspace server" }).click();
+    await page.getByRole("option", { name: "Local server", exact: true }).click();
     await expect.element(screen.getByTestId("theme")).toHaveTextContent("light");
     fixture.navigate.mockClear();
     await screen.getByRole("button", { name: "Back", exact: true }).click();
@@ -293,7 +298,8 @@ it("switches catalogs, settings and unread activity together without letting an 
   await expect.element(screen.getByTestId("activity")).toHaveTextContent("false:true");
   // Navigation deliberately remains pending: the existing PC route must not
   // overwrite the explicit Mac selection before it commits.
-  await screen.getByRole("combobox", { name: "Workspace server" }).selectOptions(local);
+  await screen.getByRole("combobox", { name: "Workspace server" }).click();
+  await page.getByRole("option", { name: "Local server", exact: true }).click();
   await expect.element(screen.getByTestId("workspace")).toHaveTextContent(local);
   await expect.element(screen.getByTestId("chats")).toHaveTextContent("Mac chat");
   await expect.element(screen.getByTestId("projects")).toHaveTextContent("Mac project");
@@ -376,4 +382,109 @@ it("keeps the workspace selector absent until a remote connection is saved", asy
   await expect
     .element(screen.getByRole("combobox", { name: "Workspace server" }))
     .not.toBeInTheDocument();
+});
+
+it("centers the server caret and fits the themed menu in a narrow sidebar at every interface scale", async () => {
+  const root = document.documentElement;
+  const originalFontSize = root.style.fontSize;
+  const originallyDark = root.classList.contains("dark");
+  writePrimaryEnvironmentDescriptor({
+    environmentId: local,
+    label: "Salt's MacBook Pro with a very long server name",
+  } as never);
+  const host = document.createElement("div");
+  host.style.width = "208px";
+  document.body.append(host);
+  const screen = await render(
+    <WorkspaceEnvironmentProvider>
+      <WorkspaceEnvironmentSelector />
+      <span data-testid="popover-color" style={{ background: "var(--popover)" }} />
+    </WorkspaceEnvironmentProvider>,
+    { container: host },
+  );
+  try {
+    for (const dark of [false, true]) {
+      root.classList.toggle("dark", dark);
+      for (const scale of [80, 100, 130]) {
+        root.style.fontSize = `${scale}%`;
+        const trigger = screen.getByRole("combobox", { name: "Workspace server" });
+        const triggerBounds = trigger.element().getBoundingClientRect();
+        const caretBounds = trigger.element().querySelector("svg")!.getBoundingClientRect();
+        expect(
+          Math.abs(
+            caretBounds.top +
+              caretBounds.height / 2 -
+              (triggerBounds.top + triggerBounds.height / 2),
+          ),
+        ).toBeLessThan(1);
+        expect(triggerBounds.right).toBeLessThanOrEqual(host.getBoundingClientRect().right);
+        await trigger.click();
+        await expect.element(page.getByRole("listbox")).toBeVisible();
+        const list = page.getByRole("listbox").element();
+        const surface = list.parentElement!;
+        await vi.waitFor(() => {
+          expect(
+            Math.abs(surface.getBoundingClientRect().width - triggerBounds.width),
+          ).toBeLessThan(1);
+          expect(surface.getBoundingClientRect().top).toBeGreaterThanOrEqual(triggerBounds.bottom);
+        });
+        expect(getComputedStyle(surface).backgroundColor).toBe(
+          getComputedStyle(screen.getByTestId("popover-color").element()).backgroundColor,
+        );
+        expect(list.scrollWidth).toBeLessThanOrEqual(list.clientWidth);
+        await userEvent.keyboard("{Escape}");
+        await expect.element(page.getByRole("listbox")).not.toBeInTheDocument();
+        expect(document.activeElement).toBe(trigger.element());
+      }
+    }
+  } finally {
+    await screen.unmount();
+    root.style.fontSize = originalFontSize;
+    root.classList.toggle("dark", originallyDark);
+    host.remove();
+  }
+});
+
+it("supports keyboard server selection and canceling without switching, while retaining offline recovery", async () => {
+  const screen = await render(
+    <WorkspaceEnvironmentProvider>
+      <WorkspaceEnvironmentSelector />
+      <Current />
+    </WorkspaceEnvironmentProvider>,
+  );
+  try {
+    const trigger = screen.getByRole("combobox", { name: "Workspace server" });
+    trigger.element().focus();
+    await userEvent.keyboard("{ArrowDown}");
+    await expect.element(page.getByRole("listbox")).toBeVisible();
+    await userEvent.keyboard("{End}");
+    await expect
+      .element(page.getByRole("option", { name: "PC (offline)", exact: true }))
+      .toHaveAttribute("data-highlighted");
+    await userEvent.keyboard("{Escape}");
+    await expect.element(screen.getByTestId("workspace")).toHaveTextContent(local);
+    expect(fixture.navigate).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(trigger.element());
+    await userEvent.keyboard("{ArrowDown}");
+    await expect.element(page.getByRole("listbox")).toBeVisible();
+    await userEvent.keyboard("{End}");
+    await expect
+      .element(page.getByRole("option", { name: "PC (offline)", exact: true }))
+      .toHaveAttribute("data-highlighted");
+    await userEvent.keyboard("{Enter}");
+    await expect.element(screen.getByTestId("workspace")).toHaveTextContent(remote);
+    await expect.element(trigger).toHaveTextContent("PC (offline)");
+    await expect
+      .element(screen.getByRole("button", { name: "Reconnect selected server" }))
+      .toBeVisible();
+    expect(fixture.navigate).toHaveBeenCalledWith({ to: "/" });
+    useSavedEnvironmentRuntimeStore.getState().patch(remote, { connectionState: "connected" });
+    await expect.element(trigger).toHaveTextContent("PC");
+    await expect.element(trigger).not.toHaveTextContent("offline");
+    await expect
+      .element(screen.getByRole("button", { name: "Reconnect selected server" }))
+      .not.toBeInTheDocument();
+  } finally {
+    await screen.unmount();
+  }
 });

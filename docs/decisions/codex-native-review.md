@@ -17,7 +17,7 @@ provider claim; later changes require fresh release verification.
 
 ## Decision and authority
 
-Expose a deliberate Native review action for Codex chats, with uncommitted changes,
+Expose a deliberate Code review action for Codex chats, with uncommitted changes,
 base branch, commit and custom-instruction targets. Carry the validated target as
 structured data through the ordinary authenticated, durable turn-intent/receipt
 path. The displayed user message is a description, not an instruction parser.
@@ -47,6 +47,13 @@ The action discloses that behavior before submission, especially for a full-acce
 session; Cafe does not invent interactive review approvals or alter sandbox policy.
 
 ## Boundaries and failures
+
+The review tab's minimized state is one persisted client-local editor preference,
+shared across chats, environments and panes. Thread deletion and environment
+cleanup cannot reset it. On upgrade, a valid minimized legacy thread preference
+initializes the global choice unless a global value is already saved; subsequent
+writes persist only the global boolean. Review dialog and submission state still
+belong to their exact chat/account/runtime.
 
 Bound target strings and reject control characters and option-shaped Git targets.
 Pass references as structured protocol values; Cafe never constructs a shell

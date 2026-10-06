@@ -1,12 +1,16 @@
 import { memo, useCallback, useState } from "react";
-import type { EnvironmentId, ThreadId } from "@cafecode/contracts";
+import type { EnvironmentId, TaskAtriumErrorDismissal, ThreadId } from "@cafecode/contracts";
 import { Alert, AlertAction, AlertDescription } from "../ui/alert";
 import { CircleAlertIcon, XIcon } from "lucide-react";
 
 import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
+import { getClientSettingsSnapshot } from "../../hooks/clientSettingsState";
 import { useStore } from "../../store";
 import {
   buildThreadErrorDismissal,
+  collectCodexAppServerExitDismissals,
+  isCodexAppServerExitError,
+  isSameErrorDismissal,
   mergeTaskAtriumErrorDismissals,
 } from "../atrium/taskAtriumData";
 
@@ -17,50 +21,82 @@ export const ThreadErrorBanner = memo(function ThreadErrorBanner({
   threadId,
 }: {
   error: string | null;
-  /** Stable environment/thread identity; error text supplies the occurrence key. */
+  /** Stable environment/thread identity for immediate local dismissal feedback. */
   scopeKey: string;
   environmentId: EnvironmentId;
   threadId: ThreadId;
 }) {
   const [dismissedErrorsByScope, setDismissedErrorsByScope] = useState<
-    Readonly<Record<string, string>>
+    Readonly<Record<string, { error: string; occurrence: TaskAtriumErrorDismissal | null }>>
   >({});
   const dismissedTaskAtriumErrors = useSettings((settings) => settings.dismissedTaskAtriumErrors);
   const { updateSettings } = useUpdateSettings();
+  const summary = useStore(
+    (state) => state.environmentStateById[environmentId]?.sidebarThreadSummaryById[threadId],
+  );
+  const session = useStore(
+    (state) =>
+      state.environmentStateById[environmentId]?.threadSessionById[threadId] ??
+      summary?.session ??
+      null,
+  );
+  const latestTurn = useStore(
+    (state) =>
+      state.environmentStateById[environmentId]?.threadTurnStateById[threadId]?.latestTurn ??
+      summary?.latestTurn ??
+      null,
+  );
+  const occurrence = summary
+    ? buildThreadErrorDismissal({ environmentId, threadId, session, latestTurn, summary })
+    : null;
+  const isProviderFailure = Boolean(error && error === session?.lastError);
 
   const dismiss = useCallback(() => {
     if (!error) return;
-    setDismissedErrorsByScope((current) =>
-      current[scopeKey] === error ? current : { ...current, [scopeKey]: error },
-    );
+    setDismissedErrorsByScope((current) => ({ ...current, [scopeKey]: { error, occurrence } }));
 
-    // Acknowledging a failure here also clears it from the Task Atrium. The
-    // error is read once, in the place that actually shows what went wrong;
-    // having to dismiss the same failure a second time somewhere else is what
-    // made the Atrium look permanently broken.
-    const environment = useStore.getState().environmentStateById[environmentId];
-    const summary = environment?.sidebarThreadSummaryById[threadId];
-    if (!summary) return;
-    const dismissal = buildThreadErrorDismissal({
-      environmentId,
-      threadId,
-      session: environment?.threadSessionById[threadId] ?? summary.session ?? null,
-      latestTurn: environment?.threadTurnStateById[threadId]?.latestTurn ?? summary.latestTurn,
-      summary,
-    });
+    // Restart-related app-server exits can be repeated across this server's
+    // shell catalog. Capture and acknowledge those current copies together;
+    // later failures still require their own gesture. All writes remain the
+    // existing presentation-only, bounded Atrium occurrence watermarks.
+    // Local command rejections share the provider's lifecycle slices, but
+    // dismissing them must not acknowledge an unrelated provider failure.
+    if (!occurrence || !isProviderFailure) return;
+    const copies = collectCodexAppServerExitDismissals(useStore.getState(), environmentId, error);
     updateSettings({
-      dismissedTaskAtriumErrors: mergeTaskAtriumErrorDismissals(dismissedTaskAtriumErrors, [
-        dismissal,
-      ]),
+      dismissedTaskAtriumErrors: mergeTaskAtriumErrorDismissals(
+        getClientSettingsSnapshot().dismissedTaskAtriumErrors,
+        [...copies, occurrence],
+      ),
     });
-  }, [dismissedTaskAtriumErrors, environmentId, error, scopeKey, threadId, updateSettings]);
+  }, [environmentId, error, isProviderFailure, occurrence, scopeKey, updateSettings]);
 
-  // Session snapshots are authoritative and may repeat unchanged lastError
-  // values. Dismissal is presentation state: retain the exact dismissed error
-  // per thread instead of mutating the projected snapshot and having the next
-  // poll immediately restore it. A different error for the same thread still
-  // appears, and no error strings are written to browser persistence.
-  if (!error || dismissedErrorsByScope[scopeKey] === error) return null;
+  // Switching servers remounts this banner. Read the same bounded persisted
+  // occurrence watermarks that dismissal already writes for the Atrium, so a
+  // remount or reload cannot resurrect that acknowledged failure. Subscribe
+  // only to this thread's lifecycle slices so a later failure becomes visible
+  // without subscribing the banner to message/token updates.
+  const locallyDismissed = dismissedErrorsByScope[scopeKey];
+  const sameLocalOccurrence =
+    locallyDismissed &&
+    (!locallyDismissed.occurrence ||
+      !occurrence ||
+      isSameErrorDismissal(locallyDismissed.occurrence, occurrence));
+  const persistedDismissal =
+    isProviderFailure &&
+    occurrence &&
+    dismissedTaskAtriumErrors.some((saved) => isSameErrorDismissal(saved, occurrence));
+  // Another pane can acknowledge the shared exit warning. Preserve local
+  // exact-text handling for ordinary diagnostics, while honoring that shared
+  // acknowledgement even if this pane previously dismissed a different error.
+  const dismissed = sameLocalOccurrence
+    ? locallyDismissed.error === error || (isCodexAppServerExitError(error) && persistedDismissal)
+    : persistedDismissal;
+  // Apply saved lifecycle watermarks only to the matching provider diagnostic,
+  // so a different local error stays visible even after remount. Persistence
+  // contains identities/timestamps only, never
+  // provider error text, and acknowledging it cannot mutate provider truth.
+  if (!error || dismissed) return null;
   return (
     <div className="pt-3 mx-auto max-w-3xl">
       <Alert variant="error">

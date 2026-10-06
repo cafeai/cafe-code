@@ -925,6 +925,8 @@ export default function ChatView(props: ChatViewProps) {
     routeKind === "server" ? store.threadPlanSidebarOpenById[routeThreadKey] : undefined,
   );
   const setPersistedPlanSidebarOpen = useUiStateStore((store) => store.setThreadPlanSidebarOpen);
+  const codeReviewCollapsed = useUiStateStore((store) => store.codeReviewCollapsed);
+  const onCodeReviewCollapsedChange = useUiStateStore((store) => store.setCodeReviewCollapsed);
   const globalSessionRailDocked = useUiStateStore((store) => store.sessionRailDocked);
   const setGlobalSessionRailDocked = useUiStateStore((store) => store.setSessionRailDocked);
   const sessionRailDocked = pane.sessionRailDocked ?? globalSessionRailDocked;
@@ -7159,6 +7161,88 @@ export default function ChatView(props: ChatViewProps) {
     ],
   );
 
+  const reviewEnvironmentId = activeThread?.environmentId;
+  const reviewRuntimeMode = activeThread?.runtimeMode;
+  const reviewInteractionMode = activeThread?.interactionMode;
+  const reviewAccountLabel = activeProviderStatus?.displayName ?? "this Codex account";
+  const reviewAvailable =
+    isServerThread &&
+    activeThread?.session?.provider === "codex" &&
+    activeThread.modelSelection.instanceId === activeThread.session.providerInstanceId;
+  const reviewDisabled =
+    activeThread?.session?.status !== "ready" ||
+    isSendBusy ||
+    isComposerConnecting ||
+    isWorking ||
+    isRevertingCheckpoint ||
+    activeEnvironmentUnavailable;
+  // Keep the slot stable during token streaming. It belongs to the exact
+  // captured chat/account, while the composer owns its visual attachment.
+  const codeReviewAction = useMemo(() => {
+    if (
+      !reviewAvailable ||
+      !reviewEnvironmentId ||
+      !scheduledThreadId ||
+      !scheduledModelSelection ||
+      !reviewRuntimeMode ||
+      !reviewInteractionMode
+    )
+      return undefined;
+    return (
+      <NativeCodexReview
+        key={JSON.stringify([
+          reviewEnvironmentId,
+          scheduledThreadId,
+          scheduledModelSelection.instanceId,
+        ])}
+        accountLabel={reviewAccountLabel}
+        runtimeMode={reviewRuntimeMode}
+        disabled={reviewDisabled}
+        collapsed={codeReviewCollapsed}
+        onCollapsedChange={onCodeReviewCollapsedChange}
+        onStart={async (codexReview) => {
+          const api = readEnvironmentApi(reviewEnvironmentId);
+          if (!api) throw new Error("The chat is disconnected.");
+          const text =
+            codexReview.type === "uncommittedChanges"
+              ? "Code review: uncommitted changes"
+              : codexReview.type === "baseBranch"
+                ? `Code review against ${codexReview.branch}`
+                : codexReview.type === "commit"
+                  ? `Code review of commit ${codexReview.sha}`
+                  : `Code review: ${codexReview.instructions}`;
+          await api.orchestration.dispatchCommand({
+            type: "thread.turn.start",
+            commandId: newCommandId(),
+            threadId: scheduledThreadId,
+            message: {
+              messageId: MessageId.make(crypto.randomUUID()),
+              role: "user",
+              text,
+              attachments: [],
+            },
+            codexReview,
+            modelSelection: scheduledModelSelection,
+            runtimeMode: reviewRuntimeMode,
+            interactionMode: reviewInteractionMode,
+            createdAt: new Date().toISOString(),
+          });
+        }}
+      />
+    );
+  }, [
+    reviewAvailable,
+    reviewEnvironmentId,
+    scheduledThreadId,
+    scheduledModelSelection,
+    reviewRuntimeMode,
+    reviewInteractionMode,
+    reviewAccountLabel,
+    reviewDisabled,
+    codeReviewCollapsed,
+    onCodeReviewCollapsedChange,
+  ]);
+
   if (!activeThread) {
     return <NoActiveThreadState />;
   }
@@ -7321,58 +7405,6 @@ export default function ChatView(props: ChatViewProps) {
               isGitRepo ? "pb-1" : "pb-3 sm:pb-4",
             )}
           >
-            {isServerThread &&
-              activeThread.session?.provider === "codex" &&
-              activeThread.modelSelection.instanceId ===
-                activeThread.session.providerInstanceId && (
-                <div className="flex justify-end pb-1">
-                  <NativeCodexReview
-                    key={JSON.stringify([
-                      activeThread.environmentId,
-                      activeThread.id,
-                      activeThread.modelSelection.instanceId,
-                    ])}
-                    accountLabel={activeProviderStatus?.displayName ?? "this Codex account"}
-                    runtimeMode={activeThread.runtimeMode}
-                    disabled={
-                      activeThread.session.status !== "ready" ||
-                      isSendBusy ||
-                      isComposerConnecting ||
-                      isWorking ||
-                      isRevertingCheckpoint ||
-                      activeEnvironmentUnavailable
-                    }
-                    onStart={async (codexReview) => {
-                      const api = readEnvironmentApi(activeThread.environmentId);
-                      if (!api) throw new Error("The chat is disconnected.");
-                      const text =
-                        codexReview.type === "uncommittedChanges"
-                          ? "Native review: uncommitted changes"
-                          : codexReview.type === "baseBranch"
-                            ? `Native review against ${codexReview.branch}`
-                            : codexReview.type === "commit"
-                              ? `Native review of commit ${codexReview.sha}`
-                              : `Native review: ${codexReview.instructions}`;
-                      await api.orchestration.dispatchCommand({
-                        type: "thread.turn.start",
-                        commandId: newCommandId(),
-                        threadId: activeThread.id,
-                        message: {
-                          messageId: MessageId.make(crypto.randomUUID()),
-                          role: "user",
-                          text,
-                          attachments: [],
-                        },
-                        codexReview,
-                        modelSelection: activeThread.modelSelection,
-                        runtimeMode: activeThread.runtimeMode,
-                        interactionMode: activeThread.interactionMode,
-                        createdAt: new Date().toISOString(),
-                      });
-                    }}
-                  />
-                </div>
-              )}
             {isServerThread && activeThread.session?.provider === "codex" && (
               <ComposerAsyncQuestionsPanel
                 environmentId={activeThread.environmentId}
@@ -7395,6 +7427,9 @@ export default function ChatView(props: ChatViewProps) {
                   />
                 )}
                 <ChatComposer
+                  codeReviewAction={codeReviewAction}
+                  codeReviewCollapsed={codeReviewCollapsed}
+                  codeReviewDisabled={reviewDisabled}
                   composerRef={composerRef}
                   composerDraftTarget={composerDraftTarget}
                   environmentId={environmentId}

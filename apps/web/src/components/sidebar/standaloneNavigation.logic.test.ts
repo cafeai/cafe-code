@@ -6,13 +6,8 @@ import {
 } from "@cafecode/contracts";
 import { scopeThreadRef, scopedThreadKey } from "@cafecode/client-runtime";
 import { describe, expect, it } from "vitest";
-import { DraftId, type DraftSessionState } from "../../composerDraftStore";
 import type { SidebarThreadSummary } from "../../types";
-import {
-  buildStandaloneCatalog,
-  groupThreadHistory,
-  standaloneDraftTitle,
-} from "./standaloneNavigation.logic";
+import { buildStandaloneCatalog, groupThreadHistory } from "./standaloneNavigation.logic";
 
 const local = EnvironmentId.make("local-fixture");
 const remote = EnvironmentId.make("remote-fixture");
@@ -40,25 +35,6 @@ function thread(id: string, overrides: Partial<SidebarThreadSummary> = {}): Side
     ...overrides,
   };
 }
-function draft(
-  id: string,
-  overrides: Partial<DraftSessionState> = {},
-): DraftSessionState & { draftId: DraftId } {
-  return {
-    draftId: DraftId.make(id),
-    threadId: ThreadId.make(`future-${id}`),
-    environmentId: local,
-    projectId: null,
-    logicalProjectKey: null,
-    createdAt,
-    runtimeMode: "full-access",
-    interactionMode: "default",
-    branch: null,
-    worktreePath: null,
-    envMode: "local",
-    ...overrides,
-  };
-}
 function snapshot(
   threads: readonly SidebarThreadSummary[],
   withProject = false,
@@ -81,8 +57,6 @@ describe("standalone shell catalog", () => {
         thread("project", { projectId }),
         thread("archived", { archivedAt: createdAt }),
       ],
-      drafts: [],
-      primaryEnvironmentId: local,
       sortOrder: "updated_at",
     });
     expect(rows).toHaveLength(2);
@@ -93,34 +67,7 @@ describe("standalone shell catalog", () => {
       ]),
     );
   });
-  it("admits only exact unpromoted local standalone drafts, independent of server thread ids", () => {
-    const rows = buildStandaloneCatalog({
-      threads: [thread("future-one")],
-      drafts: [
-        draft("one"),
-        draft("two"),
-        draft("remote", { environmentId: remote }),
-        draft("project", { projectId }),
-        draft("promoting", { promotedTo: scopeThreadRef(local, ThreadId.make("canonical")) }),
-      ],
-      primaryEnvironmentId: local,
-      sortOrder: "created_at",
-    });
-    expect(rows.map((row) => row.kind)).toEqual(["draft", "draft", "server"]);
-    expect(rows.flatMap((row) => (row.kind === "draft" ? [row.draft.draftId] : []))).toEqual([
-      "one",
-      "two",
-    ]);
-    expect(
-      buildStandaloneCatalog({
-        threads: [],
-        drafts: [draft("one")],
-        primaryEnvironmentId: null,
-        sortOrder: "created_at",
-      }),
-    ).toEqual([]);
-  });
-  it("uses the existing last-user-message order and actual timestamp offsets for drafts", () => {
+  it("uses the existing last-user-message order and actual timestamp offsets", () => {
     const rows = buildStandaloneCatalog({
       threads: [
         thread("activity", {
@@ -131,23 +78,11 @@ describe("standalone shell catalog", () => {
           createdAt: "2026-10-02T02:00:00.000Z",
           updatedAt: "2026-10-02T02:00:00.000Z",
         }),
+        thread("newest", { updatedAt: "2026-10-02T12:00:00+09:00" }),
       ],
-      drafts: [draft("newest", { createdAt: "2026-10-02T12:00:00+09:00" })],
-      primaryEnvironmentId: local,
       sortOrder: "updated_at",
     });
-    expect(rows.map((row) => (row.kind === "draft" ? row.draft.draftId : row.thread.id))).toEqual([
-      "newest",
-      "created",
-      "activity",
-    ]);
-  });
-  it("renders only a bounded first-line draft preview with an empty fallback", () => {
-    expect(standaloneDraftTitle("  Distinct unsent idea\nPrivate later content ")).toBe(
-      "Distinct unsent idea",
-    );
-    expect(standaloneDraftTitle(" ")).toBe("New chat");
-    expect(standaloneDraftTitle("x".repeat(10_000))).toHaveLength(100);
+    expect(rows.map((row) => row.thread.id)).toEqual(["newest", "created", "activity"]);
   });
 });
 

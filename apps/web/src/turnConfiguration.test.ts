@@ -21,9 +21,9 @@ const configuration: ProviderTurnConfiguration = {
 };
 
 describe("accepted turn configuration presentation", () => {
-  it("displays the frozen exact tier instead of a misleading legacy Fast toggle", () => {
+  it("displays Fast state with the frozen exact tier instead of a stale legacy toggle", () => {
     for (const [serviceTier, label] of [
-      ["ultrafast", "ultrafast"],
+      ["ultrafast", "Ultra fast"],
       ["default", "Standard"],
     ]) {
       const decoded = readTurnConfiguration({
@@ -32,8 +32,38 @@ describe("accepted turn configuration presentation", () => {
       expect(decoded?.serviceTier).toBe(serviceTier);
       const settings = presentTurnConfiguration(decoded!).settings;
       expect(settings).toContain(`Service tier: ${label}`);
-      expect(settings).not.toContain("Fast on");
+      expect(settings).toContain(serviceTier === "default" ? "Fast off" : "Fast on");
     }
+  });
+
+  it.each([
+    ["default", "Fast off · Service tier: Standard"],
+    ["priority", "Fast on · Service tier: Fast"],
+    ["fast", "Fast on · Service tier: Fast"],
+    ["ultrafast", "Fast on · Service tier: Ultra fast"],
+    ["future_tier", "Service tier: future_tier"],
+  ])("uses frozen native %s routing when no override was submitted", (tier, label) => {
+    const { fastMode: _fast, ...inherited } = configuration;
+    const snapshot = readTurnConfiguration({
+      turnConfiguration: { ...inherited, resolvedServiceTier: tier },
+    });
+    expect(snapshot?.resolvedServiceTier).toBe(tier);
+    expect(presentTurnConfiguration(snapshot!).settings).toBe(
+      `GPT-6.1 Sol · Effort: Ultra · ${label}`,
+    );
+    expect(presentTurnConfiguration(snapshot!).sourceDescription).toContain(
+      "native session routing",
+    );
+  });
+
+  it("prefers resolved native routing over conflicting submitted options", () => {
+    expect(
+      presentTurnConfiguration({
+        ...configuration,
+        serviceTier: "ultrafast",
+        resolvedServiceTier: "default",
+      }).settings,
+    ).toBe("GPT-6.1 Sol · Effort: Ultra · Fast off · Service tier: Standard");
   });
 
   it("shows frozen model, Ultra, explicit Fast on, account, and modes", () => {
@@ -55,7 +85,7 @@ describe("accepted turn configuration presentation", () => {
     );
     const { fastMode: _fast, effort: _effort, ...defaults } = configuration;
     expect(presentTurnConfiguration(defaults).settings).toBe(
-      "GPT-6.1 Sol · Effort: provider default · Fast: provider default",
+      "GPT-6.1 Sol · Effort: provider default · Fast status not recorded",
     );
   });
 
@@ -115,6 +145,8 @@ describe("accepted turn configuration presentation", () => {
     { turnConfiguration: null },
     { turnConfiguration: { ...configuration, version: 2 } },
     { turnConfiguration: { ...configuration, fastMode: "false" } },
+    { turnConfiguration: { ...configuration, resolvedServiceTier: "priority\nforged" } },
+    { turnConfiguration: { ...configuration, resolvedServiceTier: "a".repeat(65) } },
     { turnConfiguration: { ...configuration, runtimeMode: "unsafe" } },
     { turnConfiguration: { ...configuration, providerDisplayName: "name\u0000forged" } },
     { turnConfiguration: { ...configuration, modelDisplayName: "model\u202Eforged" } },

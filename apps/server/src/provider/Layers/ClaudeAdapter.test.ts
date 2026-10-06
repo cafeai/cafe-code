@@ -259,6 +259,7 @@ function makeHarness(config?: {
   readonly baseDir?: string;
   readonly claudeConfig?: Partial<ClaudeSettings>;
   readonly environment?: NodeJS.ProcessEnv;
+  readonly resolveEnvironment?: ClaudeAdapterLiveOptions["resolveEnvironment"];
   readonly instanceId?: ProviderInstanceId;
   readonly createQueryError?: Error;
   readonly onAuthStatusChanged?: ClaudeAdapterLiveOptions["onAuthStatusChanged"];
@@ -285,6 +286,7 @@ function makeHarness(config?: {
     getSubagentConcurrencySupport: () => config?.subagentConcurrencySupported ?? false,
     ...(config?.instanceId ? { instanceId: config.instanceId } : {}),
     ...(config?.environment ? { environment: config.environment } : {}),
+    ...(config?.resolveEnvironment ? { resolveEnvironment: config.resolveEnvironment } : {}),
     createQuery: (input) => {
       createInput = input;
       createInputs.push(input);
@@ -2033,6 +2035,59 @@ describe("ClaudeAdapterLive", () => {
           [original.subagentRuntimeId, replacement.subagentRuntimeId],
         );
       }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect(
+    "uses the selected login environment while retaining per-query concurrency snapshots",
+    () => {
+      const selectedConfigDirectory = path.resolve(os.homedir(), ".claude");
+      const selectedEnvironment = Object.freeze({
+        CLAUDE_CONFIG_DIR: selectedConfigDirectory,
+        CAFE_TEST_LOGIN_SELECTION: "existing-cafe-login",
+      });
+      let resolutions = 0;
+      const harness = makeHarness({
+        newQueryPerSession: true,
+        environment: { CAFE_TEST_LOGIN_SELECTION: "unresolved-base" },
+        resolveEnvironment: Effect.sync(() => {
+          resolutions++;
+          return selectedEnvironment;
+        }),
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        assert.equal(resolutions, 0);
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "full-access",
+          maxConcurrentSubagents: 1,
+        });
+        const first = harness.createInputs[0]?.options.env;
+        yield* adapter.startSession({
+          threadId: ThreadId.make("claude-selected-login-sibling"),
+          runtimeMode: "full-access",
+          maxConcurrentSubagents: 64,
+        });
+        assert.equal(resolutions, 2);
+        for (const input of harness.createInputs) {
+          assert.equal(input.options.env?.CLAUDE_CONFIG_DIR, selectedConfigDirectory);
+          assert.equal(input.options.env?.CAFE_TEST_LOGIN_SELECTION, "existing-cafe-login");
+        }
+        assert.equal(first?.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS, "1");
+        assert.equal(
+          harness.createInputs[1]?.options.env?.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS,
+          "64",
+        );
+        assert.notEqual(first, harness.createInputs[1]?.options.env);
+        assert.deepEqual(selectedEnvironment, {
+          CLAUDE_CONFIG_DIR: selectedConfigDirectory,
+          CAFE_TEST_LOGIN_SELECTION: "existing-cafe-login",
+        });
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
     },
   );
 

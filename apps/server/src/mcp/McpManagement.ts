@@ -88,10 +88,10 @@ export function makeMcpInstallationFiles(options: McpInstallationOptions) {
 
   const targets = async (original: McpClientConfiguration) => {
     const client = await resolveClient(original);
-    // Cafe's ClaudeHome explicitly sets CLAUDE_CONFIG_DIR even for the default
-    // profile. Current Claude then reads .claude/.claude.json, while a plain
-    // terminal launch reads ~/.claude.json. Qualify both default user surfaces
-    // without changing Claude's auth-home selection or its launch environment.
+    // An explicit CLAUDE_CONFIG_DIR makes Claude read .claude/.claude.json,
+    // while ordinary terminal launches and Cafe's macOS terminal-login fallback
+    // read ~/.claude.json. Retain both targets for other hosts and existing explicit
+    // default-directory configurations without changing authentication selection.
     return client.id === "claude" && !options.env.CLAUDE_CONFIG_DIR
       ? [client, { ...client, filePath: path.join(options.home, ".claude", ".claude.json") }]
       : [client];

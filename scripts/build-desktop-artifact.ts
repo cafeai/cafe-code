@@ -8,6 +8,7 @@ import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
 import { getDefaultBuildArch } from "./lib/build-target-arch.ts";
 import { readYarnCatalog, resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
 import { parseRepositoryNodeVersion, REPOSITORY_NODE_VERSION } from "./lib/node-version.ts";
+import { MAC_LOCAL_NETWORK_USAGE_DESCRIPTION } from "./lib/mac-app-privacy.ts";
 
 import { createHash } from "node:crypto";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
@@ -891,6 +892,7 @@ export function resolveMacDesktopBuildConfig(
       category: "public.app-category.developer-tools",
       extendInfo: {
         NSMicrophoneUsageDescription: MAC_MICROPHONE_USAGE_DESCRIPTION,
+        NSLocalNetworkUsageDescription: MAC_LOCAL_NETWORK_USAGE_DESCRIPTION,
       },
       ...(signed
         ? {}

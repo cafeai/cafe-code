@@ -2185,7 +2185,17 @@ const make = Effect.gen(function* () {
     // The original accepted start owns this turn's immutable snapshot. A
     // routed steer must not race its pending write, rewrite a renamed account,
     // or backfill pre-upgrade history with the current composer's settings.
-    const configuration = steeredExistingTurn ? undefined : prepared.configuration;
+    const configuration = steeredExistingTurn
+      ? undefined
+      : prepared.configuration === undefined
+        ? undefined
+        : {
+            ...prepared.configuration,
+            ...(prepared.configuration.provider === "codex" &&
+            turn.resolvedServiceTier !== undefined
+              ? { resolvedServiceTier: turn.resolvedServiceTier }
+              : {}),
+          };
     if (configuration !== undefined) {
       const acceptedAt = DateTime.formatIso(yield* DateTime.now);
       yield* orchestrationEngine

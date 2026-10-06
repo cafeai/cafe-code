@@ -7,7 +7,7 @@ import {
 import {
   configuredInstanceSubagentLimit,
   deriveSubagentConcurrencyPresentation,
-  formatSubagentConcurrencyDetails,
+  formatSubagentConcurrencyLimit,
   subagentLimitKey,
   subagentLimitsEqual,
   validSubagentLimit,
@@ -94,75 +94,53 @@ describe("subagent concurrency policy", () => {
     ).toBeUndefined();
   });
 
-  it("explains a selected chat limit separately from the provider-managed running session", () => {
+  it("shows the saved chat limit while a provider-managed session is still pending", () => {
     const presentation = deriveSubagentConcurrencyPresentation({
       provider: codex,
       limits: { codex: 5 },
       inheritedLimit: undefined,
       configuredLimit: null,
     })!;
-    expect(formatSubagentConcurrencyDetails(presentation)).toEqual({
-      selected: "Selected for this chat: 5 at once",
-      currentSession: "Current session: Provider-managed",
-      pending: "Waiting to apply — applies before a new turn when the session can safely restart.",
-    });
+    expect(formatSubagentConcurrencyLimit(presentation)).toBe("Subagent limit: 5");
+    expect(formatSubagentConcurrencyLimit({ ...presentation, configured: 3 })).toBe(
+      "Subagent limit: 5",
+    );
   });
 
-  it("retains account provenance inline after resetting a chat override", () => {
+  it("shows a numeric inherited account setting after resetting a chat override", () => {
     const presentation = deriveSubagentConcurrencyPresentation({
       provider: claude,
       limits: {},
       inheritedLimit: 6,
       configuredLimit: 6,
     })!;
-    expect(formatSubagentConcurrencyDetails(presentation)).toEqual({
-      selected: "Account setting: 6 at once",
-      currentSession: "Current session: 6 at once",
-      pending: null,
-    });
+    expect(formatSubagentConcurrencyLimit(presentation)).toBe("Subagent limit: 6");
   });
 
-  it("keeps an unrecorded process policy distinct from a known provider-managed policy", () => {
-    const presentation = deriveSubagentConcurrencyPresentation({
-      provider: codex,
-      limits: {},
-      inheritedLimit: undefined,
-      configuredLimit: undefined,
-    })!;
-    expect(formatSubagentConcurrencyDetails(presentation)).toEqual({
-      selected: "Selected limit: Provider-managed",
-      currentSession: "Current session: Not recorded",
-      pending: null,
-    });
-    expect(
-      formatSubagentConcurrencyDetails({ ...presentation, configured: null }).currentSession,
-    ).toBe("Current session: Provider-managed");
-  });
+  it.each([undefined, null, 8])(
+    "hides an unknown inherited number with session policy %s",
+    (configuredLimit) => {
+      const presentation = deriveSubagentConcurrencyPresentation({
+        provider: codex,
+        limits: {},
+        inheritedLimit: undefined,
+        configuredLimit,
+      })!;
+      expect(formatSubagentConcurrencyLimit(presentation)).toBeNull();
+    },
+  );
 
-  it("does not invent a pending/applied state when only the saved chat request is known", () => {
+  it("shows a saved numeric choice before session configuration has been recorded", () => {
     const presentation = deriveSubagentConcurrencyPresentation({
       provider: claude,
       limits: { claude: 12 },
       inheritedLimit: undefined,
       configuredLimit: undefined,
     })!;
-    expect(formatSubagentConcurrencyDetails(presentation)).toEqual({
-      selected: "Selected for this chat: 12 at once",
-      currentSession: "Current session: Not recorded",
-      pending: null,
-    });
+    expect(formatSubagentConcurrencyLimit(presentation)).toBe("Subagent limit: 12");
   });
 
-  it("describes a pending reset without pretending it immediately changes the current session", () => {
-    const presentation = deriveSubagentConcurrencyPresentation({
-      provider: codex,
-      limits: {},
-      inheritedLimit: undefined,
-      configuredLimit: 8,
-    })!;
-    const wording = formatSubagentConcurrencyDetails(presentation);
-    expect(wording.selected).toBe("Selected limit: Provider-managed");
-    expect(wording.currentSession).toBe("Current session: 8 at once");
-    expect(wording.pending).not.toBeNull();
+  it.each([null, undefined])("omits missing presentation %s", (presentation) => {
+    expect(formatSubagentConcurrencyLimit(presentation)).toBeNull();
   });
 });

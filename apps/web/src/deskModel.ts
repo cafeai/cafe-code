@@ -45,7 +45,13 @@ export interface DeskState {
 
 export type DeskEdge = "left" | "right" | "top" | "bottom";
 export type DeskAction =
-  | { readonly type: "open"; readonly target: ThreadRouteTarget; readonly groupId?: string }
+  | {
+      readonly type: "open";
+      readonly target: ThreadRouteTarget;
+      readonly groupId?: string;
+      /** Background first-send promotion must not select another editor. */
+      readonly activate?: boolean;
+    }
   | { readonly type: "select"; readonly tabKey: string }
   | { readonly type: "activateGroup"; readonly groupId: string }
   | { readonly type: "close"; readonly tabKey: string }
@@ -378,7 +384,8 @@ export function reduceDesk(state: DeskState, action: DeskAction): DeskState {
       const group = ownGroup(state, action.groupId ?? state.activeGroupId);
       if (!target || !group) return state;
       const tabKey = deskTabKey(target);
-      if (deskGroupForTab(state, tabKey)) return selectTab(state, tabKey);
+      if (deskGroupForTab(state, tabKey))
+        return action.activate === false ? state : selectTab(state, tabKey);
       if (
         Object.values(state.groups).reduce((count, item) => count + item.tabs.length, 0) >=
         DESK_LIMITS.tabs
@@ -386,10 +393,19 @@ export function reduceDesk(state: DeskState, action: DeskAction): DeskState {
         return state;
       return {
         ...state,
-        groups: { ...state.groups, [group.id]: withTab(group, tabKey, group.tabs.length) },
+        groups: {
+          ...state.groups,
+          [group.id]: {
+            ...withTab(group, tabKey, group.tabs.length),
+            ...(action.activate === false ? { activeTabKey: group.activeTabKey ?? tabKey } : {}),
+          },
+        },
         targets: { ...state.targets, [tabKey]: target },
-        activeGroupId: group.id,
-        focusedGroupId: state.focusedGroupId === null ? null : group.id,
+        activeGroupId: action.activate === false ? state.activeGroupId : group.id,
+        focusedGroupId:
+          action.activate === false || state.focusedGroupId === null
+            ? state.focusedGroupId
+            : group.id,
         closed: state.closed.filter((entry) => entry.tabKey !== tabKey),
       };
     }

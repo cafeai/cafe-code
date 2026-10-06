@@ -14,6 +14,9 @@ import type { AppState } from "../../store";
 import {
   formatElapsed,
   formatAtriumCardElapsed,
+  buildThreadErrorDismissal,
+  collectCodexAppServerExitDismissals,
+  isSameErrorDismissal,
   mergeTaskAtriumErrorDismissals,
   selectAtriumSnapshot,
 } from "./taskAtriumData";
@@ -797,6 +800,95 @@ describe("selectAtriumSnapshot", () => {
     laterSummary.session.activeTurnId = undefined;
 
     expect(selectAtriumSnapshot(laterState, NOW, [dismissed]).errorCount).toBe(1);
+  });
+
+  it("distinguishes a new app-server exit even if the previous failed turn is unchanged", () => {
+    const state = buildState({ status: "error", latestTurnState: "error" });
+    const summary = state.environmentStateById[ENV]!.sidebarThreadSummaryById[THREAD]!;
+    const session = {
+      ...summary.session!,
+      provider: "codex" as NonNullable<typeof summary.session>["provider"],
+      lastError: "Codex App Server exited unexpectedly.",
+      updatedAt: "2026-10-06T12:00:00.000Z",
+    };
+    const first = buildThreadErrorDismissal({
+      environmentId: ENV,
+      threadId: THREAD,
+      summary,
+      latestTurn: summary.latestTurn,
+      session,
+    });
+    const later = buildThreadErrorDismissal({
+      environmentId: ENV,
+      threadId: THREAD,
+      summary,
+      latestTurn: summary.latestTurn,
+      session: { ...session, updatedAt: "2026-10-06T13:00:00.000Z" },
+    });
+    expect(first).toEqual({
+      environmentId: ENV,
+      threadId: THREAD,
+      turnId: null,
+      observedAt: session.updatedAt,
+    });
+    expect(isSameErrorDismissal(first, later)).toBe(false);
+    expect(isSameErrorDismissal(first, { ...first })).toBe(true);
+  });
+
+  it("batches only identical Cafe exit diagnostics for Codex sessions on the exact server", () => {
+    const state = buildState({ status: "error", provider: "codex" });
+    const environment = state.environmentStateById[ENV]!;
+    const summary = environment.sidebarThreadSummaryById[THREAD]!;
+    const error = "Codex App Server exited unexpectedly with code 1.";
+    const failedSession = { ...summary.session!, lastError: error };
+    environment.sidebarThreadSummaryById[THREAD] = { ...summary, session: failedSession };
+    const peer = "peer" as ThreadId;
+    const overridden = "overridden" as ThreadId;
+    const otherProvider = "other-provider" as ThreadId;
+    const different = "different-exit-code" as ThreadId;
+    environment.sidebarThreadSummaryById[peer] = {
+      ...summary,
+      id: peer,
+      session: { ...failedSession, updatedAt: "2026-10-06T12:00:00.500Z" },
+    };
+    environment.sidebarThreadSummaryById[overridden] = {
+      ...summary,
+      id: overridden,
+      session: failedSession,
+    };
+    environment.threadShellById = {
+      ...environment.threadShellById,
+      [overridden]: {
+        error: "Newer local send failure",
+      } as (typeof environment.threadShellById)[ThreadId],
+    };
+    environment.sidebarThreadSummaryById[otherProvider] = {
+      ...summary,
+      id: otherProvider,
+      session: {
+        ...failedSession,
+        provider: "claudeAgent" as NonNullable<typeof summary.session>["provider"],
+      },
+    };
+    environment.sidebarThreadSummaryById[different] = {
+      ...summary,
+      id: different,
+      session: { ...failedSession, lastError: "Codex App Server exited unexpectedly with code 2." },
+    };
+    state.environmentStateById["remote" as EnvironmentId] = environment;
+    const current = collectCodexAppServerExitDismissals(state, ENV, error);
+    expect(current.map((entry) => [entry.environmentId, entry.threadId])).toEqual([
+      [ENV, THREAD],
+      [ENV, peer],
+    ]);
+    expect(current.every((entry) => entry.turnId === null)).toBe(true);
+    expect(collectCodexAppServerExitDismissals(state, ENV, "An ordinary provider error")).toEqual(
+      [],
+    );
+    expect(collectCodexAppServerExitDismissals(state, "absent" as EnvironmentId, error)).toEqual(
+      [],
+    );
+    expect(JSON.stringify(current)).not.toContain(error);
   });
 
   it("ages a stale failure off the board without needing a dismissal", () => {

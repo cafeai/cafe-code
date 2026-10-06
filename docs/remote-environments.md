@@ -14,6 +14,14 @@ Browser local storage contains connection metadata; bearer sessions live in
 session storage. Reconnect uses the bearer and mints a fresh short-lived WS token.
 An expired or revoked session requires signing in again.
 
+macOS also controls the desktop app's access to servers on your local network.
+Both source launches and packaged apps declare this use in their app metadata;
+the declaration does not grant access. Allow Cafe Code when macOS asks. If LAN
+connections fail while a browser can reach the same server, check System Settings
+→ Privacy & Security → Local Network. A connection that worked from one launch
+context can fail after relaunching from another; app identity and OS permission
+state must be checked separately from certificate trust and the saved login.
+
 For a self-signed HTTPS server, the desktop app asks for certificate approval
 before sending a sign-in credential. Compare the displayed SHA-256 fingerprint
 with the server's public certificate. Approval applies only to that HTTPS/WSS

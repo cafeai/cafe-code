@@ -13,13 +13,17 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { MAC_LOCAL_NETWORK_USAGE_DESCRIPTION } from "../../../scripts/lib/mac-app-privacy.ts";
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export const desktopDir = resolve(__dirname, "..");
 
 const macAppName = "Cafe Code";
 const macBundleIdentifier = "com.cafeai.cafecode";
-const macRuntimeLauncherVersion = 1;
+// Rebuild cached source bundles so an existing installation also receives the
+// Local Network usage declaration on its next launch.
+const macRuntimeLauncherVersion = 2;
 const macRuntimeDir = join(desktopDir, ".electron-runtime");
 const macRuntimeMetadataPath = join(macRuntimeDir, "metadata.json");
 const macRuntimeAppBundlePath = join(macRuntimeDir, `${macAppName}.app`);
@@ -64,6 +68,14 @@ function patchMacAppBundlePlists(appBundlePath) {
   replacePlistString(appInfoPlistPath, "CFBundleName", macAppName);
   replacePlistString(appInfoPlistPath, "CFBundleIdentifier", macBundleIdentifier);
   replacePlistString(appInfoPlistPath, "CFBundleIconFile", "icon.icns");
+  // A source launch is still a macOS app when it connects to a remote LAN
+  // server. Declare that use on the responsible app, just as packaging does.
+  // This does not grant access or bypass macOS Local Network consent.
+  replacePlistString(
+    appInfoPlistPath,
+    "NSLocalNetworkUsageDescription",
+    MAC_LOCAL_NETWORK_USAGE_DESCRIPTION,
+  );
 
   const frameworkPath = join(appBundlePath, "Contents", "Frameworks");
   const helperPlists = [

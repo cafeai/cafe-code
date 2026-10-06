@@ -1,73 +1,38 @@
 import type { EnvironmentId, OrchestrationShellSnapshot } from "@cafecode/contracts";
 import { scopedThreadKey, scopeThreadRef } from "@cafecode/client-runtime";
 import type { SidebarThreadSortOrder } from "@cafecode/contracts/settings";
-import type { DraftId, DraftSessionState } from "../../composerDraftStore";
-import { getThreadSortTimestamp, toSortableTimestamp } from "../../lib/threadSort";
+import { getThreadSortTimestamp } from "../../lib/threadSort";
 import type { SidebarThreadSummary } from "../../types";
 
-export type StandaloneCatalogEntry =
-  | { readonly kind: "server"; readonly key: string; readonly thread: SidebarThreadSummary }
-  | {
-      readonly kind: "draft";
-      readonly key: string;
-      readonly draft: DraftSessionState & { draftId: DraftId };
-    };
-
-/** Local-only preview; never copy composer text into Desk preferences or RPC. */
-export function standaloneDraftTitle(prompt: string): string {
-  return (
-    prompt
-      .slice(0, 512)
-      .split(/[\r\n]/, 1)[0]
-      ?.trim()
-      .slice(0, 100) || "New chat"
-  );
+export interface StandaloneCatalogEntry {
+  readonly key: string;
+  readonly thread: SidebarThreadSummary;
 }
 
 /**
- * The standalone catalog consumes only shell summaries and local draft metadata.
- * A chat is not represented by a fake project, and duplicate imported ids remain
- * distinct across environments. Promoted drafts are omitted before the catalog
- * sees them, so the server's canonical row owns its title and mutations.
+ * Match the project catalog: only canonical server shells are saved chats.
+ * Local unsent drafts remain in their composer/Desk views until first send;
+ * opening a new editor never adds a conversation to this catalog.
+ * Duplicate imported ids remain distinct across environments.
  */
 export function buildStandaloneCatalog(input: {
   readonly threads: readonly SidebarThreadSummary[];
-  readonly drafts: readonly (DraftSessionState & { draftId: DraftId })[];
-  readonly primaryEnvironmentId: EnvironmentId | null;
   readonly sortOrder: SidebarThreadSortOrder;
 }): StandaloneCatalogEntry[] {
-  const threads = input.threads.filter(
-    (thread) => thread.projectId === null && thread.archivedAt === null,
-  );
-  const entries: StandaloneCatalogEntry[] = threads.map((thread) => ({
-    kind: "server",
-    key: scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
-    thread,
-  }));
-  for (const draft of input.drafts) {
-    // Standalone creation is local-only. Never reopen an imported remote draft
-    // through the current local Desk merely because its opaque id matches.
-    if (
-      input.primaryEnvironmentId !== null &&
-      draft.environmentId === input.primaryEnvironmentId &&
-      draft.projectId === null &&
-      draft.promotedTo == null
-    ) {
-      entries.push({ kind: "draft", key: JSON.stringify(["draft", draft.draftId]), draft });
-    }
-  }
-  return entries.toSorted((left, right) => {
-    const timestamp = (entry: StandaloneCatalogEntry): number =>
-      entry.kind === "draft"
-        ? (toSortableTimestamp(entry.draft.createdAt) ?? Number.NEGATIVE_INFINITY)
-        : getThreadSortTimestamp(entry.thread, input.sortOrder);
-    const leftTimestamp = timestamp(left);
-    const rightTimestamp = timestamp(right);
-    return (
-      (leftTimestamp === rightTimestamp ? 0 : rightTimestamp > leftTimestamp ? 1 : -1) ||
-      left.key.localeCompare(right.key)
-    );
-  });
+  return input.threads
+    .filter((thread) => thread.projectId === null && thread.archivedAt === null)
+    .map((thread) => ({
+      key: scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+      thread,
+    }))
+    .toSorted((left, right) => {
+      const leftTimestamp = getThreadSortTimestamp(left.thread, input.sortOrder);
+      const rightTimestamp = getThreadSortTimestamp(right.thread, input.sortOrder);
+      return (
+        (leftTimestamp === rightTimestamp ? 0 : rightTimestamp > leftTimestamp ? 1 : -1) ||
+        left.key.localeCompare(right.key)
+      );
+    });
 }
 
 type HistoryThread = OrchestrationShellSnapshot["threads"][number] & {

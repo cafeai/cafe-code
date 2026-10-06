@@ -38,10 +38,11 @@ import { SidebarInset } from "../ui/sidebar";
 import { Button } from "../ui/button";
 import { Dialog, DialogPopup, DialogTitle, DialogDescription } from "../ui/dialog";
 import { Input } from "../ui/input";
-import { ChatPaneContext } from "../../chatPaneContext";
+import { ChatPaneContext, isChatSendInFlight } from "../../chatPaneContext";
 import { useDeskStore } from "../../deskStore";
 import {
   deskGroupIds,
+  deskGroupForTab,
   deskTabKey,
   type DeskAction,
   type DeskGroup,
@@ -131,6 +132,7 @@ export function useDeskRouteSync() {
   const target = useParams({ strict: false, select: resolveThreadRouteTarget });
   const routeKey = target ? deskTabKey(target) : "";
   const desk = useDeskStore((s) => s.desk);
+  const activeDraftId = useDeskStore((s) => s.activeDraftId);
   const bindEnvironment = useDeskStore((s) => s.bindEnvironment);
   const dispatch = useDeskStore((s) => s.dispatch);
   const bootstrapped = useStore((s) => selectEnvironmentState(s, environmentId).bootstrapComplete);
@@ -148,6 +150,10 @@ export function useDeskRouteSync() {
         .map(([id]) => id),
     ),
   );
+  const openTabCount = Object.values(desk.groups).reduce(
+    (count, group) => count + group.tabs.length,
+    0,
+  );
   const lastRoute = useRef<string | null>(null);
   const expectedRoute = useRef<string | null>(null);
   useEffect(() => {
@@ -157,7 +163,8 @@ export function useDeskRouteSync() {
   }, [environmentId, bindEnvironment]);
 
   useEffect(() => {
-    if (!environmentId || !bootstrapped || desk.environmentId !== environmentId) return;
+    const currentDesk = useDeskStore.getState().desk;
+    if (!environmentId || !bootstrapped || currentDesk.environmentId !== environmentId) return;
     // Never prune against an empty reconnect snapshot: bootstrapComplete marks
     // an authoritative catalog, while disconnected cached catalogs stay valid.
     const available: ThreadRouteTarget[] = Object.values(shells)
@@ -167,11 +174,30 @@ export function useDeskRouteSync() {
       if (draft.environmentId !== environmentId) continue;
       const promoted = draft.promotedTo;
       if (promoted && promoted.environmentId === environmentId && readyDrafts.includes(id)) {
-        dispatch({ type: "promoteDraft", draftId: DraftId.make(id), threadRef: promoted });
+        const view = useDeskStore.getState();
+        if (view.draftEditors[id]) {
+          if (!view.promoteDraftEditor(DraftId.make(id), promoted)) continue;
+        } else dispatch({ type: "promoteDraft", draftId: DraftId.make(id), threadRef: promoted });
         // Transfer Desk ownership before removing the draft identity. This also
         // handles a send completing in a nonfocused group without duplicate tabs.
         finalizePromotedDraftThreadByRef(promoted);
       } else {
+        if (draft.projectId === null) {
+          // Older builds saved standalone draft tabs. Retire those view rows
+          // without deleting their independently persisted input/attachments.
+          const group = deskGroupForTab(
+            currentDesk,
+            deskTabKey({ kind: "draft", draftId: DraftId.make(id) }),
+          );
+          if (group) useDeskStore.getState().showDraftEditor(DraftId.make(id), group.id, false);
+          if (promoted) {
+            const alias = available.findIndex(
+              (entry) => entry.kind === "server" && entry.threadRef.threadId === promoted.threadId,
+            );
+            if (alias >= 0) available.splice(alias, 1);
+          }
+          continue;
+        }
         available.push({ kind: "draft", draftId: DraftId.make(id) });
         if (promoted?.environmentId === environmentId) {
           // The server shell can appear before the first accepted turn. Keep
@@ -181,8 +207,27 @@ export function useDeskRouteSync() {
         }
       }
     }
+    useDeskStore
+      .getState()
+      .reconcileDraftEditors(
+        Object.entries(drafts).flatMap(([id, draft]) =>
+          draft.environmentId === environmentId && draft.projectId === null
+            ? [DraftId.make(id)]
+            : [],
+        ),
+      );
     dispatch({ type: "reconcile", targets: available });
-  }, [environmentId, bootstrapped, shells, drafts, readyDrafts, desk.environmentId, dispatch]);
+  }, [
+    environmentId,
+    bootstrapped,
+    shells,
+    drafts,
+    readyDrafts,
+    desk.environmentId,
+    desk.targets,
+    openTabCount,
+    dispatch,
+  ]);
 
   useEffect(() => {
     if (!environmentId || !bootstrapped || desk.environmentId !== environmentId) return;
@@ -212,6 +257,15 @@ export function useDeskRouteSync() {
               (shells[target.threadRef.threadId]?.archivedAt === null || Boolean(pending))
             : drafts[target.draftId]?.environmentId === environmentId;
         if (admitted) {
+          const draftId = pending
+            ? DraftId.make(pending[0])
+            : target.kind === "draft"
+              ? target.draftId
+              : null;
+          if (draftId && drafts[draftId]?.projectId === null) {
+            useDeskStore.getState().showDraftEditor(draftId);
+            return;
+          }
           dispatch({
             type: "open",
             target: pending ? { kind: "draft", draftId: DraftId.make(pending[0]) } : target,
@@ -221,7 +275,10 @@ export function useDeskRouteSync() {
       }
     }
     const latest = useDeskStore.getState().desk;
-    const activeKey = latest.groups[latest.activeGroupId]?.activeTabKey ?? "";
+    const currentEditor = useDeskStore.getState().activeDraftId;
+    const activeKey = currentEditor
+      ? deskTabKey({ kind: "draft", draftId: currentEditor })
+      : (latest.groups[latest.activeGroupId]?.activeTabKey ?? "");
     // Preserve the existing no-project empty route behavior. Its route guard,
     // not the layout, decides whether an unknown deep link should redirect.
     if (
@@ -234,7 +291,9 @@ export function useDeskRouteSync() {
     // Serialize route writes. A rapid B→C selection must not treat the delayed
     // B route commit as external navigation and steal focus back from C.
     if (activeKey === routeKey || expectedRoute.current !== null) return;
-    const next = latest.targets[activeKey];
+    const next = currentEditor
+      ? { kind: "draft" as const, draftId: currentEditor }
+      : latest.targets[activeKey];
     expectedRoute.current = activeKey;
     const navigation =
       next?.kind === "server"
@@ -250,6 +309,7 @@ export function useDeskRouteSync() {
     });
   }, [
     desk,
+    activeDraftId,
     environmentId,
     bootstrapped,
     routeKey,
@@ -332,7 +392,7 @@ function ChatTab({
         className="desk-tab"
         role="tab"
         aria-selected={selected}
-        tabIndex={selected ? 0 : -1}
+        tabIndex={selected || (group.activeTabKey === null && index === 0) ? 0 : -1}
         data-desk-tab-key={tabKey}
         title={`${meta.title}${meta.projectName ? ` · ${meta.projectName}` : ""}`}
         onClick={() => {
@@ -395,6 +455,7 @@ function GroupTabs({
   onRename,
   onRenameGroup,
   onOverflow,
+  pendingEditor = false,
 }: {
   group: DeskGroup;
   hint: DropHint;
@@ -405,6 +466,7 @@ function GroupTabs({
   onRename: (target: ThreadRouteTarget) => void;
   onRenameGroup: () => void;
   onOverflow: () => void;
+  pendingEditor?: boolean;
 }) {
   const desk = useDeskStore((s) => s.desk);
   const strip = useRef<HTMLDivElement>(null);
@@ -462,7 +524,7 @@ function GroupTabs({
               <ChatTab
                 target={target}
                 tabKey={key}
-                group={group}
+                group={pendingEditor ? { ...group, activeTabKey: null } : group}
                 index={index}
                 onMenu={onMenu}
                 onRename={onRename}
@@ -655,6 +717,8 @@ function ResizeDivider({
 export default function DeskWorkspace() {
   useDeskRouteSync();
   const desk = useDeskStore((s) => s.desk);
+  const draftEditors = useDeskStore((s) => s.draftEditors);
+  const activeDraftId = useDeskStore((s) => s.activeDraftId);
   const dispatch = useDeskStore((s) => s.dispatch);
   const defaultDocked = useUiStateStore((s) => s.sessionRailDocked);
   const { openRenameChat, renameChatDialog } = useRenameChat();
@@ -726,9 +790,19 @@ export default function DeskWorkspace() {
   const panes = isolated
     ? [{ groupId: isolated, rect: { x: 0, y: 0, width: 1, height: 1 } }]
     : geometry.panes;
+  const activeEditor =
+    activeDraftId && drafts[activeDraftId]?.environmentId === primaryEnvironmentId
+      ? draftEditors[activeDraftId]
+      : null;
+  const editorGroupId =
+    activeEditor && desk.groups[activeEditor.groupId] ? activeEditor.groupId : desk.activeGroupId;
+  const editorTarget: ThreadRouteTarget | null = activeEditor
+    ? { kind: "draft", draftId: activeEditor.draftId }
+    : null;
   const activeKey = desk.groups[desk.activeGroupId]?.activeTabKey;
-  const selectedTarget = activeKey ? desk.targets[activeKey] : null;
+  const selectedTarget = editorTarget ?? (activeKey ? desk.targets[activeKey] : null);
   const hasTabs = Object.values(desk.groups).some((g) => g.tabs.length > 0);
+  const hasVisibleChat = hasTabs || editorTarget !== null;
   const admitted = (target: ThreadRouteTarget) =>
     target.kind === "server"
       ? target.threadRef.environmentId === primaryEnvironmentId &&
@@ -1032,7 +1106,7 @@ export default function DeskWorkspace() {
         }}
       >
         <div className="desk-workspace" ref={root}>
-          {!hasTabs ? (
+          {!hasVisibleChat ? (
             <>
               <NoActiveThreadState />
               <div className="desk-empty-actions">
@@ -1057,7 +1131,8 @@ export default function DeskWorkspace() {
             panes.map(({ groupId, rect }) => {
               const group = desk.groups[groupId];
               const key = group?.activeTabKey;
-              const target = key ? desk.targets[key] : null;
+              const pendingEditor = editorTarget !== null && groupId === editorGroupId;
+              const target = pendingEditor ? editorTarget : key ? desk.targets[key] : null;
               if (!group || !target || desk.environmentId !== primaryEnvironmentId) return null;
               const active = groupId === desk.activeGroupId;
               return (
@@ -1116,6 +1191,7 @@ export default function DeskWorkspace() {
                         )}
                         <GroupTabs
                           group={group}
+                          pendingEditor={pendingEditor}
                           hint={hint}
                           restoreGroups={restoreGroups}
                           canRestoreGroups={canRestoreGroups}
@@ -1141,17 +1217,35 @@ export default function DeskWorkspace() {
             })
           )}
           {!isolated &&
-            hasTabs &&
+            hasVisibleChat &&
             geometry.dividers.map(({ node, rect }) => (
               <ResizeDivider key={node.id} node={node} rect={rect} area={area} />
             ))}
-          {!hasTabs && emptyQueueHost && desk.environmentId === primaryEnvironmentId && (
-            <div hidden aria-hidden inert>
-              <ChatPaneContext value={{ active: false, visible: false }}>
-                {renderChat(emptyQueueHost)}
-              </ChatPaneContext>
-            </div>
-          )}
+          {Object.values(draftEditors).map((editor) => {
+            const session = drafts[editor.draftId];
+            // Keep pending sends mounted in the background without mounting
+            // idle recovered drafts or introducing a second provider owner.
+            return editor.draftId !== activeDraftId &&
+              session?.environmentId === primaryEnvironmentId &&
+              (session.promotedTo ||
+                isChatSendInFlight(session.environmentId, session.threadId)) ? (
+              <div key={editor.draftId} hidden aria-hidden inert>
+                <ChatPaneContext value={{ active: false, visible: false }}>
+                  {renderChat({ kind: "draft", draftId: editor.draftId })}
+                </ChatPaneContext>
+              </div>
+            ) : null;
+          })}
+          {!hasVisibleChat &&
+            emptyQueueHost &&
+            !(emptyQueueHost.kind === "draft" && draftEditors[emptyQueueHost.draftId]) &&
+            desk.environmentId === primaryEnvironmentId && (
+              <div hidden aria-hidden inert>
+                <ChatPaneContext value={{ active: false, visible: false }}>
+                  {renderChat(emptyQueueHost)}
+                </ChatPaneContext>
+              </div>
+            )}
         </div>
       </DndContext>
       {renameChatDialog}

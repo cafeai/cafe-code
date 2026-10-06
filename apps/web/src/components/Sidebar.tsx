@@ -93,7 +93,7 @@ import { useShortcutModifierState } from "../shortcutModifierState";
 import { useGitStatus } from "../lib/gitStatusState";
 import { useDesktopDebugEnabled } from "../lib/desktopDebugState";
 import { readLocalApi } from "../localApi";
-import { selectStandaloneDraftSessions, useComposerDraftStore } from "../composerDraftStore";
+import { useComposerDraftStore } from "../composerDraftStore";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useThreadActions } from "../hooks/useThreadActions";
 import {
@@ -209,6 +209,7 @@ import {
   type SidebarProjectSnapshot,
 } from "../sidebarProjectGrouping";
 import { SidebarProviderUpdatePill } from "./sidebar/SidebarProviderUpdatePill";
+import { SidebarNewChatButton } from "./sidebar/SidebarNewChatButton";
 import { SidebarTriggerWithUnreadDot } from "./sidebar/unseenCompletions";
 import { DeskSidebar } from "./desk/DeskSidebar";
 import { useDeskStore } from "../deskStore";
@@ -217,7 +218,6 @@ import { renameThread } from "../threadRename";
 import type { ThreadRouteTarget } from "../threadRoutes";
 import {
   buildStandaloneCatalog,
-  standaloneDraftTitle,
   type StandaloneCatalogEntry,
 } from "./sidebar/standaloneNavigation.logic";
 const SIDEBAR_SORT_LABELS: Record<SidebarProjectSortOrder, string> = {
@@ -537,7 +537,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const isConfirmingArchive = confirmingArchiveThreadKey === threadKey && !isThreadRunning;
   const threadMetaClassName = isConfirmingArchive
     ? "pointer-events-none opacity-0"
-    : "pointer-events-none transition-opacity duration-150 max-md:opacity-0 group-hover/menu-sub-item:opacity-0 group-focus-within/menu-sub-item:opacity-0";
+    : "pointer-events-none transition-opacity duration-150 max-md:opacity-0 pointer-coarse:opacity-0 group-hover/menu-sub-item:opacity-0 group-focus-within/menu-sub-item:opacity-0";
   const clearConfirmingArchive = useCallback(() => {
     setConfirmingArchiveThreadKey((current) => (current === threadKey ? null : current));
   }, [setConfirmingArchiveThreadKey, threadKey]);
@@ -564,6 +564,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   );
   const handleRowKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
+      // Nested actions own their native Enter/Space behavior.
+      if (event.target !== event.currentTarget) return;
       if (event.key === "F2") {
         event.preventDefault();
         event.stopPropagation();
@@ -759,18 +761,18 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             </Tooltip>
           )}
         </div>
-        {/* Keep both row actions in one trailing cluster. The metadata reserves
+        {/* Keep row actions in one trailing cluster. The metadata reserves
             its normal width underneath, so revealing actions cannot move the
             title or leave the rename button stranded before the timestamp. */}
-        <div className="ml-auto flex min-w-12 shrink-0 justify-end max-md:min-w-20">
-          <div className="pointer-events-none absolute top-1/2 right-1 flex -translate-y-1/2 items-center gap-1 opacity-0 transition-opacity duration-150 max-md:pointer-events-auto max-md:opacity-100 group-hover/menu-sub-item:pointer-events-auto group-hover/menu-sub-item:opacity-100 group-focus-within/menu-sub-item:pointer-events-auto group-focus-within/menu-sub-item:opacity-100">
+        <div className="ml-auto flex min-w-12 shrink-0 justify-end max-md:min-w-20 pointer-coarse:min-w-20">
+          <div className="pointer-events-none absolute top-1/2 right-1 flex -translate-y-1/2 items-center gap-1 opacity-0 transition-opacity duration-150 max-md:pointer-events-auto max-md:opacity-100 pointer-coarse:pointer-events-auto pointer-coarse:opacity-100 group-hover/menu-sub-item:pointer-events-auto group-hover/menu-sub-item:opacity-100 group-focus-within/menu-sub-item:pointer-events-auto group-focus-within/menu-sub-item:opacity-100">
             {renamingThreadKey !== threadKey && !isConfirmingArchive ? (
               <button
                 type="button"
                 data-thread-selection-safe
                 aria-label={`Rename ${thread.title}`}
                 title="Rename chat (F2)"
-                className="inline-flex size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground/60 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring max-md:size-8"
+                className="inline-flex size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground/60 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring max-md:size-8 pointer-coarse:size-8"
                 onPointerDown={stopPropagationOnPointerDown}
                 onClick={(event) => {
                   event.preventDefault();
@@ -801,7 +803,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                   data-thread-selection-safe
                   data-testid={`thread-archive-${thread.id}`}
                   aria-label={`Archive ${thread.title}`}
-                  className="inline-flex size-5 cursor-pointer items-center justify-center text-muted-foreground/60 transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring max-md:size-8"
+                  className="inline-flex size-5 cursor-pointer items-center justify-center text-muted-foreground/60 transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring max-md:size-8 pointer-coarse:size-8"
                   onPointerDown={stopPropagationOnPointerDown}
                   onClick={handleStartArchiveConfirmation}
                 >
@@ -819,7 +821,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                           data-thread-selection-safe
                           data-testid={`thread-archive-${thread.id}`}
                           aria-label={`Archive ${thread.title}`}
-                          className="inline-flex size-5 cursor-pointer items-center justify-center text-muted-foreground/60 transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring max-md:size-8"
+                          className="inline-flex size-5 cursor-pointer items-center justify-center text-muted-foreground/60 transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring max-md:size-8 pointer-coarse:size-8"
                           onPointerDown={stopPropagationOnPointerDown}
                           onClick={handleArchiveImmediateClick}
                         >
@@ -861,51 +863,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   );
 });
 
-const SidebarStandaloneDraftRow = memo(function SidebarStandaloneDraftRow({
-  entry,
-  activeTarget,
-  onOpen,
-}: {
-  entry: Extract<StandaloneCatalogEntry, { kind: "draft" }>;
-  activeTarget: ThreadRouteTarget | null;
-  onOpen: (target: ThreadRouteTarget) => void;
-}) {
-  // Subscribe only to a bounded display preview of this existing local draft.
-  // The full prompt remains in its composer-owned store and is never persisted
-  // in navigation preferences, copied into an activity, or sent by this row.
-  const title = useComposerDraftStore((state) =>
-    standaloneDraftTitle(state.getComposerDraft(entry.draft.draftId)?.prompt ?? ""),
-  );
-  const active = activeTarget?.kind === "draft" && activeTarget.draftId === entry.draft.draftId;
-  return (
-    <SidebarMenuSubItem className="w-full">
-      <SidebarMenuSubButton
-        render={
-          <button
-            type="button"
-            aria-label={`${title} draft, created ${formatRelativeTimeLabel(entry.draft.createdAt)}`}
-          />
-        }
-        size="sm"
-        isActive={active}
-        className={resolveThreadRowClassName({ isActive: active, isSelected: false })}
-        onClick={() => onOpen({ kind: "draft", draftId: entry.draft.draftId })}
-      >
-        <span className="min-w-0 flex-1 truncate text-xs">
-          {title} <span className="text-muted-foreground/50">· Draft</span>
-        </span>
-        <span className="shrink-0 text-[10px] text-muted-foreground/40">
-          {formatRelativeTimeLabel(entry.draft.createdAt)}
-        </span>
-      </SidebarMenuSubButton>
-    </SidebarMenuSubItem>
-  );
-});
-
 /**
  * Projectless saved chats share Projects' canonical row and mutation controls.
- * Unsent drafts are navigation identities only: reopening preserves their
- * composer content, while archive/rename never target a nonexistent server row.
+ * Local drafts stay in the composer/Desk until first send creates a canonical
+ * thread. Closing a tab remains view-only.
  * This component intentionally receives shell metadata, not full chat history.
  */
 export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
@@ -916,6 +877,8 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
   jumpLabelByKey,
   onOpen,
   onExpansionChange,
+  onNewChat,
+  newChatDisabled = false,
 }: {
   entries: readonly StandaloneCatalogEntry[];
   previewCount: number;
@@ -924,6 +887,8 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
   jumpLabelByKey: ReadonlyMap<string, string>;
   onOpen: (target: ThreadRouteTarget) => void;
   onExpansionChange: (expanded: boolean) => void;
+  onNewChat: () => void;
+  newChatDisabled?: boolean;
 }) {
   const [renamingThreadKey, setRenamingThreadKey] = useState<string | null>(null);
   const [renamingTitle, setRenamingTitle] = useState("");
@@ -931,7 +896,8 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
   const renamingInputRef = useRef<HTMLInputElement | null>(null);
   const renamingCommittedRef = useRef(false);
   const confirmArchiveButtonRefs = useRef(new Map<string, HTMLButtonElement>());
-  const { archiveThread, deleteThread } = useThreadActions();
+  const { archiveThread, deleteThread, confirmAndDeleteThread } = useThreadActions();
+  const deletingThreadKeysRef = useRef(new Set<string>());
   const isMobile = useIsMobile();
   const archiveRequiresConfirmation =
     useSettings((settings) => settings.confirmThreadArchive) || isMobile;
@@ -940,14 +906,10 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
   const toggleSelection = useThreadSelectionStore((state) => state.toggleThread);
   const rangeSelectTo = useThreadSelectionStore((state) => state.rangeSelectTo);
   const removeFromSelection = useThreadSelectionStore((state) => state.removeFromSelection);
-  const savedRows = useMemo(
-    () => entries.flatMap((entry) => (entry.kind === "server" ? [entry] : [])),
-    [entries],
-  );
-  const orderedKeys = useMemo(() => savedRows.map((entry) => entry.key), [savedRows]);
+  const orderedKeys = useMemo(() => entries.map((entry) => entry.key), [entries]);
   const rowsByKey = useMemo(
-    () => new Map(savedRows.map((entry) => [entry.key, entry.thread])),
-    [savedRows],
+    () => new Map(entries.map((entry) => [entry.key, entry.thread])),
+    [entries],
   );
   const visibleEntries = expanded ? entries : entries.slice(0, previewCount);
   const cancelRename = useCallback(() => {
@@ -1001,6 +963,27 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
     (threadRef: ScopedThreadRef) => onOpen({ kind: "server", threadRef }),
     [onOpen],
   );
+  const attemptDeleteThread = useCallback(
+    async (threadRef: ScopedThreadRef) => {
+      const key = scopedThreadKey(threadRef);
+      if (deletingThreadKeysRef.current.has(key)) return;
+      deletingThreadKeysRef.current.add(key);
+      try {
+        await confirmAndDeleteThread(threadRef);
+      } catch {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not delete chat",
+            description: "Reconnect to the chat's environment before trying again.",
+          }),
+        );
+      } finally {
+        deletingThreadKeysRef.current.delete(key);
+      }
+    },
+    [confirmAndDeleteThread],
+  );
   const handleThreadClick = useCallback(
     (event: React.MouseEvent, threadRef: ScopedThreadRef, keys: readonly string[]) => {
       const key = scopedThreadKey(threadRef);
@@ -1039,20 +1022,16 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
           );
         } else await attemptArchiveThread(threadRef);
       } else if (action === "delete") {
-        try {
-          await deleteThread(threadRef);
-        } catch {
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Could not delete chat",
-              description: "Reconnect to the chat's environment before trying again.",
-            }),
-          );
-        }
+        await attemptDeleteThread(threadRef);
       }
     },
-    [archiveRequiresConfirmation, attemptArchiveThread, beginRename, deleteThread, rowsByKey],
+    [
+      archiveRequiresConfirmation,
+      attemptArchiveThread,
+      attemptDeleteThread,
+      beginRename,
+      rowsByKey,
+    ],
   );
   const handleMultiSelectContextMenu = useCallback(
     async (position: { x: number; y: number }) => {
@@ -1107,51 +1086,45 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
 
   return (
     <SidebarGroup aria-label="Standalone chats" className="px-2 pt-2 pb-1">
-      <div className="mb-1 pl-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/60">
-        Chats
+      <div className="mb-1 flex items-center justify-between pl-2 pr-1.5">
+        <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground/60">
+          Chats
+        </span>
+        <SidebarNewChatButton disabled={newChatDisabled} onClick={onNewChat} />
       </div>
       <SidebarMenuSub className="mx-1 my-0 w-full translate-x-0 gap-0.5 overflow-hidden px-1.5 py-0">
-        {visibleEntries.map((entry) =>
-          entry.kind === "server" ? (
-            <SidebarThreadRow
-              key={JSON.stringify(["server", entry.thread.environmentId, entry.thread.id])}
-              thread={entry.thread}
-              projectCwd={null}
-              orderedProjectThreadKeys={orderedKeys}
-              isActive={
-                activeTarget?.kind === "server" &&
-                scopedThreadKey(activeTarget.threadRef) === entry.key
-              }
-              jumpLabel={jumpLabelByKey.get(entry.key) ?? null}
-              appSettingsConfirmThreadArchive={archiveRequiresConfirmation}
-              renamingThreadKey={renamingThreadKey}
-              renamingTitle={renamingTitle}
-              setRenamingTitle={setRenamingTitle}
-              renamingInputRef={renamingInputRef}
-              renamingCommittedRef={renamingCommittedRef}
-              confirmingArchiveThreadKey={confirmingArchiveThreadKey}
-              setConfirmingArchiveThreadKey={setConfirmingArchiveThreadKey}
-              confirmArchiveButtonRefs={confirmArchiveButtonRefs}
-              handleThreadClick={handleThreadClick}
-              navigateToThread={navigateToThread}
-              handleMultiSelectContextMenu={handleMultiSelectContextMenu}
-              handleThreadContextMenu={handleThreadContextMenu}
-              clearSelection={clearSelection}
-              commitRename={commitRename}
-              cancelRename={cancelRename}
-              beginRename={beginRename}
-              attemptArchiveThread={attemptArchiveThread}
-              openPrLink={ignorePrLink}
-            />
-          ) : (
-            <SidebarStandaloneDraftRow
-              key={entry.key}
-              entry={entry}
-              activeTarget={activeTarget}
-              onOpen={onOpen}
-            />
-          ),
-        )}
+        {visibleEntries.map((entry) => (
+          <SidebarThreadRow
+            key={JSON.stringify(["server", entry.thread.environmentId, entry.thread.id])}
+            thread={entry.thread}
+            projectCwd={null}
+            orderedProjectThreadKeys={orderedKeys}
+            isActive={
+              activeTarget?.kind === "server" &&
+              scopedThreadKey(activeTarget.threadRef) === entry.key
+            }
+            jumpLabel={jumpLabelByKey.get(entry.key) ?? null}
+            appSettingsConfirmThreadArchive={archiveRequiresConfirmation}
+            renamingThreadKey={renamingThreadKey}
+            renamingTitle={renamingTitle}
+            setRenamingTitle={setRenamingTitle}
+            renamingInputRef={renamingInputRef}
+            renamingCommittedRef={renamingCommittedRef}
+            confirmingArchiveThreadKey={confirmingArchiveThreadKey}
+            setConfirmingArchiveThreadKey={setConfirmingArchiveThreadKey}
+            confirmArchiveButtonRefs={confirmArchiveButtonRefs}
+            handleThreadClick={handleThreadClick}
+            navigateToThread={navigateToThread}
+            handleMultiSelectContextMenu={handleMultiSelectContextMenu}
+            handleThreadContextMenu={handleThreadContextMenu}
+            clearSelection={clearSelection}
+            commitRename={commitRename}
+            cancelRename={cancelRename}
+            beginRename={beginRename}
+            attemptArchiveThread={attemptArchiveThread}
+            openPrLink={ignorePrLink}
+          />
+        ))}
       </SidebarMenuSub>
       {entries.length === 0 ? (
         <p className="px-2 py-2 text-xs text-muted-foreground/60">No standalone chats yet</p>
@@ -3558,7 +3531,6 @@ const SidebarChromeFooter = memo(function SidebarChromeFooter() {
 interface SidebarProjectsContentProps {
   sidebarMode: "desk" | "projects";
   onSidebarModeChange: (mode: "desk" | "projects") => void;
-  onNewStandaloneChat: () => void;
   standaloneContent: React.ReactNode;
   deskContent: React.ReactNode;
   primaryEnvironmentBootstrapped: boolean;
@@ -3613,7 +3585,6 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
   const {
     sidebarMode,
     onSidebarModeChange,
-    onNewStandaloneChat,
     standaloneContent,
     deskContent,
     primaryEnvironmentBootstrapped,
@@ -3692,21 +3663,6 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
 
   return (
     <SidebarContent className="min-h-full gap-0">
-      <SidebarGroup className="px-2 pt-1 pb-0">
-        <SidebarMenu>
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              size="sm"
-              disabled={!primaryEnvironmentBootstrapped}
-              className="gap-2 px-2 text-muted-foreground/80 hover:text-foreground"
-              onClick={onNewStandaloneChat}
-            >
-              <SquarePenIcon className="size-3.5" />
-              <span className="flex-1 truncate text-left text-xs">New chat</span>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        </SidebarMenu>
-      </SidebarGroup>
       <div
         role="group"
         aria-label="Sidebar view"
@@ -4280,18 +4236,13 @@ export default function Sidebar() {
     () => sidebarThreads.filter((thread) => thread.archivedAt === null),
     [sidebarThreads],
   );
-  const standaloneDrafts = useComposerDraftStore(
-    useShallow((state) => selectStandaloneDraftSessions(state, workspaceEnvironmentId)),
-  );
   const standaloneCatalog = useMemo(
     () =>
       buildStandaloneCatalog({
         threads: sidebarThreads,
-        drafts: standaloneDrafts,
-        primaryEnvironmentId: workspaceEnvironmentId,
         sortOrder: sidebarThreadSortOrder,
       }),
-    [workspaceEnvironmentId, sidebarThreads, sidebarThreadSortOrder, standaloneDrafts],
+    [sidebarThreads, sidebarThreadSortOrder],
   );
   const [standaloneCatalogExpanded, setStandaloneCatalogExpanded] = useState(false);
   const sortedProjects = useMemo(() => {
@@ -4334,7 +4285,7 @@ export default function Sidebar() {
       ...(standaloneCatalogExpanded
         ? standaloneCatalog
         : standaloneCatalog.slice(0, sidebarThreadPreviewCount)
-      ).flatMap((entry) => (entry.kind === "server" ? [entry.key] : [])),
+      ).map((entry) => entry.key),
       ...sortedProjects.flatMap((project) => {
         const projectThreads = sortThreads(
           (threadsByProjectKey.get(project.projectKey) ?? []).filter(
@@ -4717,9 +4668,10 @@ export default function Sidebar() {
             <SidebarProjectsContent
               sidebarMode={desk.sidebarMode}
               onSidebarModeChange={changeSidebarMode}
-              onNewStandaloneChat={createStandaloneChat}
               standaloneContent={
                 <SidebarStandaloneChats
+                  onNewChat={createStandaloneChat}
+                  newChatDisabled={!primaryEnvironmentBootstrapped}
                   entries={standaloneCatalog}
                   previewCount={sidebarThreadPreviewCount}
                   expanded={standaloneCatalogExpanded}

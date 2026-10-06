@@ -59,6 +59,7 @@ import {
 } from "../providerMaintenance.ts";
 import { resolveProviderRuntimeEnvironment } from "../managedProviderRuntime.ts";
 import { makeClaudeCapabilitiesCacheKey, makeClaudeContinuationGroupKey } from "./ClaudeHome.ts";
+import { makeClaudeAuthenticationEnvironment } from "./ClaudeAuthenticationEnvironment.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("claudeAgent");
@@ -164,6 +165,10 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         binaryPath: runtime.binaryPath,
       } satisfies ClaudeSettings;
       const effectiveEnvironment = runtime.env;
+      const resolveEnvironment = yield* makeClaudeAuthenticationEnvironment(
+        effectiveConfig,
+        effectiveEnvironment,
+      );
       const maintenanceCapabilities =
         effectiveConfig.runtimeSource === "bundled"
           ? runtime.maintenanceCapabilities
@@ -225,6 +230,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
           supportsSubagentConcurrency("claudeAgent", observedCliVersion),
         instanceId,
         environment: effectiveEnvironment,
+        resolveEnvironment,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
         onAuthStatusChanged,
         getModelCapabilities: (model: string) =>
@@ -238,27 +244,40 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
           ),
       };
       const adapter = yield* makeClaudeAdapter(effectiveConfig, adapterOptions);
-      const textGeneration = yield* makeClaudeTextGeneration(effectiveConfig, effectiveEnvironment);
+      const textGeneration = yield* makeClaudeTextGeneration(
+        effectiveConfig,
+        effectiveEnvironment,
+        resolveEnvironment,
+      );
 
-      // Per-instance capabilities cache: keyed on binary + resolved HOME so
-      // account-specific probes never share auth metadata across instances.
+      // Per-instance capabilities cache: include the resolved configuration
+      // scope in each read key so an unresolved legacy probe cannot hide a later
+      // conclusive terminal login behind the five-minute capabilities cache.
       const capabilitiesProbeCache = yield* Cache.make({
         capacity: 1,
         timeToLive: CAPABILITIES_PROBE_TTL,
         lookup: () =>
-          probeClaudeCapabilities(effectiveConfig, effectiveEnvironment).pipe(
+          resolveEnvironment.pipe(
+            Effect.flatMap((environment) => probeClaudeCapabilities(effectiveConfig, environment)),
             Effect.tap((result) => Ref.set(nativeModelsRef, result?.models)),
             Effect.provideService(Path.Path, path),
           ),
       });
       const capabilitiesCacheKey = yield* makeClaudeCapabilitiesCacheKey(effectiveConfig);
 
-      const checkProvider = checkClaudeProviderStatus(
-        effectiveConfig,
-        () => Cache.get(capabilitiesProbeCache, capabilitiesCacheKey),
-        effectiveEnvironment,
-        Ref.get(authFailureRef),
-      ).pipe(
+      const checkProvider = resolveEnvironment.pipe(
+        Effect.flatMap((environment) =>
+          checkClaudeProviderStatus(
+            effectiveConfig,
+            () =>
+              Cache.get(
+                capabilitiesProbeCache,
+                `${capabilitiesCacheKey}\0${environment.CLAUDE_CONFIG_DIR ?? "terminal"}`,
+              ),
+            environment,
+            Ref.get(authFailureRef),
+          ),
+        ),
         Effect.map(stampIdentity),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
         Effect.provideService(Path.Path, path),

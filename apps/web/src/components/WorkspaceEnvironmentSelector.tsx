@@ -8,6 +8,7 @@ import {
 import { EnvironmentId } from "@cafecode/contracts";
 import { reconnectSavedEnvironment } from "../environments/runtime/service";
 import { Button } from "./ui/button";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "./ui/select";
 import { toastManager } from "./ui/toast";
 
 export function WorkspaceEnvironmentSelector() {
@@ -19,6 +20,13 @@ export function WorkspaceEnvironmentSelector() {
   const pathname = useLocation({ select: (s) => s.pathname });
   const savedRemotes = Object.values(records).filter((r) => r.environmentId !== primary);
   if (!primary || savedRemotes.length === 0) return null;
+  const serverItems = [
+    { value: primary, label: readPrimaryEnvironmentDescriptor()?.label ?? "Local server" },
+    ...savedRemotes.map((r) => ({
+      value: r.environmentId,
+      label: `${r.label}${runtime[r.environmentId]?.connectionState === "connected" ? "" : " (offline)"}`,
+    })),
+  ];
   const disconnected =
     selected !== primary && selected && runtime[selected]?.connectionState !== "connected";
   return (
@@ -26,29 +34,37 @@ export function WorkspaceEnvironmentSelector() {
       <label className="text-xs text-muted-foreground" htmlFor="workspace-server">
         Server
       </label>
-      <select
-        id="workspace-server"
-        aria-label="Workspace server"
+      <Select
+        items={serverItems}
         value={selected ?? primary}
-        className="min-w-0 rounded-md border border-border bg-background px-2 py-1.5 text-sm"
-        onChange={(event) => {
-          const id = EnvironmentId.make(event.target.value);
+        onValueChange={(value) => {
+          if (!value) return;
+          const id = EnvironmentId.make(value);
           selectWorkspaceEnvironment(id);
           // A chat route belongs to one exact server. Clear it when explicitly
           // choosing another; each Desk restores its own durable working set.
           if (!pathname.startsWith("/settings")) void navigate({ to: "/" });
         }}
       >
-        <option value={primary}>
-          {readPrimaryEnvironmentDescriptor()?.label ?? "Local server"}
-        </option>
-        {savedRemotes.map((r) => (
-          <option key={r.environmentId} value={r.environmentId}>
-            {r.label}
-            {runtime[r.environmentId]?.connectionState === "connected" ? "" : " (offline)"}
-          </option>
-        ))}
-      </select>
+        <SelectTrigger
+          id="workspace-server"
+          aria-label="Workspace server"
+          className="min-w-0 rounded-md border-border px-2 py-1.5 [&_[data-slot=select-icon]]:flex [&_[data-slot=select-icon]]:shrink-0"
+        >
+          <SelectValue />
+        </SelectTrigger>
+        <SelectPopup alignItemWithTrigger={false} popupClassName="no-drag w-(--anchor-width)">
+          {serverItems.map((item) => (
+            <SelectItem
+              key={item.value}
+              value={item.value}
+              className="[&_[data-slot=select-item-text]]:truncate"
+            >
+              {item.label}
+            </SelectItem>
+          ))}
+        </SelectPopup>
+      </Select>
       {disconnected ? (
         <Button
           size="xs"

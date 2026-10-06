@@ -15,7 +15,7 @@ import {
   resolveClaudeHomePath,
 } from "./ClaudeHome.ts";
 
-// The derived-config-dir assertions below must not see an ambient
+// The default-config-dir assertions below must not see an ambient
 // CLAUDE_CONFIG_DIR (e.g. when this suite runs inside a Claude Code session),
 // since makeClaudeEnvironment deliberately preserves an explicit one. Drop it so
 // the "no override configured" path is exercised deterministically.
@@ -113,9 +113,71 @@ it.layer(NodeServices.layer)("ClaudeHome", (it) => {
 
         expect(yield* resolveClaudeHomePath({ homePath: "" })).toBe(resolved);
         expect(env.HOME).toBe(resolved);
-        expect(env.CLAUDE_CONFIG_DIR).toBe(path.join(resolved, ".claude"));
+        if (process.platform === "darwin") {
+          expect(Object.hasOwn(env, "CLAUDE_CONFIG_DIR")).toBe(false);
+        } else {
+          expect(env.CLAUDE_CONFIG_DIR).toBe(path.join(resolved, ".claude"));
+        }
       }),
     );
+
+    for (const platform of ["darwin", "linux", "win32"] as const) {
+      it.effect(`preserves the default credential-store selection on ${platform}`, () =>
+        Effect.gen(function* () {
+          const path = yield* Path.Path;
+          const resolved = path.resolve(NodeOS.homedir());
+          for (const homePath of ["", " \t "]) {
+            for (const configDir of [undefined, "", " \t "]) {
+              const baseEnv = Object.freeze({
+                HOME: resolved,
+                ...(configDir !== undefined ? { CLAUDE_CONFIG_DIR: configDir } : {}),
+                CAFE_TEST_UNRELATED: "preserved",
+              });
+              const env = yield* makeClaudeEnvironment({ homePath }, baseEnv, platform);
+              expect(env.HOME).toBe(resolved);
+              expect(env.CAFE_TEST_UNRELATED).toBe("preserved");
+              if (platform === "darwin") {
+                expect(Object.hasOwn(env, "CLAUDE_CONFIG_DIR")).toBe(false);
+              } else {
+                expect(env.CLAUDE_CONFIG_DIR).toBe(path.join(resolved, ".claude"));
+              }
+              expect(baseEnv.CLAUDE_CONFIG_DIR).toBe(configDir);
+              expect(Object.hasOwn(baseEnv, "CLAUDE_CONFIG_DIR")).toBe(configDir !== undefined);
+            }
+          }
+        }),
+      );
+
+      it.effect(`retains explicit account-directory selection on ${platform}`, () =>
+        Effect.gen(function* () {
+          const path = yield* Path.Path;
+          const homePath = path.resolve(NodeOS.homedir(), ".claude-work");
+          const configDir = path.resolve(NodeOS.homedir(), ".claude-explicit");
+          const baseEnv = Object.freeze({ HOME: path.resolve(NodeOS.homedir()) });
+          const customHome = yield* makeClaudeEnvironment({ homePath }, baseEnv, platform);
+          expect(customHome.HOME).toBe(homePath);
+          expect(customHome.CLAUDE_CONFIG_DIR).toBe(path.join(homePath, ".claude"));
+
+          // An explicit directory remains authoritative even when it spells the
+          // default path: its scoped Keychain login may belong to another account.
+          for (const explicitConfigDir of [configDir, path.join(baseEnv.HOME, ".claude")]) {
+            const explicitBaseEnv = Object.freeze({
+              ...baseEnv,
+              CLAUDE_CONFIG_DIR: explicitConfigDir,
+            });
+            for (const accountHome of ["", homePath]) {
+              const env = yield* makeClaudeEnvironment(
+                { homePath: accountHome },
+                explicitBaseEnv,
+                platform,
+              );
+              expect(env.CLAUDE_CONFIG_DIR).toBe(explicitConfigDir);
+              expect(explicitBaseEnv.CLAUDE_CONFIG_DIR).toBe(explicitConfigDir);
+            }
+          }
+        }),
+      );
+    }
 
     it.effect("resolves configured Claude HOME and stamps continuation/cache keys with it", () =>
       Effect.gen(function* () {

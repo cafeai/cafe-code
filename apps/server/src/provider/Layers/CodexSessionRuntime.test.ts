@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import * as Toml from "toml";
 import { makeCodexChildUsageAccounting } from "../codexChildUsageAccounting.ts";
+import { observeCodexServiceTier, type CodexServiceTierSnapshot } from "../codexServiceTier.ts";
 
 import { it as effectIt } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
@@ -4705,6 +4706,47 @@ describe("Codex native root completion and aggregate input admission", () => {
       }),
   );
 
+  effectIt.effect(
+    "freezes native routing at admission while later settings remain independent",
+    () =>
+      Effect.gen(function* () {
+        const boundary = yield* makeBoundary();
+        const providerThreadId = "native-root-thread";
+        const serviceTierSnapshotRef = yield* Ref.make<CodexServiceTierSnapshot | undefined>(
+          observeCodexServiceTier({
+            current: undefined,
+            providerThreadId,
+            serviceTier: "priority",
+          }),
+        );
+        yield* boundary.semaphore.withPermits(1)(
+          Ref.update(serviceTierSnapshotRef, (current) =>
+            observeCodexServiceTier({
+              current,
+              providerThreadId,
+              serviceTier: null,
+            }),
+          ),
+        );
+        const admission = yield* admitCodexTurnStartLifecycleBoundary({
+          ...boundary,
+          serviceTierSnapshotRef,
+          expectedCompletedRootTurnId: rootTurnId,
+        });
+        yield* boundary.semaphore.withPermits(1)(
+          Ref.update(serviceTierSnapshotRef, (current) =>
+            observeCodexServiceTier({
+              current,
+              providerThreadId,
+              serviceTier: "ultrafast",
+            }),
+          ),
+        );
+        assert.equal(admission.serviceTierSnapshot?.serviceTier, "default");
+        assert.equal((yield* Ref.get(serviceTierSnapshotRef))?.serviceTier, "ultrafast");
+      }),
+  );
+
   it("exports exact successful root proof without mistaking child liveness for root activity", () => {
     const input = {
       session,
@@ -6750,6 +6792,42 @@ describe("selectCodexActiveSnapshotTurn", () => {
 });
 
 describe("openCodexThread", () => {
+  it.each(["thread/start", "thread/resume"] as const)(
+    "preserves native routing from %s without changing requested settings",
+    async (method) => {
+      for (const serviceTier of [undefined, null, "priority", "ultrafast"]) {
+        const calls: Array<{ method: string; payload: unknown }> = [];
+        const opened = await Effect.runPromise(
+          openCodexThread({
+            client: {
+              raw: {
+                request: (requestedMethod, payload) => {
+                  calls.push({ method: requestedMethod, payload });
+                  return Effect.succeed({
+                    ...makeThreadOpenResponse("native-root"),
+                    ...(serviceTier !== undefined ? { serviceTier } : {}),
+                    privateConfig: { secret: "not-public" },
+                  });
+                },
+              },
+            },
+            threadId: ThreadId.make("thread-1"),
+            runtimeMode: "full-access",
+            cwd: process.cwd(),
+            requestedModel: "gpt-6.1-sol",
+            serviceTier: undefined,
+            resumeThreadId: method === "thread/resume" ? "native-root" : undefined,
+          }),
+        );
+        assert.equal(opened.serviceTier, serviceTier);
+        assert.equal(Reflect.has(opened, "privateConfig"), false);
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0]?.method, method);
+        assert.equal(Reflect.has(calls[0]!.payload as object, "serviceTier"), false);
+      }
+    },
+  );
+
   it.each(["list_turns", "list_items"])(
     "preserves the native thread when its SQLite history rejects %s",
     async (operation) => {

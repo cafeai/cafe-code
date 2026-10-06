@@ -1,6 +1,7 @@
 import { CodexReviewTarget, type RuntimeMode } from "@cafecode/contracts";
 import * as Schema from "effect/Schema";
-import { useRef, useState } from "react";
+import { ChevronDownIcon, ChevronUpIcon, FileSearchIcon } from "lucide-react";
+import { useId, useRef, useState } from "react";
 import { Button } from "../ui/button";
 import {
   Dialog,
@@ -10,6 +11,7 @@ import {
   DialogPopup,
   DialogTitle,
 } from "../ui/dialog";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
 const isReviewTarget = Schema.is(CodexReviewTarget);
 
@@ -18,6 +20,8 @@ export interface NativeCodexReviewProps {
   readonly accountLabel: string;
   readonly runtimeMode: RuntimeMode;
   readonly disabled: boolean;
+  readonly collapsed: boolean;
+  readonly onCollapsedChange: (collapsed: boolean) => void;
   readonly onStart: (target: CodexReviewTarget) => Promise<void>;
 }
 
@@ -27,8 +31,13 @@ export function NativeCodexReview({
   accountLabel,
   runtimeMode,
   disabled,
+  collapsed,
+  onCollapsedChange,
   onStart,
 }: NativeCodexReviewProps) {
+  const tooltipId = useId();
+  const contentId = useId();
+  const toggleTooltipId = useId();
   const [open, setOpen] = useState(false);
   const [kind, setKind] = useState<CodexReviewTarget["type"]>("uncommittedChanges");
   const [value, setValue] = useState("");
@@ -47,17 +56,93 @@ export function NativeCodexReview({
 
   return (
     <>
-      <Button
-        size="xs"
-        variant="ghost"
-        disabled={disabled}
-        onClick={() => {
-          setError(null);
-          setOpen(true);
-        }}
-      >
-        Native review
-      </Button>
+      {/* Starting a review can make the chat busy before its acknowledgement
+          arrives. Hide only the trigger; keep its dialog and pending/error
+          state mounted until that submission settles. */}
+      {!disabled && (
+        <div className="no-drag cafe-code-review-tab-entry inline-flex max-w-full">
+          <div
+            className="cafe-code-review-tab"
+            data-collapsed={collapsed ? "true" : "false"}
+            data-review-open={open ? "true" : "false"}
+          >
+            <svg
+              aria-hidden="true"
+              className="cafe-code-review-tab-shape"
+              viewBox="0 0 180 32"
+              preserveAspectRatio="none"
+            >
+              <path
+                className="cafe-code-review-tab-fill"
+                d="M0 32C9 32 14 31 16 20L18 11C19 5 23 1 30 1H150C157 1 161 5 162 11L164 20C166 31 171 32 180 32Z"
+              />
+              <path
+                className="cafe-code-review-tab-outline"
+                d="M0 32C9 32 14 31 16 20L18 11C19 5 23 1 30 1H150C157 1 161 5 162 11L164 20C166 31 171 32 180 32"
+                vectorEffect="non-scaling-stroke"
+              />
+            </svg>
+            <span id={contentId} className="cafe-code-review-tab-content" hidden={collapsed}>
+              <Tooltip>
+                <TooltipTrigger
+                  delay={250}
+                  render={<span className="inline-flex w-full min-w-0" />}
+                >
+                  <button
+                    type="button"
+                    className="cafe-code-review-tab-action"
+                    disabled={disabled}
+                    aria-haspopup="dialog"
+                    aria-expanded={open}
+                    aria-describedby={tooltipId}
+                    onClick={() => {
+                      setError(null);
+                      setOpen(true);
+                    }}
+                  >
+                    <FileSearchIcon aria-hidden="true" className="size-3.5 shrink-0" />
+                    <span className="truncate">Code review</span>
+                  </button>
+                </TooltipTrigger>
+                <TooltipPopup
+                  id={tooltipId}
+                  role="tooltip"
+                  side="top"
+                  className="no-drag max-w-72 whitespace-normal leading-relaxed"
+                >
+                  Ask Codex to review code for bugs and risks. Choose uncommitted changes, a branch,
+                  a commit, or custom instructions. Findings appear in this chat.
+                </TooltipPopup>
+              </Tooltip>
+            </span>
+            <Tooltip>
+              <TooltipTrigger
+                delay={250}
+                render={
+                  <button
+                    type="button"
+                    className="cafe-code-review-tab-toggle"
+                    aria-label={collapsed ? "Expand code review" : "Minimize code review"}
+                    aria-expanded={!collapsed}
+                    aria-controls={contentId}
+                    aria-describedby={toggleTooltipId}
+                    onClick={() => onCollapsedChange(!collapsed)}
+                  />
+                }
+              >
+                {collapsed ? (
+                  <ChevronUpIcon aria-hidden="true" className="size-3.5" />
+                ) : (
+                  <ChevronDownIcon aria-hidden="true" className="size-3.5" />
+                )}
+              </TooltipTrigger>
+              <TooltipPopup id={toggleTooltipId} role="tooltip" className="no-drag">
+                {collapsed ? "Expand code review" : "Minimize code review"}
+              </TooltipPopup>
+            </Tooltip>
+          </div>
+        </div>
+      )}
       <Dialog
         open={open}
         onOpenChange={(next) => {
@@ -66,7 +151,7 @@ export function NativeCodexReview({
       >
         <DialogPopup className="no-drag max-w-lg">
           <DialogHeader>
-            <DialogTitle>Start a native Codex review</DialogTitle>
+            <DialogTitle>Start a code review</DialogTitle>
             <DialogDescription>
               Review in this chat with {accountLabel}. Uses the current native session and its
               review-model settings, not unsent composer changes.
@@ -77,6 +162,10 @@ export function NativeCodexReview({
               className="space-y-4"
               onSubmit={async (event) => {
                 event.preventDefault();
+                // This dialog is portalled from a tab inside the composer form.
+                // React submit events still bubble through that parent: a review
+                // must never also submit the ordinary unsent composer prompt.
+                event.stopPropagation();
                 if (disabled || pendingRef.current || !isReviewTarget(target)) return;
                 pendingRef.current = true;
                 setPending(true);

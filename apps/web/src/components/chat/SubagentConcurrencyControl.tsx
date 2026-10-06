@@ -2,7 +2,7 @@ import type { ProviderDriverKind } from "@cafecode/contracts";
 import { useState } from "react";
 import { InfoIcon } from "lucide-react";
 import {
-  formatSubagentConcurrencyDetails,
+  formatSubagentConcurrencyLimit,
   validSubagentLimit,
   type SubagentConcurrencyPresentation,
 } from "../../subagentConcurrency";
@@ -24,44 +24,39 @@ export function SubagentConcurrencyDetails({
   showHeading = true,
 }: {
   readonly presentation: SubagentConcurrencyPresentation | null | undefined;
-  /** The editor already has a dialog title; context/rail details need their own heading. */
+  /** The editor already has a dialog title; context/rail labels act as headings. */
   readonly showHeading?: boolean;
 }) {
-  if (!presentation) return null;
-  const wording = formatSubagentConcurrencyDetails(presentation);
+  const label = formatSubagentConcurrencyLimit(presentation);
+  if (label === null) return null;
   return (
     <div
       data-subagent-concurrency-details="true"
-      className="grid min-w-0 max-w-[min(20rem,calc(100vw-3rem))] gap-1.5 text-xs text-muted-foreground [overflow-wrap:anywhere]"
+      className="flex min-w-0 max-w-[min(20rem,calc(100vw-3rem))] items-center gap-1.5 text-xs font-medium text-foreground [overflow-wrap:anywhere]"
     >
-      <div className="flex min-w-0 items-center gap-1.5 font-medium text-foreground">
-        {showHeading ? (
-          <h3 className="min-w-0">Subagent limit</h3>
-        ) : (
-          <span className="min-w-0">{wording.selected}</span>
-        )}
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <Button
-                size="icon-xs"
-                variant="ghost"
-                className="size-5 shrink-0 rounded-sm p-0 text-muted-foreground hover:text-foreground"
-                aria-label="About subagent limits"
-              />
-            }
-          >
-            <InfoIcon aria-hidden="true" className="size-3" />
-          </TooltipTrigger>
-          <TooltipPopup className="max-w-[min(20rem,calc(100vw-2rem))]">
-            Cafe shows the configured setting, but can’t independently confirm the limit the
-            provider enforces.
-          </TooltipPopup>
-        </Tooltip>
-      </div>
-      {showHeading ? <span className="font-medium text-foreground">{wording.selected}</span> : null}
-      <span>{wording.currentSession}</span>
-      {wording.pending ? <span className="leading-relaxed">{wording.pending}</span> : null}
+      {showHeading ? (
+        <h3 className="min-w-0">{label}</h3>
+      ) : (
+        <span className="min-w-0">{label}</span>
+      )}
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Button
+              size="icon-xs"
+              variant="ghost"
+              className="size-5 shrink-0 rounded-sm p-0 text-muted-foreground hover:text-foreground"
+              aria-label="About subagent limits"
+            />
+          }
+        >
+          <InfoIcon aria-hidden="true" className="size-3" />
+        </TooltipTrigger>
+        <TooltipPopup className="max-w-[min(20rem,calc(100vw-2rem))]">
+          This is the saved limit. Changes take effect before a new turn when the session can safely
+          restart. Cafe can’t independently confirm the limit the provider enforces.
+        </TooltipPopup>
+      </Tooltip>
     </div>
   );
 }

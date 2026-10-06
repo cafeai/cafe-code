@@ -304,7 +304,7 @@ function errorDismissalScopeKey(
   return JSON.stringify([dismissal.environmentId, dismissal.threadId]);
 }
 
-function isSameErrorDismissal(
+export function isSameErrorDismissal(
   left: TaskAtriumErrorDismissal,
   right: TaskAtriumErrorDismissal,
 ): boolean {
@@ -344,6 +344,50 @@ export function mergeTaskAtriumErrorDismissals(
   return [...byScope.values()].slice(-MAX_TASK_ATRIUM_ERROR_DISMISSALS);
 }
 
+/** Only Cafe's fixed process-exit diagnostic is eligible for batch dismissal.
+ * Arbitrary provider errors remain separate; their text is never persisted. */
+export function isCodexAppServerExitError(error: string | null | undefined): boolean {
+  return (
+    typeof error === "string" &&
+    /^Codex App Server exited unexpectedly(?: with code -?\d+)?\.$/.test(error)
+  );
+}
+
+/** A restart can leave the same diagnostic on many independent native sessions.
+ * Acknowledge only the exact copies already in this server's shell catalog at
+ * the gesture, without loading histories or claiming those processes recovered.
+ * Each copy retains its own occurrence identity, so future exits are visible. */
+export function collectCodexAppServerExitDismissals(
+  state: AppState,
+  environmentId: EnvironmentId,
+  error: string,
+): TaskAtriumErrorDismissal[] {
+  if (!isCodexAppServerExitError(error)) return [];
+  const environment = state.environmentStateById[environmentId];
+  if (!environment) return [];
+  const dismissals: TaskAtriumErrorDismissal[] = [];
+  for (const summary of Object.values(environment.sidebarThreadSummaryById)) {
+    const threadId = summary.id;
+    const session = environment.threadSessionById[threadId] ?? summary.session ?? null;
+    const shell = environment.threadShellById[threadId];
+    if (session?.provider !== "codex" || session.lastError !== error) continue;
+    // A mounted composer can hold a different local failure than its persisted
+    // session. Do not acknowledge that diagnostic on the user's behalf.
+    if (shell && shell.error !== error) continue;
+    dismissals.push(
+      buildThreadErrorDismissal({
+        environmentId,
+        threadId,
+        session,
+        summary,
+        latestTurn:
+          environment.threadTurnStateById[threadId]?.latestTurn ?? summary.latestTurn ?? null,
+      }),
+    );
+  }
+  return dismissals;
+}
+
 /**
  * Build the Atrium snapshot from store state. `now` is injected so callers can
  * drive the elapsed readouts from one clock and tests stay deterministic.
@@ -358,11 +402,27 @@ export function mergeTaskAtriumErrorDismissals(
 export function buildThreadErrorDismissal(input: {
   environmentId: EnvironmentId;
   threadId: ThreadId;
-  session: { activeTurnId?: TurnId | undefined; updatedAt?: string | undefined } | null;
+  session: {
+    activeTurnId?: TurnId | undefined;
+    updatedAt?: string | undefined;
+    provider?: ThreadSession["provider"];
+    lastError?: string | undefined;
+  } | null;
   latestTurn: OrchestrationLatestTurn | null;
   summary: { updatedAt?: string | undefined; createdAt: string };
 }): TaskAtriumErrorDismissal {
   const { environmentId, threadId, session, latestTurn, summary } = input;
+  if (session?.provider === "codex" && isCodexAppServerExitError(session.lastError)) {
+    // An app-server exit belongs to the session, not an old failed turn. Using
+    // the latter's id would hide a later process exit after another restart if
+    // the chat has not started a new turn in between.
+    return {
+      environmentId,
+      threadId,
+      turnId: null,
+      observedAt: session.updatedAt ?? summary.updatedAt ?? summary.createdAt,
+    };
+  }
   if (latestTurn?.state === "error") {
     return {
       environmentId,

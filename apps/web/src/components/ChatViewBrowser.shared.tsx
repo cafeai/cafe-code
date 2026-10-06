@@ -18,7 +18,7 @@ import {
   type RuntimeMode,
   type ServerConfig,
   type ServerLifecycleWelcomePayload,
-  type ThreadId,
+  ThreadId,
   type TurnId,
   WS_METHODS,
   OrchestrationSessionStatus,
@@ -2127,7 +2127,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
     await setViewport(DEFAULT_VIEWPORT);
     useDeskStore.getState().bindEnvironment(null);
     localStorage.clear();
-    useDeskStore.setState({ desk: createDeskState() });
+    useDeskStore.setState({ desk: createDeskState(), draftEditors: {}, activeDraftId: null });
     document.body.innerHTML = "";
     wsRequests.length = 0;
     customWsRpcResolver = null;
@@ -2152,6 +2152,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       projectExpandedById: {},
       projectOrder: [],
       threadPlanSidebarOpenById: {},
+      codeReviewCollapsed: false,
       threadLastVisitedAtById: {},
       sessionRailDocked: false,
     });
@@ -7712,7 +7713,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       }
     });
 
-    it("creates multiple standalone drafts with zero projects, reopens unsent content, and sends without workspace bootstrap", async () => {
+    it("reuses the standalone editor, preserves sidebar mode, and adds a chat only on first send", async () => {
       const mounted = await mountChatView({
         viewport: DEFAULT_VIEWPORT,
         snapshot: createProjectlessSnapshot(),
@@ -7735,42 +7736,40 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
       });
       try {
-        await page.getByRole("button", { name: "New chat", exact: true }).click();
+        const newChat = page.getByRole("button", { name: "New chat", exact: true });
+        await newChat.click();
         await vi.waitFor(() =>
           expect(mounted.router.state.location.pathname).toMatch(UUID_ROUTE_RE),
         );
-        const first = draftIdFromPath(mounted.router.state.location.pathname);
-        const firstThreadId = draftThreadIdFor(first);
-        useComposerDraftStore.getState().setSubagentLimits(first, { codex: 5 });
-        useComposerDraftStore.getState().setPrompt(first, "First independent conversation");
-        await waitForStandaloneComposerText("First independent conversation");
+        const draftId = draftIdFromPath(mounted.router.state.location.pathname);
+        const threadId = draftThreadIdFor(draftId);
+        expect(useDeskStore.getState().desk.sidebarMode).toBe("projects");
+        expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual([]);
+        expect(useDeskStore.getState().activeDraftId).toBe(draftId);
+        expect(document.querySelector("[data-desk-tab-key]")).toBeNull();
+        expect(document.body.textContent).toContain("No standalone chats yet");
+        useComposerDraftStore.getState().setSubagentLimits(draftId, { codex: 5 });
+        useComposerDraftStore.getState().setPrompt(draftId, "First standalone conversation");
+        await waitForStandaloneComposerText("First standalone conversation");
+        await newChat.click();
+        await waitForLayout();
+        expect(mounted.router.state.location.pathname).toBe(`/draft/${draftId}`);
+        expect(Object.keys(useComposerDraftStore.getState().draftThreadsByThreadKey)).toEqual([
+          draftId,
+        ]);
+        await waitForStandaloneComposerText("First standalone conversation");
+        await page.getByRole("button", { name: "Desk", exact: true }).click();
         await page
           .getByRole("button", { name: "New chat in active tab group", exact: true })
           .click();
-        await vi.waitFor(() =>
-          expect(mounted.router.state.location.pathname).not.toBe(`/draft/${first}`),
-        );
-        const second = draftIdFromPath(mounted.router.state.location.pathname);
-        expect(second).not.toBe(first);
-        expect(useComposerDraftStore.getState().getDraftSession(second)).toMatchObject({
-          projectId: null,
-          logicalProjectKey: null,
-          runtimeMode: "full-access",
-          worktreePath: null,
-          branch: null,
-        });
-        useComposerDraftStore.getState().setPrompt(second, "Second draft stays here");
-        await waitForStandaloneComposerText("Second draft stays here");
-        useDeskStore
-          .getState()
-          .dispatch({ type: "close", tabKey: deskTabKey({ kind: "draft", draftId: second }) });
-        await waitForStandaloneComposerText("First independent conversation");
-        useDeskStore.getState().dispatch({ type: "reopen" });
-        await waitForStandaloneComposerText("Second draft stays here");
-        useDeskStore
-          .getState()
-          .dispatch({ type: "select", tabKey: deskTabKey({ kind: "draft", draftId: first }) });
-        await waitForStandaloneComposerText("First independent conversation");
+        await waitForLayout();
+        expect(mounted.router.state.location.pathname).toBe(`/draft/${draftId}`);
+        expect(useDeskStore.getState().desk.sidebarMode).toBe("desk");
+        expect(document.querySelector("[data-desk-chat-row]")).toBeNull();
+        expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual([]);
+        expect(
+          wsRequests.some((body) => body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand),
+        ).toBe(false);
         expect(document.querySelector('[aria-label="Open in"]')).toBeNull();
         expect(document.body.textContent).not.toContain("Current checkout");
         (await waitForSendButton()).click();
@@ -7781,7 +7780,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
               body.type === "thread.turn.start",
           );
           expect(request).toMatchObject({
-            threadId: firstThreadId,
+            threadId,
             runtimeMode: "full-access",
             subagentLimits: { codex: 5 },
             bootstrap: {
@@ -7798,9 +7797,28 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           expect(bootstrap?.prepareWorktree).toBeUndefined();
           expect(bootstrap?.runSetupScript).toBeUndefined();
         });
-        expect(useComposerDraftStore.getState().getComposerDraft(second)?.prompt).toBe(
-          "Second draft stays here",
-        );
+        fixture.snapshot = addThreadToSnapshot(fixture.snapshot, threadId);
+        fixture.snapshot = {
+          ...fixture.snapshot,
+          threads: fixture.snapshot.threads.map((thread) =>
+            thread.id === threadId
+              ? { ...thread, projectId: null, branch: null, worktreePath: null }
+              : thread,
+          ),
+        };
+        await startPromotedServerThreadViaDomainEvent(threadId);
+        await vi.waitFor(() => {
+          expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual([
+            deskTabKey({ kind: "server", threadRef: threadRefFor(threadId) }),
+          ]);
+          expect(document.querySelectorAll("[data-desk-chat-row]")).toHaveLength(1);
+          expect(useDeskStore.getState().activeDraftId).toBeNull();
+          expect(mounted.router.state.location.pathname).toBe(serverThreadPath(threadId));
+        });
+        expect(useDeskStore.getState().desk.sidebarMode).toBe("desk");
+        await page.getByRole("button", { name: "Projects", exact: true }).click();
+        await expect.element(page.getByTestId(`thread-row-${threadId}`)).toBeVisible();
+        expect(document.querySelectorAll('[data-testid^="thread-row-"]')).toHaveLength(1);
         expect(
           useComposerDraftStore.getState().logicalProjectDraftThreadKeyByLogicalProjectKey,
         ).toEqual({});
@@ -7810,14 +7828,28 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       }
     });
 
-    it("creates in the active Desk group and promotes a background standalone draft without stealing the newer composer", async () => {
+    it("captures the editor's group and promotes its first send without stealing a newer editor", async () => {
       let release!: (value: { sequence: number }) => void;
       const pending = new Promise<{ sequence: number }>((resolve) => {
         release = resolve;
       });
+      const firstSavedId = ThreadId.make("standalone-saved-one");
+      const secondSavedId = ThreadId.make("standalone-saved-two");
+      const withSaved = addThreadToSnapshot(
+        addThreadToSnapshot(createProjectlessSnapshot(), firstSavedId),
+        secondSavedId,
+      );
       const mounted = await mountChatView({
         viewport: { ...DEFAULT_VIEWPORT, width: 1800, height: 1000 },
-        snapshot: createProjectlessSnapshot(),
+        snapshot: {
+          ...withSaved,
+          threads: withSaved.threads.map((thread) => ({
+            ...thread,
+            projectId: null,
+            branch: null,
+            worktreePath: null,
+          })),
+        },
         initialPath: "/",
         configureFixture: configureStandaloneShortcut,
         resolveRpc: (body) =>
@@ -7827,42 +7859,30 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
             : undefined,
       });
       try {
-        newChatShortcut();
+        const desk = useDeskStore.getState();
+        desk.dispatch({
+          type: "open",
+          target: { kind: "server", threadRef: threadRefFor(firstSavedId) },
+        });
+        desk.dispatch({
+          type: "open",
+          target: { kind: "server", threadRef: threadRefFor(secondSavedId) },
+        });
+        const secondKey = deskTabKey({ kind: "server", threadRef: threadRefFor(secondSavedId) });
+        desk.dispatch({ type: "split", tabKey: secondKey, targetGroupId: "g1", edge: "right" });
+        desk.dispatch({ type: "sidebarMode", mode: "desk" });
+        const capturedGroup = useDeskStore.getState().desk.activeGroupId;
+        await waitForLayout();
+        await page
+          .getByRole("button", { name: "New chat in active tab group", exact: true })
+          .click();
         await vi.waitFor(() =>
           expect(mounted.router.state.location.pathname).toMatch(UUID_ROUTE_RE),
         );
         const first = draftIdFromPath(mounted.router.state.location.pathname);
         const firstThreadId = draftThreadIdFor(first);
-        newChatShortcut();
-        await vi.waitFor(() =>
-          expect(mounted.router.state.location.pathname).not.toBe(`/draft/${first}`),
-        );
-        const second = draftIdFromPath(mounted.router.state.location.pathname);
-        const secondKey = deskTabKey({ kind: "draft", draftId: second });
-        useDeskStore
-          .getState()
-          .dispatch({ type: "split", tabKey: secondKey, targetGroupId: "g1", edge: "right" });
-        const capturedGroup = useDeskStore.getState().desk.activeGroupId;
-        newChatShortcut();
-        await vi.waitFor(() =>
-          expect(mounted.router.state.location.pathname).not.toBe(`/draft/${second}`),
-        );
-        const third = draftIdFromPath(mounted.router.state.location.pathname);
-        expect(useDeskStore.getState().desk.groups[capturedGroup]?.tabs).toContain(
-          deskTabKey({ kind: "draft", draftId: third }),
-        );
-        await waitForLayout();
-        const firstTab = await waitForElement(
-          () =>
-            Array.from(document.querySelectorAll<HTMLButtonElement>("[data-desk-tab-key]")).find(
-              (tab) => tab.dataset.deskTabKey === deskTabKey({ kind: "draft", draftId: first }),
-            ) ?? null,
-          "First standalone tab missing",
-        );
-        await userEvent.click(firstTab);
-        await vi.waitFor(() =>
-          expect(mounted.router.state.location.pathname).toBe(`/draft/${first}`),
-        );
+        expect(useDeskStore.getState().draftEditors[first]?.groupId).toBe(capturedGroup);
+        expect(useDeskStore.getState().desk.groups[capturedGroup]?.tabs).toEqual([secondKey]);
         useComposerDraftStore.getState().setPrompt(first, "Send the first chat");
         await waitForStandaloneComposerText("Send the first chat");
         const firstPane = await waitForElement(
@@ -7879,36 +7899,60 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
             ),
           ).toBe(true),
         );
-        useDeskStore
-          .getState()
-          .dispatch({ type: "select", tabKey: deskTabKey({ kind: "draft", draftId: third }) });
-        useComposerDraftStore.getState().setPrompt(third, "Newer composer survives");
+        const originalKey = deskTabKey({ kind: "server", threadRef: threadRefFor(firstSavedId) });
+        const originalTab = await waitForElement(
+          () =>
+            Array.from(document.querySelectorAll<HTMLButtonElement>("[data-desk-tab-key]")).find(
+              (tab) => tab.dataset.deskTabKey === originalKey,
+            ) ?? null,
+          "Saved standalone tab missing",
+        );
+        await userEvent.click(originalTab);
+        await vi.waitFor(() =>
+          expect(mounted.router.state.location.pathname).toBe(serverThreadPath(firstSavedId)),
+        );
+        // Use the sidebar action, outside the chat runtime's React context, to
+        // qualify its observation of the exact first-send gate.
+        await page
+          .getByRole("button", { name: "New chat in active tab group", exact: true })
+          .click();
+        await vi.waitFor(() =>
+          expect(mounted.router.state.location.pathname).toMatch(UUID_ROUTE_RE),
+        );
+        const newer = draftIdFromPath(mounted.router.state.location.pathname);
+        expect(newer).not.toBe(first);
+        expect(useDeskStore.getState().draftEditors[newer]?.groupId).toBe("g1");
+        useComposerDraftStore.getState().setPrompt(newer, "Newer composer survives");
+        await waitForStandaloneComposerText("Newer composer survives");
         release({ sequence: 2 });
         fixture.snapshot = addThreadToSnapshot(fixture.snapshot, firstThreadId);
         fixture.snapshot = {
           ...fixture.snapshot,
           threads: fixture.snapshot.threads.map((thread) =>
             thread.id === firstThreadId
-              ? {
-                  ...thread,
-                  projectId: null,
-                  runtimeMode: "full-access",
-                  branch: null,
-                  worktreePath: null,
-                }
+              ? { ...thread, projectId: null, branch: null, worktreePath: null }
               : thread,
           ),
         };
         await startPromotedServerThreadViaDomainEvent(firstThreadId);
         await vi.waitFor(() => {
-          expect(useDeskStore.getState().desk.groups.g1?.tabs).toContain(
+          expect(useDeskStore.getState().desk.groups[capturedGroup]?.tabs).toContain(
             deskTabKey({ kind: "server", threadRef: threadRefFor(firstThreadId) }),
           );
-          expect(useDeskStore.getState().desk.activeGroupId).toBe(capturedGroup);
-          expect(useComposerDraftStore.getState().getComposerDraft(third)?.prompt).toBe(
-            "Newer composer survives",
-          );
+          expect(useDeskStore.getState().desk.groups[capturedGroup]?.activeTabKey).toBe(secondKey);
+          expect(useDeskStore.getState().desk.activeGroupId).toBe("g1");
+          expect(useDeskStore.getState().activeDraftId).toBe(newer);
+          expect(mounted.router.state.location.pathname).toBe(`/draft/${newer}`);
         });
+        await waitForStandaloneComposerText("Newer composer survives");
+        expect(useDeskStore.getState().desk.sidebarMode).toBe("desk");
+        expect(
+          wsRequests.filter(
+            (body) =>
+              body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+              body.type === "thread.turn.start",
+          ),
+        ).toHaveLength(1);
       } finally {
         release({ sequence: 2 });
         await mounted.cleanup();
