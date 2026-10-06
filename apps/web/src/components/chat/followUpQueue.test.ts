@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { ProviderDriverKind, ProviderInstanceId, TurnId } from "@cafecode/contracts";
 
 import {
   canAutoStartQueuedFollowUpTurn,
   canDispatchRunningQueuedFollowUp,
   canStartQueuedFollowUpTurn,
+  canSteerPriorityToSession,
   canExpandQueuedFollowUpText,
   decideQueuedFollowUpAction,
   decideFollowUpDelivery,
@@ -23,6 +25,138 @@ describe("followUpQueue", () => {
     blockedReason: string | null;
     promptText?: string;
   };
+
+  describe("Claude priority account admission", () => {
+    const selectedAccount = ProviderInstanceId.make("claude-personal");
+    const otherAccount = ProviderInstanceId.make("claude-work");
+
+    it.each(["now", "next", "later"] as const)(
+      "admits %s only for the captured Claude account and keeps queued priority intact",
+      (deliveryPriority) => {
+        const snapshot = Object.freeze({
+          provider: ProviderDriverKind.make("claudeAgent"),
+          modelSelection: Object.freeze({ instanceId: selectedAccount }),
+          deliveryPriority,
+          promptText: "Handle the selected account's message",
+        });
+        const sameAccount = {
+          provider: ProviderDriverKind.make("claudeAgent"),
+          providerInstanceId: selectedAccount,
+        };
+        expect(canSteerPriorityToSession(snapshot, sameAccount)).toBe(true);
+        expect(
+          decideFollowUpDelivery({
+            phase: "running",
+            requestedSteer: true,
+            liveSteerSupported: canSteerPriorityToSession(snapshot, sameAccount),
+          }),
+        ).toBe("steer");
+
+        for (const session of [
+          { provider: ProviderDriverKind.make("claudeAgent"), providerInstanceId: otherAccount },
+          { provider: ProviderDriverKind.make("codex"), providerInstanceId: selectedAccount },
+          { provider: ProviderDriverKind.make("grok"), providerInstanceId: selectedAccount },
+          { provider: ProviderDriverKind.make("claudeAgent") },
+          null,
+          undefined,
+        ]) {
+          const admitted = canSteerPriorityToSession(snapshot, session);
+          expect(admitted).toBe(false);
+          expect(
+            decideFollowUpDelivery({
+              phase: "running",
+              requestedSteer: true,
+              liveSteerSupported: admitted,
+            }),
+          ).toBe("queue");
+          // Admission never strips urgency or substitutes the native account.
+          // The queued object can be sent normally once its account is idle.
+          expect(snapshot).toEqual({
+            provider: "claudeAgent",
+            modelSelection: { instanceId: selectedAccount },
+            deliveryPriority,
+            promptText: "Handle the selected account's message",
+          });
+          expect(
+            decideFollowUpDelivery({
+              phase: "ready",
+              requestedSteer: true,
+              liveSteerSupported: admitted,
+            }),
+          ).toBe("send");
+        }
+      },
+    );
+
+    it.each(["codex", "grok"] as const)("rejects stale priority on a %s snapshot", (provider) => {
+      expect(
+        canSteerPriorityToSession(
+          {
+            provider: ProviderDriverKind.make(provider),
+            modelSelection: { instanceId: selectedAccount },
+            deliveryPriority: "now",
+          },
+          { provider: ProviderDriverKind.make(provider), providerInstanceId: selectedAccount },
+        ),
+      ).toBe(false);
+    });
+
+    it("rechecks the captured turn and runtime after asynchronous preparation", () => {
+      const snapshot = Object.freeze({
+        provider: ProviderDriverKind.make("claudeAgent"),
+        modelSelection: Object.freeze({ instanceId: selectedAccount }),
+        deliveryPriority: "next" as const,
+      });
+      const admittedSession = {
+        provider: ProviderDriverKind.make("claudeAgent"),
+        providerInstanceId: selectedAccount,
+        activeTurnId: TurnId.make("turn-at-admission"),
+        subagentRuntimeId: "runtime-at-admission",
+        createdAt: "2026-10-07T00:00:00.000Z",
+      };
+      expect(canSteerPriorityToSession(snapshot, { ...admittedSession }, admittedSession)).toBe(
+        true,
+      );
+      for (const currentSession of [
+        { ...admittedSession, providerInstanceId: otherAccount },
+        { ...admittedSession, activeTurnId: TurnId.make("replacement-turn") },
+        { ...admittedSession, subagentRuntimeId: "replacement-runtime" },
+        { ...admittedSession, subagentRuntimeId: null },
+        { ...admittedSession, createdAt: "2026-10-07T01:00:00.000Z" },
+        { provider: admittedSession.provider, providerInstanceId: selectedAccount },
+        null,
+      ]) {
+        expect(canSteerPriorityToSession(snapshot, currentSession, admittedSession)).toBe(false);
+      }
+      // Older sessions can lack runtime identity, but a known exact turn is
+      // still required; a missing turn cannot authorize priority delivery.
+      const legacySession = { ...admittedSession, subagentRuntimeId: null };
+      expect(canSteerPriorityToSession(snapshot, legacySession, legacySession)).toBe(true);
+      const noTurn = { provider: admittedSession.provider, providerInstanceId: selectedAccount };
+      expect(canSteerPriorityToSession(snapshot, noTurn, noTurn)).toBe(false);
+      expect(snapshot.deliveryPriority).toBe("next");
+      expect(snapshot.modelSelection.instanceId).toBe(selectedAccount);
+    });
+
+    it("preserves ordinary steering of the active session without an explicit priority", () => {
+      const snapshot = {
+        provider: ProviderDriverKind.make("claudeAgent"),
+        modelSelection: { instanceId: selectedAccount },
+      };
+      const session = {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: otherAccount,
+      };
+      expect(canSteerPriorityToSession(snapshot, session)).toBe(true);
+      expect(
+        decideFollowUpDelivery({
+          phase: "running",
+          requestedSteer: true,
+          liveSteerSupported: canSteerPriorityToSession(snapshot, session),
+        }),
+      ).toBe("steer");
+    });
+  });
 
   describe("running follow-up admission", () => {
     const runningInput = {

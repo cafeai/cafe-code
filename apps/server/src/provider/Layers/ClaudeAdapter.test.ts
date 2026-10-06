@@ -48,6 +48,7 @@ import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Random from "effect/Random";
 import * as Schema from "effect/Schema";
@@ -267,6 +268,8 @@ function makeHarness(config?: {
   readonly deleteNativeSession?: ClaudeAdapterLiveOptions["deleteNativeSession"];
   readonly listNativeSubagents?: ClaudeAdapterLiveOptions["listNativeSubagents"];
   readonly getNativeSubagentMessages?: ClaudeAdapterLiveOptions["getNativeSubagentMessages"];
+  /** Narrow in-memory seam for suspending attachment preparation without real provider I/O. */
+  readonly readAttachmentFile?: FileSystem.FileSystem["readFile"];
 }) {
   const query = new FakeClaudeQuery();
   const queries = [query];
@@ -326,7 +329,15 @@ function makeHarness(config?: {
       ClaudeAdapter,
       Effect.gen(function* () {
         const claudeConfig = decodeClaudeSettings(config?.claudeConfig ?? {});
-        return yield* makeClaudeAdapter(claudeConfig, adapterOptions);
+        const adapter = makeClaudeAdapter(claudeConfig, adapterOptions);
+        if (!config?.readAttachmentFile) return yield* adapter;
+        const fileSystem = yield* FileSystem.FileSystem;
+        return yield* adapter.pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fileSystem,
+            readFile: config.readAttachmentFile,
+          }),
+        );
       }),
     ).pipe(
       Layer.provideMerge(
@@ -964,6 +975,200 @@ describe("ClaudeAdapterLive", () => {
       },
     );
   }
+
+  for (const priority of ["now", "next", "later"] as const) {
+    for (const boundary of [
+      "unchanged",
+      "completed",
+      "replaced",
+      "ended",
+      "failed",
+      "pending-result",
+      "pending-lifecycle-completed",
+      "pending-lifecycle-cancelled",
+      "pending-lifecycle-discarded",
+      "pending-delta",
+    ] as const) {
+      it.effect(
+        `rechecks ${priority} priority after attachment preparation with ${boundary} query`,
+        () =>
+          Effect.gen(function* () {
+            const fileSystem = yield* FileSystem.FileSystem;
+            const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+              prefix: "claude-priority-admission-",
+            });
+            const readingAttachment = yield* Deferred.make<void>();
+            const releaseAttachment = yield* Deferred.make<void>();
+            const loggingMessage = yield* Deferred.make<void>();
+            const releaseLogger = yield* Deferred.make<void>();
+            const attachment = {
+              type: "image" as const,
+              id: "thread-claude-1-12345678-1234-1234-1234-123456789abc",
+              name: "fixture.png",
+              mimeType: "image/png",
+              sizeBytes: 4,
+            };
+            const pendingNativeFrame = boundary.startsWith("pending-");
+            const harness = makeHarness({
+              nativeVersion: "2.1.287",
+              environment: {},
+              cwd: baseDir,
+              baseDir,
+              newQueryPerSession: true,
+              readAttachmentFile: (target) =>
+                Effect.gen(function* () {
+                  assert.equal(path.basename(target), attachmentRelativePath(attachment));
+                  yield* Deferred.succeed(readingAttachment, undefined);
+                  yield* Deferred.await(releaseAttachment);
+                  return Uint8Array.from([1, 2, 3, 4]);
+                }),
+              ...(pendingNativeFrame
+                ? {
+                    nativeEventLogger: {
+                      filePath: "memory://priority-boundary-fixture",
+                      write: () =>
+                        Deferred.succeed(loggingMessage, undefined).pipe(
+                          Effect.andThen(Deferred.await(releaseLogger)),
+                        ),
+                      close: () => Effect.void,
+                    },
+                  }
+                : {}),
+            });
+            yield* Effect.gen(function* () {
+              const adapter = yield* ClaudeAdapter;
+              const session = yield* adapter.startSession({
+                threadId: THREAD_ID,
+                runtimeMode: "approval-required",
+              });
+              const turn = yield* adapter.sendTurn({ threadId: THREAD_ID, input: "first" });
+              const originalInput = harness.getLastCreateQueryInput();
+              assert.ok(originalInput);
+              const iterator = originalInput!.prompt[Symbol.asyncIterator]();
+              const first = yield* Effect.promise(() => iterator.next());
+              assert.equal(first.done, false);
+              assert.equal(promptMessageText(first.value), "first");
+              assert.equal(first.value?.priority, undefined);
+              // Keep the SDK consumer waiting before admission. A stale prompt
+              // cannot be hidden by shutting the queue down after the assertion.
+              const nextPrompt = yield* Effect.promise(() => iterator.next()).pipe(
+                Effect.forkChild,
+              );
+              const completed = yield* Deferred.make<void>();
+              const exited = yield* Deferred.make<void>();
+              yield* adapter.streamEvents.pipe(
+                Stream.runForEach((event) => {
+                  if (event.type === "turn.completed")
+                    return Deferred.succeed(completed, undefined);
+                  if (event.type === "session.exited") return Deferred.succeed(exited, undefined);
+                  return Effect.void;
+                }),
+                Effect.forkChild,
+              );
+              const pendingSteer = yield* adapter
+                .steerTurn({
+                  threadId: THREAD_ID,
+                  expectedTurnId: turn.turnId,
+                  expectedPrioritySession: {
+                    providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+                    subagentRuntimeId: session.subagentRuntimeId ?? null,
+                    activeTurnId: turn.turnId,
+                  },
+                  input: "must stay bound to first turn",
+                  attachments: [attachment],
+                  deliveryPriority: priority,
+                })
+                .pipe(Effect.result, Effect.forkChild);
+              yield* Deferred.await(readingAttachment);
+
+              if (boundary === "completed" || boundary === "pending-result") {
+                harness.query.emit(makeSuccessfulClaudeResult("synthetic-priority"));
+                if (boundary === "completed") {
+                  yield* Deferred.await(completed);
+                }
+              } else if (boundary === "replaced") {
+                yield* adapter.stopSession(THREAD_ID);
+                const replacement = yield* adapter.startSession({
+                  threadId: THREAD_ID,
+                  runtimeMode: "approval-required",
+                });
+                assert.notEqual(replacement.subagentRuntimeId, session.subagentRuntimeId);
+                yield* adapter.sendTurn({ threadId: THREAD_ID, input: "replacement work" });
+              } else if (boundary === "ended" || boundary === "failed") {
+                if (boundary === "ended") harness.query.finish();
+                else harness.query.fail(new Error("Synthetic iterator failure"));
+                yield* Deferred.await(exited);
+              } else if (boundary.startsWith("pending-lifecycle-")) {
+                harness.query.emit({
+                  type: "command_lifecycle",
+                  command_uuid: first.value!.uuid,
+                  state: boundary.slice("pending-lifecycle-".length),
+                  session_id: "synthetic-priority",
+                } as unknown as SDKMessage);
+              } else if (boundary === "pending-delta") {
+                harness.query.emit({
+                  type: "stream_event",
+                  session_id: "synthetic-priority",
+                  parent_tool_use_id: null,
+                  uuid: "00000000-0000-4000-8000-000000000995",
+                  event: {
+                    type: "content_block_delta",
+                    index: 0,
+                    delta: { type: "text_delta", text: "ordinary output" },
+                  },
+                } as SDKMessage);
+              }
+              if (pendingNativeFrame) yield* Deferred.await(loggingMessage);
+              yield* Deferred.succeed(releaseAttachment, undefined);
+              const result = yield* Fiber.join(pendingSteer);
+              const accepted = boundary === "unchanged" || boundary === "pending-delta";
+              assert.equal(result._tag, accepted ? "Success" : "Failure");
+
+              if (accepted) {
+                const delivered = yield* Fiber.join(nextPrompt);
+                assert.equal(delivered.done, false);
+                assert.equal(delivered.value?.priority, priority);
+                assert.equal(promptMessageText(delivered.value), "must stay bound to first turn");
+              } else if (boundary === "replaced") {
+                assert.equal((yield* Fiber.join(nextPrompt)).done, true);
+                const replacementPrompt = yield* Effect.promise(() =>
+                  readFirstPromptMessage(harness.getLastCreateQueryInput()),
+                );
+                assert.equal(promptMessageText(replacementPrompt), "replacement work");
+                assert.equal(replacementPrompt?.priority, undefined);
+              } else if (boundary === "ended" || boundary === "failed") {
+                assert.equal((yield* Fiber.join(nextPrompt)).done, true);
+                assert.deepEqual(yield* adapter.listSessions(), []);
+              } else {
+                yield* Deferred.succeed(releaseLogger, undefined);
+                if (boundary === "pending-result") yield* Deferred.await(completed);
+                // A legitimate unprioritized control prompt proves the waiting
+                // SDK iterator did not receive the rejected priority message.
+                if (boundary.startsWith("pending-lifecycle-")) {
+                  yield* adapter.steerTurn({
+                    threadId: THREAD_ID,
+                    expectedTurnId: turn.turnId,
+                    input: "legitimate control prompt",
+                  });
+                } else {
+                  yield* adapter.sendTurn({
+                    threadId: THREAD_ID,
+                    input: "legitimate control prompt",
+                  });
+                }
+                const delivered = yield* Fiber.join(nextPrompt);
+                assert.equal(delivered.done, false);
+                assert.equal(promptMessageText(delivered.value), "legitimate control prompt");
+                assert.equal(delivered.value?.priority, undefined);
+              }
+              yield* Deferred.succeed(releaseLogger, undefined);
+              assert.equal(harness.createInputs.length, boundary === "replaced" ? 2 : 1);
+            }).pipe(Effect.provide(harness.layer));
+          }).pipe(Effect.provide(NodeServices.layer)),
+      );
+    }
+  }
+
   it.effect(
     "rejects unqualified or scheduled priorities before queue admission and preserves synthetic provenance",
     () => {
@@ -7181,6 +7386,181 @@ describe("ClaudeAdapterLive", () => {
       Effect.provide(harness.layer),
     );
   });
+
+  it.effect(
+    "shows exact Claude tool categories without exposing native payloads or reasoning",
+    () => {
+      const sessionId = "00000000-0000-4000-8000-000000000981";
+      const historyId = "agent-safe-activity-981";
+      const tools = [
+        "Bash",
+        "Read",
+        "Glob",
+        "Grep",
+        "Edit",
+        "Write",
+        "NotebookEdit",
+        "SendMessage",
+        "PRIVATE_UNKNOWN_TOOL",
+        "bash",
+      ];
+      const historyMessages: SessionMessage[] = [
+        {
+          type: "assistant",
+          uuid: "00000000-0000-4000-8000-000000000982",
+          session_id: sessionId,
+          parent_tool_use_id: "PRIVATE_PARENT_TOOL",
+          parent_agent_id: null,
+          message: {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "PRIVATE_REASONING" },
+              { type: "text", text: "Public update remains visible" },
+              ...tools.map((name, index) => ({
+                type: "tool_use" as const,
+                id: `PRIVATE_NATIVE_${index}`,
+                name,
+                input: {
+                  command: "PRIVATE_COMMAND",
+                  file_path: "/PRIVATE_PATH",
+                  recipient: "PRIVATE_RECIPIENT",
+                  content: "PRIVATE_AGENT_MESSAGE",
+                },
+              })),
+              // Other native tool block kinds are visible only as a generic
+              // tool. A familiar name must not promote their different schema.
+              {
+                type: "server_tool_use",
+                id: "PRIVATE_SERVER_CALL",
+                name: "Read",
+                input: { query: "PRIVATE_QUERY" },
+              },
+              {
+                type: "mcp_tool_use",
+                id: "PRIVATE_MCP_CALL",
+                name: "SendMessage",
+                server_name: "PRIVATE_SERVER",
+                input: { recipient: "PRIVATE_RECIPIENT" },
+              },
+            ],
+          },
+        },
+        {
+          type: "user",
+          uuid: "00000000-0000-4000-8000-000000000983",
+          session_id: sessionId,
+          parent_tool_use_id: "PRIVATE_PARENT_TOOL",
+          parent_agent_id: null,
+          message: {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "PRIVATE_NATIVE_0",
+                content: "PRIVATE_TOOL_RESULT",
+              },
+            ],
+          },
+        },
+      ];
+      const harness = makeHarness({
+        listNativeSubagents: async () => [historyId],
+        getNativeSubagentMessages: async () => historyMessages,
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        assert.ok(adapter.readSubagentDetail);
+        const detail = yield* adapter.readSubagentDetail(THREAD_ID, "task-safe-activity-981", {
+          resumeCursor: { resume: sessionId, turnCount: 1 },
+          historyId,
+          cwd: process.cwd(),
+        });
+        assert.deepEqual(
+          detail.activities,
+          (
+            [
+              "command",
+              "file_read",
+              "file_read",
+              "file_read",
+              "file_edit",
+              "file_edit",
+              "file_edit",
+              "agent_message",
+              "tool",
+              "tool",
+              "tool",
+              "tool",
+            ] as const
+          ).map((kind, index) => ({ key: `a${index.toString(36)}`, kind })),
+        );
+        assert.deepEqual(
+          detail.messages.map(({ role, text }) => ({ role, text })),
+          [{ role: "assistant", text: "Public update remains visible" }],
+        );
+        assert.equal(detail.activityHistoryIncomplete, undefined);
+        assert.equal(JSON.stringify(detail).includes("PRIVATE_"), false);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect(
+    "keeps only the most recent bounded Claude activity tail without dropping public messages",
+    () => {
+      const sessionId = "00000000-0000-4000-8000-000000000984";
+      const historyId = "agent-activity-tail-984";
+      const historyMessages: SessionMessage[] = [
+        {
+          type: "assistant",
+          uuid: "00000000-0000-4000-8000-000000000985",
+          session_id: sessionId,
+          parent_tool_use_id: "PRIVATE_PARENT_TOOL",
+          parent_agent_id: null,
+          message: {
+            role: "assistant",
+            content: [
+              { type: "text", text: "Public result survives the activity cutoff" },
+              ...Array.from({ length: 129 }, (_, index) => ({
+                type: "tool_use",
+                id: `PRIVATE_NATIVE_${index}`,
+                name: index === 0 ? "Bash" : "Read",
+                input: { file_path: "/PRIVATE_PATH" },
+              })),
+            ],
+          },
+        },
+      ];
+      const harness = makeHarness({
+        listNativeSubagents: async () => [historyId],
+        getNativeSubagentMessages: async () => historyMessages,
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        assert.ok(adapter.readSubagentDetail);
+        const detail = yield* adapter.readSubagentDetail(THREAD_ID, "task-activity-tail-984", {
+          resumeCursor: { resume: sessionId, turnCount: 1 },
+          historyId,
+          cwd: process.cwd(),
+        });
+        assert.equal(detail.activities?.length, 128);
+        assert.deepEqual(detail.activities?.[0], { key: "a1", kind: "file_read" });
+        assert.deepEqual(detail.activities?.at(-1), {
+          key: `a${(128).toString(36)}`,
+          kind: "file_read",
+        });
+        assert.equal(detail.activityHistoryIncomplete, true);
+        assert.equal(detail.messages[0]?.text, "Public result survives the activity cutoff");
+        assert.equal(detail.truncated, false);
+        assert.equal(JSON.stringify(detail).includes("PRIVATE_"), false);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
 
   it.effect(
     "keeps an ended Claude child pinned to its persisted root when another root is live",

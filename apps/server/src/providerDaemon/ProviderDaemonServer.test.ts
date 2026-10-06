@@ -923,6 +923,7 @@ describe("ProviderDaemonServer", () => {
   it.effect("forwards bounded subagent detail as a read-only daemon RPC", () => {
     const rootToJsonSentinel = "provider-root-to-json-must-not-cross-daemon";
     const nestedToJsonSentinel = "provider-message-to-json-must-not-cross-daemon";
+    const activityToJsonSentinel = "provider-activity-to-json-must-not-cross-daemon";
     const privateFieldSentinel = "provider-private-field-must-not-cross-daemon";
     const readSubagentDetail = vi.fn(
       (_input: { threadId: ThreadId; turnId: TurnId; subagentId: string }) =>
@@ -937,10 +938,27 @@ describe("ProviderDaemonServer", () => {
               privateProviderField: privateFieldSentinel,
               toJSON: () => ({ leaked: nestedToJsonSentinel }),
             },
-            { key: "m1", role: "assistant" as const, text: "## Result\n\nComplete." },
+            {
+              key: "m1",
+              role: "assistant" as const,
+              text: "## Result\n\nComplete.",
+              timestamp: "2026-10-07T00:00:00.000Z",
+              phase: "final_answer" as const,
+            },
           ],
+          activities: [
+            {
+              key: "a0",
+              kind: "command" as const,
+              timestamp: "2026-10-06T23:59:59.000Z",
+              command: privateFieldSentinel,
+              toJSON: () => ({ leaked: activityToJsonSentinel }),
+            },
+          ],
+          activityHistoryIncomplete: true,
+          historyIncomplete: true,
           gaps: [],
-          truncated: false,
+          truncated: true,
           privateProviderField: privateFieldSentinel,
           toJSON: () => ({ leaked: rootToJsonSentinel }),
         }),
@@ -983,6 +1001,7 @@ describe("ProviderDaemonServer", () => {
       const responseText = yield* Effect.promise(() => response.text());
       assert.notInclude(responseText, rootToJsonSentinel);
       assert.notInclude(responseText, nestedToJsonSentinel);
+      assert.notInclude(responseText, activityToJsonSentinel);
       assert.notInclude(responseText, privateFieldSentinel);
       const envelope = decodeProviderDaemonRpcEnvelopeJson(responseText);
       assert.equal(envelope.ok, true);
@@ -992,10 +1011,19 @@ describe("ProviderDaemonServer", () => {
           providerInstanceId: "codex",
           messages: [
             { key: "m0", role: "user", text: "Audit the provider" },
-            { key: "m1", role: "assistant", text: "## Result\n\nComplete." },
+            {
+              key: "m1",
+              role: "assistant",
+              text: "## Result\n\nComplete.",
+              timestamp: "2026-10-07T00:00:00.000Z",
+              phase: "final_answer",
+            },
           ],
+          activities: [{ key: "a0", kind: "command", timestamp: "2026-10-06T23:59:59.000Z" }],
+          activityHistoryIncomplete: true,
+          historyIncomplete: true,
           gaps: [],
-          truncated: false,
+          truncated: true,
         });
       }
       assert.equal(readSubagentDetail.mock.calls.length, 1);

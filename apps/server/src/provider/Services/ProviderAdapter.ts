@@ -9,6 +9,7 @@
  */
 import type {
   ProviderTaskControlInput,
+  SubagentDetailActivity,
   ProviderTaskControlResult,
   ApprovalRequestId,
   ProviderApprovalDecision,
@@ -116,6 +117,8 @@ export interface ProviderSubagentDetailGap {
  * trusted adapter boundary before the value reaches orchestration transports.
  */
 export interface ProviderSubagentDetail {
+  readonly activities?: ReadonlyArray<SubagentDetailActivity> | undefined;
+  readonly activityHistoryIncomplete?: boolean | undefined;
   readonly messages: ReadonlyArray<ProviderSubagentDetailMessage>;
   /** Ordered discontinuities between retained chronological message blocks. */
   readonly gaps: ReadonlyArray<ProviderSubagentDetailGap>;

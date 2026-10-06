@@ -291,6 +291,18 @@ const makePublicProviderSubagentDetailBody = (input: unknown) =>
         omittedUtf8Bytes: gap.omittedUtf8Bytes,
       })),
       truncated: detail.truncated,
+      ...(detail.activities !== undefined
+        ? {
+            activities: detail.activities.map((activity) => ({
+              key: activity.key,
+              kind: activity.kind,
+              ...(activity.timestamp !== undefined ? { timestamp: activity.timestamp } : {}),
+            })),
+          }
+        : {}),
+      ...(detail.activityHistoryIncomplete !== undefined
+        ? { activityHistoryIncomplete: detail.activityHistoryIncomplete }
+        : {}),
       ...(detail.historyIncomplete !== undefined
         ? { historyIncomplete: detail.historyIncomplete }
         : {}),
@@ -2265,6 +2277,16 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         );
       }
       if (
+        input.deliveryPriority !== undefined &&
+        input.modelSelection !== undefined &&
+        input.modelSelection.instanceId !== routed.instanceId
+      ) {
+        return yield* toValidationError(
+          "ProviderService.sendTurn",
+          "The explicit-priority Claude account changed. The message was not delivered.",
+        );
+      }
+      if (
         input.codexReview !== undefined &&
         (routed.adapter.provider !== "codex" ||
           input.attachments.length > 0 ||
@@ -2322,7 +2344,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           const turn = yield* routed.adapter.steerTurn({
             threadId: input.threadId,
             ...(input.deliveryPriority !== undefined
-              ? { deliveryPriority: input.deliveryPriority }
+              ? {
+                  deliveryPriority: input.deliveryPriority,
+                  expectedPrioritySession: {
+                    providerInstanceId: routed.instanceId,
+                    subagentRuntimeId: activeSession.subagentRuntimeId ?? null,
+                    activeTurnId: activeSession.activeTurnId,
+                  },
+                }
               : {}),
             expectedTurnId: activeSession.activeTurnId,
             ...(input.messageId !== undefined ? { messageId: input.messageId } : {}),
@@ -2436,7 +2465,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       const routed = yield* resolveRoutableSession({
         threadId: input.threadId,
         operation: "ProviderService.steerTurn",
-        allowRecovery: true,
+        // A bound priority targets an existing live query. Recovery would
+        // create a different incarnation before discovering the mismatch.
+        allowRecovery: input.deliveryPriority === undefined,
       });
       metricProvider = routed.adapter.provider;
       if (input.deliveryPriority !== undefined && routed.adapter.provider !== "claudeAgent") {
@@ -2444,6 +2475,30 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           "ProviderService.steerTurn",
           "This provider does not support explicit delivery priority.",
         );
+      }
+      if (input.deliveryPriority !== undefined) {
+        // The public service wrapper holds the existing thread lifecycle lock
+        // through this live read and adapter mutation. Do not rely on a stale
+        // projection or let null legacy runtime evidence act as a wildcard.
+        const expected = input.expectedPrioritySession;
+        const live = (yield* routed.adapter.listSessions()).find(
+          (session) => session.threadId === input.threadId,
+        );
+        if (
+          expected === undefined ||
+          routed.instanceId !== expected.providerInstanceId ||
+          input.expectedTurnId !== expected.activeTurnId ||
+          live?.provider !== "claudeAgent" ||
+          live.providerInstanceId !== expected.providerInstanceId ||
+          live.status !== "running" ||
+          live.activeTurnId !== expected.activeTurnId ||
+          (live.subagentRuntimeId ?? null) !== expected.subagentRuntimeId
+        ) {
+          return yield* toValidationError(
+            "ProviderService.steerTurn",
+            "The explicit-priority Claude session changed. The message was not delivered.",
+          );
+        }
       }
       if (routed.adapter.capabilities.liveSteer !== "supported") {
         return yield* toValidationError(
@@ -3281,6 +3336,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       messages: publicDetail.messages,
       gaps: publicDetail.gaps,
       truncated: publicDetail.truncated,
+      ...(publicDetail.activities !== undefined ? { activities: publicDetail.activities } : {}),
+      ...(publicDetail.activityHistoryIncomplete !== undefined
+        ? { activityHistoryIncomplete: publicDetail.activityHistoryIncomplete }
+        : {}),
       ...(publicDetail.historyIncomplete !== undefined
         ? { historyIncomplete: publicDetail.historyIncomplete }
         : {}),

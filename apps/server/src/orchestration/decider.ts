@@ -4,6 +4,7 @@ import type {
   OrchestrationCommand,
   OrchestrationEvent,
   OrchestrationReadModel,
+  ProviderPrioritySessionBinding,
 } from "@cafecode/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -788,6 +789,30 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command.modelSelection.instanceId !== boundProviderInstanceId;
       if (threadHasUnsettledTurnStart(targetThread) && !requestsProviderInstanceSwitch) {
         const activeTurnId = activeTurnIdForSteer(targetThread);
+        // A start may become a steer when the renderer's ready snapshot lags.
+        // Capture its exact canonical recipient now; replay must never borrow
+        // a later Claude account or runtime merely because this chat still runs.
+        let expectedPrioritySession: ProviderPrioritySessionBinding | undefined;
+        if (command.deliveryPriority !== undefined) {
+          const prioritySession = targetThread.session;
+          if (
+            prioritySession?.providerName !== "claudeAgent" ||
+            prioritySession.providerInstanceId === undefined ||
+            prioritySession.status !== "running" ||
+            activeTurnId === null ||
+            prioritySession.activeTurnId !== activeTurnId
+          ) {
+            return yield* new OrchestrationCommandInvariantError({
+              commandType: command.type,
+              detail: "Explicit delivery priority requires the exact active Claude session.",
+            });
+          }
+          expectedPrioritySession = {
+            providerInstanceId: prioritySession.providerInstanceId,
+            subagentRuntimeId: prioritySession.subagentRuntimeId ?? null,
+            activeTurnId,
+          };
+        }
         // The renderer can submit from an older ready snapshot while the
         // authoritative aggregate has already moved to `starting`. Claude can
         // also remain live while briefly projecting `running` without an
@@ -795,7 +820,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         // boundary. Rejecting here loses the renderer's only durable handoff
         // and exposes a recoverable projection race to the user.
         //
-        // Persist one steer intent even when `activeTurnId` is null. The
+        // Ordinary input persists one steer intent even when `activeTurnId`
+        // is null; explicit priority was bound more narrowly above. The
         // ProviderCommandReactor resolves that intent against live provider
         // state in sequence: it steers a materialized active turn, or submits
         // the same message as the next turn when no active provider turn
@@ -834,7 +860,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           payload: {
             threadId: command.threadId,
             ...(command.deliveryPriority !== undefined
-              ? { deliveryPriority: command.deliveryPriority }
+              ? {
+                  deliveryPriority: command.deliveryPriority,
+                  ...(expectedPrioritySession !== undefined ? { expectedPrioritySession } : {}),
+                }
               : {}),
             messageId: command.message.messageId,
             expectedTurnId: activeTurnId,
@@ -997,6 +1026,24 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       });
       const activeTurnId =
         targetThread.session?.status === "running" ? targetThread.session.activeTurnId : null;
+      // Renderer attachment preparation and transport can race an account
+      // switch. Only the observed recipient authorizes urgent steering; never
+      // reinterpret a rejected binding as permission to start another turn.
+      const expectedPrioritySession = command.expectedPrioritySession;
+      if (
+        command.deliveryPriority !== undefined &&
+        (expectedPrioritySession === undefined ||
+          targetThread.session?.providerName !== "claudeAgent" ||
+          targetThread.session.providerInstanceId !== expectedPrioritySession.providerInstanceId ||
+          activeTurnId !== expectedPrioritySession.activeTurnId ||
+          (targetThread.session.subagentRuntimeId ?? null) !==
+            expectedPrioritySession.subagentRuntimeId)
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "The explicit-priority Claude session changed. The message was not delivered.",
+        });
+      }
       const userMessageEvent: Omit<OrchestrationEvent, "sequence"> = {
         ...withEventBase({
           aggregateKind: "thread",
@@ -1060,6 +1107,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             : {}),
           messageId: command.message.messageId,
           expectedTurnId: activeTurnId,
+          ...(command.deliveryPriority !== undefined && expectedPrioritySession !== undefined
+            ? { expectedPrioritySession }
+            : {}),
           ...(command.terminalRecovery !== undefined
             ? { terminalSteerRecovery: command.terminalRecovery }
             : {}),

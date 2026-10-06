@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import * as Toml from "toml";
+import { canonicalizeCodexSubagentDetail } from "./CodexAdapter.ts";
 import { makeCodexChildUsageAccounting } from "../codexChildUsageAccounting.ts";
 import { observeCodexServiceTier, type CodexServiceTierSnapshot } from "../codexServiceTier.ts";
 
@@ -1570,6 +1572,226 @@ describe("Codex subagent thread ownership validation", () => {
             (message) => message.startedAtMs === undefined && message.completedAtMs === undefined,
           ),
         );
+      }),
+  );
+
+  effectIt.effect(
+    "projects typed child activities without retaining native payloads or reasoning",
+    () =>
+      Effect.gen(function* () {
+        const command = (
+          id: string,
+          commandActions: EffectCodexSchema.V2ThreadItemsListResponse__CommandAction[],
+        ): EffectCodexSchema.V2ThreadItemsListResponse__ThreadItem => ({
+          type: "commandExecution",
+          id,
+          command: "PRIVATE_COMMAND",
+          cwd: "/PRIVATE_CWD",
+          commandActions,
+          aggregatedOutput: "PRIVATE_OUTPUT",
+          status: "completed",
+        });
+        const items: EffectCodexSchema.V2ThreadItemsListResponse__ThreadItem[] = [
+          command("PRIVATE_COMMAND_ID", []),
+          command("PRIVATE_READ_ID", [
+            { type: "read", command: "PRIVATE_READ", name: "PRIVATE_NAME", path: "/PRIVATE_PATH" },
+          ]),
+          command("PRIVATE_MIXED_ID", [
+            { type: "read", command: "PRIVATE_READ", name: "PRIVATE_NAME", path: "/PRIVATE_PATH" },
+            { type: "unknown", command: "PRIVATE_WRITE" },
+          ]),
+          {
+            type: "fileChange",
+            id: "PRIVATE_EDIT_ID",
+            status: "completed",
+            changes: [
+              { path: "/PRIVATE_EDIT_PATH", kind: { type: "update" }, diff: "PRIVATE_DIFF" },
+            ],
+          },
+          {
+            type: "collabAgentToolCall",
+            id: "PRIVATE_MESSAGE_ID",
+            tool: "sendMessage",
+            status: "completed",
+            senderThreadId: "PRIVATE_SENDER",
+            receiverThreadIds: ["PRIVATE_RECIPIENT"],
+            prompt: "PRIVATE_MESSAGE",
+            agentsStates: {},
+          },
+          {
+            type: "collabAgentToolCall",
+            id: "PRIVATE_WAIT_ID",
+            tool: "wait",
+            status: "completed",
+            senderThreadId: "PRIVATE_SENDER",
+            receiverThreadIds: ["PRIVATE_RECIPIENT"],
+            agentsStates: {},
+          },
+          ...[
+            "read_file",
+            "apply_patch",
+            "exec_command",
+            "send_message",
+            "followup_task",
+            "PRIVATE_UNKNOWN_TOOL",
+          ].map((tool, index) => ({
+            type: "dynamicToolCall" as const,
+            id: `PRIVATE_DYNAMIC_${index}`,
+            tool,
+            arguments: { secret: "PRIVATE_ARGS" },
+            contentItems: [{ type: "inputText" as const, text: "PRIVATE_RESULT" }],
+            status: "completed" as const,
+          })),
+          {
+            type: "mcpToolCall",
+            id: "PRIVATE_MCP_ID",
+            tool: "PRIVATE_MCP_TOOL",
+            server: "PRIVATE_SERVER",
+            arguments: { secret: "PRIVATE_ARGS" },
+            result: { content: ["PRIVATE_RESULT"] },
+            status: "completed",
+          },
+          {
+            type: "webSearch",
+            id: "PRIVATE_SEARCH_ID",
+            query: "PRIVATE_QUERY",
+            results: ["PRIVATE_RESULT"],
+          },
+          { type: "imageView", id: "PRIVATE_IMAGE_ID", path: "/PRIVATE_IMAGE_PATH" },
+          {
+            type: "reasoning",
+            id: "PRIVATE_REASONING_ID",
+            summary: ["PRIVATE_REASONING"],
+            content: ["PRIVATE_REASONING"],
+          },
+          {
+            type: "functionCallOutput",
+            id: "PRIVATE_RESULT_ID",
+            name: "PRIVATE_TOOL",
+            output: "PRIVATE_RESULT",
+          },
+          { type: "agentMessage", id: "PRIVATE_ASSISTANT_ID", text: "Public progress" },
+        ];
+        const snapshot = yield* readPublicHistoryFixture(() =>
+          Effect.succeed({
+            data: items.map((item) => ({ turnId: "PRIVATE_TURN_ID", item })).toReversed(),
+            nextCursor: null,
+          }),
+        );
+        assert.deepEqual(
+          snapshot.publicActivities?.map((activity) => activity.kind),
+          [
+            "command",
+            "file_read",
+            "command",
+            "file_edit",
+            "agent_message",
+            "tool",
+            "file_read",
+            "file_edit",
+            "command",
+            "agent_message",
+            "agent_message",
+            "tool",
+            "tool",
+            "tool",
+            "file_read",
+          ],
+        );
+        assert.deepEqual(snapshot.publicHistory, [{ role: "assistant", text: "Public progress" }]);
+        assert.doesNotMatch(
+          JSON.stringify(snapshot),
+          /PRIVATE_|reasoning|aggregatedOutput|arguments|receiverThreadIds|diff/,
+        );
+      }),
+  );
+
+  effectIt.effect(
+    "retains the newest bounded activity tail in chronology without counting overlap twice",
+    () =>
+      Effect.gen(function* () {
+        const newest = 159;
+        let pages = 0;
+        const snapshot = yield* readPublicHistoryFixture((input) => {
+          const pageIndex = Number(input.cursor ?? "0");
+          pages += 1;
+          const start = pageIndex * 31;
+          const count = Math.min(32, newest - start + 1);
+          return Effect.succeed({
+            data: Array.from({ length: count }, (_, index) => {
+              const sequence = newest - start - index;
+              return {
+                turnId: "PRIVATE_TURN",
+                completedAtMs: 1_800_000_000_000 + sequence,
+                item: {
+                  type: "imageView" as const,
+                  id: `PRIVATE_ITEM_${sequence}`,
+                  path: "/PRIVATE_IMAGE",
+                },
+              };
+            }),
+            nextCursor: start + count > newest ? null : String(pageIndex + 1),
+          });
+        });
+        assert.equal(pages, 6);
+        assert.deepEqual(snapshot.publicHistory, []);
+        assert.equal(snapshot.publicActivities?.length, 128);
+        assert.deepEqual(snapshot.publicActivities?.[0], {
+          kind: "file_read",
+          identityDigest: createHash("sha256")
+            .update(JSON.stringify(["PRIVATE_TURN", "PRIVATE_ITEM_32"]), "utf16le")
+            .digest("hex"),
+          timestamp: new Date(1_800_000_000_032).toISOString(),
+        });
+        assert.deepEqual(snapshot.publicActivities?.at(-1), {
+          kind: "file_read",
+          identityDigest: createHash("sha256")
+            .update(JSON.stringify(["PRIVATE_TURN", "PRIVATE_ITEM_159"]), "utf16le")
+            .digest("hex"),
+          timestamp: new Date(1_800_000_000_159).toISOString(),
+        });
+        assert.equal(snapshot.activityHistoryIncomplete, true);
+        assert.equal(snapshot.historyIncomplete, false);
+        assert.doesNotMatch(JSON.stringify(snapshot), /PRIVATE_/);
+      }),
+  );
+
+  effectIt.effect(
+    "keeps native activity keys stable as identical untimed tools slide through the bounded window",
+    () =>
+      Effect.gen(function* () {
+        const readWindow = (newest: number) =>
+          readPublicHistoryFixture((input) => {
+            const offset = Number(input.cursor ?? "0");
+            const count = Math.min(input.limit ?? 32, newest - offset + 1);
+            return Effect.succeed({
+              data: Array.from({ length: count }, (_, index) => ({
+                turnId: "PRIVATE_STABLE_TURN",
+                item: {
+                  type: "imageView" as const,
+                  id: `PRIVATE_STABLE_${newest - offset - index}`,
+                  path: "/PRIVATE_IMAGE",
+                },
+              })),
+              nextCursor: offset + count > newest ? null : String(offset + count),
+            });
+          });
+        const first = canonicalizeCodexSubagentDetail(yield* readWindow(128));
+        const next = canonicalizeCodexSubagentDetail(yield* readWindow(129));
+        const firstKeys = first.activities?.map((activity) => activity.key);
+        const nextKeys = next.activities?.map((activity) => activity.key);
+        assert.equal(firstKeys?.length, 128);
+        assert.equal(nextKeys?.length, 128);
+        assert.deepEqual(firstKeys?.slice(1), nextKeys?.slice(0, -1));
+        assert.notEqual(firstKeys?.at(-1), nextKeys?.at(-1));
+        assert.equal(new Set(nextKeys).size, 128);
+        assert.ok(nextKeys?.every((key) => /^a[0-9a-f]{24}$/.test(key)));
+        assert.ok(
+          next.activities?.every(
+            (activity) => activity.kind === "file_read" && activity.timestamp === undefined,
+          ),
+        );
+        assert.doesNotMatch(JSON.stringify([first, next]), /PRIVATE_|identityDigest|path/);
       }),
   );
 

@@ -6,7 +6,15 @@ import {
   type ThreadId,
   type TurnId,
 } from "@cafecode/contracts";
-import { ArrowLeftIcon, LoaderCircleIcon } from "lucide-react";
+import {
+  ArrowLeftIcon,
+  FilePenLineIcon,
+  FileSearchIcon,
+  LoaderCircleIcon,
+  MessageSquareIcon,
+  TerminalIcon,
+  WrenchIcon,
+} from "lucide-react";
 import {
   Fragment,
   useEffect,
@@ -55,6 +63,14 @@ type LoadedSubagentDetail = Awaited<
 
 const EMPTY_SUBAGENT_DETAIL_MESSAGES: LoadedSubagentDetail["messages"] = [];
 const EMPTY_SUBAGENT_DETAIL_GAPS: LoadedSubagentDetail["gaps"] = [];
+const EMPTY_SUBAGENT_DETAIL_ACTIVITIES: NonNullable<LoadedSubagentDetail["activities"]> = [];
+const SUBAGENT_ACTIVITY_PRESENTATION = {
+  command: { label: "Command", icon: TerminalIcon },
+  file_read: { label: "File read", icon: FileSearchIcon },
+  file_edit: { label: "File edit", icon: FilePenLineIcon },
+  agent_message: { label: "Agent message", icon: MessageSquareIcon },
+  tool: { label: "Tool use", icon: WrenchIcon },
+} as const;
 
 type DetailLoadState =
   | { readonly status: "idle" | "loading" }
@@ -147,8 +163,9 @@ function useDetailNow(enabled: boolean): string {
  *
  * The server validates the opaque child id against this exact Cafe
  * thread/turn before it reads Codex or Claude history. The browser receives
- * only bounded public user/assistant text; provider reasoning, tool payloads,
- * commands, paths, and raw errors never cross this boundary.
+ * only bounded public user/assistant text and fixed activity categories;
+ * provider reasoning, tool payloads, commands, paths, recipients, and raw
+ * errors never cross this boundary. Category labels do not assert success.
  */
 export function SubagentDetailView(props: SubagentDetailViewProps) {
   // The durable tuple, not the visible row/name or latest parent provider,
@@ -377,6 +394,10 @@ function BoundSubagentDetailView({
     subagent.description ?? subagent.objective ?? statusLabel(subagent.status);
   const messages =
     loadState.status === "loaded" ? loadState.detail.messages : EMPTY_SUBAGENT_DETAIL_MESSAGES;
+  const activities =
+    loadState.status === "loaded"
+      ? (loadState.detail.activities ?? EMPTY_SUBAGENT_DETAIL_ACTIVITIES)
+      : EMPTY_SUBAGENT_DETAIL_ACTIVITIES;
   const keyedMessages = useMemo(
     () => messages.map((message) => ({ key: message.key, message })),
     [messages],
@@ -402,6 +423,10 @@ function BoundSubagentDetailView({
       last?.omission?.tail ?? null,
       loadState.detail.gaps,
       loadState.detail.truncated,
+      // Tool-only work can advance while public messages are unchanged. Keep
+      // it on the same follow/jump lane without adding another refresh timer.
+      loadState.detail.activities,
+      loadState.detail.activityHistoryIncomplete,
     ]);
   }, [loadState]);
 
@@ -600,6 +625,58 @@ function BoundSubagentDetailView({
             );
           })}
 
+          {loadState.status === "loaded" &&
+          (activities.length > 0 || loadState.detail.activityHistoryIncomplete === true) ? (
+            <section
+              aria-label="Subagent activity"
+              className="min-w-0 border-t border-border/40 pt-4"
+            >
+              <h3 className="mb-2 text-[9px] font-medium uppercase tracking-[0.16em] text-muted-foreground/55">
+                Activity
+              </h3>
+              {/* Provider times can be absent. Keep this bounded activity tail
+                  in its supplied order instead of inventing chronology among
+                  the separately retained public messages above. Never render
+                  tool-owned labels, arguments, outputs, paths, or recipients. */}
+              <ol className="space-y-1" aria-label="Recorded activity">
+                {activities.map((activity) => {
+                  const { label, icon: Icon } = SUBAGENT_ACTIVITY_PRESENTATION[activity.kind];
+                  return (
+                    <li
+                      key={activity.key}
+                      data-subagent-detail-activity={activity.kind}
+                      className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-3 gap-y-1 py-1.5 text-xs text-muted-foreground/80"
+                    >
+                      <span className="inline-flex min-w-0 items-center gap-2">
+                        <Icon aria-hidden="true" className="size-3.5 shrink-0 opacity-70" />
+                        {label}
+                      </span>
+                      {activity.timestamp ? (
+                        <time
+                          dateTime={activity.timestamp}
+                          className="max-w-full text-right font-mono text-[10px] leading-4 tabular-nums break-words text-muted-foreground/55"
+                        >
+                          {SUBAGENT_MESSAGE_TIMESTAMP_FORMATTER.format(
+                            new Date(activity.timestamp),
+                          )}
+                        </time>
+                      ) : null}
+                    </li>
+                  );
+                })}
+              </ol>
+              {loadState.detail.activityHistoryIncomplete === true ? (
+                <p
+                  role="note"
+                  data-subagent-detail-activity-incomplete="true"
+                  className="mt-2 text-[11px] leading-5 text-muted-foreground/55"
+                >
+                  Showing recent activity. Earlier activity is outside this view’s retrieval limit.
+                </p>
+              ) : null}
+            </section>
+          ) : null}
+
           {loadState.status === "unavailable" ? (
             <div
               className="rounded-xl border border-border/40 bg-muted/15 px-3 py-3 text-xs leading-5 text-muted-foreground/65"
@@ -670,7 +747,7 @@ function BoundSubagentDetailView({
             </div>
           ) : null}
 
-          {loadState.status === "loaded" && messages.length === 0 ? (
+          {loadState.status === "loaded" && messages.length === 0 && activities.length === 0 ? (
             <p className="text-xs leading-5 text-muted-foreground/60" role="status">
               No public subagent messages were saved for this task. The task summary above is still
               available.

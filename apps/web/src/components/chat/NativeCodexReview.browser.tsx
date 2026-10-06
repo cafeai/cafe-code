@@ -2,200 +2,72 @@ import "../../index.css";
 import { render } from "vitest-browser-react";
 import { describe, expect, it, vi } from "vitest";
 import { page } from "vitest/browser";
-import type { CodexReviewTarget } from "@cafecode/contracts";
-import type { FormEvent } from "react";
+import type { CodexReviewTarget, RuntimeMode } from "@cafecode/contracts";
+import { useState, type FormEvent } from "react";
 import { NativeCodexReview } from "./NativeCodexReview";
-import { useUiStateStore } from "../../uiStateStore";
 
-const expandedTabProps = { collapsed: false, onCollapsedChange: () => {} };
-
-function EditorReviewTab({
-  label,
+/** The composer owns the menu gesture and open state; the native operation is
+ * only a controlled dialog and must never put another tab on the editor. */
+function ReviewDialogHarness({
+  disabled = false,
+  accountLabel = "Codex personal",
+  runtimeMode = "approval-required",
   onStart,
 }: {
-  label: string;
+  disabled?: boolean;
+  accountLabel?: string;
+  runtimeMode?: RuntimeMode;
   onStart: (target: CodexReviewTarget) => Promise<void>;
 }) {
-  const collapsed = useUiStateStore((store) => store.codeReviewCollapsed);
-  const onCollapsedChange = useUiStateStore((store) => store.setCodeReviewCollapsed);
+  const [open, setOpen] = useState(false);
   return (
-    <section aria-label={label}>
+    <>
+      <button type="button" onClick={() => setOpen(true)}>
+        Open review dialog
+      </button>
       <NativeCodexReview
-        accountLabel={label}
-        runtimeMode="approval-required"
-        disabled={false}
-        collapsed={collapsed}
-        onCollapsedChange={onCollapsedChange}
+        open={open}
+        onOpenChange={setOpen}
+        accountLabel={accountLabel}
+        runtimeMode={runtimeMode}
+        disabled={disabled}
         onStart={onStart}
       />
-    </section>
+    </>
   );
 }
 
-describe("native Codex review controls", () => {
-  it("shares minimize and restore across open panes and newly opened chats", async () => {
-    const originalCollapsed = useUiStateStore.getState().codeReviewCollapsed;
+describe("native Codex review dialog", () => {
+  it("renders no standalone review tab or minimize control while closed", async () => {
     const start = vi.fn<(target: CodexReviewTarget) => Promise<void>>().mockResolvedValue();
-    const content = (labels: string[]) => (
-      <>
-        {labels.map((label) => (
-          <EditorReviewTab key={label} label={label} onStart={start} />
-        ))}
-      </>
-    );
-    useUiStateStore.getState().setCodeReviewCollapsed(false);
-    try {
-      const view = await render(content(["Local chat", "Remote chat"]));
-      await page
-        .getByRole("region", { name: "Local chat" })
-        .getByRole("button", { name: "Minimize code review", exact: true })
-        .click();
-      for (const label of ["Local chat", "Remote chat"]) {
-        const region = page.getByRole("region", { name: label });
-        await expect
-          .element(region.getByRole("button", { name: "Expand code review", exact: true }))
-          .toBeEnabled();
-        await expect
-          .element(
-            region.getByRole("button", { name: "Code review", exact: true, includeHidden: true }),
-          )
-          .not.toBeVisible();
-      }
-      await view.rerender(content(["Remote chat", "New chat"]));
-      await expect
-        .element(
-          page
-            .getByRole("region", { name: "New chat" })
-            .getByRole("button", { name: "Expand code review", exact: true }),
-        )
-        .toBeEnabled();
-      await page
-        .getByRole("region", { name: "Remote chat" })
-        .getByRole("button", { name: "Expand code review", exact: true })
-        .click();
-      await view.rerender(content(["Local chat", "Remote chat", "New chat"]));
-      for (const label of ["Local chat", "Remote chat", "New chat"]) {
-        await expect
-          .element(
-            page
-              .getByRole("region", { name: label })
-              .getByRole("button", { name: "Code review", exact: true }),
-          )
-          .toBeEnabled();
-      }
-      expect(start).not.toHaveBeenCalled();
-    } finally {
-      useUiStateStore.getState().setCodeReviewCollapsed(originalCollapsed);
-    }
-  });
-
-  it("can minimize and expand without submitting a review or a chat prompt", async () => {
-    const start = vi.fn<(target: CodexReviewTarget) => Promise<void>>().mockResolvedValue();
-    const collapse = vi.fn();
-    const submitComposer = vi.fn((event: FormEvent) => event.preventDefault());
-    const content = (collapsed: boolean) => (
-      <form onSubmit={submitComposer}>
-        <NativeCodexReview
-          accountLabel="Codex personal"
-          runtimeMode="approval-required"
-          disabled={false}
-          collapsed={collapsed}
-          onCollapsedChange={collapse}
-          onStart={start}
-        />
-      </form>
-    );
-    const view = await render(content(false));
-    await page.getByRole("button", { name: "Minimize code review", exact: true }).click();
-    expect(collapse).toHaveBeenCalledExactlyOnceWith(true);
-    await view.rerender(content(true));
-    const expand = page.getByRole("button", { name: "Expand code review", exact: true });
-    await expect.element(expand).toBeEnabled();
-    await expect.element(expand).toHaveAttribute("aria-expanded", "false");
-    await expect
-      .element(page.getByRole("button", { name: "Code review", exact: true, includeHidden: true }))
-      .not.toBeVisible();
-    await expand.click();
-    expect(collapse).toHaveBeenLastCalledWith(false);
-    await view.rerender(content(false));
-    await expect
-      .element(page.getByRole("button", { name: "Code review", exact: true }))
-      .toBeEnabled();
-    await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
-    expect(start).not.toHaveBeenCalled();
-    expect(submitComposer).not.toHaveBeenCalled();
-  });
-
-  it("hides unavailable review controls while letting an already submitted review settle", async () => {
-    let resolve!: () => void;
-    const start = vi.fn(
-      () =>
-        new Promise<void>((done) => {
-          resolve = done;
-        }),
-    );
-    const content = (disabled: boolean, collapsed = false) => (
+    await render(
       <NativeCodexReview
-        {...expandedTabProps}
+        open={false}
+        onOpenChange={vi.fn()}
         accountLabel="Codex personal"
         runtimeMode="approval-required"
-        disabled={disabled}
-        collapsed={collapsed}
+        disabled={false}
         onStart={start}
-      />
+      />,
     );
-    const view = await render(content(false));
-    await page.getByRole("button", { name: "Code review", exact: true }).click();
-    await page.getByRole("button", { name: "Start review", exact: true }).click();
-    await view.rerender(content(true));
-    await expect
-      .element(page.getByRole("button", { name: "Code review", exact: true }))
-      .not.toBeInTheDocument();
-    await expect
-      .element(page.getByRole("button", { name: "Minimize code review", exact: true }))
-      .not.toBeInTheDocument();
-    await expect
-      .element(page.getByRole("button", { name: "Starting review…", exact: true }))
-      .toBeDisabled();
-    expect(start).toHaveBeenCalledTimes(1);
-    resolve();
     await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
-    await view.rerender(content(true, true));
-    await expect
-      .element(page.getByRole("button", { name: "Expand code review", exact: true }))
-      .not.toBeInTheDocument();
-    await view.rerender(content(false, true));
-    await expect
-      .element(page.getByRole("button", { name: "Expand code review", exact: true }))
-      .toBeVisible();
-    expect(start).toHaveBeenCalledTimes(1);
+    await expect.element(page.getByRole("button")).not.toBeInTheDocument();
+    expect(document.querySelector(".cafe-code-review-tab")).toBeNull();
+    expect(start).not.toHaveBeenCalled();
   });
 
-  it("explains the tab on hover and submits only the review from its portalled dialog", async () => {
+  it("submits only the review from its portalled dialog inside a composer form", async () => {
     const start = vi.fn<(target: CodexReviewTarget) => Promise<void>>().mockResolvedValue();
     const submitComposer = vi.fn((event: FormEvent) => event.preventDefault());
     await render(
       <form onSubmit={submitComposer}>
-        <NativeCodexReview
-          {...expandedTabProps}
-          accountLabel="Codex personal"
-          runtimeMode="approval-required"
-          disabled={false}
-          onStart={start}
-        />
+        <ReviewDialogHarness onStart={start} />
       </form>,
     );
-    const tab = page.getByRole("button", { name: "Code review", exact: true });
-    await tab.hover();
-    await expect
-      .element(page.getByRole("tooltip"))
-      .toHaveTextContent(
-        "Ask Codex to review code for bugs and risks. Choose uncommitted changes, a branch, a commit, or custom instructions. Findings appear in this chat.",
-      );
+    await page.getByRole("button", { name: "Open review dialog", exact: true }).click();
     expect(start).not.toHaveBeenCalled();
     expect(submitComposer).not.toHaveBeenCalled();
-    await tab.click();
-    await expect.element(page.getByRole("dialog", { name: "Start a code review" })).toBeVisible();
+    await expect.element(page.getByRole("dialog", { name: "Start a Codex review" })).toBeVisible();
     await page.getByRole("button", { name: "Start review", exact: true }).click();
     expect(start).toHaveBeenCalledExactlyOnceWith({ type: "uncommittedChanges" });
     expect(submitComposer).not.toHaveBeenCalled();
@@ -225,21 +97,13 @@ describe("native Codex review controls", () => {
     "submits the exact $kind structured target only after an explicit gesture",
     async ({ kind, label, value, target }) => {
       const start = vi.fn<(target: CodexReviewTarget) => Promise<void>>().mockResolvedValue();
-      await render(
-        <NativeCodexReview
-          {...expandedTabProps}
-          accountLabel="Codex personal"
-          runtimeMode="approval-required"
-          disabled={false}
-          onStart={start}
-        />,
-      );
+      await render(<ReviewDialogHarness onStart={start} />);
       expect(start).not.toHaveBeenCalled();
-      await page.getByRole("button", { name: "Code review", exact: true }).click();
+      await page.getByRole("button", { name: "Open review dialog", exact: true }).click();
       await expect
         .element(
           page.getByText(
-            "Review in this chat with Codex personal. Uses the current native session and its review-model settings, not unsent composer changes.",
+            "Ask Codex to check code for bugs and risks. Findings appear in this chat. Review in this chat with Codex personal. Uses the current native session and its review-model settings, not unsent composer changes.",
             { exact: true },
           ),
         )
@@ -264,18 +128,12 @@ describe("native Codex review controls", () => {
     },
   );
 
-  it("rejects unsafe reference spelling, has no hidden automatic retry and sanitizes failures", async () => {
+  it("rejects unsafe reference spelling, has no automatic retry and sanitizes failures", async () => {
     const start = vi.fn().mockRejectedValue(new Error("private-token-and-path"));
     await render(
-      <NativeCodexReview
-        {...expandedTabProps}
-        accountLabel="Codex work"
-        runtimeMode="full-access"
-        disabled={false}
-        onStart={start}
-      />,
+      <ReviewDialogHarness accountLabel="Codex work" runtimeMode="full-access" onStart={start} />,
     );
-    await page.getByRole("button", { name: "Code review", exact: true }).click();
+    await page.getByRole("button", { name: "Open review dialog", exact: true }).click();
     await expect.element(page.getByText(/This chat currently has full access/)).toBeVisible();
     await page.getByRole("combobox", { name: "Review target" }).selectOptions("baseBranch");
     await page.getByRole("textbox", { name: "Base branch" }).fill("--upload-pack=evil");
@@ -293,7 +151,7 @@ describe("native Codex review controls", () => {
     expect(start).toHaveBeenCalledTimes(1);
   });
 
-  it("blocks duplicate submission while acknowledgement is pending and resets on exact account identity change", async () => {
+  it("keeps an acknowledged submission single-flight as the chat becomes busy", async () => {
     let resolve!: () => void;
     const start = vi.fn(
       () =>
@@ -301,38 +159,66 @@ describe("native Codex review controls", () => {
           resolve = done;
         }),
     );
-    const view = await render(
-      <NativeCodexReview
-        {...expandedTabProps}
-        key="personal"
-        accountLabel="Personal"
-        runtimeMode="approval-required"
-        disabled={false}
-        onStart={start}
-      />,
-    );
-    await page.getByRole("button", { name: "Code review", exact: true }).click();
+    const view = await render(<ReviewDialogHarness onStart={start} />);
+    await page.getByRole("button", { name: "Open review dialog", exact: true }).click();
     await page.getByRole("button", { name: "Start review", exact: true }).click();
+    await view.rerender(<ReviewDialogHarness disabled onStart={start} />);
     await expect
       .element(page.getByRole("button", { name: "Starting review…", exact: true }))
       .toBeDisabled();
     await expect.element(page.getByRole("button", { name: "Cancel", exact: true })).toBeDisabled();
     expect(start).toHaveBeenCalledTimes(1);
-    await view.rerender(
-      <NativeCodexReview
-        {...expandedTabProps}
-        key="work"
-        accountLabel="Work"
-        runtimeMode="approval-required"
-        disabled={true}
-        onStart={start}
-      />,
-    );
     resolve();
     await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
-    await expect
-      .element(page.getByRole("button", { name: "Code review", exact: true }))
-      .not.toBeInTheDocument();
     expect(start).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let an old acknowledgement close a replacement dialog with the same account key", async () => {
+    let acknowledge!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      acknowledge = resolve;
+    });
+    const start = vi.fn(() => pending);
+    // The composer owner survives account switches. Reuse its callback so an
+    // old instance's late close would reach the replacement account's state.
+    const onOpenChange = vi.fn();
+    const dialog = (
+      <NativeCodexReview
+        key="same-codex-account"
+        open
+        onOpenChange={onOpenChange}
+        accountLabel="Codex personal"
+        runtimeMode="approval-required"
+        disabled={false}
+        onStart={start}
+      />
+    );
+    const view = await render(dialog);
+    try {
+      await page.getByRole("button", { name: "Start review", exact: true }).click();
+      await expect
+        .element(page.getByRole("button", { name: "Starting review…", exact: true }))
+        .toBeDisabled();
+      await view.rerender(<span>Claude selected</span>);
+      await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+      await view.rerender(dialog);
+      await page.getByRole("combobox", { name: "Review target" }).selectOptions("custom");
+      await page
+        .getByRole("textbox", { name: "Review instructions" })
+        .fill("Replacement review draft");
+      acknowledge();
+      await pending;
+      expect(onOpenChange).not.toHaveBeenCalled();
+      await expect
+        .element(page.getByRole("dialog", { name: "Start a Codex review" }))
+        .toBeVisible();
+      await expect
+        .element(page.getByRole("textbox", { name: "Review instructions" }))
+        .toHaveValue("Replacement review draft");
+      expect(start).toHaveBeenCalledTimes(1);
+    } finally {
+      acknowledge();
+      await view.unmount();
+    }
   });
 });

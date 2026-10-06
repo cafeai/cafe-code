@@ -162,7 +162,11 @@ import {
 } from "../Errors.ts";
 import { type ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import type { ProviderSubagentDetail } from "../Services/ProviderAdapter.ts";
-import { canonicalizeProviderSubagentDetail } from "../subagentDetail.ts";
+import {
+  canonicalizeProviderSubagentDetail,
+  canonicalizeProviderSubagentActivities,
+  type ProviderSubagentActivityInput,
+} from "../subagentDetail.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.UnknownFromJsonString);
 const decodeUnknownJsonStringExit = Schema.decodeUnknownExit(Schema.UnknownFromJsonString);
@@ -521,6 +525,10 @@ interface ClaudeSessionContext {
   taskLivenessUncertain: boolean;
   /** SDK messages consumed from the iterator but not fully projected. */
   inFlightSdkMessageCount: number;
+  /** Result/terminal lifecycle frames fence priority delivery before async projection. */
+  inFlightSdkTurnBoundaryCount: number;
+  /** Iterator termination is authoritative before asynchronous session retirement. */
+  sdkStreamEnded: boolean;
   /** Changes at iterator ingress, before asynchronous normalization. */
   sdkMessageRevision: number;
   /** Native close threw; never admit another owner until explicit recovery. */
@@ -2160,6 +2168,13 @@ function isTerminalClaudeCommandLifecycleState(state: ClaudeCommandLifecycleStat
   return state === "completed" || state === "cancelled" || state === "discarded";
 }
 
+/** Only turn-retiring frames fence explicit priority; ordinary deltas remain deliverable. */
+function isClaudePriorityTurnBoundaryMessage(message: SDKMessage): boolean {
+  if (message.type === "result") return true;
+  const lifecycle = readClaudeCommandLifecycleMessage(message);
+  return lifecycle !== undefined && isTerminalClaudeCommandLifecycleState(lifecycle.state);
+}
+
 type ClaudePromptCorrelation = {
   readonly user_message_uuid?: unknown;
   readonly user_message_uuids?: unknown;
@@ -3711,6 +3726,36 @@ function extractClaudeSubagentSessionMessageText(message: SessionMessage): strin
     })
     .join("\n\n");
   return text.trim().length > 0 ? text : undefined;
+}
+
+/** Fixed categories from explicit tool-use blocks, never arguments or output. */
+function* claudeSubagentActivities(
+  messages: ReadonlyArray<SessionMessage>,
+): Iterable<ProviderSubagentActivityInput> {
+  for (const message of messages) {
+    if (message.type !== "assistant") continue;
+    const content = recordValue(message.message)?.content;
+    if (!Array.isArray(content)) continue;
+    for (const entry of content) {
+      const block = recordValue(entry);
+      if (block?.type === "server_tool_use" || block?.type === "mcp_tool_use") {
+        yield { kind: "tool" };
+        continue;
+      }
+      if (block?.type !== "tool_use" || typeof block.name !== "string") continue;
+      const kind =
+        block.name === "Bash"
+          ? "command"
+          : block.name === "Read" || block.name === "Glob" || block.name === "Grep"
+            ? "file_read"
+            : block.name === "Edit" || block.name === "Write" || block.name === "NotebookEdit"
+              ? "file_edit"
+              : block.name === "SendMessage"
+                ? "agent_message"
+                : "tool";
+      yield { kind };
+    }
+  }
 }
 
 function extractExitPlanModePlan(value: unknown): string | undefined {
@@ -7526,14 +7571,26 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           const iterator = context.query[Symbol.asyncIterator]();
           return {
             async next() {
-              const message = await iterator.next();
-              // Count before stream batching or logger/normalizer awaits can
-              // hide a consumed task_started edge from idle retirement.
-              if (!message.done) {
-                context.inFlightSdkMessageCount += 1;
-                context.sdkMessageRevision += 1;
+              try {
+                const message = await iterator.next();
+                // Count before stream batching or logger/normalizer awaits can
+                // hide a consumed task_started edge from idle retirement, or a
+                // terminal result from explicit-priority admission. None of
+                // these new priority-only fences change ordinary steer rules.
+                if (message.done) {
+                  context.sdkStreamEnded = true;
+                } else {
+                  context.inFlightSdkMessageCount += 1;
+                  context.sdkMessageRevision += 1;
+                  if (isClaudePriorityTurnBoundaryMessage(message.value)) {
+                    context.inFlightSdkTurnBoundaryCount += 1;
+                  }
+                }
+                return message;
+              } catch (cause) {
+                context.sdkStreamEnded = true;
+                throw cause;
               }
-              return message;
             },
             ...(iterator.return ? { return: () => iterator.return!() } : {}),
           };
@@ -7547,6 +7604,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           Effect.ensuring(
             Effect.sync(() => {
               context.inFlightSdkMessageCount = Math.max(0, context.inFlightSdkMessageCount - 1);
+              if (isClaudePriorityTurnBoundaryMessage(message)) {
+                context.inFlightSdkTurnBoundaryCount = Math.max(
+                  0,
+                  context.inFlightSdkTurnBoundaryCount - 1,
+                );
+              }
             }),
           ),
         ),
@@ -8620,6 +8683,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         environment: sessionEnvironment,
         taskLivenessUncertain: false,
         inFlightSdkMessageCount: 0,
+        inFlightSdkTurnBoundaryCount: 0,
+        sdkStreamEnded: false,
         sdkMessageRevision: 0,
         queryClosureUncertain: false,
         rewindRetirementUncertain: false,
@@ -9532,7 +9597,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ? []
           : [{ role: message.type, text } as const];
       });
-      return canonicalizeProviderSubagentDetail(publicMessages) satisfies ProviderSubagentDetail;
+      return {
+        ...canonicalizeProviderSubagentDetail(publicMessages),
+        ...canonicalizeProviderSubagentActivities(claudeSubagentActivities(messages)),
+      } satisfies ProviderSubagentDetail;
     }).pipe(
       // One authenticated UI read has one wall-clock budget. Per-request
       // timeouts redact individual SDK failures, but without this outer cap a
@@ -9907,6 +9975,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
     }
 
+    // Keep the object identity as well as the public turn id. A resumed query
+    // can reuse history, but it must never inherit an in-flight priority steer.
+    const admittedTurnState = context.turnState;
     const messageUuid = yield* Random.nextUUIDv4;
     const message = yield* buildUserMessageEffect(input, {
       fileSystem,
@@ -9915,6 +9986,79 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       method: "turn/steer",
       messageUuid,
     });
+
+    if (input.deliveryPriority !== undefined) {
+      return yield* Effect.suspend(() => {
+        const expectedSession = input.expectedPrioritySession;
+        // Attachment preparation yields. Native result/lifecycle processing is
+        // independent of ProviderService's session lock, so the entry checks
+        // alone cannot authorize this later queue write. An unprojected terminal
+        // frame is inconclusive too: a result can be awaiting its native logger
+        // while the old turn still appears running. Ordinary token deltas do
+        // not fence delivery. Fail closed without registering a prompt or
+        // retrying against a replacement turn/query.
+        if (
+          sessions.get(input.threadId) !== context ||
+          context.stopped ||
+          context.queryClosureUncertain ||
+          context.inFlightSdkTurnBoundaryCount > 0 ||
+          context.sdkStreamEnded ||
+          context.session.status !== "running" ||
+          context.turnState !== admittedTurnState ||
+          context.turnState.turnId !== input.expectedTurnId ||
+          context.session.activeTurnId !== input.expectedTurnId ||
+          (expectedSession !== undefined &&
+            (expectedSession.providerInstanceId !== boundInstanceId ||
+              expectedSession.activeTurnId !== input.expectedTurnId ||
+              expectedSession.subagentRuntimeId !== context.subagentRuntimeId))
+        ) {
+          return Effect.fail(
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "turn/steer",
+              detail: "The observed Claude session changed before priority delivery.",
+            }),
+          );
+        }
+
+        // This queue is unbounded. Its synchronous offer either accepts one
+        // message or reports a closed queue; no scheduler boundary may separate
+        // the final identity check, lifecycle registration and prompt admission.
+        // Keep accounting in the same critical section so completion cannot
+        // clear/replace turnState before the accepted prompt is attributed.
+        context.promptLifecycleByUuid.set(messageUuid, "submitted");
+        if (!Queue.offerUnsafe(context.promptQueue, { type: "message", message })) {
+          context.promptLifecycleByUuid.delete(messageUuid);
+          return Effect.fail(
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "turn/steer",
+              detail: "The observed Claude prompt stream closed before priority delivery.",
+            }),
+          );
+        }
+        context.hasSubmittedUserPrompt = true;
+        rememberClaudeForkMessage({
+          ids: context.forkMessageIds,
+          messageId: input.messageId,
+          nativeId: messageUuid,
+          turnId: activeTurnId,
+          turnCount: context.resumeBaseTurnCount + context.turns.length + 1,
+        });
+        admittedTurnState.promptTextBytes =
+          (admittedTurnState.promptTextBytes ?? 0) +
+          Buffer.byteLength(input.input?.trim() ?? "", "utf8");
+        admittedTurnState.promptAttachmentCount =
+          (admittedTurnState.promptAttachmentCount ?? 0) + (input.attachments?.length ?? 0);
+        return Effect.succeed({
+          threadId: context.session.threadId,
+          turnId: activeTurnId,
+          ...(context.session.resumeCursor !== undefined
+            ? { resumeCursor: context.session.resumeCursor }
+            : {}),
+        });
+      });
+    }
 
     // Official Claude Agent SDK streaming input mode is the long-lived,
     // interactive path: `query({ prompt: AsyncIterable<SDKUserMessage> })`

@@ -2,9 +2,11 @@
 
 ## Message delivery
 
-For a qualified Claude runtime, the composer has a **Claude message delivery**
-selector. **Automatic** preserves the provider's existing behavior; Cafe does not
-assume that omission is equivalent to one of the explicit choices.
+For a qualified Claude account selected in the composer, open the existing
+model-options menu (labelled with the current effort/context, such as **1M · High**)
+and use **Message delivery**. It is not a separate strip beneath the text box.
+**Automatic** preserves the provider's existing behavior; Cafe does not assume
+that omission is equivalent to one of the explicit choices.
 
 - **Now:** asks Claude to incorporate your message into its current work. Supported
   foreground tools may move into the background.
@@ -15,7 +17,14 @@ assume that omission is equivalent to one of the explicit choices.
 These choices do not approve tools or bypass a pending permission request. The
 choice belongs to the individual message and survives Cafe's durable queue and
 reconnect handling; input whose delivery is uncertain is not automatically sent
-again. Scheduled follow-ups remain idle-only and cannot use urgent delivery.
+again. The unsent choice is scoped to the selected chat and account; switching
+provider or account cannot carry it into a different selection. An already queued
+message retains its captured account and priority. Priority cannot steer work
+running under a different provider/account; that message uses Cafe's normal queue
+instead. Scheduled follow-ups remain idle-only and cannot use urgent delivery.
+If the bound turn ends or changes while preparing a priority message, Cafe rejects
+that delivery rather than starting another turn or sending it to a replacement
+session. Review the retained message before explicitly sending again.
 
 The selector requires the configured Claude executable to report a qualified
 version, not merely a recent SDK installed with Cafe. An unknown or unsupported

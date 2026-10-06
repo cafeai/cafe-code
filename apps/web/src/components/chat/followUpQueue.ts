@@ -1,4 +1,12 @@
-import type { SessionPhase } from "../../types";
+import type {
+  ModelSelection,
+  ProviderDeliveryPriority,
+  ProviderDriverKind,
+} from "@cafecode/contracts";
+import type { SessionPhase, ThreadSession } from "../../types";
+
+type PrioritySteerSession = Pick<ThreadSession, "provider" | "providerInstanceId"> &
+  Partial<Pick<ThreadSession, "activeTurnId" | "createdAt" | "subagentRuntimeId">>;
 
 export type FollowUpDeliveryAction = "send" | "queue" | "steer";
 
@@ -16,6 +24,34 @@ export function decideFollowUpDelivery(input: FollowUpDeliveryInput): FollowUpDe
     return "queue";
   }
   return input.liveSteerSupported ? "steer" : "queue";
+}
+
+/** A steer cannot select a new provider account. Keep explicit Claude priority
+ * bound to the captured snapshot's account; a mismatch must queue that same
+ * snapshot until its selected account can start a turn. Ordinary steering has
+ * no priority override and retains its existing active-session behavior. */
+export function canSteerPriorityToSession(
+  snapshot: {
+    readonly provider: ProviderDriverKind;
+    readonly modelSelection: Pick<ModelSelection, "instanceId">;
+    readonly deliveryPriority?: ProviderDeliveryPriority;
+  },
+  session: PrioritySteerSession | null | undefined,
+  expectedSession?: PrioritySteerSession,
+): boolean {
+  return (
+    snapshot.deliveryPriority === undefined ||
+    (snapshot.provider === "claudeAgent" &&
+      session?.provider === snapshot.provider &&
+      session.providerInstanceId === snapshot.modelSelection.instanceId &&
+      (expectedSession === undefined ||
+        (expectedSession.activeTurnId !== undefined &&
+          session.provider === expectedSession.provider &&
+          session.providerInstanceId === expectedSession.providerInstanceId &&
+          session.activeTurnId === expectedSession.activeTurnId &&
+          session.createdAt === expectedSession.createdAt &&
+          session.subagentRuntimeId === expectedSession.subagentRuntimeId)))
+  );
 }
 
 export interface LiveSteerAvailabilityInput {

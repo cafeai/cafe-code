@@ -3,8 +3,9 @@
 Decision status: Accepted within the user's provider-parity implementation request.
 Implementation status: Implemented and released; integrated local and exact-head platform CI gates verified on 36c64874.
 Created: 2026-10-05 06:19:58 JST (UTC+0900)
-Last updated: 2026-10-05 16:58:09 JST (UTC+0900)
+Last updated: 2026-10-07 04:24:34 JST (UTC+0900)
 Supersedes: no prior decision. Preserves [runtime observation](subagent-runtime-observation.md), [prepared rewinds](claude-conversation-rewind.md) and [idle-only scheduling](scheduled-followups.md).
+Supplemented by: [provider-aware composer menus and recipient binding](provider-aware-composer-and-child-activity.md).
 
 ## Released qualification
 
@@ -56,6 +57,22 @@ then time/id, and requires the current account/runtime before displaying control
 The same typed metadata crosses runtime ingestion, so reconnects do not reconstruct
 authority from prose. A 15-second acknowledgement deadline persists unknown rather
 than hanging or replaying; it cannot retract an already-delivered native request.
+
+## Composer presentation amendment — 2026-10-07 04:24:34 JST (UTC+0900)
+
+At the user's request, Message delivery now lives inside the existing effort/
+model-options menu, with no persistent strip outside it. Availability follows the
+effective selected Claude account and its qualified runtime capability. Draft
+priority belongs to the exact environment/chat/account selection; sending captures
+it with the message's model/account snapshot. Queued messages retain that snapshot.
+An explicit priority may steer only an already running Claude session under the
+same selected account; a different native provider/account uses the normal durable
+queue instead. After asynchronous attachment preparation, recheck the canonical
+session. Bind explicit-priority steer to its account, native runtime and active
+turn in the Cafe command and durable event, and reject drift at server admission
+and locked provider I/O. This prevents command transit from retargeting the message.
+Automatic still omits priority. No native provider protocol, permission, scheduler
+or task-control mutation capability is broadened by this UI relocation.
 
 ## Detached results and rewind safety
 

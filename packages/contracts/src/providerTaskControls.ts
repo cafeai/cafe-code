@@ -5,6 +5,17 @@ import { ProviderInstanceId } from "./providerInstance.ts";
 /** Native queue ordering; omission retains the provider's existing default. */
 export const ProviderDeliveryPriority = Schema.Literals(["now", "next", "later"]);
 export type ProviderDeliveryPriority = typeof ProviderDeliveryPriority.Type;
+
+/** Exact recipient observed for an explicit-priority steer. A null runtime is
+ * legacy unknown evidence, never a wildcard; account and active turn remain
+ * mandatory, and every known runtime incarnation must match exactly. */
+export const ProviderPrioritySessionBinding = Schema.Struct({
+  providerInstanceId: ProviderInstanceId,
+  subagentRuntimeId: Schema.NullOr(SubagentRuntimeId),
+  activeTurnId: TurnId,
+});
+export type ProviderPrioritySessionBinding = typeof ProviderPrioritySessionBinding.Type;
+
 export const ProviderTaskControlCapability = Schema.Struct({
   providerInstanceId: ProviderInstanceId,
   taskGeneration: Schema.String.check(Schema.isUUID()),

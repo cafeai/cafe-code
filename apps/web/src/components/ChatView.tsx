@@ -1,5 +1,6 @@
 import {
   type ApprovalRequestId,
+  type CodexReviewTarget,
   DEFAULT_MODEL,
   defaultInstanceIdForDriver,
   type EnvironmentId,
@@ -20,6 +21,7 @@ import {
   ProviderDriverKind,
   RuntimeMode,
   type SubagentLimits,
+  SubagentRuntimeId,
   type UploadChatAttachment as OrchestrationUploadChatAttachment,
 } from "@cafecode/contracts";
 import { scopedThreadKey, scopeProjectRef, scopeThreadRef } from "@cafecode/client-runtime";
@@ -62,7 +64,6 @@ import { useDesktopDebugEnabled } from "~/lib/desktopDebugState";
 import { useWorkspaceProjects, useWorkspaceThreads } from "../environments/workspaceData";
 import { readPrimaryEnvironmentDescriptor, usePrimaryEnvironmentId } from "../environments/primary";
 import { readEnvironmentApi } from "../environmentApi";
-import { NativeCodexReview } from "./chat/NativeCodexReview";
 import { MessageForkDialog } from "./chat/MessageForkDialog";
 import { isElectron } from "../env";
 import { readLocalApi } from "../localApi";
@@ -179,6 +180,7 @@ import {
   canDispatchRunningQueuedFollowUp,
   canExpandQueuedFollowUpText,
   canStartQueuedFollowUpTurn,
+  canSteerPriorityToSession,
   decideQueuedFollowUpAction,
   decideFollowUpDelivery,
   hasQueuedFollowUpDispatchBeenObserved,
@@ -193,7 +195,6 @@ import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
 import type { SubagentDetailSelection } from "./chat/SubagentDetailView";
-import { ClaudeDeliveryPriorityPicker } from "./chat/ClaudeDeliveryPriorityPicker";
 import { useTaskAtriumStore } from "./atrium/taskAtriumStore";
 import {
   isTimelineScrolledToEnd,
@@ -934,8 +935,6 @@ export default function ChatView(props: ChatViewProps) {
     routeKind === "server" ? store.threadPlanSidebarOpenById[routeThreadKey] : undefined,
   );
   const setPersistedPlanSidebarOpen = useUiStateStore((store) => store.setThreadPlanSidebarOpen);
-  const codeReviewCollapsed = useUiStateStore((store) => store.codeReviewCollapsed);
-  const onCodeReviewCollapsedChange = useUiStateStore((store) => store.setCodeReviewCollapsed);
   const globalSessionRailDocked = useUiStateStore((store) => store.sessionRailDocked);
   const setGlobalSessionRailDocked = useUiStateStore((store) => store.setSessionRailDocked);
   const sessionRailDocked = pane.sessionRailDocked ?? globalSessionRailDocked;
@@ -991,11 +990,6 @@ export default function ChatView(props: ChatViewProps) {
     (store) => store.getComposerDraft(composerDraftTarget)?.queueEditingItemId,
   );
   const localComposerRef = useRef<ChatComposerHandle | null>(null);
-  // Scope urgency to the exact chat/account, never a global model preference.
-  const [deliveryChoice, setDeliveryChoice] = useState<{
-    key: string;
-    priority: import("@cafecode/contracts").ProviderDeliveryPriority | undefined;
-  } | null>(null);
   const activeComposerHandle = useComposerHandleContext();
   // Every pane owns its editor. Only the active pane publishes an alias for the
   // global palette; sharing the actual ref lets a sibling send the wrong draft.
@@ -2669,14 +2663,6 @@ export default function ChatView(props: ChatViewProps) {
   }, [activeProviderInstanceId, providerStatuses, selectedProvider]);
   const activeProviderLiveSteerSupported =
     activeProviderStatus?.runtimeCapabilities?.liveSteer === "supported";
-  const deliveryChoiceKey = `${environmentId}:${activeThread?.id ?? "draft"}:${activeProviderInstanceId ?? ""}`;
-  const deliveryPriorityAvailable =
-    activeProviderStatus?.driver === "claudeAgent" &&
-    activeProviderStatus.runtimeCapabilities?.deliveryPriority === true;
-  const deliveryPriority =
-    deliveryPriorityAvailable && deliveryChoice?.key === deliveryChoiceKey
-      ? deliveryChoice.priority
-      : undefined;
   const goalControlsSupported =
     isServerThread &&
     activeProviderStatus?.driver === "codex" &&
@@ -4418,7 +4404,9 @@ export default function ChatView(props: ChatViewProps) {
       providerModels: sendCtx.selectedProviderModels,
       promptEffort: sendCtx.selectedPromptEffort,
       modelSelection: sendCtx.selectedModelSelection,
-      ...(deliveryPriority !== undefined ? { deliveryPriority } : {}),
+      ...(sendCtx.selectedProvider === "claudeAgent" && sendCtx.deliveryPriority !== undefined
+        ? { deliveryPriority: sendCtx.deliveryPriority }
+        : {}),
       ...(sendCtx.subagentLimits !== undefined
         ? { subagentLimits: { ...sendCtx.subagentLimits } }
         : {}),
@@ -4967,7 +4955,21 @@ export default function ChatView(props: ChatViewProps) {
     const composerContentAtAdmission = useComposerDraftStore
       .getState()
       .getComposerDraft(composerDraftTarget);
-    if (!activeProviderLiveSteerAvailable || phase !== "running") {
+    // A native steer has no model/account selection: it always reaches the
+    // existing session. Priority from a newly selected Claude account must
+    // wait in its captured queue snapshot until that account can start.
+    const priorityAdmissionSession =
+      snapshot.deliveryPriority !== undefined
+        ? selectThreadByRef(
+            useStore.getState(),
+            scopeThreadRef(activeThread.environmentId, activeThread.id),
+          )?.session
+        : undefined;
+    const priorityMatchesSession =
+      snapshot.deliveryPriority === undefined ||
+      (priorityAdmissionSession?.activeTurnId !== undefined &&
+        canSteerPriorityToSession(snapshot, priorityAdmissionSession));
+    if (!activeProviderLiveSteerAvailable || phase !== "running" || !priorityMatchesSession) {
       if (!options?.queuedItem) {
         await enqueueFollowUpSnapshot(snapshot);
       }
@@ -4993,6 +4995,24 @@ export default function ChatView(props: ChatViewProps) {
     }
 
     setSendInFlight(true);
+    // Finish asynchronous priority preparation before taking a durable claim.
+    // A local account/runtime change is definitely unsubmitted, so it must not
+    // become an ambiguous claimed row merely because file reading took time.
+    let priorityTurnAttachments: OrchestrationUploadChatAttachment[] | undefined;
+    if (snapshot.deliveryPriority !== undefined) {
+      try {
+        priorityTurnAttachments = await buildAttachmentsForSnapshot(snapshot);
+      } catch (error) {
+        const message = describeSendFailureMessage(error, "Failed to prepare the message.");
+        if (options?.queuedItem) {
+          blockFollowUpQueueItem(options.queuedItem.threadId, options.queuedItem.id, message);
+        } else {
+          setThreadError(activeThread.id, message);
+        }
+        setSendInFlight(false);
+        return;
+      }
+    }
     const messageIdForSend =
       options?.queuedItem?.automaticSteerRetry?.sourceMessageId ??
       (options?.queuedItem ? MessageId.make(options.queuedItem.id) : newMessageId());
@@ -5022,6 +5042,29 @@ export default function ChatView(props: ChatViewProps) {
         setSendInFlight(false);
         return;
       }
+    }
+    if (snapshot.deliveryPriority !== undefined) {
+      const currentSession = selectThreadByRef(
+        useStore.getState(),
+        scopeThreadRef(activeThread.environmentId, activeThread.id),
+      )?.session;
+      if (
+        !priorityAdmissionSession ||
+        currentSession?.status !== "running" ||
+        !canSteerPriorityToSession(snapshot, currentSession, priorityAdmissionSession)
+      ) {
+        setSendInFlight(false);
+        // Existing queued input has not been claimed or removed. Direct input
+        // becomes that same immutable queue snapshot, preserving its account
+        // and priority while protecting any composer text typed during prep.
+        if (!options?.queuedItem) {
+          const queued = await enqueueFollowUpSnapshot(snapshot, { preserveComposer: true });
+          if (queued) clearActiveComposerContent(composerContentAtAdmission);
+        }
+        return;
+      }
+    }
+    if (claim) {
       const claimed = queuePersistence.claim(claim, options!.queuedItem!);
       if (!claimed.ok) {
         blockFollowUpQueueItem(claim.threadId, claim.itemId, claimed.error);
@@ -5033,7 +5076,8 @@ export default function ChatView(props: ChatViewProps) {
       claim && options?.queuedItem ? options.queuedItem.queuedAt : new Date().toISOString();
     const outgoingMessageText = outgoingTextForSnapshot(snapshot);
     const optimisticAttachments = optimisticAttachmentsForSnapshot(snapshot);
-    const turnAttachmentsPromise = buildAttachmentsForSnapshot(snapshot);
+    const turnAttachmentsPromise =
+      priorityTurnAttachments === undefined ? buildAttachmentsForSnapshot(snapshot) : undefined;
 
     updatePendingSteerDispatches((current) => {
       const next = {
@@ -5069,13 +5113,24 @@ export default function ChatView(props: ChatViewProps) {
     ]);
 
     try {
-      const turnAttachments = await turnAttachmentsPromise;
+      // Priority's reads completed before the canonical admission above; do
+      // not introduce another await between that check and command dispatch.
+      const turnAttachments = priorityTurnAttachments ?? (await turnAttachmentsPromise!);
       const receipt = await api.orchestration.dispatchCommand({
         type: "thread.turn.steer",
         commandId: commandIdForSend,
         threadId: activeThread.id,
         ...(snapshot.deliveryPriority !== undefined
-          ? { deliveryPriority: snapshot.deliveryPriority }
+          ? {
+              deliveryPriority: snapshot.deliveryPriority,
+              expectedPrioritySession: {
+                providerInstanceId: snapshot.modelSelection.instanceId,
+                subagentRuntimeId: priorityAdmissionSession?.subagentRuntimeId
+                  ? SubagentRuntimeId.make(priorityAdmissionSession.subagentRuntimeId)
+                  : null,
+                activeTurnId: priorityAdmissionSession!.activeTurnId!,
+              },
+            }
           : {}),
         message: {
           messageId: messageIdForSend,
@@ -5396,7 +5451,9 @@ export default function ChatView(props: ChatViewProps) {
     const delivery = decideFollowUpDelivery({
       phase: followUpQueuePhase,
       requestedSteer: snapshot.deliveryPriority !== undefined,
-      liveSteerSupported: activeProviderLiveSteerAvailable,
+      liveSteerSupported:
+        activeProviderLiveSteerAvailable &&
+        canSteerPriorityToSession(snapshot, activeThread.session),
     });
     if (delivery === "queue") {
       if (!hasSendableContent) return;
@@ -7170,14 +7227,6 @@ export default function ChatView(props: ChatViewProps) {
     ],
   );
 
-  const reviewEnvironmentId = activeThread?.environmentId;
-  const reviewRuntimeMode = activeThread?.runtimeMode;
-  const reviewInteractionMode = activeThread?.interactionMode;
-  const reviewAccountLabel = activeProviderStatus?.displayName ?? "this Codex account";
-  const reviewAvailable =
-    isServerThread &&
-    activeThread?.session?.provider === "codex" &&
-    activeThread.modelSelection.instanceId === activeThread.session.providerInstanceId;
   const reviewDisabled =
     activeThread?.session?.status !== "ready" ||
     isSendBusy ||
@@ -7185,72 +7234,69 @@ export default function ChatView(props: ChatViewProps) {
     isWorking ||
     isRevertingCheckpoint ||
     activeEnvironmentUnavailable;
-  // Keep the slot stable during token streaming. It belongs to the exact
-  // captured chat/account, while the composer owns its visual attachment.
-  const codeReviewAction = useMemo(() => {
-    if (
-      !reviewAvailable ||
-      !reviewEnvironmentId ||
-      !scheduledThreadId ||
-      !scheduledModelSelection ||
-      !reviewRuntimeMode ||
-      !reviewInteractionMode
-    )
-      return undefined;
-    return (
-      <NativeCodexReview
-        key={JSON.stringify([
-          reviewEnvironmentId,
-          scheduledThreadId,
-          scheduledModelSelection.instanceId,
-        ])}
-        accountLabel={reviewAccountLabel}
-        runtimeMode={reviewRuntimeMode}
-        disabled={reviewDisabled}
-        collapsed={codeReviewCollapsed}
-        onCollapsedChange={onCodeReviewCollapsedChange}
-        onStart={async (codexReview) => {
-          const api = readEnvironmentApi(reviewEnvironmentId);
-          if (!api) throw new Error("The chat is disconnected.");
-          const text =
-            codexReview.type === "uncommittedChanges"
-              ? "Code review: uncommitted changes"
-              : codexReview.type === "baseBranch"
-                ? `Code review against ${codexReview.branch}`
-                : codexReview.type === "commit"
-                  ? `Code review of commit ${codexReview.sha}`
-                  : `Code review: ${codexReview.instructions}`;
-          await api.orchestration.dispatchCommand({
-            type: "thread.turn.start",
-            commandId: newCommandId(),
-            threadId: scheduledThreadId,
-            message: {
-              messageId: MessageId.make(crypto.randomUUID()),
-              role: "user",
-              text,
-              attachments: [],
-            },
-            codexReview,
-            modelSelection: scheduledModelSelection,
-            runtimeMode: reviewRuntimeMode,
-            interactionMode: reviewInteractionMode,
-            createdAt: new Date().toISOString(),
-          });
-        }}
-      />
-    );
-  }, [
-    reviewAvailable,
-    reviewEnvironmentId,
-    scheduledThreadId,
-    scheduledModelSelection,
-    reviewRuntimeMode,
-    reviewInteractionMode,
-    reviewAccountLabel,
-    reviewDisabled,
-    codeReviewCollapsed,
-    onCodeReviewCollapsedChange,
-  ]);
+  const startCodeReview = useCallback(
+    async (codexReview: CodexReviewTarget) => {
+      const sendContext = readComposerHandle(composerRef)?.getSendContext();
+      const currentThread = activeThread
+        ? selectThreadByRef(
+            useStore.getState(),
+            scopeThreadRef(activeThread.environmentId, activeThread.id),
+          )
+        : undefined;
+      // The menu and dialog follow the effective picker selection. Recheck the
+      // current handle and canonical session immediately before dispatch too:
+      // a stale menu callback must never submit to a previously selected account.
+      if (
+        !isServerThread ||
+        !chatViewMountedRef.current ||
+        currentRouteThreadKeyRef.current !== routeThreadKey ||
+        reviewDisabled ||
+        !currentThread ||
+        !sendContext ||
+        sendContext.selectedProvider !== "codex" ||
+        currentThread.session?.provider !== "codex" ||
+        currentThread.session.status !== "ready" ||
+        currentThread.session.providerInstanceId !==
+          sendContext.selectedModelSelection.instanceId ||
+        currentThread.modelSelection.instanceId !== sendContext.selectedModelSelection.instanceId ||
+        currentThread.runtimeMode !== activeThread?.runtimeMode ||
+        currentThread.interactionMode !== activeThread?.interactionMode ||
+        currentThread.session.createdAt !== activeThread?.session?.createdAt ||
+        currentThread.session.subagentRuntimeId !== activeThread?.session?.subagentRuntimeId
+      ) {
+        throw new Error("The selected Codex account or session changed. Reopen the review.");
+      }
+      const api = readEnvironmentApi(currentThread.environmentId);
+      if (!api) throw new Error("The chat is disconnected.");
+      const text =
+        codexReview.type === "uncommittedChanges"
+          ? "Code review: uncommitted changes"
+          : codexReview.type === "baseBranch"
+            ? `Code review against ${codexReview.branch}`
+            : codexReview.type === "commit"
+              ? `Code review of commit ${codexReview.sha}`
+              : `Code review: ${codexReview.instructions}`;
+      await api.orchestration.dispatchCommand({
+        type: "thread.turn.start",
+        commandId: newCommandId(),
+        threadId: currentThread.id,
+        message: {
+          messageId: MessageId.make(crypto.randomUUID()),
+          role: "user",
+          text,
+          attachments: [],
+        },
+        codexReview,
+        // Native review uses the admitted saved session's review settings. The
+        // exact selected account was checked above; unsent model traits stay inert.
+        modelSelection: currentThread.modelSelection,
+        runtimeMode: currentThread.runtimeMode,
+        interactionMode: currentThread.interactionMode,
+        createdAt: new Date().toISOString(),
+      });
+    },
+    [activeThread, composerRef, isServerThread, reviewDisabled, routeThreadKey],
+  );
 
   if (!activeThread) {
     return <NoActiveThreadState />;
@@ -7437,16 +7483,8 @@ export default function ChatView(props: ChatViewProps) {
             <div className="relative isolate">
               <ComposerBannerStack className="relative z-0" items={composerBannerItems} />
               <div className="relative z-10">
-                {deliveryPriorityAvailable && (
-                  <ClaudeDeliveryPriorityPicker
-                    value={deliveryPriority}
-                    onChange={(priority) => setDeliveryChoice({ key: deliveryChoiceKey, priority })}
-                    disabled={isSendBusy || isComposerConnecting || activeEnvironmentUnavailable}
-                  />
-                )}
                 <ChatComposer
-                  codeReviewAction={codeReviewAction}
-                  codeReviewCollapsed={codeReviewCollapsed}
+                  onStartCodeReview={startCodeReview}
                   codeReviewDisabled={reviewDisabled}
                   composerRef={composerRef}
                   composerDraftTarget={composerDraftTarget}

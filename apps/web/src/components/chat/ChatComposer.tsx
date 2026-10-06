@@ -10,6 +10,7 @@ import { resolveComposerThreadId } from "~/composerDraftStore";
 import type {
   ApprovalRequestId,
   ChatFileAttachment,
+  CodexReviewTarget,
   DictationTranscriptionModel,
   EnvironmentId,
   ModelSelection,
@@ -19,6 +20,7 @@ import type {
   ProviderCommandsInput,
   ProviderApprovalDecision,
   ProviderInteractionMode,
+  ProviderDeliveryPriority,
   ResolvedKeybindingsConfig,
   RuntimeMode,
   ScopedThreadRef,
@@ -77,6 +79,8 @@ import { ProviderModelPicker } from "./ProviderModelPicker";
 import { type ComposerCommandItem, ComposerCommandMenu } from "./ComposerCommandMenu";
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
+import { NativeCodexReview } from "./NativeCodexReview";
+import { ClaudeDeliveryPriorityPicker } from "./ClaudeDeliveryPriorityPicker";
 import { ComposerAttachImageButton } from "./ComposerAttachImageButton";
 import { FileAttachmentPill } from "./FileAttachmentPill";
 import { uploadFileAttachment } from "../../attachments/fileAttachments";
@@ -120,6 +124,7 @@ import {
   LoaderCircleIcon,
   ListTodoIcon,
   FileIcon,
+  FileSearchIcon,
   PencilIcon,
   Trash2Icon,
   XIcon,
@@ -405,6 +410,7 @@ export interface ChatComposerHandle {
     selectedModel: string;
     selectedProviderModels: ReadonlyArray<ServerProvider["models"][number]>;
     subagentLimits?: SubagentLimits;
+    deliveryPriority?: ProviderDeliveryPriority;
   };
 }
 
@@ -757,9 +763,8 @@ export function FollowUpQueueShelf(props: {
 // --------------------------------------------------------------------------
 
 export interface ChatComposerProps extends ComposerInteractionCallbacks {
-  /** An explicit review action attached to this composer's frame, outside its editor. */
-  codeReviewAction?: ReactNode;
-  codeReviewCollapsed?: boolean;
+  /** The native review dispatch remains owned by the active chat. */
+  onStartCodeReview?: (target: CodexReviewTarget) => Promise<void>;
   codeReviewDisabled?: boolean;
   composerDraftTarget: ScopedThreadRef | DraftId;
   environmentId: EnvironmentId;
@@ -898,8 +903,7 @@ export interface ChatComposerProps extends ComposerInteractionCallbacks {
 
 export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps) {
   const {
-    codeReviewAction,
-    codeReviewCollapsed,
+    onStartCodeReview,
     codeReviewDisabled,
     composerDraftTarget,
     environmentId,
@@ -1162,6 +1166,86 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     () => selectedProviderEntry?.snapshot ?? null,
     [selectedProviderEntry],
   );
+  // Priority belongs to the effective picker account, not the last saved
+  // session. Reset on a switch so returning to an account cannot revive a
+  // hidden urgency setting; queue snapshots keep their already captured value.
+  const deliveryChoiceKey = JSON.stringify([
+    environmentId,
+    isServerThread ? activeThreadId : draftId,
+    selectedProvider,
+    selectedInstanceId,
+  ]);
+  const deliveryPriorityAvailable =
+    selectedProvider === "claudeAgent" &&
+    selectedProviderStatus?.driver === "claudeAgent" &&
+    selectedProviderStatus.runtimeCapabilities?.deliveryPriority === true;
+  const [deliveryChoice, setDeliveryChoice] = useState<{
+    key: string;
+    priority: ProviderDeliveryPriority | undefined;
+  }>({ key: deliveryChoiceKey, priority: undefined });
+  if (deliveryChoice.key !== deliveryChoiceKey) {
+    setDeliveryChoice({ key: deliveryChoiceKey, priority: undefined });
+  }
+  const deliveryPriority =
+    deliveryPriorityAvailable && deliveryChoice.key === deliveryChoiceKey
+      ? deliveryChoice.priority
+      : undefined;
+
+  const nativeReviewAvailable =
+    onStartCodeReview !== undefined &&
+    isServerThread &&
+    selectedProvider === "codex" &&
+    selectedProviderStatus?.driver === "codex" &&
+    activeThread?.session?.provider === "codex" &&
+    activeThread.session.providerInstanceId === selectedInstanceId &&
+    activeThread.modelSelection.instanceId === selectedInstanceId;
+  const nativeReviewDisabled =
+    codeReviewDisabled === true ||
+    activeThread?.session?.status !== "ready" ||
+    phase === "running" ||
+    isSendBusy ||
+    isConnecting ||
+    environmentUnavailable !== null;
+  // The menu is transient, but the dialog must survive its closure and an ACK
+  // that makes the session busy. Identity/mode changes invalidate it instead;
+  // do not use updatedAt, which advances during ordinary review submission.
+  const nativeReviewKey = JSON.stringify([
+    environmentId,
+    activeThreadId,
+    selectedProvider,
+    selectedInstanceId,
+    runtimeMode,
+    interactionMode,
+    activeThread?.runtimeMode,
+    activeThread?.interactionMode,
+    activeThread?.session?.createdAt,
+    activeThread?.session?.subagentRuntimeId,
+    nativeReviewAvailable,
+  ]);
+  const [nativeReviewState, setNativeReviewState] = useState({
+    key: nativeReviewKey,
+    open: false,
+  });
+  if (nativeReviewState.key !== nativeReviewKey) {
+    setNativeReviewState({ key: nativeReviewKey, open: false });
+  }
+  const nativeReviewOpen = nativeReviewState.key === nativeReviewKey && nativeReviewState.open;
+  const providerActions =
+    nativeReviewAvailable && !nativeReviewDisabled ? (
+      <MenuItem
+        aria-haspopup="dialog"
+        onClick={() => setNativeReviewState({ key: nativeReviewKey, open: true })}
+      >
+        <FileSearchIcon aria-hidden="true" className="size-4 shrink-0" />
+        Codex review
+      </MenuItem>
+    ) : deliveryPriorityAvailable ? (
+      <ClaudeDeliveryPriorityPicker
+        value={deliveryPriority}
+        onChange={(priority) => setDeliveryChoice({ key: deliveryChoiceKey, priority })}
+        disabled={isSendBusy || isConnecting || environmentUnavailable !== null}
+      />
+    ) : null;
   const selectedCodexRateLimits = shouldSurfaceProviderAccountRateLimits(selectedProviderStatus)
     ? (selectedProviderStatus?.accountRateLimits ?? null)
     : null;
@@ -3147,6 +3231,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         selectedModel,
         selectedProviderModels,
         ...(desiredSubagentLimits !== undefined ? { subagentLimits: desiredSubagentLimits } : {}),
+        ...(deliveryPriority !== undefined ? { deliveryPriority } : {}),
       }),
     }),
     [
@@ -3172,6 +3257,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       selectedProvider,
       selectedProviderModels,
       desiredSubagentLimits,
+      deliveryPriority,
     ],
   );
 
@@ -3219,10 +3305,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       />
       <div
         className={cn(
-          "group relative isolate rounded-[22px] p-px transition-[color,background-color,border-color,margin-top] duration-200 motion-reduce:transition-none",
-          codeReviewAction &&
-            !codeReviewDisabled &&
-            (codeReviewCollapsed ? "mt-5 pointer-coarse:mt-7" : "mt-9 pointer-coarse:mt-12"),
+          "group relative isolate rounded-[22px] p-px transition-[color,background-color,border-color] duration-200 motion-reduce:transition-none",
           composerProviderState.composerFrameClassName ??
             (ambianceComposerRing ? "cafe-ambiance-composer-frame" : undefined),
         )}
@@ -3231,14 +3314,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         onDragLeave={onComposerDragLeave}
         onDrop={onComposerDrop}
       >
-        {codeReviewAction ? (
-          <div
-            data-chat-composer-review-tab="true"
-            className="absolute inset-x-6 bottom-full -z-10 -mb-1 flex justify-end"
-          >
-            {codeReviewAction}
-          </div>
-        ) : null}
         <div
           ref={composerSurfaceRef}
           data-chat-composer-mobile-collapsed={isComposerCollapsedMobile ? "true" : "false"}
@@ -3834,6 +3909,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     goalStatus={activeThread?.goal?.status ?? null}
                     traitsMenuContent={providerTraitsMenuContent}
                     subagentConcurrencyControl={concurrencyMenuItem}
+                    providerActions={providerActions}
                     traitsTriggerLabel={
                       providerTraitsMenuContent ? composerProviderState.traitsTriggerLabel : null
                     }
@@ -3856,6 +3932,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       showInteractionModeToggle={selectedProviderUsesNativePermissionModes}
                       traitsMenuContent={providerTraitsMenuContent}
                       subagentConcurrencyControl={concurrencyMenuItem}
+                      providerActions={providerActions}
                       traitsTriggerLabel={
                         providerTraitsMenuContent ? composerProviderState.traitsTriggerLabel : null
                       }
@@ -3956,6 +4033,21 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           )}
         </div>
       </div>
+      {nativeReviewAvailable && onStartCodeReview ? (
+        <NativeCodexReview
+          key={nativeReviewKey}
+          open={nativeReviewOpen}
+          onOpenChange={(open) =>
+            setNativeReviewState((current) =>
+              current.key === nativeReviewKey ? { key: nativeReviewKey, open } : current,
+            )
+          }
+          accountLabel={selectedProviderStatus?.displayName ?? "this Codex account"}
+          runtimeMode={activeThread.runtimeMode}
+          disabled={nativeReviewDisabled}
+          onStart={onStartCodeReview}
+        />
+      ) : null}
       {concurrencyKey ? (
         <SubagentConcurrencyControl
           key={concurrencyEditorKey}

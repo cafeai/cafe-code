@@ -89,6 +89,7 @@ import { type CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import type { ProviderSubagentDetail } from "../Services/ProviderAdapter.ts";
 import {
   canonicalizeProviderSubagentDetail,
+  canonicalizeProviderSubagentActivities,
   type ProviderSubagentPublicMessageInput,
 } from "../subagentDetail.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
@@ -356,10 +357,18 @@ export function canonicalizeCodexSubagentDetail(
         ...(message.phase !== undefined ? { phase: message.phase } : {}),
       });
     }
-    return canonicalizeProviderSubagentDetail(publicMessages, {
-      historyIncomplete: snapshot.historyIncomplete === true,
-      preservePrefix: true,
-    });
+    return {
+      ...canonicalizeProviderSubagentDetail(publicMessages, {
+        historyIncomplete: snapshot.historyIncomplete === true,
+        preservePrefix: true,
+      }),
+      ...(snapshot.publicActivities !== undefined
+        ? canonicalizeProviderSubagentActivities(
+            snapshot.publicActivities,
+            snapshot.activityHistoryIncomplete === true,
+          )
+        : {}),
+    };
   }
   for (const turn of snapshot.turns) {
     for (const item of turn.items) {

@@ -3,8 +3,9 @@
 Decision status: Accepted within the authorized provider-parity implementation
 Implementation status: Implemented and released; integrated local and exact-head platform CI gates verified on 36c64874.
 Created: 2026-10-05 06:18:21 JST (UTC+0900)
-Last updated: 2026-10-05 16:58:09 JST (UTC+0900)
+Last updated: 2026-10-07 04:24:34 JST (UTC+0900)
 Supersedes: None
+Partially superseded by: [provider-aware composer menus](provider-aware-composer-and-child-activity.md), replacing only the separate tab presentation and adding exact effective-selection checks.
 
 ## Released qualification
 
@@ -48,6 +49,9 @@ session; Cafe does not invent interactive review approvals or alter sandbox poli
 
 ## Boundaries and failures
 
+The following presentation rule is historical and is superseded by the linked
+menu decision; the native operation boundaries below remain in force.
+
 The review tab's minimized state is one persisted client-local editor preference,
 shared across chats, environments and panes. Thread deletion and environment
 cleanup cannot reset it. On upgrade, a valid minimized legacy thread preference
@@ -73,6 +77,23 @@ paid natural-language turn. No provider call is automatically repeated merely
 because its acknowledgement is missing.
 
 ## Verification
+
+### Presentation amendment — 2026-10-07 04:24:34 JST (UTC+0900)
+
+The user requested moving the always-visible review tab into the existing effort/
+model-options menu. The menu item is named **Codex review** and follows the actual
+unsent composer provider/account selection, not merely the last saved session.
+It requires that selection to match the exact ready Cafe-owned Codex binding.
+Changing chat, account or native binding retires the old dialog; submission also
+rechecks selection. The dialog is mounted outside the transient menu popup so
+closing the menu cannot discard it, and its portalled form stops propagation to
+the ordinary composer form. A busy transition alone retains in-flight settlement.
+The permission disclosure uses the saved native session mode, never unsent draft
+mode. Existing protocol, approval/sandbox and uncertain-acknowledgement boundaries
+above are unchanged. New browser and release checks qualify this amendment
+separately from the historical released source noted above.
+
+### Native protocol qualification
 
 Credential-free contract, decider, service, runtime and adapter fixtures qualify
 all four structured targets, wrong account/provider, active-turn races, native

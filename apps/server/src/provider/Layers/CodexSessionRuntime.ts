@@ -24,10 +24,13 @@ import {
   type ProviderTurnStartResult,
   type ProviderUserInputAnswers,
   RuntimeMode,
+  THREAD_TURN_SUBAGENT_DETAIL_MAX_ACTIVITIES,
+  type SubagentDetailActivityKind,
   ThreadId,
   TurnId,
 } from "@cafecode/contracts";
 import { normalizeModelSlug } from "@cafecode/shared/model";
+import type { ProviderSubagentActivityInput } from "../subagentDetail.ts";
 import { CODEX_HISTORY_RECOVERY_REQUIRED_MESSAGE } from "@cafecode/shared/codexHistorySafety";
 import {
   codexHistoryFailureBelongsToRoot,
@@ -518,6 +521,8 @@ export interface CodexThreadSnapshot {
   readonly turns: ReadonlyArray<CodexThreadTurnSnapshot>;
   /** Present only on the isolated, public-only subagent history read. */
   readonly publicHistory?: ReadonlyArray<CodexSubagentPublicHistoryMessage>;
+  readonly publicActivities?: ReadonlyArray<ProviderSubagentActivityInput>;
+  readonly activityHistoryIncomplete?: boolean;
   /** Upstream history remains outside this bounded read; counts are unknown. */
   readonly historyIncomplete?: boolean;
 }
@@ -5153,6 +5158,48 @@ function publicHistoryTimestamp(value: number | null | undefined): number | unde
     : undefined;
 }
 
+/** Only typed operation categories leave the reader; never inspect shell text. */
+export function codexSubagentActivityKind(
+  item: CodexThreadItem,
+): SubagentDetailActivityKind | undefined {
+  switch (item.type) {
+    case "commandExecution":
+      return item.commandActions.length > 0 &&
+        item.commandActions.every((action) => action.type === "read")
+        ? "file_read"
+        : "command";
+    case "fileChange":
+      return "file_edit";
+    case "imageView":
+      return "file_read";
+    case "collabAgentToolCall":
+      return item.tool === "sendInput" ||
+        item.tool === "sendMessage" ||
+        item.tool === "followupTask"
+        ? "agent_message"
+        : "tool";
+    case "dynamicToolCall":
+      switch (item.tool) {
+        case "read_file":
+          return "file_read";
+        case "apply_patch":
+          return "file_edit";
+        case "exec_command":
+          return "command";
+        case "send_message":
+        case "followup_task":
+          return "agent_message";
+        default:
+          return "tool";
+      }
+    case "mcpToolCall":
+    case "webSearch":
+      return "tool";
+    default:
+      return undefined;
+  }
+}
+
 /**
  * Read public child history through an already isolated read-only client.
  * Native summary turns omit commentary, so use item pagination while proving
@@ -5170,6 +5217,8 @@ const readCodexSubagentPublicHistoryWithClient = Effect.fn(
 }): Effect.fn.Return<CodexThreadSnapshot, CodexSessionRuntimeError> {
   yield* readCodexVerifiedSubagentMetadataWithClient(input);
   const descendingMessages: CodexSubagentPublicHistoryMessage[] = [];
+  const descendingActivities: ProviderSubagentActivityInput[] = [];
+  let activityHistoryIncomplete = false;
   const seenItems = new Set<string>();
   const seenCursors = new Set<string>();
   let cursor: string | undefined;
@@ -5191,7 +5240,9 @@ const readCodexSubagentPublicHistoryWithClient = Effect.fn(
     for (const entry of response.data.slice(0, limit)) {
       scannedItems += 1;
       const item = entry.item;
-      if (item.type !== "userMessage" && item.type !== "agentMessage") continue;
+      const activityKind = codexSubagentActivityKind(item);
+      if (item.type !== "userMessage" && item.type !== "agentMessage" && activityKind === undefined)
+        continue;
 
       // Pagination can overlap while a child is appending work. Preserve the
       // newest exact native item once, with bounded digests rather than keeping
@@ -5201,6 +5252,22 @@ const readCodexSubagentPublicHistoryWithClient = Effect.fn(
         .digest("hex");
       if (seenItems.has(identity)) continue;
       seenItems.add(identity);
+      if (activityKind !== undefined) {
+        if (descendingActivities.length < THREAD_TURN_SUBAGENT_DETAIL_MAX_ACTIVITIES) {
+          const timestampMs = publicHistoryTimestamp(entry.completedAtMs ?? entry.startedAtMs);
+          descendingActivities.push({
+            kind: activityKind,
+            identityDigest: identity,
+            ...(timestampMs !== undefined && timestampMs <= 253_402_300_799_999
+              ? { timestamp: new Date(timestampMs).toISOString() }
+              : {}),
+          });
+        } else {
+          activityHistoryIncomplete = true;
+        }
+        continue;
+      }
+      if (item.type !== "userMessage" && item.type !== "agentMessage") continue;
       const text =
         item.type === "agentMessage"
           ? item.text
@@ -5250,6 +5317,8 @@ const readCodexSubagentPublicHistoryWithClient = Effect.fn(
     threadId: input.subagentThreadId,
     turns: [],
     publicHistory: descendingMessages.toReversed(),
+    publicActivities: descendingActivities.toReversed(),
+    activityHistoryIncomplete: activityHistoryIncomplete || historyIncomplete,
     historyIncomplete,
   };
 });

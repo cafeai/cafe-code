@@ -95,6 +95,8 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
   goalStatus?: ProviderThreadGoalStatus | null;
   traitsMenuContent?: ReactNode;
   subagentConcurrencyControl?: ReactNode;
+  /** Provider-specific actions stay inside this menu in every footer layout. */
+  providerActions?: ReactNode;
   traitsTriggerLabel?: string | null;
   onToggleInteractionMode: () => void;
   onNativePermissionModeChange: (mode: ClaudePermissionMode) => void;
@@ -108,6 +110,7 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
     ? CLAUDE_PERMISSION_MODE_OPTIONS
     : GROK_PERMISSION_MODE_OPTIONS;
   const hasTraits = props.traitsMenuContent !== null && props.traitsMenuContent !== undefined;
+  const hasSecondaryControls = Boolean(props.subagentConcurrencyControl || props.providerActions);
   const showAccessControls = !usesNativePermissionModes;
   const claudePermissionMode = deriveClaudePermissionMode({
     interactionMode: props.interactionMode,
@@ -146,9 +149,15 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
             {props.subagentConcurrencyControl}
           </>
         ) : null}
+        {props.providerActions ? (
+          <>
+            {hasTraits || props.subagentConcurrencyControl ? <MenuDivider /> : null}
+            {props.providerActions}
+          </>
+        ) : null}
         {props.showInteractionModeToggle ? (
           <>
-            {hasTraits ? <MenuDivider /> : null}
+            {hasTraits || hasSecondaryControls ? <MenuDivider /> : null}
             <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">Mode</div>
             <MenuRadioGroup
               value={usesNativePermissionModes ? claudePermissionMode : props.interactionMode}
@@ -189,7 +198,9 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
         ) : null}
         {showAccessControls ? (
           <>
-            {hasTraits || props.showInteractionModeToggle ? <MenuDivider /> : null}
+            {hasTraits || hasSecondaryControls || props.showInteractionModeToggle ? (
+              <MenuDivider />
+            ) : null}
             <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">Access</div>
             <MenuRadioGroup
               value={props.runtimeMode}
@@ -212,7 +223,10 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
         ) : null}
         {props.showGoalControl ? (
           <>
-            {hasTraits || props.showInteractionModeToggle || showAccessControls ? (
+            {hasTraits ||
+            hasSecondaryControls ||
+            props.showInteractionModeToggle ||
+            showAccessControls ? (
               <MenuDivider />
             ) : null}
             <MenuItem onClick={props.onOpenGoal}>
@@ -226,6 +240,7 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
         {props.showPlanSidebar ? (
           <>
             {hasTraits ||
+            hasSecondaryControls ||
             props.showInteractionModeToggle ||
             showAccessControls ||
             props.showGoalControl ? (

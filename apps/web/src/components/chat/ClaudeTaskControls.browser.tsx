@@ -16,6 +16,7 @@ import { ClaudeDeliveryPriorityPicker } from "./ClaudeDeliveryPriorityPicker";
 import { SubagentTaskControls } from "./SubagentTaskControls";
 import { ProviderTasks, type ProviderTasksContext } from "./ProviderTasks";
 import type { WorkLogEntry } from "../../session-logic";
+import { Menu, MenuPopup, MenuTrigger } from "../ui/menu";
 
 const { controlTask } = vi.hoisted(() => ({ controlTask: vi.fn() }));
 vi.mock("../../environmentApi", () => ({
@@ -39,7 +40,14 @@ const subagent: NonNullable<WorkLogEntry["subagent"]> = {
 };
 function PriorityHarness() {
   const [priority, setPriority] = useState<ProviderDeliveryPriority | undefined>();
-  return <ClaudeDeliveryPriorityPicker value={priority} onChange={setPriority} disabled={false} />;
+  return (
+    <Menu>
+      <MenuTrigger>More composer controls</MenuTrigger>
+      <MenuPopup>
+        <ClaudeDeliveryPriorityPicker value={priority} onChange={setPriority} disabled={false} />
+      </MenuPopup>
+    </Menu>
+  );
 }
 afterEach(() => vi.clearAllMocks());
 describe("Claude priority and exact task controls", () => {
@@ -84,13 +92,24 @@ describe("Claude priority and exact task controls", () => {
   });
   it("offers accessible explicit priority choices and explains Later is not a schedule", async () => {
     await render(<PriorityHarness />);
-    const picker = page.getByRole("combobox", { name: "Claude message delivery priority" });
-    await expect.element(picker).toHaveValue("default");
-    await picker.selectOptions("now");
+    await expect
+      .element(page.getByText("Message delivery", { exact: true }))
+      .not.toBeInTheDocument();
+    await page.getByRole("button", { name: "More composer controls" }).click();
+    await expect
+      .element(page.getByRole("menuitemradio", { name: /^Automatic / }))
+      .toHaveAttribute("aria-checked", "true");
+    await page.getByRole("menuitemradio", { name: /^Now / }).click();
+    await expect
+      .element(page.getByRole("menuitemradio", { name: /^Now / }))
+      .toHaveAttribute("aria-checked", "true");
     await expect
       .element(page.getByText("Join the active turn; supported work may move to the background."))
       .toBeVisible();
-    await picker.selectOptions("later");
+    await page.getByRole("menuitemradio", { name: /^Later / }).click();
+    await expect
+      .element(page.getByRole("menuitemradio", { name: /^Later / }))
+      .toHaveAttribute("aria-checked", "true");
     await expect.element(page.getByText(/not a scheduled time/)).toBeVisible();
   });
   it("binds stop to the displayed account/runtime/task incarnation and waits for native completion", async () => {

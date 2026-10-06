@@ -3212,7 +3212,14 @@ const make = Effect.gen(function* () {
             expectedTurnId: activeTurnId,
             messageId: event.payload.messageId,
             ...(event.payload.deliveryPriority !== undefined
-              ? { deliveryPriority: event.payload.deliveryPriority }
+              ? {
+                  deliveryPriority: event.payload.deliveryPriority,
+                  expectedPrioritySession: {
+                    providerInstanceId: runtimeActiveSession.providerInstanceId,
+                    subagentRuntimeId: runtimeActiveSession.subagentRuntimeId ?? null,
+                    activeTurnId,
+                  },
+                }
               : {}),
             ...(normalizedInput ? { input: normalizedInput } : {}),
             ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
@@ -3320,6 +3327,9 @@ const make = Effect.gen(function* () {
         cause: Cause.Cause<unknown>,
       ) => {
         if (event.payload.codexReview !== undefined) return recoverTurnStartFailure(cause);
+        // Claude priority cannot authorize Codex-specific active-turn recovery.
+        // Preserve the failed input rather than creating an unbound fallback.
+        if (event.payload.deliveryPriority !== undefined) return recoverTurnStartFailure(cause);
         if (event.payload.terminalSteerRecovery !== undefined) {
           return queueGuardedTerminalSteerRecovery({
             threadId: event.payload.threadId,
@@ -3850,14 +3860,27 @@ const make = Effect.gen(function* () {
         expectedTurnId,
       });
       const queue = (reason: Parameters<typeof queueCodexSteerIntentRecovery>[0]["reason"]) =>
-        queueCodexSteerIntentRecovery({
-          threadId: event.payload.threadId,
-          expectedTurnId,
-          messageId: event.payload.messageId,
-          intentSequence: event.sequence,
-          createdAt: event.payload.createdAt,
-          reason,
-        }).pipe(Effect.as(undefined));
+        (event.payload.deliveryPriority !== undefined
+          ? appendProviderFailureActivity({
+              threadId: event.payload.threadId,
+              kind: "provider.turn.steer.failed",
+              summary: "Explicit-priority message was not delivered",
+              detail:
+                "The observed Claude session changed. Review the saved message before sending again.",
+              turnId: expectedTurnId,
+              messageId: event.payload.messageId,
+              intentSequence: event.sequence,
+              createdAt: event.payload.createdAt,
+            })
+          : queueCodexSteerIntentRecovery({
+              threadId: event.payload.threadId,
+              expectedTurnId,
+              messageId: event.payload.messageId,
+              intentSequence: event.sequence,
+              createdAt: event.payload.createdAt,
+              reason,
+            })
+        ).pipe(Effect.as(undefined));
 
       if (!barriers.intentVerified) {
         return yield* queue("intent-tuple-unverified");
@@ -3874,6 +3897,22 @@ const make = Effect.gen(function* () {
 
       const currentThread = yield* resolveThread(event.payload.threadId);
       if (currentThread === undefined) {
+        return yield* queue("intent-tuple-unverified");
+      }
+      // New priority intents retain the recipient from durable admission.
+      // Missing legacy evidence remains readable but cannot authorize replay
+      // into whichever account/runtime happens to own this thread now.
+      const priorityBinding = event.payload.expectedPrioritySession;
+      if (
+        event.payload.deliveryPriority !== undefined &&
+        (priorityBinding === undefined ||
+          expectedTurnId !== priorityBinding.activeTurnId ||
+          currentThread.session?.providerName !== "claudeAgent" ||
+          currentThread.session.providerInstanceId !== priorityBinding.providerInstanceId ||
+          currentThread.session.status !== "running" ||
+          currentThread.session.activeTurnId !== priorityBinding.activeTurnId ||
+          (currentThread.session.subagentRuntimeId ?? null) !== priorityBinding.subagentRuntimeId)
+      ) {
         return yield* queue("intent-tuple-unverified");
       }
       const projectedNewerTurnId = [
@@ -4606,7 +4645,12 @@ const make = Effect.gen(function* () {
       .steerTurn({
         threadId: event.payload.threadId,
         ...(event.payload.deliveryPriority !== undefined
-          ? { deliveryPriority: event.payload.deliveryPriority }
+          ? {
+              deliveryPriority: event.payload.deliveryPriority,
+              ...(event.payload.expectedPrioritySession !== undefined
+                ? { expectedPrioritySession: event.payload.expectedPrioritySession }
+                : {}),
+            }
           : {}),
         expectedTurnId,
         messageId: event.payload.messageId,

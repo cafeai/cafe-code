@@ -6132,6 +6132,115 @@ describe("ProviderCommandReactor", () => {
     });
   });
 
+  it.each(
+    (["now", "next", "later"] as const).flatMap((deliveryPriority) =>
+      (["unchanged", "account", "runtime"] as const).map((change) => ({
+        deliveryPriority,
+        change,
+      })),
+    ),
+  )(
+    "retains $deliveryPriority recipient across durable reactor admission ($change)",
+    async ({ deliveryPriority, change }) => {
+      const account = ProviderInstanceId.make("claudeAgent");
+      const preparationEntered = Effect.runSync(Deferred.make<void>());
+      const releasePreparation = Effect.runSync(Deferred.make<void>());
+      const harness = await createHarness({
+        beforeProjectRead: Deferred.succeed(preparationEntered, undefined).pipe(
+          Effect.andThen(Deferred.await(releasePreparation)),
+        ),
+        liveSteer: "supported",
+        threadModelSelection: { instanceId: account, model: "claude-fable-5-1" },
+      });
+      const threadId = ThreadId.make("thread-1");
+      const activeTurnId = asTurnId("priority-admitted-turn");
+      const subagentRuntimeId = "b4613f5d-dd81-4c5d-a49f-8f51e331ef51";
+      const now = "2026-01-01T00:00:01.000Z";
+      const session = {
+        threadId,
+        providerName: "claudeAgent",
+        providerInstanceId: account,
+        status: "running" as const,
+        runtimeMode: "approval-required" as const,
+        subagentRuntimeId,
+        activeTurnId,
+        lastError: null,
+        updatedAt: now,
+      };
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("priority-seed-session"),
+          threadId,
+          session,
+          createdAt: now,
+        }),
+      );
+      const expectedPrioritySession = {
+        providerInstanceId: account,
+        subagentRuntimeId,
+        activeTurnId,
+      };
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.steer",
+          commandId: CommandId.make("priority-admit"),
+          threadId,
+          deliveryPriority,
+          expectedPrioritySession,
+          message: {
+            messageId: asMessageId("priority-message"),
+            role: "user",
+            text: "Bound guidance",
+            attachments: [],
+          },
+          createdAt: now,
+        }),
+      );
+      await Effect.runPromise(Deferred.await(preparationEntered));
+      // Pause consumption until after the durable command has committed, then
+      // replace its recipient without changing the turn spelling. Account and
+      // runtime checks must work independently of the existing turn fence.
+      if (change !== "unchanged") {
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("priority-replace-session"),
+            threadId,
+            session: {
+              ...session,
+              ...(change === "account"
+                ? { providerInstanceId: ProviderInstanceId.make("claude-other") }
+                : { subagentRuntimeId: "a992f68b-fdb9-49b7-bc63-cc662b177b46" }),
+              updatedAt: "2026-01-01T00:00:02.000Z",
+            },
+            createdAt: "2026-01-01T00:00:02.000Z",
+          }),
+        );
+      }
+      await Effect.runPromise(Deferred.succeed(releasePreparation, undefined));
+      await harness.drain();
+      if (change === "unchanged") {
+        expect(harness.steerTurn).toHaveBeenCalledTimes(1);
+        expect(harness.steerTurn.mock.calls[0]?.[0]).toMatchObject({
+          deliveryPriority,
+          expectedPrioritySession,
+          expectedTurnId: activeTurnId,
+        });
+      } else {
+        expect(harness.steerTurn).not.toHaveBeenCalled();
+        expect(harness.startSession).not.toHaveBeenCalled();
+        const current = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+        const failure = current?.activities.find(
+          (activity) => activity.kind === "provider.turn.steer.failed",
+        );
+        expect(failure?.summary).toBe("Explicit-priority message was not delivered");
+        expect(failure?.payload).not.toMatchObject({ retryableFollowUp: true });
+      }
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+    },
+  );
+
   it("delivers two durable steers in order without waiting for provider processing", async () => {
     const harness = await createHarness({ liveSteer: "supported" });
     const threadId = ThreadId.make("thread-1");

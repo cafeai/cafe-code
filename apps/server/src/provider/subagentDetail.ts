@@ -2,12 +2,64 @@ import {
   THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_BYTES,
   THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES,
   THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_BYTES,
+  THREAD_TURN_SUBAGENT_DETAIL_MAX_ACTIVITIES,
+  type SubagentDetailActivity,
+  type SubagentDetailActivityKind,
 } from "@cafecode/contracts";
 
 import type {
   ProviderSubagentDetail,
   ProviderSubagentDetailMessage,
 } from "./Services/ProviderAdapter.ts";
+
+export interface ProviderSubagentActivityInput {
+  readonly kind: SubagentDetailActivityKind;
+  readonly timestamp?: string | undefined;
+  /** Reader-owned digest for sliding native windows; never a native ID. */
+  readonly identityDigest?: string | undefined;
+}
+
+/**
+ * Retain only a finite recent tail. Native payloads never enter this helper:
+ * adapters map a typed operation to an enum before calling it. Reconstruct
+ * every entry so no private keys can ride alongside public categories.
+ */
+export function canonicalizeProviderSubagentActivities(
+  input: Iterable<ProviderSubagentActivityInput>,
+  historyIncomplete = false,
+): Pick<ProviderSubagentDetail, "activities" | "activityHistoryIncomplete"> {
+  const activities: SubagentDetailActivity[] = [];
+  let sequence = 0;
+  let incomplete = historyIncomplete;
+  for (const activity of input) {
+    const indexKey = `a${(sequence++).toString(36)}`;
+    activities.push({
+      // A bounded native window can contain 128 identical tool categories.
+      // A digest-derived key exposes row replacement without copying native
+      // identifiers or depending on optional timestamps. It is not authority.
+      key:
+        activity.identityDigest !== undefined && /^[0-9a-f]{64}$/.test(activity.identityDigest)
+          ? `a${activity.identityDigest.slice(0, 24)}`
+          : indexKey,
+      kind: activity.kind,
+      ...(isCanonicalPublicTimestamp(activity.timestamp) ? { timestamp: activity.timestamp } : {}),
+    });
+    if (activities.length > THREAD_TURN_SUBAGENT_DETAIL_MAX_ACTIVITIES) {
+      activities.shift();
+      incomplete = true;
+    }
+  }
+  return { activities, ...(incomplete ? { activityHistoryIncomplete: true } : {}) };
+}
+
+function isCanonicalPublicTimestamp(value: string | undefined): value is string {
+  return (
+    value !== undefined &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) &&
+    Number.isFinite(Date.parse(value)) &&
+    new Date(value).toISOString() === value
+  );
+}
 
 /** Public provider text admitted to the shared detail canonicalizer. */
 export interface ProviderSubagentPublicMessageInput {
@@ -266,10 +318,7 @@ export function canonicalizeProviderSubagentDetail(
       sanitizedUtf8Bytes: measurement.utf8Bytes,
       // Never forward unknown metadata or native item identities. Dates are
       // revalidated here because other adapters can also call this boundary.
-      ...(providerMessage.timestamp !== undefined &&
-      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(providerMessage.timestamp) &&
-      Number.isFinite(Date.parse(providerMessage.timestamp)) &&
-      new Date(providerMessage.timestamp).toISOString() === providerMessage.timestamp
+      ...(isCanonicalPublicTimestamp(providerMessage.timestamp)
         ? { timestamp: providerMessage.timestamp }
         : {}),
       ...(providerMessage.role === "assistant" &&

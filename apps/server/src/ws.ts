@@ -1045,6 +1045,10 @@ const makeWsRpcLayer = (
                 messages: detail.messages,
                 gaps: detail.gaps,
                 truncated: detail.truncated,
+                ...(detail.activities !== undefined ? { activities: detail.activities } : {}),
+                ...(detail.activityHistoryIncomplete !== undefined
+                  ? { activityHistoryIncomplete: detail.activityHistoryIncomplete }
+                  : {}),
                 ...(detail.historyIncomplete !== undefined
                   ? { historyIncomplete: detail.historyIncomplete }
                   : {}),

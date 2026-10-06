@@ -131,6 +131,8 @@ const makePublicProviderDaemonSubagentDetail = (input: unknown) =>
         key: message.key,
         role: message.role,
         text: message.text,
+        ...(message.timestamp !== undefined ? { timestamp: message.timestamp } : {}),
+        ...(message.phase !== undefined ? { phase: message.phase } : {}),
         ...(message.omission === undefined
           ? {}
           : {
@@ -146,6 +148,21 @@ const makePublicProviderDaemonSubagentDetail = (input: unknown) =>
         omittedUtf8Bytes: gap.omittedUtf8Bytes,
       })),
       truncated: detail.truncated,
+      ...(detail.historyIncomplete !== undefined
+        ? { historyIncomplete: detail.historyIncomplete }
+        : {}),
+      ...(detail.activities !== undefined
+        ? {
+            activities: detail.activities.map((activity) => ({
+              key: activity.key,
+              kind: activity.kind,
+              ...(activity.timestamp !== undefined ? { timestamp: activity.timestamp } : {}),
+            })),
+          }
+        : {}),
+      ...(detail.activityHistoryIncomplete !== undefined
+        ? { activityHistoryIncomplete: detail.activityHistoryIncomplete }
+        : {}),
     })),
   );
 

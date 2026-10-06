@@ -4,6 +4,7 @@ import * as SchemaTransformation from "effect/SchemaTransformation";
 import { ProviderOptionSelections } from "./model.ts";
 import {
   ProviderDeliveryPriority,
+  ProviderPrioritySessionBinding,
   ProviderTaskControlInput,
   ProviderTaskControlResult,
 } from "./providerTaskControls.ts";
@@ -587,6 +588,7 @@ export type OrchestrationThreadTurnActivityPage = typeof OrchestrationThreadTurn
  */
 export const THREAD_TURN_SUBAGENT_ID_MAX_LENGTH = 512;
 export const THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES = 64;
+export const THREAD_TURN_SUBAGENT_DETAIL_MAX_ACTIVITIES = 128;
 export const THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_BYTES = 32_768;
 export const THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_BYTES = 131_072;
 export const THREAD_TURN_SUBAGENT_DETAIL_MAX_ENCODED_BYTES = 1_048_576;
@@ -711,6 +713,22 @@ export const OrchestrationThreadTurnSubagentDetailGap = Schema.Struct({
 export type OrchestrationThreadTurnSubagentDetailGap =
   typeof OrchestrationThreadTurnSubagentDetailGap.Type;
 
+/** Content-free operation categories, never native tools, arguments or results. */
+export const SubagentDetailActivityKind = Schema.Literals([
+  "command",
+  "file_read",
+  "file_edit",
+  "agent_message",
+  "tool",
+]);
+export type SubagentDetailActivityKind = typeof SubagentDetailActivityKind.Type;
+export const SubagentDetailActivity = Schema.Struct({
+  key: Schema.String.check(Schema.isPattern(/^a[0-9a-z]{1,32}$/)),
+  kind: SubagentDetailActivityKind,
+  timestamp: Schema.optional(ThreadTurnSubagentDetailTimestamp),
+});
+export type SubagentDetailActivity = typeof SubagentDetailActivity.Type;
+
 /**
  * Shared flat body fields for both the public orchestration response and the
  * provider-daemon response. Keeping one field set prevents the two authenticated
@@ -727,6 +745,14 @@ export const OrchestrationThreadTurnSubagentDetailBodyFields = {
   // Native pagination may stop before its beginning; missing totals are not
   // guessed or represented as an exact counted gap. Older adapters omit this.
   historyIncomplete: Schema.optional(Schema.Boolean),
+  activities: Schema.optional(
+    Schema.Array(SubagentDetailActivity).check(
+      Schema.isMaxLength(THREAD_TURN_SUBAGENT_DETAIL_MAX_ACTIVITIES),
+    ),
+  ),
+  // Separate from public-message omissions: a tool-only worker may have no
+  // public prose while still having a bounded, useful operation history.
+  activityHistoryIncomplete: Schema.optional(Schema.Boolean),
 } as const;
 
 const OrchestrationThreadTurnSubagentDetailBodyStruct = Schema.Struct(
@@ -747,6 +773,13 @@ export function orchestrationThreadTurnSubagentDetailBodyIssues(
   detail: OrchestrationThreadTurnSubagentDetailBody,
 ): Array<Schema.FilterIssue> {
   const issues: Array<Schema.FilterIssue> = [];
+  const activityKeys = new Set<string>();
+  for (const [index, activity] of (detail.activities ?? []).entries()) {
+    if (activityKeys.has(activity.key)) {
+      issues.push({ path: ["activities", index, "key"], issue: "activity keys must be unique" });
+    }
+    activityKeys.add(activity.key);
+  }
   const keys = new Set<string>();
   const keyIndexes = new Map<string, number>();
   let retainedBytes = 0;
@@ -1098,6 +1131,7 @@ const ThreadTurnInterruptCommand = Schema.Struct({
 const ThreadTurnSteerCommand = Schema.Struct({
   type: Schema.Literal("thread.turn.steer"),
   deliveryPriority: Schema.optional(ProviderDeliveryPriority),
+  expectedPrioritySession: Schema.optional(ProviderPrioritySessionBinding),
   commandId: CommandId,
   threadId: ThreadId,
   message: Schema.Struct({
@@ -1124,6 +1158,7 @@ const ThreadTurnSteerCommand = Schema.Struct({
 const ClientThreadTurnSteerCommand = Schema.Struct({
   type: Schema.Literal("thread.turn.steer"),
   deliveryPriority: Schema.optional(ProviderDeliveryPriority),
+  expectedPrioritySession: Schema.optional(ProviderPrioritySessionBinding),
   commandId: CommandId,
   threadId: ThreadId,
   message: Schema.Struct({
@@ -1654,6 +1689,9 @@ export const ThreadTurnInterruptRequestedPayload = Schema.Struct({
 export const ThreadTurnSteerRequestedPayload = Schema.Struct({
   threadId: ThreadId,
   deliveryPriority: Schema.optional(ProviderDeliveryPriority),
+  // Optional decoding retains old event readability. New explicit-priority
+  // intents require this immutable recipient and never infer it during replay.
+  expectedPrioritySession: Schema.optional(ProviderPrioritySessionBinding),
   messageId: MessageId,
   /**
    * Immutable turn target captured when the orchestration command is

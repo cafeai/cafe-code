@@ -3,10 +3,11 @@
 Decision status: Accepted within the authorized history repair
 Implementation status: Implemented; verification requirements and operational limits are below
 Created: 2026-10-04 14:08:58 JST (UTC+0900)
-Last updated: 2026-10-04 14:50:28 JST (UTC+0900)
+Last updated: 2026-10-07 04:48:16 JST (UTC+0900)
 Decision authority: implementation choice within the user's request to fix sparse/stale subagent detail and push dev
 Supersedes: none; supplements existing lifecycle retention and immutable history ownership
 Partially superseded by: [Codex history ancestry](codex-history-ancestry.md), which corrects the stored-thread session-ID interpretation while preserving this decision's other boundaries.
+Supplemented by: [bounded child activity](provider-aware-composer-and-child-activity.md), which adds content-free operation categories without exposing the raw tool history excluded here.
 
 ## Context
 

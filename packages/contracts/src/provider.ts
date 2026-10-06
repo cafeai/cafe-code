@@ -28,7 +28,10 @@ import {
 import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
 import { MaxConcurrentSubagents } from "./subagentLimits.ts";
 import { CodexReviewTarget } from "./codexReview.ts";
-import { ProviderDeliveryPriority } from "./providerTaskControls.ts";
+import {
+  ProviderDeliveryPriority,
+  ProviderPrioritySessionBinding,
+} from "./providerTaskControls.ts";
 import { ProviderCommandCatalog } from "./providerCommands.ts";
 
 const ProviderSessionStatus = Schema.Literals([
@@ -225,6 +228,7 @@ export type ProviderSendTurnInput = typeof ProviderSendTurnInput.Type;
 export const ProviderSteerTurnInput = Schema.Struct({
   threadId: ThreadId,
   deliveryPriority: Schema.optional(ProviderDeliveryPriority),
+  expectedPrioritySession: Schema.optional(ProviderPrioritySessionBinding),
   expectedTurnId: TurnId,
   // Cafe's durable user-message identity is correlation metadata only. The
   // Codex adapter derives a bounded opaque token before forwarding it as

@@ -208,6 +208,91 @@ it("canonicalizes only public subagent chat text and strips unsafe controls", ()
   assert.doesNotMatch(JSON.stringify(detail), /private chain|secret\/skill/);
 });
 
+it("forwards safe activity summaries with fresh local keys and no private fields", () => {
+  const snapshot = {
+    threadId: "PRIVATE_CHILD_ID",
+    turns: [],
+    publicHistory: [
+      {
+        role: "assistant" as const,
+        text: "Public update",
+        phase: "commentary" as const,
+        completedAtMs: 0,
+      },
+    ],
+    publicActivities: [
+      {
+        kind: "command" as const,
+        timestamp: "2026-10-07T00:00:00.000Z",
+        nativeId: "PRIVATE_ACTIVITY_ID",
+        command: "PRIVATE_COMMAND",
+        arguments: { token: "PRIVATE_TOKEN" },
+      },
+      {
+        kind: "agent_message" as const,
+        timestamp: "2026-99-07T00:00:00.000Z",
+        recipient: "PRIVATE_RECIPIENT",
+        text: "PRIVATE_MESSAGE",
+      },
+      { kind: "file_read" as const, timestamp: "2026-10-07T00:00:00+00:00", path: "/PRIVATE_PATH" },
+    ],
+    activityHistoryIncomplete: true,
+  };
+  const detail = canonicalizeCodexSubagentDetail(snapshot);
+  assert.deepEqual(detail.activities, [
+    { key: "a0", kind: "command", timestamp: "2026-10-07T00:00:00.000Z" },
+    { key: "a1", kind: "agent_message" },
+    { key: "a2", kind: "file_read" },
+  ]);
+  assert.equal(detail.activityHistoryIncomplete, true);
+  assert.deepEqual(detail.messages, [
+    {
+      key: "m0",
+      role: "assistant",
+      text: "Public update",
+      phase: "commentary",
+      timestamp: "1970-01-01T00:00:00.000Z",
+    },
+  ]);
+  assert.doesNotMatch(
+    JSON.stringify(detail),
+    /PRIVATE_|nativeId|command":|arguments|recipient|path/,
+  );
+});
+
+it("bounds activity summaries independently from public text and preserves legacy absence", () => {
+  const detail = canonicalizeCodexSubagentDetail({
+    threadId: "activity-tail",
+    turns: [],
+    publicHistory: [],
+    publicActivities: Array.from({ length: 129 }, (_, index) => ({
+      kind: "tool" as const,
+      timestamp: new Date(index).toISOString(),
+    })),
+  });
+  assert.equal(detail.activities?.length, 128);
+  assert.deepEqual(detail.activities?.[0], {
+    key: "a1",
+    kind: "tool",
+    timestamp: new Date(1).toISOString(),
+  });
+  assert.deepEqual(detail.activities?.at(-1), {
+    key: `a${(128).toString(36)}`,
+    kind: "tool",
+    timestamp: new Date(128).toISOString(),
+  });
+  assert.equal(detail.activityHistoryIncomplete, true);
+  assert.equal(detail.truncated, false);
+  assert.deepEqual(detail.messages, []);
+  const legacy = canonicalizeCodexSubagentDetail({
+    threadId: "legacy",
+    turns: [],
+    publicHistory: [],
+  });
+  assert.equal(Object.hasOwn(legacy, "activities"), false);
+  assert.equal(Object.hasOwn(legacy, "activityHistoryIncomplete"), false);
+});
+
 it("enforces subagent transcript message, per-message, and total limits", () => {
   const oversized = canonicalizeCodexSubagentDetail({
     threadId: "provider-child-oversized",

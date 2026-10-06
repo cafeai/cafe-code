@@ -4052,6 +4052,124 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
+  for (const deliveryPriority of ["now", "next", "later"] as const) {
+    it.effect(
+      `fences ${deliveryPriority} steering against live account/runtime drift after admission`,
+      () =>
+        Effect.gen(function* () {
+          const provider = yield* ProviderService;
+          const threadId = asThreadId(`priority-binding-${deliveryPriority}`);
+          const session = yield* provider.startSession(threadId, {
+            provider: CLAUDE_AGENT_DRIVER,
+            providerInstanceId: claudeAgentInstanceId,
+            threadId,
+            runtimeMode: "full-access",
+          });
+          const activeTurnId = asTurnId(`priority-turn-${deliveryPriority}`);
+          const subagentRuntimeId = "b4613f5d-dd81-4c5d-a49f-8f51e331ef51";
+          const admitted = {
+            ...session,
+            status: "running" as const,
+            activeTurnId,
+            subagentRuntimeId,
+          };
+          const expectedPrioritySession = {
+            providerInstanceId: claudeAgentInstanceId,
+            activeTurnId,
+            subagentRuntimeId,
+          };
+          const request = {
+            threadId,
+            expectedTurnId: activeTurnId,
+            deliveryPriority,
+            expectedPrioritySession,
+            input: "Bound guidance",
+            attachments: [],
+          };
+          // The tuple was captured at command admission. These replacements
+          // model native state changing before the durable reactor reaches I/O.
+          for (const changed of [
+            { ...admitted, providerInstanceId: ProviderInstanceId.make("claude-other") },
+            { ...admitted, provider: CODEX_DRIVER },
+            { ...admitted, activeTurnId: asTurnId("replacement-turn") },
+            { ...admitted, subagentRuntimeId: "a992f68b-fdb9-49b7-bc63-cc662b177b46" },
+            { ...admitted, subagentRuntimeId: undefined },
+            { ...admitted, status: "ready" as const },
+          ]) {
+            routing.claude.updateSession(threadId, () => changed);
+            routing.claude.steerTurn.mockClear();
+            const result = yield* Effect.exit(provider.steerTurn(request));
+            assert.equal(result._tag, "Failure");
+            assert.equal(routing.claude.steerTurn.mock.calls.length, 0);
+          }
+          routing.claude.updateSession(threadId, () => admitted);
+          const { expectedPrioritySession: _omitted, ...unbound } = request;
+          assert.equal((yield* Effect.exit(provider.steerTurn(unbound)))._tag, "Failure");
+          assert.equal(
+            (yield* Effect.exit(
+              provider.steerTurn({ ...request, expectedTurnId: asTurnId("other-wire-turn") }),
+            ))._tag,
+            "Failure",
+          );
+          assert.equal(routing.claude.steerTurn.mock.calls.length, 0);
+
+          yield* provider.steerTurn(request);
+          assert.equal(routing.claude.steerTurn.mock.calls.length, 1);
+          assert.deepEqual(
+            routing.claude.steerTurn.mock.calls[0]?.[0].expectedPrioritySession,
+            expectedPrioritySession,
+          );
+
+          const legacyRequest = {
+            ...request,
+            expectedPrioritySession: { ...expectedPrioritySession, subagentRuntimeId: null },
+          };
+          routing.claude.steerTurn.mockClear();
+          assert.equal((yield* Effect.exit(provider.steerTurn(legacyRequest)))._tag, "Failure");
+          assert.equal(routing.claude.steerTurn.mock.calls.length, 0);
+          routing.claude.updateSession(threadId, () => ({
+            ...admitted,
+            subagentRuntimeId: undefined,
+          }));
+          yield* provider.steerTurn(legacyRequest);
+          assert.equal(routing.claude.steerTurn.mock.calls.length, 1);
+
+          // A regular start can discover an active query under the same service
+          // lock. Preserve that existing fallback, but capture its live binding
+          // and never borrow another selected account's priority.
+          routing.claude.updateSession(threadId, () => admitted);
+          routing.claude.steerTurn.mockClear();
+          const send = {
+            threadId,
+            deliveryPriority,
+            input: "Priority start raced active query",
+            attachments: [],
+            modelSelection: createModelSelection(claudeAgentInstanceId, "claude-fable-5-1"),
+          };
+          yield* provider.sendTurn(send);
+          assert.equal(routing.claude.steerTurn.mock.calls.length, 1);
+          assert.deepEqual(
+            routing.claude.steerTurn.mock.calls[0]?.[0].expectedPrioritySession,
+            expectedPrioritySession,
+          );
+          routing.claude.steerTurn.mockClear();
+          assert.equal(
+            (yield* Effect.exit(
+              provider.sendTurn({
+                ...send,
+                modelSelection: createModelSelection(
+                  ProviderInstanceId.make("claude-other"),
+                  "claude-fable-5-1",
+                ),
+              }),
+            ))._tag,
+            "Failure",
+          );
+          assert.equal(routing.claude.steerTurn.mock.calls.length, 0);
+        }),
+    );
+  }
+
   it.effect("routes live steering and preserves the expected active turn id", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;
