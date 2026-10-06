@@ -28,6 +28,16 @@ import {
   TurnId,
 } from "@cafecode/contracts";
 import { normalizeModelSlug } from "@cafecode/shared/model";
+import { CODEX_HISTORY_RECOVERY_REQUIRED_MESSAGE } from "@cafecode/shared/codexHistorySafety";
+import {
+  codexHistoryFailureBelongsToRoot,
+  CODEX_HISTORY_CANDIDATE_LIMIT,
+  CODEX_HISTORY_CANDIDATE_ID_LIMIT,
+  CODEX_HISTORY_DIAGNOSIS_UNCERTAIN_MESSAGE,
+  makeCodexHistorySafety,
+  normalizeCodexBlockedHistoryNotification,
+  type CodexHistorySafetyCallbacks,
+} from "../codexHistorySafety.ts";
 import {
   codexChildUsageMetadata,
   makeCodexChildUsageAccounting,
@@ -437,6 +447,8 @@ export function buildCodexAppServerArgs(
 }
 
 export interface CodexSessionRuntimeOptions {
+  /** Exact Cafe chat/account-bound durable guard; never a native history writer. */
+  readonly historySafety?: CodexHistorySafetyCallbacks<CodexSessionRuntimeError>;
   readonly desktopMcp?: DesktopMcpLaunch | undefined;
   readonly schedulingMcp?: Pick<SchedulingSessionBinding, "name" | "launch"> | undefined;
   readonly threadId: ThreadId;
@@ -4111,6 +4123,7 @@ export const observeCodexRootTurnStartedLifecycleBoundary = Effect.fn(
   readonly manualCompactionPendingRef: Ref.Ref<boolean>;
   readonly closedRef: Ref.Ref<boolean>;
   readonly sessionRef: Ref.Ref<ProviderSession>;
+  readonly latestHistoryRootTurnRef?: Ref.Ref<string | undefined>;
   readonly turnId: TurnId | undefined;
 }) {
   if (input.turnId === undefined) return;
@@ -4127,6 +4140,10 @@ export const observeCodexRootTurnStartedLifecycleBoundary = Effect.fn(
       yield* Ref.set(input.nativeTurnStartRequestRef, undefined);
       yield* Ref.set(input.rootLifecycleEpochRef, Symbol());
       yield* updateSession(input.sessionRef, { status: "running", activeTurnId: turnId });
+      // Capture the admitted identity in the same lifecycle transaction. A
+      // terminal notification may arrive immediately after this permit exits.
+      if (input.latestHistoryRootTurnRef)
+        yield* Ref.set(input.latestHistoryRootTurnRef, String(turnId));
     }),
   );
 });
@@ -4152,6 +4169,7 @@ export function acknowledgeCodexTurnStartLifecycleBoundary(input: {
   readonly turnId: TurnId;
   readonly model?: string | undefined;
   readonly acknowledgedAt: string;
+  readonly latestHistoryRootTurnRef?: Ref.Ref<string | undefined>;
   readonly supersededAggregateTurnId?: TurnId | undefined;
   readonly nativeTurnStartPendingRef?: Ref.Ref<boolean> | undefined;
   readonly nativeTurnStartRequestRef?: Ref.Ref<symbol | undefined> | undefined;
@@ -4196,7 +4214,7 @@ export function acknowledgeCodexTurnStartLifecycleBoundary(input: {
         ) {
           yield* Ref.set(input.nativeTurnStartPendingRef, false);
         }
-        return yield* Ref.modify(input.sessionRef, (session) => {
+        const acknowledged = yield* Ref.modify(input.sessionRef, (session) => {
           const maySupersedeCompletedAggregate =
             (!rootLifecycleChanged || ownsPendingRequest) &&
             input.supersededAggregateTurnId !== undefined &&
@@ -4245,6 +4263,9 @@ export function acknowledgeCodexTurnStartLifecycleBoundary(input: {
             },
           ] as const;
         });
+        if (acknowledged && input.latestHistoryRootTurnRef)
+          yield* Ref.set(input.latestHistoryRootTurnRef, String(input.turnId));
+        return acknowledged;
       }),
     ),
   );
@@ -5512,6 +5533,38 @@ export const makeCodexSessionRuntime = (
       updatedAt: sessionCreatedAt,
     } satisfies ProviderSession;
     const sessionRef = yield* Ref.make<ProviderSession>(initialSession);
+    const historySafety = yield* makeCodexHistorySafety(options.historySafety);
+    // Retain only the newest live root turn, including after its completion.
+    // This admits the paired error/completion in either order but cannot let an
+    // old error or a child turn revoke a newer root's admission.
+    const latestHistoryRootTurnRef = yield* Ref.make<string | undefined>(undefined);
+    // A completion may precede its start ACK with no turn/started frame. Keep
+    // only identity evidence until the ACK proves that this exact request owns
+    // the failed turn; never retain the provider's error body. Cardinality and
+    // identity length are capped; overflow requires an authoritative read.
+    const pendingHistoryFailureRef = yield* Ref.make<
+      | {
+          readonly requestToken: symbol;
+          readonly nativeThreadId: string;
+          readonly nativeTurnIds: ReadonlySet<string>;
+          readonly overflow: boolean;
+          readonly latestTurnAtObservation: string | undefined;
+        }
+      | undefined
+    >(undefined);
+    const uncertainHistoryThreadRef = yield* Ref.make<string | undefined>(undefined);
+    const assertHistoryUsable = (nativeThreadId: string) =>
+      Effect.gen(function* () {
+        if (yield* historySafety.isBlocked(nativeThreadId)) {
+          return yield* CodexErrors.CodexAppServerRequestError.invalidRequest(
+            CODEX_HISTORY_RECOVERY_REQUIRED_MESSAGE,
+          );
+        }
+        if ((yield* Ref.get(uncertainHistoryThreadRef)) === nativeThreadId)
+          return yield* CodexErrors.CodexAppServerRequestError.invalidRequest(
+            CODEX_HISTORY_DIAGNOSIS_UNCERTAIN_MESSAGE,
+          );
+      });
     const reasoningEffortSnapshotRef = yield* Ref.make<CodexReasoningEffortSnapshot | undefined>(
       undefined,
     );
@@ -5973,6 +6026,22 @@ export const makeCodexSessionRuntime = (
       readonly focusTurnId?: TurnId;
     }) =>
       Effect.gen(function* () {
+        // A focused read is authoritative only for the already admitted live
+        // root turn. Old restored failures elsewhere in the transcript cannot
+        // install a new marker (the history could have been repaired since).
+        if (
+          input.focusTurnId !== undefined &&
+          input.providerThread.id === (yield* currentSessionProviderThreadId) &&
+          input.focusTurnId === (yield* Ref.get(latestHistoryRootTurnRef))
+        ) {
+          const turn = input.providerThread.turns.find((entry) => entry.id === input.focusTurnId);
+          if (turn)
+            yield* applyHistorySafetyToNotification({
+              method: "turn/completed",
+              params: { threadId: input.providerThread.id, turn },
+            });
+        }
+        const historyBlocked = yield* historySafety.knownBlocked(input.providerThread.id);
         const builtEvents = buildCodexThreadSnapshotBackfillEvents({
           threadId: options.threadId,
           ...(options.providerInstanceId ? { providerInstanceId: options.providerInstanceId } : {}),
@@ -5980,6 +6049,13 @@ export const makeCodexSessionRuntime = (
           createdAt: yield* nowIso,
           reason: input.reason,
           ...(input.focusTurnId ? { focusTurnId: input.focusTurnId } : {}),
+        }).map((event) => {
+          if (!historyBlocked) return event;
+          const normalized = normalizeCodexBlockedHistoryNotification(
+            { method: event.method, params: event.payload },
+            input.providerThread.id,
+          );
+          return { ...event, payload: normalized.params };
         });
         if (builtEvents.length === 0) {
           return;
@@ -6898,7 +6974,75 @@ export const makeCodexSessionRuntime = (
         manualCompactionPendingRef,
         closedRef,
         sessionRef,
+        latestHistoryRootTurnRef,
         turnId,
+      });
+
+    const markHistoryBlocked = (nativeThreadId: string) =>
+      historySafety.markBlocked(nativeThreadId).pipe(
+        // After admission, graceful cancellation waits for local publication.
+        // A hard process crash before the commit remains an external boundary.
+        Effect.uninterruptible,
+        Effect.catchCause(() =>
+          Effect.logWarning("codex.history-safety.persistence-failed", {
+            provider: PROVIDER,
+          }),
+        ),
+      );
+
+    const applyHistorySafetyToNotification = (notification: CodexServerNotification) =>
+      Effect.gen(function* () {
+        const nativeThreadId = yield* currentSessionProviderThreadId;
+        if (!nativeThreadId || (yield* Ref.get(closedRef))) return notification;
+        const admitted = yield* aggregateLifecycleSemaphore.withPermits(1)(
+          Effect.gen(function* () {
+            if (
+              (yield* Ref.get(closedRef)) ||
+              (yield* currentSessionProviderThreadId) !== nativeThreadId
+            )
+              return false;
+            if (
+              codexHistoryFailureBelongsToRoot(
+                notification,
+                nativeThreadId,
+                yield* Ref.get(latestHistoryRootTurnRef),
+              )
+            ) {
+              yield* historySafety.blockLocally(nativeThreadId);
+              return true;
+            }
+            const nativeTurnId = readNotificationTurnId(notification);
+            if (
+              nativeTurnId &&
+              codexHistoryFailureBelongsToRoot(notification, nativeThreadId, nativeTurnId)
+            ) {
+              const requestToken = yield* Ref.get(nativeTurnStartRequestRef);
+              if (!requestToken) return false;
+              const pending = yield* Ref.get(pendingHistoryFailureRef);
+              const previous = pending?.requestToken === requestToken ? pending : undefined;
+              const ids = previous?.nativeTurnIds ?? new Set<string>();
+              const overflow =
+                previous?.overflow === true ||
+                nativeTurnId.length > CODEX_HISTORY_CANDIDATE_ID_LIMIT ||
+                (!ids.has(nativeTurnId) && ids.size >= CODEX_HISTORY_CANDIDATE_LIMIT);
+              yield* Ref.set(pendingHistoryFailureRef, {
+                requestToken,
+                nativeThreadId,
+                nativeTurnIds: overflow ? ids : new Set([...ids, nativeTurnId]),
+                overflow,
+                latestTurnAtObservation:
+                  previous?.latestTurnAtObservation ?? (yield* Ref.get(latestHistoryRootTurnRef)),
+              });
+            }
+            return false;
+          }),
+        );
+        // The local fence is installed atomically with lifecycle admission,
+        // but database I/O never holds the permit needed by Stop/notifications.
+        if (admitted) yield* markHistoryBlocked(nativeThreadId);
+        return (yield* historySafety.knownBlocked(nativeThreadId))
+          ? normalizeCodexBlockedHistoryNotification(notification, nativeThreadId)
+          : notification;
       });
 
     const reconcileRawNotificationSessionState = (notification: CodexServerNotification) =>
@@ -7014,8 +7158,9 @@ export const makeCodexSessionRuntime = (
         );
       });
 
-    const handleRawNotification = (notification: CodexServerNotification) =>
+    const handleRawNotification = (receivedNotification: CodexServerNotification) =>
       Effect.gen(function* () {
+        let notification = receivedNotification;
         if (isCodexPrivateMetadataNotification(notification.method)) {
           return;
         }
@@ -7041,6 +7186,7 @@ export const makeCodexSessionRuntime = (
         // projection. Recheck under the mutation permit below because detached
         // resume discovery can make the route set incomplete while we await.
         if (!initiallyAdmitted) return;
+        notification = yield* applyHistorySafetyToNotification(notification);
         // Native cancellation wins even for child-owned or standalone MCP
         // requests. Compare the actual RPC id and provider thread, never an
         // item-id guess or the currently focused Cafe thread.
@@ -7419,11 +7565,17 @@ export const makeCodexSessionRuntime = (
           if (providerThreadId && payloadThreadId && payloadThreadId !== providerThreadId) {
             return Effect.void;
           }
-          const errorMessage = payload.error.message;
-          const willRetry = payload.willRetry;
-          return updateSession(sessionRef, {
-            status: willRetry ? "running" : "error",
-            ...(errorMessage ? { lastError: errorMessage } : {}),
+          return Effect.gen(function* () {
+            const notification = yield* applyHistorySafetyToNotification({
+              method: "error",
+              params: payload,
+            });
+            const errorMessage = readNotificationErrorMessage(notification);
+            const willRetry = readNotificationParamBoolean(notification, "willRetry");
+            yield* updateSession(sessionRef, {
+              status: willRetry ? "running" : "error",
+              ...(errorMessage ? { lastError: errorMessage } : {}),
+            });
           });
         }),
       ),
@@ -7774,6 +7926,10 @@ export const makeCodexSessionRuntime = (
     );
 
     const start = Effect.fn("CodexSessionRuntime.start")(function* () {
+      const resumeThreadId = readResumeCursorThreadId(options.resumeCursor);
+      // Resume can restore a native goal or queued work, so it is not an inert
+      // metadata read. A known poisoned cursor must be refused before that RPC.
+      if (resumeThreadId) yield* assertHistoryUsable(resumeThreadId);
       yield* emitSessionEvent("session/connecting", "Starting Codex App Server session.");
       if (options.transportPolicy?.responsesWebsockets === "disabled") {
         yield* emitEvent({
@@ -7804,11 +7960,15 @@ export const makeCodexSessionRuntime = (
         requestedModel,
         serviceTier: options.serviceTier,
         additionalDirectories: options.additionalDirectories,
-        resumeThreadId: readResumeCursorThreadId(options.resumeCursor),
+        resumeThreadId,
         autoCompactTokenLimit: options.autoCompactTokenLimit,
       });
 
       const providerThreadId = opened.thread.id;
+      // Recheck the actual returned identity, including a newly created thread,
+      // before any caller can submit into it. The resume preflight remains the
+      // required gate before an existing native thread is materialized.
+      const historyBlocked = yield* historySafety.isBlocked(providerThreadId);
       yield* Ref.update(reasoningEffortSnapshotRef, (current) =>
         observeCodexThreadOpenReasoningEffort({ current, opened }),
       );
@@ -7825,11 +7985,13 @@ export const makeCodexSessionRuntime = (
       const activeSnapshotTurnId = activeSnapshotTurn
         ? TurnId.make(activeSnapshotTurn.id)
         : undefined;
+      if (activeSnapshotTurnId)
+        yield* Ref.set(latestHistoryRootTurnRef, String(activeSnapshotTurnId));
       const openedThreadStatusType = readCodexSnapshotThreadStatusType(opened.thread.status);
       const session = {
         ...(yield* Ref.get(sessionRef)),
         status:
-          openedThreadStatusType === "systemError"
+          historyBlocked || openedThreadStatusType === "systemError"
             ? "error"
             : activeSnapshotTurnId
               ? "running"
@@ -7847,6 +8009,7 @@ export const makeCodexSessionRuntime = (
                 "Codex app-server reported a systemError thread status during session start.",
             }
           : {}),
+        ...(historyBlocked ? { lastError: CODEX_HISTORY_RECOVERY_REQUIRED_MESSAGE } : {}),
         updatedAt: yield* nowIso,
       } satisfies ProviderSession;
       yield* Ref.set(sessionRef, session);
@@ -8003,6 +8166,13 @@ export const makeCodexSessionRuntime = (
       getSession: aggregateLifecycleSemaphore.withPermits(1)(
         Effect.gen(function* () {
           const session = yield* Ref.get(sessionRef);
+          const nativeThreadId = currentProviderThreadId(session);
+          const guardedSession =
+            nativeThreadId && (yield* historySafety.knownBlocked(nativeThreadId))
+              ? { ...session, lastError: CODEX_HISTORY_RECOVERY_REQUIRED_MESSAGE }
+              : nativeThreadId && (yield* Ref.get(uncertainHistoryThreadRef)) === nativeThreadId
+                ? { ...session, lastError: CODEX_HISTORY_DIAGNOSIS_UNCERTAIN_MESSAGE }
+                : session;
           const completion = readCodexRootTurnCompletion({
             session,
             completions: yield* Ref.get(aggregateRootCompletionsRef),
@@ -8014,19 +8184,25 @@ export const makeCodexSessionRuntime = (
           // never kept on sessionRef, so a later root/Stop/compaction cannot
           // accidentally inherit it through an ordinary session spread.
           return completion === undefined
-            ? session
-            : { ...session, codexRootTurnCompletion: completion };
+            ? guardedSession
+            : { ...guardedSession, codexRootTurnCompletion: completion };
         }),
       ),
       compactThread: Effect.gen(function* () {
         const providerThreadId = yield* readProviderThreadId;
+        yield* assertHistoryUsable(providerThreadId);
         const reservationEpoch = yield* requestCodexManualCompaction({
           sessionRef,
           pendingRef: manualCompactionPendingRef,
           lifecycleEpochRef: rootTurnLifecycleEpochRef,
           semaphore: aggregateLifecycleSemaphore,
           nativeTurnStartPendingRef,
-          request: () => client.request("thread/compact/start", { threadId: providerThreadId }),
+          request: () =>
+            assertHistoryUsable(providerThreadId).pipe(
+              Effect.andThen(
+                client.request("thread/compact/start", { threadId: providerThreadId }),
+              ),
+            ),
         });
         // A missing native start must not leave an apparently running turn
         // forever. Fail closed instead of replaying a possibly accepted RPC.
@@ -8054,6 +8230,7 @@ export const makeCodexSessionRuntime = (
       sendTurn: (input) =>
         Effect.gen(function* () {
           const providerThreadId = yield* readProviderThreadId;
+          yield* assertHistoryUsable(providerThreadId);
           const reviewParams =
             input.codexReview === undefined
               ? undefined
@@ -8154,7 +8331,8 @@ export const makeCodexSessionRuntime = (
           const request = reviewParams
             ? client.raw.request("review/start", reviewParams)
             : client.raw.request("turn/start", params!);
-          const rawResponse = yield* request.pipe(
+          const rawResponse = yield* assertHistoryUsable(providerThreadId).pipe(
+            Effect.andThen(request),
             Effect.tapError((error) =>
               rejectCodexTurnStartLifecycleBoundary({
                 semaphore: aggregateLifecycleSemaphore,
@@ -8182,6 +8360,93 @@ export const makeCodexSessionRuntime = (
                 snapshot: admittedServiceTierSnapshot,
                 requestedTier: input.serviceTier,
               });
+          const pendingHistoryFailure = yield* aggregateLifecycleSemaphore.withPermits(1)(
+            Effect.gen(function* () {
+              const pending = yield* Ref.get(pendingHistoryFailureRef);
+              if (pending?.requestToken !== requestToken) return undefined;
+              yield* Ref.set(pendingHistoryFailureRef, undefined);
+              const latest = yield* Ref.get(latestHistoryRootTurnRef);
+              const current =
+                !(yield* Ref.get(closedRef)) &&
+                (yield* currentSessionProviderThreadId) === providerThreadId &&
+                pending.nativeThreadId === providerThreadId &&
+                (latest === pending.latestTurnAtObservation || latest === turnId);
+              if (!current) return undefined;
+              if (pending.nativeTurnIds.has(turnId))
+                yield* historySafety.blockLocally(providerThreadId);
+              return pending;
+            }),
+          );
+          let confirmedPendingHistoryFailure =
+            pendingHistoryFailure?.nativeTurnIds.has(turnId) === true;
+          let historyDiagnosisUncertain = false;
+          if (pendingHistoryFailure?.overflow && !confirmedPendingHistoryFailure) {
+            const snapshot = yield* readCodexBoundedThreadSnapshotWithClient({
+              client,
+              providerThreadId,
+            }).pipe(
+              Effect.timeoutOption(CODEX_SEND_TURN_SNAPSHOT_BACKFILL_READ_TIMEOUT),
+              Effect.catchCause(() => Effect.succeed(Option.none())),
+            );
+            const exactTurn =
+              Option.isSome(snapshot) && snapshot.value.thread.id === providerThreadId
+                ? snapshot.value.thread.turns.find((turn) => turn.id === turnId)
+                : undefined;
+            const proved =
+              exactTurn !== undefined &&
+              codexHistoryFailureBelongsToRoot(
+                {
+                  method: "turn/completed",
+                  params: { threadId: providerThreadId, turn: exactTurn },
+                },
+                providerThreadId,
+                turnId,
+              );
+            yield* aggregateLifecycleSemaphore.withPermits(1)(
+              Effect.gen(function* () {
+                const latest = yield* Ref.get(latestHistoryRootTurnRef);
+                if (
+                  (yield* Ref.get(closedRef)) ||
+                  (yield* currentSessionProviderThreadId) !== providerThreadId ||
+                  (latest !== pendingHistoryFailure.latestTurnAtObservation && latest !== turnId)
+                )
+                  return;
+                if (proved || (yield* historySafety.knownBlocked(providerThreadId))) {
+                  // A live, identity-admitted rejection can arrive while the
+                  // diagnostic snapshot is pending. Its positive proof wins
+                  // over a later empty or stale snapshot result.
+                  yield* historySafety.blockLocally(providerThreadId);
+                  yield* Ref.set(uncertainHistoryThreadRef, undefined);
+                  confirmedPendingHistoryFailure = true;
+                } else {
+                  // Uncertainty is not authority to persist a poisoned diagnosis.
+                  // Keep a separate local fence and expose a fixed explanation.
+                  yield* Ref.set(uncertainHistoryThreadRef, providerThreadId);
+                  historyDiagnosisUncertain = true;
+                }
+              }),
+            );
+          }
+          if (confirmedPendingHistoryFailure) {
+            yield* markHistoryBlocked(providerThreadId);
+            // Replace the earlier unclassified diagnostic only after native
+            // identity proof. This is a local error projection, never a replay.
+            yield* emitEvent({
+              kind: "notification",
+              threadId: options.threadId,
+              method: "error",
+              turnId,
+              payload: {
+                threadId: providerThreadId,
+                turnId,
+                willRetry: false,
+                error: {
+                  message: CODEX_HISTORY_RECOVERY_REQUIRED_MESSAGE,
+                  codexErrorInfo: "other",
+                },
+              },
+            });
+          }
           if (!reviewParams)
             yield* aggregateLifecycleSemaphore.withPermits(1)(
               Effect.gen(function* () {
@@ -8276,6 +8541,7 @@ export const makeCodexSessionRuntime = (
             manualCompactionPendingRef,
             closedRef,
             sessionRef,
+            latestHistoryRootTurnRef,
             turnId,
             model: normalizedModel,
             acknowledgedAt: turnStartAcknowledgedAt,
@@ -8286,6 +8552,36 @@ export const makeCodexSessionRuntime = (
             reason: "send-turn-follow-up",
           });
           const resumedProviderThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
+          if (historyDiagnosisUncertain)
+            yield* aggregateLifecycleSemaphore.withPermits(1)(
+              Effect.gen(function* () {
+                // The native ACK already proves delivery. Diagnostic doubt
+                // must not turn that accepted request into a failed send and
+                // release the desktop turn lease. Publish a nonterminal local
+                // warning, retaining the independent future-mutation fence.
+                // Recheck under the same admission lock as live diagnoses so
+                // a confirmed rejection is never replaced by uncertainty.
+                if (
+                  (yield* Ref.get(closedRef)) ||
+                  (yield* currentSessionProviderThreadId) !== providerThreadId ||
+                  (yield* historySafety.knownBlocked(providerThreadId))
+                )
+                  return;
+                yield* emitEvent({
+                  kind: "notification",
+                  threadId: options.threadId,
+                  method: "warning",
+                  turnId,
+                  message: CODEX_HISTORY_DIAGNOSIS_UNCERTAIN_MESSAGE,
+                  payload: {
+                    threadId: providerThreadId,
+                    turnId,
+                    message: CODEX_HISTORY_DIAGNOSIS_UNCERTAIN_MESSAGE,
+                    reason: "codex_history_diagnosis_uncertain",
+                  },
+                });
+              }),
+            );
           return {
             threadId: options.threadId,
             turnId,
@@ -8298,6 +8594,7 @@ export const makeCodexSessionRuntime = (
       steerTurn: (input) =>
         Effect.gen(function* () {
           const providerThreadId = yield* readProviderThreadId;
+          yield* assertHistoryUsable(providerThreadId);
           if (yield* Ref.get(manualCompactionPendingRef)) {
             return yield* CodexErrors.CodexAppServerRequestError.invalidRequest(
               "cannot steer a compact turn",
@@ -8381,6 +8678,7 @@ export const makeCodexSessionRuntime = (
                 ...(input.input ? { prompt: input.input } : {}),
                 ...(input.attachments ? { attachments: input.attachments } : {}),
               });
+              yield* assertHistoryUsable(providerThreadId);
               return yield* client.raw.request("turn/steer", params);
             });
           const pendingSteerAdmission = yield* recordPendingSteerProcessing({
@@ -8746,6 +9044,9 @@ export const makeCodexSessionRuntime = (
         }),
       forkThread: Effect.gen(function* () {
         const providerThreadId = yield* readProviderThreadId;
+        // An ordinary native fork inherits the rejected input too. Recovery
+        // uses an explicitly confirmed Cafe copy, never a silent fork fallback.
+        yield* assertHistoryUsable(providerThreadId);
         // Source sessions are checked for idleness by ProviderService. Keep the
         // fork persistent and let app-server copy the complete stored history,
         // matching the native Codex UI's thread/fork behavior. The source is
@@ -8787,6 +9088,10 @@ export const makeCodexSessionRuntime = (
       setGoal: (input) =>
         Effect.gen(function* () {
           const providerThreadId = yield* readProviderThreadId;
+          // Pausing/finishing remains available. An objective edit or omitted
+          // status may create/resume a goal, so those mutations require safety.
+          if (input.status === undefined || input.status === "active")
+            yield* assertHistoryUsable(providerThreadId);
           const response = yield* client.request("thread/goal/set", {
             threadId: providerThreadId,
             ...(input.objective !== undefined ? { objective: input.objective } : {}),

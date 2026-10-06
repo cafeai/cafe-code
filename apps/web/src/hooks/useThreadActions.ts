@@ -1,5 +1,6 @@
 import { parseScopedThreadKey, scopeProjectRef, scopeThreadRef } from "@cafecode/client-runtime";
 import { type ScopedThreadRef, ThreadId } from "@cafecode/contracts";
+import { isCodexHistoryRecoveryRequiredError } from "@cafecode/shared/codexHistorySafety";
 import { useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "@tanstack/react-router";
 import { useCallback, useLayoutEffect, useRef } from "react";
@@ -11,7 +12,8 @@ import { ensureEnvironmentApi, readEnvironmentApi } from "../environmentApi";
 import { invalidateGitQueries } from "../lib/gitReactQuery";
 import { refreshArchivedThreadsForEnvironment } from "../lib/archivedThreadsState";
 import { refreshDeletedThreadsForEnvironment } from "../lib/deletedThreadsState";
-import { newCommandId } from "../lib/utils";
+import { newCommandId, newThreadId } from "../lib/utils";
+import { readWorkspaceEnvironmentId, useWorkspaceSelection } from "../environments/workspace";
 import { readLocalApi } from "../localApi";
 import {
   selectProjectByRef,
@@ -23,6 +25,11 @@ import { buildThreadRouteParams, resolveThreadRouteRef } from "../threadRoutes";
 import { formatWorktreePathForDisplay, getOrphanedWorktreePathForThread } from "../worktreeCleanup";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { useSettings } from "./useSettings";
+
+// A second mounted pane must not admit a second copy while the first pane's
+// confirmation or command is unresolved. This is UI admission only; the stable
+// command/target identities below remain the server's idempotency boundary.
+const pendingHistoryRecoveries = new Set<string>();
 
 export function useThreadActions() {
   const sidebarThreadSortOrder = useSettings((settings) => settings.sidebarThreadSortOrder);
@@ -53,6 +60,17 @@ export function useThreadActions() {
   const handleNewStandaloneChatRef = useRef(handleNewStandaloneChat);
   handleNewStandaloneChatRef.current = handleNewStandaloneChat;
   const queryClient = useQueryClient();
+  const uncertainHistoryRecovery = useRef<{
+    key: string;
+    command: {
+      type: "thread.duplicate";
+      commandId: ReturnType<typeof newCommandId>;
+      sourceThreadId: ThreadId;
+      targetThreadId: ThreadId;
+      title: string;
+      createdAt: string;
+    };
+  } | null>(null);
 
   const resolveThreadTarget = useCallback((target: ScopedThreadRef) => {
     const state = useStore.getState();
@@ -69,6 +87,121 @@ export function useThreadActions() {
     const currentRouteParams = router.state.matches[router.state.matches.length - 1]?.params ?? {};
     return resolveThreadRouteRef(currentRouteParams);
   }, [router]);
+
+  const continueInNewChat = useCallback(
+    async (target: ScopedThreadRef, isCurrentSurface: () => boolean): Promise<void> => {
+      const source = resolveThreadTarget(target)?.thread;
+      const api = readEnvironmentApi(target.environmentId);
+      const localApi = readLocalApi();
+      const owner = navigationOwner.current;
+      const location = router.state.location;
+      const workspace = useWorkspaceSelection.getState();
+      const route = getCurrentRouteThreadRef();
+      if (
+        !source ||
+        !api ||
+        !localApi ||
+        !owner ||
+        source.session?.provider !== "codex" ||
+        !isCodexHistoryRecoveryRequiredError(source.error ?? "") ||
+        source.session.activeTurnId != null ||
+        source.session.status === "running" ||
+        source.session.status === "connecting" ||
+        (source.latestTurn !== null && !source.latestTurn.completedAt) ||
+        route?.threadId !== target.threadId ||
+        route.environmentId !== target.environmentId ||
+        readWorkspaceEnvironmentId() !== target.environmentId ||
+        !isCurrentSurface()
+      )
+        return;
+
+      const pendingKey = JSON.stringify([target.environmentId, target.threadId]);
+      const key = JSON.stringify([
+        target.environmentId,
+        target.threadId,
+        source.createdAt,
+        source.updatedAt,
+        source.modelSelection,
+        source.codexThreadId,
+        source.session.subagentRuntimeId,
+      ]);
+      if (pendingHistoryRecoveries.has(pendingKey)) return;
+      pendingHistoryRecoveries.add(pendingKey);
+      // Never redirect a new route, a replacement pane, or a newly selected
+      // account after the owner has spent time reviewing the confirmation.
+      const stillCurrent = () => {
+        const current = resolveThreadTarget(target)?.thread;
+        return (
+          navigationOwner.current === owner &&
+          router.state.location === location &&
+          useWorkspaceSelection.getState() === workspace &&
+          isCurrentSurface() &&
+          current?.createdAt === source.createdAt &&
+          current.error === source.error &&
+          current.modelSelection === source.modelSelection &&
+          current.latestTurn === source.latestTurn &&
+          current.codexThreadId === source.codexThreadId &&
+          current.session?.subagentRuntimeId === source.session?.subagentRuntimeId &&
+          current.session?.providerInstanceId === source.session?.providerInstanceId &&
+          current.session?.activeTurnId == null &&
+          current.session?.status !== "running" &&
+          current.session?.status !== "connecting" &&
+          current.archivedAt === null &&
+          current.projectId === source.projectId &&
+          current.branch === source.branch &&
+          current.worktreePath === source.worktreePath &&
+          current.runtimeMode === source.runtimeMode &&
+          current.interactionMode === source.interactionMode
+        );
+      };
+      try {
+        const confirmed = await localApi.dialogs.confirm(
+          [
+            "Continue in a new chat?",
+            "Cafe will copy the visible conversation into a new chat using the same selected account. On your next explicit message, a bounded excerpt of recent visible messages will provide context to a fresh Codex session; hidden native history is not copied.",
+            source.projectId === null
+              ? "This standalone chat receives a new empty workspace; existing workspace files are not copied."
+              : "The new chat keeps this project's workspace context.",
+            "Your original chat and workspace files remain unchanged. No prompt is sent automatically, and your current draft stays in the original chat.",
+          ].join("\n\n"),
+        );
+        if (!confirmed || !stillCurrent()) return;
+        // Retain this exact command after an uncertain transport error. A
+        // subsequent explicit retry must resolve the same copy, not create a
+        // second chat merely because its first acknowledgement was lost.
+        let operation = uncertainHistoryRecovery.current;
+        if (operation?.key !== key) {
+          operation = {
+            key,
+            command: {
+              type: "thread.duplicate",
+              commandId: newCommandId(),
+              sourceThreadId: target.threadId,
+              targetThreadId: newThreadId(),
+              title: `${source.title.slice(0, 180)} (continued)`,
+              createdAt: new Date().toISOString(),
+            },
+          };
+          uncertainHistoryRecovery.current = operation;
+        }
+        await api.orchestration.dispatchCommand(operation.command);
+        // Keep the identity after acknowledgement too: failed/stale navigation
+        // must not turn a later explicit retry into another copy of this same
+        // source revision. A changed source/account gets a new operation key.
+        if (stillCurrent()) {
+          await router.navigate({
+            to: "/$environmentId/$threadId",
+            params: buildThreadRouteParams(
+              scopeThreadRef(target.environmentId, operation.command.targetThreadId),
+            ),
+          });
+        }
+      } finally {
+        pendingHistoryRecoveries.delete(pendingKey);
+      }
+    },
+    [getCurrentRouteThreadRef, resolveThreadTarget, router],
+  );
 
   const archiveThread = useCallback(
     async (target: ScopedThreadRef) => {
@@ -363,5 +496,6 @@ export function useThreadActions() {
     deleteThread,
     confirmAndDeleteThread,
     hardDeleteThread,
+    continueInNewChat,
   };
 }

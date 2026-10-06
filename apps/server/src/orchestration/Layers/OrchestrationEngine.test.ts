@@ -1367,6 +1367,7 @@ describe("OrchestrationEngine", () => {
               updatedAt: projectionSnapshot.updatedAt,
             }),
           getThreadForkSourceVersion: () => Effect.succeed(0),
+          hasPendingContextBootstrap: () => Effect.succeed(false),
           getThreadForkMessageCount: () => Effect.succeed(0),
           getSnapshotSequence: () =>
             Effect.succeed({ snapshotSequence: projectionSnapshot.snapshotSequence }),

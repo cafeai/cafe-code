@@ -28,6 +28,7 @@ import type { ProviderServiceShape } from "../provider/Services/ProviderService.
 import { ProviderAdapterRequestError } from "../provider/Errors.ts";
 import { ServerConfig } from "../config.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { PersistenceSqlError } from "../persistence/Errors.ts";
 import { makeStandaloneWorkspaceStore } from "./standaloneWorkspace.ts";
 import { threadForkPrefix } from "./threadForkCutoff.ts";
 
@@ -37,6 +38,7 @@ const commandId = CommandId.make("cmd-thread-fork");
 const createdAt = "2026-08-21T12:00:00.000Z";
 const getThreadForkSourceVersion = () => Effect.succeed(42);
 const forkProjectionDefaults = {
+  hasPendingContextBootstrap: () => Effect.succeed(false),
   getThreadForkSourceVersion,
   getThreadForkMessageCount: () => Effect.succeed(0),
   getProjectShellById: () => Effect.succeed(Option.none()),
@@ -201,6 +203,89 @@ it.effect(
       assert.deepEqual(forkSession.mock.calls[1]?.[0].messageCutoff, expected);
     }),
 );
+
+for (const admission of ["pending", "unreadable"] as const) {
+  it.effect(
+    `refuses ${admission} copied context before native fork or standalone ownership`,
+    () => {
+      const forkSession = vi.fn<ProviderServiceShape["forkSession"]>(() =>
+        Effect.succeed(nativeFork),
+      );
+      const discardSessionFork = vi.fn<ProviderServiceShape["discardSessionFork"]>(
+        () => Effect.void,
+      );
+      const dispatch = vi.fn<OrchestrationEngineShape["dispatch"]>(() =>
+        Effect.succeed({ sequence: 1 }),
+      );
+      const readExisting = vi.fn(() => Effect.succeed("/server-owned-neutral"));
+      const resolve = vi.fn(() => Effect.succeed("/server-owned-neutral"));
+      const remove = vi.fn(() => Effect.succeed(undefined));
+      const shareFork = vi.fn(() => Effect.succeed(undefined));
+      const discardFork = vi.fn(() => Effect.succeed(undefined));
+      const hasPendingContextBootstrap = vi.fn<
+        ProjectionSnapshotQueryShape["hasPendingContextBootstrap"]
+      >(() =>
+        admission === "pending"
+          ? Effect.succeed(true)
+          : Effect.fail(
+              new PersistenceSqlError({
+                operation: "fixture-read",
+                detail: "Synthetic missing admission database",
+              }),
+            ),
+      );
+      return Effect.gen(function* () {
+        const error = yield* dispatchProviderNativeThreadFork({
+          command: {
+            type: "thread.fork",
+            commandId,
+            sourceThreadId,
+            targetThreadId,
+            title: "Fork",
+            createdAt,
+          },
+          orchestrationEngine: { dispatch },
+          projectionSnapshotQuery: {
+            ...forkProjectionDefaults,
+            hasPendingContextBootstrap,
+            getThreadDetailById: () =>
+              Effect.succeed(
+                Option.some({
+                  ...sourceThread,
+                  projectId: null,
+                  branch: null,
+                  worktreePath: null,
+                }),
+              ),
+          },
+          providerService: { forkSession, discardSessionFork },
+          standaloneWorkspaces: { readExisting, resolve, remove, shareFork, discardFork },
+        }).pipe(Effect.flip);
+        assert.equal(
+          "_tag" in error ? error._tag : undefined,
+          admission === "pending" ? "OrchestrationDispatchCommandError" : "PersistenceSqlError",
+        );
+        if (admission === "pending")
+          assert.match(
+            error.message,
+            /Send a normal message in this copied chat before creating a native fork/,
+          );
+        assert.deepEqual(hasPendingContextBootstrap.mock.calls, [[sourceThreadId]]);
+        for (const operation of [
+          forkSession,
+          discardSessionFork,
+          dispatch,
+          readExisting,
+          resolve,
+          remove,
+          shareFork,
+          discardFork,
+        ])
+          assert.equal(operation.mock.calls.length, 0);
+      });
+    },
+  );
+}
 
 it.effect("compensates only the owned native fork when the domain commit fails", () => {
   const forkSession = vi.fn<ProviderServiceShape["forkSession"]>(() => Effect.succeed(nativeFork));

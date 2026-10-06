@@ -107,6 +107,7 @@ it.effect("resolveAutoBootstrapWelcomeTargets returns existing project and threa
         getDeletedShellSnapshot: () => Effect.die("unused"),
         getSnapshotSequence: () => Effect.die("unused"),
         getThreadForkSourceVersion: () => Effect.die("unused"),
+        hasPendingContextBootstrap: () => Effect.succeed(false),
         getThreadForkMessageCount: () => Effect.die("unused"),
         getCounts: () => Effect.die("unused"),
         getActiveProjectByWorkspaceRoot: () =>
@@ -181,6 +182,7 @@ it.effect("resolveAutoBootstrapWelcomeTargets creates a project and thread when 
         getDeletedShellSnapshot: () => Effect.die("unused"),
         getSnapshotSequence: () => Effect.die("unused"),
         getThreadForkSourceVersion: () => Effect.die("unused"),
+        hasPendingContextBootstrap: () => Effect.succeed(false),
         getThreadForkMessageCount: () => Effect.die("unused"),
         getCounts: () => Effect.die("unused"),
         getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),

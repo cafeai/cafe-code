@@ -243,6 +243,10 @@ export interface ProjectionSnapshotQueryShape {
   readonly getThreadForkSourceVersion: (
     threadId: ThreadId,
   ) => Effect.Effect<number, ProjectionRepositoryError>;
+  /** Exact indexed admission: a visible-context copy is not yet native history. */
+  readonly hasPendingContextBootstrap: (
+    threadId: ThreadId,
+  ) => Effect.Effect<boolean, ProjectionRepositoryError>;
   /** Capped at 2001; proves a selected fork's bounded candidate list is complete. */
   readonly getThreadForkMessageCount: (
     threadId: ThreadId,

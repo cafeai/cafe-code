@@ -4743,8 +4743,26 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       });
     });
 
+  const getContextBootstrapRow = SqlSchema.findOneOption({
+    Request: ThreadId,
+    Result: Schema.Struct({ pending: Schema.Literals([0, 1]) }),
+    execute: (threadId) => sql`
+      SELECT pending FROM projection_thread_context_bootstraps WHERE thread_id = ${threadId}
+    `,
+  });
+
   return {
     getCommandReadModel,
+    hasPendingContextBootstrap: (threadId) =>
+      getContextBootstrapRow(threadId).pipe(
+        Effect.map((row) => Option.isSome(row) && row.value.pending === 1),
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProjectionSnapshotQuery.hasPendingContextBootstrap:query",
+            "ProjectionSnapshotQuery.hasPendingContextBootstrap:decodeRow",
+          ),
+        ),
+      ),
     getSnapshot,
     getShellSnapshot,
     getArchivedShellSnapshot,

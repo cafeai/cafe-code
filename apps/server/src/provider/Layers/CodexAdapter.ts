@@ -64,6 +64,7 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
@@ -71,6 +72,8 @@ import * as EffectCodexSchema from "effect-codex-app-server/schema";
 import { getModelSelectionStringOptionValue } from "@cafecode/shared/model";
 import { summarizeToolArguments } from "@cafecode/shared/toolActivity";
 import { resolveCodexServiceTier } from "../codexServiceTier.ts";
+import { isCodexHistoryRecoveryRequiredError } from "@cafecode/shared/codexHistorySafety";
+import { makeCodexHistorySafetyStore } from "../../persistence/CodexHistorySafety.ts";
 
 import {
   ProviderAdapterRequestError,
@@ -241,7 +244,9 @@ function mapCodexRuntimeError(
     provider: PROVIDER,
     method,
     detail: error.message,
-    cause: error,
+    // The runtime has already proven exact native-thread provenance before
+    // producing this finite error. Do not retain the original provider body.
+    ...(isCodexHistoryRecoveryRequiredError(error.message) ? {} : { cause: error }),
   });
 }
 
@@ -3552,9 +3557,19 @@ function mapToRuntimeEvents(
       return [];
     }
     const errorMessage = trimText(payload.turn.error?.message);
+    const historyRecoveryRequired =
+      errorMessage !== undefined && isCodexHistoryRecoveryRequiredError(errorMessage);
     return [
       {
-        ...runtimeEventBase(event, canonicalThreadId),
+        ...runtimeEventBase(
+          event,
+          canonicalThreadId,
+          historyRecoveryRequired
+            ? {
+                rawPayload: { reason: "codex_history_tool_arguments_too_large" },
+              }
+            : undefined,
+        ),
         type: "turn.completed",
         payload: {
           state: toTurnStatus(payload.turn.status),
@@ -4232,14 +4247,28 @@ function mapToRuntimeEvents(
     const message = payload?.error.message ?? event.message ?? "Provider runtime error";
     const willRetry = payload?.willRetry === true;
     const isSubagentError = event.method === "codex.subagent/error";
+    // Only the runtime's proven, already-normalized root error earns this
+    // finite handling. Never reinterpret raw child/stale provider text here.
+    const historyRecoveryRequired =
+      !isSubagentError && isCodexHistoryRecoveryRequiredError(message);
     return [
       {
         type: willRetry || isSubagentError ? "runtime.warning" : "runtime.error",
-        ...runtimeEventBase(event, canonicalThreadId),
+        ...runtimeEventBase(
+          event,
+          canonicalThreadId,
+          historyRecoveryRequired
+            ? {
+                rawPayload: { reason: "codex_history_tool_arguments_too_large" },
+              }
+            : undefined,
+        ),
         payload: {
           message,
           ...(!willRetry && !isSubagentError ? { class: "provider_error" as const } : {}),
-          ...(event.payload !== undefined ? { detail: event.payload } : {}),
+          ...(!historyRecoveryRequired && event.payload !== undefined
+            ? { detail: event.payload }
+            : {}),
         },
       },
     ];
@@ -4478,6 +4507,13 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   const path = yield* Path.Path;
   const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const serverConfig = yield* Effect.service(ServerConfig);
+  const sql = yield* Effect.serviceOption(SqlClient.SqlClient);
+  // Production provider owners already supply their durable SQLite client.
+  // A missing client (for example a deliberately isolated adapter fixture)
+  // must reject safety operations rather than silently turn off the guard.
+  const historySafety = Option.isSome(sql)
+    ? yield* makeCodexHistorySafetyStore.pipe(Effect.provideService(SqlClient.SqlClient, sql.value))
+    : undefined;
   const transportPolicyPath = path.join(serverConfig.stateDir, CODEX_TRANSPORT_POLICY_FILENAME);
   const transportPolicyKey = codexTransportPolicyKey({
     instanceId: boundInstanceId,
@@ -4797,6 +4833,48 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           : undefined;
         const currentTransportPolicy = toRuntimeTransportPolicy(yield* Ref.get(transportPolicyRef));
         const runtimeInput: CodexSessionRuntimeOptions = {
+          historySafety: {
+            isBlocked: (nativeThreadId) =>
+              historySafety
+                ? historySafety
+                    .isBlocked({
+                      threadId: input.threadId,
+                      providerInstanceId: boundInstanceId,
+                      nativeThreadId,
+                    })
+                    .pipe(
+                      Effect.mapError(() =>
+                        CodexErrors.CodexAppServerRequestError.invalidRequest(
+                          "Could not verify Codex conversation history safety.",
+                        ),
+                      ),
+                    )
+                : Effect.fail(
+                    CodexErrors.CodexAppServerRequestError.invalidRequest(
+                      "Could not verify Codex conversation history safety.",
+                    ),
+                  ),
+            markBlocked: (nativeThreadId) =>
+              historySafety
+                ? historySafety
+                    .markBlocked({
+                      threadId: input.threadId,
+                      providerInstanceId: boundInstanceId,
+                      nativeThreadId,
+                    })
+                    .pipe(
+                      Effect.mapError(() =>
+                        CodexErrors.CodexAppServerRequestError.invalidRequest(
+                          "Could not persist Codex conversation history safety.",
+                        ),
+                      ),
+                    )
+                : Effect.fail(
+                    CodexErrors.CodexAppServerRequestError.invalidRequest(
+                      "Could not persist Codex conversation history safety.",
+                    ),
+                  ),
+          },
           ...(desktopBinding
             ? {
                 desktopMcp: {

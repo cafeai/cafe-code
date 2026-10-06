@@ -1,14 +1,13 @@
+import { createHash } from "node:crypto";
 import {
   type ChatAttachment,
   CommandId,
   EventId,
   MessageId,
   type ModelSelection,
-  type OrchestrationMessage,
   type OrchestrationCommand,
   type OrchestrationEvent,
   type OrchestrationProjectShell,
-  PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   ProviderDriverKind,
   type ProjectId,
   type OrchestrationSession,
@@ -84,6 +83,10 @@ import {
 import { makeProviderTurnRecoveryEvidenceReader } from "../providerTurnRecoveryEvidence.ts";
 import { makeRuntimeRecoveryBarrierReader } from "../providerRuntimeRecovery.ts";
 import {
+  composeProviderContinuationBootstrapInput,
+  ProviderContinuationInputTooLargeError,
+} from "../providerContinuationBootstrap.ts";
+import {
   isScheduledFollowUpAuthorized,
   verifyScheduledFollowUpDispatch,
 } from "../../scheduledFollowups/authorization.ts";
@@ -139,6 +142,8 @@ interface PreparedProviderTurn {
   readonly request: ProviderSendTurnInput;
   readonly configuration: ProviderTurnConfiguration | undefined;
   readonly activeTurnId: TurnId | undefined;
+  /** This exact ordinary request carried a duplicate's visible context. */
+  readonly copiedContextBootstrap?: boolean;
 }
 const isRuntimeLossEvent = (event: OrchestrationEvent): event is RuntimeLossEvent =>
   event.type === "thread.activity-appended" &&
@@ -245,8 +250,6 @@ const HANDLED_TURN_START_KEY_MAX = 10_000;
 const HANDLED_TURN_START_KEY_TTL = Duration.minutes(30);
 const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
 const DEFAULT_THREAD_TITLE = "New thread";
-const PROVIDER_CONTINUATION_BOOTSTRAP_TRANSCRIPT_MAX_CHARS = 40_000;
-const PROVIDER_CONTINUATION_BOOTSTRAP_MIN_TRANSCRIPT_CHARS = 500;
 const ORPHANED_TURN_START_RESTART_DETAIL =
   "Turn start was interrupted by application restart before a provider turn started. The prompt was not resent automatically to avoid duplicate provider work; resend the message to continue.";
 const ORPHANED_ACTIVE_TURN_RESTART_DETAIL =
@@ -279,102 +282,6 @@ function canReplaceThreadTitle(currentTitle: string, titleSeed?: string): boolea
   return trimmedTitleSeed !== undefined && trimmedTitleSeed.length > 0
     ? trimmedCurrentTitle === trimmedTitleSeed
     : false;
-}
-
-function formatProviderBootstrapMessage(message: OrchestrationMessage): string | undefined {
-  if (message.role === "assistant" && message.streaming) {
-    return undefined;
-  }
-  const text = message.text.trim();
-  const attachments = message.attachments ?? [];
-  if (text.length === 0 && attachments.length === 0) {
-    return undefined;
-  }
-  const role =
-    message.role === "assistant" ? "Assistant" : message.role === "system" ? "System" : "User";
-  const attachmentLine =
-    attachments.length > 0
-      ? `\n[attachments: ${attachments.map((attachment) => attachment.name).join(", ")}]`
-      : "";
-  return `${role}:\n${text.length > 0 ? text : "[no text]"}${attachmentLine}`;
-}
-
-function buildBoundedProviderBootstrapTranscript(input: {
-  readonly messages: ReadonlyArray<OrchestrationMessage>;
-  readonly currentMessageId: MessageId | undefined;
-  readonly maxChars: number;
-}): string | undefined {
-  const formattedMessages = input.messages.flatMap((message) => {
-    if (input.currentMessageId !== undefined && message.id === input.currentMessageId) {
-      return [];
-    }
-    const formatted = formatProviderBootstrapMessage(message);
-    return formatted === undefined ? [] : [formatted];
-  });
-  if (
-    formattedMessages.length === 0 ||
-    input.maxChars < PROVIDER_CONTINUATION_BOOTSTRAP_MIN_TRANSCRIPT_CHARS
-  ) {
-    return undefined;
-  }
-
-  const selected: string[] = [];
-  let usedChars = 0;
-  let omittedEarlierMessages = false;
-  for (let index = formattedMessages.length - 1; index >= 0; index -= 1) {
-    const block = formattedMessages[index] as string;
-    const separatorChars = selected.length === 0 ? 0 : 2;
-    const remaining = input.maxChars - usedChars - separatorChars;
-    if (remaining <= 0) {
-      omittedEarlierMessages = true;
-      break;
-    }
-    if (block.length > remaining) {
-      if (remaining >= PROVIDER_CONTINUATION_BOOTSTRAP_MIN_TRANSCRIPT_CHARS) {
-        selected.unshift(`${block.slice(0, remaining - 32)}\n[message truncated]`);
-      }
-      omittedEarlierMessages = true;
-      break;
-    }
-    selected.unshift(block);
-    usedChars += block.length + separatorChars;
-  }
-
-  if (selected.length === 0) {
-    return undefined;
-  }
-  if (omittedEarlierMessages) {
-    selected.unshift("[Earlier Cafe-visible messages omitted due to length.]");
-  }
-  return selected.join("\n\n");
-}
-
-function composeProviderContinuationBootstrapInput(input: {
-  readonly messages: ReadonlyArray<OrchestrationMessage>;
-  readonly currentMessageId: MessageId | undefined;
-  readonly currentUserInput: string | undefined;
-}): string | undefined {
-  const currentUserInput =
-    input.currentUserInput ??
-    "[No text was provided with this request. Use the attached input, if any, with the prior chat context.]";
-  const prefix =
-    "You are taking over an existing Cafe Code chat in a new provider session.\n" +
-    "The previous provider session cannot be resumed by this provider, so Cafe is providing the visible prior chat transcript below. Use it as context for the current request; do not repeat or re-answer earlier messages unless asked.\n\n" +
-    "Prior Cafe-visible chat transcript:\n";
-  const suffix = `\n\nCurrent user request:\n${currentUserInput}`;
-  const transcriptBudget = Math.min(
-    PROVIDER_CONTINUATION_BOOTSTRAP_TRANSCRIPT_MAX_CHARS,
-    PROVIDER_SEND_TURN_MAX_INPUT_CHARS - prefix.length - suffix.length,
-  );
-  const transcript = buildBoundedProviderBootstrapTranscript({
-    messages: input.messages,
-    currentMessageId: input.currentMessageId,
-    maxChars: transcriptBudget,
-  });
-  if (transcript === undefined) {
-    return input.currentUserInput;
-  }
-  return `${prefix}${transcript}${suffix}`;
 }
 
 function findProviderAdapterRequestError(
@@ -2063,14 +1970,31 @@ const make = Effect.gen(function* () {
         });
       }
     }
+    // An explicit Cafe duplicate copies visible history but deliberately has
+    // no native history. Admission comes from its projected domain event,
+    // survives restart/failed materialization, and uses a constant-size lookup.
+    const copiedContext = yield* sql<{ readonly pending: number }>`
+      SELECT pending FROM projection_thread_context_bootstraps WHERE thread_id = ${input.threadId}
+    `;
+    if (copiedContext[0]?.pending === 1 && input.codexReview !== undefined) {
+      // review/start ignores ordinary prompt text; admitting it here would
+      // consume the copy without ever delivering its visible conversation.
+      return yield* new ProviderAdapterRequestError({
+        provider: "Codex",
+        method: "review/start",
+        detail:
+          "Send a message in this copied chat before starting a native review, so Cafe can transfer its visible context.",
+      });
+    }
     const shouldBootstrapProviderContext =
-      input.modelSelection !== undefined
+      copiedContext[0]?.pending === 1 ||
+      (input.modelSelection !== undefined
         ? yield* shouldBootstrapProviderContinuationContext({
             thread,
             desiredModelSelection: input.modelSelection,
             activeSession,
           })
-        : false;
+        : false);
     const ensuredSession = yield* ensureSessionForThread(input.threadId, input.createdAt, {
       ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
       thread,
@@ -2090,20 +2014,32 @@ const make = Effect.gen(function* () {
     const systemPrompt = isFirstUserMessageTurn
       ? yield* readSystemPromptFileForInjection(serverConfig.systemPromptPath)
       : undefined;
-    const providerInput =
-      systemPrompt !== undefined
-        ? composeSystemPromptProviderInput({ systemPrompt, userMessage: normalizedInput })
-        : shouldBootstrapProviderContext
-          ? yield* resolveThread(input.threadId).pipe(
-              Effect.map((latestThread) =>
+    const providerInput = shouldBootstrapProviderContext
+      ? yield* resolveThread(input.threadId).pipe(
+          Effect.flatMap((latestThread) =>
+            Effect.try({
+              try: () =>
                 composeProviderContinuationBootstrapInput({
                   messages: (latestThread ?? thread).messages,
                   currentMessageId: input.messageId,
                   currentUserInput: normalizedInput,
+                  systemPrompt,
                 }),
-              ),
-            )
-          : normalizedInput;
+              catch: (error) =>
+                new ProviderAdapterRequestError({
+                  provider: providerErrorLabel(ensuredSession.provider),
+                  method: "thread.turn.start",
+                  detail:
+                    error instanceof ProviderContinuationInputTooLargeError
+                      ? error.message
+                      : "Could not prepare the visible conversation context.",
+                }),
+            }),
+          ),
+        )
+      : systemPrompt !== undefined
+        ? composeSystemPromptProviderInput({ systemPrompt, userMessage: normalizedInput })
+        : normalizedInput;
     const normalizedAttachments = input.attachments ?? [];
     const instanceId = ensuredSession.providerInstanceId;
     if (instanceId === undefined) {
@@ -2154,6 +2090,7 @@ const make = Effect.gen(function* () {
       : undefined;
     return {
       request,
+      copiedContextBootstrap: copiedContext[0]?.pending === 1,
       // review/start inherits native review settings (which may select a
       // separate review model). Do not publish the ordinary turn's submitted
       // composer configuration as if those unsupported overrides were applied.
@@ -2182,6 +2119,37 @@ const make = Effect.gen(function* () {
       turn.deliveryKind === "steer" ||
       turn.clientCorrelationId !== undefined ||
       turn.turnId === prepared.activeTurnId;
+    if (prepared.copiedContextBootstrap && !steeredExistingTurn) {
+      const acceptedAt = DateTime.formatIso(yield* DateTime.now);
+      const identity = createHash("sha256")
+        .update(JSON.stringify([prepared.request.threadId, turn.turnId]))
+        .digest("hex");
+      // Completion can precede the start ACK, so a running projection alone
+      // cannot prove this delivery. Record a replayable, content-free fact
+      // without reopening terminal work or treating metadata failure as a
+      // rejected send. The pending marker stays conservative on SQL failure.
+      yield* orchestrationEngine
+        .dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make(`context-bootstrap:${identity}`),
+          threadId: prepared.request.threadId,
+          activity: {
+            id: EventId.make(`context-bootstrap:${identity}`),
+            kind: "provider.context.bootstrap.accepted",
+            tone: "info",
+            summary: "Copied conversation context delivered",
+            payload: { version: 1 },
+            turnId: turn.turnId,
+            createdAt: acceptedAt,
+          },
+          createdAt: acceptedAt,
+        })
+        .pipe(
+          Effect.catchCause(() =>
+            Effect.logWarning("copied context acceptance could not be recorded"),
+          ),
+        );
+    }
     // The original accepted start owns this turn's immutable snapshot. A
     // routed steer must not race its pending write, rewrite a renamed account,
     // or backfill pre-upgrade history with the current composer's settings.
@@ -4909,6 +4877,21 @@ const make = Effect.gen(function* () {
   ) {
     const thread = yield* resolveThread(event.payload.threadId);
     if (!thread) return;
+    const pendingCopy = yield* sql<{ readonly pending: number }>`
+      SELECT pending FROM projection_thread_context_bootstraps WHERE thread_id = ${thread.id}
+    `;
+    if (pendingCopy[0]?.pending === 1) {
+      yield* appendProviderFailureActivity({
+        threadId: thread.id,
+        kind: "provider.compaction.failed",
+        summary: "Send a message before compacting this copied chat",
+        detail:
+          "Cafe needs to transfer the visible conversation on your next message before native compaction can start.",
+        turnId: null,
+        createdAt: event.payload.createdAt,
+      });
+      return;
+    }
     // Record submission before native I/O so an immediate completion cannot
     // race a later "requested" activity and leave the UI looking pending.
     const requestedAt = DateTime.formatIso(yield* DateTime.now);
@@ -4967,6 +4950,24 @@ const make = Effect.gen(function* () {
   ) {
     const thread = yield* resolveThread(event.payload.threadId);
     if (!thread) {
+      return;
+    }
+    const pendingCopy = yield* sql<{ readonly pending: number }>`
+      SELECT pending FROM projection_thread_context_bootstraps WHERE thread_id = ${thread.id}
+    `;
+    if (pendingCopy[0]?.pending === 1) {
+      // Creating/activating a native goal can start an automatic turn with no
+      // user-input transcript. Require one explicit context-bearing message
+      // first; never auto-submit that message on the owner's behalf.
+      yield* appendProviderFailureActivity({
+        threadId: thread.id,
+        kind: "provider.goal.set.failed",
+        summary: "Send a message before setting a goal in this copied chat",
+        detail:
+          "Cafe needs to transfer the visible conversation on your next message before a native goal can start.",
+        turnId: null,
+        createdAt: event.payload.createdAt,
+      });
       return;
     }
     const goalService = yield* requireGoalServiceForThread(thread, event.payload.createdAt);

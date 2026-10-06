@@ -19,6 +19,7 @@ import {
 import { createModelSelection } from "@cafecode/shared/model";
 import {
   ApprovalRequestId,
+  CheckpointRef,
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   EventId,
@@ -3466,6 +3467,357 @@ describe("ProviderCommandReactor", () => {
     });
 
     expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+  });
+
+  describe("visible-context copies", () => {
+    const source = ThreadId.make("thread-1");
+    const target = ThreadId.make("recovery-copy");
+    let sendSequence = 0;
+    beforeEach(() => {
+      sendSequence = 0;
+    });
+    async function copy(harness: Awaited<ReturnType<typeof createHarness>>) {
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.duplicate",
+          commandId: CommandId.make("duplicate-for-recovery"),
+          sourceThreadId: source,
+          targetThreadId: target,
+          title: "Recovered context",
+          createdAt: "2026-01-01T00:00:02.000Z",
+        }),
+      );
+      await harness.drain();
+    }
+    async function send(
+      harness: Awaited<ReturnType<typeof createHarness>>,
+      id: string,
+      threadId = source,
+      text = id,
+    ) {
+      const callsBefore = harness.sendTurn.mock.calls.length;
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make(`copy-send-${id}`),
+          threadId,
+          message: { messageId: asMessageId(id), role: "user", text, attachments: [] },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: new Date(
+            Date.parse("2026-01-01T00:00:03.000Z") + ++sendSequence * 1000,
+          ).toISOString(),
+        }),
+      );
+      await waitFor(async () => {
+        const thread = await harness.readThreadDetail(threadId);
+        return (
+          harness.sendTurn.mock.calls.length > callsBefore &&
+          (thread?.session?.status === "running" || Boolean(thread?.session?.lastError))
+        );
+      });
+      await harness.drain();
+    }
+    const pending = (harness: Awaited<ReturnType<typeof createHarness>>) =>
+      Effect.runPromise(
+        harness.sql<{
+          pending: number;
+        }>`SELECT pending FROM projection_thread_context_bootstraps WHERE thread_id = ${target}`,
+      );
+
+    it.each(["codex", "claudeAgent", "grok"])(
+      "bootstraps bounded visible context once for %s, only after the owner sends",
+      async (provider) => {
+        const harness = await createHarness({
+          threadModelSelection: {
+            instanceId: ProviderInstanceId.make(provider),
+            model: "test-model",
+          },
+        });
+        await send(harness, "old-user", source, `old visible context ${"x".repeat(45_000)}`);
+        await harness.markThreadReady(source);
+        harness.sendTurn.mockClear();
+        await copy(harness);
+        expect(harness.sendTurn).not.toHaveBeenCalled();
+        expect(await pending(harness)).toEqual([{ pending: 1 }]);
+        expect((await harness.readThreadDetail(target))?.session).toBeNull();
+        await send(harness, "owner-next-request", target);
+        expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+        const input = harness.sendTurn.mock.calls[0]?.[0].input;
+        expect(input).toContain("Prior Cafe-visible chat transcript:");
+        expect(input).toContain("old visible context");
+        expect(input).toContain("[message truncated]");
+        expect(input).toContain("Current user request:\nowner-next-request");
+        expect(input!.length).toBeLessThan(41_000);
+        expect(await pending(harness)).toEqual([{ pending: 0 }]);
+        await harness.markThreadReady(target);
+        harness.sendTurn.mockImplementationOnce((input) =>
+          Effect.succeed({ threadId: input.threadId, turnId: asTurnId("copy-second-native-turn") }),
+        );
+        await send(harness, "ordinary-followup", target);
+        expect(harness.sendTurn.mock.calls[1]?.[0].input).toBe("ordinary-followup");
+      },
+    );
+
+    it("consumes accepted copied context when completion precedes the start ACK without reopening the turn", async () => {
+      const harness = await createHarness();
+      await send(harness, "source-visible-history", source, "Keep this visible prior context.");
+      await harness.markThreadReady(source, "2026-01-01T00:00:02.000Z");
+      await copy(harness);
+      harness.sendTurn.mockClear();
+
+      const nativeTurnId = asTurnId("copy-completed-before-ack");
+      const completedAt = "2026-01-01T00:00:05.000Z";
+      const releaseAck = Effect.runSync(Deferred.make<void>());
+      harness.sendTurn.mockImplementationOnce((input) =>
+        Deferred.await(releaseAck).pipe(
+          Effect.as({ threadId: input.threadId, turnId: nativeTurnId }),
+        ),
+      );
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("copy-terminal-first-send"),
+          threadId: target,
+          message: {
+            messageId: asMessageId("copy-terminal-first-message"),
+            role: "user",
+            text: "Use the copied context.",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: "2026-01-01T00:00:04.000Z",
+        }),
+      );
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      expect(harness.sendTurn.mock.calls[0]?.[0].input).toContain(
+        "Keep this visible prior context.",
+      );
+
+      // The checkpoint is authoritative terminal evidence even when the native
+      // start notification was omitted. Keep the transport ACK held until that
+      // terminal projection commits; no synthetic running transition may consume
+      // the copy before the acceptance path under test executes.
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.diff.complete",
+          commandId: CommandId.make("copy-terminal-before-ack"),
+          threadId: target,
+          turnId: nativeTurnId,
+          checkpointRef: CheckpointRef.make("refs/t3/checkpoints/copy/turn/1"),
+          checkpointTurnCount: 1,
+          status: "ready",
+          files: [],
+          completedAt,
+          createdAt: completedAt,
+        }),
+      );
+      await harness.markThreadReady(target, completedAt);
+      const beforeAck = await harness.readThreadDetail(target);
+      expect(beforeAck?.latestTurn).toMatchObject({
+        turnId: nativeTurnId,
+        state: "completed",
+        completedAt,
+      });
+      expect(await pending(harness)).toEqual([{ pending: 1 }]);
+      expect(
+        beforeAck?.activities.filter(
+          (entry) => entry.kind === "provider.context.bootstrap.accepted",
+        ),
+      ).toEqual([]);
+
+      await Effect.runPromise(Deferred.succeed(releaseAck, undefined));
+      await waitFor(async () => (await pending(harness))[0]?.pending === 0);
+      await harness.drain();
+      const afterAck = await harness.readThreadDetail(target);
+      expect(afterAck?.latestTurn).toEqual(beforeAck?.latestTurn);
+      expect(afterAck?.session?.status).toBe("ready");
+      expect(afterAck?.session?.activeTurnId).toBeNull();
+      expect(
+        afterAck?.activities.filter(
+          (entry) => entry.kind === "provider.context.bootstrap.accepted",
+        ),
+      ).toEqual([expect.objectContaining({ turnId: nativeTurnId, payload: { version: 1 } })]);
+      expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+
+      harness.sendTurn.mockImplementationOnce((input) =>
+        Effect.succeed({ threadId: input.threadId, turnId: asTurnId("copy-after-terminal-ack") }),
+      );
+      // The next explicit request is later than the completed first turn and
+      // must use ordinary continuation, not send the historical transcript twice.
+      sendSequence = 3;
+      await send(harness, "ordinary-after-terminal-ack", target);
+      expect(harness.sendTurn.mock.calls[1]?.[0].input).toBe("ordinary-after-terminal-ack");
+      expect(harness.sendTurn).toHaveBeenCalledTimes(2);
+      expect(await pending(harness)).toEqual([{ pending: 0 }]);
+    });
+
+    it("binds bootstrap admission to its projection and rejects retired-chat writes", async () => {
+      const harness = await createHarness();
+      await copy(harness);
+      await Effect.runPromise(
+        harness.sql`INSERT INTO projection_thread_context_bootstraps (thread_id, pending) VALUES (${source}, 0)`,
+      );
+      expect(
+        await Effect.runPromise(
+          Effect.exit(
+            harness.sql`INSERT INTO projection_thread_context_bootstraps (thread_id, pending) VALUES ('missing-chat', 1)`,
+          ),
+        ),
+      ).toMatchObject({ _tag: "Failure" });
+      await Effect.runPromise(
+        harness.sql`INSERT INTO hard_deleted_threads (thread_id, deleted_at) VALUES (${target}, '2026-01-01T00:00:05.000Z')`,
+      );
+      expect(
+        await Effect.runPromise(
+          Effect.exit(
+            harness.sql`UPDATE projection_thread_context_bootstraps SET pending = 0 WHERE thread_id = ${target}`,
+          ),
+        ),
+      ).toMatchObject({ _tag: "Failure" });
+      await Effect.runPromise(
+        harness.sql`DELETE FROM projection_threads WHERE thread_id = ${target}`,
+      );
+      expect(await pending(harness)).toEqual([]);
+      expect(
+        await Effect.runPromise(
+          Effect.exit(
+            harness.sql`INSERT INTO projection_thread_context_bootstraps (thread_id, pending) VALUES (${target}, 1)`,
+          ),
+        ),
+      ).toMatchObject({ _tag: "Failure" });
+      expect(
+        await Effect.runPromise(harness.sql`SELECT * FROM projection_thread_context_bootstraps`),
+      ).toEqual([{ thread_id: source, pending: 0 }]);
+    });
+
+    it("refuses native review, goal and compaction until visible context has been delivered", async () => {
+      const harness = await createHarness({
+        manualCompaction: "supported",
+        threadGoals: "supported",
+      });
+      await copy(harness);
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("copy-idle-metadata"),
+          threadId: target,
+          session: {
+            threadId: target,
+            status: "ready",
+            providerName: "codex",
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: "2026-01-01T00:00:03.000Z",
+          },
+          createdAt: "2026-01-01T00:00:03.000Z",
+        }),
+      );
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.compact",
+          commandId: CommandId.make("copy-compact"),
+          threadId: target,
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          createdAt: "2026-01-01T00:00:04.000Z",
+        }),
+      );
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.goal.set",
+          commandId: CommandId.make("copy-goal"),
+          threadId: target,
+          objective: "Do not run before context transfer",
+          status: "active",
+          expectedUpdatedAt: null,
+          createdAt: "2026-01-01T00:00:05.000Z",
+        }),
+      );
+      await harness.drain();
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("copy-native-review"),
+          threadId: target,
+          message: {
+            messageId: asMessageId("copy-review-message"),
+            role: "user",
+            text: "Native review",
+            attachments: [],
+          },
+          codexReview: { type: "uncommittedChanges" },
+          runtimeMode: "approval-required",
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          createdAt: "2026-01-01T00:00:06.000Z",
+        }),
+      );
+      await waitFor(
+        async () =>
+          (await harness.readThreadDetail(target))?.activities.some(
+            (entry) => entry.kind === "provider.turn.start.failed",
+          ) === true,
+      );
+      await harness.drain();
+      const thread = await harness.readThreadDetail(target);
+      expect(thread?.session?.lastError).toContain("Send a message in this copied chat");
+      expect(thread?.activities.some((entry) => entry.kind === "provider.compaction.failed")).toBe(
+        true,
+      );
+      expect(thread?.activities.some((entry) => entry.kind === "provider.goal.set.failed")).toBe(
+        true,
+      );
+      expect(await pending(harness)).toEqual([{ pending: 1 }]);
+      expect(harness.startSession).not.toHaveBeenCalled();
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      expect(harness.compactThread).not.toHaveBeenCalled();
+      expect(harness.setGoal).not.toHaveBeenCalled();
+      expect(harness.clearGoal).not.toHaveBeenCalled();
+    });
+
+    it("retains durable bootstrap admission after an unaccepted send and idle native materialization", async () => {
+      const harness = await createHarness();
+      const startSession = harness.startSession.getMockImplementation()!;
+      harness.startSession.mockImplementation((threadId, input) =>
+        startSession(threadId, input).pipe(
+          Effect.map((session) => {
+            // A newly materialized native session cannot predate the turn that
+            // requested it. The general harness freezes all starts at midnight,
+            // which makes the projection correctly reject this binding as stale.
+            const materialized = { ...session, updatedAt: new Date().toISOString() };
+            const index = harness.runtimeSessions.findIndex((entry) => entry.threadId === threadId);
+            harness.runtimeSessions.splice(index, 1, materialized);
+            return materialized;
+          }),
+        ),
+      );
+      await send(harness, "previous visible request");
+      await harness.markThreadReady(source);
+      await copy(harness);
+      harness.sendTurn.mockClear();
+      harness.sendTurn.mockImplementationOnce(() =>
+        Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: "Codex",
+            method: "turn/start",
+            detail: "rejected before acceptance",
+          }),
+        ),
+      );
+      await send(harness, "failed-first-request", target);
+      expect(await pending(harness)).toEqual([{ pending: 1 }]);
+      await harness.markThreadReady(target);
+      expect(await pending(harness)).toEqual([{ pending: 1 }]);
+      await send(harness, "explicit-owner-retry", target);
+      expect(harness.sendTurn.mock.calls[1]?.[0].input).toContain("previous visible request");
+      expect(harness.sendTurn.mock.calls[1]?.[0].input).toContain(
+        "Current user request:\nexplicit-owner-retry",
+      );
+      expect(await pending(harness)).toEqual([{ pending: 0 }]);
+      expect((await harness.readThreadDetail(source))?.messages).toHaveLength(1);
+    });
   });
 
   describe("accepted turn configuration", () => {

@@ -307,6 +307,14 @@ export const purgeProviderDaemonThreadPersistence = Effect.fn(
           DELETE FROM provider_subagent_history_roots
           WHERE thread_id = ${input.threadId}
         `;
+        // This durable safety fence outlives ordinary runtime resets, but its
+        // exact thread-owned metadata is removed by permanent deletion. The
+        // leading primary-key column keeps this purge indexed in daemon-only
+        // databases too; tombstone triggers reject every late rewrite.
+        yield* sql`
+          DELETE FROM provider_codex_history_safety
+          WHERE thread_id = ${input.threadId}
+        `;
         yield* sql`
           DELETE FROM provider_supervisor_ownership_events
           WHERE session_id IN (

@@ -45,10 +45,13 @@ import * as Schema from "effect/Schema";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
 import * as CodexErrors from "effect-codex-app-server/errors";
 
 import { ServerConfig } from "../../config.ts";
+import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import { CODEX_HISTORY_RECOVERY_REQUIRED_MESSAGE } from "@cafecode/shared/codexHistorySafety";
 import { storeFileAttachment } from "../../fileAttachmentStore.ts";
 import { AssistantStreamTextCommitment } from "../../orchestration/providerAssistantStreamCommitment.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
@@ -59,6 +62,7 @@ import {
 import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import { buildCodexSteerClientCorrelationId } from "../codexSteerCorrelation.ts";
+import { CODEX_HISTORY_DIAGNOSIS_UNCERTAIN_MESSAGE } from "../codexHistorySafety.ts";
 import {
   type CodexSessionRuntimeOptions,
   type CodexSessionRuntimeError,
@@ -602,6 +606,151 @@ function makeRuntimeFactory() {
   };
 }
 
+it.effect(
+  "binds durable history safety callbacks to the exact Cafe chat and configured account",
+  () => {
+    const factory = makeRuntimeFactory();
+    return Effect.gen(function* () {
+      const account = ProviderInstanceId.make("history-account");
+      const threadId = asThreadId("history-chat");
+      const adapter = yield* makeCodexAdapter(decodeCodexSettings({}), {
+        instanceId: account,
+        makeRuntime: factory.factory,
+      });
+      yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
+      const safety = factory.lastRuntime?.options.historySafety;
+      assert.ok(safety);
+      assert.equal(yield* safety.isBlocked("native-history"), false);
+      yield* safety.markBlocked("native-history");
+      assert.equal(yield* safety.isBlocked("native-history"), true);
+      assert.equal(yield* safety.isBlocked("fresh-native-history"), false);
+      yield* adapter.stopSession(threadId);
+      yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
+      assert.equal(
+        yield* factory.lastRuntime!.options.historySafety!.isBlocked("native-history"),
+        true,
+      );
+      yield* adapter.startSession({
+        threadId: asThreadId("different-history-chat"),
+        runtimeMode: "full-access",
+      });
+      assert.equal(
+        yield* factory.lastRuntime!.options.historySafety!.isBlocked("native-history"),
+        false,
+      );
+      const otherAccount = yield* makeCodexAdapter(decodeCodexSettings({}), {
+        instanceId: ProviderInstanceId.make("other-history-account"),
+        makeRuntime: factory.factory,
+      });
+      yield* otherAccount.startSession({ threadId, runtimeMode: "full-access" });
+      assert.equal(
+        yield* factory.lastRuntime!.options.historySafety!.isBlocked("native-history"),
+        false,
+      );
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`DROP TABLE provider_codex_history_safety`;
+      const readError = yield* safety.isBlocked("native-history").pipe(Effect.flip);
+      const writeError = yield* safety.markBlocked("native-history").pipe(Effect.flip);
+      assert.equal(readError.message, "Could not verify Codex conversation history safety.");
+      assert.equal(writeError.message, "Could not persist Codex conversation history safety.");
+      assert.doesNotMatch(
+        JSON.stringify([readError, writeError]),
+        /native-history|history-chat|history-account|SELECT|INSERT|no such table/,
+      );
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(SqlitePersistenceMemory),
+      Effect.provide(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Effect.provide(ServerSettingsService.layerTest()),
+      Effect.provide(providerSessionDirectoryTestLayer),
+      Effect.provide(NodeServices.layer),
+    );
+  },
+);
+
+it.effect("fails closed when an adapter owner does not supply durable storage", () => {
+  const factory = makeRuntimeFactory();
+  return Effect.gen(function* () {
+    const adapter = yield* CodexAdapter;
+    yield* adapter.startSession({
+      threadId: asThreadId("missing-storage-chat"),
+      runtimeMode: "full-access",
+    });
+    const safety = factory.lastRuntime?.options.historySafety;
+    assert.ok(safety, "the production adapter must never omit its safety boundary");
+    assert.equal((yield* Effect.exit(safety.isBlocked("native-chat")))._tag, "Failure");
+    assert.equal((yield* Effect.exit(safety.markBlocked("native-chat")))._tag, "Failure");
+  }).pipe(Effect.provide(makeConcurrencyTestLayer(factory)));
+});
+
+it.effect(
+  "preserves finite history recovery errors and strips their retained native bodies",
+  () => {
+    const factory = makeRuntimeFactory();
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("history-error-chat");
+      yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
+      const runtime = factory.lastRuntime!;
+      const received = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 2)).pipe(
+        Effect.forkChild,
+      );
+      yield* runtime.emit({
+        id: asEventId("history-error"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        turnId: asTurnId("history-turn"),
+        createdAt: "2026-10-06T00:00:00.000Z",
+        method: "error",
+        payload: {
+          threadId: "private-native-id",
+          turnId: "history-turn",
+          willRetry: false,
+          error: {
+            message: CODEX_HISTORY_RECOVERY_REQUIRED_MESSAGE,
+            codexErrorInfo: null,
+            additionalDetails: "private body",
+          },
+        },
+      });
+      yield* runtime.emit({
+        id: asEventId("history-failed-completion"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        turnId: asTurnId("history-turn"),
+        createdAt: "2026-10-06T00:00:01.000Z",
+        method: "turn/completed",
+        payload: {
+          threadId: "private-native-id",
+          turn: {
+            id: "history-turn",
+            items: [],
+            itemsView: "notLoaded",
+            status: "failed",
+            error: {
+              message: CODEX_HISTORY_RECOVERY_REQUIRED_MESSAGE,
+              codexErrorInfo: null,
+              additionalDetails: "private body",
+            },
+          },
+        },
+      });
+      const events = Array.from(yield* Fiber.join(received));
+      assert.deepEqual(
+        events.map((event) => event.type),
+        ["runtime.error", "turn.completed"],
+      );
+      assert.doesNotMatch(JSON.stringify(events), /private-native-id|private body/);
+      for (const event of events) {
+        assert.match(JSON.stringify(event.payload), /Codex/);
+        assert.deepEqual(event.raw?.payload, { reason: "codex_history_tool_arguments_too_large" });
+      }
+    }).pipe(Effect.provide(makeConcurrencyTestLayer(factory)));
+  },
+);
+
 function makeConcurrencyTestLayer(
   factory: ReturnType<typeof makeRuntimeFactory>,
   instanceLimit?: number,
@@ -889,7 +1038,11 @@ validationLayer("CodexAdapterLive validation", (it) => {
         runtimeMode: "full-access",
       });
 
-      assert.deepStrictEqual(validationRuntimeFactory.factory.mock.calls[0]?.[0], {
+      const options = validationRuntimeFactory.factory.mock.calls[0]?.[0];
+      assert.equal(typeof options?.historySafety?.isBlocked, "function");
+      assert.equal(typeof options?.historySafety?.markBlocked, "function");
+      assert.deepStrictEqual(options, {
+        historySafety: options?.historySafety,
         appServerCwd: path.join(process.cwd(), "userdata"),
         binaryPath: "codex",
         cwd: process.cwd(),
@@ -7258,6 +7411,69 @@ it.effect("surfaces desktop admission errors without submitting or retrying the 
       assert.equal(runtime.sendTurnImpl.mock.calls.length, 1);
     }),
   ),
+);
+
+it.effect(
+  "keeps accepted-turn desktop ownership through an uncertain history diagnosis warning",
+  () =>
+    desktopCase(({ adapter, factory, bindings, select }) =>
+      Effect.gen(function* () {
+        const threadId = asThreadId("desktop-history-diagnosis");
+        select("desktop-a");
+        yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
+        const runtime = factory.lastRuntime!;
+        const binding = bindings[0]!;
+        const accepted = yield* adapter.sendTurn({ threadId, input: "Owner-authorized request" });
+        assert.equal(accepted.turnId, asTurnId("turn-1"));
+        assert.equal(runtime.sendTurnImpl.mock.calls.length, 1);
+        assert.equal(vi.mocked(binding.startTurn).mock.calls.length, 1);
+        const warningRead = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+        yield* runtime.emit({
+          id: asEventId("history-diagnosis-warning"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId,
+          turnId: accepted.turnId,
+          createdAt: "2026-10-07T00:00:00.000Z",
+          method: "warning",
+          message: CODEX_HISTORY_DIAGNOSIS_UNCERTAIN_MESSAGE,
+          payload: { message: CODEX_HISTORY_DIAGNOSIS_UNCERTAIN_MESSAGE },
+        });
+        const warning = yield* Fiber.join(warningRead);
+        assert.ok(Option.isSome(warning));
+        assert.equal(warning.value.type, "runtime.warning");
+        assert.equal(warning.value.payload.message, CODEX_HISTORY_DIAGNOSIS_UNCERTAIN_MESSAGE);
+        assert.equal(vi.mocked(binding.endTurn).mock.calls.length, 0);
+        assert.equal(vi.mocked(binding.dispose).mock.calls.length, 0);
+        assert.equal(runtime.closeImpl.mock.calls.length, 0);
+        const completionRead = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+        yield* runtime.emit({
+          id: asEventId("history-diagnosis-real-completion"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId,
+          turnId: accepted.turnId,
+          createdAt: "2026-10-07T00:00:01.000Z",
+          method: "turn/completed",
+          payload: {
+            threadId: "provider-thread-1",
+            turn: {
+              id: accepted.turnId,
+              items: [],
+              itemsView: "notLoaded",
+              status: "completed",
+              error: null,
+            },
+          },
+        });
+        const completion = yield* Fiber.join(completionRead);
+        assert.ok(Option.isSome(completion));
+        assert.equal(completion.value.type, "turn.completed");
+        assert.equal(vi.mocked(binding.endTurn).mock.calls.length, 1);
+        assert.equal(vi.mocked(binding.dispose).mock.calls.length, 0);
+        assert.equal(runtime.sendTurnImpl.mock.calls.length, 1);
+      }),
+    ),
 );
 
 it.effect(

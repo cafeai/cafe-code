@@ -955,6 +955,7 @@ const buildAppUnderTest = (options?: {
             }),
           getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 0 }),
           getThreadForkSourceVersion: () => Effect.succeed(0),
+          hasPendingContextBootstrap: () => Effect.succeed(false),
           getThreadForkMessageCount: () => Effect.succeed(0),
           getProjectShellById: (projectId) => {
             const project = makeDefaultOrchestrationReadModel().projects.find(

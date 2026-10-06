@@ -4,6 +4,10 @@
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "exports": {
+    "./codexHistorySafety": {
+      "types": "./src/codexHistorySafety.ts",
+      "import": "./src/codexHistorySafety.ts"
+    },
     "./scheduledFollowupResult": {
       "types": "./src/scheduledFollowupResult.ts",
       "import": "./src/scheduledFollowupResult.ts"

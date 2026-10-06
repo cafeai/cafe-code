@@ -210,6 +210,7 @@ import { NoActiveThreadState } from "./NoActiveThreadState";
 import { resolveEffectiveEnvMode, resolveEnvironmentOptionLabel } from "./BranchToolbar.logic";
 import { ProviderStatusBanner } from "./chat/ProviderStatusBanner";
 import { ThreadErrorBanner } from "./chat/ThreadErrorBanner";
+import { useThreadActions } from "../hooks/useThreadActions";
 import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
 import {
   buildLocalDraftThread,
@@ -885,6 +886,14 @@ export default function ChatView(props: ChatViewProps) {
   const pane = useChatPane();
   const currentPaneRef = useRef(pane);
   currentPaneRef.current = pane;
+  const { continueInNewChat } = useThreadActions();
+  const onContinueInNewChat = useCallback(async () => {
+    if (routeKind !== "server") return;
+    await continueInNewChat(
+      scopeThreadRef(environmentId, threadId),
+      () => currentPaneRef.current.active && currentPaneRef.current.visible,
+    );
+  }, [continueInNewChat, environmentId, routeKind, threadId]);
   const sharedChatRuntime = useHasSharedChatRuntime();
   const { owns: ownsQueuedThread, revision: queueOwnershipRevision } = useChatPaneQueueOwnership(
     environmentId,
@@ -7320,6 +7329,15 @@ export default function ChatView(props: ChatViewProps) {
         scopeKey={`${activeThread.environmentId}\u0000${activeThread.id}`}
         environmentId={activeThread.environmentId}
         threadId={activeThread.id}
+        canContinueInNewChat={
+          isServerThread &&
+          pane.active &&
+          pane.visible &&
+          !activeEnvironmentUnavailable &&
+          !isWorking &&
+          latestTurnSettled
+        }
+        onContinueInNewChat={onContinueInNewChat}
       />
       {/* Main content area with optional plan / session rail */}
       <div className="flex min-h-0 min-w-0 flex-1">

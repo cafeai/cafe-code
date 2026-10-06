@@ -1,6 +1,8 @@
-import { memo, useCallback, useState } from "react";
+import { memo, useCallback, useRef, useState } from "react";
 import type { EnvironmentId, TaskAtriumErrorDismissal, ThreadId } from "@cafecode/contracts";
+import { isCodexHistoryRecoveryRequiredError } from "@cafecode/shared/codexHistorySafety";
 import { Alert, AlertAction, AlertDescription } from "../ui/alert";
+import { Button } from "../ui/button";
 import { CircleAlertIcon, XIcon } from "lucide-react";
 
 import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
@@ -19,12 +21,16 @@ export const ThreadErrorBanner = memo(function ThreadErrorBanner({
   scopeKey,
   environmentId,
   threadId,
+  canContinueInNewChat = false,
+  onContinueInNewChat,
 }: {
   error: string | null;
   /** Stable environment/thread identity for immediate local dismissal feedback. */
   scopeKey: string;
   environmentId: EnvironmentId;
   threadId: ThreadId;
+  canContinueInNewChat?: boolean;
+  onContinueInNewChat?: () => Promise<void>;
 }) {
   const [dismissedErrorsByScope, setDismissedErrorsByScope] = useState<
     Readonly<Record<string, { error: string; occurrence: TaskAtriumErrorDismissal | null }>>
@@ -50,6 +56,39 @@ export const ThreadErrorBanner = memo(function ThreadErrorBanner({
     ? buildThreadErrorDismissal({ environmentId, threadId, session, latestTurn, summary })
     : null;
   const isProviderFailure = Boolean(error && error === session?.lastError);
+
+  const [recoveryState, setRecoveryState] = useState<{
+    scopeKey: string;
+    error: string;
+    pending: boolean;
+    failed: boolean;
+  } | null>(null);
+  const pendingRecovery = useRef<{ scopeKey: string; error: string } | null>(null);
+  const recover = useCallback(async () => {
+    if (
+      !error ||
+      !isCodexHistoryRecoveryRequiredError(error) ||
+      !canContinueInNewChat ||
+      !onContinueInNewChat ||
+      (pendingRecovery.current?.scopeKey === scopeKey && pendingRecovery.current.error === error)
+    )
+      return;
+    const occurrence = { scopeKey, error, pending: true, failed: false };
+    pendingRecovery.current = occurrence;
+    setRecoveryState(occurrence);
+    try {
+      await onContinueInNewChat();
+      setRecoveryState((current) => (current === occurrence ? null : current));
+    } catch {
+      // Transport diagnostics can contain private native details. Keep the
+      // original error and an explicit uncertain-copy notice, never replay work.
+      setRecoveryState((current) =>
+        current === occurrence ? { ...occurrence, pending: false, failed: true } : current,
+      );
+    } finally {
+      if (pendingRecovery.current === occurrence) pendingRecovery.current = null;
+    }
+  }, [canContinueInNewChat, error, onContinueInNewChat, scopeKey]);
 
   const dismiss = useCallback(() => {
     if (!error) return;
@@ -97,12 +136,37 @@ export const ThreadErrorBanner = memo(function ThreadErrorBanner({
   // contains identities/timestamps only, never
   // provider error text, and acknowledging it cannot mutate provider truth.
   if (!error || dismissed) return null;
+  const recoveryForScope =
+    recoveryState?.scopeKey === scopeKey && recoveryState.error === error ? recoveryState : null;
   return (
     <div className="pt-3 mx-auto max-w-3xl">
       <Alert variant="error">
         <CircleAlertIcon />
-        <AlertDescription className="line-clamp-3" title={error}>
-          {error}
+        <AlertDescription>
+          <span className="line-clamp-3" title={error}>
+            {error}
+          </span>
+          {isCodexHistoryRecoveryRequiredError(error) && onContinueInNewChat ? (
+            <div className="flex flex-col items-start gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={!canContinueInNewChat || recoveryForScope?.pending === true}
+                onClick={() => {
+                  void recover();
+                }}
+              >
+                {recoveryForScope?.pending ? "Continuing…" : "Continue in new chat"}
+              </Button>
+              {recoveryForScope?.failed ? (
+                <span role="status">
+                  Could not confirm the new chat. No prompt was sent. Check your chat list before
+                  trying again.
+                </span>
+              ) : null}
+            </div>
+          ) : null}
         </AlertDescription>
         <AlertAction>
           <button

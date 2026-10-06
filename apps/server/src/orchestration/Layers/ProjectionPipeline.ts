@@ -992,6 +992,16 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               toPersistenceSqlError("ProjectionPipeline.copyThreadContextProjectionRows:query"),
             ),
           );
+          // Visible-context copies have no native resume cursor. Preserve an
+          // explicit durable bootstrap admission rather than guessing from
+          // message IDs or an empty runtime (both also occur for native forks).
+          yield* sql`
+            INSERT INTO projection_thread_context_bootstraps (thread_id, pending)
+            VALUES (${event.payload.targetThreadId}, 1)
+            ON CONFLICT(thread_id) DO NOTHING
+          `.pipe(
+            Effect.mapError(toPersistenceSqlError("ProjectionPipeline.contextBootstrap:insert")),
+          );
           yield* refreshThreadShellSummary(event.payload.targetThreadId);
           return;
 
@@ -1661,13 +1671,39 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             createdAt: event.payload.activity.createdAt,
           });
 
+          // Only the internal accepted-send fact consumes a copy whose native
+          // completion raced ahead of its ACK. This command is not exposed by
+          // the client command schema; arbitrary diagnostic prose and provider
+          // activity payloads do not supply this authority. Replay uses the
+          // same exact chat/turn fact without resurrecting terminal execution.
+          if (
+            event.payload.activity.kind === "provider.context.bootstrap.accepted" &&
+            event.payload.activity.turnId !== null &&
+            event.payload.activity.payload !== null &&
+            typeof event.payload.activity.payload === "object" &&
+            !Array.isArray(event.payload.activity.payload) &&
+            "version" in event.payload.activity.payload &&
+            event.payload.activity.payload.version === 1 &&
+            Object.keys(event.payload.activity.payload).length === 1
+          ) {
+            yield* sql`
+              UPDATE projection_thread_context_bootstraps SET pending = 0
+              WHERE thread_id = ${event.payload.threadId} AND pending = 1
+            `.pipe(
+              Effect.mapError(
+                toPersistenceSqlError("ProjectionPipeline.contextBootstrap:accepted"),
+              ),
+            );
+          }
+
           // This fact describes settings captured before submission; its
           // asynchronous persistence is not provider execution. In particular
           // a delayed metadata write cannot extend an already completed turn's
           // generation duration or its terminal recovery watermark.
           if (
             event.payload.activity.turnId !== null &&
-            event.payload.activity.kind !== "provider.turn.configuration"
+            event.payload.activity.kind !== "provider.turn.configuration" &&
+            event.payload.activity.kind !== "provider.context.bootstrap.accepted"
           ) {
             const existingTurn = yield* projectionTurnRepository.getByTurnId({
               threadId: event.payload.threadId,
@@ -2161,6 +2197,16 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           const pendingTurnStart = yield* projectionTurnRepository.getPendingTurnStartByThreadId({
             threadId: event.payload.threadId,
           });
+          // A real native turn consumes the copy. Session materialization
+          // alone may retire the provisional pending row, so that row is not
+          // evidence of delivery. Idle start, failed start and restart never
+          // enter this branch; terminal native turn replays were rejected above.
+          yield* sql`
+            UPDATE projection_thread_context_bootstraps SET pending = 0
+            WHERE thread_id = ${event.payload.threadId} AND pending = 1
+          `.pipe(
+            Effect.mapError(toPersistenceSqlError("ProjectionPipeline.contextBootstrap:consume")),
+          );
           const turnStartedAt = event.payload.session.updatedAt;
           if (Option.isSome(existingTurn)) {
             const nextState =

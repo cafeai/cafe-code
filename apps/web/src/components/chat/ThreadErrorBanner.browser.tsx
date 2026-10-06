@@ -11,6 +11,7 @@ import {
   type ThreadId,
   type TurnId,
 } from "@cafecode/contracts";
+import { CODEX_HISTORY_RECOVERY_REQUIRED_MESSAGE } from "@cafecode/shared/codexHistorySafety";
 
 vi.mock("../../localApi", () => ({
   ensureLocalApi: () => ({
@@ -309,6 +310,43 @@ describe("ThreadErrorBanner", () => {
     }
   });
 
+  it("offers an explicit recovery action only for the fixed classified error", async () => {
+    const recover = vi.fn(async () => {});
+    const props = {
+      scopeKey: "local/thread-1",
+      environmentId: ENV,
+      threadId: THREAD,
+      canContinueInNewChat: true,
+      onContinueInNewChat: recover,
+    };
+    const screen = await render(<ThreadErrorBanner {...props} error="Bad Request" />);
+    try {
+      await expect
+        .element(page.getByRole("button", { name: "Continue in new chat" }))
+        .not.toBeInTheDocument();
+      await screen.rerender(
+        <ThreadErrorBanner {...props} error={CODEX_HISTORY_RECOVERY_REQUIRED_MESSAGE} />,
+      );
+      await expect
+        .element(page.getByRole("button", { name: "Continue in new chat" }))
+        .toBeVisible();
+      expect(recover).not.toHaveBeenCalled();
+      await page.getByRole("button", { name: "Continue in new chat" }).click();
+      expect(recover).toHaveBeenCalledOnce();
+      await screen.rerender(
+        <ThreadErrorBanner
+          {...props}
+          error={`${CODEX_HISTORY_RECOVERY_REQUIRED_MESSAGE} extra text`}
+        />,
+      );
+      await expect
+        .element(page.getByRole("button", { name: "Continue in new chat" }))
+        .not.toBeInTheDocument();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("keeps a turn-bound dismissal stable through projection settling and shows the same error on a new turn", async () => {
     const error = "Synthetic provider error";
     seedFailure(ENV, FIRST_FAILURE, "turn-1" as TurnId, THREAD, error);
@@ -332,6 +370,43 @@ describe("ThreadErrorBanner", () => {
       await page.getByLabelText("Dismiss error").click();
       seedFailure(ENV, LATER_FAILURE, "turn-3" as TurnId, THREAD, error);
       await expect.element(page.getByText(error)).toBeVisible();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("disables unavailable recovery and reports uncertainty without raw provider diagnostics", async () => {
+    const recover = vi.fn(async () => {
+      throw new Error("private native path and provider token");
+    });
+    const props = {
+      scopeKey: "local/thread-1",
+      environmentId: ENV,
+      threadId: THREAD,
+      error: CODEX_HISTORY_RECOVERY_REQUIRED_MESSAGE,
+      onContinueInNewChat: recover,
+    };
+    const screen = await render(<ThreadErrorBanner {...props} canContinueInNewChat={false} />);
+    try {
+      await expect
+        .element(page.getByRole("button", { name: "Continue in new chat" }))
+        .toBeDisabled();
+      expect(recover).not.toHaveBeenCalled();
+      await screen.rerender(<ThreadErrorBanner {...props} canContinueInNewChat />);
+      await page.getByRole("button", { name: "Continue in new chat" }).click();
+      await expect
+        .element(page.getByRole("status"))
+        .toHaveTextContent(
+          "Could not confirm the new chat. No prompt was sent. Check your chat list before trying again.",
+        );
+      await expect
+        .element(page.getByText("private native path and provider token"))
+        .not.toBeInTheDocument();
+      expect(recover).toHaveBeenCalledOnce();
+      await screen.rerender(
+        <ThreadErrorBanner {...props} scopeKey="remote/thread-2" canContinueInNewChat />,
+      );
+      await expect.element(page.getByRole("status")).not.toBeInTheDocument();
     } finally {
       await screen.unmount();
     }

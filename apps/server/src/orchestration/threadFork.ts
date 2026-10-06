@@ -37,6 +37,7 @@ export const dispatchProviderNativeThreadFork = Effect.fn("dispatchProviderNativ
       ProjectionSnapshotQueryShape,
       | "getThreadDetailById"
       | "getThreadForkSourceVersion"
+      | "hasPendingContextBootstrap"
       | "getThreadForkMessageCount"
       | "getProjectShellById"
     >;
@@ -74,6 +75,17 @@ export const dispatchProviderNativeThreadFork = Effect.fn("dispatchProviderNativ
     if (!source || source.deletedAt !== null || source.archivedAt !== null) {
       return yield* forkDispatchError("The source thread is unavailable and cannot be forked.");
     }
+    // A duplicate's visible transcript is not native provider context until
+    // its first ordinary message has delivered the bootstrap. Native fork
+    // would otherwise copy an empty context and silently lose that history.
+    // Refuse before acquiring standalone ownership or making provider calls;
+    // an unreadable admission must propagate, never become a false result.
+    if (
+      yield* input.projectionSnapshotQuery.hasPendingContextBootstrap(input.command.sourceThreadId)
+    )
+      return yield* forkDispatchError(
+        "Send a normal message in this copied chat before creating a native fork so its visible context can be delivered first.",
+      );
     if (
       projectedMessageCount !== undefined &&
       (projectedMessageCount > 2000 || projectedMessageCount !== source.messages.length)
