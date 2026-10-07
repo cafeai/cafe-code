@@ -17,6 +17,7 @@ import {
   setSessionRailDocked,
   setThreadPlanSidebarOpen,
   setCodeReviewCollapsed,
+  setMessageDeliveryCollapsed,
   syncProjects,
   syncThreads,
   type UiState,
@@ -29,6 +30,7 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
     threadLastVisitedAtById: {},
     threadPlanSidebarOpenById: {},
     codeReviewCollapsed: false,
+    messageDeliveryCollapsed: false,
     defaultAdvertisedEndpointKey: null,
     navigationSidebarOpen: true,
     sessionRailDocked: false,
@@ -37,6 +39,23 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
 }
 
 describe("uiStateStore pure functions", () => {
+  it("persists independent editor-wide delivery and review tab choices", () => {
+    const state = setMessageDeliveryCollapsed(setCodeReviewCollapsed(makeUiState(), true), true);
+    const afterNavigation = clearThreadUi(syncThreads(state, []), "environment:old-chat");
+    expect(afterNavigation.messageDeliveryCollapsed).toBe(true);
+    expect(afterNavigation.codeReviewCollapsed).toBe(true);
+    const expandedDelivery = setMessageDeliveryCollapsed(afterNavigation, false);
+    expect(expandedDelivery.messageDeliveryCollapsed).toBe(false);
+    expect(expandedDelivery.codeReviewCollapsed).toBe(true);
+    expect(
+      hydratePersistedUiState({ messageDeliveryCollapsed: true }).messageDeliveryCollapsed,
+    ).toBe(true);
+    expect(hydratePersistedUiState({}).messageDeliveryCollapsed).toBe(false);
+    expect(
+      hydratePersistedUiState({ messageDeliveryCollapsed: "true" } as unknown as PersistedUiState)
+        .messageDeliveryCollapsed,
+    ).toBe(false);
+  });
   it("keeps the editor-wide review preference when chats or servers are removed", () => {
     const local = "environment-local:thread-1";
     const remote = "environment-remote:thread-1";
@@ -527,6 +546,18 @@ describe("uiStateStore persistence round-trip", () => {
         hydratePersistedUiState({ codeReviewCollapsed: invalid } as PersistedUiState)
           .codeReviewCollapsed,
       ).toBe(false);
+    }
+  });
+
+  it("restores the independent delivery tab choice on reload", () => {
+    for (const collapsed of [true, false]) {
+      persistState(setMessageDeliveryCollapsed(makeUiState(), collapsed));
+      const persisted = JSON.parse(
+        localStorageStub.getItem(PERSISTED_STATE_KEY)!,
+      ) as PersistedUiState;
+      expect(persisted.messageDeliveryCollapsed).toBe(collapsed);
+      expect(hydratePersistedUiState(persisted).messageDeliveryCollapsed).toBe(collapsed);
+      expect(hydratePersistedUiState(persisted).codeReviewCollapsed).toBe(false);
     }
   });
 

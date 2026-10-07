@@ -1,5 +1,10 @@
 import type { ProviderDeliveryPriority } from "@cafecode/contracts";
-import { MenuRadioGroup, MenuRadioItem } from "../ui/menu";
+import { useState } from "react";
+import { SendIcon } from "lucide-react";
+import { Menu, MenuPopup, MenuRadioGroup, MenuRadioItem, MenuTrigger } from "../ui/menu";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { ComposerTab } from "./ComposerTab";
+import { useChatPane } from "../../chatPaneContext";
 
 const DELIVERY_OPTIONS = [
   {
@@ -24,15 +29,13 @@ const DELIVERY_OPTIONS = [
   },
 ] as const;
 
-export function ClaudeDeliveryPriorityPicker({
-  value,
-  onChange,
-  disabled,
-}: {
+interface DeliveryPriorityProps {
   value: ProviderDeliveryPriority | undefined;
   onChange: (value: ProviderDeliveryPriority | undefined) => void;
   disabled: boolean;
-}) {
+}
+
+export function ClaudeDeliveryPriorityPicker({ value, onChange, disabled }: DeliveryPriorityProps) {
   return (
     <>
       <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">Message delivery</div>
@@ -45,19 +48,97 @@ export function ClaudeDeliveryPriorityPicker({
         }}
       >
         {DELIVERY_OPTIONS.map((option) => (
-          <MenuRadioItem
-            key={option.value}
-            value={option.value}
-            disabled={disabled}
-            className="min-w-0 py-1.5"
-          >
-            <span className="grid min-w-0 gap-0.5 py-0.5">
-              <span className="font-medium text-foreground">{option.label}</span>
-              <span className="text-muted-foreground text-xs leading-4">{option.description}</span>
-            </span>
-          </MenuRadioItem>
+          <Tooltip key={option.value}>
+            <TooltipTrigger
+              delay={250}
+              render={
+                <MenuRadioItem
+                  value={option.value}
+                  disabled={disabled}
+                  aria-label={option.label}
+                  className="min-w-0 py-1.5"
+                />
+              }
+            >
+              {option.label}
+            </TooltipTrigger>
+            <TooltipPopup
+              role="tooltip"
+              side="top"
+              className="no-drag pointer-events-none max-w-64 leading-relaxed"
+            >
+              {option.description}
+            </TooltipPopup>
+          </Tooltip>
         ))}
       </MenuRadioGroup>
     </>
+  );
+}
+
+/** Both the tab and the existing options-menu shortcut edit the same account-
+ * scoped composer choice. This popup owns only presentation, never delivery. */
+export function ClaudeDeliveryPriorityTab({
+  value,
+  onChange,
+  disabled,
+  collapsed,
+  onCollapsedChange,
+}: DeliveryPriorityProps & {
+  collapsed: boolean;
+  onCollapsedChange: (collapsed: boolean) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const pane = useChatPane();
+  // A global minimize gesture can come from another pane. Retire this popup
+  // before it can outlive a hidden/disabled trigger or reopen on restoration.
+  if (open && (collapsed || disabled || !pane.visible)) setOpen(false);
+  const selected = DELIVERY_OPTIONS.find((option) => option.value === (value ?? "default"))!;
+  return (
+    <ComposerTab
+      label="Message delivery"
+      collapsed={collapsed}
+      active={open}
+      onCollapsedChange={(next) => {
+        setOpen(false);
+        onCollapsedChange(next);
+      }}
+    >
+      <Menu open={open} onOpenChange={setOpen} modal={false}>
+        <Tooltip>
+          <TooltipTrigger
+            delay={250}
+            render={
+              <MenuTrigger
+                type="button"
+                className="cafe-composer-tab-action"
+                disabled={disabled}
+                aria-label={`Message delivery: ${selected.label}`}
+              />
+            }
+          >
+            <SendIcon aria-hidden="true" className="size-3.5 shrink-0" />
+            <span className="truncate">Delivery · {selected.label}</span>
+          </TooltipTrigger>
+          <TooltipPopup
+            role="tooltip"
+            side="top"
+            className="no-drag pointer-events-none max-w-64 leading-relaxed"
+          >
+            {selected.description}
+          </TooltipPopup>
+        </Tooltip>
+        <MenuPopup side="top" align="end" className="no-drag w-44 max-w-[calc(100vw-2rem)]">
+          <ClaudeDeliveryPriorityPicker
+            value={value}
+            disabled={disabled}
+            onChange={(next) => {
+              onChange(next);
+              setOpen(false);
+            }}
+          />
+        </MenuPopup>
+      </Menu>
+    </ComposerTab>
   );
 }

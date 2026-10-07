@@ -97,20 +97,22 @@ describe("Claude priority and exact task controls", () => {
       .not.toBeInTheDocument();
     await page.getByRole("button", { name: "More composer controls" }).click();
     await expect
-      .element(page.getByRole("menuitemradio", { name: /^Automatic / }))
+      .element(page.getByRole("menuitemradio", { name: "Automatic", exact: true }))
       .toHaveAttribute("aria-checked", "true");
-    await page.getByRole("menuitemradio", { name: /^Now / }).click();
+    const now = page.getByRole("menuitemradio", { name: "Now", exact: true });
+    await now.hover();
     await expect
-      .element(page.getByRole("menuitemradio", { name: /^Now / }))
-      .toHaveAttribute("aria-checked", "true");
+      .element(page.getByRole("tooltip"))
+      .toHaveTextContent("Join the active turn; supported work may move to the background.");
+    await now.click();
+    await expect.element(now).toHaveAttribute("aria-checked", "true");
+    const later = page.getByRole("menuitemradio", { name: "Later", exact: true });
+    await later.hover();
     await expect
-      .element(page.getByText("Join the active turn; supported work may move to the background."))
-      .toBeVisible();
-    await page.getByRole("menuitemradio", { name: /^Later / }).click();
-    await expect
-      .element(page.getByRole("menuitemradio", { name: /^Later / }))
-      .toHaveAttribute("aria-checked", "true");
-    await expect.element(page.getByText(/not a scheduled time/)).toBeVisible();
+      .element(page.getByRole("tooltip"))
+      .toHaveTextContent("Let Claude defer this behind more urgent messages—not a scheduled time.");
+    await later.click();
+    await expect.element(later).toHaveAttribute("aria-checked", "true");
   });
   it("binds stop to the displayed account/runtime/task incarnation and waits for native completion", async () => {
     controlTask.mockResolvedValue({ status: "accepted" });

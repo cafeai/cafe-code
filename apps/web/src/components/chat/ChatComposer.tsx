@@ -80,7 +80,12 @@ import { type ComposerCommandItem, ComposerCommandMenu } from "./ComposerCommand
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
 import { NativeCodexReview } from "./NativeCodexReview";
-import { ClaudeDeliveryPriorityPicker } from "./ClaudeDeliveryPriorityPicker";
+import {
+  ClaudeDeliveryPriorityPicker,
+  ClaudeDeliveryPriorityTab,
+} from "./ClaudeDeliveryPriorityPicker";
+import { ComposerTab } from "./ComposerTab";
+import { useUiStateStore } from "../../uiStateStore";
 import { ComposerAttachImageButton } from "./ComposerAttachImageButton";
 import { FileAttachmentPill } from "./FileAttachmentPill";
 import { uploadFileAttachment } from "../../attachments/fileAttachments";
@@ -1230,6 +1235,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     setNativeReviewState({ key: nativeReviewKey, open: false });
   }
   const nativeReviewOpen = nativeReviewState.key === nativeReviewKey && nativeReviewState.open;
+  const codeReviewCollapsed = useUiStateStore((state) => state.codeReviewCollapsed);
+  const messageDeliveryCollapsed = useUiStateStore((state) => state.messageDeliveryCollapsed);
+  const showNativeReviewTab = nativeReviewAvailable && !nativeReviewDisabled;
+  const hasComposerTab = showNativeReviewTab || deliveryPriorityAvailable;
   const providerActions =
     nativeReviewAvailable && !nativeReviewDisabled ? (
       <MenuItem
@@ -3279,7 +3288,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     <form
       ref={composerFormRef}
       onSubmit={submitComposer}
-      className="mx-auto w-full min-w-0 max-w-208"
+      className="mx-auto flow-root w-full min-w-0 max-w-208"
       data-chat-composer-form="true"
     >
       <FollowUpQueueShelf
@@ -3306,6 +3315,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       <div
         className={cn(
           "group relative isolate rounded-[22px] p-px transition-[color,background-color,border-color] duration-200 motion-reduce:transition-none",
+          hasComposerTab && "mt-9 pointer-coarse:mt-12",
           composerProviderState.composerFrameClassName ??
             (ambianceComposerRing ? "cafe-ambiance-composer-frame" : undefined),
         )}
@@ -3314,6 +3324,56 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         onDragLeave={onComposerDragLeave}
         onDrop={onComposerDrop}
       >
+        {hasComposerTab ? (
+          <div
+            data-chat-composer-tab="true"
+            className="absolute inset-x-6 bottom-full -z-10 -mb-1 flex justify-end"
+          >
+            {showNativeReviewTab ? (
+              <ComposerTab
+                label="Code review"
+                collapsed={codeReviewCollapsed}
+                active={nativeReviewOpen}
+                onCollapsedChange={useUiStateStore.getState().setCodeReviewCollapsed}
+              >
+                <Tooltip>
+                  <TooltipTrigger
+                    delay={250}
+                    render={
+                      <button
+                        type="button"
+                        className="cafe-composer-tab-action"
+                        aria-haspopup="dialog"
+                        aria-expanded={nativeReviewOpen}
+                        onClick={() => setNativeReviewState({ key: nativeReviewKey, open: true })}
+                      />
+                    }
+                  >
+                    <FileSearchIcon aria-hidden="true" className="size-3.5 shrink-0" />
+                    <span className="truncate">Code review</span>
+                  </TooltipTrigger>
+                  <TooltipPopup
+                    role="tooltip"
+                    side="top"
+                    className="no-drag pointer-events-none max-w-64 leading-relaxed"
+                  >
+                    Ask Codex to review code for bugs and risks. Choose changes, a branch, a commit,
+                    or custom instructions. Findings appear in this chat.
+                  </TooltipPopup>
+                </Tooltip>
+              </ComposerTab>
+            ) : (
+              <ClaudeDeliveryPriorityTab
+                key={deliveryChoiceKey}
+                value={deliveryPriority}
+                onChange={(priority) => setDeliveryChoice({ key: deliveryChoiceKey, priority })}
+                disabled={isSendBusy || isConnecting || environmentUnavailable !== null}
+                collapsed={messageDeliveryCollapsed}
+                onCollapsedChange={useUiStateStore.getState().setMessageDeliveryCollapsed}
+              />
+            )}
+          </div>
+        ) : null}
         <div
           ref={composerSurfaceRef}
           data-chat-composer-mobile-collapsed={isComposerCollapsedMobile ? "true" : "false"}

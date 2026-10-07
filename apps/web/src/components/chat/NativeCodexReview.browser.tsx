@@ -6,8 +6,8 @@ import type { CodexReviewTarget, RuntimeMode } from "@cafecode/contracts";
 import { useState, type FormEvent } from "react";
 import { NativeCodexReview } from "./NativeCodexReview";
 
-/** The composer owns the menu gesture and open state; the native operation is
- * only a controlled dialog and must never put another tab on the editor. */
+/** The composer owns tab/menu gestures and open state; the native operation
+ * remains a controlled dialog independent of either transient trigger. */
 function ReviewDialogHarness({
   disabled = false,
   accountLabel = "Codex personal",

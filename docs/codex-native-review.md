@@ -1,20 +1,23 @@
 # Native Codex review
 
-In an idle Codex chat, open the composer's existing model-options menu (labelled
-with the current effort, such as **Extra High**) and select **Codex review**.
-There is no separate review tab above the text box. Choose one of:
+In an idle Codex chat, select the **Code review** tab above the composer. The
+existing model-options menu also keeps its **Codex review** shortcut. Choose one of:
 
 - **Uncommitted changes** in the chat's workspace.
 - **Changes against a base branch**, such as `main` or `origin/main`.
 - **A specific commit**, using its hexadecimal SHA rather than a shell command.
 - **Custom review instructions**.
 
-The menu action appears only when the account currently selected in the composer
+The tab and menu action appear only when the account currently selected in the composer
 matches the saved, ready Codex session, the server is connected, and the chat is
 idle. Selecting Claude, Grok or a different Codex account hides it immediately,
 even before sending a message. Work, a send, a connection or a checkpoint restore
 also makes it unavailable. Changing its chat, account or session binding closes
 the old review dialog; submission checks the current selection again.
+
+The tab's caret minimizes or restores it without moving the caret or the composer.
+Its minimized choice is shared across all chats, environments and panes and survives
+reloads. The action's explanation is available on hover or keyboard focus.
 
 Review runs in that exact Cafe chat and Codex account. The confirmation names the
 account and explains its permission behavior. Native review uses the existing

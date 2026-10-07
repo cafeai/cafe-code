@@ -2,9 +2,13 @@
 
 ## Message delivery
 
-For a qualified Claude account selected in the composer, open the existing
-model-options menu (labelled with the current effort/context, such as **1M · High**)
-and use **Message delivery**. It is not a separate strip beneath the text box.
+For a qualified Claude account selected in the composer, open the compact
+**Delivery · Automatic** tab above the text box. Its popup offers Automatic, Now,
+Next and Later; hover or focus an option for its explanation. The existing
+model-options menu also keeps the same **Message delivery** choices.
+The caret minimizes or restores the tab at a fixed position without moving the
+composer. This layout preference is editor-wide and survives navigation and reloads;
+it is independent of the account-scoped delivery priority.
 **Automatic** preserves the provider's existing behavior; Cafe does not assume
 that omission is equivalent to one of the explicit choices.
 

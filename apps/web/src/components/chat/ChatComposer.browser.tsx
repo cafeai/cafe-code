@@ -14,6 +14,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { render } from "vitest-browser-react";
 import { useComposerDraftStore } from "../../composerDraftStore";
+import { useUiStateStore } from "../../uiStateStore";
+import { applyInterfaceScalePercent } from "../../interfaceScale";
+import { ChatPaneContext } from "../../chatPaneContext";
 import type { Thread } from "../../types";
 import { ChatComposer, type ChatComposerHandle, type ChatComposerProps } from "./ChatComposer";
 
@@ -237,9 +240,14 @@ async function mountComposer(width: number, overrides: Partial<ChatComposerProps
     ...overrides,
   };
   useComposerDraftStore.getState().setPrompt(threadRef, props.promptRef.current);
+  let pane = { active: true, visible: true };
   const content = () => (
     <QueryClientProvider client={queryClient}>
-      <ChatComposer {...props} />
+      <ChatPaneContext value={pane}>
+        <div hidden={!pane.visible}>
+          <ChatComposer {...props} />
+        </div>
+      </ChatPaneContext>
     </QueryClientProvider>
   );
   const view = await render(content(), { container: host });
@@ -248,6 +256,10 @@ async function mountComposer(width: number, overrides: Partial<ChatComposerProps
     composerRef,
     onStartCodeReview,
     onSend,
+    async setPane(next: typeof pane) {
+      pane = next;
+      await view.rerender(content());
+    },
     async update(next: Partial<ChatComposerProps>) {
       Object.assign(props, next);
       await view.rerender(content());
@@ -288,8 +300,16 @@ async function closeComposerControlsWithKeyboard() {
     .toHaveFocus();
 }
 
+async function waitForTabEntrance() {
+  const tab = document.querySelector(".cafe-composer-tab-entry")!;
+  await Promise.all(tab.getAnimations().map((animation) => animation.finished));
+}
+
 describe("provider-specific composer menu actions", () => {
   afterEach(() => {
+    useUiStateStore.setState({ codeReviewCollapsed: false, messageDeliveryCollapsed: false });
+    applyInterfaceScalePercent(100);
+    document.documentElement.classList.remove("dark");
     useComposerDraftStore.setState({
       draftsByThreadKey: {},
       draftThreadsByThreadKey: {},
@@ -299,10 +319,158 @@ describe("provider-specific composer menu actions", () => {
   });
 
   it.each([
+    { width: 1100, scale: 80, dark: false },
+    { width: 1100, scale: 130, dark: true },
+    { width: 390, scale: 80, dark: true },
+    { width: 390, scale: 130, dark: false },
+  ])(
+    "anchors both tab carets at width $width and $scale% scale",
+    async ({ width, scale, dark }) => {
+      applyInterfaceScalePercent(scale);
+      document.documentElement.classList.toggle("dark", dark);
+      await using fixture = await mountComposer(width);
+      for (const label of ["code review", "message delivery"]) {
+        if (label === "message delivery") await fixture.select("claudeAgent");
+        const caret = page
+          .getByRole("button", { name: `Minimize ${label}`, exact: true })
+          .element();
+        const initial = caret.getBoundingClientRect();
+        const frame = document.querySelector('[data-chat-composer-tab="true"]')!.parentElement!;
+        const initialFrameTop = frame.getBoundingClientRect().top;
+        const expandedWidth = document
+          .querySelector(".cafe-composer-tab")!
+          .getBoundingClientRect().width;
+        // Repeatedly use the same DOM button. Its hit target must stay fixed even
+        // while the width animation is running, not just at the final endpoint.
+        for (let count = 0; count < 4; count++) {
+          await page.elementLocator(caret).click();
+          const end = performance.now() + 230;
+          while (performance.now() < end) {
+            await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+            const current = caret.getBoundingClientRect();
+            expect(current.x).toBeCloseTo(initial.x, 1);
+            expect(current.y).toBeCloseTo(initial.y, 1);
+            expect(current.width).toBeCloseTo(initial.width, 1);
+            expect(current.height).toBeCloseTo(initial.height, 1);
+            expect(frame.getBoundingClientRect().top).toBeCloseTo(initialFrameTop, 1);
+          }
+          expect(caret.getAttribute("aria-expanded")).toBe(count % 2 === 0 ? "false" : "true");
+          const tab = document.querySelector(".cafe-composer-tab")!.getBoundingClientRect();
+          expect(tab.left).toBeGreaterThanOrEqual(0);
+          expect(tab.right).toBeLessThanOrEqual(window.innerWidth);
+          if (count % 2 === 0) expect(tab.width).toBeLessThan(expandedWidth);
+        }
+      }
+      expect(fixture.onSend).not.toHaveBeenCalled();
+      expect(fixture.onStartCodeReview).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps delivery explanations in hover/focus tooltips and changes only the next message choice", async () => {
+    await using fixture = await mountComposer(390);
+    await fixture.select("claudeAgent");
+    const automaticHelp = "Use Cafe’s normal queue and Claude’s default priority.";
+    const laterHelp = "Let Claude defer this behind more urgent messages—not a scheduled time.";
+    const trigger = page.getByRole("button", { name: "Message delivery: Automatic", exact: true });
+    await expect.element(trigger).toBeVisible();
+    await expect.element(page.getByText(automaticHelp, { exact: true })).not.toBeInTheDocument();
+    await trigger.hover();
+    await expect.element(page.getByRole("tooltip")).toHaveTextContent(automaticHelp);
+    await trigger.click();
+    const later = page.getByRole("menuitemradio", { name: "Later", exact: true });
+    await expect.element(later).toBeVisible();
+    await expect.element(page.getByText(laterHelp, { exact: true })).not.toBeInTheDocument();
+    await vi.waitFor(() =>
+      expect(page.getByRole("menu").element().contains(document.activeElement)).toBe(true),
+    );
+    await userEvent.keyboard("{End}");
+    await expect.element(later).toHaveFocus();
+    await expect.element(page.getByRole("tooltip")).toHaveTextContent(laterHelp);
+    await userEvent.keyboard("{Enter}");
+    await expect.element(page.getByRole("menu")).not.toBeInTheDocument();
+    await expect
+      .element(page.getByRole("button", { name: "Message delivery: Later", exact: true }))
+      .toBeVisible();
+    expect(fixture.composerRef.current?.getSendContext().deliveryPriority).toBe("later");
+    expect(fixture.onSend).not.toHaveBeenCalled();
+    await page.getByRole("button", { name: "Message delivery: Later", exact: true }).click();
+    await page.getByRole("menuitemradio", { name: "Automatic", exact: true }).click();
+    expect(fixture.composerRef.current?.getSendContext()).not.toHaveProperty("deliveryPriority");
+    // Collapsing while the popup is open closes it in the same gesture.
+    await page.getByRole("button", { name: "Message delivery: Automatic", exact: true }).click();
+    await page.getByRole("button", { name: "Minimize message delivery", exact: true }).click();
+    await expect.element(page.getByRole("menu")).not.toBeInTheDocument();
+    await expect
+      .element(
+        page.getByRole("button", {
+          name: "Message delivery: Automatic",
+          exact: true,
+          includeHidden: true,
+        }),
+      )
+      .not.toBeVisible();
+    await page.getByRole("button", { name: "Expand message delivery", exact: true }).click();
+    await expect
+      .element(page.getByRole("button", { name: "Message delivery: Automatic", exact: true }))
+      .toBeVisible();
+  });
+
+  it("closes delivery popups when another pane minimizes the tab or its owner is hidden", async () => {
+    await using fixture = await mountComposer(1100);
+    await fixture.select("claudeAgent");
+    const trigger = page.getByRole("button", { name: "Message delivery: Automatic", exact: true });
+    await trigger.click();
+    await expect.element(page.getByRole("menu")).toBeVisible();
+    useUiStateStore.getState().setMessageDeliveryCollapsed(true);
+    await expect.element(page.getByRole("menu")).not.toBeInTheDocument();
+    useUiStateStore.getState().setMessageDeliveryCollapsed(false);
+    await expect.element(trigger).toBeVisible();
+    await expect.element(page.getByRole("menu")).not.toBeInTheDocument();
+    await trigger.click();
+    await expect.element(page.getByRole("menu")).toBeVisible();
+    await fixture.setPane({ active: false, visible: false });
+    await expect.element(page.getByRole("menu")).not.toBeInTheDocument();
+    await fixture.setPane({ active: true, visible: true });
+    await expect.element(trigger).toBeVisible();
+    await expect.element(page.getByRole("menu")).not.toBeInTheDocument();
+    expect(fixture.onSend).not.toHaveBeenCalled();
+  });
+
+  it("uses the review tab without sending the draft and shares its minimized state across chats", async () => {
+    await using fixture = await mountComposer(1100);
+    await page.getByRole("button", { name: "Code review", exact: true }).click();
+    await expect.element(page.getByRole("dialog", { name: "Start a Codex review" })).toBeVisible();
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    await page.getByRole("button", { name: "Minimize code review", exact: true }).click();
+    const nextThread = thread("next-tab-chat");
+    const nextRef = { environmentId, threadId: nextThread.id };
+    await fixture.update({
+      activeThread: nextThread,
+      activeThreadId: nextThread.id,
+      routeThreadRef: nextRef,
+      composerDraftTarget: nextRef,
+    });
+    await expect
+      .element(page.getByRole("button", { name: "Expand code review", exact: true }))
+      .toBeVisible();
+    await page.getByRole("button", { name: "Expand code review", exact: true }).click();
+    await expect
+      .element(page.getByRole("button", { name: "Code review", exact: true }))
+      .toBeVisible();
+    await fixture.update({ phase: "running" });
+    await expect
+      .element(page.getByRole("button", { name: "Code review", exact: true }))
+      .not.toBeInTheDocument();
+    expect(document.querySelector('[data-chat-composer-tab="true"]')).toBeNull();
+    expect(fixture.onSend).not.toHaveBeenCalled();
+    expect(fixture.onStartCodeReview).not.toHaveBeenCalled();
+  });
+
+  it.each([
     { width: 1100, compact: "false" },
     { width: 390, compact: "true" },
   ])(
-    "keeps provider actions inside the existing controls menu at width $width",
+    "shares provider actions between composer tabs and the existing controls menu at width $width",
     async ({ width, compact }) => {
       await using fixture = await mountComposer(width);
       await vi.waitFor(() =>
@@ -315,10 +483,13 @@ describe("provider-specific composer menu actions", () => {
       await expect
         .element(page.getByRole("menuitem", { name: "Codex review", exact: true }))
         .not.toBeInTheDocument();
-      expect(document.querySelector(".cafe-code-review-tab")).toBeNull();
+      await expect
+        .element(page.getByRole("button", { name: "Code review", exact: true }))
+        .toBeVisible();
       await expect
         .element(page.getByText("Message delivery", { exact: true }))
         .not.toBeInTheDocument();
+      await waitForTabEntrance();
       await page.screenshot({
         path: `../../../../../.explorations/composer-menu-ui/codex-closed-${width}.png`,
       });
@@ -346,6 +517,7 @@ describe("provider-specific composer menu actions", () => {
       await expect
         .element(page.getByText("Message delivery", { exact: true }))
         .not.toBeInTheDocument();
+      await waitForTabEntrance();
       await page.screenshot({
         path: `../../../../../.explorations/composer-menu-ui/claude-closed-${width}.png`,
       });
@@ -357,7 +529,7 @@ describe("provider-specific composer menu actions", () => {
       await page.screenshot({
         path: `../../../../../.explorations/composer-menu-ui/claude-menu-${width}.png`,
       });
-      await page.getByRole("menuitemradio", { name: /^Next / }).click();
+      await page.getByRole("menuitemradio", { name: "Next", exact: true }).click();
       await closeComposerControlsWithKeyboard();
       await expect.element(page.getByRole("menu")).not.toBeInTheDocument();
       expect(fixture.composerRef.current?.getSendContext()).toMatchObject({
@@ -430,7 +602,7 @@ describe("provider-specific composer menu actions", () => {
     await using fixture = await mountComposer(1100);
     await fixture.select("claudeAgent");
     await page.getByRole("button", { name: "More composer controls", exact: true }).click();
-    await page.getByRole("menuitemradio", { name: /^Later / }).click();
+    await page.getByRole("menuitemradio", { name: "Later", exact: true }).click();
     await closeComposerControlsWithKeyboard();
     await expect.element(page.getByRole("menu")).not.toBeInTheDocument();
     expect(fixture.composerRef.current?.getSendContext().deliveryPriority).toBe("later");
@@ -468,7 +640,7 @@ describe("provider-specific composer menu actions", () => {
     await closeComposerControlsWithKeyboard();
     await fixture.update({ providerStatuses: providers });
     await page.getByRole("button", { name: "More composer controls", exact: true }).click();
-    await page.getByRole("menuitemradio", { name: /^Now / }).click();
+    await page.getByRole("menuitemradio", { name: "Now", exact: true }).click();
     await closeComposerControlsWithKeyboard();
     await expect.element(page.getByRole("menu")).not.toBeInTheDocument();
     expect(fixture.composerRef.current?.getSendContext().deliveryPriority).toBe("now");

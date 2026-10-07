@@ -2,7 +2,7 @@
 
 Decision status: Accepted within the user's explicit UI cleanup and subagent-history request
 Implementation status: Implemented; verification requirements and operational limits are below
-Superseded by: [Useful bounded subagent activity details](subagent-activity-details.md) for category-only activity disclosure; composer, priority binding, ownership and retention decisions remain unchanged.
+Superseded by: [Useful bounded subagent activity details](subagent-activity-details.md) for category-only activity disclosure and [anchored composer tabs](anchored-composer-tabs.md) for control placement. Priority binding, ownership and retention decisions remain unchanged.
 Created: 2026-10-07 04:40:05 JST (UTC+0900)
 Last updated: 2026-10-07 04:51:30 JST (UTC+0900)
 Decision authority: the user requested menu-only provider controls, exact selected-provider behavior, and useful activity when opening subagents

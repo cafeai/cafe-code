@@ -27,6 +27,7 @@ export interface PersistedUiState {
   threadLastVisitedAtById?: Record<string, string>;
   threadPlanSidebarOpenById?: Record<string, boolean>;
   codeReviewCollapsed?: boolean;
+  messageDeliveryCollapsed?: boolean;
   /** Legacy per-thread preferences, read only when migrating to the global choice. */
   threadCodeReviewCollapsedById?: Record<string, boolean>;
   sessionRailDocked?: boolean;
@@ -48,9 +49,10 @@ export interface UiThreadState {
   threadPlanSidebarOpenById: Record<string, boolean>;
 }
 
-export interface UiCodeReviewState {
-  /** One editor-wide preference shared by every chat, server and pane. */
+export interface UiComposerTabState {
+  /** Independent editor-wide choices shared by every chat, server and pane. */
   codeReviewCollapsed: boolean;
+  messageDeliveryCollapsed: boolean;
 }
 
 export interface UiEndpointState {
@@ -75,7 +77,7 @@ export interface UiState
   extends
     UiProjectState,
     UiThreadState,
-    UiCodeReviewState,
+    UiComposerTabState,
     UiEndpointState,
     UiNavigationState,
     UiSessionRailState {}
@@ -99,6 +101,7 @@ const initialState: UiState = {
   threadLastVisitedAtById: {},
   threadPlanSidebarOpenById: {},
   codeReviewCollapsed: false,
+  messageDeliveryCollapsed: false,
   defaultAdvertisedEndpointKey: null,
   navigationSidebarOpen: true,
   sessionRailDocked: false,
@@ -236,6 +239,7 @@ export function hydratePersistedUiState(parsed: PersistedUiState): UiState {
       typeof parsed.codeReviewCollapsed === "boolean"
         ? parsed.codeReviewCollapsed
         : hasLegacyCodeReviewCollapsed(parsed.threadCodeReviewCollapsedById),
+    messageDeliveryCollapsed: parsed.messageDeliveryCollapsed === true,
     sessionRailDocked: parsed.sessionRailDocked === true,
   };
 }
@@ -291,6 +295,7 @@ export function persistState(state: UiState): void {
         threadLastVisitedAtById: state.threadLastVisitedAtById,
         threadPlanSidebarOpenById: state.threadPlanSidebarOpenById,
         codeReviewCollapsed: state.codeReviewCollapsed,
+        messageDeliveryCollapsed: state.messageDeliveryCollapsed,
         sessionRailDocked: state.sessionRailDocked,
       } satisfies PersistedUiState),
     );
@@ -606,6 +611,11 @@ export function setCodeReviewCollapsed(state: UiState, collapsed: boolean): UiSt
   };
 }
 
+export function setMessageDeliveryCollapsed(state: UiState, collapsed: boolean): UiState {
+  if (state.messageDeliveryCollapsed === collapsed) return state;
+  return { ...state, messageDeliveryCollapsed: collapsed };
+}
+
 export function setDefaultAdvertisedEndpointKey(state: UiState, key: string | null): UiState {
   const nextKey = key && key.length > 0 ? key : null;
   if (state.defaultAdvertisedEndpointKey === nextKey) {
@@ -712,6 +722,7 @@ interface UiStateStore extends UiState {
   clearThreadUi: (threadId: string) => void;
   setThreadPlanSidebarOpen: (threadId: string, open: boolean) => void;
   setCodeReviewCollapsed: (collapsed: boolean) => void;
+  setMessageDeliveryCollapsed: (collapsed: boolean) => void;
   setDefaultAdvertisedEndpointKey: (key: string | null) => void;
   setNavigationSidebarOpen: (open: boolean) => void;
   setSessionRailDocked: (docked: boolean) => void;
@@ -735,6 +746,8 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
   setThreadPlanSidebarOpen: (threadId, open) =>
     set((state) => setThreadPlanSidebarOpen(state, threadId, open)),
   setCodeReviewCollapsed: (collapsed) => set((state) => setCodeReviewCollapsed(state, collapsed)),
+  setMessageDeliveryCollapsed: (collapsed) =>
+    set((state) => setMessageDeliveryCollapsed(state, collapsed)),
   setDefaultAdvertisedEndpointKey: (key) =>
     set((state) => setDefaultAdvertisedEndpointKey(state, key)),
   setNavigationSidebarOpen: (open) => set((state) => setNavigationSidebarOpen(state, open)),
