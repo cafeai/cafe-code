@@ -27,5 +27,13 @@ not claim that old data is current. Native indexed history can lag active work.
 Normal restart of the rebuilt backend is required to receive the updated detail
 fields from its daemon. No provider session is restarted merely to view history.
 
+Large Codex command results are handled by a separate bounded history reader;
+they are never displayed as raw output. If native history exceeds its limits,
+Cafe retains safely read entries or tries one separately verified public-summary
+read. The incomplete-history notice still applies: summaries can omit intermediate
+messages and activity, and an empty bounded result does not mean no work occurred.
+
 See [the activity detail decision](decisions/subagent-activity-details.md) and
 [the preserved ownership decision](decisions/provider-aware-composer-and-child-activity.md).
+Native retrieval and fallback bounds are documented in
+[the wire-budget decision](decisions/codex-history-wire-budgets.md).

@@ -63,6 +63,18 @@ export class CodexAppServerIncomingMessageTooLargeError extends Schema.TaggedErr
   }
 }
 
+/** A scoped reader exhausted its total raw-byte allowance; no wire content is retained. */
+export class CodexAppServerIncomingBudgetExceededError extends Schema.TaggedErrorClass<CodexAppServerIncomingBudgetExceededError>()(
+  "CodexAppServerIncomingBudgetExceededError",
+  {
+    maxBytes: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  },
+) {
+  override get message() {
+    return `Codex App Server exceeded the ${this.maxBytes}-byte total input budget`;
+  }
+}
+
 export class CodexAppServerTransportError extends Schema.TaggedErrorClass<CodexAppServerTransportError>()(
   "CodexAppServerTransportError",
   {
@@ -157,6 +169,7 @@ export const CodexAppServerError = Schema.Union([
   CodexAppServerProcessExitedError,
   CodexAppServerProtocolParseError,
   CodexAppServerIncomingMessageTooLargeError,
+  CodexAppServerIncomingBudgetExceededError,
   CodexAppServerTransportError,
 ]);
 

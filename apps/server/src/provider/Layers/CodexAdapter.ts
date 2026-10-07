@@ -84,6 +84,7 @@ import {
   makeProviderSubagentDetailReadError,
   type ProviderAdapterError,
   type ProviderSubagentDetailReadFailureReason,
+  type ProviderSubagentDetailReadError,
 } from "../Errors.ts";
 import { type CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import type { ProviderSubagentDetail } from "../Services/ProviderAdapter.ts";
@@ -109,6 +110,7 @@ import {
   type CodexSessionRuntimeOptions,
   type CodexSessionRuntimeShape,
   type CodexTransientSubagentHistoryReadOptions,
+  type CodexSubagentHistoryDiagnostic,
   type CodexThreadSnapshot,
   type CodexTransportPolicy,
 } from "./CodexSessionRuntime.ts";
@@ -277,6 +279,7 @@ function redactCodexSubagentDetailReadError(
       break;
     case "CodexAppServerProtocolParseError":
     case "CodexAppServerIncomingMessageTooLargeError":
+    case "CodexAppServerIncomingBudgetExceededError":
       reason = "provider-response-invalid";
       break;
     case "CodexSessionRuntimeThreadIdMissingError":
@@ -294,6 +297,58 @@ function redactCodexSubagentDetailReadError(
   }
   return makeProviderSubagentDetailReadError(reason);
 }
+
+/**
+ * The sole production boundary around isolated Codex history operations.
+ * A no-op protocol logger does not suppress Effect.fn failure spans: a native
+ * request/schema error can still include private output before adapter error
+ * mapping runs. Disable only these internal operations, then expose a traced
+ * outer exit containing the existing finite, stack-free public error algebra.
+ * Other provider operations and global tracing retain their original policy.
+ */
+export const readCodexSubagentHistorySafely = Effect.fn("CodexAdapter.readSubagentHistorySafely")(
+  function* <R>(
+    read: Effect.Effect<
+      CodexThreadSnapshot,
+      | CodexSessionRuntimeError
+      | ProviderAdapterSessionNotFoundError
+      | ProviderSubagentDetailReadError,
+      R
+    >,
+    readDiagnostic?: () => CodexSubagentHistoryDiagnostic | undefined,
+  ): Effect.fn.Return<CodexThreadSnapshot, ProviderSubagentDetailReadError, R> {
+    return yield* read.pipe(
+      Effect.withTracerEnabled(false),
+      Effect.catchCause((cause) => {
+        if (Cause.hasInterrupts(cause)) {
+          // When the incoming cause actually contains cancellation, retain it.
+          // Rebuild only interrupt identities so annotations or companion
+          // defects cannot enter the outer trace. A finalizer that replaces
+          // cancellation with a defect remains a sanitized failure below.
+          return Effect.failCause(
+            Cause.fromReasons<never>(
+              cause.reasons
+                .filter(Cause.isInterruptReason)
+                .map((reason) => Cause.makeInterruptReason(reason.fiberId)),
+            ),
+          );
+        }
+        const failure = Cause.findErrorOption(cause);
+        return Effect.fail(
+          Option.isSome(failure)
+            ? failure.value._tag === "ProviderSubagentDetailReadError"
+              ? makeProviderSubagentDetailReadError(failure.value.reason)
+              : redactCodexSubagentDetailReadError(failure.value)
+            : makeProviderSubagentDetailReadError("provider-request-failed"),
+        );
+      }),
+      Effect.onExit(() => {
+        const diagnostic = readDiagnostic?.();
+        return diagnostic ? Effect.annotateCurrentSpan({ ...diagnostic }) : Effect.void;
+      }),
+    );
+  },
+);
 
 type CodexLifecycleItem =
   | EffectCodexSchema.V2ItemStartedNotification["item"]
@@ -5656,6 +5711,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       return Effect.fail(makeProviderSubagentDetailReadError("invalid-request"));
     }
 
+    let historyDiagnostic: CodexSubagentHistoryDiagnostic | undefined;
+    const onHistoryDiagnostic = (diagnostic: CodexSubagentHistoryDiagnostic) => {
+      historyDiagnostic = { ...historyDiagnostic, ...diagnostic };
+    };
+
     const readPersistedSnapshot = (resumeCursor = context?.resumeCursor) => {
       if (!isCodexResumeCursorSchema(resumeCursor)) {
         return Effect.fail(makeProviderSubagentDetailReadError("session-unavailable"));
@@ -5688,6 +5748,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                     : {}),
                   rootProviderThreadId: resumeCursor.threadId,
                   subagentThreadId: subagentId,
+                  onHistoryDiagnostic,
                   ...(options?.environment ? { environment: options.environment } : {}),
                   ...(codexConfig.homePath ? { homePath: codexConfig.homePath } : {}),
                   ...(runtimeTransportPolicy !== undefined
@@ -5723,20 +5784,19 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       return readPersistedSnapshot();
     });
 
-    return readSnapshot.pipe(
-      // Provider history is a read-only convenience surface, not a model turn.
-      // A wedged app-server read must release the transient-reader semaphore
-      // and its scoped child instead of blocking every later detail request.
-      Effect.timeoutOrElse({
-        duration: CODEX_SUBAGENT_HISTORY_READ_TIMEOUT_MS,
-        orElse: () => Effect.fail(makeProviderSubagentDetailReadError("provider-request-failed")),
-      }),
-      Effect.map(canonicalizeCodexSubagentDetail),
-      Effect.mapError((error) =>
-        error._tag === "ProviderSubagentDetailReadError"
-          ? error
-          : redactCodexSubagentDetailReadError(error),
+    return readCodexSubagentHistorySafely(
+      readSnapshot.pipe(
+        // Provider history is a read-only convenience surface, not a model turn.
+        // A wedged app-server read must release the transient-reader semaphore
+        // and its scoped child instead of blocking every later detail request.
+        Effect.timeoutOrElse({
+          duration: CODEX_SUBAGENT_HISTORY_READ_TIMEOUT_MS,
+          orElse: () => Effect.fail(makeProviderSubagentDetailReadError("provider-request-failed")),
+        }),
       ),
+      () => historyDiagnostic,
+    ).pipe(
+      Effect.map(canonicalizeCodexSubagentDetail),
       // A malformed provider client implementation can defect instead of
       // returning its declared typed error. Defects are also collapsed here so
       // their stack/cause cannot bypass the finite adapter error algebra.

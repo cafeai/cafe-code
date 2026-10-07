@@ -172,6 +172,13 @@ function measureSanitizedPublicText(source: string | ReadonlyArray<string>): {
   return { utf8Bytes, hasVisibleText };
 }
 
+/** Recovery decisions must agree with the canonicalizer's exact text admission. */
+export function hasVisibleProviderSubagentPublicText(
+  source: string | ReadonlyArray<string>,
+): boolean {
+  return measureSanitizedPublicText(source).hasVisibleText;
+}
+
 function retainSanitizedPublicText(
   candidate: MeasuredCandidate,
   retainedByteBudget: number,

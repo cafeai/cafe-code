@@ -39,6 +39,8 @@ export interface CodexAppServerClientOptions {
    * The protocol always applies a finite default when this is omitted.
    */
   readonly maxIncomingLineBytes?: number;
+  /** Optional lifetime raw-byte budget for bounded readers, including framing/notifications. */
+  readonly maxIncomingBytes?: number;
   readonly logger?: (
     event: CodexProtocol.CodexAppServerProtocolLogEvent,
   ) => Effect.Effect<void, never>;
@@ -285,6 +287,9 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
     ...(options.logOutgoing !== undefined ? { logOutgoing: options.logOutgoing } : {}),
     ...(options.maxIncomingLineBytes !== undefined
       ? { maxIncomingLineBytes: options.maxIncomingLineBytes }
+      : {}),
+    ...(options.maxIncomingBytes !== undefined
+      ? { maxIncomingBytes: options.maxIncomingBytes }
       : {}),
     ...(options.logger ? { logger: options.logger } : {}),
     ...(options.onNotificationReceived

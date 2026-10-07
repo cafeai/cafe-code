@@ -936,6 +936,147 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
     }),
   );
 
+  it.effect(
+    "counts exact raw bytes across responses and fails later requests after exhaustion",
+    () =>
+      Effect.gen(function* () {
+        const wire = encodeJsonl({ id: 1, result: "🙂" });
+        const emojiStart = wire.findIndex((byte) => byte === 0xf0);
+        const { stdio, input, output } = yield* makeInMemoryStdio();
+        const terminated = yield* Deferred.make<CodexError.CodexAppServerError>();
+        const outgoing: unknown[] = [];
+        const transport = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+          stdio,
+          maxIncomingBytes: wire.byteLength,
+          logOutgoing: true,
+          logger: (event) =>
+            Effect.sync(() => {
+              if (event.direction === "outgoing") outgoing.push(event);
+            }),
+          onTermination: (error) => Deferred.succeed(terminated, error).pipe(Effect.asVoid),
+        });
+        const first = yield* transport.request("x/read").pipe(Effect.forkScoped);
+        yield* Queue.take(output);
+        // Raw bytes include the newline; split inside a UTF-8 scalar to prove
+        // this accounting does not depend on decoder chunk boundaries.
+        yield* Queue.offer(input, wire.slice(0, emojiStart + 2));
+        yield* Queue.offer(input, wire.slice(emojiStart + 2));
+        assert.equal(yield* Fiber.join(first), "🙂");
+        yield* Queue.offer(input, encoder.encode(" "));
+        const error = yield* Deferred.await(terminated);
+        assert.instanceOf(error, CodexError.CodexAppServerIncomingBudgetExceededError);
+        assert.equal(error.message.includes(String(wire.byteLength)), true);
+        // There was no pending request when the budget was exhausted. Registering
+        // one now must replay the finite transport failure, not wait forever on
+        // an outgoing queue whose false offer result was previously discarded.
+        const late = yield* transport.request("x/next-page").pipe(Effect.flip);
+        assert.equal(late, error);
+        assert.equal(outgoing.length, 2);
+        assert.equal(JSON.stringify(outgoing).includes("x/next-page"), false);
+      }),
+  );
+
+  it.effect("retains a valid acknowledged response when stdout immediately closes", () =>
+    Effect.gen(function* () {
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      const terminated = yield* Deferred.make<void>();
+      const transport = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+        stdio,
+        onTermination: () => Deferred.succeed(terminated, undefined).pipe(Effect.asVoid),
+      });
+      const pending = yield* transport.request("x/read").pipe(Effect.forkScoped);
+      yield* Queue.take(output);
+      yield* Queue.offer(input, encodeJsonl({ id: 1, result: "acknowledged" }));
+      yield* Queue.end(input);
+      yield* Deferred.await(terminated);
+      assert.equal(yield* Fiber.join(pending), "acknowledged");
+    }),
+  );
+
+  it.effect("bounds blank and malformed input before decoding or logging it", () =>
+    Effect.gen(function* () {
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      const logs: CodexProtocol.CodexAppServerProtocolLogEvent[] = [];
+      const transport = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+        stdio,
+        maxIncomingBytes: 9,
+        logIncoming: true,
+        logger: (event) => Effect.sync(() => logs.push(event)).pipe(Effect.asVoid),
+      });
+      const pending = yield* transport.request("x/read").pipe(Effect.forkScoped);
+      yield* Queue.take(output);
+      yield* Queue.offer(input, encoder.encode(" \n \n \n"));
+      yield* Queue.offer(input, encoder.encode("PRIVATE_INVALID_JSON"));
+      const error = yield* Fiber.join(pending).pipe(Effect.flip);
+      assert.instanceOf(error, CodexError.CodexAppServerIncomingBudgetExceededError);
+      assert.equal(JSON.stringify([logs, error]).includes("PRIVATE_INVALID_JSON"), false);
+    }),
+  );
+
+  it.effect("counts malformed UTF-8 source bytes rather than replacement text", () =>
+    Effect.gen(function* () {
+      const wire = Buffer.concat([
+        Buffer.from('{"id":1,"result":"'),
+        Buffer.from([0xff]),
+        Buffer.from('"}\n'),
+      ]);
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      const transport = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+        stdio,
+        maxIncomingBytes: wire.byteLength,
+      });
+      const pending = yield* transport.request("x/read").pipe(Effect.forkScoped);
+      yield* Queue.take(output);
+      yield* Queue.offer(input, wire);
+      assert.equal(yield* Fiber.join(pending), "�");
+    }),
+  );
+
+  it.effect("fails closed for an invalid configured total input budget", () =>
+    Effect.gen(function* () {
+      for (const maxIncomingBytes of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const { stdio, input, output } = yield* makeInMemoryStdio();
+            const transport = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+              stdio,
+              maxIncomingBytes,
+            });
+            const pending = yield* transport.request("x/read").pipe(Effect.forkScoped);
+            yield* Queue.take(output);
+            yield* Queue.offer(input, encodeJsonl({ id: 1, result: null }));
+            const error = yield* Fiber.join(pending).pipe(Effect.flip);
+            assert.instanceOf(error, CodexError.CodexAppServerIncomingBudgetExceededError);
+            if (error instanceof CodexError.CodexAppServerIncomingBudgetExceededError) {
+              assert.equal(error.maxBytes, 1);
+            }
+          }),
+        );
+      }
+    }),
+  );
+
+  it.effect("retires a request held in outgoing logging when input is exhausted", () =>
+    Effect.gen(function* () {
+      const { stdio, input } = yield* makeInMemoryStdio();
+      const held = yield* Deferred.make<void>();
+      const transport = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+        stdio,
+        maxIncomingBytes: 1,
+        logOutgoing: true,
+        logger: (event) =>
+          event.direction === "outgoing"
+            ? Deferred.succeed(held, undefined).pipe(Effect.andThen(Effect.never))
+            : Effect.void,
+      });
+      const pending = yield* transport.request("x/read").pipe(Effect.forkScoped);
+      yield* Deferred.await(held);
+      yield* Queue.offer(input, encoder.encode(" \n"));
+      const error = yield* Fiber.join(pending).pipe(Effect.flip);
+      assert.instanceOf(error, CodexError.CodexAppServerIncomingBudgetExceededError);
+    }),
+  );
+
   it.effect("keeps reading notifications after onNotification defects", () =>
     Effect.gen(function* () {
       const { stdio, input } = yield* makeInMemoryStdio();

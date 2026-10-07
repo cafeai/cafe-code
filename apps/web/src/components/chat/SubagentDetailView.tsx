@@ -687,7 +687,8 @@ function BoundSubagentDetailView({
                   data-subagent-detail-activity-incomplete="true"
                   className="mt-2 text-[11px] leading-5 text-muted-foreground/55"
                 >
-                  Showing recent activity. Earlier activity is outside this view’s retrieval limit.
+                  Activity is incomplete. Some operations could not be loaded within this view’s
+                  retrieval limits.
                 </p>
               ) : null}
             </section>
@@ -765,8 +766,8 @@ function BoundSubagentDetailView({
 
           {loadState.status === "loaded" && messages.length === 0 && activities.length === 0 ? (
             <p className="text-xs leading-5 text-muted-foreground/60" role="status">
-              No public subagent messages were saved for this task. The task summary above is still
-              available.
+              No public subagent messages are available in this view. The task summary above is
+              still available.
             </p>
           ) : null}
 
@@ -776,8 +777,8 @@ function BoundSubagentDetailView({
               role="note"
               data-subagent-detail-history-incomplete="true"
             >
-              Showing recent public messages. Earlier history is outside this view’s retrieval
-              limit.
+              History is incomplete. Some public messages could not be loaded within this view’s
+              retrieval limits.
             </p>
           ) : null}
 

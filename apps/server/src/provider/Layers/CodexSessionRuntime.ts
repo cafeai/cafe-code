@@ -30,7 +30,10 @@ import {
   TurnId,
 } from "@cafecode/contracts";
 import { normalizeModelSlug } from "@cafecode/shared/model";
-import type { ProviderSubagentActivityInput } from "../subagentDetail.ts";
+import {
+  hasVisibleProviderSubagentPublicText,
+  type ProviderSubagentActivityInput,
+} from "../subagentDetail.ts";
 import {
   subagentCommandDetail,
   subagentFileDetail,
@@ -5043,6 +5046,29 @@ export interface CodexSubagentHistoryReadClient {
   readonly request: CodexClient.CodexAppServerClientShape["request"];
 }
 
+/** Content-free diagnostics that the traced adapter may publish after private reads finish. */
+export interface CodexSubagentHistoryDiagnostic {
+  readonly historyReadMode: "items" | "summary";
+  readonly budgetKind?: "line" | "total";
+  readonly wireCutoffMode?: "items" | "summary";
+  readonly retainedMessageCount: number;
+  readonly retainedActivityCount: number;
+  readonly fallbackRequested?: boolean;
+  readonly historyReadOutcome?: "partial" | "unavailable" | "empty";
+}
+
+function recordCodexSubagentHistoryDiagnostic(
+  diagnostic: CodexSubagentHistoryDiagnostic,
+  observe?: (diagnostic: CodexSubagentHistoryDiagnostic) => void,
+): Effect.Effect<void> {
+  // The production adapter disables tracing inside the private reader. Keep
+  // only this fixed-field projection for its outer sanitized span; never pass
+  // the original error, request, cursor, native identifier or provider object.
+  return Effect.sync(() => observe?.(diagnostic)).pipe(
+    Effect.andThen(Effect.annotateCurrentSpan({ ...diagnostic })),
+  );
+}
+
 /**
  * Execute the exact read sequence shared by live and transient Codex clients.
  * Root metadata is intentionally fetched first: a missing or inaccessible root
@@ -5145,12 +5171,27 @@ export const readCodexSubagentThreadWithClient = Effect.fn(
 // feature only needs public prose. Never read them on a live provider client.
 // The isolated client enforces its line cap before JSON decoding; these
 // additional budgets bound repeated small pages and retained public material.
-export const CODEX_SUBAGENT_HISTORY_MAX_INCOMING_LINE_BYTES = 1024 * 1024;
+export const CODEX_SUBAGENT_HISTORY_MAX_INCOMING_LINE_BYTES = 16 * 1024 * 1024;
+export const CODEX_SUBAGENT_HISTORY_MAX_INCOMING_BYTES = 32 * 1024 * 1024;
 export const CODEX_SUBAGENT_HISTORY_PAGE_ITEM_LIMIT = 32;
 export const CODEX_SUBAGENT_HISTORY_MAX_PAGES = 16;
 export const CODEX_SUBAGENT_HISTORY_MAX_ITEMS = 512;
 export const CODEX_SUBAGENT_HISTORY_MAX_PUBLIC_BYTES = 2 * 1024 * 1024;
 const CODEX_SUBAGENT_HISTORY_MAX_CURSOR_CHARS = 4096;
+export const CODEX_SUBAGENT_SUMMARY_MAX_INCOMING_LINE_BYTES = 1024 * 1024;
+export const CODEX_SUBAGENT_SUMMARY_MAX_INCOMING_BYTES = 4 * 1024 * 1024;
+export const CODEX_SUBAGENT_SUMMARY_PAGE_TURN_LIMIT = 4;
+export const CODEX_SUBAGENT_SUMMARY_MAX_TURNS = 16;
+
+/**
+ * This content-free internal signal can arise only after exact ancestry has
+ * been verified and an item request exhausts a wire budget. The transient
+ * reader handles it outside its process scope, never on a dead/live client.
+ */
+class CodexSubagentHistorySummaryFallbackRequired extends Schema.TaggedErrorClass<CodexSubagentHistorySummaryFallbackRequired>()(
+  "CodexSubagentHistorySummaryFallbackRequired",
+  {},
+) {}
 
 function publicHistoryTimestamp(value: number | null | undefined): number | undefined {
   // The optional metadata is display-only, never lifecycle authority. Reject
@@ -5241,6 +5282,8 @@ function codexSubagentActivityDetail(item: CodexThreadItem): string | undefined 
  * native identifier, input annotation, private tool or reasoning field leaves
  * this reader. Provider errors still fail the refresh instead of making a
  * partial snapshot look fresh; only known local cutoffs report incompleteness.
+ * Wire-size cutoffs may preserve already projected pages; an empty cutoff
+ * instead requests one independently authorized summary-only read.
  */
 const readCodexSubagentPublicHistoryWithClient = Effect.fn(
   "CodexSessionRuntime.readSubagentPublicHistoryWithClient",
@@ -5248,7 +5291,11 @@ const readCodexSubagentPublicHistoryWithClient = Effect.fn(
   readonly client: CodexSubagentHistoryReadClient;
   readonly rootProviderThreadId: string;
   readonly subagentThreadId: string;
-}): Effect.fn.Return<CodexThreadSnapshot, CodexSessionRuntimeError> {
+  readonly onHistoryDiagnostic?: (diagnostic: CodexSubagentHistoryDiagnostic) => void;
+}): Effect.fn.Return<
+  CodexThreadSnapshot,
+  CodexSessionRuntimeError | CodexSubagentHistorySummaryFallbackRequired
+> {
   yield* readCodexVerifiedSubagentMetadataWithClient(input);
   const descendingMessages: CodexSubagentPublicHistoryMessage[] = [];
   const descendingActivities: ProviderSubagentActivityInput[] = [];
@@ -5259,18 +5306,49 @@ const readCodexSubagentPublicHistoryWithClient = Effect.fn(
   let scannedItems = 0;
   let publicBytes = 0;
   let historyIncomplete = false;
+  const recordWireCutoff = (budgetKind: "line" | "total") =>
+    recordCodexSubagentHistoryDiagnostic(
+      {
+        historyReadMode: "items",
+        wireCutoffMode: "items",
+        budgetKind,
+        retainedMessageCount: descendingMessages.length,
+        retainedActivityCount: descendingActivities.length,
+        fallbackRequested:
+          descendingActivities.length === 0 &&
+          !descendingMessages.some((message) => hasVisibleProviderSubagentPublicText(message.text)),
+      },
+      input.onHistoryDiagnostic,
+    ).pipe(Effect.as(undefined));
 
   for (let page = 0; page < CODEX_SUBAGENT_HISTORY_MAX_PAGES; page += 1) {
     const limit = Math.min(
       CODEX_SUBAGENT_HISTORY_PAGE_ITEM_LIMIT,
       CODEX_SUBAGENT_HISTORY_MAX_ITEMS - scannedItems,
     );
-    const response = yield* input.client.request("thread/items/list", {
-      threadId: input.subagentThreadId,
-      sortDirection: "desc",
-      limit,
-      ...(cursor !== undefined ? { cursor } : {}),
-    });
+    const response = yield* input.client
+      .request("thread/items/list", {
+        threadId: input.subagentThreadId,
+        sortDirection: "desc",
+        limit,
+        ...(cursor !== undefined ? { cursor } : {}),
+      })
+      .pipe(
+        Effect.catchTags({
+          CodexAppServerIncomingMessageTooLargeError: () => recordWireCutoff("line"),
+          CodexAppServerIncomingBudgetExceededError: () => recordWireCutoff("total"),
+        }),
+      );
+    if (response === undefined) {
+      if (
+        descendingActivities.length === 0 &&
+        !descendingMessages.some((message) => hasVisibleProviderSubagentPublicText(message.text))
+      ) {
+        return yield* new CodexSubagentHistorySummaryFallbackRequired();
+      }
+      historyIncomplete = true;
+      break;
+    }
     for (const entry of response.data.slice(0, limit)) {
       scannedItems += 1;
       const item = entry.item;
@@ -5370,10 +5448,169 @@ export const readCodexSubagentThreadWithInitializedClient = Effect.fn(
   readonly client: CodexInitializedSubagentHistoryReadClient;
   readonly rootProviderThreadId: string;
   readonly subagentThreadId: string;
+  readonly onHistoryDiagnostic?: (diagnostic: CodexSubagentHistoryDiagnostic) => void;
 }) {
   yield* input.client.request("initialize", buildCodexInitializeParams());
   yield* input.client.notify("initialized", undefined);
   return yield* readCodexSubagentPublicHistoryWithClient(input);
+});
+
+/**
+ * One smaller, summary-only recovery read, on a fresh isolated process. Native
+ * summary turns normally contain a user prompt and final assistant answer;
+ * distrust that optimization and still project only those explicit public
+ * item variants. No tool payload or native identifier enters the snapshot.
+ * Unlike the ordinary summary reader, this preserves honest cutoff metadata
+ * through the public-history canonicalizer rather than returning raw turns.
+ */
+export const readCodexSubagentSummaryWithInitializedClient = Effect.fn(
+  "CodexSessionRuntime.readSubagentSummaryWithInitializedClient",
+)(function* (input: {
+  readonly client: CodexInitializedSubagentHistoryReadClient;
+  readonly rootProviderThreadId: string;
+  readonly subagentThreadId: string;
+  readonly onHistoryDiagnostic?: (diagnostic: CodexSubagentHistoryDiagnostic) => void;
+}): Effect.fn.Return<CodexThreadSnapshot, CodexSessionRuntimeError> {
+  yield* input.client.request("initialize", buildCodexInitializeParams());
+  yield* input.client.notify("initialized", undefined);
+  yield* readCodexVerifiedSubagentMetadataWithClient(input);
+
+  const descendingMessages: CodexSubagentPublicHistoryMessage[] = [];
+  const seenItems = new Set<string>();
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+  let scannedTurns = 0;
+  let scannedItems = 0;
+  let publicBytes = 0;
+  let sourceLimitReached = false;
+  const retainSummaryOnWireCutoff = (
+    error:
+      | CodexErrors.CodexAppServerIncomingMessageTooLargeError
+      | CodexErrors.CodexAppServerIncomingBudgetExceededError,
+  ) =>
+    Effect.gen(function* () {
+      const retainedPublicContent = descendingMessages.some((message) =>
+        hasVisibleProviderSubagentPublicText(message.text),
+      );
+      yield* recordCodexSubagentHistoryDiagnostic(
+        {
+          historyReadMode: "summary",
+          wireCutoffMode: "summary",
+          budgetKind:
+            error._tag === "CodexAppServerIncomingMessageTooLargeError" ? "line" : "total",
+          retainedMessageCount: descendingMessages.length,
+          retainedActivityCount: 0,
+          fallbackRequested: false,
+          historyReadOutcome: retainedPublicContent ? "partial" : "unavailable",
+        },
+        input.onHistoryDiagnostic,
+      );
+      return retainedPublicContent ? undefined : yield* Effect.fail(error);
+    });
+  for (
+    let page = 0;
+    page < CODEX_SUBAGENT_SUMMARY_MAX_TURNS / CODEX_SUBAGENT_SUMMARY_PAGE_TURN_LIMIT;
+    page += 1
+  ) {
+    const limit = Math.min(
+      CODEX_SUBAGENT_SUMMARY_PAGE_TURN_LIMIT,
+      CODEX_SUBAGENT_SUMMARY_MAX_TURNS - scannedTurns,
+    );
+    const response = yield* input.client
+      .request("thread/turns/list", {
+        threadId: input.subagentThreadId,
+        sortDirection: "desc",
+        itemsView: "summary",
+        limit,
+        ...(cursor !== undefined ? { cursor } : {}),
+      })
+      .pipe(
+        Effect.catchTags({
+          CodexAppServerIncomingMessageTooLargeError: retainSummaryOnWireCutoff,
+          CodexAppServerIncomingBudgetExceededError: retainSummaryOnWireCutoff,
+        }),
+      );
+    if (response === undefined) break;
+    for (const turn of response.data.slice(0, limit)) {
+      scannedTurns += 1;
+      // Descending turn pages contain chronologically ordered items. Walk
+      // items backwards as well so a single final reversal restores both.
+      for (let index = turn.items.length - 1; index >= 0; index -= 1) {
+        if (scannedItems >= CODEX_SUBAGENT_HISTORY_MAX_ITEMS) {
+          sourceLimitReached = true;
+          break;
+        }
+        scannedItems += 1;
+        const item = turn.items[index]!;
+        if (item.type !== "userMessage" && item.type !== "agentMessage") continue;
+        const identity = createHash("sha256")
+          .update(JSON.stringify([turn.id, item.id]), "utf16le")
+          .digest("hex");
+        if (seenItems.has(identity)) continue;
+        seenItems.add(identity);
+        const text =
+          item.type === "agentMessage"
+            ? item.text
+            : item.content
+                .flatMap((content) => (content.type === "text" ? [content.text] : []))
+                .join("\n");
+        const bytes = Buffer.byteLength(text, "utf8");
+        if (publicBytes + bytes > CODEX_SUBAGENT_HISTORY_MAX_PUBLIC_BYTES) {
+          sourceLimitReached = true;
+          break;
+        }
+        publicBytes += bytes;
+        descendingMessages.push({
+          role: item.type === "userMessage" ? "user" : "assistant",
+          text,
+          ...(item.type === "agentMessage" &&
+          (item.phase === "commentary" || item.phase === "final_answer")
+            ? { phase: item.phase }
+            : {}),
+        });
+      }
+      if (sourceLimitReached) break;
+    }
+    const nextCursor = response.nextCursor;
+    if (
+      sourceLimitReached ||
+      response.data.length === 0 ||
+      response.data.length > limit ||
+      scannedTurns >= CODEX_SUBAGENT_SUMMARY_MAX_TURNS ||
+      nextCursor === undefined ||
+      nextCursor === null ||
+      nextCursor.length === 0 ||
+      nextCursor.length > CODEX_SUBAGENT_HISTORY_MAX_CURSOR_CHARS ||
+      seenCursors.has(nextCursor)
+    ) {
+      break;
+    }
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+  }
+  yield* recordCodexSubagentHistoryDiagnostic(
+    {
+      historyReadMode: "summary",
+      retainedMessageCount: descendingMessages.length,
+      retainedActivityCount: 0,
+      historyReadOutcome: descendingMessages.some((message) =>
+        hasVisibleProviderSubagentPublicText(message.text),
+      )
+        ? "partial"
+        : "empty",
+    },
+    input.onHistoryDiagnostic,
+  );
+  return {
+    threadId: input.subagentThreadId,
+    turns: [],
+    publicHistory: descendingMessages.toReversed(),
+    publicActivities: [],
+    // Summary-only recovery omits commentary/activity by definition. Never
+    // claim completeness or invent counts, even when its cursor reaches EOF.
+    historyIncomplete: true,
+    activityHistoryIncomplete: true,
+  };
 });
 
 export interface CodexTransientSubagentHistoryReadOptions {
@@ -5386,6 +5623,8 @@ export interface CodexTransientSubagentHistoryReadOptions {
   readonly homePath?: string;
   readonly transportPolicy?: CodexTransportPolicy;
   readonly maxConcurrentSubagents?: number | undefined;
+  /** Fixed counters only; private reads run with internal tracing disabled by the adapter. */
+  readonly onHistoryDiagnostic?: (diagnostic: CodexSubagentHistoryDiagnostic) => void;
 }
 
 /**
@@ -5398,40 +5637,66 @@ export const readCodexSubagentThreadTransient = Effect.fn(
   "CodexSessionRuntime.readCodexSubagentThreadTransient",
 )(function* (options: CodexTransientSubagentHistoryReadOptions) {
   const resolvedHomePath = options.homePath ? expandHomePath(options.homePath) : undefined;
-  return yield* Effect.scoped(
-    Effect.gen(function* () {
-      const clientContext = yield* Layer.build(
-        CodexClient.layerCommand({
-          maxIncomingLineBytes: CODEX_SUBAGENT_HISTORY_MAX_INCOMING_LINE_BYTES,
-          logIncoming: false,
-          logOutgoing: false,
-          // Undefined logger uses the protocol's default debug logger for
-          // decoding failures, whose cause can contain malformed private wire
-          // data. Explicitly suppress that isolated diagnostic path as well.
-          logger: () => Effect.void,
-          command: options.binaryPath,
-          args: buildCodexAppServerArgs({
-            maxConcurrentSubagents: options.maxConcurrentSubagents,
-            desktopMcp: options.desktopMcp,
-            transportPolicy: options.transportPolicy,
+  const readIsolated = <E>(
+    summaryOnly: boolean,
+    read: (input: {
+      readonly client: CodexInitializedSubagentHistoryReadClient;
+      readonly rootProviderThreadId: string;
+      readonly subagentThreadId: string;
+      readonly onHistoryDiagnostic?: (diagnostic: CodexSubagentHistoryDiagnostic) => void;
+    }) => Effect.Effect<CodexThreadSnapshot, E>,
+  ) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const clientContext = yield* Layer.build(
+          CodexClient.layerCommand({
+            maxIncomingLineBytes: summaryOnly
+              ? CODEX_SUBAGENT_SUMMARY_MAX_INCOMING_LINE_BYTES
+              : CODEX_SUBAGENT_HISTORY_MAX_INCOMING_LINE_BYTES,
+            maxIncomingBytes: summaryOnly
+              ? CODEX_SUBAGENT_SUMMARY_MAX_INCOMING_BYTES
+              : CODEX_SUBAGENT_HISTORY_MAX_INCOMING_BYTES,
+            logIncoming: false,
+            logOutgoing: false,
+            // Undefined logger uses the protocol's default debug logger for
+            // decoding failures, whose cause can contain malformed private wire
+            // data. Explicitly suppress that isolated diagnostic path as well.
+            logger: () => Effect.void,
+            command: options.binaryPath,
+            args: buildCodexAppServerArgs({
+              maxConcurrentSubagents: options.maxConcurrentSubagents,
+              desktopMcp: options.desktopMcp,
+              transportPolicy: options.transportPolicy,
+            }),
+            cwd: options.appServerCwd,
+            env: {
+              ...(options.environment ?? process.env),
+              ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
+            },
+            // The finite adapter error mapping is the only diagnostic boundary.
           }),
-          cwd: options.appServerCwd,
-          env: {
-            ...(options.environment ?? process.env),
-            ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
-          },
-          // The finite adapter error mapping is the only diagnostic boundary.
-        }),
-      );
-      const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
-        Effect.provide(clientContext),
-      );
-      return yield* readCodexSubagentThreadWithInitializedClient({
-        client,
-        rootProviderThreadId: options.rootProviderThreadId,
-        subagentThreadId: options.subagentThreadId,
-      });
-    }),
+        );
+        const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
+          Effect.provide(clientContext),
+        );
+        const input = {
+          client,
+          rootProviderThreadId: options.rootProviderThreadId,
+          subagentThreadId: options.subagentThreadId,
+          ...(options.onHistoryDiagnostic
+            ? { onHistoryDiagnostic: options.onHistoryDiagnostic }
+            : {}),
+        };
+        return yield* read(input);
+      }),
+    );
+  // Scope retirement precedes recovery: the wire limit has terminated the
+  // first protocol reader. Never reuse it, retry the huge item, or attach to a
+  // live runtime. The adapter's existing timeout/semaphore cover both scopes.
+  return yield* readIsolated(false, readCodexSubagentThreadWithInitializedClient).pipe(
+    Effect.catchTag("CodexSubagentHistorySummaryFallbackRequired", () =>
+      readIsolated(true, readCodexSubagentSummaryWithInitializedClient),
+    ),
   );
 });
 

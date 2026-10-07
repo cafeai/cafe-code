@@ -194,11 +194,13 @@ describe("subagent activity detail", () => {
       expect(rows[0]?.querySelector("time")?.getAttribute("datetime")).toBe(timestamp);
       expect(document.querySelector("[data-subagent-detail-activity-detail]")).toBeNull();
       expect(document.body.textContent).not.toContain("PRIVATE_");
-      expect(document.body.textContent).not.toContain("No public subagent messages were saved");
+      expect(document.body.textContent).not.toContain(
+        "No public subagent messages are available in this view.",
+      );
       await expect
         .element(
           page.getByText(
-            "Showing recent activity. Earlier activity is outside this view’s retrieval limit.",
+            "Activity is incomplete. Some operations could not be loaded within this view’s retrieval limits.",
           ),
         )
         .toBeVisible();
@@ -208,6 +210,99 @@ describe("subagent activity detail", () => {
         subagentId: "child-worker",
         historyId: "history-a",
       });
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  it("discloses summary-only history without claiming that missing activity means no work", async () => {
+    installRead(async () => ({
+      provider: ProviderDriverKind.make("codex"),
+      messages: [
+        { key: "m1", role: "assistant", text: "The retained public summary remains readable." },
+      ],
+      gaps: [],
+      truncated: true,
+      activities: [],
+      historyIncomplete: true,
+      activityHistoryIncomplete: true,
+    }));
+    const view = await render(<DetailFixture />);
+    try {
+      await expect
+        .element(page.getByText("The retained public summary remains readable.", { exact: true }))
+        .toBeVisible();
+      await expect
+        .element(
+          page.getByText(
+            "History is incomplete. Some public messages could not be loaded within this view’s retrieval limits.",
+            { exact: true },
+          ),
+        )
+        .toBeVisible();
+      await expect
+        .element(
+          page.getByText(
+            "Activity is incomplete. Some operations could not be loaded within this view’s retrieval limits.",
+            { exact: true },
+          ),
+        )
+        .toBeVisible();
+      expect(document.querySelectorAll("[data-subagent-detail-activity]")).toHaveLength(0);
+      expect(document.querySelector("[data-subagent-detail-unavailable]")).toBeNull();
+      expect(document.body.textContent).not.toMatch(
+        /No (?:public subagent messages|public output|activity|work)/i,
+      );
+      expect(document.body.textContent).not.toContain("Showing recent");
+      expect(document.body.textContent).not.toContain("Earlier history");
+      expect(document.body.textContent).not.toContain("Earlier activity");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  it("qualifies an empty incomplete scan without claiming that no public history was saved", async () => {
+    installRead(async () => ({
+      provider: ProviderDriverKind.make("codex"),
+      messages: [],
+      gaps: [],
+      truncated: true,
+      activities: [],
+      historyIncomplete: true,
+      activityHistoryIncomplete: true,
+    }));
+    const view = await render(<DetailFixture />);
+    try {
+      await expect
+        .element(
+          page.getByText(
+            "No public subagent messages are available in this view. The task summary above is still available.",
+            { exact: true },
+          ),
+        )
+        .toBeVisible();
+      await expect
+        .element(
+          page.getByText(
+            "History is incomplete. Some public messages could not be loaded within this view’s retrieval limits.",
+            { exact: true },
+          ),
+        )
+        .toBeVisible();
+      await expect
+        .element(
+          page.getByText(
+            "Activity is incomplete. Some operations could not be loaded within this view’s retrieval limits.",
+            { exact: true },
+          ),
+        )
+        .toBeVisible();
+      expect(document.querySelector("[data-subagent-detail-message]")).toBeNull();
+      expect(document.querySelector("[data-subagent-detail-activity]")).toBeNull();
+      expect(document.querySelector("[data-subagent-detail-unavailable]")).toBeNull();
+      expect(document.body.textContent).not.toMatch(
+        /were saved|No (?:work|activity|public output)/i,
+      );
     } finally {
       await view.unmount();
     }

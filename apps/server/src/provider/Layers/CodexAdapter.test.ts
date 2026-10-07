@@ -1214,9 +1214,9 @@ validationLayer("CodexAdapterLive validation", (it) => {
 
 const sessionRuntimeFactory = makeRuntimeFactory();
 const transientSubagentHistoryRead = vi.fn(
-  (options: {
-    readonly subagentThreadId: string;
-  }): Effect.Effect<CodexThreadSnapshot, CodexErrors.CodexAppServerTransportError> =>
+  (
+    options: CodexTransientSubagentHistoryReadOptions,
+  ): Effect.Effect<CodexThreadSnapshot, CodexErrors.CodexAppServerTransportError> =>
     Effect.succeed({
       threadId: options.subagentThreadId,
       turns: [],
@@ -1306,11 +1306,16 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       assert.deepEqual(detail, { messages: [], gaps: [], truncated: false });
       assert.equal(sessionRuntimeFactory.factory.mock.calls.length, runtimeCountBefore);
       assert.equal(transientSubagentHistoryRead.mock.calls.length, 1);
+      assert.equal(
+        typeof transientSubagentHistoryRead.mock.calls[0]?.[0].onHistoryDiagnostic,
+        "function",
+      );
       assert.deepEqual(transientSubagentHistoryRead.mock.calls[0]?.[0], {
         binaryPath: "codex",
         appServerCwd: path.join(process.cwd(), "userdata"),
         rootProviderThreadId: "provider-root-ended",
         subagentThreadId: childId,
+        onHistoryDiagnostic: transientSubagentHistoryRead.mock.calls[0]?.[0].onHistoryDiagnostic,
       });
       assert.equal(
         (yield* adapter.listSessions()).some((session) => session.threadId === threadId),
@@ -1369,11 +1374,16 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
 
       assert.equal(runtime.readSubagentThreadImpl.mock.calls.length, 0);
       assert.equal(transientSubagentHistoryRead.mock.calls.length, 1);
+      assert.equal(
+        typeof transientSubagentHistoryRead.mock.calls[0]?.[0].onHistoryDiagnostic,
+        "function",
+      );
       assert.deepEqual(transientSubagentHistoryRead.mock.calls[0]?.[0], {
         binaryPath: "codex",
         appServerCwd: path.join(process.cwd(), "userdata"),
         rootProviderThreadId: "provider-root-that-ended",
         subagentThreadId: childId,
+        onHistoryDiagnostic: transientSubagentHistoryRead.mock.calls[0]?.[0].onHistoryDiagnostic,
       });
     }),
   );

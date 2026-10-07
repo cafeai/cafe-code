@@ -897,7 +897,7 @@ describe("MessagesTimeline", () => {
       await expect
         .element(
           page.getByText(
-            "Showing recent public messages. Earlier history is outside this view’s retrieval limit.",
+            "History is incomplete. Some public messages could not be loaded within this view’s retrieval limits.",
             { exact: true },
           ),
         )

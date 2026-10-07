@@ -1054,6 +1054,20 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
     }),
   );
 
+  it.effect("forwards the scoped raw input budget without private diagnostics", () =>
+    Effect.gen(function* () {
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      const client = yield* CodexClient.make(stdio, { maxIncomingBytes: 3 });
+      const pending = yield* client.raw.request("x/read").pipe(Effect.forkScoped);
+      yield* Queue.take(output);
+      yield* Queue.offer(input, encoder.encode(" \n"));
+      yield* Queue.offer(input, encoder.encode("PRIVATE_TOO_LARGE"));
+      const error = yield* Fiber.join(pending).pipe(Effect.flip);
+      assert.instanceOf(error, CodexError.CodexAppServerIncomingBudgetExceededError);
+      assert.equal(JSON.stringify(error).includes("PRIVATE_TOO_LARGE"), false);
+    }),
+  );
+
   it.effect("forwards a redacted terminal protocol diagnostic to the client observer", () =>
     Effect.gen(function* () {
       const privateWireSentinel = "private-wire-sentinel-that-must-not-leak";

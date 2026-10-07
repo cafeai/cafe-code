@@ -49,6 +49,8 @@ import {
   CODEX_SUBAGENT_HISTORY_MAX_PAGES,
   CODEX_SUBAGENT_HISTORY_MAX_PUBLIC_BYTES,
   CODEX_SUBAGENT_HISTORY_PAGE_ITEM_LIMIT,
+  CODEX_SUBAGENT_SUMMARY_PAGE_TURN_LIMIT,
+  CODEX_SUBAGENT_SUMMARY_MAX_TURNS,
   CODEX_PENDING_STEER_UNRESOLVED_CAPACITY,
   CODEX_RESUME_CHILD_RECONCILIATION_LIMIT,
   CODEX_CHILD_ACTIVITY_RECEIVER_LIMIT,
@@ -105,6 +107,7 @@ import {
   readCodexChildLivenessSnapshotWithClient,
   readCodexExpectedActiveTurnMismatchActualTurnId,
   readCodexSubagentThreadWithInitializedClient,
+  readCodexSubagentSummaryWithInitializedClient,
   CODEX_SUBAGENT_HISTORY_MAX_ANCESTRY_HOPS,
   readCodexSubagentThreadTransient,
   readCodexNotificationEmittedAtIso,
@@ -1441,6 +1444,248 @@ describe("Codex subagent thread ownership validation", () => {
       subagentThreadId: nestedChild.id,
     });
   };
+
+  const readSummaryHistoryFixture = (
+    readPage: (
+      input: EffectCodexSchema.V2ThreadTurnsListParams,
+    ) => Effect.Effect<
+      EffectCodexSchema.V2ThreadTurnsListResponse,
+      CodexErrors.CodexAppServerError
+    >,
+  ) => {
+    const request = ((method: string, payload: unknown) => {
+      if (method === "initialize") return Effect.succeed({ userAgent: "codex-test" });
+      if (method === "thread/turns/list") {
+        return readPage(payload as EffectCodexSchema.V2ThreadTurnsListParams);
+      }
+      if (method === "thread/read") {
+        const threadId = (payload as { threadId: string }).threadId;
+        const metadata = [root, nestedChild, intermediateChild].find(
+          (thread) => thread.id === threadId,
+        );
+        assert.ok(metadata);
+        return Effect.succeed({ thread: { ...metadata, turns: [] } });
+      }
+      return Effect.die(new Error(`Unexpected summary fixture method: ${method}`));
+    }) as CodexSubagentHistoryReadClient["request"];
+    return readCodexSubagentSummaryWithInitializedClient({
+      client: { request, notify: () => Effect.void },
+      rootProviderThreadId: root.id,
+      subagentThreadId: nestedChild.id,
+    });
+  };
+
+  effectIt.effect("filters full summary variants and overlapping identities in chronology", () =>
+    Effect.gen(function* () {
+      let calls = 0;
+      const snapshot = yield* readSummaryHistoryFixture((input) => {
+        calls += 1;
+        assert.equal(input.threadId, nestedChild.id);
+        assert.equal(input.itemsView, "summary");
+        assert.equal(input.sortDirection, "desc");
+        assert.equal(input.limit, CODEX_SUBAGENT_SUMMARY_PAGE_TURN_LIMIT);
+        const newer = {
+          ...makeCodexSummaryTurnFixture("newer"),
+          items: [
+            {
+              type: "userMessage" as const,
+              id: "prompt-id",
+              content: [
+                { type: "text" as const, text: "Public prompt", text_elements: [] },
+                { type: "image" as const, url: "PRIVATE_IMAGE" },
+              ],
+            },
+            {
+              type: "reasoning" as const,
+              id: "PRIVATE_ID",
+              summary: ["PRIVATE_REASONING"],
+              content: ["PRIVATE_REASONING"],
+            },
+            {
+              type: "functionCallOutput" as const,
+              id: "PRIVATE_OUTPUT_ID",
+              name: "PRIVATE_TOOL",
+              namespace: null,
+              output: "PRIVATE_OUTPUT",
+            },
+            { ...publicEntry("answer-id", "Public answer").item, phase: "final_answer" as const },
+          ],
+        };
+        return Effect.succeed(
+          calls === 1
+            ? { data: [newer], nextCursor: "older" }
+            : {
+                data: [
+                  newer,
+                  {
+                    ...makeCodexSummaryTurnFixture("older"),
+                    items: [publicEntry("answer-id", "Older public answer").item],
+                  },
+                ],
+                nextCursor: null,
+              },
+        );
+      });
+      assert.equal(calls, 2);
+      assert.deepEqual(snapshot.publicHistory, [
+        { role: "assistant", text: "Older public answer", phase: "commentary" },
+        { role: "user", text: "Public prompt" },
+        { role: "assistant", text: "Public answer", phase: "final_answer" },
+      ]);
+      assert.deepEqual(snapshot.turns, []);
+      assert.deepEqual(snapshot.publicActivities, []);
+      assert.equal(snapshot.historyIncomplete, true);
+      assert.equal(snapshot.activityHistoryIncomplete, true);
+      assert.doesNotMatch(JSON.stringify(snapshot), /PRIVATE_|prompt-id|answer-id/);
+    }),
+  );
+
+  effectIt.effect("bounds summary turns, broken cursors and untrusted page sizes", () =>
+    Effect.gen(function* () {
+      let calls = 0;
+      const snapshot = yield* readSummaryHistoryFixture(() => {
+        const page = calls++;
+        return Effect.succeed({
+          data: Array.from({ length: CODEX_SUBAGENT_SUMMARY_PAGE_TURN_LIMIT }, (_, index) => ({
+            ...makeCodexSummaryTurnFixture(`turn-${page}-${index}`),
+            items: [publicEntry(`item-${page}-${index}`).item],
+          })),
+          nextCursor: `page-${page}`,
+        });
+      });
+      assert.equal(calls, 4);
+      assert.equal(snapshot.publicHistory?.length, CODEX_SUBAGENT_SUMMARY_MAX_TURNS);
+      for (const nextCursor of ["repeat", "", "x".repeat(4097)]) {
+        let cursorCalls = 0;
+        yield* readSummaryHistoryFixture(() => {
+          cursorCalls += 1;
+          return Effect.succeed({
+            data: [makeCodexSummaryTurnFixture(`turn-${cursorCalls}`)],
+            nextCursor,
+          });
+        });
+        assert.equal(cursorCalls, nextCursor === "repeat" ? 2 : 1);
+      }
+      let oversizedCalls = 0;
+      const oversized = yield* readSummaryHistoryFixture(() => {
+        oversizedCalls += 1;
+        return Effect.succeed({
+          data: Array.from({ length: 5 }, (_, index) => ({
+            ...makeCodexSummaryTurnFixture(`turn-${index}`),
+            items: [publicEntry(`item-${index}`).item],
+          })),
+          nextCursor: "must-not-request",
+        });
+      });
+      assert.equal(oversizedCalls, 1);
+      assert.equal(oversized.publicHistory?.length, 4);
+    }),
+  );
+
+  effectIt.effect(
+    "bounds projected summary source bytes and hostile full-variant item counts",
+    () =>
+      Effect.gen(function* () {
+        let calls = 0;
+        const snapshot = yield* readSummaryHistoryFixture(() => {
+          calls += 1;
+          return Effect.succeed({
+            data: [
+              {
+                ...makeCodexSummaryTurnFixture(`turn-${calls}`),
+                items: [publicEntry(`item-${calls}`, "x".repeat(900 * 1024)).item],
+              },
+            ],
+            nextCursor: `page-${calls}`,
+          });
+        });
+        assert.equal(calls, 3);
+        assert.equal(snapshot.publicHistory?.length, 2);
+        assert.ok(
+          snapshot.publicHistory!.reduce((sum, item) => sum + Buffer.byteLength(item.text), 0) <=
+            CODEX_SUBAGENT_HISTORY_MAX_PUBLIC_BYTES,
+        );
+        let itemCalls = 0;
+        const manyItems = yield* readSummaryHistoryFixture(() => {
+          itemCalls += 1;
+          return Effect.succeed({
+            data: [
+              {
+                ...makeCodexSummaryTurnFixture("full-variant-turn"),
+                items: Array.from(
+                  { length: CODEX_SUBAGENT_HISTORY_MAX_ITEMS + 1 },
+                  (_, index) => publicEntry(`item-${index}`).item,
+                ),
+              },
+            ],
+            nextCursor: "must-not-request",
+          });
+        });
+        assert.equal(itemCalls, 1);
+        assert.equal(manyItems.publicHistory?.length, CODEX_SUBAGENT_HISTORY_MAX_ITEMS);
+        assert.equal(manyItems.publicHistory?.[0]?.text, "item-1");
+      }),
+  );
+
+  effectIt.effect(
+    "keeps activity-only history on wire exhaustion but rejects canonically invisible prose",
+    () =>
+      Effect.gen(function* () {
+        for (const failure of [
+          new CodexErrors.CodexAppServerIncomingMessageTooLargeError({ maxBytes: 123 }),
+          new CodexErrors.CodexAppServerIncomingBudgetExceededError({ maxBytes: 456 }),
+        ]) {
+          let calls = 0;
+          const snapshot = yield* readPublicHistoryFixture(() => {
+            calls += 1;
+            return calls === 1
+              ? Effect.succeed({
+                  data: [
+                    {
+                      turnId: "turn",
+                      item: { type: "imageView" as const, id: "activity", path: "src/diagram.png" },
+                    },
+                  ],
+                  nextCursor: "older",
+                })
+              : Effect.fail(failure);
+          });
+          assert.equal(snapshot.publicActivities?.length, 1);
+          assert.deepEqual(snapshot.publicHistory, []);
+          assert.equal(snapshot.historyIncomplete, true);
+          assert.equal(snapshot.activityHistoryIncomplete, true);
+          // The canonicalizer removes control/bidi scalars. A raw nonblank
+          // string therefore is not evidence that the owner would see a row.
+          for (const text of ["  ", "\u0000\u202e", "\t\r\n\u0080\u2069"]) {
+            let emptyCalls = 0;
+            const emptyFailure = yield* readPublicHistoryFixture(() => {
+              emptyCalls += 1;
+              return emptyCalls === 1
+                ? Effect.succeed({ data: [publicEntry("empty", text)], nextCursor: "older" })
+                : Effect.fail(failure);
+            }).pipe(Effect.flip);
+            assert.equal(emptyFailure._tag, "CodexSubagentHistorySummaryFallbackRequired");
+
+            let summaryCalls = 0;
+            const summaryFailure = yield* readSummaryHistoryFixture(() => {
+              summaryCalls += 1;
+              return summaryCalls === 1
+                ? Effect.succeed({
+                    data: [
+                      {
+                        ...makeCodexSummaryTurnFixture("empty-summary"),
+                        items: [publicEntry("empty", text).item],
+                      },
+                    ],
+                    nextCursor: "older",
+                  })
+                : Effect.fail(failure);
+            }).pipe(Effect.flip);
+            assert.equal(summaryFailure, failure);
+          }
+        }
+      }),
+  );
 
   effectIt.effect(
     "retains public commentary and final items in chronology without private fields",

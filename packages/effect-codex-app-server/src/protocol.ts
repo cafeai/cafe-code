@@ -53,6 +53,8 @@ export interface CodexAppServerIncomingRequest {
 export interface CodexAppServerPatchedProtocolOptions {
   readonly stdio: Stdio.Stdio;
   readonly maxIncomingLineBytes?: number;
+  /** Raw bytes over this protocol scope, checked before decoding or logging. */
+  readonly maxIncomingBytes?: number;
   readonly terminationError?: Effect.Effect<CodexError.CodexAppServerError>;
   readonly logIncoming?: boolean;
   readonly logOutgoing?: boolean;
@@ -287,8 +289,21 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
       configuredMaxIncomingLineBytes >= 1
         ? configuredMaxIncomingLineBytes
         : DEFAULT_CODEX_APP_SERVER_MAX_INCOMING_LINE_BYTES;
+    // Long-lived clients intentionally omit this budget. A caller that supplies
+    // an invalid value must not accidentally disable a bounded reader's guard.
+    const maxIncomingBytes =
+      options.maxIncomingBytes === undefined
+        ? undefined
+        : Number.isSafeInteger(options.maxIncomingBytes) && options.maxIncomingBytes >= 1
+          ? options.maxIncomingBytes
+          : 1;
+    let incomingBytes = 0;
     const remainder = yield* Ref.make<IncomingLineRemainder>({ text: "", utf8Bytes: 0 });
     const terminationHandled = yield* Ref.make(false);
+    // A request can arrive between history pages after the transport failed.
+    // Closed queues reject offers without throwing, so retain the terminal
+    // error for future requests as well as the pending set present at failure.
+    const terminalFailure = yield* Deferred.make<never, CodexError.CodexAppServerError>();
 
     const logProtocol = (event: CodexAppServerProtocolLogEvent) => {
       if (
@@ -325,6 +340,7 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
         return [
           Effect.gen(function* () {
             const error = yield* classify();
+            yield* Deferred.fail(terminalFailure, error);
             yield* failAllPending(error);
             yield* Queue.end(outgoing);
             if (options.onTermination) {
@@ -553,6 +569,24 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
     let lastIncomingByte: number | undefined;
     const handleIncomingBuffer = (buffer: Uint8Array) =>
       Effect.suspend(() => {
+        // Count source bytes, including delimiters, whitespace, malformed UTF-8,
+        // metadata and unsolicited envelopes. Re-encoding decoded JSON would
+        // miss those costs. Subtraction avoids overflowing the safe counter;
+        // never allocate a decoded string for an over-budget input chunk.
+        if (maxIncomingBytes !== undefined) {
+          if (buffer.byteLength > maxIncomingBytes - incomingBytes) {
+            return Ref.set(remainder, { text: "", utf8Bytes: 0 }).pipe(
+              Effect.andThen(
+                Effect.fail(
+                  new CodexError.CodexAppServerIncomingBudgetExceededError({
+                    maxBytes: maxIncomingBytes,
+                  }),
+                ),
+              ),
+            );
+          }
+          incomingBytes += buffer.byteLength;
+        }
         if (buffer.length > 0) lastIncomingByte = buffer[buffer.length - 1];
         const chunk = incomingDecoder.decode(buffer, { stream: true });
         return Ref.modify<IncomingLineRemainder, IncomingChunkSplit>(
@@ -642,17 +676,29 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
         );
         const deferred = yield* Deferred.make<unknown, CodexError.CodexAppServerError>();
         yield* Ref.update(pending, (current) => new Map(current).set(String(requestId), deferred));
-        yield* offerOutgoing({
-          id: requestId,
-          method,
-          ...(payload !== undefined ? { params: payload } : {}),
-        }).pipe(
+        const sendAndWait = Effect.gen(function* () {
+          yield* offerOutgoing({
+            id: requestId,
+            method,
+            ...(payload !== undefined ? { params: payload } : {}),
+          });
+          return yield* Deferred.await(deferred);
+        });
+        return yield* Deferred.await(terminalFailure).pipe(
+          // A response that already completed remains authoritative even if
+          // stdout closes in the same pulled batch. Otherwise the terminal
+          // error wins immediately, including before send-side work begins.
           Effect.catch((error) =>
-            removePending(String(requestId)).pipe(Effect.andThen(Effect.fail(error))),
+            Deferred.isDone(deferred).pipe(
+              Effect.flatMap((done) => (done ? Deferred.await(deferred) : Effect.fail(error))),
+            ),
           ),
-        );
-        return yield* Deferred.await(deferred).pipe(
-          Effect.onInterrupt(() => removePending(String(requestId))),
+          // Race the whole send/wait, not only the response wait: termination
+          // can also happen while asynchronous outgoing logging is held. The
+          // shared deferred is sticky, covering requests registered after the
+          // original pending-map drain without resubmitting any provider work.
+          Effect.raceFirst(sendAndWait),
+          Effect.ensuring(removePending(String(requestId))),
         );
       });
 

@@ -3,12 +3,13 @@
 Decision status: Accepted within the authorized history repair
 Implementation status: Implemented; verification requirements and operational limits are below
 Created: 2026-10-04 14:08:58 JST (UTC+0900)
-Last updated: 2026-10-07 04:48:16 JST (UTC+0900)
+Last updated: 2026-10-07 10:15:38 JST (UTC+0900)
 Decision authority: implementation choice within the user's request to fix sparse/stale subagent detail and push dev
 Supersedes: none; supplements existing lifecycle retention and immutable history ownership
 Partially superseded by: [Codex history ancestry](codex-history-ancestry.md), which corrects the stored-thread session-ID interpretation while preserving this decision's other boundaries.
 Supplemented by: [bounded child activity](provider-aware-composer-and-child-activity.md), which adds content-free operation categories without exposing the raw tool history excluded here.
 Partially superseded by: [useful activity details](subagent-activity-details.md), which admits separately bounded sanitized file/command descriptions only; raw tool payloads, private output and all history-authorization boundaries remain unchanged.
+Partially superseded by: [native history wire budgets](codex-history-wire-budgets.md), which separates native response size from public display limits and preserves safe partial history with one verified summary fallback on local size exhaustion. Other failure and authorization boundaries remain unchanged.
 
 ## Context
 

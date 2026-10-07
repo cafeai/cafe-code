@@ -44,7 +44,10 @@ describe("desktop sidebar header", () => {
           const sidebarBounds = host
             .querySelector('[data-slot="sidebar-container"]')!
             .getBoundingClientRect();
-          expect(Math.round(sidebarBounds.width)).toBe(width);
+          // Width transitions can enter the target's rounding bucket before
+          // finishing. Wait for the exact requested width before recording an
+          // exact toggle position; rounding here races the assertion below.
+          expect(sidebarBounds.width).toBe(width);
           expect(Math.round(headerBounds.right - toggleBounds.right)).toBe(16);
           expect(brandBounds.left).toBeGreaterThanOrEqual(headerBounds.left + 90);
           expect(brandBounds.right).toBeLessThanOrEqual(toggleBounds.left - 8);
