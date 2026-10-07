@@ -1188,42 +1188,59 @@ label:has(> select#reasoning-effort) select {
   --composer-tab-background: color-mix(in srgb, var(--card) 86%, var(--foreground));
   --composer-tab-border: var(--border);
   --composer-tab-base-overlap: max(0px, calc(0.25rem - 1px));
+  --composer-tab-edge-width: 1.875rem;
+  --composer-tab-height: 2rem;
+  --composer-tab-right-extension: 0.375rem;
   position: relative;
   display: inline-flex;
   align-items: center;
-  width: max-content;
-  min-width: min(13rem, 100%);
+  width: max(11rem, var(--composer-tab-expanded-width, 11rem));
   max-width: 100%;
-  height: 2rem;
-  padding: 0 2.625rem var(--composer-tab-base-overlap) 1.125rem;
+  height: var(--composer-tab-height);
   color: color-mix(in srgb, var(--foreground) 82%, var(--composer-tab-background));
   font-size: 0.75rem;
   font-weight: 500;
   line-height: 1;
   transition:
-    min-width 200ms ease,
+    width 200ms ease,
     color 150ms ease;
 }
 
 .cafe-composer-tab[data-collapsed="true"] {
+  --composer-tab-edge-width: 0.583333rem;
+  --composer-tab-right-extension: 0rem;
   width: 3.5rem;
-  min-width: 3.5rem;
-  padding: 0 0 var(--composer-tab-base-overlap);
 }
 
 .cafe-composer-tab-content {
-  position: relative;
+  position: absolute;
+  inset: 0 2.875rem 0 2rem;
   display: inline-flex;
   justify-content: center;
-  gap: 0.75rem;
-  flex: 1 1 auto;
   min-width: 0;
   height: 100%;
-  overflow: hidden;
+  padding-bottom: var(--composer-tab-base-overlap);
+  overflow: clip;
+  transition:
+    opacity 100ms ease,
+    visibility 0s;
 }
 
-.cafe-composer-tab-content[hidden] {
-  display: none;
+.cafe-composer-tab[data-collapsed="true"] .cafe-composer-tab-content {
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    opacity 100ms ease,
+    visibility 0s 100ms;
+}
+
+.cafe-composer-tab-items {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 0.75rem;
+  width: max-content;
+  height: 100%;
 }
 
 .cafe-composer-tab-action,
@@ -1259,11 +1276,43 @@ label:has(> select#reasoning-effort) select {
 
 .cafe-composer-tab-shape {
   position: absolute;
-  inset: 0;
-  width: 100%;
+  /* Add breathing room beyond the expanded caret by moving the decoration,
+     while its button stays anchored to the unchanged layout box. */
+  inset: 0 calc(-1 * var(--composer-tab-right-extension)) 0 0;
   height: 100%;
   overflow: visible;
   pointer-events: none;
+  transition: right 200ms ease;
+}
+
+.cafe-composer-tab-edge {
+  position: absolute;
+  top: 0;
+  width: var(--composer-tab-edge-width);
+  height: 100%;
+  overflow: visible;
+  transition: width 200ms ease;
+}
+
+.cafe-composer-tab-edge-left {
+  left: 0;
+}
+
+.cafe-composer-tab-edge-right {
+  right: 0;
+  transform: scaleX(-1);
+}
+
+.cafe-composer-tab-middle {
+  position: absolute;
+  inset: calc(var(--composer-tab-height) / 32 - 0.5px) var(--composer-tab-edge-width) 0;
+  background: var(--composer-tab-background);
+  border-top: 1px solid var(--composer-tab-border);
+  transition:
+    left 200ms ease,
+    right 200ms ease,
+    background-color 150ms ease,
+    border-color 150ms ease;
 }
 
 .cafe-composer-tab-fill {
@@ -1291,6 +1340,19 @@ label:has(> select#reasoning-effort) select {
   stroke-width: 2;
 }
 
+.cafe-composer-tab:has(button:focus-visible) .cafe-composer-tab-middle {
+  top: calc(var(--composer-tab-height) / 32 - 1px);
+  border-top-width: 2px;
+}
+
+.cafe-composer-tab-caret {
+  transition: transform 200ms ease;
+}
+
+.cafe-composer-tab[data-collapsed="true"] .cafe-composer-tab-caret {
+  transform: rotate(180deg);
+}
+
 .cafe-composer-tab-action:disabled {
   pointer-events: none;
   opacity: 0.5;
@@ -1299,19 +1361,22 @@ label:has(> select#reasoning-effort) select {
 @keyframes cafe-composer-tab-enter {
   from {
     opacity: 0;
+    transform: translateY(0.625rem) scaleY(0.85);
   }
   to {
     opacity: 1;
+    transform: translateY(0) scaleY(1);
   }
 }
 
 .cafe-composer-tab-entry {
-  animation: cafe-composer-tab-enter 200ms ease both;
+  transform-origin: center bottom;
+  animation: cafe-composer-tab-enter 260ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 
 @media (pointer: coarse) {
   .cafe-composer-tab {
-    height: 2.75rem;
+    --composer-tab-height: 2.75rem;
   }
   .cafe-composer-tab-toggle {
     width: 1.5rem;
@@ -1321,6 +1386,12 @@ label:has(> select#reasoning-effort) select {
 
 @media (prefers-reduced-motion: reduce) {
   .cafe-composer-tab,
+  .cafe-composer-tab-content,
+  .cafe-composer-tab[data-collapsed="true"] .cafe-composer-tab-content,
+  .cafe-composer-tab-caret,
+  .cafe-composer-tab-shape,
+  .cafe-composer-tab-edge,
+  .cafe-composer-tab-middle,
   .cafe-composer-tab-fill,
   .cafe-composer-tab-outline {
     transition: none;

@@ -68,6 +68,9 @@ function updateProviderUpdateToast(input: {
       title: input.view.title,
       description: input.view.description,
       timeout: 0,
+      // Toast updates merge fields; omission would retain the prompt's Update
+      // action while the command runs and after it succeeds.
+      actionProps: undefined,
       data: {
         hideCopyButton: true,
         ...(input.view.dismissAfterVisibleMs !== undefined

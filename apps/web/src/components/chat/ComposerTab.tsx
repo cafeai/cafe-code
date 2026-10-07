@@ -1,10 +1,10 @@
-import { ChevronDownIcon, ChevronUpIcon } from "lucide-react";
-import { useId, type ReactNode } from "react";
+import { ChevronDownIcon } from "lucide-react";
+import { useId, useLayoutEffect, useRef, type ReactNode } from "react";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
-/** A curved composer tab whose right edge and caret stay fixed as its content
- * folds away. The composer reserves the same height in both states, so neither
- * the editor nor the pointer target moves during repeated toggles. */
+/** A curved composer tab whose caret stays fixed as its content folds away.
+ * Its expanded decoration extends slightly past the layout box for balanced
+ * caret spacing. Reserved height keeps the editor and pointer target steady. */
 export function ComposerTab({
   label,
   collapsed,
@@ -19,34 +19,69 @@ export function ComposerTab({
   children: ReactNode;
 }) {
   const contentId = useId();
+  const tabRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLSpanElement>(null);
+  const itemsRef = useRef<HTMLSpanElement>(null);
+  useLayoutEffect(() => {
+    const tab = tabRef.current;
+    const content = contentRef.current;
+    const items = itemsRef.current;
+    if (!tab || !content || !items) return;
+    // Keep a numeric expanded width so every browser can animate it. The
+    // mounted contents retain their natural size while minimized, and changes
+    // to provider controls, fonts or interface scale update the same tab.
+    const measure = () => {
+      const { left, right } = getComputedStyle(content);
+      const width = items.offsetWidth + Number.parseFloat(left) + Number.parseFloat(right);
+      if (width > 0) tab.style.setProperty("--composer-tab-expanded-width", `${width}px`);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(items);
+    return () => observer.disconnect();
+  }, []);
   const toggleLabel = `${collapsed ? "Expand" : "Minimize"} ${label.toLowerCase()}`;
   return (
     <div className="no-drag cafe-composer-tab-entry inline-flex max-w-full">
       <div
+        ref={tabRef}
         className="cafe-composer-tab"
         role="group"
         aria-label={label}
         data-collapsed={collapsed ? "true" : "false"}
         data-popup-open={active ? "true" : "false"}
       >
-        <svg
-          aria-hidden="true"
-          className="cafe-composer-tab-shape"
-          viewBox="0 0 180 32"
-          preserveAspectRatio="none"
+        <div aria-hidden="true" className="cafe-composer-tab-shape">
+          <span className="cafe-composer-tab-middle" />
+          {(["left", "right"] as const).map((side) => (
+            <svg
+              key={side}
+              className={`cafe-composer-tab-edge cafe-composer-tab-edge-${side}`}
+              viewBox="0 0 30 32"
+              preserveAspectRatio="none"
+            >
+              <path
+                className="cafe-composer-tab-fill"
+                d="M0 32C9 32 14 31 16 20L18 11C19 5 23 1 30 1V32Z"
+              />
+              <path
+                className="cafe-composer-tab-outline"
+                d="M0 32C9 32 14 31 16 20L18 11C19 5 23 1 30 1"
+                vectorEffect="non-scaling-stroke"
+              />
+            </svg>
+          ))}
+        </div>
+        <span
+          ref={contentRef}
+          id={contentId}
+          className="cafe-composer-tab-content"
+          inert={collapsed}
+          aria-hidden={collapsed}
         >
-          <path
-            className="cafe-composer-tab-fill"
-            d="M0 32C9 32 14 31 16 20L18 11C19 5 23 1 30 1H150C157 1 161 5 162 11L164 20C166 31 171 32 180 32Z"
-          />
-          <path
-            className="cafe-composer-tab-outline"
-            d="M0 32C9 32 14 31 16 20L18 11C19 5 23 1 30 1H150C157 1 161 5 162 11L164 20C166 31 171 32 180 32"
-            vectorEffect="non-scaling-stroke"
-          />
-        </svg>
-        <span id={contentId} className="cafe-composer-tab-content" hidden={collapsed}>
-          {children}
+          <span ref={itemsRef} className="cafe-composer-tab-items">
+            {children}
+          </span>
         </span>
         <Tooltip>
           <TooltipTrigger
@@ -62,11 +97,7 @@ export function ComposerTab({
               />
             }
           >
-            {collapsed ? (
-              <ChevronUpIcon aria-hidden="true" className="size-3.5" />
-            ) : (
-              <ChevronDownIcon aria-hidden="true" className="size-3.5" />
-            )}
+            <ChevronDownIcon aria-hidden="true" className="cafe-composer-tab-caret size-3.5" />
           </TooltipTrigger>
           <TooltipPopup role="tooltip" className="no-drag pointer-events-none">
             {toggleLabel}

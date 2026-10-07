@@ -302,7 +302,7 @@ async function closeComposerControlsWithKeyboard() {
 
 async function waitForTabEntrance() {
   const tab = document.querySelector(".cafe-composer-tab-entry")!;
-  await Promise.all(tab.getAnimations().map((animation) => animation.finished));
+  await Promise.all(tab.getAnimations({ subtree: true }).map((animation) => animation.finished));
 }
 
 describe("provider-specific composer menu actions", () => {
@@ -319,6 +319,8 @@ describe("provider-specific composer menu actions", () => {
   });
 
   it.each([
+    { width: 1100, scale: 100, dark: false },
+    { width: 1100, scale: 100, dark: true },
     { width: 1100, scale: 80, dark: false },
     { width: 1100, scale: 130, dark: true },
     { width: 390, scale: 80, dark: true },
@@ -332,6 +334,19 @@ describe("provider-specific composer menu actions", () => {
       const sharedTab = document.querySelector(".cafe-composer-tab");
       for (const provider of ["codex", "claudeAgent"]) {
         if (provider === "claudeAgent") await fixture.select(provider);
+        await waitForTabEntrance();
+        const capture = (state: string) =>
+          page.screenshot({
+            element: document.querySelector('[data-chat-composer-form="true"]')!,
+            path: `../../../../../.explorations/composer-tab-visual/${provider}-${width}-${scale}-${dark ? "dark" : "light"}-${state}.png`,
+          });
+        await capture("expanded");
+        const content = document
+          .querySelector(".cafe-composer-tab-content")!
+          .getBoundingClientRect();
+        const items = document.querySelector(".cafe-composer-tab-items")!.getBoundingClientRect();
+        expect(items.left).toBeGreaterThanOrEqual(content.left - 1);
+        expect(items.right).toBeLessThanOrEqual(content.right + 1);
         expect(document.querySelector(".cafe-composer-tab")).toBe(sharedTab);
         const caret = page
           .getByRole("button", { name: "Minimize composer tools", exact: true })
@@ -346,6 +361,7 @@ describe("provider-specific composer menu actions", () => {
         // while the width animation is running, not just at the final endpoint.
         for (let count = 0; count < 4; count++) {
           await page.elementLocator(caret).click();
+          const widths = new Set<number>();
           const end = performance.now() + 230;
           while (performance.now() < end) {
             await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
@@ -355,18 +371,77 @@ describe("provider-specific composer menu actions", () => {
             expect(current.width).toBeCloseTo(initial.width, 1);
             expect(current.height).toBeCloseTo(initial.height, 1);
             expect(frame.getBoundingClientRect().top).toBeCloseTo(initialFrameTop, 1);
+            widths.add(Math.round(sharedTab!.getBoundingClientRect().width));
           }
+          // An endpoint-only assertion missed the max-content regression: the
+          // tab reached both sizes but jumped between them without animating.
+          expect(widths.size).toBeGreaterThan(2);
           expect(caret.getAttribute("aria-expanded")).toBe(count % 2 === 0 ? "false" : "true");
           const tab = document.querySelector(".cafe-composer-tab")!.getBoundingClientRect();
           expect(tab.left).toBeGreaterThanOrEqual(0);
           expect(tab.right).toBeLessThanOrEqual(window.innerWidth);
           if (count % 2 === 0) expect(tab.width).toBeLessThan(expandedWidth);
+          if (count === 0) await capture("minimized");
         }
       }
       expect(fixture.onSend).not.toHaveBeenCalled();
       expect(fixture.onStartCodeReview).not.toHaveBeenCalled();
     },
   );
+
+  it("preserves the original rise-in animation and rounded outline during collapse", async () => {
+    document.documentElement.classList.add("dark");
+    await using fixture = await mountComposer(1100);
+    const entry = document.querySelector(".cafe-composer-tab-entry")!;
+    const entrance = entry
+      .getAnimations()
+      .find(
+        (animation) =>
+          animation instanceof CSSAnimation &&
+          animation.animationName === "cafe-composer-tab-enter",
+      )!;
+    entrance.pause();
+    entrance.currentTime = 100;
+    const style = getComputedStyle(entry);
+    expect(Number(style.opacity)).toBeLessThan(1);
+    expect(new DOMMatrixReadOnly(style.transform).m42).toBeGreaterThan(0);
+    const capture = (state: string) =>
+      page.screenshot({
+        element: document.querySelector('[data-chat-composer-form="true"]')!,
+        path: `../../../../../.explorations/composer-tab-visual/animation-${state}.png`,
+      });
+    await capture("entrance");
+    entrance.finish();
+
+    const tab = document.querySelector(".cafe-composer-tab")!;
+    const caret = page
+      .getByRole("button", { name: "Minimize composer tools", exact: true })
+      .element() as HTMLButtonElement;
+    const anchor = caret.getBoundingClientRect();
+    const expandedWidth = tab.getBoundingClientRect().width;
+    caret.click();
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    const transitions = tab.getAnimations({ subtree: true });
+    expect(
+      transitions.some(
+        (animation) =>
+          animation instanceof CSSTransition && animation.transitionProperty === "width",
+      ),
+    ).toBe(true);
+    for (const animation of transitions) {
+      animation.pause();
+      animation.currentTime = 100;
+    }
+    const intermediateWidth = tab.getBoundingClientRect().width;
+    expect(intermediateWidth).toBeLessThan(expandedWidth);
+    expect(caret.getBoundingClientRect().x).toBeCloseTo(anchor.x, 1);
+    expect(caret.getBoundingClientRect().y).toBeCloseTo(anchor.y, 1);
+    await capture("collapse-midpoint");
+    transitions.forEach((animation) => animation.finish());
+    expect(tab.getBoundingClientRect().width).toBeLessThan(intermediateWidth);
+    expect(document.querySelector(".cafe-composer-tab-content")?.hasAttribute("inert")).toBe(true);
+    expect(fixture.onSend).not.toHaveBeenCalled();
+  });
 
   it("keeps delivery explanations in hover/focus tooltips and changes only the next message choice", async () => {
     await using fixture = await mountComposer(390);
