@@ -31,7 +31,13 @@ export const layer = Layer.effect(
     });
     yield* Effect.acquireRelease(
       Effect.promise(async () => {
-        if (environment.platform === "darwin") await host.listen();
+        if (environment.platform === "darwin") {
+          await host.listen();
+          // The user selected default-on local control. Starting the embedded
+          // helper does not grant TCC permissions or authorize an idle chat;
+          // the normal native and active-turn gates still apply to every call.
+          await host.setEnabled(true);
+        }
         return host;
       }),
       (value) =>

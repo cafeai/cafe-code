@@ -104,7 +104,8 @@ establish native Linux or Windows qualification.
   tests, native driver health/screen-size tests and ad-hoc signing qualification.
 
 The first user test after merging is `corepack yarn build:desktop --force`, then
-the user's normal desktop launch. In local Settings → MCP, enable control,
+the user's normal desktop launch. Local control starts enabled on Mac; each
+local Codex/Claude chat has a Computer use composer toggle. In Settings → MCP,
 grant Accessibility and Screen Recording to Cafe when requested, check
 permissions and test a screenshot. Start or normally stop/resume a Codex/Claude
 session and use a disposable window for initial input. No separate app is

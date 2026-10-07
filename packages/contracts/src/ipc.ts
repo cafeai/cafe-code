@@ -58,6 +58,7 @@ import type {
 } from "./server.ts";
 import type { ServerRemoveKeybindingInput, ServerUpsertKeybindingInput } from "./server.ts";
 import * as Schema from "effect/Schema";
+import { ThreadId } from "./baseSchemas.ts";
 import type {
   ClientOrchestrationCommand,
   OrchestrationShellSnapshot,
@@ -407,6 +408,13 @@ export const NativeControlStateSchema = Schema.Struct({
   detail: Schema.String,
 });
 export type NativeControlState = typeof NativeControlStateSchema.Type;
+export const NativeControlChatStateSchema = Schema.Struct({
+  threadId: ThreadId,
+  enabled: Schema.Boolean,
+  revision: Schema.Number,
+  control: NativeControlStateSchema,
+});
+export type NativeControlChatState = typeof NativeControlChatStateSchema.Type;
 export const NativeControlResultSchema = Schema.Struct({
   content: Schema.Array(Schema.Record(Schema.String, Schema.Unknown)),
   isError: Schema.optionalKey(Schema.Boolean),
@@ -417,6 +425,12 @@ export type NativeControlResult = typeof NativeControlResultSchema.Type;
 export interface DesktopBridge {
   getNativeControlState?: () => Promise<NativeControlState>;
   setNativeControlEnabled?: (enabled: boolean) => Promise<NativeControlState>;
+  getNativeControlChatState?: (threadId: ThreadId) => Promise<NativeControlChatState>;
+  setNativeControlChatEnabled?: (input: {
+    threadId: ThreadId;
+    enabled: boolean;
+  }) => Promise<NativeControlChatState>;
+  onNativeControlChanged?: (listener: () => void) => () => void;
   getNativeControlDiagnostics?: () => Promise<NativeControlResult>;
   captureNativeControlPreview?: () => Promise<NativeControlResult>;
   getAppBranding: () => DesktopAppBranding | null;

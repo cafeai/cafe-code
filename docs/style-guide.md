@@ -122,6 +122,9 @@ radii.
 - **Settings pages** use `SettingsPageContainer` at its standard width and
   start with a page title. Its `wide` variant is for tables and dashboards only.
 - **Chat content** uses the shared reading width; the composer aligns to it.
+- **Composer controls** keep computer use directly available for local Mac
+  Codex/Claude chats. Build/Plan, Goal and the other secondary controls share
+  the expandable extra-controls dropdown at every width.
 - **Queued and steering messages** form an attached top section of the composer,
   with one divider above the typing area. Anchor the tools tab above the combined
   box so it stays clear of queue content at narrow widths too.

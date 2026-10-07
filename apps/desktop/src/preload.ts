@@ -125,6 +125,19 @@ if (process.isMainFrame === true) {
             ipcRenderer.invoke(IpcChannels.NATIVE_CONTROL_DIAGNOSTICS_CHANNEL),
           captureNativeControlPreview: () =>
             ipcRenderer.invoke(IpcChannels.NATIVE_CONTROL_PREVIEW_CHANNEL),
+          getNativeControlChatState: (threadId) =>
+            ipcRenderer.invoke(IpcChannels.NATIVE_CONTROL_CHAT_STATE_CHANNEL, threadId),
+          setNativeControlChatEnabled: (input) =>
+            ipcRenderer.invoke(IpcChannels.NATIVE_CONTROL_CHAT_ENABLE_CHANNEL, input),
+          onNativeControlChanged: (listener) => {
+            const wrappedListener = () => listener();
+            ipcRenderer.on(IpcChannels.NATIVE_CONTROL_CHANGED_CHANNEL, wrappedListener);
+            return () =>
+              ipcRenderer.removeListener(
+                IpcChannels.NATIVE_CONTROL_CHANGED_CHANNEL,
+                wrappedListener,
+              );
+          },
         }
       : {}),
     checkSourceUpdate: () => ipcRenderer.invoke(IpcChannels.SOURCE_UPDATE_CHECK_CHANNEL),

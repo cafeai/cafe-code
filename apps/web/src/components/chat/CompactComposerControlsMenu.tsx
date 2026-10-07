@@ -176,7 +176,10 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
             <ChevronDownIcon aria-hidden="true" className="size-3 shrink-0 opacity-60" />
           </>
         ) : (
-          <EllipsisIcon aria-hidden="true" className="size-4" />
+          <>
+            <EllipsisIcon aria-hidden="true" className="size-4" />
+            <ChevronDownIcon aria-hidden="true" className="size-3 shrink-0 opacity-60" />
+          </>
         )}
       </MenuTrigger>
       <MenuPopup align="start" className="w-[min(18rem,calc(100vw-1rem))] max-w-[calc(100vw-1rem)]">

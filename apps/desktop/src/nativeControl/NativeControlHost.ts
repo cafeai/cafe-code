@@ -13,7 +13,7 @@ import {
   type NativeToolResult,
   type NativeControlHostConnection,
 } from "@cafecode/shared/nativeControl";
-import type { NativeControlState } from "@cafecode/contracts";
+import type { NativeControlChatState, NativeControlState, ThreadId } from "@cafecode/contracts";
 import { NativeDaemon, verifyNativeRuntime, type NativeDaemonConnection } from "./NativeDaemon.ts";
 
 export interface NativeController {
@@ -65,6 +65,11 @@ export class NativeControlHost {
   private readonly token = randomBytes(32).toString("hex");
   private readonly sessions = new Map<string, Session>();
   private readonly threadGenerations = new Map<string, string>();
+  // User choices belong to the trusted local renderer, never the provider's
+  // capability transport. Keep them across provider replacement in this app
+  // session. Absence means on; only explicit disabled chats need storage.
+  private readonly disabledThreads = new Set<string>();
+  private policyRevision = 0;
   private readonly controller: NativeController;
   private readonly server = createServer((request, response) => {
     void this.handle(request, response);
@@ -166,6 +171,7 @@ export class NativeControlHost {
     if (this.closed) throw new Error("Desktop control host is closed.");
     if ((this.options.platform ?? process.platform) !== "darwin") return this.state();
     this.desiredEnabled = enabled;
+    this.policyRevision++;
     if (!enabled) {
       this.enabled = false;
       for (const session of this.sessions.values()) session.turnActive = false;
@@ -218,6 +224,45 @@ export class NativeControlHost {
     return this.state();
   }
 
+  async chatState(threadId: ThreadId): Promise<NativeControlChatState> {
+    if (!threadId || threadId.length > 256) throw new Error("Invalid local chat identity.");
+    const control = await this.state();
+    // Runtime verification can yield while a second window changes policy.
+    // Snapshot all admission state together afterward, and give the renderer
+    // a revision so an older IPC/query acknowledgement cannot undo a new one.
+    return {
+      threadId,
+      enabled: !this.disabledThreads.has(threadId),
+      revision: this.policyRevision,
+      control: { ...control, enabled: this.enabled, phase: this.phase, detail: this.detail },
+    };
+  }
+
+  async setChatEnabled(threadId: ThreadId, enabled: boolean): Promise<NativeControlChatState> {
+    if (this.closed) throw new Error("Desktop control host is closed.");
+    if (!threadId || threadId.length > 256) throw new Error("Invalid local chat identity.");
+    if ((this.options.platform ?? process.platform) !== "darwin") return this.chatState(threadId);
+    this.policyRevision++;
+    if (enabled) {
+      this.disabledThreads.delete(threadId);
+    } else {
+      // Do not evict another chat's explicit denial to admit more preferences.
+      if (!this.disabledThreads.has(threadId) && this.disabledThreads.size >= 4096)
+        throw new Error("Too many local computer-use choices. Restart Cafe before changing more.");
+      // Revoke admission before any asynchronous cleanup. An in-flight action
+      // may already have executed; wait for it, never cancel/replay its input.
+      // Preserve the real provider turn's activity so re-enabling can work in
+      // that same turn, while an independent end-turn still wins immediately.
+      this.disabledThreads.add(threadId);
+      await Promise.all(
+        [...this.sessions.values()]
+          .filter((session) => session.threadId === threadId)
+          .map((session) => this.release(session, false)),
+      );
+    }
+    return this.chatState(threadId);
+  }
+
   async diagnostics(): Promise<NativeToolResult> {
     if (!this.enabled)
       return nativeControlError(
@@ -254,8 +299,8 @@ export class NativeControlHost {
     }
   }
 
-  private async release(session: Session): Promise<void> {
-    session.turnActive = false;
+  private async release(session: Session, endTurn = true): Promise<void> {
+    if (endTurn) session.turnActive = false;
     if (session.releasing) return session.releasing;
     const cleanup = async () => {
       await session.inFlight?.catch(() => undefined);
@@ -303,6 +348,10 @@ export class NativeControlHost {
           "This desktop tool is outside an active Cafe turn. Resume the conversation to reconnect.",
         ),
       );
+    if (this.disabledThreads.has(session.threadId))
+      return Promise.resolve(
+        nativeControlError("Computer use is off for this chat. Enable it in the composer."),
+      );
     if (session.releasing || session.inFlight || (this.owner && this.owner !== session))
       return Promise.resolve(
         nativeControlError(
@@ -318,7 +367,12 @@ export class NativeControlHost {
     const operation = async (): Promise<NativeToolResult> => {
       try {
         session.connection ??= await this.controller.session(`cafe-${session.id}`);
-        if (!this.enabled || !session.turnActive || session.revoked)
+        if (
+          !this.enabled ||
+          !session.turnActive ||
+          session.revoked ||
+          this.disabledThreads.has(session.threadId)
+        )
           return nativeControlError("Desktop access was revoked before the action started.");
         return (await session.connection.request({
           method: "trusted_session_call",
@@ -517,6 +571,7 @@ export class NativeControlHost {
     if (this.owner) await this.release(this.owner);
     await this.controller.stop();
     this.sessions.clear();
+    this.disabledThreads.clear();
     this.server.closeAllConnections();
     await new Promise<void>((resolve) => this.server.close(() => resolve()));
     const path = join(this.options.stateDirectory, NATIVE_CONTROL_HOST_FILE);

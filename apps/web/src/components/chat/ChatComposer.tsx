@@ -109,7 +109,7 @@ import {
   withSubagentLimit,
   type SubagentConcurrencyPresentation,
 } from "../../subagentConcurrency";
-import { ThreadGoalFooterButton } from "./ThreadGoalControl";
+import { ComputerUseButton } from "./ComputerUseButton";
 import { buildExpandedImagePreview, type ExpandedImagePreview } from "./ExpandedImagePreview";
 import { basenameOfPath } from "../../vscode-icons";
 import { cn, newCommandId, randomUUID } from "~/lib/utils";
@@ -120,12 +120,10 @@ import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { toastManager } from "../ui/toast";
 import {
-  BotIcon,
   ChevronRightIcon,
   CircleAlertIcon,
   ImageIcon,
   LoaderCircleIcon,
-  ListTodoIcon,
   FileSearchIcon,
   PencilIcon,
   Trash2Icon,
@@ -232,74 +230,6 @@ const extendReplacementRangeForTrailingSpace = (
 function isInsideComposerFloatingLayer(element: Element): boolean {
   return element.closest(COMPOSER_FLOATING_LAYER_SELECTOR) !== null;
 }
-
-const ComposerFooterModeControls = memo(function ComposerFooterModeControls(props: {
-  provider: ProviderDriverKind;
-  showInteractionModeToggle: boolean;
-  interactionMode: ProviderInteractionMode;
-  showPlanToggle: boolean;
-  planSidebarLabel: string;
-  planSidebarOpen: boolean;
-  onToggleInteractionMode: () => void;
-  onTogglePlanSidebar: () => void;
-}) {
-  const usesNativePermissionModes = props.provider === "claudeAgent" || props.provider === "grok";
-  const showStandaloneInteractionMode =
-    props.showInteractionModeToggle && !usesNativePermissionModes;
-
-  if (!showStandaloneInteractionMode && !props.showPlanToggle) {
-    return null;
-  }
-
-  return (
-    <>
-      {showStandaloneInteractionMode ? (
-        <>
-          <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
-          <Button
-            variant="ghost"
-            className="shrink-0 whitespace-nowrap px-2 text-muted-foreground hover:text-foreground sm:px-3"
-            size="sm"
-            type="button"
-            onClick={props.onToggleInteractionMode}
-            title={props.interactionMode === "plan" ? "Switch to Build" : "Switch to Plan"}
-          >
-            <BotIcon />
-            <span className="sr-only sm:not-sr-only">
-              {props.interactionMode === "plan" ? "Plan" : "Build"}
-            </span>
-          </Button>
-        </>
-      ) : null}
-
-      {props.showPlanToggle ? (
-        <>
-          <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
-          <Button
-            variant="ghost"
-            className={cn(
-              "shrink-0 whitespace-nowrap px-2 sm:px-3",
-              props.planSidebarOpen
-                ? "text-primary hover:text-primary"
-                : "text-muted-foreground hover:text-foreground",
-            )}
-            size="sm"
-            type="button"
-            onClick={props.onTogglePlanSidebar}
-            title={
-              props.planSidebarOpen
-                ? `Hide ${props.planSidebarLabel.toLowerCase()} sidebar`
-                : `Show ${props.planSidebarLabel.toLowerCase()} sidebar`
-            }
-          >
-            <ListTodoIcon />
-            <span className="sr-only sm:not-sr-only">{props.planSidebarLabel}</span>
-          </Button>
-        </>
-      ) : null}
-    </>
-  );
-});
 
 const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(props: {
   compact: boolean;
@@ -4007,77 +3937,37 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   onInstanceModelChange={onProviderModelSelect}
                 />
 
-                {isComposerFooterCompact ? (
-                  <CompactComposerControlsMenu
-                    showPlanSidebar={showPlanSidebarToggle}
-                    provider={selectedProvider}
-                    interactionMode={interactionMode}
-                    planSidebarLabel={planSidebarLabel}
-                    planSidebarOpen={planSidebarOpen}
-                    runtimeMode={runtimeMode}
-                    showInteractionModeToggle={
-                      composerProviderControls.showInteractionModeToggle ||
-                      selectedProviderUsesNativePermissionModes
-                    }
-                    showGoalControl={goalControlsSupported}
-                    goalStatus={activeThread?.goal?.status ?? null}
-                    traitsMenuContent={providerTraitsMenuContent}
-                    subagentConcurrencyControl={concurrencyMenuItem}
-                    providerActions={providerActions}
-                    traitsTriggerLabel={
-                      providerTraitsMenuContent ? composerProviderState.traitsTriggerLabel : null
-                    }
-                    onToggleInteractionMode={cycleComposerInteractionMode}
-                    onNativePermissionModeChange={handleClaudePermissionModeChange}
-                    onTogglePlanSidebar={togglePlanSidebar}
-                    onRuntimeModeChange={handleRuntimeModeChange}
-                    onOpenGoal={onOpenGoalDialog}
-                  />
-                ) : (
-                  <>
-                    <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
-                    <CompactComposerControlsMenu
-                      showPlanSidebar={false}
-                      provider={selectedProvider}
-                      interactionMode={interactionMode}
-                      planSidebarLabel={planSidebarLabel}
-                      planSidebarOpen={planSidebarOpen}
-                      runtimeMode={runtimeMode}
-                      showInteractionModeToggle={selectedProviderUsesNativePermissionModes}
-                      traitsMenuContent={providerTraitsMenuContent}
-                      subagentConcurrencyControl={concurrencyMenuItem}
-                      providerActions={providerActions}
-                      traitsTriggerLabel={
-                        providerTraitsMenuContent ? composerProviderState.traitsTriggerLabel : null
-                      }
-                      onToggleInteractionMode={cycleComposerInteractionMode}
-                      onNativePermissionModeChange={handleClaudePermissionModeChange}
-                      onTogglePlanSidebar={togglePlanSidebar}
-                      onRuntimeModeChange={handleRuntimeModeChange}
-                    />
-                    <ComposerFooterModeControls
-                      provider={selectedProvider}
-                      showInteractionModeToggle={composerProviderControls.showInteractionModeToggle}
-                      interactionMode={interactionMode}
-                      showPlanToggle={showPlanSidebarToggle}
-                      planSidebarLabel={planSidebarLabel}
-                      planSidebarOpen={planSidebarOpen}
-                      onToggleInteractionMode={cycleComposerInteractionMode}
-                      onTogglePlanSidebar={togglePlanSidebar}
-                    />
-                    {goalControlsSupported && interactionMode !== "plan" ? (
-                      <>
-                        <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
-                        <ThreadGoalFooterButton
-                          goal={activeThread?.goal ?? null}
-                          activeTurnStartedAt={activeThread?.latestTurn?.startedAt ?? null}
-                          isTurnRunning={phase === "running"}
-                          onClick={onOpenGoalDialog}
-                        />
-                      </>
-                    ) : null}
-                  </>
-                )}
+                <ComputerUseButton
+                  threadId={activeThreadId}
+                  provider={selectedProvider}
+                  local={environmentId === primaryEnvironmentId}
+                  compact={isComposerFooterCompact}
+                />
+                <CompactComposerControlsMenu
+                  showPlanSidebar={showPlanSidebarToggle}
+                  provider={selectedProvider}
+                  interactionMode={interactionMode}
+                  planSidebarLabel={planSidebarLabel}
+                  planSidebarOpen={planSidebarOpen}
+                  runtimeMode={runtimeMode}
+                  showInteractionModeToggle={
+                    composerProviderControls.showInteractionModeToggle ||
+                    selectedProviderUsesNativePermissionModes
+                  }
+                  showGoalControl={goalControlsSupported}
+                  goalStatus={activeThread?.goal?.status ?? null}
+                  traitsMenuContent={providerTraitsMenuContent}
+                  subagentConcurrencyControl={concurrencyMenuItem}
+                  providerActions={providerActions}
+                  traitsTriggerLabel={
+                    providerTraitsMenuContent ? composerProviderState.traitsTriggerLabel : null
+                  }
+                  onToggleInteractionMode={cycleComposerInteractionMode}
+                  onNativePermissionModeChange={handleClaudePermissionModeChange}
+                  onTogglePlanSidebar={togglePlanSidebar}
+                  onRuntimeModeChange={handleRuntimeModeChange}
+                  onOpenGoal={onOpenGoalDialog}
+                />
               </div>
 
               {/* Keep task progress outside the horizontally scrolling provider

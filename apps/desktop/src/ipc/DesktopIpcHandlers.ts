@@ -6,6 +6,8 @@ import {
   setNativeControlEnabled,
   getNativeControlDiagnostics,
   captureNativeControlPreview,
+  getNativeControlChatState,
+  setNativeControlChatEnabled,
 } from "./methods/nativeControl.ts";
 import { getClientSettings, setClientSettings } from "./methods/clientSettings.ts";
 import {
@@ -56,6 +58,8 @@ export const installDesktopIpcHandlers = Effect.gen(function* () {
   yield* ipc.handle(setNativeControlEnabled);
   yield* ipc.handle(getNativeControlDiagnostics);
   yield* ipc.handle(captureNativeControlPreview);
+  yield* ipc.handle(getNativeControlChatState);
+  yield* ipc.handle(setNativeControlChatEnabled);
   yield* ipc.handle(publishDebugSnapshot);
 
   yield* ipc.handle(getClientSettings);

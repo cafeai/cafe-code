@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NativeControlHost, type NativeController } from "./NativeControlHost.ts";
+import type { ThreadId } from "@cafecode/contracts";
 import {
   NATIVE_CONTROL_HOST_FILE,
   readNativeControlHost,
@@ -68,6 +69,54 @@ async function fixture(fault?: "action" | "cleanup") {
 }
 
 describe("Electron-owned native control authority", () => {
+  it("disables one chat, releases its session, and can re-enable its still-active turn", async () => {
+    const f = await fixture();
+    const threadId = "computer-use-fixture" as ThreadId;
+    try {
+      const first = await f.bind(threadId);
+      await first.update("activate");
+      await first.update("begin-turn");
+      expect((await f.host.chatState(threadId)).enabled).toBe(true);
+      await first.call("get_screen_size");
+      const state = await f.host.setChatEnabled(threadId, false);
+      expect(state.enabled).toBe(false);
+      expect(state.control.enabled).toBe(true);
+      expect(f.request).toHaveBeenCalledWith({ method: "trusted_session_end" });
+      expect((await first.call("health")).result.isError).toBe(true);
+      expect(f.controller.health).not.toHaveBeenCalled();
+
+      const second = await f.bind("another-chat");
+      await second.update("activate");
+      await second.update("begin-turn");
+      expect((await second.call("get_screen_size")).result.isError).not.toBe(true);
+      await second.update("end-turn");
+
+      await f.host.setChatEnabled(threadId, true);
+      expect((await first.call("get_screen_size")).result.isError).not.toBe(true);
+      expect(f.controller.stop).not.toHaveBeenCalled();
+    } finally {
+      await f.host.close();
+    }
+  });
+
+  it("keeps a disabled chat denied when its provider binding is replaced", async () => {
+    const f = await fixture();
+    const threadId = "disabled-replacement" as ThreadId;
+    try {
+      await f.host.setChatEnabled(threadId, false);
+      for (let index = 0; index < 2; index++) {
+        const binding = await f.bind(threadId);
+        await binding.update("activate");
+        await binding.update("begin-turn");
+        expect((await binding.call("get_screen_size")).result.isError).toBe(true);
+      }
+      expect(f.controller.session).not.toHaveBeenCalled();
+      expect(f.request).not.toHaveBeenCalled();
+    } finally {
+      await f.host.close();
+    }
+  });
+
   it.skipIf(process.platform === "win32")(
     "publishes private credentials inside Cafe's existing 0755 directory without changing it",
     async () => {

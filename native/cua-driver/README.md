@@ -58,10 +58,14 @@ reach this actual child. Its HOME and Cua state directories are private temporar
 directories, so ambient Cua history, extensions or preferences are not adopted.
 Provider transports use copied standalone Node/Electron stdio bridges and
 session-only private capability files; no provider-global configuration is
-changed. Only Cafe renderer IPC can enable control, which starts off on restart.
+changed. Mac startup enables the helper by default. The Settings switch controls
+app-wide availability; the composer **Computer use** button enables or disables
+access for its local Codex/Claude chat. Chat choices last for the app session and
+default on. Only trusted renderer IPC can change them, and the host enforces
+disabled chat access before dispatch even with an already-connected provider.
 
 After merging and building, open **Settings → MCP → Local desktop control** in
-the local Mac desktop app. Enable it, check permissions, and test a screenshot.
+the local Mac desktop app. Check permissions and test a screenshot.
 Grant the actual Cafe app Accessibility and Screen Recording in macOS System
 Settings when required. Start a new Codex/Claude session or normally stop/resume
 an existing session to attach the tools. Begin with `health`, observe before
