@@ -1,6 +1,6 @@
 # Native Codex review
 
-In an idle Codex chat, select the **Code review** tab above the composer. The
+In an idle Codex chat, select **Code review** inside the shared composer tools tab. The
 existing model-options menu also keeps its **Codex review** shortcut. Choose one of:
 
 - **Uncommitted changes** in the chat's workspace.
@@ -15,9 +15,10 @@ even before sending a message. Work, a send, a connection or a checkpoint restor
 also makes it unavailable. Changing its chat, account or session binding closes
 the old review dialog; submission checks the current selection again.
 
-The tab's caret minimizes or restores it without moving the caret or the composer.
-Its minimized choice is shared across all chats, environments and panes and survives
-reloads. The action's explanation is available on hover or keyboard focus.
+The shared tab's caret minimizes or restores all its controls without moving the
+caret or the composer. Its single minimized choice applies across chats, providers,
+environments and panes and survives reloads, including when switching to Claude's
+delivery control. The action's explanation is available on hover or keyboard focus.
 
 Review runs in that exact Cafe chat and Codex account. The confirmation names the
 account and explains its permission behavior. Native review uses the existing

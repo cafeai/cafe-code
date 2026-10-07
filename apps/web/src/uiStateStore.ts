@@ -26,6 +26,8 @@ export interface PersistedUiState {
   navigationSidebarOpen?: boolean;
   threadLastVisitedAtById?: Record<string, string>;
   threadPlanSidebarOpenById?: Record<string, boolean>;
+  composerTabCollapsed?: boolean;
+  /** Legacy independent tab choices, read only during migration. */
   codeReviewCollapsed?: boolean;
   messageDeliveryCollapsed?: boolean;
   /** Legacy per-thread preferences, read only when migrating to the global choice. */
@@ -50,9 +52,8 @@ export interface UiThreadState {
 }
 
 export interface UiComposerTabState {
-  /** Independent editor-wide choices shared by every chat, server and pane. */
-  codeReviewCollapsed: boolean;
-  messageDeliveryCollapsed: boolean;
+  /** One editor-wide choice for the shared tab, across every chat/server/pane. */
+  composerTabCollapsed: boolean;
 }
 
 export interface UiEndpointState {
@@ -100,8 +101,7 @@ const initialState: UiState = {
   projectOrder: [],
   threadLastVisitedAtById: {},
   threadPlanSidebarOpenById: {},
-  codeReviewCollapsed: false,
-  messageDeliveryCollapsed: false,
+  composerTabCollapsed: false,
   defaultAdvertisedEndpointKey: null,
   navigationSidebarOpen: true,
   sessionRailDocked: false,
@@ -232,14 +232,16 @@ export function hydratePersistedUiState(parsed: PersistedUiState): UiState {
       typeof parsed.navigationSidebarOpen === "boolean" ? parsed.navigationSidebarOpen : true,
     threadLastVisitedAtById: sanitizeThreadVisitRecord(parsed.threadLastVisitedAtById),
     threadPlanSidebarOpenById: sanitizeBooleanRecord(parsed.threadPlanSidebarOpenById),
-    // The old format recorded only minimized threads, without an ordering of
-    // gestures. Preserve any valid minimized choice on upgrade; an explicit
-    // new global value (including false) always wins over legacy records.
-    codeReviewCollapsed:
-      typeof parsed.codeReviewCollapsed === "boolean"
-        ? parsed.codeReviewCollapsed
-        : hasLegacyCodeReviewCollapsed(parsed.threadCodeReviewCollapsedById),
-    messageDeliveryCollapsed: parsed.messageDeliveryCollapsed === true,
+    // Independent legacy tabs did not record gesture order. Preserve a valid
+    // minimized choice from either; an explicit shared choice always wins.
+    // An explicit old review choice also supersedes its per-thread legacy map.
+    composerTabCollapsed:
+      typeof parsed.composerTabCollapsed === "boolean"
+        ? parsed.composerTabCollapsed
+        : parsed.codeReviewCollapsed === true ||
+          parsed.messageDeliveryCollapsed === true ||
+          (typeof parsed.codeReviewCollapsed !== "boolean" &&
+            hasLegacyCodeReviewCollapsed(parsed.threadCodeReviewCollapsedById)),
     sessionRailDocked: parsed.sessionRailDocked === true,
   };
 }
@@ -294,8 +296,7 @@ export function persistState(state: UiState): void {
         navigationSidebarOpen: state.navigationSidebarOpen,
         threadLastVisitedAtById: state.threadLastVisitedAtById,
         threadPlanSidebarOpenById: state.threadPlanSidebarOpenById,
-        codeReviewCollapsed: state.codeReviewCollapsed,
-        messageDeliveryCollapsed: state.messageDeliveryCollapsed,
+        composerTabCollapsed: state.composerTabCollapsed,
         sessionRailDocked: state.sessionRailDocked,
       } satisfies PersistedUiState),
     );
@@ -603,17 +604,12 @@ export function setThreadPlanSidebarOpen(state: UiState, threadId: string, open:
   };
 }
 
-export function setCodeReviewCollapsed(state: UiState, collapsed: boolean): UiState {
-  if (state.codeReviewCollapsed === collapsed) return state;
+export function setComposerTabCollapsed(state: UiState, collapsed: boolean): UiState {
+  if (state.composerTabCollapsed === collapsed) return state;
   return {
     ...state,
-    codeReviewCollapsed: collapsed,
+    composerTabCollapsed: collapsed,
   };
-}
-
-export function setMessageDeliveryCollapsed(state: UiState, collapsed: boolean): UiState {
-  if (state.messageDeliveryCollapsed === collapsed) return state;
-  return { ...state, messageDeliveryCollapsed: collapsed };
 }
 
 export function setDefaultAdvertisedEndpointKey(state: UiState, key: string | null): UiState {
@@ -721,8 +717,7 @@ interface UiStateStore extends UiState {
   markThreadVisited: (threadId: string, visitedAt?: string) => void;
   clearThreadUi: (threadId: string) => void;
   setThreadPlanSidebarOpen: (threadId: string, open: boolean) => void;
-  setCodeReviewCollapsed: (collapsed: boolean) => void;
-  setMessageDeliveryCollapsed: (collapsed: boolean) => void;
+  setComposerTabCollapsed: (collapsed: boolean) => void;
   setDefaultAdvertisedEndpointKey: (key: string | null) => void;
   setNavigationSidebarOpen: (open: boolean) => void;
   setSessionRailDocked: (docked: boolean) => void;
@@ -745,9 +740,7 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
   clearThreadUi: (threadId) => set((state) => clearThreadUi(state, threadId)),
   setThreadPlanSidebarOpen: (threadId, open) =>
     set((state) => setThreadPlanSidebarOpen(state, threadId, open)),
-  setCodeReviewCollapsed: (collapsed) => set((state) => setCodeReviewCollapsed(state, collapsed)),
-  setMessageDeliveryCollapsed: (collapsed) =>
-    set((state) => setMessageDeliveryCollapsed(state, collapsed)),
+  setComposerTabCollapsed: (collapsed) => set((state) => setComposerTabCollapsed(state, collapsed)),
   setDefaultAdvertisedEndpointKey: (key) =>
     set((state) => setDefaultAdvertisedEndpointKey(state, key)),
   setNavigationSidebarOpen: (open) => set((state) => setNavigationSidebarOpen(state, open)),

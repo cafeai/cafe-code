@@ -2152,7 +2152,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       projectExpandedById: {},
       projectOrder: [],
       threadPlanSidebarOpenById: {},
-      codeReviewCollapsed: false,
+      composerTabCollapsed: false,
       threadLastVisitedAtById: {},
       sessionRailDocked: false,
     });

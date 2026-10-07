@@ -3,7 +3,6 @@ import { useState } from "react";
 import { SendIcon } from "lucide-react";
 import { Menu, MenuPopup, MenuRadioGroup, MenuRadioItem, MenuTrigger } from "../ui/menu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { ComposerTab } from "./ComposerTab";
 import { useChatPane } from "../../chatPaneContext";
 
 const DELIVERY_OPTIONS = [
@@ -78,15 +77,13 @@ export function ClaudeDeliveryPriorityPicker({ value, onChange, disabled }: Deli
 
 /** Both the tab and the existing options-menu shortcut edit the same account-
  * scoped composer choice. This popup owns only presentation, never delivery. */
-export function ClaudeDeliveryPriorityTab({
+export function ClaudeDeliveryPriorityControl({
   value,
   onChange,
   disabled,
   collapsed,
-  onCollapsedChange,
 }: DeliveryPriorityProps & {
   collapsed: boolean;
-  onCollapsedChange: (collapsed: boolean) => void;
 }) {
   const [open, setOpen] = useState(false);
   const pane = useChatPane();
@@ -95,50 +92,40 @@ export function ClaudeDeliveryPriorityTab({
   if (open && (collapsed || disabled || !pane.visible)) setOpen(false);
   const selected = DELIVERY_OPTIONS.find((option) => option.value === (value ?? "default"))!;
   return (
-    <ComposerTab
-      label="Message delivery"
-      collapsed={collapsed}
-      active={open}
-      onCollapsedChange={(next) => {
-        setOpen(false);
-        onCollapsedChange(next);
-      }}
-    >
-      <Menu open={open} onOpenChange={setOpen} modal={false}>
-        <Tooltip>
-          <TooltipTrigger
-            delay={250}
-            render={
-              <MenuTrigger
-                type="button"
-                className="cafe-composer-tab-action"
-                disabled={disabled}
-                aria-label={`Message delivery: ${selected.label}`}
-              />
-            }
-          >
-            <SendIcon aria-hidden="true" className="size-3.5 shrink-0" />
-            <span className="truncate">Delivery · {selected.label}</span>
-          </TooltipTrigger>
-          <TooltipPopup
-            role="tooltip"
-            side="top"
-            className="no-drag pointer-events-none max-w-64 leading-relaxed"
-          >
-            {selected.description}
-          </TooltipPopup>
-        </Tooltip>
-        <MenuPopup side="top" align="end" className="no-drag w-44 max-w-[calc(100vw-2rem)]">
-          <ClaudeDeliveryPriorityPicker
-            value={value}
-            disabled={disabled}
-            onChange={(next) => {
-              onChange(next);
-              setOpen(false);
-            }}
-          />
-        </MenuPopup>
-      </Menu>
-    </ComposerTab>
+    <Menu open={open} onOpenChange={setOpen} modal={false}>
+      <Tooltip>
+        <TooltipTrigger
+          delay={250}
+          render={
+            <MenuTrigger
+              type="button"
+              className="cafe-composer-tab-action"
+              disabled={disabled}
+              aria-label={`Message delivery: ${selected.label}`}
+            />
+          }
+        >
+          <SendIcon aria-hidden="true" className="size-3.5 shrink-0" />
+          <span className="truncate">Delivery · {selected.label}</span>
+        </TooltipTrigger>
+        <TooltipPopup
+          role="tooltip"
+          side="top"
+          className="no-drag pointer-events-none max-w-64 leading-relaxed"
+        >
+          {selected.description}
+        </TooltipPopup>
+      </Tooltip>
+      <MenuPopup side="top" align="end" className="no-drag w-44 max-w-[calc(100vw-2rem)]">
+        <ClaudeDeliveryPriorityPicker
+          value={value}
+          disabled={disabled}
+          onChange={(next) => {
+            onChange(next);
+            setOpen(false);
+          }}
+        />
+      </MenuPopup>
+    </Menu>
   );
 }

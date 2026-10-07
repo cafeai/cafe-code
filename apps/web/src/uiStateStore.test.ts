@@ -16,8 +16,7 @@ import {
   setProjectExpanded,
   setSessionRailDocked,
   setThreadPlanSidebarOpen,
-  setCodeReviewCollapsed,
-  setMessageDeliveryCollapsed,
+  setComposerTabCollapsed,
   syncProjects,
   syncThreads,
   type UiState,
@@ -29,8 +28,7 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
     projectOrder: [],
     threadLastVisitedAtById: {},
     threadPlanSidebarOpenById: {},
-    codeReviewCollapsed: false,
-    messageDeliveryCollapsed: false,
+    composerTabCollapsed: false,
     defaultAdvertisedEndpointKey: null,
     navigationSidebarOpen: true,
     sessionRailDocked: false,
@@ -39,42 +37,46 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
 }
 
 describe("uiStateStore pure functions", () => {
-  it("persists independent editor-wide delivery and review tab choices", () => {
-    const state = setMessageDeliveryCollapsed(setCodeReviewCollapsed(makeUiState(), true), true);
-    const afterNavigation = clearThreadUi(syncThreads(state, []), "environment:old-chat");
-    expect(afterNavigation.messageDeliveryCollapsed).toBe(true);
-    expect(afterNavigation.codeReviewCollapsed).toBe(true);
-    const expandedDelivery = setMessageDeliveryCollapsed(afterNavigation, false);
-    expect(expandedDelivery.messageDeliveryCollapsed).toBe(false);
-    expect(expandedDelivery.codeReviewCollapsed).toBe(true);
+  it("migrates independent legacy tab choices into one shared preference", () => {
+    for (const legacy of [
+      { codeReviewCollapsed: true },
+      { messageDeliveryCollapsed: true },
+      { codeReviewCollapsed: false, messageDeliveryCollapsed: true },
+      { codeReviewCollapsed: true, messageDeliveryCollapsed: false },
+    ]) {
+      expect(hydratePersistedUiState(legacy).composerTabCollapsed).toBe(true);
+      expect(
+        hydratePersistedUiState({ ...legacy, composerTabCollapsed: false }).composerTabCollapsed,
+      ).toBe(false);
+    }
     expect(
-      hydratePersistedUiState({ messageDeliveryCollapsed: true }).messageDeliveryCollapsed,
-    ).toBe(true);
-    expect(hydratePersistedUiState({}).messageDeliveryCollapsed).toBe(false);
+      hydratePersistedUiState({ codeReviewCollapsed: false, messageDeliveryCollapsed: false })
+        .composerTabCollapsed,
+    ).toBe(false);
     expect(
       hydratePersistedUiState({ messageDeliveryCollapsed: "true" } as unknown as PersistedUiState)
-        .messageDeliveryCollapsed,
+        .composerTabCollapsed,
     ).toBe(false);
   });
-  it("keeps the editor-wide review preference when chats or servers are removed", () => {
+  it("keeps the shared editor-wide tab preference when chats or servers are removed", () => {
     const local = "environment-local:thread-1";
     const remote = "environment-remote:thread-1";
-    const state = setCodeReviewCollapsed(
+    const state = setComposerTabCollapsed(
       makeUiState({ threadPlanSidebarOpenById: { [local]: true, [remote]: false } }),
       true,
     );
-    expect(state.codeReviewCollapsed).toBe(true);
-    expect(setCodeReviewCollapsed(state, true)).toBe(state);
-    expect(clearThreadUi(state, remote).codeReviewCollapsed).toBe(true);
-    expect(syncThreads(state, [{ key: local }]).codeReviewCollapsed).toBe(true);
-    expect(syncThreads(state, []).codeReviewCollapsed).toBe(true);
+    expect(state.composerTabCollapsed).toBe(true);
+    expect(setComposerTabCollapsed(state, true)).toBe(state);
+    expect(clearThreadUi(state, remote).composerTabCollapsed).toBe(true);
+    expect(syncThreads(state, [{ key: local }]).composerTabCollapsed).toBe(true);
+    expect(syncThreads(state, []).composerTabCollapsed).toBe(true);
     expect(
       removeThreadUiForNonPrimaryEnvironment(state, EnvironmentId.make("environment-local"))
-        .codeReviewCollapsed,
+        .composerTabCollapsed,
     ).toBe(true);
-    const expanded = setCodeReviewCollapsed(state, false);
-    expect(expanded.codeReviewCollapsed).toBe(false);
-    expect(setCodeReviewCollapsed(expanded, false)).toBe(expanded);
+    const expanded = setComposerTabCollapsed(state, false);
+    expect(expanded.composerTabCollapsed).toBe(false);
+    expect(setComposerTabCollapsed(expanded, false)).toBe(expanded);
     expect(expanded.threadPlanSidebarOpenById).toEqual({ [local]: true, [remote]: false });
   });
 
@@ -531,45 +533,35 @@ describe("uiStateStore persistence round-trip", () => {
     vi.unstubAllGlobals();
   });
 
-  it("restores the global review choice on reload and stops writing per-thread preferences", () => {
+  it("restores the shared tab choice on reload and stops writing legacy preferences", () => {
     for (const collapsed of [true, false]) {
-      persistState(setCodeReviewCollapsed(makeUiState(), collapsed));
+      persistState(setComposerTabCollapsed(makeUiState(), collapsed));
       const persisted = JSON.parse(
         localStorageStub.getItem(PERSISTED_STATE_KEY)!,
       ) as PersistedUiState;
-      expect(hydratePersistedUiState(persisted).codeReviewCollapsed).toBe(collapsed);
+      expect(hydratePersistedUiState(persisted).composerTabCollapsed).toBe(collapsed);
       expect(persisted).not.toHaveProperty("threadCodeReviewCollapsedById");
+      expect(persisted).not.toHaveProperty("codeReviewCollapsed");
+      expect(persisted).not.toHaveProperty("messageDeliveryCollapsed");
     }
-    expect(hydratePersistedUiState({}).codeReviewCollapsed).toBe(false);
+    expect(hydratePersistedUiState({}).composerTabCollapsed).toBe(false);
     for (const invalid of [null, "true", 1, {}, []]) {
       expect(
-        hydratePersistedUiState({ codeReviewCollapsed: invalid } as PersistedUiState)
-          .codeReviewCollapsed,
+        hydratePersistedUiState({ composerTabCollapsed: invalid } as PersistedUiState)
+          .composerTabCollapsed,
       ).toBe(false);
-    }
-  });
-
-  it("restores the independent delivery tab choice on reload", () => {
-    for (const collapsed of [true, false]) {
-      persistState(setMessageDeliveryCollapsed(makeUiState(), collapsed));
-      const persisted = JSON.parse(
-        localStorageStub.getItem(PERSISTED_STATE_KEY)!,
-      ) as PersistedUiState;
-      expect(persisted.messageDeliveryCollapsed).toBe(collapsed);
-      expect(hydratePersistedUiState(persisted).messageDeliveryCollapsed).toBe(collapsed);
-      expect(hydratePersistedUiState(persisted).codeReviewCollapsed).toBe(false);
     }
   });
 
   it("migrates a valid minimized thread without overriding a new global choice", () => {
     const key = "environment-local:thread-1";
     const legacy = { threadCodeReviewCollapsedById: { [key]: true } };
-    expect(hydratePersistedUiState(legacy).codeReviewCollapsed).toBe(true);
+    expect(hydratePersistedUiState(legacy).composerTabCollapsed).toBe(true);
     expect(
-      hydratePersistedUiState({ ...legacy, codeReviewCollapsed: false }).codeReviewCollapsed,
+      hydratePersistedUiState({ ...legacy, codeReviewCollapsed: false }).composerTabCollapsed,
     ).toBe(false);
     expect(
-      hydratePersistedUiState({ ...legacy, codeReviewCollapsed: true }).codeReviewCollapsed,
+      hydratePersistedUiState({ ...legacy, codeReviewCollapsed: true }).composerTabCollapsed,
     ).toBe(true);
     expect(
       hydratePersistedUiState({
@@ -578,7 +570,7 @@ describe("uiStateStore persistence round-trip", () => {
           "environment-local:expanded": false,
           [`environment-local:${"x".repeat(512)}`]: true,
         },
-      }).codeReviewCollapsed,
+      }).composerTabCollapsed,
     ).toBe(false);
     const tooManyInvalid = Object.fromEntries(
       Array.from({ length: 10_000 }, (_, index) => [`invalid-${index}`, true]),
@@ -586,7 +578,7 @@ describe("uiStateStore persistence round-trip", () => {
     expect(
       hydratePersistedUiState({
         threadCodeReviewCollapsedById: { ...tooManyInvalid, [key]: true },
-      }).codeReviewCollapsed,
+      }).composerTabCollapsed,
     ).toBe(false);
   });
 

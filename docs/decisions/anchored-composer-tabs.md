@@ -2,8 +2,12 @@
 
 Status: Implemented under the user's request for compact delivery controls and a stationary minimize/expand caret.
 
-Code review and qualified Claude message delivery use the same curved tab above
-the composer. The existing options-menu shortcuts remain available and share the
+One generic **Composer tools** tab above the composer contains available controls,
+including Code review and qualified Claude message delivery. Each feature supplies
+only its own control; neither owns a separate tab or collapse state. Render these
+controls as independent children so future features can appear together in the
+same container. The tab adapts to its contents without replacing its caret when
+the provider changes. The existing options-menu shortcuts remain available and share the
 same controlled review dialog or account-scoped delivery choice. This replaces
 only the menu-only presentation from the provider-aware composer decision.
 
@@ -16,8 +20,10 @@ binding rules.
 Tabs collapse toward a fixed right edge. Their caret is absolutely positioned,
 and both tab height and reserved composer spacing stay constant across toggles.
 This keeps the pointer target stationary throughout the width animation, including
-at 80–130% interface scale. Reduced-motion users receive no animation. Review and
-delivery each have an independent, persisted editor-wide minimized preference.
+at 80–130% interface scale. Reduced-motion users receive no animation. One persisted
+editor-wide `composerTabCollapsed` preference applies across every chat, provider,
+environment and pane. Migrate either legacy tab's valid minimized choice when no
+explicit shared choice exists, then persist only the new shared preference.
 
 Review visibility still requires the exact selected Codex account and saved ready
 session. Busy work hides its trigger without discarding a submitting dialog.

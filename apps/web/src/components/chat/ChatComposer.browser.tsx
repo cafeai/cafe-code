@@ -307,7 +307,7 @@ async function waitForTabEntrance() {
 
 describe("provider-specific composer menu actions", () => {
   afterEach(() => {
-    useUiStateStore.setState({ codeReviewCollapsed: false, messageDeliveryCollapsed: false });
+    useUiStateStore.setState({ composerTabCollapsed: false });
     applyInterfaceScalePercent(100);
     document.documentElement.classList.remove("dark");
     useComposerDraftStore.setState({
@@ -324,15 +324,17 @@ describe("provider-specific composer menu actions", () => {
     { width: 390, scale: 80, dark: true },
     { width: 390, scale: 130, dark: false },
   ])(
-    "anchors both tab carets at width $width and $scale% scale",
+    "anchors the shared tab caret across providers at width $width and $scale% scale",
     async ({ width, scale, dark }) => {
       applyInterfaceScalePercent(scale);
       document.documentElement.classList.toggle("dark", dark);
       await using fixture = await mountComposer(width);
-      for (const label of ["code review", "message delivery"]) {
-        if (label === "message delivery") await fixture.select("claudeAgent");
+      const sharedTab = document.querySelector(".cafe-composer-tab");
+      for (const provider of ["codex", "claudeAgent"]) {
+        if (provider === "claudeAgent") await fixture.select(provider);
+        expect(document.querySelector(".cafe-composer-tab")).toBe(sharedTab);
         const caret = page
-          .getByRole("button", { name: `Minimize ${label}`, exact: true })
+          .getByRole("button", { name: "Minimize composer tools", exact: true })
           .element();
         const initial = caret.getBoundingClientRect();
         const frame = document.querySelector('[data-chat-composer-tab="true"]')!.parentElement!;
@@ -398,7 +400,7 @@ describe("provider-specific composer menu actions", () => {
     expect(fixture.composerRef.current?.getSendContext()).not.toHaveProperty("deliveryPriority");
     // Collapsing while the popup is open closes it in the same gesture.
     await page.getByRole("button", { name: "Message delivery: Automatic", exact: true }).click();
-    await page.getByRole("button", { name: "Minimize message delivery", exact: true }).click();
+    await page.getByRole("button", { name: "Minimize composer tools", exact: true }).click();
     await expect.element(page.getByRole("menu")).not.toBeInTheDocument();
     await expect
       .element(
@@ -409,7 +411,7 @@ describe("provider-specific composer menu actions", () => {
         }),
       )
       .not.toBeVisible();
-    await page.getByRole("button", { name: "Expand message delivery", exact: true }).click();
+    await page.getByRole("button", { name: "Expand composer tools", exact: true }).click();
     await expect
       .element(page.getByRole("button", { name: "Message delivery: Automatic", exact: true }))
       .toBeVisible();
@@ -421,9 +423,9 @@ describe("provider-specific composer menu actions", () => {
     const trigger = page.getByRole("button", { name: "Message delivery: Automatic", exact: true });
     await trigger.click();
     await expect.element(page.getByRole("menu")).toBeVisible();
-    useUiStateStore.getState().setMessageDeliveryCollapsed(true);
+    useUiStateStore.getState().setComposerTabCollapsed(true);
     await expect.element(page.getByRole("menu")).not.toBeInTheDocument();
-    useUiStateStore.getState().setMessageDeliveryCollapsed(false);
+    useUiStateStore.getState().setComposerTabCollapsed(false);
     await expect.element(trigger).toBeVisible();
     await expect.element(page.getByRole("menu")).not.toBeInTheDocument();
     await trigger.click();
@@ -436,12 +438,12 @@ describe("provider-specific composer menu actions", () => {
     expect(fixture.onSend).not.toHaveBeenCalled();
   });
 
-  it("uses the review tab without sending the draft and shares its minimized state across chats", async () => {
+  it("shares one tab and minimized state across chats and provider controls without sending the draft", async () => {
     await using fixture = await mountComposer(1100);
     await page.getByRole("button", { name: "Code review", exact: true }).click();
     await expect.element(page.getByRole("dialog", { name: "Start a Codex review" })).toBeVisible();
     await page.getByRole("button", { name: "Cancel", exact: true }).click();
-    await page.getByRole("button", { name: "Minimize code review", exact: true }).click();
+    await page.getByRole("button", { name: "Minimize composer tools", exact: true }).click();
     const nextThread = thread("next-tab-chat");
     const nextRef = { environmentId, threadId: nextThread.id };
     await fixture.update({
@@ -451,9 +453,35 @@ describe("provider-specific composer menu actions", () => {
       composerDraftTarget: nextRef,
     });
     await expect
-      .element(page.getByRole("button", { name: "Expand code review", exact: true }))
+      .element(page.getByRole("button", { name: "Expand composer tools", exact: true }))
       .toBeVisible();
-    await page.getByRole("button", { name: "Expand code review", exact: true }).click();
+    const sharedTab = document.querySelector(".cafe-composer-tab");
+    const sharedCaret = page
+      .getByRole("button", { name: "Expand composer tools", exact: true })
+      .element();
+    await fixture.select("claudeAgent");
+    expect(document.querySelectorAll(".cafe-composer-tab")).toHaveLength(1);
+    expect(document.querySelector(".cafe-composer-tab")).toBe(sharedTab);
+    expect(page.getByRole("button", { name: "Expand composer tools", exact: true }).element()).toBe(
+      sharedCaret,
+    );
+    await expect
+      .element(
+        page.getByRole("button", {
+          name: "Message delivery: Automatic",
+          exact: true,
+          includeHidden: true,
+        }),
+      )
+      .not.toBeVisible();
+    await page.getByRole("button", { name: "Expand composer tools", exact: true }).click();
+    await expect
+      .element(page.getByRole("button", { name: "Message delivery: Automatic", exact: true }))
+      .toBeVisible();
+    await fixture.select("codex");
+    expect(document.querySelector(".cafe-composer-tab")).toBe(sharedTab);
+    await page.getByRole("button", { name: "Minimize composer tools", exact: true }).click();
+    await page.getByRole("button", { name: "Expand composer tools", exact: true }).click();
     await expect
       .element(page.getByRole("button", { name: "Code review", exact: true }))
       .toBeVisible();

@@ -82,7 +82,7 @@ import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
 import { NativeCodexReview } from "./NativeCodexReview";
 import {
   ClaudeDeliveryPriorityPicker,
-  ClaudeDeliveryPriorityTab,
+  ClaudeDeliveryPriorityControl,
 } from "./ClaudeDeliveryPriorityPicker";
 import { ComposerTab } from "./ComposerTab";
 import { useUiStateStore } from "../../uiStateStore";
@@ -1235,10 +1235,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     setNativeReviewState({ key: nativeReviewKey, open: false });
   }
   const nativeReviewOpen = nativeReviewState.key === nativeReviewKey && nativeReviewState.open;
-  const codeReviewCollapsed = useUiStateStore((state) => state.codeReviewCollapsed);
-  const messageDeliveryCollapsed = useUiStateStore((state) => state.messageDeliveryCollapsed);
-  const showNativeReviewTab = nativeReviewAvailable && !nativeReviewDisabled;
-  const hasComposerTab = showNativeReviewTab || deliveryPriorityAvailable;
+  const composerTabCollapsed = useUiStateStore((state) => state.composerTabCollapsed);
+  const showNativeReviewControl = nativeReviewAvailable && !nativeReviewDisabled;
+  const hasComposerTab = showNativeReviewControl || deliveryPriorityAvailable;
   const providerActions =
     nativeReviewAvailable && !nativeReviewDisabled ? (
       <MenuItem
@@ -3329,13 +3328,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             data-chat-composer-tab="true"
             className="absolute inset-x-6 bottom-full -z-10 -mb-1 flex justify-end"
           >
-            {showNativeReviewTab ? (
-              <ComposerTab
-                label="Code review"
-                collapsed={codeReviewCollapsed}
-                active={nativeReviewOpen}
-                onCollapsedChange={useUiStateStore.getState().setCodeReviewCollapsed}
-              >
+            <ComposerTab
+              label="Composer tools"
+              collapsed={composerTabCollapsed}
+              active={nativeReviewOpen}
+              onCollapsedChange={useUiStateStore.getState().setComposerTabCollapsed}
+            >
+              {showNativeReviewControl ? (
                 <Tooltip>
                   <TooltipTrigger
                     delay={250}
@@ -3361,17 +3360,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     or custom instructions. Findings appear in this chat.
                   </TooltipPopup>
                 </Tooltip>
-              </ComposerTab>
-            ) : (
-              <ClaudeDeliveryPriorityTab
-                key={deliveryChoiceKey}
-                value={deliveryPriority}
-                onChange={(priority) => setDeliveryChoice({ key: deliveryChoiceKey, priority })}
-                disabled={isSendBusy || isConnecting || environmentUnavailable !== null}
-                collapsed={messageDeliveryCollapsed}
-                onCollapsedChange={useUiStateStore.getState().setMessageDeliveryCollapsed}
-              />
-            )}
+              ) : null}
+              {deliveryPriorityAvailable ? (
+                <ClaudeDeliveryPriorityControl
+                  key={deliveryChoiceKey}
+                  value={deliveryPriority}
+                  onChange={(priority) => setDeliveryChoice({ key: deliveryChoiceKey, priority })}
+                  disabled={isSendBusy || isConnecting || environmentUnavailable !== null}
+                  collapsed={composerTabCollapsed}
+                />
+              ) : null}
+            </ComposerTab>
           </div>
         ) : null}
         <div

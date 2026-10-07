@@ -24,6 +24,8 @@ export function ComposerTab({
     <div className="no-drag cafe-composer-tab-entry inline-flex max-w-full">
       <div
         className="cafe-composer-tab"
+        role="group"
+        aria-label={label}
         data-collapsed={collapsed ? "true" : "false"}
         data-popup-open={active ? "true" : "false"}
       >

@@ -2,13 +2,14 @@
 
 ## Message delivery
 
-For a qualified Claude account selected in the composer, open the compact
-**Delivery · Automatic** tab above the text box. Its popup offers Automatic, Now,
+For a qualified Claude account selected in the composer, choose the compact
+**Delivery · Automatic** control inside the shared composer tools tab. Its popup offers Automatic, Now,
 Next and Later; hover or focus an option for its explanation. The existing
 model-options menu also keeps the same **Message delivery** choices.
-The caret minimizes or restores the tab at a fixed position without moving the
-composer. This layout preference is editor-wide and survives navigation and reloads;
-it is independent of the account-scoped delivery priority.
+The shared caret minimizes or restores every control in the tab at a fixed position
+without moving the composer. One layout preference applies across all chats and
+providers and survives navigation and reloads; delivery priority remains scoped
+to the selected chat/account.
 **Automatic** preserves the provider's existing behavior; Cafe does not assume
 that omission is equivalent to one of the explicit choices.
 
