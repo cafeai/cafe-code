@@ -42,6 +42,10 @@ Provider-specific native schedulers would create incompatible ownership and dupl
 
 ## Verification
 
+### Terminal-session admission consistency
+
+Updated: 2026-10-08 01:05:09 JST (UTC+0900). Isolated SQLite/engine/service regressions found that the canonical chat shell could reconcile its exact latest completed, errored or interrupted turn to idle while the writer-locked scheduled admission still unconditionally rejected the retained raw running-session row. Admission now recognizes only that exact terminal active ID with a nonnull completion timestamp at least as recent as the session publication. It does not mutate lifecycle history, discard receipts, clear paid-attempt markers or replay provider work. Starting sessions, different/newer native work, absent/older completion evidence and separately indexed NULL-turn pending starts remain busy, alongside the existing approvals/input, account/permissions and uncertain-occurrence barriers. This is an implementation consistency correction to the accepted idle-only policy, not a new execution authority or recovery mechanism. Synthetic fixtures do not establish the cause of any deleted live chat's provider failure.
+
 ### Renderer visibility implementation
 
 Updated: 2026-10-05 05:54:23 JST (UTC+0900). The owner requested inline proposal visibility while explicitly retaining approval. The conversation tail now projects saved schedules with bounded pagination and pending proposals first; it does not fabricate a message/turn association. Review opens the existing Tasks editor rather than creating a second approval/mutation path. Merely displaying or opening a card cannot authorize execution.

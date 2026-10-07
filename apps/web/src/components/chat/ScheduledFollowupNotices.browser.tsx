@@ -122,7 +122,9 @@ describe("inline scheduled follow-up notices", () => {
       await expect
         .element(page.getByText("Won’t run until you approve.", { exact: true }))
         .toBeVisible();
-      await expect.element(page.getByText("Every 5 minutes · Asia/Tokyo")).toBeVisible();
+      await expect
+        .element(page.getByText("Every 5 minutes · Schedule timezone: Asia/Tokyo", { exact: true }))
+        .toBeVisible();
       await expect.element(page.getByText("Account: Personal Codex")).toBeVisible();
       await expect
         .element(page.getByText("Uses chat settings · gpt-6-astra · Effort: ultra"))
@@ -328,7 +330,7 @@ describe("inline scheduled follow-up notices", () => {
     try {
       await expect.element(page.getByRole("heading", { name: title, exact: true })).toBeVisible();
       expect(host.querySelectorAll("img, script, a")).toHaveLength(0);
-      expect(host.textContent).toContain("One-time follow-up · Asia/Tokyo");
+      expect(host.textContent).toContain("One-time follow-up · Schedule timezone: Asia/Tokyo");
       expect(host.textContent).toContain("Planned:");
       for (const dark of [false, true]) {
         document.documentElement.classList.toggle("dark", dark);

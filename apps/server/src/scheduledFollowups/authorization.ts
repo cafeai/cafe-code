@@ -59,13 +59,32 @@ export const verifyScheduledFollowUpAdmission = (command: StartCommand) =>
     // Authority is checked before this branch so a forged occurrence cannot
     // obtain the special definitive "wait and retry" outcome. Throwing rolls
     // back the provisional claim with the enclosing event/receipt transaction.
+    // The canonical shell can already reconcile a retained running session to
+    // idle from its exact latest terminal turn. Treat that same narrow evidence
+    // as idle here, without rewriting lifecycle rows: the native active ID must
+    // match, and definitive completion must not predate the session publication.
+    // Startup, newer/different native work and missing evidence remain busy.
+    // A NULL-turn pending start is independent work which the latest-turn join
+    // cannot see; retain that explicit barrier even after historical completion.
     const [busy] = yield* sql<{ busy: number }>`SELECT (
       EXISTS (SELECT 1 FROM scheduled_followup_runs other
         WHERE other.thread_id = ${command.threadId} AND other.id <> ${guard.runId}
           AND other.state IN ('dispatching','running','unknown'))
       OR EXISTS (SELECT 1 FROM projection_thread_sessions session
         WHERE session.thread_id = ${command.threadId}
-          AND (session.active_turn_id IS NOT NULL OR session.status IN ('starting','running')))
+          AND (session.active_turn_id IS NOT NULL OR session.status IN ('starting','running'))
+          AND NOT (session.status = 'running' AND EXISTS (
+            SELECT 1 FROM projection_threads thread
+            JOIN projection_turns terminal ON terminal.thread_id = thread.thread_id
+              AND terminal.turn_id = thread.latest_turn_id
+            WHERE thread.thread_id = session.thread_id
+              AND terminal.turn_id = session.active_turn_id
+              AND terminal.state IN ('completed','interrupted','error')
+              AND terminal.completed_at IS NOT NULL
+              AND terminal.completed_at >= session.updated_at)))
+      OR EXISTS (SELECT 1 FROM projection_turns pending
+        WHERE pending.thread_id = ${command.threadId} AND pending.turn_id IS NULL
+          AND pending.state IN ('pending','running') AND pending.completed_at IS NULL)
       OR EXISTS (SELECT 1 FROM projection_threads thread
         WHERE thread.thread_id = ${command.threadId}
           AND (thread.pending_approval_count > 0 OR thread.pending_user_input_count > 0))

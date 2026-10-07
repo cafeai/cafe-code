@@ -126,7 +126,7 @@ function ScheduleHistory(props: {
               <div className="flex flex-wrap items-baseline justify-between gap-1">
                 <span className="font-medium">{runLabel(run)}</span>
                 <time dateTime={run.createdAt} className="text-[11px] text-muted-foreground">
-                  {formatScheduleTime(run.createdAt, record.recurrence.timeZone)}
+                  {formatScheduleTime(run.createdAt)}
                 </time>
               </div>
               {run.summary ? (
@@ -205,11 +205,11 @@ function ScheduleCard(props: {
       </div>
       {record.nextRunAt && record.state === "active" ? (
         <p className="mt-1 break-words text-xs text-primary">
-          Next: {formatScheduleTime(record.nextRunAt, record.recurrence.timeZone)}
+          Next: {formatScheduleTime(record.nextRunAt)}
         </p>
       ) : null}
       <p className="mt-1 break-words text-[11px] text-muted-foreground [overflow-wrap:anywhere]">
-        {scheduleRecurrenceLabel(record)} · {record.recurrence.timeZone}
+        {scheduleRecurrenceLabel(record)} · Schedule timezone: {record.recurrence.timeZone}
       </p>
       <p className="mt-2 break-words text-[11px] text-muted-foreground [overflow-wrap:anywhere]">
         {record.modelSelection

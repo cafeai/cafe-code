@@ -21,10 +21,11 @@ import {
   browserScheduleTimeZone,
   formatScheduleTime,
   parseScheduleNumbers,
-  parseScheduleUtcInput,
+  parseScheduleZonedInput,
   scheduleAccountLabel,
   scheduleModelLabel,
-  scheduleUtcInput,
+  scheduleTimeZoneOptions,
+  scheduleZonedInput,
 } from "./schedulePresentation";
 
 type RepeatPreset = "once" | "interval" | "daily" | "weekdays" | "weekly" | "custom";
@@ -75,14 +76,20 @@ export function ScheduledFollowupEditor(props: {
   const recurrence = record?.recurrence;
   const [repeat, setRepeat] = useState<RepeatPreset>(() => recurrencePreset(recurrence));
   const [timeZone, setTimeZone] = useState(recurrence?.timeZone ?? browserScheduleTimeZone());
+  const localTimeZone = browserScheduleTimeZone();
+  const timeZoneOptions = useMemo(
+    () => scheduleTimeZoneOptions(timeZone, localTimeZone),
+    [timeZone, localTimeZone],
+  );
   const [minutes, setMinutes] = useState(
     String(recurrence?.kind === "interval" ? recurrence.everyMinutes : 5),
   );
   const [at, setAt] = useState(() =>
-    scheduleUtcInput(
+    scheduleZonedInput(
       recurrence?.kind === "once"
         ? recurrence.at
         : new Date(Date.parse(openedAt) + 3_600_000).toISOString(),
+      timeZone,
     ),
   );
   const [time, setTime] = useState(
@@ -111,23 +118,42 @@ export function ScheduledFollowupEditor(props: {
   const [notificationPolicy, setNotificationPolicy] = useState<
     ScheduledFollowupDraft["notificationPolicy"]
   >(record?.notificationPolicy ?? "changes-and-errors");
-  const [endAt, setEndAt] = useState(scheduleUtcInput(record?.endAt ?? null));
+  const [endAt, setEndAt] = useState(() => scheduleZonedInput(record?.endAt ?? null, timeZone));
+  const [endAtReviewed, setEndAtReviewed] = useState(false);
   const [maxRuns, setMaxRuns] = useState(record?.maxRuns?.toString() ?? "");
   const [allowAutoFinish, setAllowAutoFinish] = useState(record?.allowAutoFinish ?? false);
   const [validationError, setValidationError] = useState<string | null>(null);
   const originalEndAt = record?.endAt ?? null;
+  // An existing UTC limit can be valid while its civil year is outside the
+  // native four-digit input range (or its saved zone is unavailable). An empty
+  // control in that case is not human intent to remove a paid-execution limit.
+  // Require an explicit replacement/clear instead of silently saving null.
+  const endAtNeedsReview =
+    originalEndAt !== null &&
+    !endAtReviewed &&
+    scheduleZonedInput(originalEndAt, recurrence?.timeZone ?? timeZone) === "";
 
   const calendar = useMemo(() => {
+    if (endAtNeedsReview) {
+      return {
+        value: null,
+        occurrences: [],
+        error:
+          "Review the saved end date in Model and run settings: enter a new date or explicitly clear it.",
+      };
+    }
     try {
       let value: ScheduledFollowupRecurrence;
       if (repeat === "once") {
         // Native minute-resolution controls must not silently truncate an
         // existing second/millisecond instant when only instructions change.
         const parsed =
-          recurrence?.kind === "once" && at === scheduleUtcInput(recurrence.at)
+          recurrence?.kind === "once" &&
+          timeZone === recurrence.timeZone &&
+          at === scheduleZonedInput(recurrence.at, recurrence.timeZone)
             ? recurrence.at
-            : parseScheduleUtcInput(at);
-        if (!parsed) throw new Error("Choose a valid UTC date and time.");
+            : parseScheduleZonedInput(at, timeZone);
+        if (!parsed) throw new Error("Choose a valid date and time in the selected timezone.");
         value = { kind: "once", at: parsed, timeZone };
       } else if (repeat === "interval") {
         value = {
@@ -163,9 +189,11 @@ export function ScheduledFollowupEditor(props: {
       }
       const validated = decodeRecurrence(value);
       const end = endAt
-        ? originalEndAt && endAt === scheduleUtcInput(originalEndAt)
+        ? originalEndAt &&
+          timeZone === recurrence?.timeZone &&
+          endAt === scheduleZonedInput(originalEndAt, recurrence.timeZone)
           ? originalEndAt
-          : parseScheduleUtcInput(endAt)
+          : parseScheduleZonedInput(endAt, timeZone)
         : null;
       if (endAt && !end) throw new Error("Choose a valid end date.");
       const occurrences = nextScheduleOccurrences(validated, new Date(), 3, end);
@@ -198,6 +226,7 @@ export function ScheduledFollowupEditor(props: {
     months,
     endAt,
     originalEndAt,
+    endAtNeedsReview,
   ]);
 
   const model = context.provider?.models.find((entry) => entry.slug === selection.model);
@@ -222,9 +251,11 @@ export function ScheduledFollowupEditor(props: {
           : null,
         notificationPolicy,
         endAt: endAt
-          ? originalEndAt && endAt === scheduleUtcInput(originalEndAt)
+          ? originalEndAt &&
+            timeZone === recurrence?.timeZone &&
+            endAt === scheduleZonedInput(originalEndAt, recurrence.timeZone)
             ? originalEndAt
-            : parseScheduleUtcInput(endAt)
+            : parseScheduleZonedInput(endAt, timeZone)
           : null,
         maxRuns: maxRuns.trim() ? Number(maxRuns) : null,
         allowAutoFinish,
@@ -332,7 +363,7 @@ export function ScheduledFollowupEditor(props: {
           )}
         </Field>
       ) : repeat === "once" ? (
-        <Field label="Run at (UTC)">
+        <Field label="Run at" help={`Time in ${timeZone}. The preview below uses your local time.`}>
           {(id) => (
             <Input
               id={id}
@@ -376,15 +407,29 @@ export function ScheduledFollowupEditor(props: {
           )}
         </Field>
       ) : null}
-      <Field label="Timezone" help="An IANA name such as Asia/Tokyo, America/New_York, or UTC.">
+      <Field
+        label="Timezone"
+        help={`Scheduling uses this timezone. Your computer's local timezone is ${localTimeZone}.`}
+      >
         {(id) => (
-          <Input
+          <select
             id={id}
+            className={selectClass}
             value={timeZone}
-            maxLength={100}
             required
             onChange={(event) => setTimeZone(event.target.value)}
-          />
+          >
+            {!timeZoneOptions.includes(timeZone) ? (
+              <option value={timeZone} disabled>
+                Unavailable timezone
+              </option>
+            ) : null}
+            {timeZoneOptions.map((zone) => (
+              <option key={zone} value={zone}>
+                {zone === localTimeZone ? `${zone} (computer local time)` : zone}
+              </option>
+            ))}
+          </select>
         )}
       </Field>
       {repeat === "custom" ? (
@@ -425,13 +470,13 @@ export function ScheduledFollowupEditor(props: {
         </div>
       ) : null}
       <div className="rounded-lg bg-muted/35 p-3 text-xs" aria-label="Upcoming runs">
-        <p className="mb-1 font-medium">Next runs · {timeZone}</p>
+        <p className="mb-1 font-medium">Next runs · local time · {localTimeZone}</p>
         {calendar.error ? (
           <p className="text-muted-foreground">{calendar.error}</p>
         ) : (
           <ol className="space-y-1 text-muted-foreground">
             {calendar.occurrences.map((instant) => (
-              <li key={instant}>{formatScheduleTime(instant, timeZone)}</li>
+              <li key={instant}>{formatScheduleTime(instant)}</li>
             ))}
           </ol>
         )}
@@ -547,17 +592,42 @@ export function ScheduledFollowupEditor(props: {
               </select>
             )}
           </Field>
-          <Field label="End at (UTC)" help="Optional. Leave blank for no end date.">
+          <Field
+            label="End at"
+            help={`Optional. Time in ${timeZone}; leave blank for no end date.`}
+          >
             {(id) => (
               <Input
                 id={id}
                 nativeInput
                 type="datetime-local"
                 value={endAt}
-                onChange={(event) => setEndAt(event.target.value)}
+                onChange={(event) => {
+                  setEndAtReviewed(true);
+                  setEndAt(event.target.value);
+                }}
               />
             )}
           </Field>
+          {endAtNeedsReview ? (
+            <div className="space-y-2 text-xs">
+              <p className="text-muted-foreground">
+                The saved end limit cannot be shown in its scheduling timezone. Saved limit:{" "}
+                {formatScheduleTime(originalEndAt!)}
+              </p>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  setEndAtReviewed(true);
+                  setEndAt("");
+                }}
+              >
+                Clear saved end date
+              </Button>
+            </div>
+          ) : null}
           <Field label="Maximum runs" help="Optional. Each started run may use paid tokens.">
             {(id) => (
               <Input

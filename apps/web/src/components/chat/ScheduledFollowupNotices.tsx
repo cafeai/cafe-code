@@ -156,17 +156,17 @@ export const ScheduledFollowupNotices = memo(function ScheduledFollowupNotices({
                 </p>
               ) : null}
               <p className="mt-2 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
-                {scheduleRecurrenceLabel(record)} · {record.recurrence.timeZone}
+                {scheduleRecurrenceLabel(record)} · Schedule timezone: {record.recurrence.timeZone}
               </p>
               {record.recurrence.kind === "once" ? (
                 <p className="mt-1 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
-                  Planned: {formatScheduleTime(record.recurrence.at, record.recurrence.timeZone)}
+                  Planned: {formatScheduleTime(record.recurrence.at)}
                 </p>
               ) : null}
               {record.state === "active" && record.nextRunAt ? (
                 <p className="mt-1 break-words text-xs text-primary [overflow-wrap:anywhere]">
                   {stale ? "Last reported next run: " : "Next: "}
-                  {formatScheduleTime(record.nextRunAt, record.recurrence.timeZone)}
+                  {formatScheduleTime(record.nextRunAt)}
                 </p>
               ) : null}
               <p className="mt-2 break-words text-[11px] text-muted-foreground [overflow-wrap:anywhere]">

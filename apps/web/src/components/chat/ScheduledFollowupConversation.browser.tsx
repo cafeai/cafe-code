@@ -127,6 +127,20 @@ function deferredList() {
   return { promise, resolve };
 }
 
+/** Use the browser's computer zone independently of the saved schedule's
+ * selected zone and of the production presentation helper. */
+function computerLocalTime(instant: string): string {
+  return new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+    timeZone: new Intl.DateTimeFormat().resolvedOptions().timeZone,
+  }).format(new Date(instant));
+}
+
 describe("inline scheduled follow-up owner review", () => {
   afterEach(() => {
     __resetEnvironmentApiOverridesForTests();
@@ -199,6 +213,43 @@ describe("inline scheduled follow-up owner review", () => {
       await screen.unmount();
     }
   });
+
+  it.each(["Asia/Tokyo", "America/New_York"])(
+    "shows planned and next-run notice dates in computer local time for a %s schedule",
+    async (timeZone) => {
+      const at = "2099-10-04T00:30:00.000Z";
+      const nextRunAt = "2099-10-04T13:30:00.000Z";
+      const saved = proposal({
+        state: "active",
+        recurrence: { kind: "once", at, timeZone },
+        nextRunAt,
+      });
+      const { api } = installApi([saved]);
+      const screen = await render(<ScheduledFollowupConversation context={context} />);
+      try {
+        const notice = page.getByRole("article", {
+          name: `Scheduled follow-up notice: ${saved.name}`,
+        });
+        await expect
+          .element(notice.getByText(`Planned: ${computerLocalTime(at)}`, { exact: true }))
+          .toBeVisible();
+        await expect
+          .element(notice.getByText(`Next: ${computerLocalTime(nextRunAt)}`, { exact: true }))
+          .toBeVisible();
+        await expect
+          .element(
+            notice.getByText(`One-time follow-up · Schedule timezone: ${timeZone}`, {
+              exact: true,
+            }),
+          )
+          .toBeVisible();
+        expect(document.querySelector("[data-scheduled-followups]")).toBeNull();
+        expectNoMutation(api);
+      } finally {
+        await screen.unmount();
+      }
+    },
+  );
 
   it.each(["account", "chat", "environment"] as const)(
     "discards the open review and unsaved values when the %s changes",
