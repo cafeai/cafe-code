@@ -40,6 +40,7 @@ import * as DesktopAppSettings from "./settings/DesktopAppSettings.ts";
 import * as DesktopShellEnvironment from "./shell/DesktopShellEnvironment.ts";
 import * as DesktopState from "./app/DesktopState.ts";
 import * as DesktopNativeControl from "./nativeControl/DesktopNativeControl.ts";
+import * as DesktopNativePermissions from "./nativeControl/DesktopNativePermissions.ts";
 import * as DesktopUpdates from "./updates/DesktopUpdates.ts";
 import * as DesktopSourceUpdates from "./updates/DesktopSourceUpdates.ts";
 import * as DesktopWindow from "./window/DesktopWindow.ts";
@@ -129,6 +130,7 @@ const desktopBackendLayer = DesktopBackendManager.layer.pipe(
 );
 
 const desktopApplicationLayer = Layer.mergeAll(
+  DesktopNativePermissions.layer,
   DesktopLifecycle.layer,
   DesktopApplicationMenu.layer,
   DesktopShellEnvironment.layer,

@@ -6,6 +6,9 @@ export const NATIVE_CONTROL_PREVIEW_CHANNEL = "desktop:native-control-preview";
 export const NATIVE_CONTROL_CHAT_STATE_CHANNEL = "desktop:native-control-chat-state";
 export const NATIVE_CONTROL_CHAT_ENABLE_CHANNEL = "desktop:native-control-chat-enable";
 export const NATIVE_CONTROL_CHANGED_CHANNEL = "desktop:native-control-changed";
+export const NATIVE_CONTROL_PERMISSIONS_CHANNEL = "desktop:native-control-permissions";
+export const NATIVE_CONTROL_REQUEST_PERMISSIONS_CHANNEL =
+  "desktop:native-control-request-permissions";
 export const CONFIRM_CHANNEL = "desktop:confirm";
 export const SET_THEME_CHANNEL = "desktop:set-theme";
 export const CONTEXT_MENU_CHANNEL = "desktop:context-menu";

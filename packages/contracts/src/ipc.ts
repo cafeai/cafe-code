@@ -415,6 +415,18 @@ export const NativeControlChatStateSchema = Schema.Struct({
   control: NativeControlStateSchema,
 });
 export type NativeControlChatState = typeof NativeControlChatStateSchema.Type;
+export const NativeControlPermissionsStateSchema = Schema.Struct({
+  platform: Schema.String,
+  accessibility: Schema.Literals(["granted", "missing", "unknown"]),
+  screenRecording: Schema.Literals([
+    "not-determined",
+    "granted",
+    "denied",
+    "restricted",
+    "unknown",
+  ]),
+});
+export type NativeControlPermissionsState = typeof NativeControlPermissionsStateSchema.Type;
 export const NativeControlResultSchema = Schema.Struct({
   content: Schema.Array(Schema.Record(Schema.String, Schema.Unknown)),
   isError: Schema.optionalKey(Schema.Boolean),
@@ -431,6 +443,8 @@ export interface DesktopBridge {
     enabled: boolean;
   }) => Promise<NativeControlChatState>;
   onNativeControlChanged?: (listener: () => void) => () => void;
+  getNativeControlPermissions?: () => Promise<NativeControlPermissionsState>;
+  requestNativeControlPermissions?: () => Promise<NativeControlPermissionsState>;
   getNativeControlDiagnostics?: () => Promise<NativeControlResult>;
   captureNativeControlPreview?: () => Promise<NativeControlResult>;
   getAppBranding: () => DesktopAppBranding | null;

@@ -1,5 +1,10 @@
 import { useEffect, useState } from "react";
-import type { DesktopBridge, NativeControlResult, NativeControlState } from "@cafecode/contracts";
+import type {
+  DesktopBridge,
+  NativeControlPermissionsState,
+  NativeControlResult,
+  NativeControlState,
+} from "@cafecode/contracts";
 import { MonitorIcon, RefreshCwIcon } from "lucide-react";
 import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
@@ -11,27 +16,41 @@ type ControlBridge = Pick<
   | "setNativeControlEnabled"
   | "getNativeControlDiagnostics"
   | "captureNativeControlPreview"
+  | "getNativeControlPermissions"
+  | "requestNativeControlPermissions"
+  | "onNativeControlChanged"
 >;
 export function NativeControlSettings({
   bridge = window.desktopBridge,
 }: { bridge?: ControlBridge } = {}) {
   const [state, setState] = useState<NativeControlState>();
+  const [permissions, setPermissions] = useState<NativeControlPermissionsState>();
   const [pending, setPending] = useState(false);
   const [feedback, setFeedback] = useState<string>();
   const [preview, setPreview] = useState<string>();
   useEffect(() => {
     let active = true;
-    void bridge
-      ?.getNativeControlState?.()
-      .then((next) => {
-        if (active) setState(next);
-      })
-      .catch(() => {
-        if (active)
-          setFeedback("Could not read the local controller state. Restart Cafe or refresh.");
-      });
+    const update = () => {
+      if (!bridge?.getNativeControlState) return;
+      void Promise.all([bridge.getNativeControlState(), bridge.getNativeControlPermissions?.()])
+        .then(([next, grants]) => {
+          if (active) {
+            setState(next);
+            setPermissions(grants);
+          }
+        })
+        .catch(() => {
+          if (active)
+            setFeedback("Could not read the local controller state. Restart Cafe or refresh.");
+        });
+    };
+    update();
+    window.addEventListener("focus", update);
+    const unsubscribe = bridge?.onNativeControlChanged?.(update);
     return () => {
       active = false;
+      window.removeEventListener("focus", update);
+      unsubscribe?.();
     };
   }, [bridge]);
 
@@ -40,8 +59,21 @@ export function NativeControlSettings({
     setFeedback(undefined);
     try {
       setState(await bridge!.getNativeControlState!());
+      setPermissions(await bridge?.getNativeControlPermissions?.());
     } catch {
       setFeedback("Could not read the local controller state.");
+    } finally {
+      setPending(false);
+    }
+  };
+  const requestPermissions = async () => {
+    setPending(true);
+    setFeedback(undefined);
+    try {
+      setPermissions(await bridge!.requestNativeControlPermissions!());
+      setState(await bridge!.getNativeControlState!());
+    } catch {
+      setFeedback("Could not open permission setup. Use System Settings → Privacy & Security.");
     } finally {
       setPending(false);
     }
@@ -121,9 +153,25 @@ export function NativeControlSettings({
         )}
         {state?.platform === "darwin" && (
           <p>
-            Allow Cafe (Electron for development builds) in System Settings → Privacy &amp; Security
-            → Accessibility and Screen &amp; System Audio Recording. A restart may be required after
-            changing a grant.
+            Allow Cafe Code in System Settings → Privacy &amp; Security. A restart may be required
+            after granting access.
+          </p>
+        )}
+        {permissions && (
+          <p role="status">
+            Accessibility:{" "}
+            {permissions.accessibility === "granted"
+              ? "Allowed"
+              : permissions.accessibility === "unknown"
+                ? "Unknown"
+                : "Needed"}
+            {" · "}
+            Screen Recording:{" "}
+            {permissions.screenRecording === "granted"
+              ? "Allowed"
+              : permissions.screenRecording === "unknown"
+                ? "Unknown"
+                : "Needed"}
           </p>
         )}
         <div className="flex flex-wrap gap-2">
@@ -147,6 +195,22 @@ export function NativeControlSettings({
             }}
           >
             Check permissions
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={
+              pending ||
+              !state?.enabled ||
+              !bridge?.requestNativeControlPermissions ||
+              (permissions?.accessibility === "granted" &&
+                permissions.screenRecording === "granted")
+            }
+            onClick={() => {
+              void requestPermissions();
+            }}
+          >
+            Set up permissions
           </Button>
           <Button
             size="sm"

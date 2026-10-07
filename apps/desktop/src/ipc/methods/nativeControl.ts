@@ -1,5 +1,6 @@
 import {
   NativeControlChatStateSchema,
+  NativeControlPermissionsStateSchema,
   NativeControlResultSchema,
   NativeControlStateSchema,
   ThreadId,
@@ -7,6 +8,7 @@ import {
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { DesktopNativeControl } from "../../nativeControl/DesktopNativeControl.ts";
+import { DesktopNativePermissions } from "../../nativeControl/DesktopNativePermissions.ts";
 import { ElectronWindow } from "../../electron/ElectronWindow.ts";
 import * as IpcChannels from "../channels.ts";
 import { makeIpcMethod } from "../DesktopIpc.ts";
@@ -16,6 +18,34 @@ import { makeIpcMethod } from "../DesktopIpc.ts";
 const notifyNativeControlChanged = Effect.gen(function* () {
   const windows = yield* ElectronWindow;
   yield* windows.sendAll(IpcChannels.NATIVE_CONTROL_CHANGED_CHANNEL);
+});
+
+const promptForNativePermissions = Effect.gen(function* () {
+  const permissions = yield* DesktopNativePermissions;
+  yield* permissions.prompt().pipe(
+    Effect.catchCause(() => Effect.logWarning("Could not show computer-use permissions.")),
+    Effect.forkScoped,
+  );
+});
+
+export const getNativeControlPermissions = makeIpcMethod({
+  channel: IpcChannels.NATIVE_CONTROL_PERMISSIONS_CHANNEL,
+  payload: Schema.Void,
+  result: NativeControlPermissionsStateSchema,
+  handler: Effect.fn("desktop.nativeControl.permissions")(function* () {
+    const permissions = yield* DesktopNativePermissions;
+    return yield* permissions.state;
+  }),
+});
+
+export const requestNativeControlPermissions = makeIpcMethod({
+  channel: IpcChannels.NATIVE_CONTROL_REQUEST_PERMISSIONS_CHANNEL,
+  payload: Schema.Void,
+  result: NativeControlPermissionsStateSchema,
+  handler: Effect.fn("desktop.nativeControl.requestPermissions")(function* () {
+    const permissions = yield* DesktopNativePermissions;
+    return yield* permissions.prompt();
+  }),
 });
 
 export const getNativeControlState = makeIpcMethod({
@@ -35,6 +65,7 @@ export const setNativeControlEnabled = makeIpcMethod({
     const host = yield* DesktopNativeControl;
     const state = yield* Effect.promise(() => host.setEnabled(enabled));
     yield* notifyNativeControlChanged;
+    if (enabled) yield* promptForNativePermissions;
     return state;
   }),
 });
@@ -57,6 +88,7 @@ export const setNativeControlChatEnabled = makeIpcMethod({
     const host = yield* DesktopNativeControl;
     const state = yield* Effect.promise(() => host.setChatEnabled(threadId, enabled));
     yield* notifyNativeControlChanged;
+    if (enabled) yield* promptForNativePermissions;
     return state;
   }),
 });

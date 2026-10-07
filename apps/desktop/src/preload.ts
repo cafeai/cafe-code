@@ -125,6 +125,10 @@ if (process.isMainFrame === true) {
             ipcRenderer.invoke(IpcChannels.NATIVE_CONTROL_DIAGNOSTICS_CHANNEL),
           captureNativeControlPreview: () =>
             ipcRenderer.invoke(IpcChannels.NATIVE_CONTROL_PREVIEW_CHANNEL),
+          getNativeControlPermissions: () =>
+            ipcRenderer.invoke(IpcChannels.NATIVE_CONTROL_PERMISSIONS_CHANNEL),
+          requestNativeControlPermissions: () =>
+            ipcRenderer.invoke(IpcChannels.NATIVE_CONTROL_REQUEST_PERMISSIONS_CHANNEL),
           getNativeControlChatState: (threadId) =>
             ipcRenderer.invoke(IpcChannels.NATIVE_CONTROL_CHAT_STATE_CHANNEL, threadId),
           setNativeControlChatEnabled: (input) =>

@@ -65,8 +65,10 @@ default on. Only trusted renderer IPC can change them, and the host enforces
 disabled chat access before dispatch even with an already-connected provider.
 
 After merging and building, open **Settings → MCP → Local desktop control** in
-the local Mac desktop app. Check permissions and test a screenshot.
-Grant the actual Cafe app Accessibility and Screen Recording in macOS System
+the local Mac desktop app. Cafe prompts once per launch for missing permissions;
+the composer enable action and **Set up permissions** in Settings can reopen it.
+Choose the missing permission to open its macOS settings, then approve the actual
+Cafe app's Accessibility and Screen Recording in macOS System
 Settings when required. Start a new Codex/Claude session or normally stop/resume
 an existing session to attach the tools. Begin with `health`, observe before
 acting, and use a disposable window for initial input testing. Never repeat an

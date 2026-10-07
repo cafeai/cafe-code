@@ -30,6 +30,7 @@ import * as DesktopState from "./DesktopState.ts";
 import * as DesktopUpdates from "../updates/DesktopUpdates.ts";
 import * as DesktopSourceUpdates from "../updates/DesktopSourceUpdates.ts";
 import * as DesktopDebugServer from "../debug/DesktopDebugServer.ts";
+import { DesktopNativePermissions } from "../nativeControl/DesktopNativePermissions.ts";
 
 const DEFAULT_DESKTOP_BACKEND_PORT = 3773;
 const DEFAULT_DESKTOP_BACKEND_HTTPS_PORT = 3775;
@@ -481,6 +482,13 @@ const bootstrap = Effect.gen(function* () {
   // backend are ready. The coordinator's scoped finalizer unregisters it on
   // Quit; closing the ordinary main window does not end dictation on macOS.
   yield* installGlobalDictationCoordinator;
+  // Ask once after Electron and the backend are ready. Dismissal never blocks
+  // ordinary chat startup; native health itself remains a read-only check.
+  const permissions = yield* DesktopNativePermissions;
+  yield* permissions.prompt(true).pipe(
+    Effect.catchCause(() => Effect.logWarning("Could not show computer-use permissions.")),
+    Effect.forkScoped,
+  );
   yield* runProviderDaemonHealthWatchdog({
     backendManager,
     providerDaemonManager,
