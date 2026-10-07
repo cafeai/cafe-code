@@ -1,4 +1,3 @@
-import { DesktopPicker } from "../virtualDesktop/VirtualDesktops";
 import { providerSkillsScopeRevision, useProviderSkills } from "./useProviderSkills";
 import { useProviderCommands } from "./useProviderCommands";
 import { useWsConnectionStatus } from "../../rpc/wsConnectionState";
@@ -6,7 +5,6 @@ import { usePrimaryEnvironmentId } from "../../environments/primary";
 import { useSavedEnvironmentRuntimeStore } from "../../environments/runtime";
 import type { ScheduledFollowupsContext } from "./ScheduledFollowups";
 import type { ProviderTasksContext } from "./ProviderTasks";
-import { resolveComposerThreadId } from "~/composerDraftStore";
 import type {
   ApprovalRequestId,
   ChatFileAttachment,
@@ -1021,9 +1019,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // Store subscriptions (prompt / images)
   // ------------------------------------------------------------------
   const composerDraft = useComposerThreadDraft(composerDraftTarget);
-  const desktopThreadId = useComposerDraftStore((state) =>
-    resolveComposerThreadId(state, composerDraftTarget),
-  );
   const prompt = composerDraft.prompt;
   const composerImages = composerDraft.images;
   const composerFiles = composerDraft.files;
@@ -4083,12 +4078,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     ) : null}
                   </>
                 )}
-                <DesktopPicker
-                  environmentId={environmentId}
-                  threadId={desktopThreadId}
-                  provider={selectedProvider}
-                  compact={isComposerFooterCompact}
-                />
               </div>
 
               {/* Keep task progress outside the horizontally scrolling provider

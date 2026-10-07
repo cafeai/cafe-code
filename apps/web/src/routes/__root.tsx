@@ -1,4 +1,3 @@
-import { RemoteDesktopViewerHost } from "../components/remoteWorkspace/RemoteDesktopDialog";
 import { type ServerLifecycleWelcomePayload } from "@cafecode/contracts";
 import { scopedProjectKey, scopeProjectRef } from "@cafecode/client-runtime";
 import {
@@ -181,7 +180,6 @@ function RootRouteView() {
       <PowerSaveBlockerSync />
       {primaryEnvironmentAuthenticated ? <ProviderUpdateLaunchNotification /> : null}
       {primaryEnvironmentAuthenticated ? <DesktopNotificationWatcher /> : null}
-      <RemoteDesktopViewerHost />
       <CommandPalette>
         <AppSidebarLayout>
           <Outlet />

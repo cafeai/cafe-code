@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "version": "0.34.0",
+  "tag": "cua-driver-rs-v0.34.0",
+  "sourceCommit": "b0968e1b12834e485dda68789541a3cc57664a9f",
+  "auditedAt": "2026-10-07",
+  "repository": "trycua/cua",
+  "license": "MIT",
+  "certificateIdentity": "https://github.com/trycua/cua/.github/workflows/cd-rust-cua-driver.yml@refs/tags/cua-driver-rs-v0.34.0",
+  "certificateIssuer": "https://token.actions.githubusercontent.com",
+  "checksumManifest": {
+    "name": "SHA256SUMS",
+    "bytes": 2111,
+    "sha256": "a2003554b3e467bc70538601263b2cf98e347ca6c30e11a8639c6ca2f29ae4c5"
+  },
+  "assets": {
+    "darwin-universal": {
+      "name": "cua-driver-rs-0.34.0-darwin-universal-binary.tar.gz",
+      "bytes": 47108179,
+      "sha256": "940dc008e0f7c5d217d14c0f247d1ebab91b1bac965f4a649d19e8c789bdfd81"
+    },
+    "linux-arm64": {
+      "name": "cua-driver-rs-0.34.0-linux-arm64-binary.tar.gz",
+      "bytes": 34607515,
+      "sha256": "9db8b9084add57eb97be8164367b24b6be54ed4f3dc01213e64b72d7fc09fddb"
+    },
+    "linux-x64": {
+      "name": "cua-driver-rs-0.34.0-linux-x86_64-binary.tar.gz",
+      "bytes": 34818314,
+      "sha256": "629ac96eff829d4dfd5cf221f3f2165c2d813aed91e5efb7b20777a741cd70a7"
+    },
+    "win32-arm64": {
+      "name": "cua-driver-rs-0.34.0-windows-arm64-binary.zip",
+      "bytes": 29454268,
+      "sha256": "df5786c6e7841d2f0d88f31c627c487181463ed99614b03efc0e907acfc698c3"
+    },
+    "win32-x64": {
+      "name": "cua-driver-rs-0.34.0-windows-x86_64-binary.zip",
+      "bytes": 31314221,
+      "sha256": "bcc520e50861c7092cf775846fec76ae386d7dcd6b5b408608b0ea4423a8b888"
+    }
+  },
+  "audit": {
+    "status": "reviewed-with-findings",
+    "integrationApproved": false,
+    "registryPackagesScanned": 621,
+    "advisoryMatches": [
+      {
+        "package": "anyhow",
+        "version": "1.0.102",
+        "ids": ["RUSTSEC-2026-0190"]
+      },
+      {
+        "package": "atomic-polyfill",
+        "version": "1.0.3",
+        "ids": ["RUSTSEC-2023-0089"]
+      },
+      {
+        "package": "event-listener",
+        "version": "5.4.1",
+        "ids": ["RUSTSEC-2026-0221"]
+      },
+      {
+        "package": "lru",
+        "version": "0.18.1",
+        "ids": ["RUSTSEC-2026-0253"]
+      },
+      {
+        "package": "memmap2",
+        "version": "0.9.10",
+        "ids": ["RUSTSEC-2026-0186"]
+      },
+      {
+        "package": "quick-xml",
+        "version": "0.39.4",
+        "ids": ["RUSTSEC-2026-0194", "RUSTSEC-2026-0195"]
+      },
+      {
+        "package": "ttf-parser",
+        "version": "0.21.1",
+        "ids": ["RUSTSEC-2026-0192"]
+      }
+    ]
+  }
+}

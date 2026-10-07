@@ -1,3 +1,4 @@
+import { installNativeControlSessionBroker } from "../../nativeControl/sessionRuntime.ts";
 // @effect-diagnostics nodeBuiltinImport:off
 import {
   existsSync,
@@ -14170,3 +14171,65 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 });
+
+it.effect(
+  "attaches session-only native desktop MCP with normal Claude permissions and retires its capability",
+  () => {
+    const harness = makeHarness({ environment: {} });
+    return Effect.gen(function* () {
+      const lifecycle: string[] = [];
+      const name = "cafe-native-abcdefghijklmnopqrstuv";
+      const launch = {
+        command: process.execPath,
+        args: ["synthetic native bridge.mjs", "synthetic private connection.json"],
+        env: { ELECTRON_RUN_AS_NODE: "1" },
+      };
+      let disposed = false;
+      const uninstall = installNativeControlSessionBroker({
+        bind: async (identity) => {
+          assert.equal(identity.provider, "claudeAgent");
+          assert.equal(identity.threadId, THREAD_ID);
+          lifecycle.push("bound");
+          return {
+            name,
+            launch,
+            activate: async () => {
+              lifecycle.push("active");
+            },
+            beginTurn: async () => {
+              lifecycle.push("begin");
+            },
+            endTurn: async () => {
+              lifecycle.push("end");
+            },
+            dispose: async () => {
+              if (!disposed) lifecycle.push("disposed");
+              disposed = true;
+            },
+          };
+        },
+      });
+      yield* Effect.addFinalizer(() => Effect.sync(uninstall));
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+      const options = harness.createInputs[0]!.options;
+      assert.deepEqual(options.mcpServers, {
+        [name]: { type: "stdio", ...launch, alwaysLoad: true },
+      });
+      assert.deepEqual(options.settingSources, ["user", "project", "local"]);
+      assert.equal(options.permissionMode, "default");
+      assert.equal(options.allowedTools, undefined);
+      assert.equal(options.allowDangerouslySkipPermissions, undefined);
+      assert.equal(options.strictMcpConfig, undefined);
+      assert.deepEqual(lifecycle, ["bound", "active"]);
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "Synthetic native-control prompt" });
+      assert.ok(lifecycle.includes("begin"));
+      yield* adapter.interruptTurn(THREAD_ID);
+      assert.ok(lifecycle.includes("end"));
+      yield* adapter.stopSession(THREAD_ID);
+      yield* adapter.stopAll();
+      assert.equal(disposed, true);
+      assert.equal(lifecycle.filter((v) => v === "disposed").length, 1);
+    }).pipe(Effect.provide(harness.layer));
+  },
+);

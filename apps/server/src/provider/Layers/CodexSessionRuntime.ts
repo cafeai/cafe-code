@@ -1,8 +1,4 @@
 import { createHash, randomUUID } from "node:crypto";
-import {
-  desktopMcpOverride,
-  type DesktopMcpLaunch,
-} from "../../virtualDesktop/codexConfiguration.ts";
 import type { SchedulingSessionBinding } from "../../scheduledFollowups/sessionRuntime.ts";
 import {
   ApprovalRequestId,
@@ -338,7 +334,7 @@ export interface CodexTransportPolicy {
 }
 
 export interface CodexAppServerLaunchOptions {
-  readonly desktopMcp?: DesktopMcpLaunch | undefined;
+  readonly nativeControlMcp?: Pick<SchedulingSessionBinding, "name" | "launch"> | undefined;
   readonly schedulingMcp?: Pick<SchedulingSessionBinding, "name" | "launch"> | undefined;
   readonly maxConcurrentSubagents?: number | undefined;
   readonly transportPolicy?: CodexTransportPolicy | undefined;
@@ -427,8 +423,8 @@ export function buildCodexAppServerArgs(
     "-c",
     CODEX_UPDATE_PLAN_CONFIG_OVERRIDE,
     ...concurrencyArgs,
-    ...(options.desktopMcp ? ["-c", desktopMcpOverride(options.desktopMcp)] : []),
     ...(options.schedulingMcp ? ["-c", schedulingMcpOverride(options.schedulingMcp)] : []),
+    ...(options.nativeControlMcp ? ["-c", schedulingMcpOverride(options.nativeControlMcp)] : []),
   ] as const;
 
   if (options.transportPolicy?.responsesWebsockets !== "disabled") {
@@ -458,9 +454,9 @@ export function buildCodexAppServerArgs(
 }
 
 export interface CodexSessionRuntimeOptions {
+  readonly nativeControlMcp?: Pick<SchedulingSessionBinding, "name" | "launch"> | undefined;
   /** Exact Cafe chat/account-bound durable guard; never a native history writer. */
   readonly historySafety?: CodexHistorySafetyCallbacks<CodexSessionRuntimeError>;
-  readonly desktopMcp?: DesktopMcpLaunch | undefined;
   readonly schedulingMcp?: Pick<SchedulingSessionBinding, "name" | "launch"> | undefined;
   readonly threadId: ThreadId;
   readonly providerInstanceId?: ProviderInstanceId;
@@ -5614,7 +5610,6 @@ export const readCodexSubagentSummaryWithInitializedClient = Effect.fn(
 });
 
 export interface CodexTransientSubagentHistoryReadOptions {
-  readonly desktopMcp?: DesktopMcpLaunch | undefined;
   readonly binaryPath: string;
   readonly appServerCwd: string;
   readonly rootProviderThreadId: string;
@@ -5665,7 +5660,6 @@ export const readCodexSubagentThreadTransient = Effect.fn(
             command: options.binaryPath,
             args: buildCodexAppServerArgs({
               maxConcurrentSubagents: options.maxConcurrentSubagents,
-              desktopMcp: options.desktopMcp,
               transportPolicy: options.transportPolicy,
             }),
             cwd: options.appServerCwd,
@@ -5781,7 +5775,7 @@ export const makeCodexSessionRuntime = (
       ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
     };
     const appServerArgs = buildCodexAppServerArgs({
-      desktopMcp: options.desktopMcp,
+      nativeControlMcp: options.nativeControlMcp,
       schedulingMcp: options.schedulingMcp,
       maxConcurrentSubagents: options.maxConcurrentSubagents,
       transportPolicy: options.transportPolicy,

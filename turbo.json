@@ -1,5 +1,11 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  "globalDependencies": [
+    "native/cua-driver/build.json",
+    "native/cua-driver/release.json",
+    "native/cua-driver/catalog.json",
+    "native/cua-driver/local-only.patch"
+  ],
   "globalEnv": [
     "HOST",
     "PORT",

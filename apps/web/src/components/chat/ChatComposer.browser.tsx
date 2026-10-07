@@ -23,7 +23,6 @@ import { ChatComposer, type ChatComposerHandle, type ChatComposerProps } from ".
 // Only the unrelated external environment integrations are replaced. Provider
 // selection, draft resolution, menu placement, dialog ownership and outgoing
 // composer snapshots all execute their production code without a live server.
-vi.mock("../virtualDesktop/VirtualDesktops", () => ({ DesktopPicker: () => null }));
 vi.mock("../../hooks/useSettings", () => {
   return {
     useSettings: (select?: (value: typeof DEFAULT_UNIFIED_SETTINGS) => unknown) =>

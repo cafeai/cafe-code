@@ -40,8 +40,8 @@ again and approve its new certificate. Externally provisioned certificates keep
 their existing identity policy.
 
 The **Workspace server** selector beneath the sidebar logo appears only after a
-remote environment is saved. Remote MCP installation, in-app desktop viewing,
-server-specific help and settings failure feedback apply only to saved remote
+remote environment is saved. Remote MCP installation, server-specific help and
+settings failure feedback apply only to saved remote
 workspaces. Primary-only desktop and browser sessions keep their existing controls,
 wording and settings save behavior. Selecting a server switches the whole app:
 chat and project lists, search, new chats/projects, Archive, Recycle Bin, task
@@ -63,29 +63,18 @@ belong to the computer running the frontend. A disconnected selected server
 cannot fall back to executing a write on the Mac. Reconnect it with the sidebar
 button or manage its saved login in WebUI settings.
 
-| Feature                                                                                                             | Where it runs                                                                                                                                                                                                                                                 |
-| ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Chats, standalone chats, projects, Git, worktrees, scheduled follow-ups and attachments                             | Selected server; the Mac renders the results.                                                                                                                                                                                                                 |
-| Provider configuration, updates, restarts, usage, diagnostics, keybindings, system prompt and access administration | Selected server. Provider login opens its supported host login window; complete it on that PC.                                                                                                                                                                |
-| MCP registration and dictation credentials                                                                          | Selected server, subject to its owner/transport/runtime capabilities. Remote MCP installation requires a desktop-mode backend. Chat dictation uses the local microphone with the selected server's ephemeral credential.                                      |
-| File links and work-log file links                                                                                  | Local desktop files open in the configured external editor; remote file actions copy the path. Cafe has no in-app remote text viewer, editor or terminal.                                                                                                     |
-| Virtual desktop viewer                                                                                              | Linux virtual desktops can be viewed and controlled inside the Mac/Windows/browser frontend. Linux runtime prerequisites remain on the server. Windows/macOS hosts do not acquire Linux virtual desktops. The existing local Linux native viewer is retained. |
-| Finder/Explorer, native folder pickers, app installation/exposure/certificates and Mac global dictation             | The machine running that native app. Remote paths never launch a Mac editor or Finder. Mac global dictation uses the Mac's local Cafe credential and native permissions, separately from remote chat dictation.                                               |
+| Feature                                                                                                             | Where it runs                                                                                                                                                                                                            |
+| ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Chats, standalone chats, projects, Git, worktrees, scheduled follow-ups and attachments                             | Selected server; the Mac renders the results.                                                                                                                                                                            |
+| Provider configuration, updates, restarts, usage, diagnostics, keybindings, system prompt and access administration | Selected server. Provider login opens its supported host login window; complete it on that PC.                                                                                                                           |
+| MCP registration and dictation credentials                                                                          | Selected server, subject to its owner/transport/runtime capabilities. Remote MCP installation requires a desktop-mode backend. Chat dictation uses the local microphone with the selected server's ephemeral credential. |
+| File links and work-log file links                                                                                  | Local desktop files open in the configured external editor; remote file actions copy the path. Cafe has no in-app remote text viewer, editor or terminal.                                                                |
+| Finder/Explorer, native folder pickers, app installation/exposure/certificates and Mac global dictation             | The machine running that native app. Remote paths never launch a Mac editor or Finder. Mac global dictation uses the Mac's local Cafe credential and native permissions, separately from remote chat dictation.          |
 
-Remote desktop viewer input uses owner-authenticated
-`POST /api/workspace` over HTTPS or an observed loopback connection. Install the
-updated Cafe backend on the PC as well as the updated Mac frontend. Older servers
-can still supply their existing chat/project APIs but cannot supply these new
-desktop control operations. Cafe's existing HTTPS proxy or a trusted local TLS proxy
-provides the protected backend hop. Direct cleartext LAN requests cannot invoke
-the new owner controls.
-
-Desktop frames remain private, bounded authenticated PNGs; input and control
-leases are not written to conversation history or operational logs. **Take
-control** explicitly pauses agent input. Owner/session, desktop incarnation and
-native control epoch fence every action. A native viewer or agent takeover
-invalidates older input. Closing releases the current lease; lost viewers expire
-after 30 seconds. Queued input is cancelled on close and is never retried.
+The interim Linux virtual desktop viewer and its input HTTP routes have been
+removed. The Cua replacement starts with local native control; saved remote
+environments do not grant access to a computer's desktop. Historical conversation
+screenshots remain available through authenticated, private observation reads.
 
 Network reachability, DNS, tunnels, certificates, CORS and browser mixed-content
 policy still apply. Adding a connection does not install an SSH tunnel or alter
@@ -96,9 +85,8 @@ the PC.
 ## Qualification
 
 Unit tests cover connection authentication, environment-bound API and access
-administration, per-server state, HTTP owner/transport admission, rejection of
-removed file and terminal operations, and viewer lease takeover, incarnation and
-expiry. Browser fixtures cover remote routes/drafts and selection, Desk navigation,
+administration and per-server state. Browser fixtures cover remote routes/drafts
+and selection, Desk navigation,
 settings, provider controls, usage, MCP, dictation, secret clearing and constrained
 layout. The default test suite does not start real providers or use user credentials.
 
@@ -110,6 +98,6 @@ peers and the checked-in test-only certificate; it never connects to a user's
 server or uses credentials. It requires a native graphical Electron runtime.
 
 The implementation was checked on macOS. A separate Linux PC, real remote provider
-authentication, production certificates and the Linux native viewer's new human-input
-protocol still require native end-to-end qualification on that host. Manager
-fixtures on macOS establish lease policy, not native Linux input execution.
+authentication and production certificates still require native end-to-end
+qualification on that host. Native Cua desktop permissions, capture and input
+will need separate host qualification before that feature is enabled.

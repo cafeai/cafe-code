@@ -8,12 +8,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import { Command, Flag } from "effect/unstable/cli";
 
-export type CafeKillallProcessRole =
-  | "desktop-client"
-  | "launcher"
-  | "provider-runtime"
-  | "server"
-  | "virtual-desktop";
+export type CafeKillallProcessRole = "desktop-client" | "launcher" | "provider-runtime" | "server";
 
 export interface CafeKillallProcessSnapshot {
   readonly pid: number;
@@ -321,11 +316,6 @@ export function classifyCafeKillallProcess(
   processSnapshot: CafeKillallProcessSnapshot,
 ): CafeKillallProcessRole | null {
   const { command } = processSnapshot;
-  if (
-    /^cafe-desktop-native(?:\.[a-f0-9]{16})?$/.test(executableBasename(command)) &&
-    /\s(?:worker|viewer)\s/.test(command)
-  )
-    return "virtual-desktop";
   if (matchesProviderRuntimeCommand(command)) {
     return "provider-runtime";
   }
@@ -404,7 +394,6 @@ export function selectCafeKillallTargets(
           "desktop-client": 0,
           server: 1,
           "provider-runtime": 2,
-          "virtual-desktop": 3,
           launcher: 4,
         };
         const roleDelta = priority[left.role] - priority[right.role];
@@ -455,9 +444,7 @@ export const terminateCafeKillallTarget = (
   } = {},
 ): Effect.Effect<CafeKillallTerminationResult> =>
   Effect.gen(function* () {
-    const terminateGraceMs =
-      options.terminateGraceMs ??
-      (target.role === "virtual-desktop" ? 5000 : DEFAULT_TERMINATE_GRACE_MS);
+    const terminateGraceMs = options.terminateGraceMs ?? DEFAULT_TERMINATE_GRACE_MS;
     const killGraceMs = options.killGraceMs ?? DEFAULT_KILL_GRACE_MS;
     if (target.pid <= 0 || target.pid === process.pid) {
       return {

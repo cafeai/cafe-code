@@ -39,7 +39,6 @@ const harness = vi.hoisted(() => ({
   updateClient: vi.fn(),
   updateSettings: vi.fn(),
   applySettings: vi.fn(),
-  desktopStatus: vi.fn(),
   settings: null as ServerSettings | null,
   backendUrl: "http://127.0.0.1:3774/",
   remote: false,
@@ -57,7 +56,6 @@ vi.mock("~/environments/runtime", () => ({
         getMcpStatus: harness.getStatus,
         updateMcpClient: harness.updateClient,
         updateSettings: harness.updateSettings,
-        virtualDesktop: harness.desktopStatus,
       },
     },
   }),
@@ -105,7 +103,6 @@ describe("MCP settings", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     harness.settings = DEFAULT_SERVER_SETTINGS;
-    harness.desktopStatus.mockResolvedValue({ supported: false });
     harness.backendUrl = "http://127.0.0.1:3774/";
     harness.remote = false;
     harness.getStatus.mockResolvedValue(status);
@@ -203,14 +200,12 @@ describe("MCP settings", () => {
     expect(harness.updateClient).toHaveBeenLastCalledWith({ client: "codex", operation: "remove" });
   });
 
-  it("keeps desktop controls out of the MCP tab on Linux", async () => {
-    harness.desktopStatus.mockResolvedValue({ supported: true, available: false });
+  it("keeps retired desktop controls out of the MCP tab", async () => {
     mounted = await mount();
     await expect.element(page.getByRole("switch", { name: "Enable Cafe Code MCP" })).toBeVisible();
     await expect
       .element(page.getByRole("switch", { name: "Enable desktop control" }))
       .not.toBeInTheDocument();
-    expect(harness.desktopStatus).not.toHaveBeenCalled();
   });
 
   it("keeps installation unavailable for primary browser sessions", async () => {

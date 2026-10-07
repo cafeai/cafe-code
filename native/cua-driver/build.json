@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "sourceCommit": "b0968e1b12834e485dda68789541a3cc57664a9f",
+  "patchSha256": "d47336d80ed20ce731c3a579799453ae822db7777a7a8a5e0b4ab22f7201a156",
+  "reviewedPlatforms": ["darwin"],
+  "linuxBlocker": "RustSec XML advisories remain in runtime-reachable Linux AT-SPI dependencies",
+  "sourceOnly": true,
+  "telemetry": "compile-time-disabled",
+  "overlay": "disabled",
+  "dependencyFixes": {
+    "anyhow": "1.0.103",
+    "event-listener": "5.4.2",
+    "lru": "0.18.2",
+    "memmap2": "0.9.11"
+  }
+}

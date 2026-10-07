@@ -27,7 +27,6 @@ import {
   THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES,
   THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_BYTES,
   TurnId,
-  VirtualDesktopError,
 } from "@cafecode/contracts";
 import { createModelSelection } from "@cafecode/shared/model";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -62,7 +61,6 @@ import {
 import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import { buildCodexSteerClientCorrelationId } from "../codexSteerCorrelation.ts";
-import { CODEX_HISTORY_DIAGNOSIS_UNCERTAIN_MESSAGE } from "../codexHistorySafety.ts";
 import {
   type CodexSessionRuntimeOptions,
   type CodexSessionRuntimeError,
@@ -83,10 +81,7 @@ import {
   type SchedulingSessionBinding,
   type SchedulingSessionBroker,
 } from "../../scheduledFollowups/sessionRuntime.ts";
-import {
-  installDesktopSessionBroker,
-  type DesktopSessionBinding,
-} from "../../virtualDesktop/sessionBroker.ts";
+import { installNativeControlSessionBroker } from "../../nativeControl/sessionRuntime.ts";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 const decodeMessageId = Schema.decodeUnknownSync(MessageId);
 const isStartedItem = Schema.is(EffectCodexSchema.V2ItemStartedNotification);
@@ -7380,266 +7375,117 @@ it.effect("finishes Codex retirement when revoked scheduling files cannot be cle
   ),
 );
 
-function desktopCase(
-  run: (fixture: {
-    adapter: CodexAdapterShape;
-    factory: ReturnType<typeof makeRuntimeFactory>;
-    bindings: Array<DesktopSessionBinding>;
-    select: (value: string) => void;
-  }) => Effect.Effect<void, unknown>,
-) {
-  return Effect.scoped(
-    Effect.gen(function* () {
-      let selection = "disabled";
-      const bindings: Array<DesktopSessionBinding> = [];
-      const uninstall = installDesktopSessionBroker({
-        disabledBinding: () => ({ bridgePath: "bridge.mjs", connectionPath: null }),
-        inherit: async () => {},
-        detach: async () => {},
-        signature: async () => selection,
-        bind: async () => {
-          const binding = {
-            signature: selection,
-            bridgePath: "bridge.mjs",
-            connectionPath: selection === "disabled" ? null : "connection.json",
-            startTurn: vi.fn(async () => {}),
-            endTurn: vi.fn(async () => {}),
-            dispose: vi.fn(async () => {}),
-          };
-          bindings.push(binding);
-          return binding;
+it.each(["cafe-desktop", "cafe-native-abcdefghijklmnopqrstuv"])(
+  "redacts %s input and images from item and nested thread snapshots",
+  (server) => {
+    const reference = {
+      id: "24ff9ac9-1d98-4bb9-9d3f-1e868663a064",
+      capturedAt: "2026-09-09T00:00:00.000Z",
+      width: 1280,
+      height: 800,
+      frame: 4,
+      humanControl: false,
+      storage: "saved",
+    };
+    const item = {
+      id: "item",
+      type: "mcpToolCall",
+      server,
+      tool: "observe",
+      status: "completed",
+      arguments: { text: "private input" },
+      result: {
+        content: [{ type: "image", data: "private image" }],
+        structuredContent: {
+          desktopObservation: { ...reference, image: "private extra" },
+          privateKey: "private key",
         },
-      });
-      yield* Effect.addFinalizer(() => Effect.sync(uninstall));
-      const factory = makeRuntimeFactory();
-      const adapter = yield* makeCodexAdapter(decodeCodexSettings({}), {
-        makeRuntime: factory.factory,
-      });
-      yield* run({
-        adapter,
-        factory,
-        bindings,
-        select: (value) => {
-          selection = value;
-        },
-      });
-    }),
-  ).pipe(
-    Effect.provide(
-      Layer.mergeAll(
-        ServerConfig.layerTest(process.cwd(), process.cwd()),
-        ServerSettingsService.layerTest(),
-        providerSessionDirectoryTestLayer,
-      ).pipe(Layer.provideMerge(NodeServices.layer)),
-    ),
-  );
-}
-
-it.effect(
-  "restarts an idle desktop attachment with the exact native cursor and disposes the old authority first",
-  () =>
-    desktopCase(({ adapter, factory, bindings, select }) =>
-      Effect.gen(function* () {
-        const threadId = asThreadId("desktop-resume");
-        const original = yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
-        const old = factory.lastRuntime!;
-        assert.equal(old.options.desktopMcp?.connectionPath, null);
-        select("desktop-a");
-        yield* adapter.sendTurn({ threadId, input: "Continue" });
-        const next = factory.lastRuntime!;
-        assert.notEqual(next, old);
-        assert.deepEqual(next.options.resumeCursor, original.resumeCursor);
-        assert.equal(next.options.desktopMcp?.connectionPath, "connection.json");
-        assert.equal(old.closeImpl.mock.calls.length, 1);
-        assert.equal(vi.mocked(bindings[0]!.dispose).mock.calls.length >= 1, true);
-        assert.equal(vi.mocked(bindings[1]!.startTurn).mock.calls.length, 1);
-        yield* adapter.interruptTurn(threadId);
-        assert.equal(vi.mocked(bindings[1]!.endTurn).mock.calls.length, 1);
-      }),
-    ),
+      },
+      error: { message: "private error" },
+      extra: "private future field",
+    };
+    for (const payload of [{ item }, { thread: { turns: [{ items: [item] }] } }]) {
+      const event: ProviderEvent = {
+        id: asEventId("desktop-event"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread"),
+        createdAt: "2026-09-08T00:00:00.000Z",
+        method: "item/completed",
+        payload,
+        textDelta: "private text",
+        message: "private message",
+      };
+      const redacted = redactDesktopToolEvent(event);
+      assert.doesNotMatch(JSON.stringify(redacted), /private/);
+      assert.match(JSON.stringify(redacted), new RegExp(server));
+      if (server === "cafe-desktop")
+        assert.match(JSON.stringify(redacted), new RegExp(reference.id));
+      else assert.doesNotMatch(JSON.stringify(redacted), new RegExp(reference.id));
+      assert.equal(redacted.itemId, event.itemId);
+    }
+  },
 );
 
 it.effect(
-  "keeps the active desktop pinned and applies a pending selection only at the next idle turn",
+  "attaches native desktop authority beside scheduling and revokes it before interrupt retirement",
   () =>
-    desktopCase(({ adapter, factory, select }) =>
+    schedulingCase(({ createAdapter }) =>
       Effect.gen(function* () {
-        const threadId = asThreadId("desktop-pinned");
-        select("desktop-a");
-        const original = yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
-        const old = factory.lastRuntime!;
-        old.getSessionImpl.mockResolvedValue({
-          ...original,
-          status: "running",
-          activeTurnId: asTurnId("active"),
-        });
-        select("desktop-b");
-        yield* adapter.sendTurn({ threadId, input: "Steered while active" });
-        assert.equal(factory.lastRuntime, old);
-        old.getSessionImpl.mockResolvedValue({ ...original, status: "ready" });
-        yield* adapter.sendTurn({ threadId, input: "Next turn" });
-        assert.notEqual(factory.lastRuntime, old);
-        assert.deepEqual(factory.lastRuntime!.options.resumeCursor, original.resumeCursor);
-      }),
-    ),
-);
-
-it.effect("surfaces desktop admission errors without submitting or retrying the prompt", () =>
-  desktopCase(({ adapter, factory, bindings, select }) =>
-    Effect.gen(function* () {
-      const threadId = asThreadId("desktop-busy");
-      select("desktop-a");
-      yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
-      const runtime = factory.lastRuntime!;
-      const message =
-        "Another conversation controls this desktop. Wait for its turn to finish or select another desktop.";
-      vi.mocked(bindings[0]!.startTurn).mockRejectedValueOnce(
-        new VirtualDesktopError({ code: "busy", message }),
-      );
-      const error = yield* Effect.flip(adapter.sendTurn({ threadId, input: "Continue" }));
-      assert.equal(error._tag, "ProviderAdapterProcessError");
-      assert.equal("detail" in error && error.detail, message);
-      assert.equal(runtime.sendTurnImpl.mock.calls.length, 0);
-      assert.equal(vi.mocked(bindings[0]!.endTurn).mock.calls.length, 0);
-      vi.mocked(bindings[0]!.startTurn).mockRejectedValueOnce(new Error("private runtime path"));
-      const unknown = yield* Effect.flip(adapter.sendTurn({ threadId, input: "Continue" }));
-      assert.equal(
-        "detail" in unknown && unknown.detail,
-        "This desktop is unavailable or controlled by another conversation.",
-      );
-      assert.equal(runtime.sendTurnImpl.mock.calls.length, 0);
-      yield* adapter.sendTurn({ threadId, input: "Retry after release" });
-      assert.equal(runtime.sendTurnImpl.mock.calls.length, 1);
-    }),
-  ),
-);
-
-it.effect(
-  "keeps accepted-turn desktop ownership through an uncertain history diagnosis warning",
-  () =>
-    desktopCase(({ adapter, factory, bindings, select }) =>
-      Effect.gen(function* () {
-        const threadId = asThreadId("desktop-history-diagnosis");
-        select("desktop-a");
-        yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
-        const runtime = factory.lastRuntime!;
-        const binding = bindings[0]!;
-        const accepted = yield* adapter.sendTurn({ threadId, input: "Owner-authorized request" });
-        assert.equal(accepted.turnId, asTurnId("turn-1"));
-        assert.equal(runtime.sendTurnImpl.mock.calls.length, 1);
-        assert.equal(vi.mocked(binding.startTurn).mock.calls.length, 1);
-        const warningRead = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
-        yield* runtime.emit({
-          id: asEventId("history-diagnosis-warning"),
-          kind: "notification",
-          provider: ProviderDriverKind.make("codex"),
-          threadId,
-          turnId: accepted.turnId,
-          createdAt: "2026-10-07T00:00:00.000Z",
-          method: "warning",
-          message: CODEX_HISTORY_DIAGNOSIS_UNCERTAIN_MESSAGE,
-          payload: { message: CODEX_HISTORY_DIAGNOSIS_UNCERTAIN_MESSAGE },
-        });
-        const warning = yield* Fiber.join(warningRead);
-        assert.ok(Option.isSome(warning));
-        assert.equal(warning.value.type, "runtime.warning");
-        assert.equal(warning.value.payload.message, CODEX_HISTORY_DIAGNOSIS_UNCERTAIN_MESSAGE);
-        assert.equal(vi.mocked(binding.endTurn).mock.calls.length, 0);
-        assert.equal(vi.mocked(binding.dispose).mock.calls.length, 0);
-        assert.equal(runtime.closeImpl.mock.calls.length, 0);
-        const completionRead = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
-        yield* runtime.emit({
-          id: asEventId("history-diagnosis-real-completion"),
-          kind: "notification",
-          provider: ProviderDriverKind.make("codex"),
-          threadId,
-          turnId: accepted.turnId,
-          createdAt: "2026-10-07T00:00:01.000Z",
-          method: "turn/completed",
-          payload: {
-            threadId: "provider-thread-1",
-            turn: {
-              id: accepted.turnId,
-              items: [],
-              itemsView: "notLoaded",
-              status: "completed",
-              error: null,
-            },
+        const lifecycle: string[] = [];
+        const name = "cafe-native-abcdefghijklmnopqrstuv";
+        const launch = {
+          command: process.execPath,
+          args: ["synthetic native bridge.mjs", "synthetic private connection.json"],
+          env: { ELECTRON_RUN_AS_NODE: "1" },
+        };
+        let disposed = false;
+        const uninstall = installNativeControlSessionBroker({
+          bind: async (identity) => {
+            assert.equal(identity.provider, "codex");
+            lifecycle.push("bound");
+            return {
+              name,
+              launch,
+              activate: async () => {
+                lifecycle.push("active");
+              },
+              beginTurn: async () => {
+                lifecycle.push("begin");
+              },
+              endTurn: async () => {
+                lifecycle.push("end");
+              },
+              dispose: async () => {
+                if (!disposed) lifecycle.push("disposed");
+                disposed = true;
+              },
+            };
           },
         });
-        const completion = yield* Fiber.join(completionRead);
-        assert.ok(Option.isSome(completion));
-        assert.equal(completion.value.type, "turn.completed");
-        assert.equal(vi.mocked(binding.endTurn).mock.calls.length, 1);
-        assert.equal(vi.mocked(binding.dispose).mock.calls.length, 0);
-        assert.equal(runtime.sendTurnImpl.mock.calls.length, 1);
+        yield* Effect.addFinalizer(() => Effect.sync(uninstall));
+        const factory = makeRuntimeFactory();
+        const adapter = yield* createAdapter(ProviderInstanceId.make("codex"), factory.factory);
+        const threadId = asThreadId("native-control-fixture");
+        yield* adapter.startSession({ threadId, runtimeMode: "approval-required" });
+        const runtime = factory.lastRuntime!;
+        assert.deepEqual(runtime.options.nativeControlMcp?.launch, launch);
+        assert.ok(runtime.options.schedulingMcp);
+        assert.equal(runtime.options.runtimeMode, "approval-required");
+        assert.deepEqual(lifecycle, ["bound", "active"]);
+        yield* adapter.sendTurn({
+          threadId,
+          input: "Synthetic provider prompt; no live provider or desktop",
+        });
+        assert.ok(lifecycle.includes("begin"));
+        runtime.interruptTurnImpl.mockImplementation(async () => {
+          assert.equal(lifecycle.at(-1), "end");
+        });
+        runtime.closeImpl.mockImplementation(async () => {
+          assert.equal(disposed, true);
+        });
+        yield* adapter.interruptTurn(threadId);
+        assert.deepEqual(lifecycle, ["bound", "active", "begin", "end", "disposed"]);
       }),
     ),
 );
-
-it.effect(
-  "fails a desktop attachment change without deleting a conversation when no native cursor exists",
-  () =>
-    desktopCase(({ adapter, factory, select }) =>
-      Effect.gen(function* () {
-        const threadId = asThreadId("desktop-no-cursor");
-        const original = yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
-        const old = factory.lastRuntime!;
-        const { resumeCursor: _cursor, ...withoutCursor } = original;
-        old.getSessionImpl.mockResolvedValue(withoutCursor);
-        select("desktop-a");
-        const result = yield* Effect.exit(adapter.sendTurn({ threadId, input: "Continue" }));
-        assert.equal(Exit.isFailure(result), true);
-        assert.equal(factory.lastRuntime, old);
-        assert.equal(old.closeImpl.mock.calls.length, 0);
-        assert.equal(old.sendTurnImpl.mock.calls.length, 0);
-      }),
-    ),
-);
-
-it("redacts desktop MCP input and images from item and nested thread snapshots", () => {
-  const reference = {
-    id: "24ff9ac9-1d98-4bb9-9d3f-1e868663a064",
-    capturedAt: "2026-09-09T00:00:00.000Z",
-    width: 1280,
-    height: 800,
-    frame: 4,
-    humanControl: false,
-    storage: "saved",
-  };
-  const item = {
-    id: "item",
-    type: "mcpToolCall",
-    server: "cafe-desktop",
-    tool: "observe",
-    status: "completed",
-    arguments: { text: "private input" },
-    result: {
-      content: [{ type: "image", data: "private image" }],
-      structuredContent: {
-        desktopObservation: { ...reference, image: "private extra" },
-        privateKey: "private key",
-      },
-    },
-    error: { message: "private error" },
-    extra: "private future field",
-  };
-  for (const payload of [{ item }, { thread: { turns: [{ items: [item] }] } }]) {
-    const event: ProviderEvent = {
-      id: asEventId("desktop-event"),
-      kind: "notification",
-      provider: ProviderDriverKind.make("codex"),
-      threadId: asThreadId("thread"),
-      createdAt: "2026-09-08T00:00:00.000Z",
-      method: "item/completed",
-      payload,
-      textDelta: "private text",
-      message: "private message",
-    };
-    const redacted = redactDesktopToolEvent(event);
-    assert.doesNotMatch(JSON.stringify(redacted), /private/);
-    assert.match(JSON.stringify(redacted), /cafe-desktop/);
-    assert.match(JSON.stringify(redacted), new RegExp(reference.id));
-    assert.equal(redacted.itemId, event.itemId);
-  }
-});

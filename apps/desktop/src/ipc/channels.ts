@@ -1,4 +1,8 @@
 export const PICK_FOLDER_CHANNEL = "desktop:pick-folder";
+export const NATIVE_CONTROL_STATE_CHANNEL = "desktop:native-control-state";
+export const NATIVE_CONTROL_ENABLE_CHANNEL = "desktop:native-control-enable";
+export const NATIVE_CONTROL_DIAGNOSTICS_CHANNEL = "desktop:native-control-diagnostics";
+export const NATIVE_CONTROL_PREVIEW_CHANNEL = "desktop:native-control-preview";
 export const CONFIRM_CHANNEL = "desktop:confirm";
 export const SET_THEME_CHANNEL = "desktop:set-theme";
 export const CONTEXT_MENU_CHANNEL = "desktop:context-menu";
@@ -41,5 +45,3 @@ export const CLAIM_COMPOSER_DICTATION_CAPTURE_CHANNEL = "desktop:dictation-claim
 export const RELEASE_COMPOSER_DICTATION_CAPTURE_CHANNEL =
   "desktop:dictation-release-composer-capture";
 export const GET_ADVERTISED_ENDPOINTS_CHANNEL = "desktop:get-advertised-endpoints";
-
-export const OPEN_VIRTUAL_DESKTOP_CHANNEL = "desktop:open-virtual-desktop";

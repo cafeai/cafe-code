@@ -114,7 +114,7 @@ import {
   type TimelineScrollDebugListState,
 } from "./timelineScrollDebug";
 import { useHistoricalWorkLogPresence } from "./useHistoricalWorkLogPresence";
-import { DesktopObservation } from "../virtualDesktop/DesktopObservation";
+import { DesktopObservation } from "./DesktopObservation";
 import { SubagentRosterRow, type SubagentRosterEntry } from "../subagents/SubagentRosterRow";
 import { SubagentDetailView, type SubagentDetailSelection } from "./SubagentDetailView";
 import { ScheduledFollowupConversation } from "./ScheduledFollowupConversation";

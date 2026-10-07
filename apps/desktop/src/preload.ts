@@ -86,8 +86,6 @@ if (process.isMainFrame === true) {
     openExternal: (url: string) => ipcRenderer.invoke(IpcChannels.OPEN_EXTERNAL_CHANNEL, url),
     openPath: (path: string) => ipcRenderer.invoke(IpcChannels.OPEN_PATH_CHANNEL, path),
     revealPath: (path: string) => ipcRenderer.invoke(IpcChannels.REVEAL_PATH_CHANNEL, path),
-    openVirtualDesktop: (input) =>
-      ipcRenderer.invoke(IpcChannels.OPEN_VIRTUAL_DESKTOP_CHANNEL, input),
     copyText: (text: string) => ipcRenderer.invoke(IpcChannels.COPY_TEXT_CHANNEL, text),
     onMenuAction: (listener) => {
       const wrappedListener = (_event: Electron.IpcRendererEvent, action: unknown) => {
@@ -118,6 +116,17 @@ if (process.isMainFrame === true) {
       };
     },
     getSourceUpdateState: () => ipcRenderer.invoke(IpcChannels.SOURCE_UPDATE_GET_STATE_CHANNEL),
+    ...(process.platform === "darwin"
+      ? {
+          getNativeControlState: () => ipcRenderer.invoke(IpcChannels.NATIVE_CONTROL_STATE_CHANNEL),
+          setNativeControlEnabled: (enabled: boolean) =>
+            ipcRenderer.invoke(IpcChannels.NATIVE_CONTROL_ENABLE_CHANNEL, enabled),
+          getNativeControlDiagnostics: () =>
+            ipcRenderer.invoke(IpcChannels.NATIVE_CONTROL_DIAGNOSTICS_CHANNEL),
+          captureNativeControlPreview: () =>
+            ipcRenderer.invoke(IpcChannels.NATIVE_CONTROL_PREVIEW_CHANNEL),
+        }
+      : {}),
     checkSourceUpdate: () => ipcRenderer.invoke(IpcChannels.SOURCE_UPDATE_CHECK_CHANNEL),
     onSourceUpdateState: (listener) => {
       const wrappedListener = (_event: Electron.IpcRendererEvent, state: unknown) => {

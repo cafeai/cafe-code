@@ -1,9 +1,4 @@
 import type {
-  VirtualDesktopRequest,
-  VirtualDesktopState,
-  VirtualDesktopConnect,
-} from "./virtualDesktop.ts";
-import type {
   ProviderTaskControlInput,
   ProviderTaskControlResult,
 } from "./providerTaskControls.ts";
@@ -403,8 +398,27 @@ export interface GlobalDictationActionResult {
   readonly reason?: string;
 }
 
+export const NativeControlStateSchema = Schema.Struct({
+  platform: Schema.String,
+  enabled: Schema.Boolean,
+  phase: Schema.Literals(["off", "starting", "ready", "stopping", "error"]),
+  driverVersion: Schema.String,
+  runtimeAvailable: Schema.Boolean,
+  detail: Schema.String,
+});
+export type NativeControlState = typeof NativeControlStateSchema.Type;
+export const NativeControlResultSchema = Schema.Struct({
+  content: Schema.Array(Schema.Record(Schema.String, Schema.Unknown)),
+  isError: Schema.optionalKey(Schema.Boolean),
+  structuredContent: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
+});
+export type NativeControlResult = typeof NativeControlResultSchema.Type;
+
 export interface DesktopBridge {
-  openVirtualDesktop: (input: VirtualDesktopConnect) => Promise<void>;
+  getNativeControlState?: () => Promise<NativeControlState>;
+  setNativeControlEnabled?: (enabled: boolean) => Promise<NativeControlState>;
+  getNativeControlDiagnostics?: () => Promise<NativeControlResult>;
+  captureNativeControlPreview?: () => Promise<NativeControlResult>;
   getAppBranding: () => DesktopAppBranding | null;
   getLocalEnvironmentBootstrap: () => DesktopEnvironmentBootstrap | null;
   getDebugEndpointState: () => Promise<DesktopDebugEndpointState>;
@@ -497,7 +511,6 @@ export interface LocalApi {
   };
   server: {
     usageReset: (input: ProviderUsageResetInput) => Promise<ProviderUsageResetResult>;
-    virtualDesktop: (input: VirtualDesktopRequest) => Promise<VirtualDesktopState>;
     getMcpStatus: () => Promise<CafeMcpStatus>;
     updateMcpClient: (input: CafeMcpClientUpdate) => Promise<CafeMcpStatus>;
     getConfig: () => Promise<ServerConfig>;

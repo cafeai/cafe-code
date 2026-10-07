@@ -1,7 +1,6 @@
 import * as Effect from "effect/Effect";
 import * as Duration from "effect/Duration";
 import * as Schema from "effect/Schema";
-import { DesktopResolution, DEFAULT_DESKTOP_RESOLUTION } from "./virtualDesktop.ts";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 import {
   EnvironmentId,
@@ -22,7 +21,7 @@ import { EditorId } from "./editor.ts";
 import {
   DesktopObservationRetention,
   DEFAULT_DESKTOP_OBSERVATION_RETENTION,
-} from "./virtualDesktop.ts";
+} from "./desktopObservation.ts";
 
 // ── Client Settings (local-only) ───────────────────────────────
 
@@ -884,13 +883,7 @@ export const DEFAULT_AUTOMATIC_GIT_FETCH_INTERVAL = Duration.minutes(5);
 
 export const ServerSettings = Schema.Struct({
   // Cafe management MCP only; preserve its existing endpoint on upgrade.
-  // Desktop Control has its own availability/session policy, never this flag.
   mcpEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
-  virtualDesktopsEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
-  desktopDefaultResolution: DesktopResolution.pipe(
-    Schema.withDecodingDefault(Effect.succeed(DEFAULT_DESKTOP_RESOLUTION)),
-  ),
-  desktopControlMcpEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   desktopObservationRetention: DesktopObservationRetention.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_DESKTOP_OBSERVATION_RETENTION)),
   ),
@@ -1017,9 +1010,6 @@ const OpenCodeSettingsPatch = Schema.Struct({
 
 export const ServerSettingsPatch = Schema.Struct({
   mcpEnabled: Schema.optionalKey(Schema.Boolean),
-  virtualDesktopsEnabled: Schema.optionalKey(Schema.Boolean),
-  desktopDefaultResolution: Schema.optionalKey(DesktopResolution),
-  desktopControlMcpEnabled: Schema.optionalKey(Schema.Boolean),
   desktopObservationRetention: Schema.optionalKey(DesktopObservationRetention),
   // Server settings
   enableAssistantStreaming: Schema.optionalKey(Schema.Boolean),

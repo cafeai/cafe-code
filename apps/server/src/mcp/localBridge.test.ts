@@ -53,29 +53,7 @@ describe("local MCP bridge", () => {
         await expect(readBridgeConnection(f.connectionPath, "cafe-scheduling")).rejects.toThrow();
       }
       await expect(readBridgeConnection(f.connectionPath, "cafe-code")).rejects.toThrow();
-      await expect(readBridgeConnection(f.connectionPath, "cafe-desktop")).rejects.toThrow();
     }
-  });
-  it("keeps desktop and Cafe management targets and credential audiences separate", async () => {
-    const f = await fixture();
-    await expect(readBridgeConnection(f.connectionPath, "cafe-desktop")).rejects.toThrow();
-    await fs.writeFile(
-      f.connectionPath,
-      JSON.stringify({
-        audience: "cafe-desktop",
-        url: "http://127.0.0.1:12345/mcp/desktop",
-        token: "a".repeat(64),
-      }),
-    );
-    await expect(readBridgeConnection(f.connectionPath, "cafe-desktop")).resolves.toHaveProperty(
-      "token",
-    );
-    await expect(readBridgeConnection(f.connectionPath, "cafe-code")).rejects.toThrow();
-    await fs.writeFile(
-      f.connectionPath,
-      JSON.stringify({ url: "http://127.0.0.1:12345/mcp/desktop", token: "a".repeat(64) }),
-    );
-    await expect(readBridgeConnection(f.connectionPath, "cafe-desktop")).rejects.toThrow();
   });
   it("rejects oversized lines before sending an HTTP request", async () => {
     const f = await fixture();
