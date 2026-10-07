@@ -52,6 +52,7 @@ import { remarkChatMath } from "../lib/remarkChatMath";
 import { remarkMermaid } from "../lib/remarkMermaid";
 import { normalizeCodexCitationMarkers } from "../lib/codexCitations";
 import { MermaidBlock } from "./MermaidBlock";
+import { MarkdownTable } from "./MarkdownTableViewer";
 
 class CodeHighlightErrorBoundary extends React.Component<
   { fallback: ReactNode; children: ReactNode },
@@ -358,17 +359,6 @@ function MarkdownListItem({ node: _node, children, ...props }: ComponentProps<"l
     <li {...props}>
       {renderSkillInlineMarkdownChildren(children, rendering?.skills ?? EMPTY_MARKDOWN_SKILLS)}
     </li>
-  );
-}
-
-function MarkdownTable({ node: _node, children, ...props }: ComponentProps<"table"> & ExtraProps) {
-  // A completed message can rerender when chat or workspace metadata changes.
-  // Keep this component type stable so React preserves the user's horizontal
-  // scroll position instead of replacing the overflow container on each update.
-  return (
-    <div className="chat-markdown-table-scroll">
-      <table {...props}>{children}</table>
-    </div>
   );
 }
 

@@ -360,18 +360,21 @@ describe("provider-specific composer menu actions", () => {
         // Repeatedly use the same DOM button. Its hit target must stay fixed even
         // while the width animation is running, not just at the final endpoint.
         for (let count = 0; count < 4; count++) {
-          // Arm the native transition before the real pointer click. A timed
-          // requestAnimationFrame loop can miss every intermediate width when
-          // a busy browser worker delays frames beyond the 200ms transition.
-          // Pausing transitionrun lets the same CSS animation be inspected at
-          // deterministic points without changing its production duration.
+          // Arm the native transition before the real pointer click. The
+          // collapsed attribute changes in the same React commit as the CSS
+          // width. Observe that commit and force the style update before the
+          // browser can advance frames: transitionrun is queued separately,
+          // so its delivery does not prove that the animation is still in
+          // getAnimations(). A timed frame loop can also miss the entire
+          // 200ms transition on a busy worker.
           let stopListening: (() => void) | undefined;
           let transitionWaitTimeout: number | undefined;
           let pausedTransition: CSSTransition | undefined;
           const transitionReady = new Promise<CSSTransition>((resolve, reject) => {
-            const onTransitionRun = (event: TransitionEvent) => {
-              if (event.target !== sharedTab || event.propertyName !== "width") return;
-              stopListening?.();
+            const previousCollapsed = sharedTab.getAttribute("data-collapsed");
+            const observer = new MutationObserver(() => {
+              if (sharedTab.getAttribute("data-collapsed") === previousCollapsed) return;
+              observer.disconnect();
               try {
                 const transition = sharedTab
                   .getAnimations()
@@ -381,7 +384,7 @@ describe("provider-specific composer menu actions", () => {
                       animation.transitionProperty === "width",
                   );
                 if (!transition) {
-                  throw new Error("Composer tab emitted width transitionrun without a transition");
+                  throw new Error("Composer tab changed collapse state without a width transition");
                 }
                 transition.pause();
                 pausedTransition = transition;
@@ -389,9 +392,9 @@ describe("provider-specific composer menu actions", () => {
               } catch (error) {
                 reject(error);
               }
-            };
-            sharedTab.addEventListener("transitionrun", onTransitionRun);
-            stopListening = () => sharedTab.removeEventListener("transitionrun", onTransitionRun);
+            });
+            observer.observe(sharedTab, { attributes: true, attributeFilter: ["data-collapsed"] });
+            stopListening = () => observer.disconnect();
           });
           const widths = new Set<number>();
           try {
