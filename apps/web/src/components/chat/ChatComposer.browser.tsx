@@ -331,7 +331,7 @@ describe("provider-specific composer menu actions", () => {
       applyInterfaceScalePercent(scale);
       document.documentElement.classList.toggle("dark", dark);
       await using fixture = await mountComposer(width);
-      const sharedTab = document.querySelector(".cafe-composer-tab");
+      const sharedTab = document.querySelector<HTMLElement>(".cafe-composer-tab")!;
       for (const provider of ["codex", "claudeAgent"]) {
         if (provider === "claudeAgent") await fixture.select(provider);
         await waitForTabEntrance();
@@ -360,18 +360,73 @@ describe("provider-specific composer menu actions", () => {
         // Repeatedly use the same DOM button. Its hit target must stay fixed even
         // while the width animation is running, not just at the final endpoint.
         for (let count = 0; count < 4; count++) {
-          await page.elementLocator(caret).click();
+          // Arm the native transition before the real pointer click. A timed
+          // requestAnimationFrame loop can miss every intermediate width when
+          // a busy browser worker delays frames beyond the 200ms transition.
+          // Pausing transitionrun lets the same CSS animation be inspected at
+          // deterministic points without changing its production duration.
+          let stopListening: (() => void) | undefined;
+          let transitionWaitTimeout: number | undefined;
+          let pausedTransition: CSSTransition | undefined;
+          const transitionReady = new Promise<CSSTransition>((resolve, reject) => {
+            const onTransitionRun = (event: TransitionEvent) => {
+              if (event.target !== sharedTab || event.propertyName !== "width") return;
+              stopListening?.();
+              try {
+                const transition = sharedTab
+                  .getAnimations()
+                  .find(
+                    (animation): animation is CSSTransition =>
+                      animation instanceof CSSTransition &&
+                      animation.transitionProperty === "width",
+                  );
+                if (!transition) {
+                  throw new Error("Composer tab emitted width transitionrun without a transition");
+                }
+                transition.pause();
+                pausedTransition = transition;
+                resolve(transition);
+              } catch (error) {
+                reject(error);
+              }
+            };
+            sharedTab.addEventListener("transitionrun", onTransitionRun);
+            stopListening = () => sharedTab.removeEventListener("transitionrun", onTransitionRun);
+          });
           const widths = new Set<number>();
-          const end = performance.now() + 230;
-          while (performance.now() < end) {
-            await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-            const current = caret.getBoundingClientRect();
-            expect(current.x).toBeCloseTo(initial.x, 1);
-            expect(current.y).toBeCloseTo(initial.y, 1);
-            expect(current.width).toBeCloseTo(initial.width, 1);
-            expect(current.height).toBeCloseTo(initial.height, 1);
-            expect(frame.getBoundingClientRect().top).toBeCloseTo(initialFrameTop, 1);
-            widths.add(Math.round(sharedTab!.getBoundingClientRect().width));
+          try {
+            await page.elementLocator(caret).click();
+            const transition = await Promise.race([
+              transitionReady,
+              new Promise<never>((_, reject) => {
+                transitionWaitTimeout = window.setTimeout(
+                  () => reject(new Error("Composer tab width transition did not start within 5s")),
+                  5_000,
+                );
+              }),
+            ]);
+            expect(transition.effect?.getComputedTiming().duration).toBe(200);
+            for (const time of [0, 40, 80, 120, 160, 200]) {
+              transition.currentTime = time;
+              const current = caret.getBoundingClientRect();
+              expect(current.x).toBeCloseTo(initial.x, 1);
+              expect(current.y).toBeCloseTo(initial.y, 1);
+              expect(current.width).toBeCloseTo(initial.width, 1);
+              expect(current.height).toBeCloseTo(initial.height, 1);
+              expect(frame.getBoundingClientRect().top).toBeCloseTo(initialFrameTop, 1);
+              widths.add(Math.round(sharedTab.getBoundingClientRect().width));
+            }
+            transition.finish();
+          } finally {
+            if (transitionWaitTimeout !== undefined) window.clearTimeout(transitionWaitTimeout);
+            stopListening?.();
+            if (
+              pausedTransition &&
+              pausedTransition.playState !== "finished" &&
+              pausedTransition.playState !== "idle"
+            ) {
+              pausedTransition.finish();
+            }
           }
           // An endpoint-only assertion missed the max-content regression: the
           // tab reached both sizes but jumped between them without animating.
