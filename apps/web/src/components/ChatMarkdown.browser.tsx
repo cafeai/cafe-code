@@ -790,19 +790,26 @@ describe("ChatMarkdown", () => {
     }
   });
 
-  it("keeps wide Markdown tables inside a horizontal scroll container", async () => {
-    const screen = await render(
+  it("keeps wide Markdown tables scrollable across chat rerenders", async () => {
+    const tableText = [
+      "| Case | Expression | Notes |",
+      "| --- | --- | --- |",
+      "| Long inline math | $f(x)=\\sum_{i=1}^{999999999999999999999999999999999999999999999999} \\frac{x_i}{1+x_i}$ | Should not widen the message column |",
+      "| Long code token | `const_veryVeryVeryVeryVeryVeryVeryLongIdentifierNameWithoutBreaksOrSpacesEqualsAnotherVeryVeryVeryVeryLongIdentifierName` | Scroll instead of crushing columns |",
+      "| Display math | $$\\prod_{j=1}^{123456789012345678901234567890}\\left(\\frac{a_j+b_j+c_j+d_j+e_j+f_j+g_j+h_j+i_j}{\\omega_j^{98765432109876543210}+\\theta_j^{12345678901234567890}}\\right)$$ | Stays in the table after reload |",
+    ].join("\n");
+    // Chat renders can supply fresh arrays containing the same workspace and
+    // skill values. The table needs a stable DOM node across that render so a
+    // horizontal trackpad position does not snap back to the first column.
+    const renderWideTable = (text = tableText) => (
       <ChatMarkdown
-        text={[
-          "| Case | Expression | Notes |",
-          "| --- | --- | --- |",
-          "| Long inline math | $f(x)=\\sum_{i=1}^{999999999999999999999999999999999999999999999999} \\frac{x_i}{1+x_i}$ | Should not widen the message column |",
-          "| Long code token | `const_veryVeryVeryVeryVeryVeryVeryLongIdentifierNameWithoutBreaksOrSpacesEqualsAnotherVeryVeryVeryVeryLongIdentifierName` | Scroll instead of crushing columns |",
-          "| Display math | $$\\prod_{j=1}^{123456789012345678901234567890}\\left(\\frac{a_j+b_j+c_j+d_j+e_j+f_j+g_j+h_j+i_j}{\\omega_j^{98765432109876543210}+\\theta_j^{12345678901234567890}}\\right)$$ | Stays in the table after reload |",
-        ].join("\n")}
+        text={text}
         cwd="/repo/project"
-      />,
+        additionalWorkspaceRoots={["/repo/related-project"]}
+        skills={[{ name: "research", displayName: "Research" }]}
+      />
     );
+    const screen = await render(renderWideTable());
 
     try {
       const tableScroll = document.querySelector<HTMLElement>(".chat-markdown-table-scroll");
@@ -830,6 +837,22 @@ describe("ChatMarkdown", () => {
       await expect.element(page.getByText("Display math")).toBeInTheDocument();
       await expect.element(page.getByText("Stays in the table after reload")).toBeInTheDocument();
       expect(document.querySelector(".katex")).not.toBeNull();
+
+      tableScroll!.scrollLeft = Math.min(120, tableScroll!.scrollWidth - tableScroll!.clientWidth);
+      const positionBeforeRerender = tableScroll!.scrollLeft;
+      expect(positionBeforeRerender).toBeGreaterThan(0);
+
+      await screen.rerender(renderWideTable());
+      const tableScrollAfterRerender = document.querySelector<HTMLElement>(
+        ".chat-markdown-table-scroll",
+      );
+      expect(tableScrollAfterRerender).toBe(tableScroll);
+      expect(tableScrollAfterRerender?.scrollLeft).toBe(positionBeforeRerender);
+
+      await screen.rerender(renderWideTable(`${tableText}\n\nMore chat text arrived.`));
+      expect(document.querySelector(".chat-markdown-table-scroll")).toBe(tableScroll);
+      expect(tableScroll!.scrollLeft).toBe(positionBeforeRerender);
+      await expect.element(page.getByText("More chat text arrived.")).toBeInTheDocument();
     } finally {
       await screen.unmount();
     }

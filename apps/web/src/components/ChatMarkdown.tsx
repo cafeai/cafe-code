@@ -84,6 +84,7 @@ interface ChatMarkdownProps {
 }
 
 const EMPTY_MARKDOWN_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
+const EMPTY_ADDITIONAL_WORKSPACE_ROOTS: ReadonlyArray<string> = [];
 
 const CODE_FENCE_LANGUAGE_REGEX = /(?:^|\s)language-([^\s]+)/;
 const MAX_HIGHLIGHT_CACHE_ENTRIES = 500;
@@ -357,6 +358,17 @@ function MarkdownListItem({ node: _node, children, ...props }: ComponentProps<"l
     <li {...props}>
       {renderSkillInlineMarkdownChildren(children, rendering?.skills ?? EMPTY_MARKDOWN_SKILLS)}
     </li>
+  );
+}
+
+function MarkdownTable({ node: _node, children, ...props }: ComponentProps<"table"> & ExtraProps) {
+  // A completed message can rerender when chat or workspace metadata changes.
+  // Keep this component type stable so React preserves the user's horizontal
+  // scroll position instead of replacing the overflow container on each update.
+  return (
+    <div className="chat-markdown-table-scroll">
+      <table {...props}>{children}</table>
+    </div>
   );
 }
 
@@ -706,7 +718,7 @@ function areMarkdownFileLinkPropsEqual(
 function ChatMarkdown({
   text,
   cwd,
-  additionalWorkspaceRoots = [],
+  additionalWorkspaceRoots = EMPTY_ADDITIONAL_WORKSPACE_ROOTS,
   isStreaming = false,
   normalizeCodexCitations = false,
   skills = EMPTY_MARKDOWN_SKILLS,
@@ -804,13 +816,7 @@ function ChatMarkdown({
         );
       },
       pre: MarkdownPre,
-      table({ node: _node, children, ...props }) {
-        return (
-          <div className="chat-markdown-table-scroll">
-            <table {...props}>{children}</table>
-          </div>
-        );
-      },
+      table: MarkdownTable,
     }),
     [additionalWorkspaceRoots, cwd, fileLinkParentSuffixByPath, resolvedTheme, skills],
   );
