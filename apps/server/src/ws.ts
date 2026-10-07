@@ -1,5 +1,3 @@
-import { makeDesktopService } from "./virtualDesktop/service.ts";
-import { VirtualDesktopError } from "@cafecode/contracts";
 import * as Crypto from "node:crypto";
 
 import * as Cause from "effect/Cause";
@@ -209,7 +207,6 @@ const makeWsRpcLayer = (
   orchestrationSubscriptionHub: OrchestrationSubscriptionHubShape,
   providerMaintenanceRunner: ProviderMaintenanceRunner.ProviderMaintenanceRunnerShape,
   mcpManagement: McpManagementShape,
-  desktops: Effect.Success<typeof makeDesktopService>,
 ) =>
   WsRpcGroup.toLayer(
     Effect.gen(function* () {
@@ -1455,15 +1452,6 @@ const makeWsRpcLayer = (
             }),
             { "rpc.aggregate": "server" },
           ),
-        [WS_METHODS.serverVirtualDesktop]: (input) =>
-          mcpAccess.canManage
-            ? desktops.manage(input)
-            : Effect.fail(
-                new VirtualDesktopError({
-                  code: "not_authorized",
-                  message: "Only an owner can manage virtual desktops.",
-                }),
-              ),
         [WS_METHODS.serverGetMcpStatus]: () => mcpManagement.status(mcpAccess),
         [WS_METHODS.serverUpdateMcpClient]: (input) =>
           Effect.gen(function* () {
@@ -1489,10 +1477,7 @@ const makeWsRpcLayer = (
             Effect.gen(function* () {
               if (
                 (patch.mcpEnabled !== undefined ||
-                  patch.virtualDesktopsEnabled !== undefined ||
-                  patch.desktopControlMcpEnabled !== undefined ||
-                  patch.desktopObservationRetention !== undefined ||
-                  patch.desktopDefaultResolution !== undefined) &&
+                  patch.desktopObservationRetention !== undefined) &&
                 !mcpAccess.canManage
               ) {
                 return yield* new ServerSettingsError({
@@ -1501,13 +1486,6 @@ const makeWsRpcLayer = (
                 });
               }
               const updated = yield* serverSettings.updateSettings(patch);
-              if (
-                patch.virtualDesktopsEnabled !== undefined ||
-                patch.desktopControlMcpEnabled !== undefined ||
-                patch.desktopObservationRetention !== undefined ||
-                patch.desktopDefaultResolution !== undefined
-              )
-                yield* desktops.syncPolicy.pipe(Effect.catch(() => Effect.void));
               return redactServerSettingsForClient(updated);
             }),
             {
@@ -1923,7 +1901,6 @@ export const websocketRpcRouteLayer = Layer.unwrap(
     const dictation = yield* OpenAiRealtimeDictation;
     const providerMaintenanceRunner = yield* ProviderMaintenanceRunner.ProviderMaintenanceRunner;
     const mcpManagement = yield* McpManagement;
-    const desktops = yield* makeDesktopService;
     return HttpRouter.add(
       "GET",
       "/ws",
@@ -1952,7 +1929,6 @@ export const websocketRpcRouteLayer = Layer.unwrap(
               orchestrationSubscriptionHub,
               providerMaintenanceRunner,
               mcpManagement,
-              desktops,
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               Layer.provide(ProviderJournalMessageRepairLive),

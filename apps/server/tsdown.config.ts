@@ -29,8 +29,8 @@ export default defineConfig([
   // not reintroduce a dependency on dist or a transient AppImage mount.
   ...Object.entries({
     "mcp-bridge": "src/mcp/localBridgeEntry.ts",
-    "desktop-mcp-bridge": "src/mcp/desktopBridgeEntry.ts",
     "scheduling-mcp-bridge": "src/mcp/schedulingBridgeEntry.ts",
+    "native-desktop-mcp-bridge": "src/mcp/nativeControlBridgeEntry.ts",
   }).map(([name, entry]) => ({
     entry: { [name]: entry },
     outDir: "dist",

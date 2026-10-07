@@ -10,6 +10,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, lstatSync, realpathSync, unlinkSync } from "node:fs";
 import { lstat, open, opendir } from "node:fs/promises";
 
+import { NativeDesktopPrivacy } from "@cafecode/shared/nativeControl";
+import {
+  readNativeControlSessionBroker,
+  type NativeControlSessionBinding,
+} from "../../nativeControl/sessionRuntime.ts";
 import {
   deleteSession,
   forkSession,
@@ -546,6 +551,8 @@ interface ClaudeSessionContext {
     | undefined;
   /** Exact query-owned scheduling authority; never shared with a resumed query. */
   readonly schedulingBinding: SchedulingSessionBinding | undefined;
+  readonly nativeControlBinding?: NativeControlSessionBinding | undefined;
+  readonly nativeDesktopPrivacy?: NativeDesktopPrivacy | undefined;
   readonly runFork: RuntimeFork;
   streamFiber: Fiber.Fiber<void, Error> | undefined;
   readonly startedAt: string;
@@ -4969,6 +4976,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     result?: SDKResultMessage,
     options?: { readonly segmentAlreadyFinalized?: boolean },
   ) {
+    yield* Effect.promise(() => context.nativeControlBinding?.endTurn() ?? Promise.resolve());
     const resultContextWindow = maxClaudeContextWindowFromModelUsage(result?.modelUsage);
     const totalReasoningOutputTokens = totalClaudeThinkingTokensFromModelUsage(result?.modelUsage);
     const effectiveContextWindow =
@@ -7460,6 +7468,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     context: ClaudeSessionContext,
     message: SDKMessage,
   ) {
+    message = context.nativeDesktopPrivacy?.redact(message) ?? message;
     yield* logNativeSdkMessage(context, message);
     if (message.type === "system" && sdkMessageSubtype(message) === "session_title_changed") {
       // Claude Code 2.1.285 added this internal session-name notification,
@@ -7688,6 +7697,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     yield* Effect.promise(() => context.schedulingBinding?.dispose() ?? Promise.resolve()).pipe(
       Effect.catchCause(() => Effect.logWarning("Claude scheduling cleanup remains pending.")),
     );
+    yield* Effect.promise(() => context.nativeControlBinding?.dispose() ?? Promise.resolve()).pipe(
+      Effect.catchCause(() => Effect.logWarning("Claude desktop cleanup remains pending.")),
+    );
 
     for (const [requestId, pending] of context.pendingApprovals) {
       yield* Deferred.succeed(pending.decision, "cancel");
@@ -7816,6 +7828,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   };
 
   const startSession: ClaudeAdapterShape["startSession"] = Effect.fn("startSession")((input) => {
+    let nativeControlBinding: NativeControlSessionBinding | undefined;
     let schedulingBinding: SchedulingSessionBinding | undefined;
     let startedQuery: ClaudeQueryRuntime | undefined;
     let startedContext: ClaudeSessionContext | undefined;
@@ -8496,6 +8509,29 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         );
       }
 
+      const nativeBroker = readNativeControlSessionBroker();
+      if (nativeBroker)
+        yield* Effect.uninterruptible(
+          Effect.tryPromise({
+            try: async () => {
+              nativeControlBinding = await nativeBroker.bind({
+                threadId,
+                providerInstanceId: boundInstanceId,
+                provider: "claudeAgent",
+              });
+              await nativeControlBinding?.activate();
+            },
+            catch: () =>
+              new ProviderAdapterProcessError({
+                provider: PROVIDER,
+                threadId,
+                detail: "Failed to prepare local desktop tools.",
+              }),
+          }),
+        );
+      const providerMcpBindings = [schedulingBinding, nativeControlBinding].filter(
+        (binding) => binding !== undefined,
+      );
       const queryOptions: ClaudeQueryOptions = {
         ...(input.cwd ? { cwd: input.cwd } : {}),
         ...(apiModelId ? { model: apiModelId } : {}),
@@ -8508,17 +8544,20 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // alwaysLoad makes this small built-in catalog discoverable on the
         // first turn without granting permission to invoke any of its tools.
         // https://code.claude.com/docs/en/agent-sdk/mcp
-        ...(schedulingBinding
+        ...(providerMcpBindings.length
           ? {
-              mcpServers: {
-                [schedulingBinding.name]: {
-                  type: "stdio" as const,
-                  command: schedulingBinding.launch.command,
-                  args: [...schedulingBinding.launch.args],
-                  env: { ...schedulingBinding.launch.env },
-                  alwaysLoad: true,
-                },
-              },
+              mcpServers: Object.fromEntries(
+                providerMcpBindings.map((binding) => [
+                  binding.name,
+                  {
+                    type: "stdio" as const,
+                    command: binding.launch.command,
+                    args: [...binding.launch.args],
+                    env: { ...binding.launch.env },
+                    alwaysLoad: true,
+                  },
+                ]),
+              ),
             }
           : {}),
         // The SDK type can lag the CLI here: current Claude Code exposes
@@ -8714,6 +8753,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         commandCatalogPublishPending: false,
         pendingCommandCatalog: undefined,
         schedulingBinding,
+        nativeControlBinding,
+        nativeDesktopPrivacy: new NativeDesktopPrivacy(),
         runFork,
         streamFiber: undefined,
         startedAt,
@@ -8861,6 +8902,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             Effect.catchCause(() =>
               Effect.logWarning("Claude scheduling cleanup remains pending."),
             ),
+          );
+          yield* Effect.promise(() => nativeControlBinding?.dispose() ?? Promise.resolve()).pipe(
+            Effect.catchCause(() => Effect.logWarning("Claude desktop cleanup remains pending.")),
           );
           if (startedContext) {
             yield* stopSessionInternal(startedContext, { emitExitEvent: false });
@@ -9305,6 +9349,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     });
 
     context.promptLifecycleByUuid.set(turnId, "submitted");
+    yield* Effect.promise(() => context.nativeControlBinding?.beginTurn() ?? Promise.resolve());
     yield* Queue.offer(context.promptQueue, {
       type: "message",
       message,
@@ -9342,10 +9387,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const interruptTurn: ClaudeAdapterShape["interruptTurn"] = Effect.fn("interruptTurn")(
     function* (threadId, _turnId) {
       const context = yield* requireSession(threadId);
+      const desktopCleanup = context.nativeControlBinding?.endTurn().catch(() => undefined);
       const receipt = yield* Effect.tryPromise({
         try: () => context.query.interrupt(),
         catch: (cause) => toRequestError(threadId, "turn/interrupt", cause),
-      });
+      }).pipe(Effect.ensuring(Effect.promise(() => desktopCleanup ?? Promise.resolve())));
 
       // Claude Code 2.1.205+ returns UUIDs for queued inputs that survive an
       // interrupt. Cancel only UUIDs Cafe submitted: the receipt can include

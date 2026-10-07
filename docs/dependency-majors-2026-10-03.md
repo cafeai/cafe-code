@@ -109,6 +109,8 @@ and caching changes do not require an auth or package-manager change here.
 
 ## Ubuntu 26.04 and the published artifact ABI
 
+The interim Linux virtual desktop helper and its prerequisite/qualification steps were removed on 2026-10-07. The following records the earlier runner migration; it does not describe a currently shipped desktop-control feature. The existing release-producer and cache-image boundaries remain unchanged.
+
 GitHub announced [Ubuntu 26.04 general availability](https://github.com/actions/runner-images/issues/14747)
 on September 17. The audited
 [runner image inventory](https://github.com/actions/runner-images/blob/6d942e630479cd99a93dadfc766af11242bfa402/images/ubuntu/Ubuntu2604-Readme.md)

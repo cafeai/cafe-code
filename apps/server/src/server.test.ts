@@ -1526,40 +1526,6 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
-  it.effect(
-    "rejects Cafe owner credentials at Desktop Control and desktop-shaped credentials at Cafe management",
-    () =>
-      Effect.gen(function* () {
-        yield* buildAppUnderTest({
-          layers: {
-            serverSettings: {
-              getSettings: Effect.succeed({
-                ...DEFAULT_SERVER_SETTINGS,
-                virtualDesktopsEnabled: true,
-                desktopControlMcpEnabled: true,
-              }),
-            },
-          },
-        });
-        const bearer = yield* getAuthenticatedBearerSessionToken();
-        const request = (url: string, token: string) =>
-          HttpClient.post(url, {
-            headers: {
-              accept: "application/json, text/event-stream",
-              authorization: `Bearer ${token}`,
-              "content-type": "application/json",
-            },
-            body: HttpBody.jsonUnsafe({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
-          });
-        assert.equal(
-          (yield* request("/mcp/desktop", bearer)).status,
-          process.platform === "linux" ? 401 : 403,
-        );
-        assert.equal((yield* request("/mcp", "a".repeat(64))).status, 401);
-        assert.equal((yield* request("/api/virtual-desktops/connect", bearer)).status, 403);
-      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
-  );
-
   it.effect("blocks the next MCP request when disabled without restarting the server", () =>
     Effect.gen(function* () {
       let enabled = true;

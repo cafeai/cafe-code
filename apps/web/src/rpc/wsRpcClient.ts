@@ -108,7 +108,6 @@ export interface WsRpcClient {
   };
   readonly server: {
     readonly usageReset: RpcUnaryMethod<typeof WS_METHODS.serverUsageReset>;
-    readonly virtualDesktop: RpcUnaryMethod<typeof WS_METHODS.serverVirtualDesktop>;
     readonly getMcpStatus: RpcUnaryNoArgMethod<typeof WS_METHODS.serverGetMcpStatus>;
     readonly updateMcpClient: RpcUnaryMethod<typeof WS_METHODS.serverUpdateMcpClient>;
     readonly respondToInteraction: RpcUnaryMethod<typeof WS_METHODS.providerRespondToInteraction>;
@@ -293,8 +292,6 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
       resolveInteractionUrl: (input) =>
         transport.request((client) => client[WS_METHODS.providerResolveInteractionUrl](input)),
       getConfig: () => transport.request((client) => client[WS_METHODS.serverGetConfig]({})),
-      virtualDesktop: (input) =>
-        transport.request((client) => client[WS_METHODS.serverVirtualDesktop](input)),
       getMcpStatus: () => transport.request((client) => client[WS_METHODS.serverGetMcpStatus]({})),
       updateMcpClient: (input) =>
         transport.request((client) => client[WS_METHODS.serverUpdateMcpClient](input)),

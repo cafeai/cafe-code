@@ -1,8 +1,3 @@
-import {
-  VirtualDesktopRequest,
-  VirtualDesktopState,
-  VirtualDesktopError,
-} from "./virtualDesktop.ts";
 import * as Schema from "effect/Schema";
 import { ProviderSkillsInput, ProviderSkillsResult } from "./providerSkills.ts";
 import { ProviderCommandCatalog, ProviderCommandsInput } from "./providerCommands.ts";
@@ -171,7 +166,6 @@ export const WS_METHODS = {
 
   // Server meta
   serverGetConfig: "server.getConfig",
-  serverVirtualDesktop: "server.virtualDesktop",
   serverGetMcpStatus: "server.getMcpStatus",
   serverUpdateMcpClient: "server.updateMcpClient",
   serverRefreshProviders: "server.refreshProviders",
@@ -240,12 +234,6 @@ export const WsServerGetConfigRpc = Rpc.make(WS_METHODS.serverGetConfig, {
   payload: Schema.Struct({}),
   success: ServerConfig,
   error: Schema.Union([ClientSettingsError, KeybindingsConfigError, ServerSettingsError]),
-});
-
-export const WsServerVirtualDesktopRpc = Rpc.make(WS_METHODS.serverVirtualDesktop, {
-  payload: VirtualDesktopRequest,
-  success: VirtualDesktopState,
-  error: VirtualDesktopError,
 });
 
 export const WsServerGetMcpStatusRpc = Rpc.make(WS_METHODS.serverGetMcpStatus, {
@@ -708,7 +696,6 @@ export const WsRpcGroup = RpcGroup.make(
   }),
   WsServerGetConfigRpc,
   WsServerGetMcpStatusRpc,
-  WsServerVirtualDesktopRpc,
   WsServerUpdateMcpClientRpc,
   WsServerRefreshProvidersRpc,
   WsServerListProviderSkillsRpc,

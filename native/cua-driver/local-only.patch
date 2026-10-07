@@ -1,0 +1,153 @@
+diff --git a/libs/cua-driver/rust/Cargo.lock b/libs/cua-driver/rust/Cargo.lock
+index 1c2a153..987d4b4 100644
+--- a/libs/cua-driver/rust/Cargo.lock
++++ b/libs/cua-driver/rust/Cargo.lock
+@@ -136,9 +136,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "anyhow"
+-version = "1.0.102"
++version = "1.0.103"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
++checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
+ 
+ [[package]]
+ name = "apple-cf"
+@@ -1216,7 +1216,6 @@ dependencies = [
+  "cua-driver-core",
+  "cua-driver-sdk",
+  "cua-driver-testkit",
+- "cua-telemetry",
+  "cursor-overlay",
+  "embed-resource",
+  "flate2",
+@@ -1405,18 +1404,6 @@ dependencies = [
+  "thiserror 1.0.69",
+ ]
+ 
+-[[package]]
+-name = "cua-telemetry"
+-version = "0.1.0"
+-dependencies = [
+- "hex",
+- "rand 0.9.5",
+- "serde",
+- "serde_json",
+- "sha2",
+- "toml_edit 0.25.12+spec-1.1.0",
+-]
+-
+ [[package]]
+ name = "cursor-overlay"
+ version = "0.34.0"
+@@ -1661,11 +1648,10 @@ dependencies = [
+ 
+ [[package]]
+ name = "event-listener"
+-version = "5.4.1"
++version = "5.4.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "e13b66accf52311f30a0db42147dadea9850cb48cd070028831ae5f5d4b856ab"
++checksum = "5a23add41df1562121a9393cb065eab5146a1242410f23a644851e90cfd669d2"
+ dependencies = [
+- "concurrent-queue",
+  "parking",
+  "pin-project-lite",
+ ]
+@@ -2610,9 +2596,9 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
+ 
+ [[package]]
+ name = "lru"
+-version = "0.18.1"
++version = "0.18.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "0b6180140927ee907000b0aa540091f6ea512ead4447c92b8fc35bc72788a5a6"
++checksum = "5d2f2f9b4ba7e6b24d95e7e899329d35be83bcded72c8540cdd5368932d1d90a"
+ 
+ [[package]]
+ name = "matchers"
+@@ -2657,9 +2643,9 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
+ 
+ [[package]]
+ name = "memmap2"
+-version = "0.9.10"
++version = "0.9.11"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "714098028fe011992e1c3962653c96b2d578c4b4bce9036e15ff220319b1e0e3"
++checksum = "d1219ed1b7f229ee7104d281dd01d6802fe28bb6e95d292942c4daacdeb798c0"
+ dependencies = [
+  "libc",
+ ]
+@@ -4826,7 +4812,6 @@ dependencies = [
+  "indexmap",
+  "toml_datetime 1.1.1+spec-1.1.0",
+  "toml_parser",
+- "toml_writer",
+  "winnow 1.0.3",
+ ]
+ 
+diff --git a/libs/cua-driver/rust/crates/cua-driver/Cargo.toml b/libs/cua-driver/rust/crates/cua-driver/Cargo.toml
+index 8dc0840..cf4b306 100644
+--- a/libs/cua-driver/rust/crates/cua-driver/Cargo.toml
++++ b/libs/cua-driver/rust/crates/cua-driver/Cargo.toml
+@@ -34,7 +34,6 @@ ureq = { version = "3", features = ["json"] }
+ # The switches shared by every Cua program (DO_NOT_TRACK, CUA_TELEMETRY,
+ # `[telemetry] enabled` in $CUA_HOME/config.toml). Only its config reader
+ # is used; no sender.
+-cua-telemetry = { path = "../../../../cua/crates/cua-telemetry", default-features = false }
+ # Strict semver comparison for the startup update-available banner so that
+ # pre-release tags (`-dev`, `-rc.1`) sort below their corresponding release
+ # and we never recommend a pre-release as an "update".
+diff --git a/libs/cua-driver/rust/crates/cua-driver/src/telemetry.rs b/libs/cua-driver/rust/crates/cua-driver/src/telemetry.rs
+index 8c48b9e..b73bba7 100644
+--- a/libs/cua-driver/rust/crates/cua-driver/src/telemetry.rs
++++ b/libs/cua-driver/rust/crates/cua-driver/src/telemetry.rs
+@@ -214,43 +214,16 @@ pub fn is_enabled() -> bool {
+ }
+ 
+ fn effective_enabled() -> (bool, &'static str) {
+-    // The cross-tool opt-out wins over everything.
+-    if std::env::var("DO_NOT_TRACK").is_ok_and(|v| {
+-        let v = v.trim();
+-        !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+-    }) {
+-        return (false, "do_not_track");
+-    }
+-    if let Some(value) = parse_env_bool(ENV_TELEMETRY_ENABLED) {
+-        return (value, "environment");
+-    }
+-    if let Some(value) = parse_env_bool(ENV_TELEMETRY_ENABLED_COMPAT) {
+-        return (value, "environment_compat");
+-    }
+-    // The switches every Cua program shares: `CUA_TELEMETRY`, then
+-    // `cua config set telemetry off` / the Spaces app setting.
+-    if let Some(value) = parse_env_bool(cua_telemetry::config::ENV_TELEMETRY) {
+-        return (value, "environment_shared");
+-    }
+-    if shared_config_disabled() {
+-        return (false, "shared_config");
+-    }
+-    if let Some(value) = persisted_enabled() {
+-        return (value, "persisted");
+-    }
+-    (true, "default")
++    // Cafe distributes a local-only build. Neither environment variables nor
++    // upstream profile preferences can enable product telemetry in this build.
++    (false, "cafe_local_build")
+ }
+ 
+ /// `[telemetry] enabled = "off"` in `$CUA_HOME/config.toml` (outside
+ /// tests, `~/.cua/config.toml` when `CUA_HOME` is unset). Only an explicit
+ /// off counts here; on is the driver's own default.
+ fn shared_config_disabled() -> bool {
+-    let home = if cfg!(test) {
+-        std::env::var_os("CUA_HOME").map(PathBuf::from)
+-    } else {
+-        cua_telemetry::config::cua_home(&cua_telemetry::config::process_env)
+-    };
+-    home.is_some_and(|h| cua_telemetry::config::config_value(&h) == Some(false))
++    true
+ }
+ 
+ pub fn status() -> TelemetryStatus {

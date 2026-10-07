@@ -177,31 +177,6 @@ describe("qualified major Actions and Ubuntu runner boundaries", () => {
     expect(caches).toBe(5);
   });
 
-  it("executes the real Ubuntu helper and bounded private desktop fixture after building", () => {
-    const steps = readWorkflow("ci.yml").jobs.quality?.steps ?? [];
-    const build = steps.findIndex((step) => step.run === "corepack yarn build:desktop");
-    const qualification = steps.findIndex((step) =>
-      step.run?.includes("integration/VirtualDesktopFallback.e2e.test.ts"),
-    );
-    const finalBuild = steps.findIndex(
-      (step) => step.run === "corepack yarn build:desktop --force",
-    );
-    expect(build).toBeGreaterThanOrEqual(0);
-    expect(qualification).toBeGreaterThan(build);
-    expect(finalBuild).toBeGreaterThan(qualification);
-    const step = steps[qualification]!;
-    expect(step.if).toBe("runner.os == 'Linux'");
-    expect(step["timeout-minutes"]).toBe(5);
-    expect(step.env).toEqual({ CAFE_CODE_VIRTUAL_DESKTOP_E2E: "1", DBUS_SESSION_BUS_ADDRESS: "" });
-    expect(step.run).toContain("timeout 10s apps/server/dist/cafe-desktop-native --version");
-    expect(step.run).toContain(
-      "corepack yarn workspace @cafeai/cafe-code exec vitest run --config vitest.e2e.config.ts",
-    );
-    const runtime = steps.find((candidate) => candidate.run?.includes("sway xwayland dbus-daemon"));
-    expect(runtime?.if).toBe("runner.os == 'Linux'");
-    expect(runtime?.run).toContain("sudo install -d -m 0700");
-  });
-
   it("qualifies the installed fixed Electron binary on every quality host before application tests", () => {
     const steps = readWorkflow("ci.yml").jobs.quality?.steps ?? [];
     const install = steps.findIndex((step) => step.run === "corepack yarn install --immutable");

@@ -1,10 +1,4 @@
 import {
-  DESKTOP_DAEMON_PATH,
-  DesktopInternalRequest,
-  dispatchDesktopRequest,
-} from "../virtualDesktop/service.ts";
-import { VirtualDesktopError } from "@cafecode/contracts";
-import {
   SCHEDULING_SESSION_DAEMON_PATH,
   SchedulingSessionAuthorizationRequest,
   dispatchSchedulingSessionAuthorization,
@@ -96,7 +90,6 @@ import {
 import { ProviderRuntimeInventory } from "./ProviderRuntimeInventory.ts";
 import { purgeProviderDaemonThreadPersistence } from "./ProviderDaemonThreadPurge.ts";
 
-const decodeDesktopInternalRequest = Schema.decodeUnknownSync(DesktopInternalRequest);
 const decodeSchedulingSessionAuthorization = Schema.decodeUnknownSync(
   SchedulingSessionAuthorizationRequest,
 );
@@ -1586,34 +1579,6 @@ export const runProviderDaemonServer = (
           }
           return;
         }
-        if (url.pathname === DESKTOP_DAEMON_PATH && method === "POST") {
-          if (!hasCapability(request, "rpc")) {
-            writeJson(response, 401, { error: "unauthorized" });
-            return;
-          }
-          const cancellation = new AbortController();
-          response.once("close", () => {
-            if (!response.writableEnded) cancellation.abort();
-          });
-          try {
-            const input = decodeDesktopInternalRequest(await readJsonBody(request));
-            writeJson(response, 200, await dispatchDesktopRequest(input, cancellation.signal));
-          } catch (error) {
-            writeJson(
-              response,
-              400,
-              error instanceof VirtualDesktopError
-                ? { _tag: error._tag, code: error.code, message: error.message }
-                : {
-                    _tag: "VirtualDesktopError",
-                    code: "invalid_request",
-                    message: "Invalid desktop request.",
-                  },
-            );
-          }
-          return;
-        }
-
         if (url.pathname === PROVIDER_DAEMON_LIVENESS_PATH && method === "GET") {
           if (!hasCapability(request, "health")) {
             writeJson(response, 401, { error: "unauthorized" });

@@ -18,7 +18,6 @@ import { Route as SettingsAppearanceRouteImport } from './routes/settings.appear
 import { Route as SettingsArchivedRouteImport } from './routes/settings.archived'
 import { Route as SettingsChatThreadsRouteImport } from './routes/settings.chat-threads'
 import { Route as SettingsConnectionsRouteImport } from './routes/settings.connections'
-import { Route as SettingsDesktopControlRouteImport } from './routes/settings.desktop-control'
 import { Route as SettingsDiagnosticsRouteImport } from './routes/settings.diagnostics'
 import { Route as SettingsDictationRouteImport } from './routes/settings.dictation'
 import { Route as SettingsFilesRouteImport } from './routes/settings.files'
@@ -76,11 +75,6 @@ const SettingsChatThreadsRoute = SettingsChatThreadsRouteImport.update({
 const SettingsConnectionsRoute = SettingsConnectionsRouteImport.update({
   id: '/connections',
   path: '/connections',
-  getParentRoute: () => SettingsRoute,
-} as any)
-const SettingsDesktopControlRoute = SettingsDesktopControlRouteImport.update({
-  id: '/desktop-control',
-  path: '/desktop-control',
   getParentRoute: () => SettingsRoute,
 } as any)
 const SettingsDiagnosticsRoute = SettingsDiagnosticsRouteImport.update({
@@ -164,7 +158,6 @@ export interface FileRoutesByFullPath {
   '/settings/archived': typeof SettingsArchivedRoute
   '/settings/chat-threads': typeof SettingsChatThreadsRoute
   '/settings/connections': typeof SettingsConnectionsRoute
-  '/settings/desktop-control': typeof SettingsDesktopControlRoute
   '/settings/diagnostics': typeof SettingsDiagnosticsRoute
   '/settings/dictation': typeof SettingsDictationRoute
   '/settings/files': typeof SettingsFilesRoute
@@ -188,7 +181,6 @@ export interface FileRoutesByTo {
   '/settings/archived': typeof SettingsArchivedRoute
   '/settings/chat-threads': typeof SettingsChatThreadsRoute
   '/settings/connections': typeof SettingsConnectionsRoute
-  '/settings/desktop-control': typeof SettingsDesktopControlRoute
   '/settings/diagnostics': typeof SettingsDiagnosticsRoute
   '/settings/dictation': typeof SettingsDictationRoute
   '/settings/files': typeof SettingsFilesRoute
@@ -215,7 +207,6 @@ export interface FileRoutesById {
   '/settings/archived': typeof SettingsArchivedRoute
   '/settings/chat-threads': typeof SettingsChatThreadsRoute
   '/settings/connections': typeof SettingsConnectionsRoute
-  '/settings/desktop-control': typeof SettingsDesktopControlRoute
   '/settings/diagnostics': typeof SettingsDiagnosticsRoute
   '/settings/dictation': typeof SettingsDictationRoute
   '/settings/files': typeof SettingsFilesRoute
@@ -243,7 +234,6 @@ export interface FileRouteTypes {
     | '/settings/archived'
     | '/settings/chat-threads'
     | '/settings/connections'
-    | '/settings/desktop-control'
     | '/settings/diagnostics'
     | '/settings/dictation'
     | '/settings/files'
@@ -267,7 +257,6 @@ export interface FileRouteTypes {
     | '/settings/archived'
     | '/settings/chat-threads'
     | '/settings/connections'
-    | '/settings/desktop-control'
     | '/settings/diagnostics'
     | '/settings/dictation'
     | '/settings/files'
@@ -293,7 +282,6 @@ export interface FileRouteTypes {
     | '/settings/archived'
     | '/settings/chat-threads'
     | '/settings/connections'
-    | '/settings/desktop-control'
     | '/settings/diagnostics'
     | '/settings/dictation'
     | '/settings/files'
@@ -380,13 +368,6 @@ declare module '@tanstack/react-router' {
       path: '/connections'
       fullPath: '/settings/connections'
       preLoaderRoute: typeof SettingsConnectionsRouteImport
-      parentRoute: typeof SettingsRoute
-    }
-    '/settings/desktop-control': {
-      id: '/settings/desktop-control'
-      path: '/desktop-control'
-      fullPath: '/settings/desktop-control'
-      preLoaderRoute: typeof SettingsDesktopControlRouteImport
       parentRoute: typeof SettingsRoute
     }
     '/settings/diagnostics': {
@@ -510,7 +491,6 @@ interface SettingsRouteChildren {
   SettingsArchivedRoute: typeof SettingsArchivedRoute
   SettingsChatThreadsRoute: typeof SettingsChatThreadsRoute
   SettingsConnectionsRoute: typeof SettingsConnectionsRoute
-  SettingsDesktopControlRoute: typeof SettingsDesktopControlRoute
   SettingsDiagnosticsRoute: typeof SettingsDiagnosticsRoute
   SettingsDictationRoute: typeof SettingsDictationRoute
   SettingsFilesRoute: typeof SettingsFilesRoute
@@ -531,7 +511,6 @@ const SettingsRouteChildren: SettingsRouteChildren = {
   SettingsArchivedRoute: SettingsArchivedRoute,
   SettingsChatThreadsRoute: SettingsChatThreadsRoute,
   SettingsConnectionsRoute: SettingsConnectionsRoute,
-  SettingsDesktopControlRoute: SettingsDesktopControlRoute,
   SettingsDiagnosticsRoute: SettingsDiagnosticsRoute,
   SettingsDictationRoute: SettingsDictationRoute,
   SettingsFilesRoute: SettingsFilesRoute,

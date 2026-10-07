@@ -33,7 +33,7 @@ export * from "./filesystem.ts";
 export * from "./usageStats.ts";
 export * from "./rpc.ts";
 export * from "./mcp.ts";
-export * from "./virtualDesktop.ts";
+export * from "./desktopObservation.ts";
 
 export * from "./providerCompaction.ts";
 export * from "./codexReview.ts";

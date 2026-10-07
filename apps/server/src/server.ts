@@ -1,7 +1,5 @@
-import { desktopConnectRouteLayer } from "./virtualDesktop/connect.ts";
-import { desktopMcpRouteLayer } from "./virtualDesktop/http.ts";
-import { DesktopRuntimeLive } from "./virtualDesktop/runtime.ts";
 import { SchedulingSessionRuntimeLive } from "./scheduledFollowups/sessionRuntime.ts";
+import { NativeControlSessionRuntimeLive } from "./nativeControl/sessionRuntime.ts";
 import { schedulingMcpRouteLayer } from "./scheduledFollowups/http.ts";
 import { startSchedulingLoopbackServer } from "./scheduledFollowups/loopbackServer.ts";
 import * as NodeHttp from "node:http";
@@ -14,9 +12,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { ServerConfig } from "./config.ts";
 import { fileAttachmentRouteLayer } from "./fileAttachmentHttp.ts";
-import { desktopObservationRouteLayer } from "./virtualDesktop/observationHttp.ts";
-import { remoteWorkspaceRouteLayer } from "./remoteWorkspace/http.ts";
-import { desktopPreviewRouteLayer } from "./virtualDesktop/previewHttp.ts";
+import { desktopObservationRouteLayer } from "./desktopObservations/observationHttp.ts";
 import {
   attachmentsRouteLayer,
   brandingSidebarImageServeRouteLayer,
@@ -292,7 +288,7 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   Layer.provideMerge(GitLayerLive),
   Layer.provideMerge(VcsLayerLive),
   Layer.provideMerge(ProviderRuntimeLayerLive),
-  Layer.provideMerge(Layer.mergeAll(DesktopRuntimeLive, SchedulingSessionRuntimeLive)),
+  Layer.provideMerge(Layer.mergeAll(SchedulingSessionRuntimeLive, NativeControlSessionRuntimeLive)),
   Layer.provideMerge(PersistenceLayerLive),
   Layer.provideMerge(KeybindingsLive),
   Layer.provideMerge(ProviderRegistryLive),
@@ -362,14 +358,11 @@ export const makeRoutesLayer = Layer.mergeAll(
   attachmentsRouteLayer,
   fileAttachmentRouteLayer,
   desktopObservationRouteLayer,
-  desktopPreviewRouteLayer,
-  remoteWorkspaceRouteLayer,
   brandingSidebarImageServeRouteLayer,
   brandingSidebarImageUploadRouteLayer,
   clientDebugLogRouteLayer,
   cafeMcpRouteLayer,
-  Layer.mergeAll(desktopMcpRouteLayer, schedulingMcpRouteLayer),
-  desktopConnectRouteLayer,
+  schedulingMcpRouteLayer,
   orchestrationDispatchRouteLayer,
   orchestrationSnapshotRouteLayer,
   otlpTracesProxyRouteLayer,

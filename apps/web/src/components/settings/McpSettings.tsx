@@ -12,6 +12,7 @@ import { Button } from "../ui/button";
 import { Badge } from "../ui/badge";
 import { Switch } from "../ui/switch";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
+import { NativeControlSettings } from "./NativeControlSettings";
 
 export function isLocalMcpEnvironment(backendUrl: string | null | undefined): boolean {
   const bootstrap = window.desktopBridge?.getLocalEnvironmentBootstrap();
@@ -122,6 +123,7 @@ export function McpSettings() {
           </p>
         </div>
       </SettingsSection>
+      {local && !remote && window.desktopBridge?.getNativeControlState && <NativeControlSettings />}
       <SettingsSection title="Cafe Code MCP" icon={<PlugIcon className="size-3.5" />}>
         <SettingsRow
           title="Enable Cafe Code MCP"

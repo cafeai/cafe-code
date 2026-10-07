@@ -334,7 +334,6 @@ const assertServerRuntimeBuildAssets = Effect.fn("assertServerRuntimeBuildAssets
     "dist/bin.mjs",
     "dist/launcher.mjs",
     "dist/mcp-bridge.mjs",
-    "dist/desktop-mcp-bridge.mjs",
     "dist/scheduling-mcp-bridge.mjs",
   ]) {
     const abs = path.join(serverDir, relPath);
@@ -570,14 +569,6 @@ const buildCmd = Command.make(
         stderr: "inherit",
       });
       yield* runCommand(bundleCommand);
-      if (process.platform === "linux")
-        yield* runCommand(
-          ChildProcess.make(
-            process.execPath,
-            [path.join(repoRoot, "scripts/build-virtual-desktop.ts")],
-            { cwd: repoRoot, stdout: "inherit", stderr: "inherit" },
-          ),
-        );
       yield* assertServerRuntimeBuildAssets(serverDir);
 
       const webDist = path.join(repoRoot, "apps/web/dist");

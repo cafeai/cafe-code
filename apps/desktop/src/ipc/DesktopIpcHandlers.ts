@@ -1,7 +1,12 @@
-import { openVirtualDesktop } from "./methods/virtualDesktop.ts";
 import * as Effect from "effect/Effect";
 
 import * as DesktopIpc from "./DesktopIpc.ts";
+import {
+  getNativeControlState,
+  setNativeControlEnabled,
+  getNativeControlDiagnostics,
+  captureNativeControlPreview,
+} from "./methods/nativeControl.ts";
 import { getClientSettings, setClientSettings } from "./methods/clientSettings.ts";
 import {
   getSavedEnvironmentRegistry,
@@ -47,6 +52,10 @@ export const installDesktopIpcHandlers = Effect.gen(function* () {
   yield* ipc.handleSync(getLocalEnvironmentBootstrap);
 
   yield* ipc.handle(getDebugEndpointState);
+  yield* ipc.handle(getNativeControlState);
+  yield* ipc.handle(setNativeControlEnabled);
+  yield* ipc.handle(getNativeControlDiagnostics);
+  yield* ipc.handle(captureNativeControlPreview);
   yield* ipc.handle(publishDebugSnapshot);
 
   yield* ipc.handle(getClientSettings);
@@ -72,7 +81,6 @@ export const installDesktopIpcHandlers = Effect.gen(function* () {
   yield* ipc.handle(openPath);
   yield* ipc.handle(revealPath);
   yield* ipc.handle(copyText);
-  yield* ipc.handle(openVirtualDesktop);
 
   yield* ipc.handle(getUpdateState);
   yield* ipc.handle(setUpdateChannel);

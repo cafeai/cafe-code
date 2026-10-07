@@ -4,11 +4,11 @@ import { readMcpFile } from "./privateFiles.ts";
 const MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
 const MAX_IN_FLIGHT = 4;
 
-type BridgeTarget = "cafe-code" | "cafe-desktop" | "cafe-scheduling";
+type BridgeTarget = "cafe-code" | "cafe-scheduling" | "cafe-native-control";
 const BRIDGE_PATHS: Record<BridgeTarget, string> = {
   "cafe-code": "/mcp",
-  "cafe-desktop": "/mcp/desktop",
   "cafe-scheduling": "/mcp/scheduling",
+  "cafe-native-control": "/mcp/native-control",
 };
 
 type RequestId = string | number;
