@@ -1,13 +1,17 @@
 import "../../index.css";
 
 import {
+  CommandId,
   EnvironmentId,
+  MessageId,
   ProviderDriverKind,
   ProviderInstanceId,
   ScheduledFollowupId,
+  ScheduledFollowupRunId,
   ThreadId,
   type EnvironmentApi,
   type ScheduledFollowupRecord,
+  type ScheduledFollowupRun,
   type ServerProvider,
 } from "@cafecode/contracts";
 import { page, userEvent } from "vitest/browser";
@@ -72,6 +76,27 @@ function proposal(overrides: Partial<ScheduledFollowupRecord> = {}): ScheduledFo
   };
 }
 
+function failedRun(errorCode: string): ScheduledFollowupRun {
+  return {
+    id: ScheduledFollowupRunId.make("22222222-2222-4222-8222-222222222222"),
+    scheduleId: proposal().id,
+    revision: 7,
+    dueAt: now,
+    state: "failed",
+    commandId: CommandId.make("inline-review-failed-command"),
+    messageId: MessageId.make("inline-review-failed-message"),
+    intentSequence: null,
+    turnId: null,
+    modelSelection: null,
+    createdAt: now,
+    startedAt: null,
+    completedAt: now,
+    result: null,
+    summary: null,
+    errorCode,
+  };
+}
+
 /** All data and mutations stay inside this fixture. Reading or opening an
  * owner review must never escape through a provider or mutate saved state. */
 function installApi(initial: readonly ScheduledFollowupRecord[], owner = environmentId) {
@@ -127,12 +152,84 @@ function deferredList() {
   return { promise, resolve };
 }
 
+/** Use the browser's computer zone independently of the saved schedule's
+ * selected zone and of the production presentation helper. */
+function computerLocalTime(instant: string): string {
+  return new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+    timeZone: new Intl.DateTimeFormat().resolvedOptions().timeZone,
+  }).format(new Date(instant));
+}
+
 describe("inline scheduled follow-up owner review", () => {
   afterEach(() => {
     __resetEnvironmentApiOverridesForTests();
     vi.restoreAllMocks();
     document.body.innerHTML = "";
   });
+
+  it.each(["provider-unavailable", "private_fixture_token"])(
+    "opens owner review after a sanitized %s explanation without enabling",
+    async (errorCode) => {
+      const saved = proposal({ state: "needs_attention", lastRun: failedRun(errorCode) });
+      const { api } = installApi([saved]);
+      const screen = await render(<ScheduledFollowupConversation context={context} />);
+      try {
+        const notice = page.getByRole("article", {
+          name: `Scheduled follow-up notice: ${saved.name}`,
+        });
+        const reason =
+          errorCode === "provider-unavailable"
+            ? "The saved provider account or selected model was unavailable. This run was not submitted."
+            : "This run failed.";
+        await expect.element(notice.getByText(reason, { exact: true })).toBeVisible();
+        await notice.getByRole("button", { name: "Details", exact: true }).click();
+        await expect
+          .element(notice.getByText("Account: Personal Codex", { exact: true }))
+          .toBeVisible();
+        expectNoMutation(api);
+        await notice.getByRole("button", { name: `Review schedule: ${saved.name}` }).click();
+        const dialog = page.getByRole("dialog", {
+          name: "Review scheduled follow-up",
+          exact: true,
+        });
+        await expect.element(dialog).toBeVisible();
+        await expect.element(page.getByLabelText("Name", { exact: true })).toHaveValue(saved.name);
+        await expect
+          .element(page.getByLabelText("Instructions", { exact: true }))
+          .toHaveValue(saved.prompt);
+        await dialog.getByText("Model and run settings", { exact: true }).click();
+        await expect
+          .element(
+            dialog.getByText(
+              "Account: Personal Codex. This account will execute and pay for these follow-ups.",
+              { exact: false },
+            ),
+          )
+          .toBeVisible();
+        expect(document.body.textContent).not.toContain(errorCode);
+        expectNoMutation(api);
+        await userEvent.keyboard("{Escape}");
+        // Escape belongs to the open editor and cancels that draft. Closing
+        // the containing review remains a separate, explicit dialog action.
+        await expect
+          .element(page.getByRole("form", { name: "Scheduled follow-up editor" }))
+          .not.toBeInTheDocument();
+        await expect.element(dialog.getByText(reason, { exact: true })).toBeVisible();
+        expectNoMutation(api);
+        await dialog.getByRole("button", { name: "Close", exact: true }).click();
+        await expect.element(dialog).not.toBeInTheDocument();
+        expectNoMutation(api);
+      } finally {
+        await screen.unmount();
+      }
+    },
+  );
 
   it("loads proposals while Tasks is closed and enables only the exact saved definition after explicit approval", async () => {
     const saved = proposal();
@@ -162,7 +259,7 @@ describe("inline scheduled follow-up owner review", () => {
       await expect.element(page.getByLabelText("Every (minutes)", { exact: true })).toHaveValue(17);
       await expect
         .element(page.getByLabelText("Timezone", { exact: true }))
-        .toHaveValue("Asia/Tokyo");
+        .toHaveTextContent("Asia/Tokyo");
       expectNoMutation(api);
 
       await page.getByRole("button", { name: "Approve & enable", exact: true }).click();
@@ -199,6 +296,48 @@ describe("inline scheduled follow-up owner review", () => {
       await screen.unmount();
     }
   });
+
+  it.each(["Asia/Tokyo", "America/New_York"])(
+    "shows planned and next-run notice dates in computer local time for a %s schedule",
+    async (timeZone) => {
+      const at = "2099-10-04T00:30:00.000Z";
+      const nextRunAt = "2099-10-04T13:30:00.000Z";
+      const saved = proposal({
+        state: "active",
+        recurrence: { kind: "once", at, timeZone },
+        nextRunAt,
+      });
+      const { api } = installApi([saved]);
+      const screen = await render(<ScheduledFollowupConversation context={context} />);
+      try {
+        const notice = page.getByRole("article", {
+          name: `Scheduled follow-up notice: ${saved.name}`,
+        });
+        await expect
+          .element(
+            notice.getByText(`One-time follow-up · Planned: ${computerLocalTime(at)}`, {
+              exact: true,
+            }),
+          )
+          .toBeVisible();
+        await expect
+          .element(notice.getByText(`Next: ${computerLocalTime(nextRunAt)}`, { exact: true }))
+          .toBeVisible();
+        await notice.getByRole("button", { name: "Details", exact: true }).click();
+        await expect
+          .element(
+            notice.getByText(`Schedule timezone: ${timeZone}`, {
+              exact: true,
+            }),
+          )
+          .toBeVisible();
+        expect(document.querySelector("[data-scheduled-followups]")).toBeNull();
+        expectNoMutation(api);
+      } finally {
+        await screen.unmount();
+      }
+    },
+  );
 
   it.each(["account", "chat", "environment"] as const)(
     "discards the open review and unsaved values when the %s changes",

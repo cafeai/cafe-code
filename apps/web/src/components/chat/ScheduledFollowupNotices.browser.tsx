@@ -1,13 +1,17 @@
 import "../../index.css";
 
 import {
+  CommandId,
   EnvironmentId,
+  MessageId,
   ProviderDriverKind,
   ProviderInstanceId,
   ScheduledFollowupId,
+  ScheduledFollowupRunId,
   ThreadId,
   type EnvironmentApi,
   type ScheduledFollowupRecord,
+  type ScheduledFollowupRun,
   type ServerProvider,
 } from "@cafecode/contracts";
 import { page, userEvent } from "vitest/browser";
@@ -79,6 +83,27 @@ function makeSchedule(
   };
 }
 
+function failedRun(errorCode: string): ScheduledFollowupRun {
+  return {
+    id: ScheduledFollowupRunId.make("44444444-4444-4444-8444-444444444444"),
+    scheduleId: makeSchedule().id,
+    revision: 2,
+    dueAt: now,
+    state: "failed",
+    commandId: CommandId.make("inline-failed-run-command"),
+    messageId: MessageId.make("inline-failed-run-message"),
+    intentSequence: null,
+    turnId: null,
+    modelSelection: null,
+    createdAt: now,
+    startedAt: null,
+    completedAt: now,
+    result: null,
+    summary: null,
+    errorCode,
+  };
+}
+
 /** No provider or scheduler is contacted by these presentational fixtures. Any
  * accidental read or mutation would fail and be visible in the assertions. */
 function installUnusedApi() {
@@ -110,6 +135,52 @@ describe("inline scheduled follow-up notices", () => {
     document.documentElement.classList.remove("dark");
   });
 
+  it.each(["provider-unavailable", "private_fixture_token", "constructor"])(
+    "explains a saved %s failure without exposing the code or changing approval authority",
+    async (errorCode) => {
+      const api = installUnusedApi();
+      const record = makeSchedule(1, {
+        state: "needs_attention",
+        nextRunAt: null,
+        lastRun: failedRun(errorCode),
+      });
+      const onReview = vi.fn();
+      const screen = await render(
+        <ScheduledFollowupNotices context={context} schedules={[record]} onReview={onReview} />,
+      );
+      try {
+        const notice = page.getByRole("article", {
+          name: `Scheduled follow-up notice: ${record.name}`,
+        });
+        const reason =
+          errorCode === "provider-unavailable"
+            ? "The saved provider account or selected model was unavailable. This run was not submitted."
+            : "This run failed.";
+        await expect.element(notice.getByText(reason, { exact: true })).toBeVisible();
+        await expect.element(notice.getByText("Needs attention", { exact: true })).toBeVisible();
+        if (errorCode === "provider-unavailable") {
+          await expect
+            .element(
+              notice.getByText(
+                "Check the saved account and model in Settings, then review the schedule before enabling it again.",
+                { exact: true },
+              ),
+            )
+            .toBeVisible();
+        } else {
+          expect(notice.element().textContent).not.toContain("not submitted");
+        }
+        expect(notice.element().textContent).not.toContain(errorCode);
+        expect(onReview).not.toHaveBeenCalled();
+        await notice.getByRole("button", { name: `Review schedule: ${record.name}` }).click();
+        expect(onReview).toHaveBeenCalledExactlyOnceWith(record);
+        for (const operation of Object.values(api)) expect(operation).not.toHaveBeenCalled();
+      } finally {
+        await screen.unmount();
+      }
+    },
+  );
+
   it("shows saved proposals without Tasks and opens owner review with the keyboard without scheduling", async () => {
     const api = installUnusedApi();
     const record = makeSchedule(1, { state: "pending_confirmation", nextRunAt: null });
@@ -130,7 +201,7 @@ describe("inline scheduled follow-up notices", () => {
       await details.click();
       await expect.element(details).toHaveAttribute("aria-expanded", "true");
       await expect.element(page.getByText("Account: Personal Codex")).toBeVisible();
-      await expect.element(page.getByText("Time zone: Asia/Tokyo")).toBeVisible();
+      await expect.element(page.getByText("Schedule timezone: Asia/Tokyo")).toBeVisible();
       await expect
         .element(page.getByText("Uses chat settings · gpt-6-astra · Effort: ultra"))
         .toBeVisible();
@@ -342,7 +413,7 @@ describe("inline scheduled follow-up notices", () => {
       expect(host.querySelectorAll("img, script, a")).toHaveLength(0);
       expect(host.textContent).toContain("One-time follow-up · Planned:");
       await page.getByRole("button", { name: "Details" }).click();
-      expect(host.textContent).toContain("Time zone: Asia/Tokyo");
+      expect(host.textContent).toContain("Schedule timezone: Asia/Tokyo");
       for (const dark of [false, true]) {
         document.documentElement.classList.toggle("dark", dark);
         const status = page.getByText("Needs your approval", { exact: true }).element();

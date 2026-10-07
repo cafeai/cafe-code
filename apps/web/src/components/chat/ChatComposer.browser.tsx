@@ -10,7 +10,6 @@ import { DEFAULT_UNIFIED_SETTINGS } from "@cafecode/contracts/settings";
 import { createModelCapabilities, createModelSelection } from "@cafecode/shared/model";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createRef } from "react";
-import { flushSync } from "react-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { render } from "vitest-browser-react";
@@ -332,7 +331,7 @@ describe("provider-specific composer menu actions", () => {
       applyInterfaceScalePercent(scale);
       document.documentElement.classList.toggle("dark", dark);
       await using fixture = await mountComposer(width);
-      const sharedTab = document.querySelector(".cafe-composer-tab");
+      const sharedTab = document.querySelector<HTMLElement>(".cafe-composer-tab")!;
       for (const provider of ["codex", "claudeAgent"]) {
         if (provider === "claudeAgent") await fixture.select(provider);
         await waitForTabEntrance();
@@ -363,32 +362,79 @@ describe("provider-specific composer menu actions", () => {
         // The visible caret lowers into the lip, while the same larger hit
         // target stays fixed throughout the animation and repeated toggles.
         for (let count = 0; count < 4; count++) {
-          // Capture and pause in the renderer before a browser-command round
-          // trip can consume the entire 200ms transition on a loaded runner.
-          flushSync(() => (caret as HTMLButtonElement).click());
-          const transitions = sharedTab!.getAnimations({ subtree: true });
-          const widthTransition = transitions.find(
-            (animation) =>
-              animation instanceof CSSTransition && animation.transitionProperty === "width",
-          );
-          expect(widthTransition).toBeDefined();
-          const duration = Number(widthTransition!.effect!.getTiming().duration);
-          expect(duration).toBeGreaterThan(0);
-          transitions.forEach((animation) => animation.pause());
-          const widths = new Set<number>();
-          for (const progress of [0, 0.25, 0.5, 0.75, 1]) {
-            transitions.forEach((animation) => {
-              animation.currentTime = duration * progress;
+          // Arm the native transition before the real pointer click. The
+          // collapsed attribute changes in the same React commit as the CSS
+          // width. Observe that commit and force the style update before the
+          // browser can advance frames: transitionrun is queued separately,
+          // so its delivery does not prove that the animation is still in
+          // getAnimations(). A timed frame loop can also miss the entire
+          // 200ms transition on a busy worker.
+          let stopListening: (() => void) | undefined;
+          let transitionWaitTimeout: number | undefined;
+          let pausedAnimations: Animation[] = [];
+          const transitionReady = new Promise<CSSTransition>((resolve, reject) => {
+            const previousCollapsed = sharedTab.getAttribute("data-collapsed");
+            const observer = new MutationObserver(() => {
+              if (sharedTab.getAttribute("data-collapsed") === previousCollapsed) return;
+              observer.disconnect();
+              try {
+                const transition = sharedTab
+                  .getAnimations()
+                  .find(
+                    (animation): animation is CSSTransition =>
+                      animation instanceof CSSTransition &&
+                      animation.transitionProperty === "width",
+                  );
+                if (!transition) {
+                  throw new Error("Composer tab changed collapse state without a width transition");
+                }
+                // The shallow lip also animates its decoration height and
+                // caret. Sample them on the same clock as the width.
+                pausedAnimations = sharedTab.getAnimations({ subtree: true });
+                pausedAnimations.forEach((animation) => animation.pause());
+                resolve(transition);
+              } catch (error) {
+                reject(error);
+              }
             });
-            const current = caret.getBoundingClientRect();
-            expect(current.x).toBeCloseTo(initial.x, 1);
-            expect(current.y).toBeCloseTo(initial.y, 1);
-            expect(current.width).toBeCloseTo(initial.width, 1);
-            expect(current.height).toBeCloseTo(initial.height, 1);
-            expect(frame.getBoundingClientRect().top).toBeCloseTo(initialFrameTop, 1);
-            widths.add(Math.round(sharedTab!.getBoundingClientRect().width));
+            observer.observe(sharedTab, { attributes: true, attributeFilter: ["data-collapsed"] });
+            stopListening = () => observer.disconnect();
+          });
+          const widths = new Set<number>();
+          try {
+            await page.elementLocator(caret).click();
+            const transition = await Promise.race([
+              transitionReady,
+              new Promise<never>((_, reject) => {
+                transitionWaitTimeout = window.setTimeout(
+                  () => reject(new Error("Composer tab width transition did not start within 5s")),
+                  5_000,
+                );
+              }),
+            ]);
+            expect(transition.effect?.getComputedTiming().duration).toBe(200);
+            for (const time of [0, 40, 80, 120, 160, 200]) {
+              pausedAnimations.forEach((animation) => {
+                animation.currentTime = time;
+              });
+              const current = caret.getBoundingClientRect();
+              expect(current.x).toBeCloseTo(initial.x, 1);
+              expect(current.y).toBeCloseTo(initial.y, 1);
+              expect(current.width).toBeCloseTo(initial.width, 1);
+              expect(current.height).toBeCloseTo(initial.height, 1);
+              expect(frame.getBoundingClientRect().top).toBeCloseTo(initialFrameTop, 1);
+              widths.add(Math.round(sharedTab.getBoundingClientRect().width));
+            }
+            pausedAnimations.forEach((animation) => animation.finish());
+          } finally {
+            if (transitionWaitTimeout !== undefined) window.clearTimeout(transitionWaitTimeout);
+            stopListening?.();
+            for (const animation of pausedAnimations) {
+              if (animation.playState !== "finished" && animation.playState !== "idle") {
+                animation.finish();
+              }
+            }
           }
-          transitions.forEach((animation) => animation.finish());
           // An endpoint-only assertion missed the max-content regression: the
           // tab reached both sizes but jumped between them without animating.
           expect(widths.size).toBeGreaterThan(2);

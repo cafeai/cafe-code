@@ -111,12 +111,10 @@
   display: flex;
   align-items: center;
   flex: 0 0 auto;
-  height: 1.75rem;
-  margin: 0 0.5rem;
-  padding-inline-start: 0.25rem;
+  align-self: stretch;
+  padding-inline-start: 0.75rem;
   overflow: hidden;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
+  border-inline-end: 1px solid var(--border-subtle);
   background: var(--secondary);
 }
 .desk-group-name {

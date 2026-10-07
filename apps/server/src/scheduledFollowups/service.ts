@@ -21,6 +21,7 @@ import {
   type TurnId,
   ThreadTurnStartCommand,
   ModelSelection,
+  isProviderAvailable,
 } from "@cafecode/contracts";
 import {
   nextScheduleOccurrences,
@@ -536,7 +537,11 @@ export const makeScheduledFollowups = Effect.gen(function* () {
       if (
         Exit.isFailure(providerResult) ||
         !providerResult.value.installed ||
-        providerResult.value.availability !== "available"
+        // Live provider snapshots may omit this optional compatibility field.
+        // The shared contract treats omission as available; only an explicit
+        // unavailable shadow is a refusal. Installation, configured account,
+        // model and enabled-state checks remain independently authoritative.
+        !isProviderAvailable(providerResult.value)
       ) {
         yield* attention(row, run, timestamp, "provider-unavailable");
         return;

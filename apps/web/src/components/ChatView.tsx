@@ -336,6 +336,7 @@ const CLOSED_THREAD_GOAL_DIALOG: ThreadGoalDialogRequest = {
 
 const EMPTY_PROVIDERS: ServerProvider[] = [];
 const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
+const EMPTY_ADDITIONAL_WORKSPACE_ROOTS: ReadonlyArray<string> = [];
 const EMPTY_PENDING_USER_INPUT_ANSWERS: Record<string, PendingUserInputDraftAnswer> = {};
 const EMPTY_FOLLOW_UP_QUEUE: FollowUpQueueItem[] = [];
 const FOLLOW_UP_QUEUE_WATCHDOG_INTERVAL_MS = 1000;
@@ -7523,7 +7524,9 @@ export default function ChatView(props: ChatViewProps) {
               activeProvider={activeThread.session?.provider ?? null}
               subagentRuntimeSession={subagentRuntimeSession}
               markdownCwd={gitCwd ?? undefined}
-              additionalWorkspaceRoots={activeProject?.additionalWorkspaceRoots ?? []}
+              additionalWorkspaceRoots={
+                activeProject?.additionalWorkspaceRoots ?? EMPTY_ADDITIONAL_WORKSPACE_ROOTS
+              }
               timestampFormat={timestampFormat}
               workspaceRoot={activeWorkspaceRoot}
               skills={activeProviderStatus?.skills ?? EMPTY_PROVIDER_SKILLS}

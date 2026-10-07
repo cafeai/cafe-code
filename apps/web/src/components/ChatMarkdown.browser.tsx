@@ -2,9 +2,11 @@ import "../index.css";
 import { EnvironmentId } from "@cafecode/contracts";
 
 import { useState } from "react";
-import { page } from "vitest/browser";
+import { page, userEvent } from "vitest/browser";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
+
+import { applyInterfaceScalePercent } from "../interfaceScale";
 
 const {
   confirmMock,
@@ -85,6 +87,26 @@ vi.mock("./MermaidBlock", () => ({
 }));
 
 import ChatMarkdown, { sanitizeHighlightedCodeHtml } from "./ChatMarkdown";
+
+const TABLE_VIEWER_MARKDOWN = [
+  "| App | Why consider it | Main tradeoff |",
+  "| --- | --- | --- |",
+  `| Jamie | \`${"long-unbroken-table-value-".repeat(18)}\` | Deletes audio after transcription |`,
+  "| Hedy | Local transcription and speaker labels | Needs the right speech engine |",
+].join("\n");
+
+function renderTableViewerFixture(text = TABLE_VIEWER_MARKDOWN) {
+  return (
+    <div style={{ width: 320 }}>
+      <ChatMarkdown
+        text={text}
+        cwd="/repo/project"
+        additionalWorkspaceRoots={["/repo/related-project"]}
+        skills={[{ name: "research", displayName: "Research" }]}
+      />
+    </div>
+  );
+}
 
 describe("ChatMarkdown", () => {
   afterEach(() => {
@@ -790,19 +812,26 @@ describe("ChatMarkdown", () => {
     }
   });
 
-  it("keeps wide Markdown tables inside a horizontal scroll container", async () => {
-    const screen = await render(
+  it("keeps wide Markdown tables scrollable across chat rerenders", async () => {
+    const tableText = [
+      "| Case | Expression | Notes |",
+      "| --- | --- | --- |",
+      "| Long inline math | $f(x)=\\sum_{i=1}^{999999999999999999999999999999999999999999999999} \\frac{x_i}{1+x_i}$ | Should not widen the message column |",
+      "| Long code token | `const_veryVeryVeryVeryVeryVeryVeryLongIdentifierNameWithoutBreaksOrSpacesEqualsAnotherVeryVeryVeryVeryLongIdentifierName` | Scroll instead of crushing columns |",
+      "| Display math | $$\\prod_{j=1}^{123456789012345678901234567890}\\left(\\frac{a_j+b_j+c_j+d_j+e_j+f_j+g_j+h_j+i_j}{\\omega_j^{98765432109876543210}+\\theta_j^{12345678901234567890}}\\right)$$ | Stays in the table after reload |",
+    ].join("\n");
+    // Chat renders can supply fresh arrays containing the same workspace and
+    // skill values. The table needs a stable DOM node across that render so a
+    // horizontal trackpad position does not snap back to the first column.
+    const renderWideTable = (text = tableText) => (
       <ChatMarkdown
-        text={[
-          "| Case | Expression | Notes |",
-          "| --- | --- | --- |",
-          "| Long inline math | $f(x)=\\sum_{i=1}^{999999999999999999999999999999999999999999999999} \\frac{x_i}{1+x_i}$ | Should not widen the message column |",
-          "| Long code token | `const_veryVeryVeryVeryVeryVeryVeryLongIdentifierNameWithoutBreaksOrSpacesEqualsAnotherVeryVeryVeryVeryLongIdentifierName` | Scroll instead of crushing columns |",
-          "| Display math | $$\\prod_{j=1}^{123456789012345678901234567890}\\left(\\frac{a_j+b_j+c_j+d_j+e_j+f_j+g_j+h_j+i_j}{\\omega_j^{98765432109876543210}+\\theta_j^{12345678901234567890}}\\right)$$ | Stays in the table after reload |",
-        ].join("\n")}
+        text={text}
         cwd="/repo/project"
-      />,
+        additionalWorkspaceRoots={["/repo/related-project"]}
+        skills={[{ name: "research", displayName: "Research" }]}
+      />
     );
+    const screen = await render(renderWideTable());
 
     try {
       const tableScroll = document.querySelector<HTMLElement>(".chat-markdown-table-scroll");
@@ -830,10 +859,280 @@ describe("ChatMarkdown", () => {
       await expect.element(page.getByText("Display math")).toBeInTheDocument();
       await expect.element(page.getByText("Stays in the table after reload")).toBeInTheDocument();
       expect(document.querySelector(".katex")).not.toBeNull();
+
+      tableScroll!.scrollLeft = Math.min(120, tableScroll!.scrollWidth - tableScroll!.clientWidth);
+      const positionBeforeRerender = tableScroll!.scrollLeft;
+      expect(positionBeforeRerender).toBeGreaterThan(0);
+
+      await screen.rerender(renderWideTable());
+      const tableScrollAfterRerender = document.querySelector<HTMLElement>(
+        ".chat-markdown-table-scroll",
+      );
+      expect(tableScrollAfterRerender).toBe(tableScroll);
+      expect(tableScrollAfterRerender?.scrollLeft).toBe(positionBeforeRerender);
+
+      await screen.rerender(renderWideTable(`${tableText}\n\nMore chat text arrived.`));
+      expect(document.querySelector(".chat-markdown-table-scroll")).toBe(tableScroll);
+      expect(tableScroll!.scrollLeft).toBe(positionBeforeRerender);
+      await expect.element(page.getByText("More chat text arrived.")).toBeInTheDocument();
     } finally {
       await screen.unmount();
     }
   });
+
+  it("opens a wide table fitted to the screen and supports zoom and native horizontal scrolling", async () => {
+    const screen = await render(renderTableViewerFixture());
+    try {
+      const expand = page.getByRole("button", { name: "Expand table" });
+      await expect.element(expand).toBeVisible();
+      await expand.click();
+
+      const dialog = page.getByRole("dialog", { name: "Expanded table" });
+      await expect.element(dialog).toBeVisible();
+      const dialogElement = dialog.element();
+      // Visibility precedes the shared dialog's 98% -> 100% entrance scale.
+      // Pixel comparisons must observe the finished presentation so that
+      // popup animation cannot be mistaken for a table zoom change.
+      await vi.waitFor(() =>
+        expect(Number.parseFloat(getComputedStyle(dialogElement).scale)).toBe(1),
+      );
+      const table = dialogElement.querySelector<HTMLTableElement>("table");
+      expect(table).not.toBeNull();
+      expect(table!.querySelectorAll("tr")).toHaveLength(3);
+      expect(table!.textContent).toContain("Main tradeoff");
+      expect(table!.textContent).toContain("Deletes audio after transcription");
+      expect(table!.textContent).toContain("Needs the right speech engine");
+
+      const viewport = page
+        .getByRole("region", { name: "Expanded table; scroll to inspect" })
+        .element() as HTMLElement;
+      // Fit is the opening state. Give ResizeObserver its normal frame to
+      // measure the dialog before asserting the full table fits the viewport.
+      await vi.waitFor(() => {
+        expect(viewport.scrollWidth).toBeLessThanOrEqual(viewport.clientWidth + 2);
+        expect(viewport.scrollHeight).toBeLessThanOrEqual(viewport.clientHeight + 2);
+      });
+      const fitWidth = table!.getBoundingClientRect().width;
+
+      await page.getByRole("button", { name: "Reset", exact: true }).click();
+      const resetWidth = table!.getBoundingClientRect().width;
+      expect(resetWidth).toBeGreaterThan(fitWidth + 1);
+      expect(viewport.scrollWidth).toBeGreaterThan(viewport.clientWidth);
+
+      await page.getByRole("button", { name: "Zoom in", exact: true }).click();
+      expect(table!.getBoundingClientRect().width).toBeGreaterThan(resetWidth);
+      expect(page.getByRole("status", { name: "Zoom level" }).element().textContent).toBe("125%");
+      await page.getByRole("button", { name: "Zoom out", exact: true }).click();
+      expect(page.getByRole("status", { name: "Zoom level" }).element().textContent).toBe("100%");
+      expect(table!.getBoundingClientRect().width).toBeCloseTo(resetWidth, 0);
+      expect(
+        Math.abs(table!.getBoundingClientRect().width - table!.offsetWidth),
+      ).toBeLessThanOrEqual(1);
+
+      viewport.focus();
+      await userEvent.keyboard("{ArrowRight}");
+      await vi.waitFor(() => expect(viewport.scrollLeft).toBeGreaterThan(0));
+      await page.getByRole("button", { name: "Fit", exact: true }).click();
+      await vi.waitFor(() =>
+        expect(viewport.scrollWidth).toBeLessThanOrEqual(viewport.clientWidth + 2),
+      );
+      expect(viewport.scrollLeft).toBe(0);
+
+      await userEvent.keyboard("{Escape}");
+      await expect.element(dialog).not.toBeInTheDocument();
+      await expect.element(expand).toHaveFocus();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("fits every row of a tall table and refits when the window changes size", async () => {
+    const originalViewport = { width: window.innerWidth, height: window.innerHeight };
+    const text = [
+      "| Item | Detail |",
+      "| --- | --- |",
+      ...Array.from({ length: 60 }, (_, index) => `| Item ${index + 1} | Detail ${index + 1} |`),
+    ].join("\n");
+    await page.viewport(900, 700);
+    const screen = await render(renderTableViewerFixture(text));
+    try {
+      await page.getByRole("button", { name: "Expand table" }).click();
+      const dialog = page.getByRole("dialog", { name: "Expanded table" });
+      await expect.element(dialog).toBeVisible();
+      const table = dialog.element().querySelector<HTMLTableElement>("table")!;
+      expect(table.querySelectorAll("tbody tr")).toHaveLength(60);
+      expect(table.textContent).toContain("Detail 60");
+      const viewport = page
+        .getByRole("region", { name: "Expanded table; scroll to inspect" })
+        .element() as HTMLElement;
+      await vi.waitFor(() => {
+        expect(viewport.scrollWidth).toBeLessThanOrEqual(viewport.clientWidth + 2);
+        expect(viewport.scrollHeight).toBeLessThanOrEqual(viewport.clientHeight + 2);
+        expect(table.getBoundingClientRect().height).toBeLessThanOrEqual(viewport.clientHeight);
+      });
+
+      await page.getByRole("button", { name: "Reset", exact: true }).click();
+      expect(viewport.scrollHeight).toBeGreaterThan(viewport.clientHeight);
+      viewport.focus();
+      await userEvent.keyboard("{ArrowDown}");
+      await vi.waitFor(() => expect(viewport.scrollTop).toBeGreaterThan(0));
+
+      await page.getByRole("button", { name: "Fit", exact: true }).click();
+      await vi.waitFor(() => expect(viewport.scrollTop).toBe(0));
+      const initialFittedHeight = table.getBoundingClientRect().height;
+      await page.viewport(650, 430);
+      await vi.waitFor(() => {
+        expect(viewport.scrollHeight).toBeLessThanOrEqual(viewport.clientHeight + 2);
+        expect(table.getBoundingClientRect().height).toBeLessThan(initialFittedHeight);
+        expect(table.getBoundingClientRect().height).toBeLessThanOrEqual(viewport.clientHeight);
+      });
+    } finally {
+      await screen.unmount();
+      await page.viewport(originalViewport.width, originalViewport.height);
+    }
+  });
+
+  it("keeps inline and expanded table scroll positions across chat rerenders", async () => {
+    const screen = await render(renderTableViewerFixture());
+    try {
+      const inlineScroller = document.querySelector<HTMLElement>(".chat-markdown-table-scroll");
+      expect(inlineScroller).not.toBeNull();
+      expect(inlineScroller!.scrollWidth).toBeGreaterThan(inlineScroller!.clientWidth);
+      inlineScroller!.scrollLeft = Math.min(
+        80,
+        inlineScroller!.scrollWidth - inlineScroller!.clientWidth,
+      );
+      const inlinePosition = inlineScroller!.scrollLeft;
+      expect(inlinePosition).toBeGreaterThan(0);
+
+      const expand = page.getByRole("button", { name: "Expand table" });
+      await expand.click();
+      const dialog = page.getByRole("dialog", { name: "Expanded table" });
+      await expect.element(dialog).toBeVisible();
+      const viewport = page
+        .getByRole("region", { name: "Expanded table; scroll to inspect" })
+        .element() as HTMLElement;
+      await page.getByRole("button", { name: "Reset", exact: true }).click();
+      viewport.scrollLeft = Math.min(100, viewport.scrollWidth - viewport.clientWidth);
+      const expandedPosition = viewport.scrollLeft;
+      expect(expandedPosition).toBeGreaterThan(0);
+
+      // Recreate workspace/skill arrays and change prose after the table, as
+      // a streaming chat update does. Neither scroll region may be remounted.
+      await screen.rerender(
+        renderTableViewerFixture(`${TABLE_VIEWER_MARKDOWN}\n\nMore chat text arrived.`),
+      );
+      await expect.element(dialog).toBeVisible();
+      expect(document.querySelector(".chat-markdown-table-scroll")).toBe(inlineScroller);
+      expect(inlineScroller!.scrollLeft).toBe(inlinePosition);
+      const expandedViewportAfterRerender = page
+        .getByRole("region", { name: "Expanded table; scroll to inspect" })
+        .element() as HTMLElement;
+      expect(expandedViewportAfterRerender).toBe(viewport);
+      expect(expandedViewportAfterRerender.scrollLeft).toBe(expandedPosition);
+      await expect.element(page.getByText("More chat text arrived.")).toBeInTheDocument();
+
+      await userEvent.keyboard("{Escape}");
+      await expect.element(dialog).not.toBeInTheDocument();
+      await expect.element(expand).toHaveFocus();
+      expect(document.querySelector(".chat-markdown-table-scroll")).toBe(inlineScroller);
+      expect(inlineScroller!.scrollLeft).toBe(inlinePosition);
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("keeps expanded Markdown file links behind the same workspace consent", async () => {
+    installDesktopCapabilityStub();
+    confirmMock.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    const path = "/private/etc/hosts";
+    const text = [
+      "| File | Why inspect it |",
+      "| --- | --- |",
+      `| [hosts](file://${path}) | Outside this workspace |`,
+    ].join("\n");
+    const screen = await render(<ChatMarkdown text={text} cwd="/repo/project" />);
+    try {
+      await page.getByRole("button", { name: "Expand table" }).click();
+      const dialog = page.getByRole("dialog", { name: "Expanded table" });
+      await expect.element(dialog).toBeVisible();
+      const expandedLink = dialog
+        .element()
+        .querySelector<HTMLAnchorElement>("a.chat-markdown-file-link");
+      expect(expandedLink).not.toBeNull();
+      expect(expandedLink!.getAttribute("href")).toBe(path);
+      expect(expandedLink!.getAttribute("data-open-policy")).toBe("confirm");
+
+      expandedLink!.click();
+      await vi.waitFor(() => expect(confirmMock).toHaveBeenCalledTimes(1));
+      expect(confirmMock).toHaveBeenCalledWith(expect.stringContaining(path));
+      expect(openInPreferredEditorMock).not.toHaveBeenCalled();
+
+      expandedLink!.click();
+      await vi.waitFor(() => {
+        expect(confirmMock).toHaveBeenCalledTimes(2);
+        expect(openInPreferredEditorMock).toHaveBeenCalledWith(expect.anything(), path);
+      });
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it.each([
+    { theme: "light", scale: 80 },
+    { theme: "dark", scale: 130 },
+  ])(
+    "keeps the expanded table inside a narrow viewport in $theme at $scale%",
+    async ({ theme, scale }) => {
+      const root = document.documentElement;
+      const originalFontSize = root.style.fontSize;
+      const originalDark = root.classList.contains("dark");
+      const originalViewport = { width: window.innerWidth, height: window.innerHeight };
+      const safeInsets = [
+        ["--markdown-table-safe-top", "48px"],
+        ["--markdown-table-safe-right", "26px"],
+        ["--markdown-table-safe-bottom", "32px"],
+        ["--markdown-table-safe-left", "18px"],
+      ] as const;
+      const originalInsets = safeInsets.map(([property]) => root.style.getPropertyValue(property));
+      for (const [property, value] of safeInsets) root.style.setProperty(property, value);
+      root.classList.toggle("dark", theme === "dark");
+      applyInterfaceScalePercent(scale);
+      await page.viewport(390, 700);
+      const screen = await render(renderTableViewerFixture());
+      try {
+        await page.getByRole("button", { name: "Expand table" }).click();
+        const dialog = page.getByRole("dialog", { name: "Expanded table" });
+        await expect.element(dialog).toBeVisible();
+        const popup = dialog.element();
+        const close = popup.querySelector<HTMLElement>('[aria-label="Close"]');
+        expect(close).not.toBeNull();
+        const viewport = page
+          .getByRole("region", { name: "Expanded table; scroll to inspect" })
+          .element() as HTMLElement;
+        await vi.waitFor(() => {
+          const bounds = popup.getBoundingClientRect();
+          expect(bounds.left).toBeGreaterThanOrEqual(18);
+          expect(bounds.top).toBeGreaterThanOrEqual(48);
+          expect(bounds.right).toBeLessThanOrEqual(window.innerWidth - 26 + 1);
+          expect(bounds.bottom).toBeLessThanOrEqual(window.innerHeight - 32 + 1);
+          expect(close!.getBoundingClientRect().top).toBeGreaterThanOrEqual(48);
+          expect(viewport.scrollWidth).toBeLessThanOrEqual(viewport.clientWidth + 2);
+        });
+        expect(document.body.scrollWidth).toBeLessThanOrEqual(window.innerWidth + 1);
+      } finally {
+        await screen.unmount();
+        root.style.fontSize = originalFontSize;
+        root.classList.toggle("dark", originalDark);
+        safeInsets.forEach(([property], index) => {
+          const original = originalInsets[index];
+          if (original) root.style.setProperty(property, original);
+          else root.style.removeProperty(property);
+        });
+        await page.viewport(originalViewport.width, originalViewport.height);
+      }
+    },
+  );
 
   it("asks before opening markdown file links outside the workspace", async () => {
     confirmMock.mockResolvedValueOnce(false);

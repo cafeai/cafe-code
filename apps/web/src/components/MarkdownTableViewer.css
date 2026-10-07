@@ -1,0 +1,131 @@
+.chat-markdown .markdown-table-block {
+  min-width: 0;
+  max-width: 100%;
+  margin: 0.65rem 0;
+}
+
+.chat-markdown .markdown-table-block > .chat-markdown-table-scroll {
+  margin: 0;
+}
+
+.markdown-table-inline-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  padding-bottom: 0.125rem;
+}
+
+/* This dialog uses the full usable viewport. The app opts into viewport-fit=cover,
+   so a plain 1rem margin can leave the close button beneath a mobile notch.
+   Test fixtures may override the --markdown-table-safe-* variables on the root. */
+[data-slot="dialog-viewport"]:has(> .markdown-table-expanded-dialog) {
+  --markdown-table-inset-top: var(
+    --markdown-table-safe-top,
+    max(1rem, env(safe-area-inset-top, 0px))
+  );
+  --markdown-table-inset-right: var(
+    --markdown-table-safe-right,
+    max(1rem, env(safe-area-inset-right, 0px))
+  );
+  --markdown-table-inset-bottom: var(
+    --markdown-table-safe-bottom,
+    max(1rem, env(safe-area-inset-bottom, 0px))
+  );
+  --markdown-table-inset-left: var(
+    --markdown-table-safe-left,
+    max(1rem, env(safe-area-inset-left, 0px))
+  );
+  padding: var(--markdown-table-inset-top) var(--markdown-table-inset-right)
+    var(--markdown-table-inset-bottom) var(--markdown-table-inset-left);
+}
+
+/* Native Windows caption controls sit above all renderer z-index values.
+   Compose their visible band with the mobile-safe top inset only when this is
+   an Electron window with an active window-controls overlay. */
+.wco
+  [data-slot="dialog-viewport"]:has(
+    > .markdown-table-expanded-dialog.markdown-table-native-titlebar
+  ) {
+  --markdown-table-inset-top: calc(
+    var(--markdown-table-safe-top, max(1rem, env(safe-area-inset-top, 0px))) +
+      env(titlebar-area-y, 0px) + env(titlebar-area-height, 40px)
+  );
+}
+
+[data-slot="dialog-popup"].markdown-table-expanded-dialog {
+  width: calc(100vw - var(--markdown-table-inset-left) - var(--markdown-table-inset-right));
+  height: calc(100dvh - var(--markdown-table-inset-top) - var(--markdown-table-inset-bottom));
+  max-width: none;
+  max-height: none;
+  overflow: hidden;
+  -webkit-app-region: no-drag;
+}
+
+.markdown-table-expanded-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 1rem 3.25rem 0.75rem 1rem;
+}
+
+.markdown-table-expanded-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0 1rem 0.75rem;
+}
+
+.markdown-table-zoom-value {
+  min-width: 3.25rem;
+  text-align: center;
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.markdown-table-expanded-viewport {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 1rem;
+  border-top: 1px solid var(--border);
+  background: var(--background);
+  -webkit-app-region: no-drag;
+}
+
+.markdown-table-expanded-viewport:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.markdown-table-expanded-viewport[data-dragging] {
+  cursor: grabbing;
+  user-select: none;
+}
+
+.markdown-table-expanded-canvas {
+  position: relative;
+  flex: none;
+  max-width: none;
+  max-height: none;
+  /* Auto margins center a fitted table; they collapse to zero when the table
+     exceeds the viewport, leaving native scroll origins reachable. */
+  margin: auto;
+}
+
+.markdown-table-expanded-content {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: max-content;
+  max-width: none;
+  transform-origin: top left;
+}
+
+.chat-markdown.markdown-table-expanded-content table {
+  width: max-content;
+  min-width: 0;
+  max-width: none;
+}

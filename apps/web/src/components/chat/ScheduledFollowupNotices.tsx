@@ -12,6 +12,7 @@ import {
   scheduleAccountLabel,
   scheduleModelLabel,
   scheduleRecurrenceLabel,
+  scheduleRunIssuePresentation,
 } from "./schedulePresentation";
 
 export interface ScheduledFollowupNoticesProps {
@@ -200,6 +201,7 @@ function ScheduledFollowupNoticeCard({
   const [detailsOpen, setDetailsOpen] = useState(false);
   const detailsId = useId();
   const pending = record.state === "pending_confirmation";
+  const issue = scheduleRunIssuePresentation(record.lastRun);
   const selection = record.modelSelection ?? context.modelSelection;
   const accountMatches = record.authorizedInstanceId === context.modelSelection.instanceId;
   return (
@@ -220,20 +222,21 @@ function ScheduledFollowupNoticeCard({
       {pending ? (
         <p className="mt-1 text-xs text-muted-foreground">Won’t run until you approve.</p>
       ) : record.state === "needs_attention" ? (
-        <p className="mt-1 text-xs text-muted-foreground">
-          Review its run history before enabling it again.
-        </p>
+        <div className="mt-1 space-y-1 text-xs text-muted-foreground">
+          {issue ? <p>{issue.reason}</p> : null}
+          <p>{issue?.action ?? "Review its run history before enabling it again."}</p>
+        </div>
       ) : null}
       <p className="mt-2 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
         {scheduleRecurrenceLabel(record)}
         {record.recurrence.kind === "once"
-          ? ` · Planned: ${formatScheduleTime(record.recurrence.at, record.recurrence.timeZone)}`
+          ? ` · Planned: ${formatScheduleTime(record.recurrence.at)}`
           : null}
       </p>
       {record.state === "active" && record.nextRunAt ? (
         <p className="mt-1 break-words text-xs text-primary [overflow-wrap:anywhere]">
           {lastKnown ? "Last reported next run: " : "Next: "}
-          {formatScheduleTime(record.nextRunAt, record.recurrence.timeZone)}
+          {formatScheduleTime(record.nextRunAt)}
         </p>
       ) : null}
       {!accountMatches ? (
@@ -293,8 +296,8 @@ function ScheduledFollowupNoticeCard({
             </dd>
           </div>
           <div>
-            <dt className="sr-only">Time zone</dt>
-            <dd>Time zone: {record.recurrence.timeZone}</dd>
+            <dt className="sr-only">Schedule timezone</dt>
+            <dd>Schedule timezone: {record.recurrence.timeZone}</dd>
           </div>
         </dl>
       ) : null}

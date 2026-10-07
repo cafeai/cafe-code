@@ -14,7 +14,7 @@ import {
   type ScheduledFollowupRun,
   type ServerProvider,
 } from "@cafecode/contracts";
-import { page } from "vitest/browser";
+import { page, userEvent } from "vitest/browser";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
@@ -173,11 +173,45 @@ async function chooseOption(label: string, option: string) {
   await page.getByRole("option", { name: option, exact: true }).click();
 }
 
+async function chooseTimeZone(zone: string) {
+  const localZone = new Intl.DateTimeFormat().resolvedOptions().timeZone;
+  await chooseOption("Timezone", zone === localZone ? `${zone} (computer local time)` : zone);
+}
+
+/** Inspect the actual rendered choices, preserving the native-catalog assertions
+ * while interacting with the same shared dropdown used by the editor. */
+async function readTimeZoneChoices() {
+  await page.getByLabelText("Timezone", { exact: true }).click();
+  const listbox = page.getByRole("listbox");
+  await expect.element(listbox).toBeVisible();
+  const choices = Array.from(listbox.element().querySelectorAll('[role="option"]'), (option) =>
+    option.textContent!.trim().replace(/ \(computer local time\)$/, ""),
+  );
+  await userEvent.keyboard("{Escape}");
+  await expect.element(listbox).not.toBeInTheDocument();
+  return choices;
+}
+
 async function fillRequired() {
   await page.getByLabelText("Name", { exact: true }).fill("Watch the build");
   await page
     .getByLabelText("Instructions", { exact: true })
     .fill("Check the build every five minutes; stop when it passes.");
+}
+
+/** Resolve expectations directly from the browser's clock zone. Importing the
+ * production formatter here could allow a wrong selected-zone display policy
+ * to satisfy both sides of the assertion. */
+function computerLocalTime(instant: string): string {
+  return new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+    timeZone: new Intl.DateTimeFormat().resolvedOptions().timeZone,
+  }).format(new Date(instant));
 }
 
 describe("scheduled follow-ups Tasks UI", () => {
@@ -188,6 +222,144 @@ describe("scheduled follow-ups Tasks UI", () => {
     document.body.innerHTML = "";
     document.documentElement.style.removeProperty("--primary");
   });
+
+  it.each(["provider-unavailable", "private_fixture_token", "constructor"])(
+    "shows a fixed failed-run reason in the card and history for %s without granting execution",
+    async (errorCode) => {
+      const run = makeRun(1, {
+        state: "failed",
+        intentSequence: null,
+        startedAt: null,
+        result: null,
+        summary: null,
+        errorCode,
+      });
+      const saved = makeSchedule(1, { state: "needs_attention", nextRunAt: null, lastRun: run });
+      const api = installApi([saved]);
+      api.history.mockResolvedValue({ runs: [run], nextCursor: null });
+      const screen = await render(<ScheduledFollowups context={context} />);
+      try {
+        const card = page.getByRole("article", { name: `Scheduled follow-up: ${saved.name}` });
+        const reason =
+          errorCode === "provider-unavailable"
+            ? "The saved provider account or selected model was unavailable. This run was not submitted."
+            : "This run failed.";
+        await expect.element(card.getByText(reason, { exact: true })).toBeVisible();
+        await expect.element(card.getByText("Needs attention", { exact: true })).toBeVisible();
+        if (errorCode === "provider-unavailable") {
+          await expect
+            .element(
+              card.getByText(
+                "Check the saved account and model in Settings, then review the schedule before enabling it again.",
+                { exact: true },
+              ),
+            )
+            .toBeVisible();
+        } else {
+          expect(card.element().textContent).not.toContain(errorCode);
+          expect(card.element().textContent).not.toContain("not submitted");
+        }
+        await expect
+          .element(card.getByRole("button", { name: "Run now", exact: true }))
+          .not.toBeInTheDocument();
+        await card.getByRole("button", { name: "Run history", exact: true }).click();
+        const history = page.getByLabelText(`Run history for ${saved.name}`);
+        await expect.element(history.getByText(reason, { exact: true })).toBeVisible();
+        await expect.element(history.getByText("Failed", { exact: true })).toBeVisible();
+        expect(history.element().textContent).not.toContain(errorCode);
+        expect(api.runNow).not.toHaveBeenCalled();
+        expect(api.save).not.toHaveBeenCalled();
+        expect(api.setStatus).not.toHaveBeenCalled();
+      } finally {
+        await screen.unmount();
+      }
+    },
+  );
+
+  it("keeps a waiting occurrence distinct from a failed provider run", async () => {
+    const run = makeRun(1, {
+      state: "waiting",
+      intentSequence: null,
+      startedAt: null,
+      completedAt: null,
+      result: null,
+      summary: null,
+    });
+    const saved = makeSchedule(1, { lastRun: run });
+    const api = installApi([saved]);
+    api.history.mockResolvedValue({ runs: [run], nextCursor: null });
+    const screen = await render(<ScheduledFollowups context={context} />);
+    try {
+      const card = page.getByRole("article", { name: `Scheduled follow-up: ${saved.name}` });
+      await expect.element(card.getByText("Waiting for this chat", { exact: true })).toBeVisible();
+      await expect
+        .element(card.getByRole("button", { name: "Run now", exact: true }))
+        .toBeDisabled();
+      await card.getByRole("button", { name: "Run history", exact: true }).click();
+      const history = page.getByLabelText(`Run history for ${saved.name}`);
+      await expect
+        .element(history.getByText("Waiting for this chat", { exact: true }))
+        .toBeVisible();
+      expect(card.element().textContent).not.toContain("Failed");
+      expect(card.element().textContent).not.toContain("unavailable");
+      expect(api.runNow).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it.each(["acceptance-unknown", "provider-unavailable", "private_fixture_token"])(
+    "keeps an unconfirmed run fenced in the presentation even with the %s classification",
+    async (errorCode) => {
+      const run = makeRun(1, {
+        state: "unknown",
+        result: null,
+        summary: null,
+        errorCode,
+      });
+      const saved = makeSchedule(1, { state: "needs_attention", nextRunAt: null, lastRun: run });
+      const api = installApi([saved]);
+      api.history.mockResolvedValue({ runs: [run], nextCursor: null });
+      const screen = await render(<ScheduledFollowups context={context} />);
+      try {
+        const card = page.getByRole("article", { name: `Scheduled follow-up: ${saved.name}` });
+        await expect
+          .element(
+            card.getByText("Cafe could not confirm whether the provider accepted this run.", {
+              exact: true,
+            }),
+          )
+          .toBeVisible();
+        await expect
+          .element(
+            card.getByText(
+              "Wait for Cafe to reconcile this run. Check this chat for existing work; do not repeat an unconfirmed run.",
+              { exact: true },
+            ),
+          )
+          .toBeVisible();
+        expect(card.element().textContent).not.toContain("not submitted");
+        expect(card.element().textContent).not.toContain(errorCode);
+        await card.getByRole("button", { name: "Run history", exact: true }).click();
+        const history = page.getByLabelText(`Run history for ${saved.name}`);
+        await expect
+          .element(history.getByText("Status unconfirmed", { exact: true }))
+          .toBeVisible();
+        await expect
+          .element(
+            history.getByText("Cafe could not confirm whether the provider accepted this run.", {
+              exact: true,
+            }),
+          )
+          .toBeVisible();
+        expect(api.runNow).not.toHaveBeenCalled();
+        expect(api.save).not.toHaveBeenCalled();
+        expect(api.setStatus).not.toHaveBeenCalled();
+      } finally {
+        await screen.unmount();
+      }
+    },
+  );
 
   it("requires review before running a schedule after the chat account changes", async () => {
     const api = installApi([
@@ -316,7 +488,7 @@ describe("scheduled follow-ups Tasks UI", () => {
       await fillRequired();
       await chooseOption("Repeat", "Weekdays");
       await page.getByLabelText("Time in selected timezone").fill("10:30");
-      await page.getByLabelText("Timezone", { exact: true }).fill("Asia/Tokyo");
+      await chooseTimeZone("Asia/Tokyo");
       await expect.element(page.getByLabelText("Upcoming runs")).toBeVisible();
       await page.getByText("Model and run settings", { exact: true }).click();
       await chooseOption("Model settings", "Choose settings for follow-ups");
@@ -384,7 +556,7 @@ describe("scheduled follow-ups Tasks UI", () => {
     }
   });
 
-  it("rejects malformed schedules locally without a mutation or permissive fallback", async () => {
+  it("rejects malformed intervals and offers only supported timezone choices", async () => {
     const api = installApi();
     const screen = await render(<ScheduledFollowups context={context} />);
     try {
@@ -393,33 +565,256 @@ describe("scheduled follow-ups Tasks UI", () => {
       await page.getByLabelText("Every (minutes)").fill("1");
       await expect.element(page.getByRole("button", { name: "Create follow-up" })).toBeDisabled();
       await page.getByLabelText("Every (minutes)").fill("5");
-      await page.getByLabelText("Timezone", { exact: true }).fill("invalid-zone");
-      await expect.element(page.getByRole("button", { name: "Create follow-up" })).toBeDisabled();
+      await expect.element(page.getByRole("button", { name: "Create follow-up" })).toBeEnabled();
+      const choices = await readTimeZoneChoices();
+      expect(choices).not.toContain("invalid-zone");
       expect(api.save).not.toHaveBeenCalled();
     } finally {
       await screen.unmount();
     }
   });
 
-  it("preserves precise saved one-shot and end instants when editing only instructions", async () => {
-    const at = "2099-10-04T09:30:27.123Z";
-    const endAt = "2099-10-04T10:30:57.456Z";
-    const api = installApi([
-      makeSchedule(1, { recurrence: { kind: "once", at, timeZone: "Asia/Tokyo" }, endAt }),
-    ]);
+  it("defaults to the computer timezone and includes the standard IANA catalog", async () => {
+    const api = installApi();
+    const localZone = new Intl.DateTimeFormat().resolvedOptions().timeZone;
     const screen = await render(<ScheduledFollowups context={context} />);
     try {
-      await page.getByRole("button", { name: "Edit", exact: true }).click();
-      await page
-        .getByLabelText("Instructions", { exact: true })
-        .fill("Only update the instructions.");
-      await page.getByRole("button", { name: "Save changes" }).click();
-      await vi.waitFor(() => expect(api.save).toHaveBeenCalledTimes(1));
-      expect(api.save.mock.calls[0]?.[0]).toMatchObject({ recurrence: { at }, endAt });
+      await page.getByRole("button", { name: "New follow-up" }).click();
+      const timezone = page.getByLabelText("Timezone", { exact: true });
+      await expect.element(timezone).toHaveTextContent(`${localZone} (computer local time)`);
+      const choices = await readTimeZoneChoices();
+      expect(choices).toEqual(
+        expect.arrayContaining(["UTC", "America/New_York", "Asia/Tokyo", localZone]),
+      );
+      expect(choices).toEqual(expect.arrayContaining(Intl.supportedValuesOf("timeZone")));
+      expect(new Set(choices).size).toBe(choices.length);
+      expect(api.save).not.toHaveBeenCalled();
+      expect(api.runNow).not.toHaveBeenCalled();
+      expect(api.setStatus).not.toHaveBeenCalled();
     } finally {
       await screen.unmount();
     }
   });
+
+  it("retains a supported saved timezone alias in the dropdown and reviewed save", async () => {
+    const saved = makeSchedule(1, {
+      recurrence: { kind: "interval", anchorAt: now, everyMinutes: 5, timeZone: "US/Eastern" },
+    });
+    const api = installApi([saved]);
+    const screen = await render(<ScheduledFollowups context={context} />);
+    try {
+      await page.getByRole("button", { name: "Edit", exact: true }).click();
+      await expect
+        .element(page.getByLabelText("Timezone", { exact: true }))
+        .toHaveTextContent("US/Eastern");
+      await page.getByLabelText("Name", { exact: true }).fill("Keep the saved timezone alias");
+      await page.getByRole("button", { name: "Save changes", exact: true }).click();
+      await vi.waitFor(() => expect(api.save).toHaveBeenCalledTimes(1));
+      expect(api.save.mock.calls[0]?.[0]).toMatchObject({ recurrence: saved.recurrence });
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("keeps an invalid saved timezone non-actionable without a permissive fallback", async () => {
+    const api = installApi([
+      makeSchedule(1, {
+        recurrence: {
+          kind: "once",
+          at: "2099-10-04T09:30:00.000Z",
+          timeZone: "invalid-zone",
+        },
+      }),
+    ]);
+    const screen = await render(<ScheduledFollowups context={context} />);
+    try {
+      await page.getByRole("button", { name: "Edit", exact: true }).click();
+      await expect.element(page.getByRole("button", { name: "Save changes" })).toBeDisabled();
+      await expect
+        .element(
+          page
+            .getByLabelText("Upcoming runs")
+            .getByText(
+              "Check the time, timezone, and recurrence fields. Intervals must be at least 5 minutes.",
+              { exact: true },
+            ),
+        )
+        .toBeVisible();
+      await page.getByLabelText("Name", { exact: true }).fill("Still invalid saved timezone");
+      await expect.element(page.getByRole("button", { name: "Save changes" })).toBeDisabled();
+      expect(api.save).not.toHaveBeenCalled();
+      expect(api.setStatus).not.toHaveBeenCalled();
+      expect(api.runNow).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it.each(["clear", "replace"] as const)(
+    "requires explicit review before the owner can %s a saved end date outside the native input range",
+    async (resolution) => {
+      const originalEndAt = "9999-12-31T23:30:00.000Z";
+      const saved = makeSchedule(1, {
+        recurrence: { kind: "once", at: "2099-10-04T00:30:00.000Z", timeZone: "Asia/Tokyo" },
+        endAt: originalEndAt,
+      });
+      const api = installApi([saved]);
+      const screen = await render(<ScheduledFollowups context={context} />);
+      try {
+        await page.getByRole("button", { name: "Edit", exact: true }).click();
+        await page
+          .getByLabelText("Instructions", { exact: true })
+          .fill("Only edit the instructions.");
+        await expect.element(page.getByRole("button", { name: "Save changes" })).toBeDisabled();
+        await expect
+          .element(
+            page
+              .getByLabelText("Upcoming runs")
+              .getByText(
+                "Review the saved end date in Model and run settings: enter a new date or explicitly clear it.",
+                { exact: true },
+              ),
+          )
+          .toBeVisible();
+
+        // The native control cannot express Tokyo's year 10000. Neither its
+        // blank value nor a direct form submission authorizes removing the
+        // saved execution limit, even after another draft field was edited.
+        const form = page.getByRole("form", { name: "Scheduled follow-up editor" }).element();
+        (form as HTMLFormElement).requestSubmit();
+        await expect.element(page.getByRole("alert")).toBeVisible();
+        expect(api.save).not.toHaveBeenCalled();
+        expect(api.setStatus).not.toHaveBeenCalled();
+        expect(api.runNow).not.toHaveBeenCalled();
+
+        await page.getByText("Model and run settings", { exact: true }).click();
+        await expect.element(page.getByLabelText("End at", { exact: true })).toHaveValue("");
+        await expect
+          .element(
+            page.getByText(
+              `The saved end limit cannot be shown in its scheduling timezone. Saved limit: ${computerLocalTime(originalEndAt)}`,
+              { exact: true },
+            ),
+          )
+          .toBeVisible();
+        const clear = page.getByRole("button", { name: "Clear saved end date", exact: true });
+        await expect.element(clear).toBeVisible();
+        if (resolution === "clear") {
+          await clear.click();
+        } else {
+          await page.getByLabelText("End at", { exact: true }).fill("2099-10-04T10:30");
+        }
+        await expect.element(page.getByRole("button", { name: "Save changes" })).toBeEnabled();
+        await expect.element(clear).not.toBeInTheDocument();
+        await page.getByRole("button", { name: "Save changes" }).click();
+        await vi.waitFor(() => expect(api.save).toHaveBeenCalledTimes(1));
+        expect(api.save.mock.calls[0]?.[0]).toMatchObject({
+          id: saved.id,
+          expectedRevision: saved.revision,
+          recurrence: saved.recurrence,
+          endAt: resolution === "clear" ? null : "2099-10-04T01:30:00.000Z",
+        });
+        expect(api.setStatus).not.toHaveBeenCalled();
+        expect(api.runNow).not.toHaveBeenCalled();
+      } finally {
+        await screen.unmount();
+      }
+    },
+  );
+
+  it("does not remove a saved end limit merely because an invalid saved timezone is repaired", async () => {
+    const originalEndAt = "2099-10-04T09:30:00.000Z";
+    const api = installApi([
+      makeSchedule(1, {
+        recurrence: { kind: "interval", anchorAt: now, everyMinutes: 5, timeZone: "invalid-zone" },
+        endAt: originalEndAt,
+      }),
+    ]);
+    const screen = await render(<ScheduledFollowups context={context} />);
+    try {
+      await page.getByRole("button", { name: "Edit", exact: true }).click();
+      await chooseTimeZone("Asia/Tokyo");
+      await page.getByLabelText("Instructions", { exact: true }).fill("Repair the saved timezone.");
+      await expect.element(page.getByRole("button", { name: "Save changes" })).toBeDisabled();
+      await expect
+        .element(
+          page
+            .getByLabelText("Upcoming runs")
+            .getByText(
+              "Review the saved end date in Model and run settings: enter a new date or explicitly clear it.",
+              { exact: true },
+            ),
+        )
+        .toBeVisible();
+      expect(api.save).not.toHaveBeenCalled();
+      expect(api.setStatus).not.toHaveBeenCalled();
+      expect(api.runNow).not.toHaveBeenCalled();
+      await page.getByText("Model and run settings", { exact: true }).click();
+      await expect.element(page.getByLabelText("End at", { exact: true })).toHaveValue("");
+      await expect
+        .element(
+          page.getByText(
+            `The saved end limit cannot be shown in its scheduling timezone. Saved limit: ${computerLocalTime(originalEndAt)}`,
+            { exact: true },
+          ),
+        )
+        .toBeVisible();
+      await page.getByLabelText("End at", { exact: true }).fill("2099-10-04T10:30");
+      await expect.element(page.getByRole("button", { name: "Save changes" })).toBeEnabled();
+      await page.getByRole("button", { name: "Save changes" }).click();
+      await vi.waitFor(() => expect(api.save).toHaveBeenCalledTimes(1));
+      expect(api.save.mock.calls[0]?.[0]).toMatchObject({
+        recurrence: { kind: "interval", timeZone: "Asia/Tokyo" },
+        endAt: "2099-10-04T01:30:00.000Z",
+      });
+      expect(api.setStatus).not.toHaveBeenCalled();
+      expect(api.runNow).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it.each([
+    {
+      timeZone: "Asia/Tokyo",
+      at: "2099-10-04T09:30:27.123Z",
+      endAt: "2099-10-04T10:30:57.456Z",
+      atInput: "2099-10-04T18:30",
+      endInput: "2099-10-04T19:30",
+    },
+    {
+      // Both saved instants are in the second 01:xx hour of New York's
+      // November fold. Re-parsing the minute text would select the earlier
+      // occurrence and lose both the reviewed instant and its precision.
+      timeZone: "America/New_York",
+      at: "2099-11-01T06:30:27.123Z",
+      endAt: "2099-11-01T06:45:57.456Z",
+      atInput: "2099-11-01T01:30",
+      endInput: "2099-11-01T01:45",
+    },
+  ])(
+    "preserves precise saved $timeZone one-shot and end instants when editing only instructions",
+    async ({ timeZone, at, endAt, atInput, endInput }) => {
+      const api = installApi([
+        makeSchedule(1, { recurrence: { kind: "once", at, timeZone }, endAt }),
+      ]);
+      const screen = await render(<ScheduledFollowups context={context} />);
+      try {
+        await page.getByRole("button", { name: "Edit", exact: true }).click();
+        await expect.element(page.getByLabelText("Run at", { exact: true })).toHaveValue(atInput);
+        await page.getByText("Model and run settings", { exact: true }).click();
+        await expect.element(page.getByLabelText("End at", { exact: true })).toHaveValue(endInput);
+        await page
+          .getByLabelText("Instructions", { exact: true })
+          .fill("Only update the instructions.");
+        await page.getByRole("button", { name: "Save changes" }).click();
+        await vi.waitFor(() => expect(api.save).toHaveBeenCalledTimes(1));
+        expect(api.save.mock.calls[0]?.[0]).toMatchObject({ recurrence: { at }, endAt });
+      } finally {
+        await screen.unmount();
+      }
+    },
+  );
 
   it("requires explicit proposal review before enabling an agent-created schedule", async () => {
     const api = installApi([makeSchedule(1, { state: "pending_confirmation" })]);
@@ -630,25 +1025,150 @@ describe("scheduled follow-ups Tasks UI", () => {
     }
   });
 
-  it("uses explicit once-only UTC instants and disconnect-safe controls", async () => {
+  it("uses explicitly selected UTC once-only instants and disconnect-safe controls", async () => {
     const api = installApi();
     const screen = await render(<ScheduledFollowups context={context} />);
     try {
       await page.getByRole("button", { name: "New follow-up" }).click();
       await fillRequired();
       await chooseOption("Repeat", "Once");
-      await page.getByLabelText("Run at (UTC)").fill("2099-10-04T09:30");
+      await chooseTimeZone("UTC");
+      await page.getByLabelText("Run at", { exact: true }).fill("2099-10-04T09:30");
       await page.getByRole("button", { name: "Create follow-up" }).click();
       await vi.waitFor(() => expect(api.save).toHaveBeenCalledTimes(1));
       expect(api.save.mock.calls[0]?.[0].recurrence).toMatchObject({
         kind: "once",
         at: "2099-10-04T09:30:00.000Z",
+        timeZone: "UTC",
       });
       await screen.rerender(<ScheduledFollowups context={{ ...context, unavailable: true }} />);
       await expect.element(page.getByRole("button", { name: "New follow-up" })).toBeDisabled();
       await expect
         .element(page.getByRole("button", { name: "Run now", exact: true }))
         .toBeDisabled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it.each([
+    ["Asia/Tokyo", "2099-10-04T00:30:00.000Z", "2099-10-04T01:30:00.000Z"],
+    ["America/New_York", "2099-10-04T13:30:00.000Z", "2099-10-04T14:30:00.000Z"],
+  ])("converts one-shot and end wall times in %s into exact instants", async (zone, at, endAt) => {
+    const api = installApi();
+    const screen = await render(<ScheduledFollowups context={context} />);
+    try {
+      await page.getByRole("button", { name: "New follow-up" }).click();
+      await fillRequired();
+      await chooseOption("Repeat", "Once");
+      await chooseTimeZone(zone);
+      await page.getByLabelText("Run at", { exact: true }).fill("2099-10-04T09:30");
+      await expect
+        .element(
+          page.getByText(`Time in ${zone}. The preview below uses your local time.`, {
+            exact: true,
+          }),
+        )
+        .toBeVisible();
+      await expect
+        .element(
+          page.getByLabelText("Upcoming runs").getByText(computerLocalTime(at), { exact: true }),
+        )
+        .toBeVisible();
+      await page.getByText("Model and run settings", { exact: true }).click();
+      await page.getByLabelText("End at", { exact: true }).fill("2099-10-04T10:30");
+      await page.getByRole("button", { name: "Create follow-up" }).click();
+      await vi.waitFor(() => expect(api.save).toHaveBeenCalledTimes(1));
+      expect(api.save.mock.calls[0]?.[0]).toMatchObject({
+        recurrence: { kind: "once", timeZone: zone, at },
+        endAt,
+      });
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("treats an explicit timezone change as new intent while retaining the entered wall times", async () => {
+    const api = installApi([
+      makeSchedule(1, {
+        recurrence: { kind: "once", at: "2099-10-04T09:30:00.000Z", timeZone: "UTC" },
+        endAt: "2099-10-04T10:30:00.000Z",
+      }),
+    ]);
+    const screen = await render(<ScheduledFollowups context={context} />);
+    try {
+      await page.getByRole("button", { name: "Edit", exact: true }).click();
+      await chooseTimeZone("Asia/Tokyo");
+      await expect
+        .element(page.getByLabelText("Run at", { exact: true }))
+        .toHaveValue("2099-10-04T09:30");
+      await page.getByText("Model and run settings", { exact: true }).click();
+      await expect
+        .element(page.getByLabelText("End at", { exact: true }))
+        .toHaveValue("2099-10-04T10:30");
+      await page.getByRole("button", { name: "Save changes" }).click();
+      await vi.waitFor(() => expect(api.save).toHaveBeenCalledTimes(1));
+      expect(api.save.mock.calls[0]?.[0]).toMatchObject({
+        recurrence: { kind: "once", at: "2099-10-04T00:30:00.000Z", timeZone: "Asia/Tokyo" },
+        endAt: "2099-10-04T01:30:00.000Z",
+      });
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("shows previews in computer local time with a zone label independently of the selected timezone", async () => {
+    const api = installApi();
+    const localZone = new Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const selectedZone = localZone === "Asia/Tokyo" ? "America/New_York" : "Asia/Tokyo";
+    const instant =
+      selectedZone === "Asia/Tokyo" ? "2099-10-04T00:30:00.000Z" : "2099-10-04T13:30:00.000Z";
+    const screen = await render(<ScheduledFollowups context={context} />);
+    try {
+      await page.getByRole("button", { name: "New follow-up" }).click();
+      await fillRequired();
+      await chooseOption("Repeat", "Once");
+      await chooseTimeZone(selectedZone);
+      await page.getByLabelText("Run at", { exact: true }).fill("2099-10-04T09:30");
+      const preview = page.getByLabelText("Upcoming runs");
+      await expect
+        .element(preview.getByText(`Next runs · local time · ${localZone}`, { exact: true }))
+        .toBeVisible();
+      await expect
+        .element(preview.getByText(computerLocalTime(instant), { exact: true }))
+        .toBeVisible();
+      expect(api.save).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("shows saved next-run and history timestamps in computer local time with an explicit zone", async () => {
+    const localZone = new Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const saved = makeSchedule(1, {
+      recurrence: {
+        kind: "once",
+        at: "2099-10-04T00:30:00.000Z",
+        timeZone: localZone === "Asia/Tokyo" ? "America/New_York" : "Asia/Tokyo",
+      },
+      nextRunAt: "2099-10-04T00:30:00.000Z",
+    });
+    const api = installApi([saved]);
+    api.history.mockResolvedValue({ runs: [makeRun()], nextCursor: null });
+    const screen = await render(<ScheduledFollowups context={context} />);
+    try {
+      const card = page.getByRole("article", { name: `Scheduled follow-up: ${saved.name}` });
+      await expect
+        .element(card.getByText(`Next: ${computerLocalTime(saved.nextRunAt!)}`, { exact: true }))
+        .toBeVisible();
+      await card.getByRole("button", { name: "Run history" }).click();
+      await expect.element(page.getByText("Run 1 summary", { exact: true })).toBeVisible();
+      const history = page.getByLabelText(`Run history for ${saved.name}`).element();
+      expect(history.querySelector("time")?.textContent).toBe(computerLocalTime(now));
+      expect(history.querySelector("time")?.getAttribute("datetime")).toBe(now);
+      expect(api.save).not.toHaveBeenCalled();
+      expect(api.setStatus).not.toHaveBeenCalled();
+      expect(api.runNow).not.toHaveBeenCalled();
     } finally {
       await screen.unmount();
     }

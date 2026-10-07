@@ -63,7 +63,8 @@ such as **Newer dev** sit beside **Settings** at the bottom of the sidebar.
   that you need to enlarge the window; the split returns once there is room.
 - Click a sidebar row's pencil or press F2 on a tab/row to rename an existing chat.
   Top tabs show only an always-visible close X; rename also remains in their
-  right-click menu. Click a pane's group name to rename the group.
+  right-click menu. Group names fill a flat section of the tab bar beside their
+  drag handle. Click a pane's group name to rename the group.
   In the Desk sidebar, hover or keyboard
   focus a group heading to replace its count with a pencil; click the pencil or
   press F2 to edit the name inline. Enter or clicking away saves, Escape cancels,

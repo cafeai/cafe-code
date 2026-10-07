@@ -42,6 +42,16 @@ Provider-specific native schedulers would create incompatible ownership and dupl
 
 ## Verification
 
+### Optional provider availability consistency
+
+Updated: 2026-10-08 02:19:15 JST (UTC+0900). Scheduled dispatch now uses the canonical `isProviderAvailable` helper rather than requiring a literal optional field. Normal Codex, Claude and Grok snapshots omit `availability`; the established contract interprets omission as available, while explicit unavailable shadows remain blocked. The previous literal comparison incorrectly failed an otherwise installed, enabled, model-qualified account before admission. Isolated migrated-SQLite regressions reproduce this mismatch for all three drivers and retain explicit unavailable, missing, disabled, uninstalled and model-mismatch refusal. All existing writer-locked account/revision/permission/idle and pre-I/O immutable-attempt fences remain unchanged. This restores existing contract behavior, not a new authentication or execution authority.
+
+Renderer cards and history use fixed allowlisted classification messages, not raw exception text or unknown codes. An already failed occurrence remains historical evidence and requires owner review; an expired one-time schedule needs a new future date. No live run is replayed or rewritten by the fix. These fixtures qualify deterministic scheduler/admission behavior, not paid inference.
+
+### Terminal-session admission consistency
+
+Updated: 2026-10-08 01:05:09 JST (UTC+0900). Isolated SQLite/engine/service regressions found that the canonical chat shell could reconcile its exact latest completed, errored or interrupted turn to idle while the writer-locked scheduled admission still unconditionally rejected the retained raw running-session row. Admission now recognizes only that exact terminal active ID with a nonnull completion timestamp at least as recent as the session publication. It does not mutate lifecycle history, discard receipts, clear paid-attempt markers or replay provider work. Starting sessions, different/newer native work, absent/older completion evidence and separately indexed NULL-turn pending starts remain busy, alongside the existing approvals/input, account/permissions and uncertain-occurrence barriers. This is an implementation consistency correction to the accepted idle-only policy, not a new execution authority or recovery mechanism. Synthetic fixtures do not establish the cause of any deleted live chat's provider failure.
+
 ### Renderer visibility implementation
 
 Updated: 2026-10-05 05:54:23 JST (UTC+0900). The owner requested inline proposal visibility while explicitly retaining approval. The conversation tail now projects saved schedules with bounded pagination and pending proposals first; it does not fabricate a message/turn association. Review opens the existing Tasks editor rather than creating a second approval/mutation path. Merely displaying or opening a card cannot authorize execution.

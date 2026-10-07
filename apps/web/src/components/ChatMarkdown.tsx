@@ -52,6 +52,7 @@ import { remarkChatMath } from "../lib/remarkChatMath";
 import { remarkMermaid } from "../lib/remarkMermaid";
 import { normalizeCodexCitationMarkers } from "../lib/codexCitations";
 import { MermaidBlock } from "./MermaidBlock";
+import { MarkdownTable } from "./MarkdownTableViewer";
 
 class CodeHighlightErrorBoundary extends React.Component<
   { fallback: ReactNode; children: ReactNode },
@@ -84,6 +85,7 @@ interface ChatMarkdownProps {
 }
 
 const EMPTY_MARKDOWN_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
+const EMPTY_ADDITIONAL_WORKSPACE_ROOTS: ReadonlyArray<string> = [];
 
 const CODE_FENCE_LANGUAGE_REGEX = /(?:^|\s)language-([^\s]+)/;
 const MAX_HIGHLIGHT_CACHE_ENTRIES = 500;
@@ -713,7 +715,7 @@ function areMarkdownFileLinkPropsEqual(
 function ChatMarkdown({
   text,
   cwd,
-  additionalWorkspaceRoots = [],
+  additionalWorkspaceRoots = EMPTY_ADDITIONAL_WORKSPACE_ROOTS,
   isStreaming = false,
   normalizeCodexCitations = false,
   skills = EMPTY_MARKDOWN_SKILLS,
@@ -811,13 +813,7 @@ function ChatMarkdown({
         );
       },
       pre: MarkdownPre,
-      table({ node: _node, children, ...props }) {
-        return (
-          <div className="chat-markdown-table-scroll">
-            <table {...props}>{children}</table>
-          </div>
-        );
-      },
+      table: MarkdownTable,
     }),
     [additionalWorkspaceRoots, cwd, fileLinkParentSuffixByPath, resolvedTheme, skills],
   );
