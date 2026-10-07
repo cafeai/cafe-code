@@ -68,6 +68,13 @@ an existing session to attach the tools. Begin with `health`, observe before
 acting, and use a disposable window for initial input testing. Never repeat an
 input whose completion is uncertain.
 
+Cafe's public `health` tool and **Check permissions** button call the native
+`health_report` tool. Its versioned report includes Accessibility and Screen
+Recording status without prompting or capturing the screen. A degraded report
+can describe missing grants; it is distinct from a tool execution error. The
+native qualification checks both the error flag and the structured report,
+including the permission entries.
+
 Native health/screen-size qualification is opt-in:
 
 ```sh

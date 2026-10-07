@@ -265,7 +265,12 @@ export class NativeDaemon {
     try {
       return (await connection.request({
         method: "trusted_session_call",
-        name: "health",
+        // Cafe's public `health` tool is a host alias. The pinned Cua 0.34.0
+        // registry exposes `health_report` (core/src/health_report.rs), whose
+        // schema_version=1 report includes TCC state without prompting or
+        // attempting a screen capture. Keep missing grants distinct from a
+        // tool failure; the driver's report can validly be degraded.
+        name: "health_report",
         args: {},
       })) as unknown as NativeToolResult;
     } finally {
