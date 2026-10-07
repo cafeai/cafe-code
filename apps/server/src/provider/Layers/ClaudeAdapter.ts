@@ -7461,6 +7461,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     message: SDKMessage,
   ) {
     yield* logNativeSdkMessage(context, message);
+    if (message.type === "system" && sdkMessageSubtype(message) === "session_title_changed") {
+      // Claude Code 2.1.285 added this internal session-name notification,
+      // which is still absent from the published SDK union. It may precede
+      // init or repeat; Cafe owns its chat titles and session identity, so
+      // retain only the existing protected native log, without rebinding the
+      // session or publishing the title as a canonical event or warning.
+      return;
+    }
     // Command telemetry cannot establish or replace native conversation
     // identity. In particular a pre-init push must await the authoritative
     // init frame and a foreign-session push must not rebind this query.

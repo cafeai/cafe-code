@@ -81,8 +81,10 @@ export function ClaudeDeliveryPriorityControl({
   value,
   onChange,
   disabled,
+  disabledReason,
   collapsed,
 }: DeliveryPriorityProps & {
+  disabledReason?: string | undefined;
   collapsed: boolean;
 }) {
   const [open, setOpen] = useState(false);
@@ -92,7 +94,17 @@ export function ClaudeDeliveryPriorityControl({
   if (open && (collapsed || disabled || !pane.visible)) setOpen(false);
   const selected = DELIVERY_OPTIONS.find((option) => option.value === (value ?? "default"))!;
   return (
-    <Menu open={open} onOpenChange={setOpen} modal={false}>
+    <Menu
+      open={open}
+      onOpenChange={(next, details) => {
+        if (next && (disabled || collapsed || !pane.visible)) {
+          details.cancel();
+          return;
+        }
+        setOpen(next);
+      }}
+      modal={false}
+    >
       <Tooltip>
         <TooltipTrigger
           delay={250}
@@ -100,7 +112,7 @@ export function ClaudeDeliveryPriorityControl({
             <MenuTrigger
               type="button"
               className="cafe-composer-tab-action"
-              disabled={disabled}
+              aria-disabled={disabled}
               aria-label={`Message delivery: ${selected.label}`}
             />
           }
@@ -114,6 +126,7 @@ export function ClaudeDeliveryPriorityControl({
           className="no-drag pointer-events-none max-w-64 leading-relaxed"
         >
           {selected.description}
+          {disabled && disabledReason ? ` ${disabledReason}` : null}
         </TooltipPopup>
       </Tooltip>
       <MenuPopup side="top" align="end" className="no-drag w-44 max-w-[calc(100vw-2rem)]">

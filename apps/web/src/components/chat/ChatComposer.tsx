@@ -1236,8 +1236,38 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   }
   const nativeReviewOpen = nativeReviewState.key === nativeReviewKey && nativeReviewState.open;
   const composerTabCollapsed = useUiStateStore((state) => state.composerTabCollapsed);
-  const showNativeReviewControl = nativeReviewAvailable && !nativeReviewDisabled;
-  const hasComposerTab = showNativeReviewControl || deliveryPriorityAvailable;
+  // Provider-owned controls stay discoverable while their actions are blocked.
+  // Eligibility still binds dispatch to the exact account and session above.
+  const showNativeReviewControl = selectedProvider === "codex";
+  const showDeliveryPriorityControl = selectedProvider === "claudeAgent";
+  const hasComposerTab = showNativeReviewControl || showDeliveryPriorityControl;
+  const nativeReviewControlDisabled = !nativeReviewAvailable || nativeReviewDisabled;
+  const nativeReviewDisabledReason =
+    environmentUnavailable !== null || isConnecting
+      ? "Reconnect to this server before starting a review."
+      : !isServerThread
+        ? "Send a message to start a Codex session before reviewing code."
+        : onStartCodeReview === undefined
+          ? "Code review is unavailable in this view."
+          : !selectedProviderStatus
+            ? "Waiting for the selected Codex account’s provider information."
+            : !nativeReviewAvailable
+              ? "Start a Codex session with the selected account before reviewing code."
+              : nativeReviewDisabled
+                ? "Wait for the current work to finish and the Codex session to be ready."
+                : undefined;
+  const deliveryPriorityDisabled =
+    !deliveryPriorityAvailable || isSendBusy || isConnecting || environmentUnavailable !== null;
+  const deliveryPriorityDisabledReason =
+    environmentUnavailable !== null || isConnecting
+      ? "Reconnect to this server to change message delivery."
+      : !selectedProviderStatus
+        ? "Waiting for the selected Claude account’s provider information."
+        : !deliveryPriorityAvailable
+          ? "Message delivery options require a supported Claude version for this account."
+          : isSendBusy
+            ? "Wait for the current message to finish sending before changing delivery."
+            : undefined;
   const providerActions =
     nativeReviewAvailable && !nativeReviewDisabled ? (
       <MenuItem
@@ -3344,7 +3374,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                         className="cafe-composer-tab-action"
                         aria-haspopup="dialog"
                         aria-expanded={nativeReviewOpen}
-                        onClick={() => setNativeReviewState({ key: nativeReviewKey, open: true })}
+                        aria-disabled={nativeReviewControlDisabled}
+                        onClick={() => {
+                          if (nativeReviewControlDisabled) return;
+                          setNativeReviewState({ key: nativeReviewKey, open: true });
+                        }}
                       />
                     }
                   >
@@ -3358,15 +3392,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   >
                     Ask Codex to review code for bugs and risks. Choose changes, a branch, a commit,
                     or custom instructions. Findings appear in this chat.
+                    {nativeReviewControlDisabled ? ` ${nativeReviewDisabledReason}` : null}
                   </TooltipPopup>
                 </Tooltip>
               ) : null}
-              {deliveryPriorityAvailable ? (
+              {showDeliveryPriorityControl ? (
                 <ClaudeDeliveryPriorityControl
                   key={deliveryChoiceKey}
                   value={deliveryPriority}
                   onChange={(priority) => setDeliveryChoice({ key: deliveryChoiceKey, priority })}
-                  disabled={isSendBusy || isConnecting || environmentUnavailable !== null}
+                  disabled={deliveryPriorityDisabled}
+                  disabledReason={deliveryPriorityDisabledReason}
                   collapsed={composerTabCollapsed}
                 />
               ) : null}

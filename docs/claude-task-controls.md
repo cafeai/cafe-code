@@ -2,10 +2,14 @@
 
 ## Message delivery
 
-For a qualified Claude account selected in the composer, choose the compact
-**Delivery · Automatic** control inside the shared composer tools tab. Its popup offers Automatic, Now,
+Selecting Claude in the composer shows the compact **Delivery · Automatic**
+control inside the shared composer tools tab. It stays visible and dimmed when
+the account's runtime capability is unavailable, the server is reconnecting, or a
+message is being sent. Hover or focus the control for the reason. For a qualified
+account, its popup offers Automatic, Now,
 Next and Later; hover or focus an option for its explanation. The existing
-model-options menu also keeps the same **Message delivery** choices.
+model-options menu also keeps the same **Message delivery** choices when the
+account supports them. Providers without tab controls, such as Grok, hide the tab.
 The shared caret minimizes or restores every control in the tab at a fixed position
 without moving the composer. One layout preference applies across all chats and
 providers and survives navigation and reloads; delivery priority remains scoped

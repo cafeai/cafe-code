@@ -8,12 +8,15 @@ existing model-options menu also keeps its **Codex review** shortcut. Choose one
 - **A specific commit**, using its hexadecimal SHA rather than a shell command.
 - **Custom review instructions**.
 
-The tab and menu action appear only when the account currently selected in the composer
-matches the saved, ready Codex session, the server is connected, and the chat is
-idle. Selecting Claude, Grok or a different Codex account hides it immediately,
-even before sending a message. Work, a send, a connection or a checkpoint restore
-also makes it unavailable. Changing its chat, account or session binding closes
-the old review dialog; submission checks the current selection again.
+The tab shows **Code review** whenever Codex is selected in the composer, including
+drafts and busy chats. The control is dimmed until the selected account matches the
+saved, ready Codex session, the server is connected, and the chat is idle. Work,
+a send, a connection or a checkpoint restore also makes it unavailable. Hover or
+focus the control to see its explanation and the reason it is unavailable. The
+existing menu shortcut appears only while review can run. Changing the chat,
+account or session binding closes the old review dialog; submission checks the
+current selection again. Selecting Claude replaces the tab's review control with
+message delivery. Providers without tab controls, such as Grok, hide the tab.
 
 The shared tab's caret minimizes or restores all its controls without moving the
 caret or the composer. Its single minimized choice applies across chats, providers,

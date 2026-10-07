@@ -560,11 +560,30 @@ describe("provider-specific composer menu actions", () => {
     await expect
       .element(page.getByRole("button", { name: "Code review", exact: true }))
       .toBeVisible();
-    await fixture.update({ phase: "running" });
-    await expect
-      .element(page.getByRole("button", { name: "Code review", exact: true }))
-      .not.toBeInTheDocument();
-    expect(document.querySelector('[data-chat-composer-tab="true"]')).toBeNull();
+    const review = page.getByRole("button", { name: "Code review", exact: true });
+    for (const unavailable of [
+      { phase: "running" as const },
+      { phase: "ready" as const, isServerThread: false },
+      { isServerThread: true, isConnecting: true },
+      { isConnecting: false, codeReviewDisabled: true },
+    ]) {
+      await fixture.update(unavailable);
+      await expect.element(review).toBeVisible();
+      await expect.element(review).toHaveAttribute("aria-disabled", "true");
+      expect(document.querySelector(".cafe-composer-tab")).toBe(sharedTab);
+      expect(
+        page.getByRole("button", { name: "Minimize composer tools", exact: true }).element(),
+      ).toBe(sharedCaret);
+      // aria-disabled controls remain focusable for their explanation, but
+      // mouse and keyboard activation must never open or dispatch a review.
+      (review.element() as HTMLButtonElement).click();
+      review.element().focus();
+      await userEvent.keyboard("{Enter}{Space}");
+      await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+    }
+    await fixture.update({ codeReviewDisabled: false });
+    await expect.element(review).toHaveAttribute("aria-disabled", "false");
+    expect(document.querySelector(".cafe-composer-tab")).toBe(sharedTab);
     expect(fixture.onSend).not.toHaveBeenCalled();
     expect(fixture.onStartCodeReview).not.toHaveBeenCalled();
   });
@@ -648,6 +667,19 @@ describe("provider-specific composer menu actions", () => {
     await using fixture = await mountComposer(1100);
     for (const id of ["claudeAgent", "codex-work", "grok"]) {
       await fixture.select(id);
+      if (id === "grok") {
+        expect(document.querySelector('[data-chat-composer-tab="true"]')).toBeNull();
+      } else if (id === "codex-work") {
+        const review = page.getByRole("button", { name: "Code review", exact: true });
+        await expect.element(review).toBeVisible();
+        await expect.element(review).toHaveAttribute("aria-disabled", "true");
+        (review.element() as HTMLButtonElement).click();
+        await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+      } else {
+        await expect
+          .element(page.getByRole("button", { name: "Message delivery: Automatic", exact: true }))
+          .toBeVisible();
+      }
       await page.getByRole("button", { name: "More composer controls", exact: true }).click();
       await expect
         .element(page.getByRole("menuitem", { name: "Codex review", exact: true }))
@@ -721,6 +753,7 @@ describe("provider-specific composer menu actions", () => {
       }
     }
     await fixture.select("claudeAgent");
+    const sharedTab = document.querySelector(".cafe-composer-tab");
     await fixture.update({
       providerStatuses: providers.map((entry) =>
         entry.instanceId === "claudeAgent"
@@ -741,7 +774,18 @@ describe("provider-specific composer menu actions", () => {
       .element(page.getByText("Message delivery", { exact: true }))
       .not.toBeInTheDocument();
     await closeComposerControlsWithKeyboard();
+    const delivery = page.getByRole("button", { name: "Message delivery: Automatic", exact: true });
+    await expect.element(delivery).toBeVisible();
+    await expect.element(delivery).toHaveAttribute("aria-disabled", "true");
+    expect(document.querySelector(".cafe-composer-tab")).toBe(sharedTab);
+    (delivery.element() as HTMLButtonElement).click();
+    delivery.element().focus();
+    await userEvent.keyboard("{Enter}{ArrowDown}");
+    await expect.element(page.getByRole("menu")).not.toBeInTheDocument();
+    expect(fixture.composerRef.current?.getSendContext()).not.toHaveProperty("deliveryPriority");
     await fixture.update({ providerStatuses: providers });
+    await expect.element(delivery).toHaveAttribute("aria-disabled", "false");
+    expect(document.querySelector(".cafe-composer-tab")).toBe(sharedTab);
     await page.getByRole("button", { name: "More composer controls", exact: true }).click();
     await page.getByRole("menuitemradio", { name: "Now", exact: true }).click();
     await closeComposerControlsWithKeyboard();

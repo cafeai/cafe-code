@@ -2,8 +2,13 @@
 
 Status: Implemented under the user's request for compact delivery controls and a stationary minimize/expand caret.
 
-One generic **Composer tools** tab above the composer contains available controls,
-including Code review and qualified Claude message delivery. Each feature supplies
+One generic **Composer tools** tab above the composer contains controls belonging
+to the selected provider, including Codex Code review and Claude message delivery.
+Keep the tab visible whenever that provider has controls, including when their
+actions are temporarily unavailable; providers without controls, such as Grok,
+have no tab. Dim unavailable controls, keep their hover/focus explanation available,
+and guard mouse and keyboard activation without relaxing action admission.
+Each feature supplies
 only its own control; neither owns a separate tab or collapse state. Render these
 controls as independent children so future features can appear together in the
 same container. The tab adapts to its contents without replacing its caret when
@@ -37,8 +42,10 @@ The expanded decorative right edge extends by `0.375rem` beyond the layout box
 to give the caret breathing room. Animate that extension back to zero when
 minimized; the caret's button and the editor keep their original coordinates.
 
-Review visibility still requires the exact selected Codex account and saved ready
-session. Busy work hides its trigger without discarding a submitting dialog.
+Review activation still requires the exact selected Codex account and saved ready
+session. Busy work dims its trigger without discarding a submitting dialog.
+Claude delivery activation still requires its advertised runtime capability;
+an unavailable control cannot change delivery priority or open its options popup.
 Provider/account/runtime changes invalidate the dialog, and the same native
 permission disclosure, structured target validation and no-replay behavior apply.
 No provider protocol, queue, permission or lifecycle changes are introduced.

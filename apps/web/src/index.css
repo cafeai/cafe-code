@@ -1358,6 +1358,11 @@ label:has(> select#reasoning-effort) select {
   opacity: 0.5;
 }
 
+.cafe-composer-tab-action[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 @keyframes cafe-composer-tab-enter {
   from {
     opacity: 0;
