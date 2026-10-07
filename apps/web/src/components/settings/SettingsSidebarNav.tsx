@@ -79,7 +79,7 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<SettingsNavGroup> = [
         activePaths: ["/settings/general"],
       },
       { label: "Ambiance", to: "/settings/ambiance", icon: CloudDrizzleIcon },
-      { label: "Chat & Threads", to: "/settings/chat-threads", icon: MessageSquareIcon },
+      { label: "Chats", to: "/settings/chat-threads", icon: MessageSquareIcon },
       { label: "Notifications", to: "/settings/notifications", icon: BellIcon },
       { label: "Files", to: "/settings/files", icon: FileTextIcon },
       { label: "Keybindings", to: "/settings/keybindings", icon: KeyboardIcon },
@@ -140,7 +140,10 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
       <SidebarContent className="overflow-x-hidden">
         {SETTINGS_NAV_GROUPS.map((group) => (
           <SidebarGroup key={group.label} className="px-2 py-2 first:pt-3">
-            <SidebarGroupLabel className="h-6 px-2 text-[11px] uppercase tracking-wide text-muted-foreground/60">
+            {/* Same section-label treatment as the sidebar's Chats/Projects
+                headings; size and colour are explicit so they win over the
+                primitive's text-xs/text-sidebar-foreground. */}
+            <SidebarGroupLabel className="label-overline h-6 px-2 text-2xs text-subtle-foreground">
               {group.label}
             </SidebarGroupLabel>
             <SidebarMenu>
@@ -157,10 +160,12 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                     <SidebarMenuButton
                       size="sm"
                       isActive={isActive}
+                      // text-(length:--text-ui): `cn` would treat a bare
+                      // `text-ui` as a colour and drop it beside the colour.
                       className={
                         isActive
-                          ? "gap-2.5 px-2.5 py-2 text-left text-[13px] font-medium text-foreground"
-                          : "gap-2.5 px-2.5 py-2 text-left text-[13px] text-muted-foreground/70 hover:text-foreground/80"
+                          ? "gap-2.5 px-2.5 py-2 text-left text-(length:--text-ui) font-medium text-foreground"
+                          : "gap-2.5 px-2.5 py-2 text-left text-(length:--text-ui) text-muted-foreground hover:text-foreground"
                       }
                       onClick={() => handleSectionClick(item.to)}
                     >
@@ -168,7 +173,7 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                         className={
                           isActive
                             ? "size-4 shrink-0 text-foreground"
-                            : "size-4 shrink-0 text-muted-foreground/60"
+                            : "size-4 shrink-0 text-subtle-foreground"
                         }
                       />
                       <span className="truncate">{item.label}</span>
@@ -187,7 +192,7 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
           <SidebarMenuItem>
             <SidebarMenuButton
               size="sm"
-              className="gap-2 px-2 py-2 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
+              className="gap-2 px-2 py-2 text-(length:--text-ui) text-muted-foreground hover:bg-accent hover:text-foreground"
               onClick={handleBackClick}
             >
               <ArrowLeftIcon className="size-4" />

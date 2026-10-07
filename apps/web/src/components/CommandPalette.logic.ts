@@ -6,7 +6,7 @@ import { formatRelativeTimeLabel } from "../timestampFormat";
 import { type Project, type SidebarThreadSummary, type Thread } from "../types";
 
 export const RECENT_THREAD_LIMIT = 12;
-export const ITEM_ICON_CLASS = "size-4 text-muted-foreground/80";
+export const ITEM_ICON_CLASS = "size-4 text-muted-foreground";
 export const ADDON_ICON_CLASS = "size-4";
 
 export interface CommandPaletteItem {
@@ -15,6 +15,11 @@ export interface CommandPaletteItem {
   readonly searchTerms: ReadonlyArray<string>;
   readonly title: ReactNode;
   readonly description?: string;
+  /**
+   * Supplementary metadata (for example a project's folder path) shown only
+   * while the row is highlighted, so long paths don't crowd every row.
+   */
+  readonly detail?: string;
   readonly timestamp?: string;
   readonly icon: ReactNode;
   readonly disabled?: boolean;
@@ -99,7 +104,7 @@ export function buildProjectActionItems(input: {
     value: `${input.valuePrefix}:${project.environmentId}:${project.id}`,
     searchTerms: [project.name, project.cwd],
     title: project.name,
-    description: project.cwd,
+    detail: project.cwd,
     icon: input.icon(project),
     run: async () => {
       await input.runProject(project);
@@ -147,7 +152,7 @@ export function buildThreadActionItems<TThread extends BuildThreadActionItemsThr
       descriptionParts.push(`#${thread.branch}`);
     }
     if (thread.id === input.activeThreadId) {
-      descriptionParts.push("Current thread");
+      descriptionParts.push("Current chat");
     }
 
     const leadingContent = input.renderLeadingContent?.(thread);
@@ -246,7 +251,7 @@ export function filterCommandPaletteGroups(input: {
     if (input.threadSearchItems.length > 0) {
       searchableGroups.push({
         value: "threads-search",
-        label: "Threads",
+        label: "Chats",
         items: input.threadSearchItems,
       });
     }
@@ -344,7 +349,7 @@ export function buildRootGroups(input: {
   if (input.recentThreadItems.length > 0) {
     groups.push({
       value: "recent-threads",
-      label: "Recent Threads",
+      label: "Recent chats",
       items: input.recentThreadItems,
     });
   }
@@ -354,7 +359,7 @@ export function buildRootGroups(input: {
 export function getCommandPaletteInputPlaceholder(mode: CommandPaletteMode): string {
   switch (mode) {
     case "root":
-      return "Search commands, projects, and threads...";
+      return "Search commands, projects and chats…";
     case "root-browse":
       return "Enter project path (e.g. ~/projects/my-app)";
     case "submenu":

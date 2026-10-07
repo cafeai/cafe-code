@@ -3,6 +3,7 @@ import { memo, useEffect, useState } from "react";
 
 import { formatDuration, formatElapsed, type WorkLogEntry } from "../../session-logic";
 import { cn } from "~/lib/utils";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { SubagentAvatar } from "./SubagentAvatar";
 
 export type SubagentRosterEntry = WorkLogEntry & {
@@ -29,6 +30,10 @@ export function subagentStatusLabel(status: SubagentRosterEntry["subagent"]["sta
       return "Done";
   }
 }
+
+/** Shared caveat for rows whose live/terminal status Cafe cannot confirm. */
+export const SUBAGENT_STATUS_UNAVAILABLE_DETAIL =
+  "Cafe can't confirm whether this subagent is still running. Its saved summary is shown as last reported.";
 
 const LIVE_SUBAGENT_CLOCK_INTERVAL_MS = 1_000;
 type LiveSubagentClockListener = (now: number) => void;
@@ -92,7 +97,7 @@ const LiveSubagentElapsed = memo(function LiveSubagentElapsed(props: {
   const elapsed = Number.isNaN(timestamp) ? "" : formatDuration(Math.max(0, now - timestamp));
   return elapsed ? (
     <p
-      className="mt-0.5 font-mono text-[10px] text-muted-foreground/65"
+      className="mt-0.5 font-mono text-2xs text-subtle-foreground"
       data-subagent-live-elapsed="true"
     >
       {elapsed}
@@ -129,11 +134,27 @@ export const SubagentRosterRow = memo(function SubagentRosterRow(props: {
       ? subagent.objective
       : null;
 
-  return (
+  const unknownStatus = subagent.status === "unknown";
+  const tooltip =
+    objectiveDescription || unknownStatus ? (
+      <>
+        {objectiveDescription ? <p className="break-words">{objectiveDescription}</p> : null}
+        {unknownStatus ? (
+          <p className={cn(objectiveDescription && "mt-1 text-muted-foreground")}>
+            {SUBAGENT_STATUS_UNAVAILABLE_DETAIL}
+          </p>
+        ) : null}
+      </>
+    ) : null;
+
+  // One line of description/progress stays visible without hover; the
+  // original objective (when it differs) moves to the row tooltip, which also
+  // opens on keyboard focus, and remains in full on the detail screen.
+  const row = (
     <button
       type="button"
       className={cn(
-        "grid min-h-11 w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2.5 rounded-lg text-left transition-colors hover:bg-muted/35 focus-visible:bg-muted/35 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
+        "grid min-h-11 w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2.5 rounded-lg text-left transition-colors duration-(--duration-fast) hover:bg-accent focus-visible:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
         props.compact ? "px-1.5 py-1.5" : "px-1 py-2",
       )}
       data-subagent-roster-row="true"
@@ -146,39 +167,42 @@ export const SubagentRosterRow = memo(function SubagentRosterRow(props: {
         className={props.compact ? "size-7" : "size-7 sm:size-8"}
       />
       <div className="min-w-0 pt-0.5">
-        <p className="truncate text-xs leading-4 font-medium text-foreground/90">
-          {subagent.label}
-        </p>
+        <p className="truncate text-xs leading-4 font-medium text-foreground">{subagent.label}</p>
         <p
-          className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-muted-foreground/70 break-words"
+          className="mt-0.5 truncate text-2xs text-muted-foreground"
           data-subagent-description="true"
         >
           {primaryDescription}
         </p>
-        {objectiveDescription ? (
-          <p className="mt-0.5 line-clamp-2 text-[10px] leading-4 text-muted-foreground/50 break-words">
-            {objectiveDescription}
-          </p>
-        ) : null}
       </div>
       <div className="flex shrink-0 items-start gap-1 pt-0.5">
         <div className="min-w-14 text-right tabular-nums">
-          <p className="text-[9px] uppercase tracking-[0.08em] text-muted-foreground/55">
+          <p className="text-2xs text-muted-foreground" data-subagent-status="true">
             {status}
           </p>
           {live ? (
             <LiveSubagentElapsed startedAt={subagent.startedAt} paused={props.paused ?? false} />
           ) : terminalElapsed ? (
             <p
-              className="mt-0.5 font-mono text-[10px] text-muted-foreground/55"
+              className="mt-0.5 font-mono text-2xs text-subtle-foreground"
               data-subagent-terminal-elapsed="true"
             >
               {terminalElapsed}
             </p>
           ) : null}
         </div>
-        <ChevronRightIcon className="mt-0.5 size-3.5 shrink-0 text-muted-foreground/35" />
+        <ChevronRightIcon className="mt-0.5 size-3.5 shrink-0 text-subtle-foreground" />
       </div>
     </button>
+  );
+
+  if (!tooltip) return row;
+  return (
+    <Tooltip>
+      <TooltipTrigger delay={300} render={row} />
+      <TooltipPopup side="top" align="start" className="max-w-80 text-pretty">
+        {tooltip}
+      </TooltipPopup>
+    </Tooltip>
   );
 });

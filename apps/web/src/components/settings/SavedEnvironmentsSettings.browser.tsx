@@ -104,7 +104,8 @@ describe("SavedEnvironmentsSettings", () => {
     await vi.waitFor(() => {
       expect(nativePairingInput?.value).toBe("");
       expect(submitButton.disabled).toBe(true);
-      expect(submitButton.textContent).toContain("Adding");
+      // The label keeps its width while pending; the button reports busy instead.
+      expect(submitButton.getAttribute("aria-busy")).toBe("true");
     });
 
     resolveAdd({

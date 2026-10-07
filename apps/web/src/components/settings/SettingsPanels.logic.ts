@@ -119,11 +119,9 @@ export function collectRecentlyDeletedThreadRefs(
 }
 
 export function buildEmptyRecycleBinConfirmationMessage(threadCount: number): string {
-  const threadLabel = threadCount === 1 ? "thread" : "threads";
+  const chatLabel = threadCount === 1 ? "chat" : "chats";
   return [
-    `Delete ${threadCount} ${threadLabel} forever?`,
-    "This removes local chat history, activity, provider session mappings, attachments, and checkpoint metadata for every thread in the Recycle Bin.",
-    "",
-    "This cannot be undone.",
+    `Delete ${threadCount} ${chatLabel} forever?`,
+    "Their history, activity, attachments and checkpoints are removed. This cannot be undone.",
   ].join("\n");
 }

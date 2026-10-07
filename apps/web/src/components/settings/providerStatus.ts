@@ -5,8 +5,12 @@ import type { ServerProvider, ServerProviderVersionAdvisory } from "@cafecode/co
  * the default-driver card and per-instance cards share the same language.
  */
 export const PROVIDER_STATUS_STYLES = {
+  // Not yet reported by the server: a neutral pulse, never a warning colour.
+  checking: {
+    dot: "bg-status-idle animate-pulse",
+  },
   disabled: {
-    dot: "bg-amber-400",
+    dot: "bg-status-idle",
   },
   error: {
     dot: "bg-destructive",
@@ -30,23 +34,16 @@ export type ProviderStatusKey = keyof typeof PROVIDER_STATUS_STYLES;
  */
 export function getProviderSummary(provider: ServerProvider | undefined) {
   if (!provider) {
-    return {
-      headline: "Checking provider status",
-      detail: "Waiting for the server to report installation and authentication details.",
-    };
+    return { headline: "Checking…", detail: null };
   }
   if (!provider.enabled) {
-    return {
-      headline: "Disabled",
-      detail:
-        provider.message ??
-        "This provider is installed but disabled for new sessions in Cafe Code.",
-    };
+    // The card's switch already shows that it is off; no extra explanation.
+    return { headline: "Disabled", detail: provider.message ?? null };
   }
   if (!provider.installed) {
     return {
       headline: "Not found",
-      detail: provider.message ?? "CLI not detected on PATH.",
+      detail: provider.message ?? "Install the CLI or set its binary path in Advanced settings.",
     };
   }
   // A protected startup failure says nothing about credentials or whether an
@@ -67,27 +64,24 @@ export function getProviderSummary(provider: ServerProvider | undefined) {
   }
   if (provider.auth.status === "unauthenticated") {
     return {
-      headline: "Not authenticated",
+      headline: "Not signed in",
       detail: provider.message ?? null,
     };
   }
   if (provider.status === "warning") {
     return {
       headline: "Needs attention",
-      detail:
-        provider.message ?? "The provider is installed, but the server could not fully verify it.",
+      detail: provider.message ?? "Installed, but it couldn't be fully verified.",
     };
   }
   if (provider.status === "error") {
     return {
       headline: "Unavailable",
-      detail: provider.message ?? "The provider failed its startup checks.",
+      detail: provider.message ?? "It failed its startup checks.",
     };
   }
-  return {
-    headline: "Available",
-    detail: provider.message ?? "Installed and ready, but authentication could not be verified.",
-  };
+  // Installed and ready, but the provider did not report sign-in state.
+  return { headline: "Sign-in not verified", detail: provider.message ?? null };
 }
 
 /**
@@ -111,16 +105,14 @@ export function getProviderVersionAdvisoryPresentation(
     return null;
   }
 
-  const label = "Update available";
   const version = advisory.latestVersion;
   const versionLabel = getProviderVersionLabel(version);
 
   return {
+    // The popover title already says "Update available"; don't repeat it.
     detail:
       advisory.message ??
-      (versionLabel
-        ? `${label}: install ${versionLabel}.`
-        : `${label}: install the latest provider version.`),
+      (versionLabel ? `Install ${versionLabel}.` : "Install the latest version."),
     updateCommand: advisory.updateCommand,
     emphasis: "normal" as const,
   };

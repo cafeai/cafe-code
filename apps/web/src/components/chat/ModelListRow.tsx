@@ -46,7 +46,7 @@ export const ModelListRow = memo(function ModelListRow(props: {
       value={`${props.instanceId}:${props.model.slug}`}
       contentClassName="flex w-full items-start gap-2"
       className={cn(
-        "w-full cursor-pointer rounded px-3 py-2 transition-colors group",
+        "group w-full cursor-pointer rounded-sm px-3 py-2 transition-colors duration-(--duration-fast)",
         "data-highlighted:bg-muted data-selected:bg-accent data-selected:text-foreground",
       )}
     >
@@ -54,7 +54,7 @@ export const ModelListRow = memo(function ModelListRow(props: {
         <TooltipTrigger
           render={
             <button
-              className="mt-0.5 shrink-0 cursor-pointer opacity-40 transition-opacity group-hover:opacity-100"
+              className="focus-ring mt-0.5 shrink-0 cursor-pointer rounded-sm opacity-40 transition-opacity duration-(--duration-fast) group-hover:opacity-100 focus-visible:opacity-100"
               onClick={(event) => {
                 event.stopPropagation();
                 props.onToggleFavorite();
@@ -65,9 +65,7 @@ export const ModelListRow = memo(function ModelListRow(props: {
               type="button"
               aria-label={props.isFavorite ? "Remove from favorites" : "Add to favorites"}
             >
-              <StarIcon
-                className={cn("size-4", props.isFavorite && "fill-current text-yellow-500")}
-              />
+              <StarIcon className={cn("size-4", props.isFavorite && "fill-current text-warning")} />
             </button>
           }
         />
@@ -89,7 +87,7 @@ export const ModelListRow = memo(function ModelListRow(props: {
             </span>
             {props.showNewBadge ? (
               <span
-                className="shrink-0 rounded border border-amber-500/35 bg-amber-500/15 px-0.5 py-px text-[10px] font-bold uppercase leading-none tracking-wide text-amber-800 dark:border-amber-400/30 dark:bg-amber-400/12 dark:text-amber-200"
+                className="shrink-0 rounded-sm border border-warning/30 bg-warning/12 px-1 py-px text-2xs font-medium leading-none text-warning-foreground"
                 aria-label="New model"
               >
                 New
@@ -99,13 +97,13 @@ export const ModelListRow = memo(function ModelListRow(props: {
           {props.jumpLabel ? (
             // Hide the keyboard-shortcut badge on touch-only devices (no
             // keyboard/hover); desktop and mouse/trackpad devices are unchanged.
-            <Kbd className="h-4 min-w-0 shrink-0 rounded-sm px-1.5 text-[10px] [@media(hover:none)_and_(pointer:coarse)]:hidden">
+            <Kbd className="h-4 min-w-0 shrink-0 rounded-sm px-1.5 text-2xs [@media(hover:none)_and_(pointer:coarse)]:hidden">
               {props.jumpLabel}
             </Kbd>
           ) : null}
         </div>
-        {props.showProvider && (
-          <div className="flex items-center gap-1 mt-0.5">
+        {props.showProvider ? (
+          <div className="mt-0.5 flex items-center gap-1">
             {ProviderIcon ? <ProviderIcon className="size-3 shrink-0" /> : null}
             {props.providerAccentColor ? (
               <span
@@ -114,11 +112,17 @@ export const ModelListRow = memo(function ModelListRow(props: {
                 aria-hidden
               />
             ) : null}
-            <span className="text-xs font-normal leading-snug text-muted-foreground/70 truncate">
+            <span className="truncate text-xs font-normal leading-snug text-muted-foreground">
               {providerLabel}
             </span>
           </div>
-        )}
+        ) : props.model.subProvider && !props.useTriggerLabel ? (
+          // The sidebar already names the provider; keep only the routing
+          // sub-provider, which is not repeated anywhere else.
+          <div className="mt-0.5 truncate text-xs font-normal leading-snug text-muted-foreground">
+            {props.model.subProvider}
+          </div>
+        ) : null}
       </div>
     </ComboboxItem>
   );

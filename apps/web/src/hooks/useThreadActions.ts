@@ -211,7 +211,7 @@ export function useThreadActions() {
       if (!resolved) return;
       const { thread, threadRef } = resolved;
       if (thread.session?.status === "running" && thread.session.activeTurnId != null) {
-        throw new Error("Cannot archive a running thread.");
+        throw new Error("Can't archive a chat while it's running.");
       }
 
       const currentRouteThreadRef = getCurrentRouteThreadRef();
@@ -272,10 +272,8 @@ export function useThreadActions() {
         if (!localApi) return;
         const confirmed = await localApi.dialogs.confirm(
           [
-            "Delete this thread forever?",
-            "This removes local chat history, activity, provider session mappings, attachments, and checkpoint metadata.",
-            "",
-            "This cannot be undone.",
+            "Delete this chat forever?",
+            "Its history, attachments and checkpoints are removed. This can't be undone.",
           ].join("\n"),
         );
         if (!confirmed) {
@@ -354,7 +352,7 @@ export function useThreadActions() {
         localApi &&
         (await localApi.dialogs.confirm(
           [
-            "This thread is the only one linked to this worktree:",
+            "This chat is the only one using this worktree:",
             displayWorktreePath ?? orphanedWorktreePath,
             "",
             "Delete the worktree too?",
@@ -447,7 +445,7 @@ export function useThreadActions() {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Thread deleted, but worktree removal failed",
+            title: "Chat deleted, but the worktree couldn't be removed",
             description: `Could not remove ${displayWorktreePath ?? orphanedWorktreePath}. ${message}`,
           }),
         );
@@ -472,11 +470,11 @@ export function useThreadActions() {
       const resolved = resolveThreadTarget(target);
 
       if (confirmThreadDelete && localApi) {
-        const title = resolved?.thread.title ?? "this thread";
+        const title = resolved?.thread.title ?? "this chat";
         const confirmed = await localApi.dialogs.confirm(
           [
-            `Move thread "${title}" to the Recycle Bin?`,
-            "You can review it later in Settings > Recently Deleted.",
+            `Move "${title}" to the Recycle Bin?`,
+            "You can restore it from Settings > Recently Deleted.",
           ].join("\n"),
         );
         if (!confirmed) {

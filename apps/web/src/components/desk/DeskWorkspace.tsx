@@ -21,23 +21,24 @@ import {
   type DragMoveEvent,
 } from "@dnd-kit/core";
 import {
-  ChevronDown,
   GripVertical,
   Maximize2,
   Minimize2,
   MoreHorizontal,
-  Plus,
   RotateCcw,
+  Search,
   X,
 } from "lucide-react";
 import type { ContextMenuItem } from "@cafecode/contracts";
 import { useShallow } from "zustand/react/shallow";
 import ChatView from "../ChatView";
 import { NoActiveThreadState } from "../NoActiveThreadState";
+import { ThreadStatusLabel } from "../ThreadStatusLabel";
 import { SidebarInset } from "../ui/sidebar";
 import { Button } from "../ui/button";
 import { Dialog, DialogPopup, DialogTitle, DialogDescription } from "../ui/dialog";
 import { Input } from "../ui/input";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { ChatPaneContext, isChatSendInFlight } from "../../chatPaneContext";
 import { useDeskStore } from "../../deskStore";
 import {
@@ -50,6 +51,7 @@ import {
   type DeskState,
 } from "../../deskModel";
 import { useWorkspaceEnvironmentId } from "~/environments/workspace";
+import { useSettings } from "../../hooks/useSettings";
 import {
   DraftId,
   finalizePromotedDraftThreadByRef,
@@ -68,8 +70,10 @@ import { useUiStateStore } from "../../uiStateStore";
 import { readLocalApi } from "../../localApi";
 import { useRenameChat } from "../../hooks/useRenameChat";
 import { isMacPlatform } from "../../lib/utils";
+import { isElectron } from "../../env";
 import { useDeskTabMetadata, readDeskTabMetadata } from "./useDeskTabMetadata";
 import { useDeskChatActions } from "./useDeskChatActions";
+import { useDeskOpenActions } from "./useDeskOpenActions";
 import {
   deskDropEdge,
   deskInsertionIndex,
@@ -128,6 +132,7 @@ function focusTabAfterSelection(tabKey: string) {
  * A route echo must never reopen a tab the user has just closed. */
 export function useDeskRouteSync() {
   const navigate = useNavigate();
+  const chatClickBehavior = useSettings((settings) => settings.chatClickBehavior);
   const environmentId = useWorkspaceEnvironmentId();
   const target = useParams({ strict: false, select: resolveThreadRouteTarget });
   const routeKey = target ? deskTabKey(target) : "";
@@ -269,6 +274,9 @@ export function useDeskRouteSync() {
           dispatch({
             type: "open",
             target: pending ? { kind: "draft", draftId: DraftId.make(pending[0]) } : target,
+            // A current URL can restore a preview, but must never pin it on reload.
+            // Existing kept tabs retain their permanent state when selected here.
+            preview: !pending && target.kind === "server" && chatClickBehavior === "preview",
           });
           return;
         }
@@ -317,6 +325,7 @@ export function useDeskRouteSync() {
     shells,
     drafts,
     readyDrafts,
+    chatClickBehavior,
     dispatch,
     navigate,
   ]);
@@ -394,11 +403,13 @@ function ChatTab({
         aria-selected={selected}
         tabIndex={selected || (group.activeTabKey === null && index === 0) ? 0 : -1}
         data-desk-tab-key={tabKey}
+        data-preview={group.previewTabKey === tabKey}
         title={`${meta.title}${meta.projectName ? ` · ${meta.projectName}` : ""}`}
         onClick={() => {
           dispatch({ type: "select", tabKey });
           focusTabAfterSelection(tabKey);
         }}
+        onDoubleClick={() => dispatch({ type: "keepOpen", tabKey })}
         onKeyDown={(event) => {
           // Once a keyboard drag is active, its sensor owns arrow/Space/Escape.
           if (drag.isDragging) return;
@@ -430,17 +441,24 @@ function ChatTab({
           } else drag.listeners?.onKeyDown?.(event);
         }}
       >
-        <span className="desk-status" data-working={meta.working} data-attention={meta.attention} />
+        {/* Same status vocabulary as the sidebar rows and project rows. */}
+        <ThreadStatusLabel status={meta.status} />
         <span className="desk-tab-title">{meta.title}</span>
       </button>
-      <button
-        className="desk-tab-action"
-        aria-label={`Close tab ${meta.title}`}
-        title="Close tab — chat keeps running"
-        onClick={() => dispatch({ type: "close", tabKey })}
-      >
-        <X size={12} />
-      </button>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <button
+              className="desk-tab-action"
+              aria-label={`Close tab ${meta.title}`}
+              onClick={() => dispatch({ type: "close", tabKey })}
+            >
+              <X size={12} />
+            </button>
+          }
+        />
+        <TooltipPopup side="bottom">Close tab (chat keeps running)</TooltipPopup>
+      </Tooltip>
     </div>
   );
 }
@@ -454,8 +472,9 @@ function GroupTabs({
   onMenu,
   onRename,
   onRenameGroup,
-  onOverflow,
   pendingEditor = false,
+  controls,
+  rect,
 }: {
   group: DeskGroup;
   hint: DropHint;
@@ -465,11 +484,30 @@ function GroupTabs({
   onMenu: (key: string | null, position: { x: number; y: number }) => void;
   onRename: (target: ThreadRouteTarget) => void;
   onRenameGroup: () => void;
-  onOverflow: () => void;
   pendingEditor?: boolean;
+  controls: ReactNode;
+  rect: DeskRect;
 }) {
   const desk = useDeskStore((s) => s.desk);
   const strip = useRef<HTMLDivElement>(null);
+  const titlebar = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const bar = titlebar.current;
+    if (!bar || !isElectron || rect.y !== 0) return;
+    const measure = () => {
+      const bounds = bar.getBoundingClientRect();
+      bar.style.setProperty("--desk-window-left-gap", `${bounds.left}px`);
+      bar.style.setProperty("--desk-window-right-gap", `${window.innerWidth - bounds.right}px`);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(bar);
+    window.addEventListener("resize", measure);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [rect.x, rect.y, rect.width]);
   const insertionIndex = hint?.kind === "insert" && hint.groupId === group.id ? hint.index : null;
   const drop = useDroppable({
     id: `strip:${group.id}`,
@@ -496,11 +534,28 @@ function GroupTabs({
     return () => observer.disconnect();
   }, [group.activeTabKey, group.tabs]);
   return (
-    <div className="desk-group-bar">
-      <GroupGrip group={group} />
-      <button className="desk-group-name" onClick={onRenameGroup} title="Rename group">
-        {group.name}
-      </button>
+    <div
+      ref={titlebar}
+      className={`desk-group-bar${isElectron && rect.y === 0 ? " drag-region" : ""}`}
+      data-desktop-titlebar={isElectron && rect.y === 0}
+      data-window-left={rect.x === 0}
+      data-window-top={rect.y === 0}
+      data-window-right={rect.x + rect.width >= 0.999}
+    >
+      <div className="desk-header-controls">{controls}</div>
+      <div className="desk-group-identity">
+        <GroupGrip group={group} />
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <button className="desk-group-name" onClick={onRenameGroup}>
+                {group.name}
+              </button>
+            }
+          />
+          <TooltipPopup side="bottom">Rename group</TooltipPopup>
+        </Tooltip>
+      </div>
       <div
         ref={(element) => {
           strip.current = element;
@@ -542,14 +597,6 @@ function GroupTabs({
       </div>
       <button
         className="desk-icon"
-        aria-label={`All tabs in ${group.name}`}
-        title="All tabs"
-        onClick={onOverflow}
-      >
-        <ChevronDown size={13} />
-      </button>
-      <button
-        className="desk-icon"
         aria-label={restoreGroups ? "Restore all groups" : `Focus ${group.name}`}
         title={
           restoreGroups
@@ -563,17 +610,23 @@ function GroupTabs({
       >
         {restoreGroups ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
       </button>
-      <button
-        className="desk-icon"
-        aria-label={`${group.name} tab actions`}
-        title="Tab actions"
-        onClick={(e) => {
-          const r = e.currentTarget.getBoundingClientRect();
-          onMenu(null, { x: r.left, y: r.bottom });
-        }}
-      >
-        <MoreHorizontal size={15} />
-      </button>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <button
+              className="desk-icon"
+              aria-label={`${group.name} tab actions`}
+              onClick={(e) => {
+                const r = e.currentTarget.getBoundingClientRect();
+                onMenu(null, { x: r.left, y: r.bottom });
+              }}
+            >
+              <MoreHorizontal size={15} />
+            </button>
+          }
+        />
+        <TooltipPopup side="bottom">Tab actions</TooltipPopup>
+      </Tooltip>
     </div>
   );
 }
@@ -845,6 +898,7 @@ export default function DeskWorkspace() {
     if (meta.threadRef) openRenameChat(meta.threadRef, meta.title);
   };
   const chatActions = useDeskChatActions();
+  const getOpenActions = useDeskOpenActions();
 
   const showMenu = async (
     groupId: string,
@@ -854,18 +908,23 @@ export default function DeskWorkspace() {
     const current = useDeskStore.getState().desk;
     const group = current.groups[groupId];
     if (!group || current.environmentId !== primaryEnvironmentId) return;
-    const key = tabKey ?? group.activeTabKey;
+    const editorMenu = tabKey === null && groupId === editorGroupId && editorTarget !== null;
+    const key = editorMenu ? null : (tabKey ?? group.activeTabKey);
     if (key && !group.tabs.includes(key)) return;
-    const target = key ? current.targets[key] : null;
+    const target = editorMenu ? editorTarget : key ? current.targets[key] : null;
+    const openActions = target ? getOpenActions(target) : null;
     const owner = Symbol();
     menuOwner.current = owner;
     const items: ContextMenuItem[] = [];
+    items.push(...(openActions?.items ?? []));
     const actions = new Map<string, DeskAction>();
     const item = (id: string, label: string, action: DeskAction, disabled = false) => {
       items.push({ id, label, disabled });
       actions.set(id, action);
     };
     if (key && target) {
+      if (group.previewTabKey === key)
+        item("keep-open", "Keep open", { type: "keepOpen", tabKey: key });
       items.push({
         id: "rename-chat",
         label: "Rename chat…",
@@ -909,6 +968,7 @@ export default function DeskWorkspace() {
     );
     item("close-all", "Close all tabs", { type: "closeAll" }, !hasTabs);
     item("reopen", "Reopen closed tab", { type: "reopen" }, !current.closed.length);
+    items.push({ id: "all-tabs", label: "Search open tabs…" });
     items.push({ id: "rename-group", label: "Rename group…" });
     for (const otherId of groupIds)
       if (otherId !== groupId) {
@@ -946,7 +1006,11 @@ export default function DeskWorkspace() {
     // environment string: a reset/reload can replace both under the same names.
     // Recheck after the awaited chat-action discriminator as well as the menu.
     if (menuOwner.current !== owner || useDeskStore.getState().desk !== current) return;
-    if (clicked === "rename-chat" && target) rename(target);
+    if (openActions?.run(clicked)) return;
+    if (clicked === "all-tabs") {
+      setFilter("");
+      setOverflow(groupId);
+    } else if (clicked === "rename-chat" && target) rename(target);
     else if (clicked === "rename-group") {
       setGroupName(group.name);
       setRenameGroup({ groupId, desk: current });
@@ -1050,7 +1114,10 @@ export default function DeskWorkspace() {
     }
   };
 
-  function renderChat(target: ThreadRouteTarget, navigationSlot?: ReactNode) {
+  function renderChat(
+    target: ThreadRouteTarget,
+    navigationSlot?: (controls: ReactNode) => ReactNode,
+  ) {
     if (!bootstrapped) return null;
     if (target.kind === "server") {
       // Promotion reconciliation runs after commit. Suppress the canonical
@@ -1107,26 +1174,25 @@ export default function DeskWorkspace() {
       >
         <div className="desk-workspace" ref={root}>
           {!hasVisibleChat ? (
-            <>
-              <NoActiveThreadState />
-              <div className="desk-empty-actions">
-                <Button
-                  variant="outline"
-                  onClick={() => useCommandPaletteStore.getState().setOpen(true)}
-                >
-                  <Plus />
-                  Open a chat
-                </Button>
-                <Button
-                  variant="ghost"
-                  disabled={!desk.closed.length}
-                  onClick={() => dispatch({ type: "reopen" })}
-                >
-                  <RotateCcw />
-                  Reopen closed tab
-                </Button>
-              </div>
-            </>
+            <NoActiveThreadState
+              secondaryActions={
+                <>
+                  <Button
+                    variant="outline"
+                    onClick={() => useCommandPaletteStore.getState().setOpen(true)}
+                  >
+                    <Search />
+                    Open a chat
+                  </Button>
+                  {desk.closed.length > 0 ? (
+                    <Button variant="ghost" onClick={() => dispatch({ type: "reopen" })}>
+                      <RotateCcw />
+                      Reopen closed tab
+                    </Button>
+                  ) : null}
+                </>
+              }
+            />
           ) : (
             panes.map(({ groupId, rect }) => {
               const group = desk.groups[groupId];
@@ -1153,9 +1219,26 @@ export default function DeskWorkspace() {
                         dispatch({ type: "sessionRail", groupId, docked }),
                     }}
                   >
-                    {renderChat(
-                      target,
+                    {renderChat(target, (controls) => (
                       <>
+                        <GroupTabs
+                          controls={controls}
+                          rect={rect}
+                          group={group}
+                          pendingEditor={pendingEditor}
+                          hint={hint}
+                          restoreGroups={restoreGroups}
+                          canRestoreGroups={canRestoreGroups}
+                          onToggleFocus={() => toggleGroupFocus(groupId)}
+                          onMenu={(key, pos) => {
+                            void showMenu(groupId, key, pos);
+                          }}
+                          onRename={rename}
+                          onRenameGroup={() => {
+                            setGroupName(group.name);
+                            setRenameGroup({ groupId, desk: useDeskStore.getState().desk });
+                          }}
+                        />
                         {isolated && groupIds.length > 1 && (
                           <div
                             className="desk-group-switcher"
@@ -1189,28 +1272,8 @@ export default function DeskWorkspace() {
                             )}
                           </div>
                         )}
-                        <GroupTabs
-                          group={group}
-                          pendingEditor={pendingEditor}
-                          hint={hint}
-                          restoreGroups={restoreGroups}
-                          canRestoreGroups={canRestoreGroups}
-                          onToggleFocus={() => toggleGroupFocus(groupId)}
-                          onMenu={(key, pos) => {
-                            void showMenu(groupId, key, pos);
-                          }}
-                          onRename={rename}
-                          onRenameGroup={() => {
-                            setGroupName(group.name);
-                            setRenameGroup({ groupId, desk: useDeskStore.getState().desk });
-                          }}
-                          onOverflow={() => {
-                            setFilter("");
-                            setOverflow(groupId);
-                          }}
-                        />
-                      </>,
-                    )}
+                      </>
+                    ))}
                   </ChatPaneContext>
                 </Pane>
               );

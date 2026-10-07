@@ -127,6 +127,29 @@ describe("KeybindingsSettings.logic", () => {
     expect(commandLabel("composer.submit")).toBe("Composer: Submit / Queue Follow-Up");
     expect(commandLabel("composer.steer")).toBe("Composer: Steer Active Turn");
     expect(commandLabel("script.setup-db.run")).toBe("Run Script: Setup Db");
+    expect(commandLabel("thread.next")).toBe("Chat: Next");
+    expect(commandLabel("thread.jump.3")).toBe("Chat: Jump: 3");
+  });
+
+  it("finds commands by their displayed label", () => {
+    const rows = buildKeybindingRows(
+      [
+        {
+          command: "thread.next",
+          shortcut: {
+            key: "]",
+            modKey: true,
+            metaKey: false,
+            ctrlKey: false,
+            altKey: false,
+            shiftKey: true,
+          },
+        },
+      ] satisfies ResolvedKeybindingsConfig,
+      "chat: next",
+    );
+
+    expect(rows.map((row) => row.command)).toEqual(["thread.next"]);
   });
 
   it("builds known when variable options from defaults", () => {

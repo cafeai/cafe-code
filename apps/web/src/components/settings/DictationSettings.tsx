@@ -3,8 +3,7 @@ import {
   CheckCircle2Icon,
   KeyRoundIcon,
   KeyboardIcon,
-  MicIcon,
-  ShieldCheckIcon,
+  Trash2Icon,
   TriangleAlertIcon,
 } from "lucide-react";
 import {
@@ -18,6 +17,7 @@ import { type FormEvent, useCallback, useEffect, useState } from "react";
 import { useWorkspaceEnvironmentId, useIsSavedRemoteEnvironment } from "~/environments/workspace";
 import { requireEnvironmentConnection } from "~/environments/runtime";
 import { readDictationRpcErrorCode } from "~/dictation/errors";
+import { useDelayedFlag } from "~/hooks/useDelayedFlag";
 import { dictationQueryKeys, dictationStatusQueryOptions } from "~/lib/dictationReactQuery";
 import { isMacPlatform } from "~/lib/utils";
 import {
@@ -31,7 +31,10 @@ import {
 } from "../ui/alert-dialog";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { InfoTip } from "../ui/info-tip";
 import { Input } from "../ui/input";
+import { Kbd } from "../ui/kbd";
+import { Skeleton } from "../ui/skeleton";
 import { Spinner } from "../ui/spinner";
 import { Switch } from "../ui/switch";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
@@ -109,41 +112,37 @@ function formatStatusError(error: unknown): string {
 function statusBadge(input: {
   readonly environmentReady: boolean;
   readonly isPending: boolean;
+  readonly showPending: boolean;
   readonly isError: boolean;
   readonly status: DictationCredentialStatus | undefined;
 }) {
   if (!input.environmentReady || input.isError) {
     return (
-      <Badge variant="error" size="sm">
+      <Badge variant="error">
         <TriangleAlertIcon />
         Unavailable
       </Badge>
     );
   }
 
-  if (input.isPending || !input.status) {
-    return (
-      <Badge variant="secondary" size="sm">
-        <Spinner />
-        Checking
-      </Badge>
-    );
+  if (input.showPending || input.isPending || !input.status) {
+    // Fast status reads show nothing; slower ones get a badge-shaped skeleton
+    // that stays up long enough not to flash (docs/style-guide.md §9).
+    return input.showPending ? (
+      <Skeleton aria-hidden="true" className="h-5.5 w-20 rounded-sm sm:h-4.5" />
+    ) : null;
   }
 
   if (input.status.configured) {
     return (
-      <Badge variant="success" size="sm">
+      <Badge variant="success">
         <CheckCircle2Icon />
         Configured
       </Badge>
     );
   }
 
-  return (
-    <Badge variant="secondary" size="sm">
-      Not configured
-    </Badge>
-  );
+  return <Badge variant="secondary">Not configured</Badge>;
 }
 
 export function DictationSettings() {
@@ -294,8 +293,8 @@ export function DictationSettings() {
         setFeedback({
           kind: "success",
           message: configured
-            ? "OpenAI API key replaced. Cafe will verify access when dictation starts."
-            : "OpenAI API key saved. Cafe will verify access when dictation starts.",
+            ? "Key replaced. Access is checked when dictation starts."
+            : "Key saved. Access is checked when dictation starts.",
         });
       } catch (error) {
         setFeedback({ kind: "error", message: formatCredentialManagementError(error) });
@@ -319,7 +318,7 @@ export function DictationSettings() {
         await requireEnvironmentConnection(primaryEnvironmentId).client.dictation.clearApiKey();
       writeAuthoritativeStatus(nextStatus);
       setRemoveDialogOpen(false);
-      setFeedback({ kind: "success", message: "OpenAI API key removed." });
+      setFeedback({ kind: "success", message: "Key removed." });
     } catch (error) {
       setRemoveError(formatCredentialManagementError(error));
     } finally {
@@ -327,69 +326,74 @@ export function DictationSettings() {
     }
   }, [canManage, isBusy, primaryEnvironmentId, writeAuthoritativeStatus]);
 
-  const statusDescription = !primaryEnvironmentId
-    ? "Waiting for the primary Cafe Code environment."
+  // Only problems get a status line; the badge already says whether a key is
+  // stored, so repeating it in prose adds nothing (docs/style-guide.md §10).
+  const statusProblem = !primaryEnvironmentId
+    ? "Waiting for Cafe to connect."
     : statusQuery.isError
       ? formatStatusError(statusQuery.error)
-      : statusQuery.isPending || !status
-        ? "Checking the server-side credential status."
-        : configured
-          ? "The key is stored. Cafe verifies OpenAI access when you explicitly start Dictation."
-          : "No key is stored, so Dictation does not access the microphone or OpenAI.";
+      : null;
+  const showStatusPending = useDelayedFlag(primaryEnvironmentId !== null && statusQuery.isPending);
+  const showGlobalSettingsPending = useDelayedFlag(
+    isMacDesktop && globalSettings === null && globalSettingsPending,
+  );
+  // Global dictation on a remote workspace uses this Mac's local key, not the
+  // selected workspace's key shown above.
+  const globalKeyStatus = remote ? localStatusQuery.data : status;
+  const globalKeyConfigured = globalKeyStatus?.configured === true;
+  const globalStatus =
+    globalSettingsError ||
+    globalSettings?.error ||
+    (globalSettings?.enabled
+      ? globalSettings.registered
+        ? "Press the shortcut to start, and again to stop."
+        : "Couldn't register this shortcut. Choose another."
+      : globalSettings && globalKeyStatus && !globalKeyConfigured
+        ? remote
+          ? "Add an OpenAI API key in this Mac's local workspace first."
+          : "Add an OpenAI API key first."
+        : null);
 
   return (
-    <SettingsPageContainer>
-      <div className="space-y-1 px-1">
-        <h1 className="text-lg font-semibold tracking-[-0.02em] text-foreground">Dictation</h1>
-        <p className="max-w-2xl text-sm leading-relaxed text-muted-foreground">
-          Opt in to OpenAI live transcription for the composer. Dictation remains off until an API
-          key is configured and you explicitly start it from the microphone control.
-        </p>
-        <p className="max-w-2xl text-xs leading-relaxed text-muted-foreground">
-          GPT Live Transcribe requires a paid OpenAI API project with Realtime model access; the
-          OpenAI API Free tier does not support this model.
-        </p>
-      </div>
-
-      <SettingsSection title="OpenAI live transcription" icon={<MicIcon className="size-3.5" />}>
+    <SettingsPageContainer
+      title="Dictation"
+      description="OpenAI live transcription for the composer. Needs a paid API project with Realtime access."
+    >
+      <SettingsSection>
         <SettingsRow
-          title="Dictation status"
-          description="Microphone audio is sent to OpenAI only during a dictation session you start."
-          status={
-            <span aria-live="polite">
-              {statusDescription}
-              {statusQuery.isError && primaryEnvironmentId ? (
-                <Button
-                  type="button"
-                  variant="link"
-                  size="xs"
-                  className="ml-1 h-auto p-0 align-baseline"
-                  onClick={() => void statusQuery.refetch()}
-                >
-                  Retry
-                </Button>
-              ) : null}
+          title={
+            <span className="inline-flex items-center gap-1.5">
+              OpenAI API key
+              <InfoTip label="About the OpenAI API key">
+                Only an owner can add, replace or remove the key. It stays in Cafe's private
+                server-side secret store; this page only learns whether a key is set, and dictation
+                uses short-lived transcription credentials. Audio is sent to OpenAI only while you
+                dictate.
+              </InfoTip>
             </span>
           }
-          control={statusBadge({
-            environmentReady: primaryEnvironmentId !== null,
-            isPending: statusQuery.isPending,
-            isError: statusQuery.isError,
-            status,
-          })}
-        />
-
-        <SettingsRow
-          title="OpenAI API key"
           description={
-            configured
-              ? "A key is stored. Enter a new key only when you want to replace it."
-              : "Enter a key to enable Dictation. The stored value is never returned to this page."
+            <span id="dictation-api-key-help">Stored only on the server; never shown again.</span>
           }
           status={
-            status && !status.canManage ? (
+            statusProblem ? (
+              <span aria-live="polite">
+                {statusProblem}
+                {statusQuery.isError && primaryEnvironmentId ? (
+                  <Button
+                    type="button"
+                    variant="link"
+                    size="xs"
+                    className="ml-1 h-auto p-0 align-baseline"
+                    onClick={() => void statusQuery.refetch()}
+                  >
+                    Retry
+                  </Button>
+                ) : null}
+              </span>
+            ) : status && !status.canManage ? (
               <span className="text-warning-foreground">
-                Only an owner session can add, replace, or remove this credential.
+                Only an owner can add, replace or remove this key.
               </span>
             ) : feedback ? (
               <span
@@ -402,8 +406,15 @@ export function DictationSettings() {
               </span>
             ) : null
           }
+          control={statusBadge({
+            environmentReady: primaryEnvironmentId !== null,
+            isPending: statusQuery.isPending,
+            showPending: showStatusPending,
+            isError: statusQuery.isError,
+            status,
+          })}
         >
-          <form className="mt-3 space-y-3 border-t border-border/60 py-4" onSubmit={handleSave}>
+          <form className="mt-3 space-y-3 border-t border-border-subtle py-4" onSubmit={handleSave}>
             <label className="block space-y-1.5">
               <span className="block text-xs font-medium text-foreground">New OpenAI API key</span>
               <Input
@@ -422,31 +433,19 @@ export function DictationSettings() {
                 aria-describedby="dictation-api-key-help"
               />
             </label>
-            <p
-              id="dictation-api-key-help"
-              className="text-[11px] leading-relaxed text-muted-foreground"
-            >
-              Cafe Code sends this permanent key only from its server when minting a short-lived
-              transcription credential. It is not added to browser settings or returned after
-              saving.
-            </p>
             <div className="flex flex-wrap items-center gap-2">
               <Button
                 type="submit"
                 size="sm"
                 disabled={!canManage || isBusy || newApiKey.trim().length === 0}
               >
+                {/* The spinner takes the icon's place so the label and width stay put. */}
                 {operation === "saving" ? (
-                  <>
-                    <Spinner className="size-3.5" />
-                    Saving…
-                  </>
+                  <Spinner className="size-3.5" />
                 ) : (
-                  <>
-                    <KeyRoundIcon className="size-3.5" />
-                    {configured ? "Replace key" : "Save key"}
-                  </>
+                  <KeyRoundIcon className="size-3.5" />
                 )}
+                {configured ? "Replace key" : "Save key"}
               </Button>
               {configured ? (
                 <Button
@@ -468,47 +467,58 @@ export function DictationSettings() {
       </SettingsSection>
 
       {isMacDesktop ? (
-        <SettingsSection
-          title="Dictate anywhere on Mac"
-          icon={<KeyboardIcon className="size-3.5" />}
-        >
+        <SettingsSection title="Global dictation" icon={<KeyboardIcon className="size-3.5" />}>
           <SettingsRow
-            title="Global dictation shortcut"
-            description={
-              remote
-                ? "This Mac uses its local Cafe dictation credential for the floating recorder. The credential above belongs to the selected workspace and is used for chat dictation there. Review recorded text before Copy, Save, or Insert; insertion needs macOS Accessibility permission."
-                : "Open a floating recorder from another Mac app. Review and edit the text before choosing Copy, Save, or Insert. Insertion needs macOS Accessibility permission."
-            }
-            status={
-              <span
-                aria-live="polite"
-                role={globalSettingsError || globalSettings?.error ? "alert" : undefined}
-              >
-                {globalSettingsError ||
-                  globalSettings?.error ||
-                  (globalSettings?.enabled
-                    ? globalSettings.registered
-                      ? "Ready. Press the shortcut to start, then press it again to stop."
-                      : "The shortcut is not registered. Choose another combination."
-                    : "Off until you enable it. Microphone audio is sent only while recording.")}
+            title={
+              <span className="inline-flex items-center gap-1.5">
+                Enable on this Mac
+                <InfoTip label="About global dictation">
+                  Opens a floating recorder from any app. Review and edit the text before Copy, Save
+                  or Insert; nothing goes into another app until you choose Insert or Paste into
+                  app, and if Cafe can't verify it, your draft stays in the recorder. Audio is sent
+                  only while recording. The shortcut is stored on this Mac.
+                  {remote
+                    ? " The recorder uses this Mac's local key; the key above belongs to the selected workspace and is used for chat dictation there."
+                    : null}
+                </InfoTip>
               </span>
             }
+            description="Dictate into any Mac app. Insert needs Accessibility permission."
+            status={
+              globalStatus ? (
+                <span
+                  aria-live="polite"
+                  role={globalSettingsError || globalSettings?.error ? "alert" : undefined}
+                >
+                  {globalStatus}
+                </span>
+              ) : null
+            }
             control={
-              <Switch
-                aria-label="Enable Mac global dictation"
-                checked={globalSettings?.enabled ?? false}
-                disabled={
-                  !globalSettings ||
-                  globalSettingsPending ||
-                  (remote ? localStatusQuery.data?.configured !== true : !configured)
-                }
-                onCheckedChange={(enabled) => void updateGlobalEnabled(enabled)}
-              />
+              showGlobalSettingsPending || (globalSettings === null && globalSettingsPending) ? (
+                showGlobalSettingsPending ? (
+                  <Skeleton
+                    aria-hidden="true"
+                    className="h-5.5 w-9.5 rounded-full sm:h-4.5 sm:w-7.5"
+                  />
+                ) : null
+              ) : (
+                <Switch
+                  aria-label="Enable Mac global dictation"
+                  checked={globalSettings?.enabled ?? false}
+                  disabled={
+                    !globalSettings ||
+                    globalSettingsPending ||
+                    (remote ? localStatusQuery.data?.configured !== true : !configured)
+                  }
+                  onCheckedChange={(enabled) => void updateGlobalEnabled(enabled)}
+                />
+              )
             }
           />
           <SettingsRow
-            title="Keyboard shortcut"
-            description="Hold Command and Shift, then press one letter, number, or punctuation key. Escape cancels shortcut capture."
+            title="Shortcut"
+            description={capturingShortcut ? "⌘⇧ + one key · Esc cancels" : "⌘⇧ + one key"}
             status={
               shortcutCaptureHint ? (
                 <span className="text-destructive" role="alert">
@@ -518,13 +528,14 @@ export function DictationSettings() {
             }
             control={
               <div className="flex items-center gap-2">
-                <kbd className="rounded-md border border-border bg-muted/40 px-2 py-1 text-xs font-medium text-foreground">
+                <Kbd className="h-6 px-2 text-foreground">
                   {globalSettings ? macShortcutLabel(globalSettings.shortcut) : "⌘ ⇧ ,"}
-                </kbd>
+                </Kbd>
                 <Button
                   type="button"
                   variant="outline"
                   size="sm"
+                  className="min-w-18"
                   disabled={!globalSettings || globalSettingsPending}
                   onClick={() => {
                     setShortcutCaptureHint(null);
@@ -536,24 +547,8 @@ export function DictationSettings() {
               </div>
             }
           />
-          <p className="border-t border-border/60 px-5 py-3 text-xs text-muted-foreground">
-            This Mac-only shortcut is stored locally. Cafe Code never inserts dictated text into
-            another app until you click Insert. If insertion cannot be verified, your editable draft
-            stays in the floating window for Copy or Save.
-          </p>
         </SettingsSection>
       ) : null}
-
-      <SettingsSection title="Security & access" icon={<ShieldCheckIcon className="size-3.5" />}>
-        <SettingsRow
-          title="Server-side credential"
-          description="The permanent API key stays in Cafe Code's private server-side secret store. Browser and desktop renderers receive only configuration status and short-lived transcription credentials."
-        />
-        <SettingsRow
-          title="Owner-managed"
-          description="Only an authenticated owner session can save, replace, or remove the permanent key. Client sessions cannot read or change it."
-        />
-      </SettingsSection>
 
       <AlertDialog
         open={removeDialogOpen}
@@ -593,13 +588,11 @@ export function DictationSettings() {
               onClick={() => void handleRemove()}
             >
               {operation === "removing" ? (
-                <>
-                  <Spinner className="size-3.5" />
-                  Removing…
-                </>
+                <Spinner className="size-3.5" />
               ) : (
-                "Remove key"
+                <Trash2Icon className="size-3.5" />
               )}
+              Remove key
             </Button>
           </AlertDialogFooter>
         </AlertDialogPopup>

@@ -7,6 +7,7 @@ import { DRIVER_OPTION_BY_VALUE } from "./providerDriverMeta";
 import {
   ProviderSettingsForm,
   deriveProviderSettingsFields,
+  isProviderSettingCustomized,
   nextProviderConfigWithFieldValue,
   readProviderConfigBoolean,
   readProviderConfigNumber,
@@ -96,11 +97,14 @@ describe("ProviderSettingsForm helpers", () => {
     expect(markup).toMatch(
       /<input[^>]*id="provider-instance-claude-maxConcurrentSubagents"[^>]*type="number"[^>]*step="1"[^>]*min="1"[^>]*max="64"[^>]*aria-describedby="provider-instance-claude-maxConcurrentSubagents-description"[^>]*>/,
     );
-    expect(markup).toContain("CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS");
-    expect(markup).toContain(
-      "Saving provider settings reloads this instance; change between sessions.",
-    );
-    expect(markup).toContain("not all running work");
+    // The visible line keeps the required "change between sessions" warning;
+    // the env var, version gate and Agent-tool caveats live in its InfoTip.
+    expect(markup).toContain("Change between sessions.");
+    expect(markup).toContain('aria-label="About Agent-tool concurrency limit"');
+    expect(markup).not.toContain("CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS");
+    expect(field?.detail).toContain("CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS");
+    expect(field?.detail).toContain("Saving reloads this account");
+    expect(field?.detail).toContain("not all running work");
     expect(
       nextProviderConfigWithFieldValue(
         { homePath: "/test-home", maxConcurrentSubagents: 12 },
@@ -128,9 +132,10 @@ describe("ProviderSettingsForm helpers", () => {
     const runtimeSource = fields.find((field) => field.key === "runtimeSource");
     const launchArgs = fields.find((field) => field.key === "launchArgs");
 
+    // The label already names the control, so Runtime has no description.
+    expect(runtimeSource?.description).toBeUndefined();
     expect(runtimeSource).toMatchObject({
       label: "Runtime",
-      description: "Choose the Claude CLI runtime used by this instance.",
       control: "select",
       defaultStringValue: "system",
       options: [
@@ -283,8 +288,7 @@ describe("ProviderSettingsForm helpers", () => {
 
     expect(field).toMatchObject({
       label: "Auto-compact override",
-      description:
-        "Optional token threshold override. Leave blank to use Codex app-server's model-specific automatic compaction policy.",
+      description: "Token count that triggers compaction. Blank: Codex's per-model default.",
       control: "number",
       step: 1_000,
       minimum: 1,
@@ -427,5 +431,50 @@ describe("ProviderSettingsForm helpers", () => {
         200_000,
       ),
     ).toBe(200_000);
+  });
+});
+
+describe("ProviderSettingsForm presentation", () => {
+  it("names home folders without env var labels and keeps the variable in the detail", () => {
+    const codex = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("codex")]!;
+    const fields = deriveProviderSettingsFields(codex);
+    expect(fields.find((field) => field.key === "homePath")).toMatchObject({
+      label: "Codex home folder",
+      detail: expect.stringContaining("CODEX_HOME"),
+    });
+    expect(fields.find((field) => field.key === "shadowHomePath")).toMatchObject({
+      description: "Separate sign-in that shares this home's history and config.",
+    });
+    const grok = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("grok")]!;
+    expect(
+      deriveProviderSettingsFields(grok).find((field) => field.key === "homePath"),
+    ).toMatchObject({ label: "Grok home folder", detail: expect.stringContaining("GROK_HOME") });
+  });
+
+  it("hides requested fields without changing the stored config", () => {
+    const codex = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("codex")]!;
+    const markup = renderToStaticMarkup(
+      createElement(ProviderSettingsForm, {
+        definition: codex,
+        value: { runtimeSource: "system" },
+        idPrefix: "provider-instance-codex",
+        variant: "card",
+        hiddenFieldKeys: new Set(["runtimeSource"]),
+        onChange: () => undefined,
+      }),
+    );
+    expect(markup).not.toContain('id="provider-instance-codex-runtimeSource"');
+    expect(markup).toContain('id="provider-instance-codex-binaryPath"');
+  });
+
+  it("counts only values that differ from their decoded defaults as customized", () => {
+    const codex = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("codex")]!;
+    const fields = deriveProviderSettingsFields(codex);
+    const customized = (config: unknown) =>
+      fields.filter((field) => isProviderSettingCustomized(config, field)).map((f) => f.key);
+    expect(customized({ binaryPath: "codex", runtimeSource: "system", homePath: "" })).toEqual([]);
+    expect(
+      customized({ binaryPath: "/opt/codex", homePath: "/tmp/home", maxConcurrentSubagents: 6 }),
+    ).toEqual(["binaryPath", "homePath", "maxConcurrentSubagents"]);
   });
 });

@@ -2,7 +2,7 @@ import { ChevronDownIcon } from "lucide-react";
 import { useId, useLayoutEffect, useRef, type ReactNode } from "react";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
-/** A curved composer tab whose caret stays fixed as its content folds away.
+/** A curved composer tab that folds into a shallow lip with a lowered caret.
  * Its expanded decoration extends slightly past the layout box for balanced
  * caret spacing. Reserved height keeps the editor and pointer target steady. */
 export function ComposerTab({

@@ -1,6 +1,6 @@
 import { useNavigate } from "@tanstack/react-router";
 import type { ServerProvider } from "@cafecode/contracts";
-import { CircleCheckIcon, DownloadIcon, LoaderIcon, TriangleAlertIcon, XIcon } from "lucide-react";
+import { CircleCheckIcon, DownloadIcon, TriangleAlertIcon, XIcon } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -15,23 +15,26 @@ import {
   getProviderUpdateSidebarPillView,
   type ProviderUpdateSidebarPillView,
 } from "../ProviderUpdateLaunchNotification.logic";
+import { Spinner } from "../ui/spinner";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
+// The shared status tokens (docs/style-guide.md §2): running in the accent,
+// done green, attention amber and error red, with readable foreground tiers.
 const PROVIDER_UPDATE_PILL_STYLES = {
   loading:
-    "bg-primary/15 text-primary group-has-[button.provider-update-main:hover]/provider-update:bg-primary/22",
+    "bg-status-running/15 text-primary group-has-[button.provider-update-main:hover]/provider-update:bg-status-running/22",
   success:
-    "bg-success/12 text-success group-has-[button.provider-update-main:hover]/provider-update:bg-success/18",
+    "bg-status-done/12 text-status-done-foreground group-has-[button.provider-update-main:hover]/provider-update:bg-status-done/18",
   warning:
-    "bg-warning/12 text-warning group-has-[button.provider-update-main:hover]/provider-update:bg-warning/18",
+    "bg-status-attention/12 text-status-attention-foreground group-has-[button.provider-update-main:hover]/provider-update:bg-status-attention/18",
   error:
-    "bg-destructive/12 text-destructive group-has-[button.provider-update-main:hover]/provider-update:bg-destructive/18",
+    "bg-status-error/12 text-status-error-foreground group-has-[button.provider-update-main:hover]/provider-update:bg-status-error/18",
 } as const;
 
 const PROVIDER_UPDATE_PILL_PROGRESS_STYLES = {
-  success: "bg-success/18",
-  warning: "bg-warning/14",
-  error: "bg-destructive/14",
+  success: "bg-status-done/18",
+  warning: "bg-status-attention/14",
+  error: "bg-status-error/14",
 } as const;
 
 // The visual exit lasts 180 ms. React state must never depend exclusively on
@@ -232,7 +235,7 @@ export function SidebarProviderUpdatePillContent({
         <div
           key={displayedView.key}
           aria-hidden="true"
-          className={`provider-update-pill-progress pointer-events-none absolute inset-y-0 left-0 w-full origin-left border-r border-current/15 shadow-[inset_0_1px_0_rgb(255_255_255_/_0.08)] ${
+          className={`provider-update-pill-progress pointer-events-none absolute inset-y-0 left-0 w-full origin-left ${
             PROVIDER_UPDATE_PILL_PROGRESS_STYLES[displayedView.tone]
           }`}
           style={
@@ -253,7 +256,7 @@ export function SidebarProviderUpdatePillContent({
               onClick={onOpenProviderSettings}
             >
               {displayedView.tone === "loading" ? (
-                <LoaderIcon className="size-3.5 animate-spin" />
+                <Spinner aria-hidden="true" className="size-3.5" />
               ) : displayedView.tone === "success" ? (
                 <CircleCheckIcon className="size-3.5" />
               ) : displayedView.tone === "error" ? (
@@ -274,7 +277,7 @@ export function SidebarProviderUpdatePillContent({
               <button
                 type="button"
                 aria-label="Dismiss provider update notice"
-                className="relative z-[1] mr-1 inline-flex size-5 items-center justify-center rounded-md opacity-70 transition-opacity hover:opacity-100"
+                className="focus-ring relative z-[1] mr-1 inline-flex size-5 items-center justify-center rounded-md opacity-70 transition-opacity duration-(--duration-fast) hover:opacity-100"
                 onClick={() => startExit(displayedView.key, null, displayedView.key)}
               >
                 <XIcon className="size-3.5" />

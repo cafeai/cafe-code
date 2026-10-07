@@ -95,15 +95,13 @@ export function UsageAreaChart({
     PADDING.top + plotHeight - (ceiling <= 0 ? 0 : (value / ceiling) * plotHeight);
 
   if (labels.length === 0) {
+    // The chart always sits inside a card, so its empty state is borderless.
     return (
       <div
-        className={cn(
-          "flex items-center justify-center rounded-xl border border-border/60 text-xs text-muted-foreground",
-          className,
-        )}
+        className={cn("flex items-center justify-center text-xs text-muted-foreground", className)}
         style={{ height: displayHeight }}
       >
-        No activity recorded yet
+        No usage in this period
       </div>
     );
   }
@@ -118,7 +116,7 @@ export function UsageAreaChart({
         className="block w-full"
         style={{ height: displayHeight }}
         role="img"
-        aria-label={`Daily usage across ${series.length} providers`}
+        aria-label={`Daily usage: ${series.map((entry) => entry.label).join(", ")}`}
         onPointerLeave={() => setHover(null)}
         onPointerMove={(event) => {
           const rect = event.currentTarget.getBoundingClientRect();
@@ -138,8 +136,10 @@ export function UsageAreaChart({
               x2="0"
               y2="1"
             >
-              <stop offset="0%" stopColor={entry.color} stopOpacity="0.55" />
-              <stop offset="100%" stopColor={entry.color} stopOpacity="0.06" />
+              {/* Colours are applied as CSS so callers can pass theme custom
+                  properties such as `var(--primary)`. */}
+              <stop offset="0%" style={{ stopColor: entry.color, stopOpacity: 0.55 }} />
+              <stop offset="100%" style={{ stopColor: entry.color, stopOpacity: 0.06 }} />
             </linearGradient>
           ))}
         </defs>
@@ -154,7 +154,7 @@ export function UsageAreaChart({
             y2={PADDING.top + plotHeight * fraction}
             stroke="currentColor"
             strokeWidth={1}
-            className="text-border/50"
+            className="text-border-subtle"
             vectorEffect="non-scaling-stroke"
           />
         ))}
@@ -174,7 +174,7 @@ export function UsageAreaChart({
               <path
                 d={smoothPath(upper)}
                 fill="none"
-                stroke={band.entry.color}
+                style={{ stroke: band.entry.color }}
                 strokeWidth={1.5}
                 vectorEffect="non-scaling-stroke"
                 strokeLinecap="round"
@@ -191,21 +191,21 @@ export function UsageAreaChart({
             y2={PADDING.top + plotHeight}
             stroke="currentColor"
             strokeWidth={1}
-            className="text-foreground/40"
+            className="text-border-strong"
             vectorEffect="non-scaling-stroke"
           />
         ) : null}
       </svg>
 
       {/* Axis ends only. Dense day labels are unreadable at this width. */}
-      <div className="flex justify-between px-1 font-mono text-[10px] text-muted-foreground/70">
+      <div className="flex justify-between px-1 font-mono text-2xs text-subtle-foreground">
         <span>{labels[0]}</span>
         <span>{labels.at(-1)}</span>
       </div>
 
       {hover !== null ? (
         <div
-          className="pointer-events-none absolute top-1 rounded-lg border border-border/70 bg-popover/95 px-2.5 py-1.5 text-[11px] shadow-lg backdrop-blur-sm"
+          className="pointer-events-none absolute top-1 rounded-md border bg-popover px-2 py-1 text-2xs text-popover-foreground shadow-md/5"
           style={
             {
               left: `${(x(hover) / width) * 100}%`,

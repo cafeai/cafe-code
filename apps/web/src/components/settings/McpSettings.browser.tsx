@@ -142,33 +142,34 @@ describe("MCP settings", () => {
         harness.getStatus.mockResolvedValue({ ...status, enabled: false });
       }
       mounted = await mount();
-      await expect
-        .element(page.getByRole("heading", { name: "Chat scheduling · built in", exact: true }))
-        .toBeVisible();
-      await expect
-        .element(
-          page.getByText(
-            "Ask Codex, Claude or Grok to schedule a follow-up in a Cafe chat. Cafe connects the scheduling tools automatically for that chat and account, including separate account profiles. No installation is needed.",
-            { exact: true },
-          ),
-        )
-        .toBeVisible();
+      await expect.element(page.getByRole("heading", { name: /^Chat scheduling/ })).toBeVisible();
+      await expect.element(page.getByText("Built in", { exact: true })).toBeVisible();
       await expect
         .element(
-          page.getByText(
-            "Review the proposal and the account that will run and pay for it in Tasks, then choose Approve & enable. Changing accounts requires another review. These chat-only tools are separate from the management access below.",
-            { exact: true },
-          ),
-        )
-        .toBeVisible();
-      await expect
-        .element(page.getByText("Built-in chat scheduling remains available.", { exact: false }))
-        .toBeVisible();
-      await expect
-        .element(
-          page.getByText("This installer is not needed for scheduling inside Cafe.", {
-            exact: false,
+          page.getByText("Agents can propose follow-ups in any chat; you approve them in Tasks.", {
+            exact: true,
           }),
+        )
+        .toBeVisible();
+      // Approval and scope details live in info tips beside each setting.
+      await page.getByRole("button", { name: "About chat scheduling" }).hover();
+      await expect
+        .element(page.getByText(/Agents can only propose, list and pause follow-ups/))
+        .toBeVisible();
+      await expect.element(page.getByText(/choose Approve & enable/)).toBeVisible();
+      await page.getByRole("button", { name: "About Cafe Code MCP" }).hover();
+      await expect.element(page.getByText(/Chat scheduling stays available/)).toBeVisible();
+      await expect.element(page.getByText(/doesn't undo work already started/)).toBeVisible();
+      await page.getByRole("button", { name: "About installing Cafe's tools" }).hover();
+      await expect.element(page.getByText(/Not needed for chat scheduling/)).toBeVisible();
+      await expect
+        .element(
+          page.getByText(
+            "Lets agents manage projects, chats, providers and settings without Cafe approval prompts.",
+            {
+              exact: true,
+            },
+          ),
         )
         .toBeVisible();
       await expect
@@ -195,6 +196,9 @@ describe("MCP settings", () => {
     await expect
       .element(page.getByRole("button", { name: "Reinstall Cafe MCP for Codex" }))
       .toBeVisible();
+    await expect
+      .element(page.getByText("Installed. Restart the agent to apply.", { exact: true }))
+      .toBeVisible();
     await page.getByRole("button", { name: "Remove Cafe MCP from Codex" }).click();
     expect(harness.updateClient).toHaveBeenLastCalledWith({ client: "codex", operation: "remove" });
   });
@@ -217,10 +221,9 @@ describe("MCP settings", () => {
       .not.toBeInTheDocument();
     await expect
       .element(
-        page.getByText(
-          "Open this page in the local Cafe Code desktop app to install provider connections.",
-          { exact: true },
-        ),
+        page.getByText("Open this page in the local Cafe Code desktop app to install.", {
+          exact: true,
+        }),
       )
       .toBeVisible();
     expect(harness.updateClient).not.toHaveBeenCalled();

@@ -4167,6 +4167,49 @@ describe("ProviderCommandReactor", () => {
     },
   );
 
+  it.each(["New chat", "New thread"])(
+    "replaces the %s placeholder title with a generated title on the first turn",
+    async (placeholderTitle) => {
+      const harness = await createHarness();
+      harness.generateThreadTitle.mockReturnValue(Effect.succeed({ title: "Generated title" }));
+
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("cmd-thread-title-placeholder"),
+          threadId: ThreadId.make("thread-1"),
+          title: placeholderTitle,
+        }),
+      );
+
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-start-title-placeholder"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("user-message-title-placeholder"),
+            role: "user",
+            text: "Please investigate reconnect failures after restarting the session.",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: "2026-01-01T00:00:00.000Z",
+        }),
+      );
+
+      await waitFor(async () => {
+        const readModel = await harness.readModel();
+        return (
+          readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"))?.title ===
+          "Generated title"
+        );
+      });
+      expect(harness.generateThreadTitle).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it("does not overwrite an existing custom thread title on the first turn", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

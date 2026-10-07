@@ -1,5 +1,5 @@
 import { memo, type PointerEventHandler } from "react";
-import { ChevronDownIcon, ChevronLeftIcon } from "lucide-react";
+import { ArrowUpIcon, ChevronDownIcon, ChevronLeftIcon, LoaderCircleIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
 import { Button } from "../ui/button";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
@@ -39,7 +39,7 @@ export const formatPendingPrimaryActionLabel = (input: {
   questionIndex: number;
 }) => {
   if (input.isResponding) {
-    return "Submitting...";
+    return "Submitting…";
   }
   if (input.compact) {
     return input.isLastQuestion ? "Submit" : "Next";
@@ -53,6 +53,15 @@ export const formatPendingPrimaryActionLabel = (input: {
 const preventPointerFocus: PointerEventHandler<HTMLElement> = (event) => {
   event.preventDefault();
 };
+
+/** Send, queue and stop share one round button: the same size in every
+ * composer layout so swapping between them never shifts the footer. */
+const ROUND_PRIMARY_BUTTON_CLASS_NAME =
+  "focus-ring flex size-9 shrink-0 items-center justify-center rounded-full transition-[background-color,opacity,scale] duration-(--duration-fast) ease-out active:scale-98 disabled:pointer-events-none disabled:opacity-50 sm:size-8";
+const SEND_BUTTON_CLASS_NAME = cn(
+  ROUND_PRIMARY_BUTTON_CLASS_NAME,
+  "enabled:cursor-pointer bg-primary/90 text-primary-foreground hover:bg-primary",
+);
 
 export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   compact,
@@ -143,7 +152,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
       return (
         <button
           type="submit"
-          className="flex size-8 enabled:cursor-pointer items-center justify-center rounded-full bg-primary/90 text-primary-foreground transition-all duration-150 hover:bg-primary disabled:pointer-events-none disabled:opacity-30"
+          className={SEND_BUTTON_CLASS_NAME}
           {...pointerFocusProps}
           onClick={onArmPostSubmitInterruptGuard}
           disabled={
@@ -151,15 +160,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
           }
           aria-label="Queue message"
         >
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
-            <path
-              d="M7 11.5V2.5M7 2.5L3 6.5M7 2.5L11 6.5"
-              stroke="currentColor"
-              strokeWidth="1.8"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
+          <ArrowUpIcon aria-hidden="true" className="size-4" strokeWidth={2.25} />
         </button>
       );
     }
@@ -167,7 +168,10 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
     return (
       <button
         type="button"
-        className="flex size-8 cursor-pointer items-center justify-center rounded-full bg-rose-500/90 text-white transition-all duration-150 hover:bg-rose-500 hover:scale-105 sm:h-8 sm:w-8"
+        className={cn(
+          ROUND_PRIMARY_BUTTON_CLASS_NAME,
+          "cursor-pointer bg-destructive/90 text-white hover:bg-destructive",
+        )}
         {...pointerFocusProps}
         onClick={onInterrupt}
         aria-label="Stop generation"
@@ -189,7 +193,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
           {...pointerFocusProps}
           disabled={isSendBusy || isConnecting || isEnvironmentUnavailable}
         >
-          {isConnecting || isSendBusy ? "Sending..." : "Refine"}
+          {isConnecting || isSendBusy ? "Sending…" : "Refine"}
         </Button>
       );
     }
@@ -203,7 +207,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
           {...pointerFocusProps}
           disabled={isSendBusy || isConnecting || isEnvironmentUnavailable}
         >
-          {isConnecting || isSendBusy ? "Sending..." : "Implement"}
+          {isConnecting || isSendBusy ? "Sending…" : "Implement"}
         </Button>
         <Menu>
           {/* This popup owns focus. Preventing its pointer default, unlike an
@@ -213,7 +217,10 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
               <Button
                 size="sm"
                 variant="default"
-                className="h-9 rounded-l-none rounded-r-full border-l-white/12 px-2 sm:h-8"
+                className={cn(
+                  "h-9 rounded-l-none rounded-r-full border-l-white/12 sm:h-8",
+                  compact ? "px-1" : "px-2",
+                )}
                 aria-label="Implementation actions"
                 disabled={isSendBusy || isConnecting || isEnvironmentUnavailable}
               />
@@ -226,7 +233,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
               disabled={isSendBusy || isConnecting || isEnvironmentUnavailable}
               onClick={() => void onImplementPlanInNewThread()}
             >
-              Implement in a new thread
+              Implement in a new chat
             </MenuItem>
           </MenuPopup>
         </Menu>
@@ -237,7 +244,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   return (
     <button
       type="submit"
-      className="flex h-9 w-9 enabled:cursor-pointer items-center justify-center rounded-full bg-primary/90 text-primary-foreground transition-all duration-150 hover:bg-primary hover:scale-105 disabled:pointer-events-none disabled:opacity-30 disabled:hover:scale-100 sm:h-8 sm:w-8"
+      className={SEND_BUTTON_CLASS_NAME}
       {...pointerFocusProps}
       disabled={isSendBusy || isConnecting || isEnvironmentUnavailable || !hasSendableContent}
       aria-label={
@@ -253,34 +260,9 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
       }
     >
       {isConnecting || isSendBusy ? (
-        <svg
-          width="14"
-          height="14"
-          viewBox="0 0 14 14"
-          fill="none"
-          className="animate-spin"
-          aria-hidden="true"
-        >
-          <circle
-            cx="7"
-            cy="7"
-            r="5.5"
-            stroke="currentColor"
-            strokeWidth="1.5"
-            strokeLinecap="round"
-            strokeDasharray="20 12"
-          />
-        </svg>
+        <LoaderCircleIcon aria-hidden="true" className="size-4 animate-spin" />
       ) : (
-        <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
-          <path
-            d="M7 11.5V2.5M7 2.5L3 6.5M7 2.5L11 6.5"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        </svg>
+        <ArrowUpIcon aria-hidden="true" className="size-4" strokeWidth={2.25} />
       )}
     </button>
   );

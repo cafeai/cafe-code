@@ -2,9 +2,10 @@
 
 import {
   ArrowUpCircleIcon,
+  CheckIcon,
+  ChevronRightIcon,
   CopyIcon,
   DownloadIcon,
-  LoaderIcon,
   LogInIcon,
   PinIcon,
   PlusIcon,
@@ -13,7 +14,7 @@ import {
   Trash2Icon,
   XIcon,
 } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import {
   isProviderDriverKind,
   type ProviderInstanceConfig,
@@ -35,26 +36,28 @@ import {
 } from "../../lib/codexRateLimits";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { normalizeProviderAccentColor } from "../../providerInstances";
+import { useServerConfig } from "../../rpc/serverState";
 import { subagentLimitKey, validSubagentLimit } from "../../subagentConcurrency";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
-import {
-  Dialog,
-  DialogDescription,
-  DialogHeader,
-  DialogPanel,
-  DialogPopup,
-  DialogTitle,
-} from "../ui/dialog";
+import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
+import { Dialog, DialogHeader, DialogPanel, DialogPopup, DialogTitle } from "../ui/dialog";
 import { DraftInput } from "../ui/draft-input";
+import { InfoTip } from "../ui/info-tip";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { ScrollArea } from "../ui/scroll-area";
+import { Spinner } from "../ui/spinner";
 import { Switch } from "../ui/switch";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import type { DriverOption } from "./providerDriverMeta";
-import { ProviderSettingsForm } from "./ProviderSettingsForm";
+import {
+  ProviderSettingsForm,
+  deriveProviderSettingsFields,
+  isProviderSettingCustomized,
+  readProviderConfigString,
+} from "./ProviderSettingsForm";
 import { ProviderModelsSection } from "./ProviderModelsSection";
 import { GrokSandboxSettings } from "./GrokSandboxSettings";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
@@ -67,7 +70,9 @@ import {
   type ProviderStatusKey,
 } from "./providerStatus";
 
-const PROVIDER_ACCENT_SWATCHES = [
+// Accent colours are user data (a per-account marker), not theme colours, so
+// these preset values are deliberately literal.
+export const PROVIDER_ACCENT_SWATCHES = [
   "#2563eb",
   "#16a34a",
   "#ea580c",
@@ -75,6 +80,15 @@ const PROVIDER_ACCENT_SWATCHES = [
   "#7c3aed",
   "#0891b2",
 ] as const;
+
+const ACCENT_SWATCH_CLASS_NAME =
+  "focus-ring relative size-6 shrink-0 cursor-pointer rounded-full border border-border transition-transform duration-(--duration-fast) ease-out hover:scale-105";
+// Selection uses a neutral ring so it stays distinct from the accent focus ring.
+const ACCENT_SWATCH_SELECTED_CLASS_NAME =
+  "ring-2 ring-foreground ring-offset-2 ring-offset-popover";
+// The custom-colour swatch shows a colour wheel until a custom colour is chosen.
+const ACCENT_COLOR_WHEEL_CLASS_NAME =
+  "bg-[conic-gradient(from_40deg,#ef4444,#f97316,#facc15,#22c55e,#06b6d4,#3b82f6,#8b5cf6,#ef4444)]";
 
 const ENVIRONMENT_VARIABLE_NAME_PATTERN = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 
@@ -167,7 +181,7 @@ function ProviderAuthEmail(props: {
   return (
     <span className="inline-flex min-w-0 max-w-full items-center gap-1.5">
       {props.separator ? <span aria-hidden>·</span> : null}
-      {props.prefix ? <span className="text-muted-foreground/80">{props.prefix}</span> : null}
+      {props.prefix ? <span className="text-subtle-foreground">{props.prefix}</span> : null}
       <RedactedSensitiveText
         value={trimmed}
         ariaLabel="Toggle account email visibility"
@@ -179,14 +193,26 @@ function ProviderAuthEmail(props: {
   );
 }
 
-function ProviderAccentColorPicker(props: {
-  readonly displayName: string;
+/**
+ * Preset accent swatches plus one custom colour, all the same circular
+ * control. A swatch commits immediately; the custom colour commits when its
+ * native picker closes (blur), so dragging through the picker does not save
+ * every intermediate value. Shared with the add-provider dialog.
+ */
+export function ProviderAccentColorPicker(props: {
+  readonly label: ReactNode;
+  readonly customColorLabel: string;
   readonly value: string | undefined;
   readonly onCommit: (value: string) => void;
 }) {
+  const labelId = useId();
   const [draft, setDraft] = useState(props.value ?? "");
   const [isEditing, setIsEditing] = useState(false);
   const draftColor = normalizeProviderAccentColor(draft);
+  const selectedSwatch = PROVIDER_ACCENT_SWATCHES.find(
+    (swatch) => swatch === draftColor?.toLowerCase(),
+  );
+  const customColor = draftColor && !selectedSwatch ? draftColor : null;
 
   useEffect(() => {
     if (isEditing) return;
@@ -206,50 +232,62 @@ function ProviderAccentColorPicker(props: {
 
   return (
     <div className="grid gap-2">
-      <span className="text-xs font-medium text-foreground">Accent color</span>
-      <div className="flex min-w-0 flex-wrap items-center gap-2">
-        <input
-          type="color"
-          value={draftColor ?? PROVIDER_ACCENT_SWATCHES[0]}
-          onFocus={() => setIsEditing(true)}
-          onInput={(event) => {
-            setIsEditing(true);
-            setDraft(event.currentTarget.value);
-          }}
-          onChange={(event) => {
-            setIsEditing(true);
-            setDraft(event.currentTarget.value);
-          }}
-          onBlur={commitDraft}
-          aria-label={`Accent color for ${props.displayName}`}
-          className="h-8 w-10 cursor-pointer rounded border border-input bg-background p-0.5"
-        />
-        <div className="flex flex-wrap gap-1.5">
-          {PROVIDER_ACCENT_SWATCHES.map((swatch) => {
-            const selected = draftColor?.toLowerCase() === swatch;
-            return (
-              <button
-                key={swatch}
-                type="button"
-                className={cn(
-                  "size-6 cursor-pointer rounded-full border transition",
-                  selected
-                    ? "border-foreground ring-2 ring-ring ring-offset-1 ring-offset-background"
-                    : "border-black/10 hover:scale-105 dark:border-white/20",
-                )}
-                style={{ backgroundColor: swatch }}
-                onClick={() => commitSwatch(swatch)}
-                aria-label={`Use ${swatch} accent`}
-              />
-            );
-          })}
-        </div>
+      <span id={labelId} className="text-xs font-medium text-foreground">
+        {props.label}
+      </span>
+      <div
+        role="group"
+        aria-labelledby={labelId}
+        className="flex min-h-7 min-w-0 flex-wrap items-center gap-2"
+      >
+        {PROVIDER_ACCENT_SWATCHES.map((swatch) => {
+          const selected = selectedSwatch === swatch;
+          return (
+            <button
+              key={swatch}
+              type="button"
+              className={cn(
+                ACCENT_SWATCH_CLASS_NAME,
+                selected && ACCENT_SWATCH_SELECTED_CLASS_NAME,
+              )}
+              style={{ backgroundColor: swatch }}
+              onClick={() => commitSwatch(swatch)}
+              aria-label={`Use ${swatch} accent`}
+              aria-pressed={selected}
+            />
+          );
+        })}
+        <label
+          className={cn(
+            ACCENT_SWATCH_CLASS_NAME,
+            "overflow-hidden has-focus-visible:ring-2 has-focus-visible:ring-ring has-focus-visible:ring-offset-2 has-focus-visible:ring-offset-popover",
+            customColor ? ACCENT_SWATCH_SELECTED_CLASS_NAME : ACCENT_COLOR_WHEEL_CLASS_NAME,
+          )}
+          style={customColor ? { backgroundColor: customColor } : undefined}
+        >
+          <input
+            type="color"
+            value={draftColor ?? PROVIDER_ACCENT_SWATCHES[0]}
+            onFocus={() => setIsEditing(true)}
+            onInput={(event) => {
+              setIsEditing(true);
+              setDraft(event.currentTarget.value);
+            }}
+            onChange={(event) => {
+              setIsEditing(true);
+              setDraft(event.currentTarget.value);
+            }}
+            onBlur={commitDraft}
+            aria-label={props.customColorLabel}
+            className="absolute inset-0 size-full cursor-pointer opacity-0"
+          />
+        </label>
         {draftColor ? (
           <Button
             type="button"
-            size="sm"
+            size="xs"
             variant="ghost"
-            className="h-7 px-2 text-xs text-muted-foreground"
+            className="text-muted-foreground"
             onClick={() => {
               setIsEditing(false);
               setDraft("");
@@ -260,9 +298,6 @@ function ProviderAccentColorPicker(props: {
           </Button>
         ) : null}
       </div>
-      <span className="text-xs text-muted-foreground">
-        Used to distinguish this instance in picker rails and model lists.
-      </span>
     </div>
   );
 }
@@ -326,9 +361,8 @@ function ProviderEnvironmentSection(props: {
         <span className="text-xs font-medium text-foreground">Environment variables</span>
         <Button
           type="button"
-          size="sm"
+          size="xs"
           variant="outline"
-          className="h-7 gap-1.5 px-2 text-xs"
           onClick={() =>
             setRows([
               ...rows,
@@ -341,20 +375,20 @@ function ProviderEnvironmentSection(props: {
             ])
           }
         >
-          <PlusIcon className="size-3" />
+          <PlusIcon />
           Add
         </Button>
       </div>
       {rows.length === 0 ? (
         <p className="text-xs text-muted-foreground">
-          Add variables to pass API keys, base URLs, or other per-instance CLI settings.
+          Pass API keys, base URLs or other CLI settings to this account.
         </p>
       ) : (
         <div className="grid gap-2">
           {rows.map((variable, index) => (
             <div
               key={variable.id}
-              className="grid gap-2 rounded-md border border-border/70 bg-muted/20 p-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_auto_auto] sm:items-center"
+              className="grid gap-2 rounded-lg border border-border-subtle bg-muted/30 p-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_auto_auto] sm:items-center"
             >
               <DraftInput
                 value={variable.name}
@@ -369,28 +403,34 @@ function ProviderEnvironmentSection(props: {
                 type={variable.sensitive ? "password" : undefined}
                 autoComplete="off"
                 placeholder={
-                  variable.valueRedacted ? "Stored secret - enter a new value to replace" : "Value"
+                  variable.valueRedacted ? "Saved. Type a new value to replace it." : "Value"
                 }
                 spellCheck={false}
                 aria-label={`Environment variable value ${index + 1}`}
               />
-              <label className="inline-flex h-8 items-center gap-2 text-xs text-muted-foreground">
-                <input
-                  type="checkbox"
-                  className="size-3.5"
-                  checked={variable.sensitive}
-                  onChange={(event) => {
-                    const sensitive = event.currentTarget.checked;
-                    updateVariable(variable.id, {
-                      sensitive,
-                      ...(sensitive && variable.valueRedacted === undefined
-                        ? {}
-                        : { valueRedacted: sensitive ? variable.valueRedacted : false }),
-                    });
-                  }}
-                />
-                Sensitive
-              </label>
+              <div className="inline-flex h-8 items-center gap-1">
+                <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    className="size-3.5 cursor-pointer accent-primary"
+                    checked={variable.sensitive}
+                    onChange={(event) => {
+                      const sensitive = event.currentTarget.checked;
+                      updateVariable(variable.id, {
+                        sensitive,
+                        ...(sensitive && variable.valueRedacted === undefined
+                          ? {}
+                          : { valueRedacted: sensitive ? variable.valueRedacted : false }),
+                      });
+                    }}
+                  />
+                  Sensitive
+                </label>
+                {/* Outside the label so its button is not part of the checkbox name. */}
+                <InfoTip label="About sensitive values">
+                  Sensitive values are stored separately and aren&apos;t shown again after saving.
+                </InfoTip>
+              </div>
               <Button
                 type="button"
                 size="icon-sm"
@@ -405,9 +445,6 @@ function ProviderEnvironmentSection(props: {
           ))}
         </div>
       )}
-      <span className="text-xs text-muted-foreground">
-        Sensitive values are stored separately and are not returned to the app after saving.
-      </span>
     </div>
   );
 }
@@ -503,7 +540,7 @@ function ProviderInstanceDefaultsSection(props: {
     {
       value: NO_DEFAULT_SELECT_VALUE,
       label: "No default",
-      description: "New chats keep the last model used on this instance.",
+      description: "New chats keep the last model used.",
     },
     ...selectableModels.map((model) => ({
       value: model.slug,
@@ -559,8 +596,7 @@ function ProviderInstanceDefaultsSection(props: {
       <div className="grid gap-0.5">
         <span className="text-xs font-medium text-foreground">New chat defaults</span>
         <span className="text-xs text-muted-foreground">
-          Applied when a new chat starts on this instance. Traits left on “No default” use the
-          model&apos;s own defaults.
+          Used for new chats. “No default” uses the model&apos;s default.
         </span>
       </div>
       <DefaultsSelectField
@@ -572,12 +608,22 @@ function ProviderInstanceDefaultsSection(props: {
       />
       {props.driver && subagentLimitKey(props.driver) ? (
         <div className="grid gap-1.5">
-          <label
-            className="text-xs font-medium text-foreground"
-            htmlFor={`provider-instance-${props.instanceId}-default-subagent-limit`}
-          >
-            Default subagent limit
-          </label>
+          <div className="flex min-w-0 items-center gap-1">
+            <label
+              className="text-xs font-medium text-foreground"
+              htmlFor={`provider-instance-${props.instanceId}-default-subagent-limit`}
+            >
+              Default subagent limit
+            </label>
+            {/* Outside the label so its button is not part of the input name. */}
+            <InfoTip label="About the default subagent limit">
+              Copied to new chats only; changing it doesn&apos;t restart the provider or change
+              existing chats. The main agent isn&apos;t counted.{" "}
+              {props.driver === "claudeAgent"
+                ? "Claude limits Agent-tool spawning, not all running work."
+                : "Codex limits spawned agents that stay open."}
+            </InfoTip>
+          </div>
           <DraftInput
             id={`provider-instance-${props.instanceId}-default-subagent-limit`}
             aria-describedby={`provider-instance-${props.instanceId}-default-subagent-limit-description`}
@@ -590,7 +636,7 @@ function ProviderInstanceDefaultsSection(props: {
                 ? ""
                 : String(props.defaultMaxConcurrentSubagents)
             }
-            placeholder="Provider / inherited default"
+            placeholder="Provider default"
             onCommit={(value) => {
               if (value.trim() === "") props.onConcurrencyDefaultChange(undefined);
               else if (validSubagentLimit(Number(value)))
@@ -601,11 +647,7 @@ function ProviderInstanceDefaultsSection(props: {
             id={`provider-instance-${props.instanceId}-default-subagent-limit-description`}
             className="text-xs text-muted-foreground"
           >
-            Enter 1–64, or leave blank. Copied only to new chats; changing this does not restart the
-            provider or change existing chats. The primary agent is not counted.{" "}
-            {props.driver === "claudeAgent"
-              ? "Claude limits Agent-tool spawning, not all running work."
-              : "Codex limits spawned resident agent threads."}
+            1–64. New chats only; blank uses the provider default.
           </span>
         </div>
       ) : null}
@@ -683,6 +725,77 @@ function ProviderInstanceDefaultsSection(props: {
         );
       })}
     </div>
+  );
+}
+
+const DIALOG_SECTION_CLASS_NAME =
+  "border-t border-border-subtle px-4 py-3 first:border-t-0 sm:px-5";
+const RUNTIME_SOURCE_FIELD_KEYS: ReadonlySet<string> = new Set(["runtimeSource"]);
+
+/**
+ * Settings-form fields to hide for the current server. The bundled runtime is
+ * Windows-only (AGENTS.md "Bundled mode is Windows-only"), so other servers
+ * hide the Runtime choice; an unknown platform keeps it. A stored "bundled"
+ * value stays visible so it can be switched back. Presentation only: hidden
+ * fields keep their stored values.
+ */
+export function useHiddenProviderSettingsFieldKeys(
+  config: unknown,
+): ReadonlySet<string> | undefined {
+  const serverOs = useServerConfig()?.environment.platform.os;
+  const showRuntimeSource =
+    serverOs === "windows" ||
+    serverOs === "unknown" ||
+    readProviderConfigString(config, "runtimeSource") === "bundled";
+  return showRuntimeSource ? undefined : RUNTIME_SOURCE_FIELD_KEYS;
+}
+
+/**
+ * Collapsed "Advanced" block for runtime identity (config fields and
+ * environment). Saving any of these reloads the instance and can end its
+ * sessions (AGENTS.md "Provider instance reconciliation"), so the warning is
+ * one visible line inside the section.
+ *
+ * It starts collapsed. None of its fields render inline validation errors
+ * (invalid numbers are rejected without saving), so collapsing cannot hide
+ * one; the trigger instead shows how many values are customized.
+ */
+function ProviderAdvancedSection(props: {
+  readonly customizedCount: number;
+  readonly reloadDetail?: string | undefined;
+  readonly children: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Collapsible open={open} onOpenChange={setOpen} className={DIALOG_SECTION_CLASS_NAME}>
+      <CollapsibleTrigger className="group focus-ring -mx-1 flex items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-xs font-medium text-foreground transition-colors duration-(--duration-fast) hover:bg-accent">
+        <ChevronRightIcon
+          aria-hidden="true"
+          className="size-3.5 text-muted-foreground transition-transform duration-(--duration-fast) ease-out group-data-[panel-open]:rotate-90"
+        />
+        Advanced
+        {props.customizedCount > 0 ? (
+          <span className="font-normal text-subtle-foreground tabular-nums">
+            · {props.customizedCount} customized
+          </span>
+        ) : null}
+      </CollapsibleTrigger>
+      {/* The panel clips its height animation; the horizontal and bottom
+          padding keeps input focus rings inside that clip. */}
+      <CollapsiblePanel className="-mx-1 px-1">
+        <div className="grid animate-enter-rise gap-4 pt-3 pb-1">
+          <div className="flex min-w-0 items-center gap-1">
+            <p className="text-xs text-muted-foreground">
+              Saving these reloads the account and can end active chats.
+            </p>
+            {props.reloadDetail ? (
+              <InfoTip label="About reloading">{props.reloadDetail}</InfoTip>
+            ) : null}
+          </div>
+          {props.children}
+        </div>
+      </CollapsiblePanel>
+    </Collapsible>
   );
 }
 
@@ -781,12 +894,16 @@ export function ProviderInstanceCard({
 }: ProviderInstanceCardProps) {
   const enabled = instance.enabled ?? true;
   // The server-reported status wins when present; otherwise fall back to
-  // "disabled"/"warning" based on the local `enabled` flag so the dot
+  // "disabled"/"checking" based on the local `enabled` flag so the dot
   // reflects the persisted intent even before the first probe completes.
+  // "Checking" is a neutral pulse: no probe has reported a problem yet.
   const statusKey: ProviderStatusKey =
-    (liveProvider?.status as ProviderStatusKey | undefined) ?? (enabled ? "warning" : "disabled");
+    (liveProvider?.status as ProviderStatusKey | undefined) ?? (enabled ? "checking" : "disabled");
   const statusStyle = PROVIDER_STATUS_STYLES[statusKey];
-  const rawSummary = getProviderSummary(liveProvider);
+  const summary =
+    !liveProvider && !enabled
+      ? { headline: "Disabled", detail: null }
+      : getProviderSummary(liveProvider);
   const authEmail = liveProvider?.auth.email;
   const hasSandboxFailure =
     instance.driver === "grok" && liveProvider?.sandbox?.status === "unavailable";
@@ -800,7 +917,6 @@ export function ProviderInstanceCard({
   const accountQuota = shouldSurfaceProviderAccountRateLimits(liveProvider)
     ? formatCodexRateLimitPresentation(liveProvider?.accountRateLimits)
     : null;
-  const summary = rawSummary;
   const versionLabel = getProviderVersionLabel(liveProvider?.version);
   const versionAdvisory = getProviderVersionAdvisoryPresentation(liveProvider?.versionAdvisory);
   const updateCommand = versionAdvisory?.updateCommand ?? null;
@@ -808,14 +924,11 @@ export function ProviderInstanceCard({
   const displayName =
     instance.displayName?.trim() || driverOption?.label || String(instance.driver);
   const accentColor = normalizeProviderAccentColor(instance.accentColor);
-  const { copyToClipboard } = useCopyToClipboard<{ providerName: string }>({
-    onCopy: ({ providerName }) => {
-      toastManager.add({
-        type: "success",
-        title: `${providerName} update command copied`,
-        description: "Run it in a terminal when you are ready to update.",
-      });
-    },
+  // A successful copy is confirmed inline by the button's check mark; only a
+  // failure needs a toast.
+  const { copyToClipboard, isCopied: isUpdateCommandCopied } = useCopyToClipboard<{
+    providerName: string;
+  }>({
     onError: (error, { providerName }) => {
       toastManager.add(
         stackedThreadToast({
@@ -907,6 +1020,16 @@ export function ProviderInstanceCard({
     } as ProviderInstanceConfig);
   };
 
+  const hiddenSettingsFieldKeys = useHiddenProviderSettingsFieldKeys(instance.config);
+  const settingsFields = useMemo(
+    () => (driverOption ? deriveProviderSettingsFields(driverOption) : []),
+    [driverOption],
+  );
+  // Advanced starts collapsed; this count keeps configured values discoverable.
+  const advancedCustomizedCount =
+    settingsFields.filter((field) => isProviderSettingCustomized(instance.config, field)).length +
+    (instance.environment?.length ?? 0);
+
   const titleIconNode = driverKind ? (
     <ProviderInstanceIcon
       driverKind={driverKind}
@@ -915,12 +1038,12 @@ export function ProviderInstanceCard({
       showBadge={Boolean(accentColor)}
       statusDotClassName={statusStyle.dot}
       className="size-5"
-      iconClassName="size-4 text-foreground/80"
+      iconClassName="size-4 text-foreground"
       badgeClassName="right-[-0.125rem] bottom-[-0.125rem] h-3 min-w-3 text-[7px]"
     />
   ) : FallbackIconComponent ? (
     <span className="relative inline-flex size-5 shrink-0 items-center justify-center">
-      <FallbackIconComponent className="size-4 text-foreground/80" aria-hidden />
+      <FallbackIconComponent className="size-4 text-foreground" aria-hidden />
       <span
         className={cn(
           "pointer-events-none absolute -left-0.5 -top-0.5 size-2 rounded-full ring-2 ring-background",
@@ -936,11 +1059,12 @@ export function ProviderInstanceCard({
   const titleHeadNode = (
     <>
       {titleIconNode}
-      <h3 className="max-w-full truncate text-[13px] font-semibold tracking-[-0.01em] text-foreground">
-        {displayName}
-      </h3>
-      {String(instanceId) !== String(instance.driver) ? (
-        <code className="max-w-full truncate rounded bg-muted/60 px-1 py-0.5 text-[10px] text-muted-foreground">
+      <h3 className="max-w-full truncate text-ui font-semibold text-foreground">{displayName}</h3>
+      {/* An unnamed extra instance shares its driver's label, so its ID is the
+          only thing telling two cards apart. Named instances show it in their
+          settings dialog instead. */}
+      {String(instanceId) !== String(instance.driver) && !instance.displayName?.trim() ? (
+        <code className="max-w-full truncate rounded-sm bg-muted px-1 py-0.5 font-mono text-2xs text-muted-foreground">
           {instanceId}
         </code>
       ) : null}
@@ -975,7 +1099,7 @@ export function ProviderInstanceCard({
                 </Button>
               }
             />
-            <TooltipPopup side="top">Delete instance</TooltipPopup>
+            <TooltipPopup side="top">Delete</TooltipPopup>
           </Tooltip>
         </span>
       ) : null}
@@ -983,7 +1107,7 @@ export function ProviderInstanceCard({
   );
 
   const authRowNode = (
-    <p className="flex min-w-0 flex-wrap items-center gap-x-1 text-xs text-muted-foreground/80 [overflow-wrap:anywhere]">
+    <p className="flex min-w-0 flex-wrap items-center gap-x-1 text-xs text-muted-foreground [overflow-wrap:anywhere]">
       {hasAuthenticatedEmail ? (
         <>
           <span>Authenticated as</span>
@@ -996,7 +1120,7 @@ export function ProviderInstanceCard({
           <ProviderAuthEmail email={authEmail} separator prefix="Email" />
         </>
       )}
-      {summary.detail ? <span>- {summary.detail}</span> : null}
+      {summary.detail ? <span>· {summary.detail}</span> : null}
     </p>
   );
 
@@ -1008,7 +1132,7 @@ export function ProviderInstanceCard({
 
   return (
     <div
-      className="@container/provider-card min-w-0 border-t border-border/60 first:border-t-0"
+      className="@container/provider-card min-w-0 border-t border-border-subtle first:border-t-0"
       data-provider-card
     >
       <div className="px-4 py-3.5 sm:px-5">
@@ -1049,9 +1173,7 @@ export function ProviderInstanceCard({
                 >
                   <div className="grid min-w-0 gap-3">
                     <div className="grid gap-0.5">
-                      <p className="text-[13px] font-semibold leading-tight text-foreground">
-                        Update available
-                      </p>
+                      <p className="text-ui font-semibold text-foreground">Update available</p>
                       <p
                         className={cn(
                           "text-xs leading-snug",
@@ -1072,21 +1194,21 @@ export function ProviderInstanceCard({
                         disabled={isUpdating}
                         onClick={onRunUpdate}
                       >
-                        {isUpdating ? <LoaderIcon className="animate-spin" /> : <DownloadIcon />}
-                        {isUpdating ? "Updating" : "Update now"}
+                        {isUpdating ? <Spinner aria-hidden="true" /> : <DownloadIcon />}
+                        {isUpdating ? "Updating…" : "Update now"}
                       </Button>
                     ) : null}
                     {onRunUpdate && updateCommand ? (
-                      <div className="flex items-center gap-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-                        <span aria-hidden className="h-px flex-1 bg-border" />
-                        or, update manually using
-                        <span aria-hidden className="h-px flex-1 bg-border" />
+                      <div className="flex items-center gap-2 text-2xs text-subtle-foreground">
+                        <span aria-hidden className="h-px flex-1 bg-border-subtle" />
+                        or update manually
+                        <span aria-hidden className="h-px flex-1 bg-border-subtle" />
                       </div>
                     ) : null}
                     {updateCommand ? (
-                      <div className="flex min-w-0 items-center gap-1 rounded-md border border-border/70 bg-muted/40 py-0.5 pr-0.5 pl-2">
+                      <div className="flex min-w-0 items-center gap-1 rounded-lg border border-border-subtle bg-muted/40 py-0.5 pr-0.5 pl-2">
                         <ScrollArea scrollFade className="h-8 min-w-0 flex-1 rounded-none">
-                          <code className="flex h-full w-max items-center whitespace-nowrap pr-3 font-mono text-[11px] text-foreground">
+                          <code className="flex h-full w-max items-center whitespace-nowrap pr-3 font-mono text-2xs text-foreground">
                             {updateCommand}
                           </code>
                         </ScrollArea>
@@ -1105,11 +1227,17 @@ export function ProviderInstanceCard({
                                 }
                                 aria-label="Copy update command"
                               >
-                                <CopyIcon className="size-3" />
+                                {isUpdateCommandCopied ? (
+                                  <CheckIcon className="size-3 text-success" />
+                                ) : (
+                                  <CopyIcon className="size-3" />
+                                )}
                               </Button>
                             }
                           />
-                          <TooltipPopup side="top">Copy command</TooltipPopup>
+                          <TooltipPopup side="top">
+                            {isUpdateCommandCopied ? "Copied" : "Copy command"}
+                          </TooltipPopup>
                         </Tooltip>
                       </div>
                     ) : null}
@@ -1133,11 +1261,11 @@ export function ProviderInstanceCard({
                 onClick={onLogIn}
               >
                 {isLoggingIn ? (
-                  <LoaderIcon className="size-3.5 animate-spin" />
+                  <Spinner aria-hidden="true" className="size-3.5" />
                 ) : (
                   <LogInIcon className="size-3.5" />
                 )}
-                Log In
+                Log in
               </Button>
             ) : null}
             {/* Keep the optional reset alongside the existing controls. A
@@ -1163,14 +1291,14 @@ export function ProviderInstanceCard({
                       aria-label={`Restart ${displayName} runtime`}
                     >
                       {isRestartingRuntime ? (
-                        <LoaderIcon className="size-3.5 animate-spin" />
+                        <Spinner aria-hidden="true" className="size-3.5" />
                       ) : (
                         <RotateCcwIcon className="size-3.5" />
                       )}
                     </Button>
                   }
                 />
-                <TooltipPopup side="top">Restart provider runtime</TooltipPopup>
+                <TooltipPopup side="top">Restart provider</TooltipPopup>
               </Tooltip>
             ) : null}
             {isDefaultProvider ? (
@@ -1179,7 +1307,7 @@ export function ProviderInstanceCard({
                   render={
                     <button
                       type="button"
-                      className="inline-flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded-md border border-primary/30 bg-primary/10 px-1.5 text-[10px] font-medium text-primary outline-hidden hover:bg-primary/15"
+                      className="focus-ring inline-flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded-md bg-primary/10 px-1.5 text-2xs font-medium text-primary transition-colors duration-(--duration-fast) hover:bg-primary/15"
                       onClick={() => onSetDefaultProvider(false)}
                       aria-label={`Clear ${displayName} as default provider`}
                     >
@@ -1226,7 +1354,7 @@ export function ProviderInstanceCard({
                   </Button>
                 }
               />
-              <TooltipPopup side="top">Instance settings</TooltipPopup>
+              <TooltipPopup side="top">Settings</TooltipPopup>
             </Tooltip>
             <Switch
               checked={enabled}
@@ -1250,6 +1378,7 @@ export function ProviderInstanceCard({
 
       {driverKind === "grok" ? (
         <GrokSandboxSettings
+          placement="card"
           instance={instance}
           displayName={displayName}
           sandbox={liveProvider?.sandbox}
@@ -1264,14 +1393,40 @@ export function ProviderInstanceCard({
               {titleIconNode}
               <span className="truncate">{displayName} settings</span>
             </DialogTitle>
-            <DialogDescription>
-              New chat defaults and configuration for this provider instance.
-            </DialogDescription>
+            {String(instanceId) !== String(instance.driver) ? (
+              <p className="truncate font-mono text-2xs text-subtle-foreground">{instanceId}</p>
+            ) : null}
           </DialogHeader>
           <DialogPanel className="px-0 pb-4">
-            <div className="space-y-0">
+            <div>
+              <div className={DIALOG_SECTION_CLASS_NAME}>
+                <div className="grid gap-4">
+                  <div className="grid gap-1.5">
+                    <label
+                      htmlFor={`provider-instance-${instanceId}-display-name`}
+                      className="text-xs font-medium text-foreground"
+                    >
+                      Display name
+                    </label>
+                    <DraftInput
+                      id={`provider-instance-${instanceId}-display-name`}
+                      value={instance.displayName ?? ""}
+                      onCommit={updateDisplayName}
+                      placeholder={driverOption?.label ?? "Instance label"}
+                      spellCheck={false}
+                    />
+                  </div>
+                  <ProviderAccentColorPicker
+                    label="Accent color"
+                    customColorLabel={`Custom accent color for ${displayName}`}
+                    value={accentColor}
+                    onCommit={updateAccentColor}
+                  />
+                </div>
+              </div>
+
               {driverOption !== undefined ? (
-                <div className="border-t border-border/60 px-4 py-3 sm:px-5 first:border-t-0">
+                <div className={DIALOG_SECTION_CLASS_NAME}>
                   <ProviderInstanceDefaultsSection
                     instanceId={instanceId}
                     models={modelsForDisplay}
@@ -1292,57 +1447,6 @@ export function ProviderInstanceCard({
                 </div>
               ) : null}
 
-              <div className="border-t border-border/60 px-4 py-3 sm:px-5 first:border-t-0">
-                <label htmlFor={`provider-instance-${instanceId}-display-name`} className="block">
-                  <span className="text-xs font-medium text-foreground">Display name</span>
-                  <DraftInput
-                    id={`provider-instance-${instanceId}-display-name`}
-                    className="mt-1.5"
-                    value={instance.displayName ?? ""}
-                    onCommit={updateDisplayName}
-                    placeholder={driverOption?.label ?? "Instance label"}
-                    spellCheck={false}
-                  />
-                  <span className="mt-1 block text-xs text-muted-foreground">
-                    Optional label shown in the provider list.
-                  </span>
-                </label>
-              </div>
-
-              <div className="border-t border-border/60 px-4 py-3 sm:px-5">
-                <ProviderAccentColorPicker
-                  displayName={displayName}
-                  value={accentColor}
-                  onCommit={updateAccentColor}
-                />
-              </div>
-
-              <div className="border-t border-border/60 px-4 py-3 sm:px-5">
-                <ProviderEnvironmentSection
-                  environment={instance.environment ?? []}
-                  onChange={updateEnvironment}
-                />
-              </div>
-
-              {driverOption ? (
-                <>
-                  {driverKind && subagentLimitKey(driverKind) ? (
-                    <p className="border-t border-border/60 px-4 pt-3 text-xs text-muted-foreground sm:px-5">
-                      Runtime configuration below affects this instance. Changing its legacy
-                      subagent limit reloads the instance and can interrupt active chats. Use the
-                      new-chat default or per-chat control for scoped changes.
-                    </p>
-                  ) : null}
-                  <ProviderSettingsForm
-                    definition={driverOption}
-                    value={instance.config}
-                    idPrefix={`provider-instance-${instanceId}`}
-                    variant="card"
-                    onChange={updateConfig}
-                  />
-                </>
-              ) : null}
-
               {driverOption !== undefined ? (
                 <ProviderModelsSection
                   instanceId={instanceId}
@@ -1358,15 +1462,48 @@ export function ProviderInstanceCard({
                   onModelOrderChange={onModelOrderChange}
                 />
               ) : (
-                <div className="border-t border-border/60 px-4 py-3 sm:px-5">
+                <div className={DIALOG_SECTION_CLASS_NAME}>
                   <p className="text-xs text-muted-foreground">
-                    This instance uses a driver (
-                    <code className="text-foreground">{String(instance.driver)}</code>) that is not
-                    shipped with the current build. Configuration values are preserved but cannot be
-                    edited from this surface.
+                    This provider (
+                    <code className="text-foreground">{String(instance.driver)}</code>) isn&apos;t
+                    in this version of Cafe Code. Its settings are kept but can&apos;t be edited
+                    here.
                   </p>
                 </div>
               )}
+
+              <ProviderAdvancedSection
+                customizedCount={advancedCustomizedCount}
+                reloadDetail={
+                  driverKind && subagentLimitKey(driverKind)
+                    ? "To change the subagent limit without a reload, use the default subagent limit above or the per-chat control."
+                    : undefined
+                }
+              >
+                {driverOption ? (
+                  <ProviderSettingsForm
+                    definition={driverOption}
+                    value={instance.config}
+                    idPrefix={`provider-instance-${instanceId}`}
+                    variant="card"
+                    hiddenFieldKeys={hiddenSettingsFieldKeys}
+                    onChange={updateConfig}
+                  />
+                ) : null}
+                <ProviderEnvironmentSection
+                  environment={instance.environment ?? []}
+                  onChange={updateEnvironment}
+                />
+                {driverKind === "grok" ? (
+                  <GrokSandboxSettings
+                    placement="dialog"
+                    instance={instance}
+                    displayName={displayName}
+                    sandbox={liveProvider?.sandbox}
+                    onUpdate={onUpdate}
+                  />
+                ) : null}
+              </ProviderAdvancedSection>
             </div>
           </DialogPanel>
         </DialogPopup>

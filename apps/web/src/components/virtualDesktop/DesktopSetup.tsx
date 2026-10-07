@@ -1,11 +1,14 @@
-import { CheckCircle2Icon, CircleAlertIcon, RefreshCwIcon } from "lucide-react";
+import { CheckCircle2Icon, ChevronRightIcon, CircleAlertIcon, RefreshCwIcon } from "lucide-react";
 import type { VirtualDesktopPrerequisites } from "@cafecode/contracts";
 import { Button } from "../ui/button";
+import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
+import { InfoTip } from "../ui/info-tip";
+import { Spinner } from "../ui/spinner";
 
 const components = [
   { id: "sway", name: "Sway", description: "Runs the virtual desktop." },
   { id: "xwayland", name: "Xwayland", description: "Supports X11 applications." },
-  { id: "dbus", name: "D-Bus", description: "Provides application services through dbus-daemon." },
+  { id: "dbus", name: "D-Bus", description: "Provides app services." },
   { id: "helper", name: "Cafe desktop component", description: "Included with Cafe for Linux." },
 ] as const;
 
@@ -28,7 +31,7 @@ export function DesktopSetup({
     prerequisites &&
     components.some(({ id }) => id !== "helper" && prerequisites[id] !== "installed");
   const checklist = prerequisites ? (
-    <ul className="divide-y divide-border/60" aria-label="Required desktop components">
+    <ul className="divide-y divide-border-subtle" aria-label="Required desktop components">
       {components.map(({ id, name, description }) => {
         const status = prerequisites[id];
         const ready = status === "installed";
@@ -56,8 +59,8 @@ export function DesktopSetup({
               {id === "helper" && !ready && (
                 <p className="text-xs text-muted-foreground">
                   {status === "missing"
-                    ? "This Cafe installation is missing its desktop component. Update or reinstall Cafe, then restart it."
-                    : "Cafe's desktop component could not run. Check that Cafe's required system libraries are installed; if the problem persists, update or reinstall Cafe and restart it."}
+                    ? "Update or reinstall Cafe, then restart it."
+                    : "Check Cafe's required system libraries, or update or reinstall Cafe and restart it."}
                 </p>
               )}
             </div>
@@ -69,38 +72,46 @@ export function DesktopSetup({
   return (
     <div className="space-y-3">
       {installed ? (
-        <details>
-          <summary className="cursor-pointer text-sm font-medium">
+        <Collapsible>
+          <CollapsibleTrigger className="focus-ring group flex items-center gap-1.5 rounded-sm text-sm font-medium">
+            <ChevronRightIcon
+              aria-hidden
+              className="size-3.5 text-muted-foreground transition-transform duration-(--duration-fast) ease-out group-data-panel-open:rotate-90"
+            />
             Required components installed
-          </summary>
-          {checklist}
-        </details>
+          </CollapsibleTrigger>
+          <CollapsiblePanel>{checklist}</CollapsiblePanel>
+        </Collapsible>
       ) : (
         <>
           <p className="text-sm font-medium">Finish setting up virtual desktops</p>
           <p className="text-xs text-muted-foreground">
-            These components are needed on the Linux computer running this Cafe environment. You can
-            keep using your current desktop environment and X11 or Wayland session.
+            Needed on the Linux computer running this Cafe environment.{" "}
+            <InfoTip label="About desktop requirements">
+              You can keep your current desktop environment and X11 or Wayland session.
+            </InfoTip>
           </p>
           {checklist}
           {missingPackages && (
             <p className="text-xs text-muted-foreground">
-              Install the missing system components using your Linux distribution's package manager.
-              Package names vary between distributions. Then select Check again.
+              Install the missing system components with your package manager, then Check again.{" "}
+              <InfoTip label="About package names">
+                Package names vary between Linux distributions.
+              </InfoTip>
             </p>
           )}
           {!prerequisites && (
             <p className="text-xs text-muted-foreground">
-              Component details are unavailable. Select Check again; if details are still missing,
-              restart Cafe to update its desktop runtime.
+              Component details are unavailable. Check again, or restart Cafe to update it.
             </p>
           )}
         </>
       )}
       {!available && reason && <p className="text-xs text-muted-foreground">{reason}</p>}
       <Button size="sm" variant="outline" disabled={busy} onClick={onRecheck}>
-        <RefreshCwIcon className={busy ? "animate-spin" : ""} />
-        {busy ? "Checking…" : "Check again"}
+        {/* The spinner takes the icon's place so the label and width stay put. */}
+        {busy ? <Spinner className="size-3.5" /> : <RefreshCwIcon />}
+        Check again
       </Button>
     </div>
   );

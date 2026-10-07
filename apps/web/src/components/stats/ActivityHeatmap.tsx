@@ -421,7 +421,7 @@ export function ActivityHeatmap({
     activeHover !== null ? (
       <div
         ref={tooltipRef}
-        className={`pointer-events-none absolute z-10 ${bounded ? "" : tooltipAlignClass} ${bounded && activeHover.yFraction < 2 / 7 ? "translate-y-[6px]" : "-translate-y-[calc(100%+6px)]"} whitespace-nowrap rounded-md border bg-popover px-2 py-1 text-[11px] text-popover-foreground shadow-md`}
+        className={`pointer-events-none absolute z-10 ${bounded ? "" : tooltipAlignClass} ${bounded && activeHover.yFraction < 2 / 7 ? "translate-y-[6px]" : "-translate-y-[calc(100%+6px)]"} whitespace-nowrap rounded-md border bg-popover px-2 py-1 text-2xs text-popover-foreground shadow-md/5`}
         style={{
           left: bounded ? activeHover.anchorX : `${activeHover.xFraction * 100}%`,
           top: bounded ? activeHover.anchorY : `${activeHover.yFraction * 100}%`,
@@ -474,8 +474,8 @@ export function ActivityHeatmap({
               <div
                 className={
                   bounded
-                    ? "grid shrink-0 gap-[0.1875rem] text-[0.5625rem] leading-none text-muted-foreground/70"
-                    : "grid flex-1 gap-[3px] text-[9px] leading-none text-muted-foreground/70"
+                    ? "grid shrink-0 gap-[0.1875rem] text-2xs leading-none text-subtle-foreground"
+                    : "grid flex-1 gap-[3px] text-2xs leading-none text-subtle-foreground"
                 }
                 style={gridStyle}
               >
@@ -484,8 +484,8 @@ export function ActivityHeatmap({
                     key={column.cells[0]?.dayKey}
                     className={
                       bounded
-                        ? "h-[0.625rem] overflow-visible whitespace-nowrap"
-                        : "h-[10px] overflow-visible whitespace-nowrap"
+                        ? "h-3 overflow-visible whitespace-nowrap"
+                        : "h-3 overflow-visible whitespace-nowrap"
                     }
                   >
                     {monthLabelByWeek.get(column.index) ?? ""}
@@ -497,8 +497,8 @@ export function ActivityHeatmap({
               <div
                 className={
                   bounded
-                    ? "grid w-7 shrink-0 grid-rows-7 gap-[0.1875rem] text-[0.5625rem] leading-none text-muted-foreground/70"
-                    : "grid w-7 shrink-0 grid-rows-7 gap-[3px] text-[9px] leading-none text-muted-foreground/70"
+                    ? "grid w-7 shrink-0 grid-rows-7 gap-[0.1875rem] text-2xs leading-none text-subtle-foreground"
+                    : "grid w-7 shrink-0 grid-rows-7 gap-[3px] text-2xs leading-none text-subtle-foreground"
                 }
                 aria-hidden
               >
@@ -537,7 +537,7 @@ export function ActivityHeatmap({
                           key={cell.dayKey}
                           data-activity-day={cell.dayKey}
                           data-activity-in-range="true"
-                          className="aspect-square w-full rounded-[2px] ring-1 ring-inset ring-foreground/[0.06] transition-colors duration-300 hover:ring-foreground/40 motion-reduce:transition-none"
+                          className="aspect-square w-full rounded-xs ring-1 ring-inset ring-border-subtle transition-colors duration-(--duration-slow) hover:ring-muted-foreground motion-reduce:transition-none"
                           style={{
                             backgroundColor: cellColor(intensityOf(cell.generatingMs, maxMs)),
                           }}
@@ -579,7 +579,7 @@ export function ActivityHeatmap({
         {bounded ? tooltip : null}
         <div
           data-activity-heatmap-legend="true"
-          className="flex items-center justify-end gap-1.5 pt-0.5 text-[10px] leading-none text-muted-foreground/70"
+          className="flex items-center justify-end gap-1.5 pt-0.5 text-2xs leading-none text-subtle-foreground"
           style={
             responsive
               ? {
@@ -596,7 +596,7 @@ export function ActivityHeatmap({
           {[0, 0.25, 0.5, 0.75, 1].map((intensity) => (
             <span
               key={intensity}
-              className="size-[10px] rounded-[2px] ring-1 ring-inset ring-foreground/[0.06]"
+              className="size-2.5 rounded-xs ring-1 ring-inset ring-border-subtle"
               style={{ backgroundColor: cellColor(intensity) }}
               aria-hidden
             />

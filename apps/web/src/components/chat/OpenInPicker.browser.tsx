@@ -21,6 +21,27 @@ beforeEach(() => {
   shell.openInEditor.mockClear();
   shell.openTerminal.mockClear();
 });
+it("keeps the favorite-editor shortcut when its buttons move into the tab menu", async () => {
+  const mounted = await render(
+    <OpenInPicker
+      environmentId={EnvironmentId.make("local")}
+      keybindings={[]}
+      availableEditors={["vscode"]}
+      terminal={{ label: "Shell", available: true }}
+      openInCwd="/fixture/project"
+      shortcutOnly
+    />,
+  );
+  try {
+    expect(document.querySelector('[aria-label="Subscription actions"]')).toBeNull();
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "o", ctrlKey: true, bubbles: true, cancelable: true }),
+    );
+    expect(shell.openInEditor).toHaveBeenCalledWith("/fixture/project", "vscode");
+  } finally {
+    await mounted.unmount();
+  }
+});
 it("offers no remote file or terminal controls and cannot launch a local editor for a remote path", async () => {
   const mounted = await render(
     <OpenInPicker

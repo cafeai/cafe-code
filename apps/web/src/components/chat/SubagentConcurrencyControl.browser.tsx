@@ -135,6 +135,8 @@ describe("per-chat subagent concurrency editor", () => {
     await openEditor();
     await expect.element(page.getByText("Subagent limit: 20", { exact: true })).toBeVisible();
     expect(document.body.textContent).not.toContain("Provider-managed");
+    // Provider-specific scope notes live in the one labelled info tooltip.
+    await page.getByRole("button", { name: "About subagent limits" }).hover();
     await expect.element(page.getByText(/Claude limits Agent-tool admission/)).toBeVisible();
     await page.getByRole("button", { name: "Reset", exact: true }).click();
     expect(onChange).toHaveBeenCalledExactlyOnceWith(undefined);
@@ -185,9 +187,7 @@ describe("per-chat subagent concurrency editor", () => {
       .element(page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }))
       .toBeDisabled();
     await expect.element(page.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
-    await expect
-      .element(page.getByText(/This runtime cannot apply a numeric override/))
-      .toBeVisible();
+    await expect.element(page.getByText(/This account can’t apply a numeric limit/)).toBeVisible();
     await page.getByRole("button", { name: "Reset", exact: true }).click();
     expect(onChange).toHaveBeenCalledExactlyOnceWith(undefined);
   });

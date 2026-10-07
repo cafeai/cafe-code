@@ -15,7 +15,10 @@ import { useStore } from "~/store";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Badge } from "../ui/badge";
-import { Dialog, DialogPopup, DialogTitle, DialogDescription, DialogHeader } from "../ui/dialog";
+import { InfoTip } from "../ui/info-tip";
+import { Spinner } from "../ui/spinner";
+import { Dialog, DialogPopup, DialogTitle, DialogHeader } from "../ui/dialog";
+import { useDelayedFlag } from "~/hooks/useDelayedFlag";
 import {
   Menu,
   MenuTrigger,
@@ -64,6 +67,7 @@ function DesktopRow({
   );
   const canOpen =
     (controls.local || controls.remote) && controls.data?.enabled && desktop.state === "ready";
+  const opening = useDelayedFlag(controls.pendingId === desktop.id);
   return (
     <article className="overflow-hidden rounded-xl border border-border bg-card">
       <DesktopPreview
@@ -140,20 +144,21 @@ function DesktopRow({
           </Link>
         ) : (
           <p className="text-xs text-muted-foreground">
+            {/* The badge already says who has control; this line adds only
+                what it doesn't (a reason, paused input, or the display size). */}
             {desktop.reason ??
               (desktop.humanControl
-                ? "Agent input is paused until control is returned or reclaimed."
-                : desktop.controllingThreadId
-                  ? "An agent is using this desktop."
-                  : desktop.resolution
-                    ? `${desktop.resolution.width} × ${desktop.resolution.height}`
-                    : "Available for your conversations.")}
+                ? "Agent input is paused."
+                : desktop.resolution
+                  ? `${desktop.resolution.width} × ${desktop.resolution.height}`
+                  : "\u00a0")}
           </p>
         )}
         <div className="flex items-center justify-between gap-2">
           <Button
             size="sm"
             variant="outline"
+            className="min-w-36"
             disabled={controls.busy || !canOpen}
             title={
               !controls.local
@@ -164,8 +169,13 @@ function DesktopRow({
             }
             onClick={() => void controls.connect(desktop.id)}
           >
-            {controls.pendingId === desktop.id ? "Opening / updating…" : "Open desktop"}
-            <ArrowUpRightIcon className="size-3.5" />
+            {/* Keep the label (and the button's width) while it opens. */}
+            Open desktop
+            {opening ? (
+              <Spinner aria-hidden="true" className="size-3.5" />
+            ) : (
+              <ArrowUpRightIcon className="size-3.5" />
+            )}
           </Button>
           <Menu>
             <MenuTrigger
@@ -207,8 +217,8 @@ function DesktopRow({
               >
                 <span>
                   End desktop
-                  <span className="block text-xs opacity-75">
-                    Closes its apps and removes this desktop
+                  <span className="block text-2xs text-muted-foreground">
+                    Closes its apps and removes it
                   </span>
                 </span>
               </MenuItem>
@@ -255,6 +265,7 @@ export function VirtualDesktopList({
   const controls = useVirtualDesktops(environmentId, null, live);
   const [revision, setRevision] = useState(0);
   const [createOpen, setCreateOpen] = useState(false);
+  const showLoading = useDelayedFlag(controls.isPending);
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-2">
@@ -281,7 +292,7 @@ export function VirtualDesktopList({
           Refresh
         </Button>
       </div>
-      {controls.isPending && (
+      {showLoading && (
         <p role="status" className="text-sm text-muted-foreground">
           Loading desktops…
         </p>
@@ -310,11 +321,11 @@ export function VirtualDesktopList({
         </p>
       )}
       {controls.data?.desktops.length === 0 && (
-        <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed px-6 py-12 text-center">
-          <MonitorIcon className="size-8 text-muted-foreground/50" />
-          <h3 className="text-sm font-medium">A desktop for your agent</h3>
-          <p className="max-w-sm text-sm text-muted-foreground">
-            Create a desktop, attach it to a conversation, and open it to follow along.
+        <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed px-6 py-12 text-center">
+          <MonitorIcon className="size-8 text-disabled-foreground" />
+          <h3 className="text-sm font-medium">No desktops yet</h3>
+          <p className="max-w-sm text-xs text-muted-foreground">
+            Create one, then attach it to a chat.
           </p>
         </div>
       )}
@@ -331,10 +342,6 @@ export function VirtualDesktopList({
             />
           ))}
       </div>
-      <p className="text-xs text-muted-foreground">
-        Previews refresh when you open this view or press Refresh. Closing a viewer leaves apps
-        running. Ending a desktop or restarting your computer removes its session.
-      </p>
       {createOpen && (
         <DesktopSessionDialog environmentId={environmentId} onClose={() => setCreateOpen(false)} />
       )}
@@ -354,10 +361,16 @@ export function VirtualDesktopManager({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogPopup className="max-w-4xl" bottomStickOnMobile={false}>
         <DialogHeader>
-          <DialogTitle>Desktops</DialogTitle>
-          <DialogDescription>
-            Separate workspaces for your apps and conversations.
-          </DialogDescription>
+          {/* The tip sits beside, not inside, the title so the dialog's
+              accessible name stays "Desktops". */}
+          <div className="flex items-center gap-1.5">
+            <DialogTitle>Desktops</DialogTitle>
+            <InfoTip label="About desktops">
+              Separate workspaces for your apps and chats. Previews refresh when you open this view
+              or press Refresh. Closing a viewer leaves apps running; ending a desktop or restarting
+              your computer removes it.
+            </InfoTip>
+          </div>
         </DialogHeader>
         <div className="max-h-[72vh] overflow-y-auto px-6 pb-6">
           {open && (
@@ -387,7 +400,7 @@ function EnabledVirtualDesktopsNavigation() {
       <SidebarMenuItem className="flex w-full items-center gap-1">
         <SidebarMenuButton
           size="sm"
-          className={`min-w-0 flex-1 select-none gap-2 px-2 py-1.5 text-muted-foreground/70 hover:bg-accent hover:text-foreground ${open ? "bg-accent text-foreground" : ""}`}
+          className={`min-w-0 flex-1 select-none gap-2 px-2 py-1.5 text-muted-foreground hover:bg-accent hover:text-foreground ${open ? "bg-accent text-foreground" : ""}`}
           aria-haspopup="dialog"
           aria-expanded={open}
           onClick={() => setOpen(true)}
@@ -434,7 +447,7 @@ export function DesktopPicker({
             <Button
               size="sm"
               variant="ghost"
-              className="max-w-56 shrink-0 px-2 text-muted-foreground/70 hover:text-foreground/80 sm:px-3"
+              className="max-w-56 shrink-0 px-2 text-muted-foreground hover:text-foreground sm:px-3"
               aria-label={`Desktop${selected ? `: ${selected.name}` : ""}`}
               title={title}
             />
@@ -443,16 +456,19 @@ export function DesktopPicker({
           <MonitorIcon />
           <span className={compact ? "sr-only" : "truncate"}>{selected?.name ?? "Desktop"}</span>
           {compact && selected && (
-            <span aria-label="Desktop attached" className="size-1.5 rounded-full bg-primary" />
+            <span
+              aria-label="Desktop attached"
+              className="size-1.5 rounded-full bg-status-running"
+            />
           )}
           {data.selectionPending && (
-            <span className="text-xs text-warning-foreground">Next turn</span>
+            <span className="text-xs text-status-attention-foreground">Next turn</span>
           )}
-          <ChevronDownIcon className="size-3 opacity-60" />
+          <ChevronDownIcon className="size-3 text-subtle-foreground" />
         </MenuTrigger>
         <MenuPopup side="top" align="start" className="w-80 max-w-[calc(100vw-1rem)]">
           <div className="px-2 py-2 text-xs font-medium text-muted-foreground">
-            Desktop for this conversation
+            Desktop for this chat
           </div>
           {viewing && (
             <div className="px-2 pb-2">

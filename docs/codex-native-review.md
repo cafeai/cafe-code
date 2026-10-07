@@ -18,8 +18,9 @@ account or session binding closes the old review dialog; submission checks the
 current selection again. Selecting Claude replaces the tab's review control with
 message delivery. Providers without tab controls, such as Grok, hide the tab.
 
-The shared tab's caret minimizes or restores all its controls without moving the
-caret or the composer. Its single minimized choice applies across chats, providers,
+The shared tab's caret minimizes its controls into a shallow lip above the composer,
+or restores them. The caret lowers into the lip while its larger click area and
+the composer stay fixed. Its single minimized choice applies across chats, providers,
 environments and panes and survives reloads, including when switching to Claude's
 delivery control. The action's explanation is available on hover or keyboard focus.
 

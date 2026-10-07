@@ -325,12 +325,12 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
             {descriptor.id === "serviceTier" &&
             descriptor.currentValue &&
             !descriptor.options.some((option) => option.id === descriptor.currentValue) ? (
-              <p role="status" className="px-2 pb-1.5 text-destructive text-xs">
+              <p role="status" className="px-2 pb-1.5 text-destructive-foreground text-xs">
                 This saved tier is unavailable. Choose an available tier before sending.
               </p>
             ) : null}
             {ultrathinkInBodyText && descriptor.id === primarySelectDescriptor?.id ? (
-              <div className="px-2 pb-1.5 text-muted-foreground/80 text-xs">
+              <div className="px-2 pb-1.5 text-muted-foreground text-xs">
                 Your prompt contains &quot;ultrathink&quot; in the text. Remove it to change this
                 option.
               </div>
@@ -439,8 +439,8 @@ export const TraitsPicker = memo(function TraitsPicker({
             variant={triggerVariant ?? "ghost"}
             className={cn(
               isCodexStyle
-                ? "min-w-0 max-w-40 shrink justify-start overflow-hidden whitespace-nowrap px-2 text-muted-foreground/70 hover:text-foreground/80 sm:max-w-48 sm:px-3 [&_svg]:mx-0"
-                : "shrink-0 whitespace-nowrap px-2 text-muted-foreground/70 hover:text-foreground/80 sm:px-3",
+                ? "min-w-0 max-w-40 shrink justify-start overflow-hidden whitespace-nowrap px-2 text-muted-foreground hover:text-foreground sm:max-w-48 sm:px-3 [&_svg]:mx-0"
+                : "shrink-0 whitespace-nowrap px-2 text-muted-foreground hover:text-foreground sm:px-3",
               triggerClassName,
             )}
           />

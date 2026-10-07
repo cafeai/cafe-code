@@ -1549,7 +1549,7 @@ function ComposerPromptEditorInner({
           />
         }
         placeholder={
-          <div className="pointer-events-none absolute inset-0 text-sm leading-relaxed text-muted-foreground/35 [@media(hover:none)_and_(pointer:coarse)]:text-[16px]">
+          <div className="pointer-events-none absolute inset-0 text-sm leading-relaxed text-subtle-foreground [@media(hover:none)_and_(pointer:coarse)]:text-[16px]">
             {placeholder}
           </div>
         }

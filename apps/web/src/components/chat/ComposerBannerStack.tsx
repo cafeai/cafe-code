@@ -2,10 +2,17 @@ import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 
 import { XIcon } from "lucide-react";
 
 import { cn } from "~/lib/utils";
+import { useMediaQuery } from "~/hooks/useMediaQuery";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button } from "../ui/button";
 
-const DISMISS_TRANSITION_MS = 220;
+/**
+ * Exits use the fast motion token (docs/style-guide.md: exits are faster than
+ * entrances). The timeout must match --duration-fast because the dismissed
+ * banner is removed only after its exit finishes. Reduced motion keeps the
+ * fade but drops the travel, matching the global entrance rule.
+ */
+const DISMISS_TRANSITION_MS = 120;
 const frontExitStyle = {
   opacity: 0,
   transform: "translate3d(0, 4rem, 0)",
@@ -14,12 +21,13 @@ const stackedExitStyle = {
   opacity: 0,
   transform: "translate3d(0, 7rem, 0)",
 } satisfies CSSProperties;
+const reducedMotionExitStyle = { opacity: 0 } satisfies CSSProperties;
 const restingStyle = {
   opacity: 1,
   transform: "translate3d(0, 0, 0)",
 } satisfies CSSProperties;
 const exitTransitionStyle = {
-  transition: `transform ${DISMISS_TRANSITION_MS}ms ease-in, opacity ${DISMISS_TRANSITION_MS}ms ease-in`,
+  transition: `transform ${DISMISS_TRANSITION_MS}ms var(--ease-in), opacity ${DISMISS_TRANSITION_MS}ms var(--ease-in)`,
   willChange: "transform, opacity",
 } satisfies CSSProperties;
 
@@ -41,6 +49,7 @@ interface ComposerBannerStackProps {
 
 export function ComposerBannerStack({ className, items }: ComposerBannerStackProps) {
   const [exitingItemId, setExitingItemId] = useState<string | null>(null);
+  const reducedMotion = useMediaQuery("(prefers-reduced-motion: reduce)");
   const dismissTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -96,7 +105,7 @@ export function ComposerBannerStack({ className, items }: ComposerBannerStackPro
             className={cn(
               "pointer-events-none absolute inset-x-0 -top-3 z-0 mx-auto h-3 rounded-t-xl",
               "border border-b-0 border-warning/24 bg-background/96 shadow-[0_6px_18px_rgba(0,0,0,0.06)]",
-              "transition-opacity duration-150 ease-out",
+              "transition-opacity duration-(--duration-fast) ease-out",
               "group-hover/banner-stack:opacity-0 group-focus-within/banner-stack:opacity-0",
             )}
             style={{ width: "96%" }}
@@ -104,13 +113,19 @@ export function ComposerBannerStack({ className, items }: ComposerBannerStackPro
           />
         ) : null}
         <div
+          // Keyed so a banner promoted from the stack (or a new one) enters once.
+          key={frontItem.id}
           className={cn(
-            "relative z-10",
+            "relative z-10 animate-enter-rise",
             exitingItemId === frontItem.id ? "pointer-events-none" : null,
           )}
           style={{
             ...exitTransitionStyle,
-            ...(exitingItemId === frontItem.id ? frontExitStyle : restingStyle),
+            ...(exitingItemId === frontItem.id
+              ? reducedMotion
+                ? reducedMotionExitStyle
+                : frontExitStyle
+              : restingStyle),
           }}
         >
           <ComposerBannerStackAlert
@@ -123,7 +138,7 @@ export function ComposerBannerStack({ className, items }: ComposerBannerStackPro
           <div
             className={cn(
               "pointer-events-none absolute inset-x-0 bottom-[calc(100%+0.5rem)] z-20 space-y-2 opacity-0",
-              "transition-[opacity,transform] duration-150 ease-out",
+              "transition-[opacity,transform] duration-(--duration-base) ease-out motion-reduce:translate-y-0",
               "translate-y-1 transform-gpu will-change-[opacity,transform]",
               "group-hover/banner-stack:pointer-events-auto group-hover/banner-stack:translate-y-0 group-hover/banner-stack:opacity-100",
               "group-focus-within/banner-stack:pointer-events-auto group-focus-within/banner-stack:translate-y-0 group-focus-within/banner-stack:opacity-100",
@@ -135,7 +150,11 @@ export function ComposerBannerStack({ className, items }: ComposerBannerStackPro
                 className={cn(exitingItemId === item.id ? "pointer-events-none" : null)}
                 style={{
                   ...exitTransitionStyle,
-                  ...(exitingItemId === item.id ? stackedExitStyle : restingStyle),
+                  ...(exitingItemId === item.id
+                    ? reducedMotion
+                      ? reducedMotionExitStyle
+                      : stackedExitStyle
+                    : restingStyle),
                 }}
               >
                 <ComposerBannerStackAlert

@@ -53,9 +53,8 @@ describe("GlobalDictationOverlay", () => {
           .element(page.getByRole("button", { name: "Insert", exact: true }))
           .not.toBeInTheDocument();
         await expect.element(paste).toHaveAttribute("aria-describedby", notice.id);
-        await expect
-          .element(paste)
-          .toHaveAttribute("title", expect.stringContaining("original app and text field"));
+        // The visible notice is the one explanation; no duplicate hover title.
+        expect(paste.element().hasAttribute("title")).toBe(false);
         await page.getByRole("textbox", { name: "Editable draft" }).fill("My reviewed paste.");
         const footerBounds = footer.getBoundingClientRect();
         expect(footerBounds.bottom).toBeLessThanOrEqual(window.innerHeight);

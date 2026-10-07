@@ -6,6 +6,18 @@ import type { CodexReviewTarget, RuntimeMode } from "@cafecode/contracts";
 import { useState, type FormEvent } from "react";
 import { NativeCodexReview } from "./NativeCodexReview";
 
+const REVIEW_TARGET_LABELS = {
+  uncommittedChanges: "Uncommitted changes",
+  baseBranch: "Changes against a base branch",
+  commit: "A specific commit",
+  custom: "Custom instructions",
+} as const;
+
+async function chooseReviewTarget(kind: keyof typeof REVIEW_TARGET_LABELS) {
+  await page.getByRole("combobox", { name: "Review target" }).click();
+  await page.getByRole("option", { name: REVIEW_TARGET_LABELS[kind], exact: true }).click();
+}
+
 /** The composer owns tab/menu gestures and open state; the native operation
  * remains a controlled dialog independent of either transient trigger. */
 function ReviewDialogHarness({
@@ -73,7 +85,12 @@ describe("native Codex review dialog", () => {
     expect(submitComposer).not.toHaveBeenCalled();
   });
 
-  it.each([
+  it.each<{
+    kind: keyof typeof REVIEW_TARGET_LABELS;
+    label: string | null;
+    value: string;
+    target: CodexReviewTarget;
+  }>([
     { kind: "uncommittedChanges", label: null, value: "", target: { type: "uncommittedChanges" } },
     {
       kind: "baseBranch",
@@ -102,20 +119,20 @@ describe("native Codex review dialog", () => {
       await page.getByRole("button", { name: "Open review dialog", exact: true }).click();
       await expect
         .element(
-          page.getByText(
-            "Ask Codex to check code for bugs and risks. Findings appear in this chat. Review in this chat with Codex personal. Uses the current native session and its review-model settings, not unsent composer changes.",
-            { exact: true },
-          ),
+          page.getByText("Codex reviews code for bugs and risks; findings appear in this chat.", {
+            exact: true,
+          }),
         )
         .toBeVisible();
+      // The saved session's account and permission mode are disclosed before submission.
       await expect
         .element(
-          page.getByText(
-            /Codex’s native reviewer runs non-interactively, without approval prompts/,
-          ),
+          page.getByText("Codex personal · Supervised · runs without approval prompts", {
+            exact: true,
+          }),
         )
         .toBeVisible();
-      await page.getByRole("combobox", { name: "Review target" }).selectOptions(kind);
+      if (kind !== "uncommittedChanges") await chooseReviewTarget(kind);
       if (label) {
         await expect
           .element(page.getByRole("button", { name: "Start review", exact: true }))
@@ -134,8 +151,10 @@ describe("native Codex review dialog", () => {
       <ReviewDialogHarness accountLabel="Codex work" runtimeMode="full-access" onStart={start} />,
     );
     await page.getByRole("button", { name: "Open review dialog", exact: true }).click();
-    await expect.element(page.getByText(/This chat currently has full access/)).toBeVisible();
-    await page.getByRole("combobox", { name: "Review target" }).selectOptions("baseBranch");
+    await expect
+      .element(page.getByText("Codex work · Full access · runs without approval prompts"))
+      .toBeVisible();
+    await chooseReviewTarget("baseBranch");
     await page.getByRole("textbox", { name: "Base branch" }).fill("--upload-pack=evil");
     await expect
       .element(page.getByRole("button", { name: "Start review", exact: true }))
@@ -202,7 +221,7 @@ describe("native Codex review dialog", () => {
       await view.rerender(<span>Claude selected</span>);
       await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
       await view.rerender(dialog);
-      await page.getByRole("combobox", { name: "Review target" }).selectOptions("custom");
+      await chooseReviewTarget("custom");
       await page
         .getByRole("textbox", { name: "Review instructions" })
         .fill("Replacement review draft");

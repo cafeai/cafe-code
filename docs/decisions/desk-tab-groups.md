@@ -5,7 +5,7 @@ repository checks and synthetic browser coverage passed on native macOS.
 
 Created: 2026-09-29 11:53:43 JST (UTC+0900).
 
-Last updated: 2026-10-06 02:23:23 JST (UTC+0900).
+Last updated: 2026-10-07 (America/Los_Angeles).
 
 ## Context and scope
 
@@ -25,6 +25,14 @@ versioned, environment-scoped local preference. Tabs reference existing server
 threads or explicit draft identities. A chat has one group membership. The
 split tree has at most four panes and the working set at most 256 tabs; reopen
 history retains 20 references. Only selected panes mount existing ChatViews.
+Each group can also hold one temporary preview. Settings → Chats selects whether
+catalog/search navigation previews chats (the default) or keeps them open. With
+Preview selected, an italic title marks the preview; selecting another chat in that group replaces or dismisses it.
+Double-clicking a chat row/tab, choosing Keep open, or explicitly rearranging
+the tab keeps it. Preview references are excluded from persisted layouts and
+reopen history, including preview-only panes. A restored current URL may show
+the preview again but cannot silently make it permanent. New-chat editors and
+first-send promotion retain their existing ownership and permanence rules.
 Flat, identity-keyed pane placement preserves a selected view when moving it
 between groups. Switching selected chats retains their existing composer store
 and a bounded in-memory timeline position/follow-tail cache.
@@ -38,6 +46,17 @@ not an empty reconnect placeholder. Admission still follows the existing
 primary-environment route boundary.
 
 The sidebar retains its original header/footer, project controls and search.
+Desk tab strips replace the redundant chat-header row and use a taller titlebar
+layout. Only top-edge panes reserve native window-control space; lower split
+panes use ordinary tab spacing. Unused titlebar space remains draggable, while
+tabs and actions are not. The chat title remains available to assistive
+technology, and project context lives in tab hover titles and the sidebar.
+Source-build status moves beside Settings in the sidebar footer. The tab's
+Open submenu reuses the existing local editor/terminal launch helpers and
+resolves the clicked chat's shell/draft project or worktree without subscribing
+to its transcript. Pending Open choices require the original Desk snapshot and
+unchanged environment/workspace; the favorite-editor shortcut stays with the
+active ChatView. No provider lifecycle or operating-system launch policy changes.
 Desk rows and compact tab strips use shell summaries for names/status, never
 eager history subscriptions. Direct pencil/F2 rename uses the existing metadata
 command. Group titles can be renamed directly. Drag-and-drop reorders tabs,

@@ -1,6 +1,6 @@
 import { VirtualDesktopsNavigation } from "./virtualDesktop/VirtualDesktops";
 import { SettingsIcon } from "lucide-react";
-import { memo } from "react";
+import { memo, type ReactNode } from "react";
 
 import unicornSilhouetteUrl from "../assets/twemoji-unicorn.svg";
 import { cn } from "../lib/utils";
@@ -12,6 +12,7 @@ interface SidebarFooterNavigationProps {
   readonly settingsActive: boolean;
   readonly onOpenAtrium: () => void;
   readonly onOpenSettings: () => void;
+  readonly settingsTrailing?: ReactNode;
 }
 
 /**
@@ -25,9 +26,10 @@ export const SidebarFooterNavigation = memo(function SidebarFooterNavigation({
   settingsActive,
   onOpenAtrium,
   onOpenSettings,
+  settingsTrailing,
 }: SidebarFooterNavigationProps) {
   const menuButtonClassName =
-    "min-w-0 flex-1 select-none gap-2 px-2 py-1.5 text-muted-foreground/70 hover:bg-accent hover:text-foreground";
+    "min-w-0 flex-1 select-none gap-2 px-2 py-1.5 text-muted-foreground hover:bg-accent hover:text-foreground";
 
   return (
     <SidebarMenu>
@@ -60,7 +62,7 @@ export const SidebarFooterNavigation = memo(function SidebarFooterNavigation({
                 WebkitMaskSize: "contain",
               }}
             />
-            <span className="truncate text-xs">Atrium</span>
+            <span className="truncate text-ui">Atrium</span>
           </SidebarMenuButton>
         </SidebarMenuItem>
       )}
@@ -73,8 +75,9 @@ export const SidebarFooterNavigation = memo(function SidebarFooterNavigation({
           onClick={onOpenSettings}
         >
           <SettingsIcon className="size-3.5" />
-          <span className="text-xs">Settings</span>
+          <span className="text-ui">Settings</span>
         </SidebarMenuButton>
+        {settingsTrailing}
       </SidebarMenuItem>
     </SidebarMenu>
   );

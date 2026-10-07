@@ -20,7 +20,9 @@ import {
   shouldClearThreadSelectionOnMouseDown,
   shouldInsetContentSidebarTrigger,
   sortProjectsForSidebar,
+  summarizeHiddenThreadStatuses,
   THREAD_JUMP_HINT_SHOW_DELAY_MS,
+  type ThreadStatusPill,
 } from "./Sidebar.logic";
 import {
   EnvironmentId,
@@ -547,7 +549,7 @@ describe("buildSidebarThreadContextMenuItems", () => {
     }).find((item) => item.id === "fork");
 
     expect(forkItem).toMatchObject({
-      label: "Fork thread",
+      label: "Fork chat",
       disabled: true,
     });
   });
@@ -651,6 +653,24 @@ describe("resolveThreadStatusPill", () => {
     ).toMatchObject({ label: "Completed", pulse: false });
   });
 
+  it("shows failed instead of completed when the unseen turn ended in error", () => {
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          interactionMode: "default",
+          latestTurn: { ...makeLatestTurn(), state: "error" },
+          lastVisitedAt: "2026-03-09T10:04:00.000Z",
+          session: {
+            ...baseThread.session,
+            status: "ready",
+            orchestrationStatus: "ready",
+          },
+        },
+      }),
+    ).toMatchObject({ label: "Failed", dotClass: "bg-status-error", pulse: false });
+  });
+
   it("shows completed when there is an unseen completion and no active blocker", () => {
     expect(
       resolveThreadStatusPill({
@@ -717,6 +737,59 @@ describe("resolveProjectStatusIndicator", () => {
         },
       ]),
     ).toMatchObject({ label: "Plan Ready", dotClass: "bg-violet-500" });
+  });
+});
+
+function pill(label: ThreadStatusPill["label"]): ThreadStatusPill {
+  return {
+    label,
+    colorClass: `text-${label}`,
+    dotClass: `bg-${label}`,
+    pulse: label === "Working" || label === "Connecting",
+  };
+}
+
+describe("summarizeHiddenThreadStatuses", () => {
+  it("returns null when hidden chats have no notable status", () => {
+    expect(summarizeHiddenThreadStatuses([])).toBeNull();
+    expect(summarizeHiddenThreadStatuses([null, null])).toBeNull();
+  });
+
+  it("summarizes only the highest-priority status and counts its members", () => {
+    expect(
+      summarizeHiddenThreadStatuses([
+        pill("Completed"),
+        pill("Pending Approval"),
+        null,
+        pill("Completed"),
+      ]),
+    ).toEqual({ status: pill("Pending Approval"), count: 1, text: "1 needs approval" });
+    expect(summarizeHiddenThreadStatuses([pill("Completed"), pill("Completed")])).toEqual({
+      status: pill("Completed"),
+      count: 2,
+      text: "2 unread",
+    });
+  });
+
+  it("uses count-aware phrases", () => {
+    expect(
+      summarizeHiddenThreadStatuses([pill("Awaiting Input"), pill("Awaiting Input")])?.text,
+    ).toBe("2 need input");
+    expect(summarizeHiddenThreadStatuses([pill("Pending Approval")])?.text).toBe(
+      "1 needs approval",
+    );
+    expect(summarizeHiddenThreadStatuses([pill("Plan Ready"), pill("Plan Ready")])?.text).toBe(
+      "2 plans ready",
+    );
+  });
+
+  it("groups equal-priority working and connecting chats under the working pill", () => {
+    expect(summarizeHiddenThreadStatuses([pill("Connecting"), pill("Working")])).toEqual({
+      status: pill("Working"),
+      count: 2,
+      text: "2 working",
+    });
+    expect(summarizeHiddenThreadStatuses([pill("Connecting")])?.text).toBe("1 connecting");
   });
 });
 

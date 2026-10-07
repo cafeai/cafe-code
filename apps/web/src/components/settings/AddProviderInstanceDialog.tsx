@@ -26,17 +26,16 @@ import { Input } from "../ui/input";
 import { RadioGroup } from "../ui/radio-group";
 import { toastManager } from "../ui/toast";
 import { DRIVER_OPTION_BY_VALUE, DRIVER_OPTIONS } from "./providerDriverMeta";
+import {
+  ProviderAccentColorPicker,
+  useHiddenProviderSettingsFieldKeys,
+} from "./ProviderInstanceCard";
 import { ProviderSettingsForm, deriveProviderSettingsFields } from "./ProviderSettingsForm";
 import { AnimatedHeight } from "../AnimatedHeight";
 
-const PROVIDER_ACCENT_SWATCHES = [
-  "#2563eb",
-  "#16a34a",
-  "#ea580c",
-  "#dc2626",
-  "#7c3aed",
-  "#0891b2",
-] as const;
+function OptionalMark() {
+  return <span className="font-normal text-subtle-foreground">(optional)</span>;
+}
 
 /**
  * Normalize a user-provided label into a slug suffix for the instance id.
@@ -135,10 +134,11 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
   const instanceIdError = validateInstanceId(instanceId, existingIds);
   const showInstanceIdError = hasAttemptedSubmit && instanceIdError !== null;
   const previewLabel = label.trim() || `${driverOption.label} Workspace`;
-  const wizardSteps = ["Driver", "Identity", "Config"] as const;
+  const wizardSteps = ["Provider", "Identity", "Config"] as const;
   const wizardStepSummaries = [driverOption.label, previewLabel, null] as const;
 
   const configDraft = configByDriver[driver] ?? EMPTY_CONFIG_DRAFT;
+  const hiddenSettingsFieldKeys = useHiddenProviderSettingsFieldKeys(configDraft);
   const setConfigDraft = useCallback(
     (config: Record<string, unknown> | undefined) => {
       setConfigByDriver((existing) => {
@@ -180,22 +180,18 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
     };
     try {
       updateSettings({ providerInstances: nextMap });
-      toastManager.add({
-        type: "success",
-        title: "Provider instance added",
-        description: `${driverOption.label} instance '${instanceId}' was added.`,
-      });
+      // The new card appearing in the list confirms the addition; toasts are
+      // reserved for failures (docs/style-guide.md §10).
       onOpenChange(false);
     } catch (error) {
       toastManager.add({
         type: "error",
-        title: "Could not add provider instance",
+        title: "Could not add provider",
         description: error instanceof Error ? error.message : "Update failed.",
       });
     }
   }, [
     driver,
-    driverOption,
     configByDriver,
     instanceId,
     instanceIdError,
@@ -209,25 +205,22 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogPopup className="max-w-xl overflow-hidden">
-        <div className="flex min-h-0 flex-col overflow-hidden border-foreground/10 bg-background shadow-2xl">
-          <DialogHeader className="border-b border-border/70 bg-background">
-            <DialogTitle>Add provider instance</DialogTitle>
-            <DialogDescription>
-              Configure an additional provider instance — for example, a second Codex install
-              pointed at a different workspace.
-            </DialogDescription>
+        <div className="flex min-h-0 flex-col overflow-hidden">
+          <DialogHeader className="border-b border-border-subtle">
+            <DialogTitle>Add provider</DialogTitle>
+            <DialogDescription>Add another account or install of a provider.</DialogDescription>
             <div className="grid grid-cols-3 gap-2">
               {wizardSteps.map((step, index) => (
                 <button
                   key={step}
                   type="button"
                   className={cn(
-                    "grid min-w-0 grid-cols-[1rem_minmax(0,1fr)] gap-x-2 rounded-lg border px-3 py-2 text-left",
+                    "focus-ring grid min-w-0 cursor-pointer grid-cols-[1rem_minmax(0,1fr)] gap-x-2 rounded-lg border px-3 py-2 text-left transition-colors duration-(--duration-fast)",
                     index === wizardStep
-                      ? "border-primary bg-primary/10 ring-1 ring-primary/25"
+                      ? "border-primary bg-primary/10"
                       : index < wizardStep
-                        ? "border-border bg-background"
-                        : "border-border bg-muted/40",
+                        ? "border-border bg-background hover:bg-accent"
+                        : "border-border bg-muted/40 hover:bg-accent",
                   )}
                   onClick={() => setWizardStep(index)}
                 >
@@ -238,15 +231,13 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
                         ? "border-primary bg-primary text-primary-foreground"
                         : index === wizardStep
                           ? "border-primary bg-background"
-                          : "border-muted-foreground/35 bg-background",
+                          : "border-border-strong bg-background",
                     )}
                     aria-hidden
                   >
                     {index < wizardStep ? <CheckIcon className="size-3" /> : null}
                   </span>
-                  <span className="text-[10px] font-medium uppercase text-muted-foreground">
-                    Step {index + 1}
-                  </span>
+                  <span className="text-2xs text-subtle-foreground">Step {index + 1}</span>
                   <span className="truncate text-xs font-semibold text-foreground">
                     {step}
                     {index < wizardStep && wizardStepSummaries[index]
@@ -258,17 +249,14 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
             </div>
           </DialogHeader>
 
-          <div
-            data-slot="dialog-panel"
-            className="space-y-4 border-b border-border/70 bg-muted/20 px-6 py-5"
-          >
+          <div data-slot="dialog-panel" className="space-y-4 px-6 py-5">
             <AnimatedHeight>
               <div className={cn("grid gap-2", wizardStep !== 0 && "hidden")}>
                 <span
                   id="add-instance-driver-label"
                   className="text-xs font-medium text-foreground"
                 >
-                  Driver
+                  Provider
                 </span>
                 <RadioGroup
                   value={driver}
@@ -288,7 +276,7 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
                           "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background",
                           isSelected
                             ? "border-primary bg-background shadow-sm ring-2 ring-primary/35"
-                            : "border-border bg-background hover:border-foreground/20 hover:bg-muted/50",
+                            : "border-border bg-background hover:border-border-strong hover:bg-accent",
                         )}
                       >
                         <IconComponent className="size-5 shrink-0" aria-hidden />
@@ -307,16 +295,15 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
               </div>
 
               <label className={cn("grid gap-2", wizardStep !== 1 && "hidden")}>
-                <span className="text-xs font-medium text-foreground">Label</span>
+                <span className="text-xs font-medium text-foreground">
+                  Display name <OptionalMark />
+                </span>
                 <Input
                   className="bg-background"
                   placeholder="e.g. Work"
                   value={label}
                   onChange={(event) => setLabel(event.target.value)}
                 />
-                <span className="text-[11px] text-muted-foreground">
-                  Shown in the provider list. Optional.
-                </span>
               </label>
 
               <label className={cn("grid gap-2", wizardStep !== 1 && "hidden")}>
@@ -332,59 +319,25 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
                   aria-invalid={showInstanceIdError}
                 />
                 {showInstanceIdError ? (
-                  <span className="text-[11px] text-destructive">{instanceIdError}</span>
+                  <span className="text-xs text-destructive-foreground">{instanceIdError}</span>
                 ) : (
-                  <span className="text-[11px] text-muted-foreground">
-                    Routing key used by threads and sessions. Letters, digits, '-', or '_'.
+                  <span className="text-xs text-muted-foreground">
+                    Internal ID: letters, digits, - or _.
                   </span>
                 )}
               </label>
 
-              <div className={cn("grid gap-2", wizardStep !== 1 && "hidden")}>
-                <span className="text-xs font-medium text-foreground">Accent color</span>
-                <div className="flex min-w-0 flex-wrap items-center gap-2">
-                  <input
-                    type="color"
-                    value={normalizeProviderAccentColor(accentColor) ?? PROVIDER_ACCENT_SWATCHES[0]}
-                    onChange={(event) => setAccentColor(event.target.value)}
-                    aria-label="Provider instance accent color"
-                    className="h-8 w-10 cursor-pointer rounded-xl border border-input bg-background p-0.5"
-                  />
-                  <div className="flex flex-wrap gap-1.5">
-                    {PROVIDER_ACCENT_SWATCHES.map((swatch) => {
-                      const selected = accentColor.toLowerCase() === swatch;
-                      return (
-                        <button
-                          key={swatch}
-                          type="button"
-                          className={cn(
-                            "size-6 cursor-pointer rounded-full border transition",
-                            selected
-                              ? "scale-110 border-foreground ring-2 ring-ring ring-offset-1 ring-offset-background"
-                              : "border-black/10 hover:scale-105 dark:border-white/20",
-                          )}
-                          style={{ backgroundColor: swatch }}
-                          onClick={() => setAccentColor(swatch)}
-                          aria-label={`Use ${swatch} accent`}
-                        />
-                      );
-                    })}
-                  </div>
-                  {accentColor ? (
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      className="h-7 px-2 text-xs text-muted-foreground"
-                      onClick={() => setAccentColor("")}
-                    >
-                      Clear
-                    </Button>
-                  ) : null}
-                </div>
-                <span className="text-[11px] text-muted-foreground">
-                  Optional marker shown in the picker.
-                </span>
+              <div className={cn(wizardStep !== 1 && "hidden")}>
+                <ProviderAccentColorPicker
+                  label={
+                    <>
+                      Accent color <OptionalMark />
+                    </>
+                  }
+                  customColorLabel="Custom provider accent color"
+                  value={accentColor}
+                  onCommit={setAccentColor}
+                />
               </div>
 
               {driverSettingsFields.length > 0 ? (
@@ -394,20 +347,19 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
                     value={configDraft}
                     idPrefix={`add-provider-${driver}`}
                     variant="dialog"
+                    hiddenFieldKeys={hiddenSettingsFieldKeys}
                     onChange={setConfigDraft}
                   />
                 </div>
               ) : wizardStep === 2 ? (
                 <div className="grid gap-2">
-                  <p className="text-sm text-muted-foreground">
-                    This driver has no required configuration. You can add the instance now.
-                  </p>
+                  <p className="text-sm text-muted-foreground">No other settings needed.</p>
                 </div>
               ) : null}
             </AnimatedHeight>
           </div>
 
-          <DialogFooter className="border-t bg-background">
+          <DialogFooter>
             <Button
               variant="outline"
               size="sm"
@@ -427,7 +379,7 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
               </Button>
             ) : (
               <Button size="sm" onClick={handleSave}>
-                Add instance
+                Add provider
               </Button>
             )}
           </DialogFooter>

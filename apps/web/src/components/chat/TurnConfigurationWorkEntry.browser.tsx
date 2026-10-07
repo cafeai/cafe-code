@@ -32,20 +32,24 @@ describe("turn configuration work-log row", () => {
   it.each([
     ["default", "Fast off", "Standard"],
     ["priority", "Fast on", "Fast"],
-    ["ultrafast", "Fast on", "Ultra fast"],
+    ["ultrafast", "Ultra fast", "Ultra fast"],
   ])(
-    "shows inherited native %s routing without provider-default ambiguity",
+    "shows inherited native %s routing on one line with the tier in its tooltip",
     async (tier, fast, label) => {
       const { fastMode: _fast, ...inherited } = configuration;
       const view = await render(
         <TurnConfigurationWorkEntry configuration={{ ...inherited, resolvedServiceTier: tier }} />,
       );
       try {
-        await expect.element(page.getByText(fast)).toBeVisible();
-        await expect.element(page.getByText(`Service tier: ${label}`)).toBeVisible();
-        expect(
-          document.querySelector("[data-turn-configuration-settings]")?.textContent,
-        ).not.toContain("provider default");
+        const settings = document.querySelector<HTMLElement>("[data-turn-configuration-settings]")!;
+        expect(settings.textContent).toBe(
+          `GPT-6.1 Sol · Ultra · ${fast} · Codex Personal · Build · Full access`,
+        );
+        expect(settings.textContent).not.toContain("Default");
+        settings.focus();
+        await expect
+          .element(page.getByText(new RegExp(`Submitted settings · Service tier: ${label}\\.`)))
+          .toBeVisible();
       } finally {
         await view.unmount();
       }
@@ -59,7 +63,7 @@ describe("turn configuration work-log row", () => {
     { width: 280, scale: 130, longLabels: true },
     { width: 480, scale: 100, longLabels: true },
   ])(
-    "keeps all settings/account visible without overflow at $width px / $scale%",
+    "keeps settings and the account label visible without overflow at $width px / $scale%",
     async (options) => {
       document.documentElement.style.fontSize = `${options.scale}%`;
       const snapshot = {
@@ -77,33 +81,51 @@ describe("turn configuration work-log row", () => {
         </div>,
       );
       try {
-        await expect.element(page.getByText("Effort: Ultra")).toBeVisible();
-        await expect.element(page.getByText("Fast on")).toBeVisible();
-        await expect.element(page.getByText("Submitted settings")).toBeVisible();
-        await expect
-          .element(page.getByText(`Account: ${snapshot.providerDisplayName}`))
-          .toBeVisible();
         const pane = document.querySelector<HTMLElement>("[data-testid='turn-settings-pane']")!;
         const row = pane.querySelector<HTMLElement>("[data-turn-configuration-row]")!;
         const settings = row.querySelector<HTMLElement>("[data-turn-configuration-settings]")!;
-        const account = row.querySelector<HTMLElement>("[data-turn-configuration-account]")!;
+        await expect.element(settings).toBeVisible();
+        expect(settings.textContent).toBe(
+          `${snapshot.modelDisplayName} · Ultra · Fast on · ${snapshot.providerDisplayName} · Build · Full access`,
+        );
         expect(pane.scrollWidth).toBeLessThanOrEqual(pane.clientWidth + 1);
         expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth + 1);
         expect(settings.scrollWidth).toBeLessThanOrEqual(settings.clientWidth + 1);
-        expect(account.scrollWidth).toBeLessThanOrEqual(account.clientWidth + 1);
-        expect(settings.textContent).toContain(snapshot.modelDisplayName);
-        expect(account.textContent).toContain("Build · Full access");
         expect(settings.className).not.toContain("truncate");
-        expect(account.className).not.toContain("truncate");
         if (options.longLabels) {
           expect(settings.getBoundingClientRect().height).toBeGreaterThan(40);
-          expect(account.getBoundingClientRect().height).toBeGreaterThan(40);
         }
       } finally {
         await view.unmount();
       }
     },
   );
+
+  it("names a Claude turn by its single native permission mode", async () => {
+    const view = await render(
+      <TurnConfigurationWorkEntry
+        configuration={{
+          ...configuration,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          providerInstanceId: ProviderInstanceId.make("claude_work"),
+          providerDisplayName: "Claude Work",
+          modelDisplayName: "Opus 5.5",
+          effort: "max",
+          interactionMode: "default",
+          runtimeMode: "approval-required",
+        }}
+      />,
+    );
+    try {
+      const settings = document.querySelector<HTMLElement>("[data-turn-configuration-settings]")!;
+      await expect.element(settings).toBeVisible();
+      expect(settings.textContent).toBe("Opus 5.5 · Max · Fast on · Claude Work · Ask permissions");
+      expect(settings.textContent).not.toContain("Build");
+      expect(settings.textContent).not.toContain("Supervised");
+    } finally {
+      await view.unmount();
+    }
+  });
 
   it("renders configured labels as inert plain text, not active markup or links", async () => {
     const view = await render(

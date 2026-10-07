@@ -548,7 +548,7 @@ export function selectAtriumSnapshot(
         key: JSON.stringify([environmentId, threadId]),
         environmentId,
         threadId,
-        title: summary.title.trim().length > 0 ? summary.title : "Untitled thread",
+        title: summary.title.trim().length > 0 ? summary.title : "Untitled chat",
         provider: session?.provider ?? turnConfiguration?.provider ?? "",
         turnConfiguration,
         projectName: project?.name ?? "",

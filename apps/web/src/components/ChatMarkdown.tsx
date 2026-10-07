@@ -26,7 +26,7 @@ import remarkGfm from "remark-gfm";
 import { VscodeEntryIcon } from "./chat/VscodeEntryIcon";
 import { renderSkillInlineMarkdownChildren } from "./chat/SkillInlineText";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
-import { stackedThreadToast, toastManager } from "./ui/toast";
+import { anchoredToastManager, stackedThreadToast, toastManager } from "./ui/toast";
 import { openInPreferredEditor } from "../editorPreferences";
 import { resolveDiffThemeName, type DiffThemeName } from "../lib/diffRendering";
 import { fnv1a32 } from "../lib/diffRendering";
@@ -506,13 +506,19 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
   const localShellCapabilities = getLocalShellCapabilities(environmentId);
   const canOpenLocalEditor = localShellCapabilities.canOpenLocalEditor;
   const canRevealLocalPath = localShellCapabilities.canOpenLocalPath;
+  const linkRef = useRef<HTMLAnchorElement | null>(null);
   const handleCopy = useCallback((value: string, title: string) => {
     void copyTextToClipboard(value).then(
       () => {
-        toastManager.add({
-          type: "success",
+        // A copy confirmation is inline (style guide §10): a brief
+        // tooltip-style note anchored to the link, not a stacked toast.
+        const anchor = linkRef.current;
+        if (!anchor?.isConnected) return;
+        anchoredToastManager.add({
+          data: { tooltipStyle: true },
+          positionerProps: { anchor },
+          timeout: 1200,
           title: `${title} copied`,
-          description: value,
         });
       },
       (error) => {
@@ -654,6 +660,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
       <TooltipTrigger
         render={
           <a
+            ref={linkRef}
             href={href}
             className={cn(MARKDOWN_FILE_LINK_CLASS_NAME, className)}
             data-open-policy={openPolicy}
@@ -676,7 +683,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
       />
       <TooltipPopup
         side="top"
-        className="max-w-[min(40rem,calc(100vw-2rem))] font-mono text-[11px] leading-tight"
+        className="max-w-[min(40rem,calc(100vw-2rem))] font-mono text-2xs leading-tight"
       >
         <div className="markdown-file-link-tooltip-scroll overflow-x-auto whitespace-nowrap">
           {displayPath}
@@ -816,7 +823,7 @@ function ChatMarkdown({
   );
 
   return (
-    <div className="chat-markdown w-full min-w-0 text-sm leading-relaxed text-foreground/80">
+    <div className="chat-markdown w-full min-w-0 text-sm leading-relaxed text-chat-foreground">
       <MarkdownRenderingContext.Provider value={renderingContext}>
         <ReactMarkdown
           remarkPlugins={[

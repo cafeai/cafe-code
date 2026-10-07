@@ -7,7 +7,6 @@ import {
   ArchiveX,
   CopyIcon,
   FileTextIcon,
-  LoaderIcon,
   MessageSquareIcon,
   PlusIcon,
   RefreshCwIcon,
@@ -15,7 +14,15 @@ import {
 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { type ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type ChangeEvent,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   defaultInstanceIdForDriver,
   type DesktopSourceUpdateState,
@@ -87,7 +94,12 @@ import {
   NumberFieldInput,
 } from "../ui/number-field";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
 import { Slider } from "../ui/slider";
+import { Skeleton } from "../ui/skeleton";
+import { Spinner } from "../ui/spinner";
+import { InfoTip } from "../ui/info-tip";
+import { useDelayedFlag } from "../../hooks/useDelayedFlag";
 import { Switch } from "../ui/switch";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -234,7 +246,7 @@ function ProviderLastChecked({ lastCheckedAt }: { lastCheckedAt: string | null }
   }
 
   return (
-    <span className="text-[11px] text-muted-foreground/60">
+    <span className="text-2xs text-subtle-foreground">
       {lastCheckedRelative.suffix ? (
         <>
           Checked <span className="font-mono tabular-nums">{lastCheckedRelative.value}</span>{" "}
@@ -271,44 +283,52 @@ function sourceUpdateRequiresRebuild(state: DesktopSourceUpdateState | null) {
   );
 }
 
-function getSourceUpdateDescription(
-  state: DesktopSourceUpdateState | null,
-  hasDesktopBridge: boolean,
-) {
+/** One short status line for the Version row; hashes live in its info tooltip. */
+function getSourceUpdateStatus(state: DesktopSourceUpdateState | null, hasDesktopBridge: boolean) {
   if (!hasDesktopBridge) {
-    return "Source branch update checks are only available in the desktop app.";
+    return "Update checks need the desktop app.";
   }
   if (!state || state.status === "idle") {
-    return "Branch hash has not been checked yet.";
+    return "Not checked yet.";
   }
   if (state.status === "checking") {
-    return "Checking latest branch hash.";
+    return "Checking…";
   }
-
-  const dirtyLabel = state.dirty === null ? "dirty state unknown" : state.dirty ? "dirty" : "clean";
-  const localLine = `Current: ${formatSourceHash(state.localHash)} (${dirtyLabel})`;
-  const runtimeLine = `Running build: ${formatSourceHash(state.runtimeHash)}`;
   if (!state.trackedBranch) {
-    return `${localLine}\n${runtimeLine}\n${state.message ?? "Only branches main and dev are tracked."}`;
+    return state.message ?? "Only main and dev are tracked.";
   }
+  if (sourceUpdateRequiresRebuild(state)) {
+    return `Rebuild to apply (${state.trackedBranch})`;
+  }
+  if (state.status === "behind") {
+    return `Newer ${state.trackedBranch} commit available`;
+  }
+  if (state.status === "current") {
+    return "Up to date.";
+  }
+  return state.message;
+}
 
-  const remoteLine = `Latest origin/${state.trackedBranch}: ${formatSourceHash(state.remoteHash)}`;
-  const statusLine = sourceUpdateRequiresRebuild(state)
-    ? `Rebuild to apply (${state.trackedBranch})`
-    : state.status === "behind"
-      ? `Newer ${state.trackedBranch} commit available: ${formatSourceHash(state.remoteHash)}`
-      : state.status === "current"
-        ? "This checkout is current with origin."
-        : state.message;
-
-  return [localLine, runtimeLine, remoteLine, statusLine].filter(Boolean).join("\n");
+/** Commit details for the Version row tooltip, or null before a check has run. */
+function getSourceUpdateHashLines(state: DesktopSourceUpdateState | null): string[] | null {
+  if (!state || state.status === "idle" || state.status === "checking") {
+    return null;
+  }
+  const dirtyLabel = state.dirty === null ? "dirty state unknown" : state.dirty ? "dirty" : "clean";
+  return [
+    `Current: ${formatSourceHash(state.localHash)} (${dirtyLabel})`,
+    `Running build: ${formatSourceHash(state.runtimeHash)}`,
+    ...(state.trackedBranch
+      ? [`Latest origin/${state.trackedBranch}: ${formatSourceHash(state.remoteHash)}`]
+      : []),
+  ];
 }
 
 function AboutVersionTitle({ state }: { readonly state: DesktopSourceUpdateState | null }) {
   return (
     <span className="inline-flex items-center gap-2">
       <span>Version</span>
-      <code className="text-[11px] font-medium text-muted-foreground">
+      <code className="text-2xs font-medium text-muted-foreground">
         {APP_VERSION} ({getSourceUpdateBranchLabel(state)})
       </code>
     </span>
@@ -337,13 +357,22 @@ function AboutVersionSection() {
 
   const isChecking = sourceUpdateState?.status === "checking";
   const buttonDisabled = !hasDesktopBridge || isChecking;
-  const buttonLabel = isChecking ? "Checking…" : "Check for Updates";
-  const description = getSourceUpdateDescription(sourceUpdateState, hasDesktopBridge);
+  const status = getSourceUpdateStatus(sourceUpdateState, hasDesktopBridge);
+  const hashLines = getSourceUpdateHashLines(sourceUpdateState);
 
   return (
     <SettingsRow
       title={<AboutVersionTitle state={sourceUpdateState} />}
-      description={<span className="whitespace-pre-line">{description}</span>}
+      description={
+        <span className="inline-flex items-center gap-1.5">
+          <span>{status}</span>
+          {hashLines ? (
+            <InfoTip label="Version details">
+              <span className="block font-mono whitespace-pre-line">{hashLines.join("\n")}</span>
+            </InfoTip>
+          ) : null}
+        </span>
+      }
       control={
         <Tooltip>
           <TooltipTrigger
@@ -354,12 +383,13 @@ function AboutVersionSection() {
                 disabled={buttonDisabled}
                 onClick={handleButtonClick}
               >
-                {buttonLabel}
+                {isChecking ? <Spinner aria-hidden="true" className="size-3.5" /> : null}
+                Check for updates
               </Button>
             }
           />
           {!hasDesktopBridge ? (
-            <TooltipPopup>Source update checks are only available in the desktop app.</TooltipPopup>
+            <TooltipPopup>Update checks need the desktop app.</TooltipPopup>
           ) : null}
         </Tooltip>
       }
@@ -388,7 +418,7 @@ export function useSettingsRestore(onRestored?: () => void) {
         ? ["Background animations"]
         : []),
       ...(settings.showSidebarMascot !== DEFAULT_UNIFIED_SETTINGS.showSidebarMascot
-        ? ["Sidebar mascot"]
+        ? ["Show sidebar image"]
         : []),
       ...(settings.showSidebarSearch !== DEFAULT_UNIFIED_SETTINGS.showSidebarSearch
         ? ["Sidebar search"]
@@ -428,7 +458,7 @@ export function useSettingsRestore(onRestored?: () => void) {
         ? ["Default editor"]
         : []),
       ...(settings.sidebarThreadPreviewCount !== DEFAULT_UNIFIED_SETTINGS.sidebarThreadPreviewCount
-        ? ["Visible threads"]
+        ? ["Visible chats"]
         : []),
       ...(settings.autoOpenPlanSidebar !== DEFAULT_UNIFIED_SETTINGS.autoOpenPlanSidebar
         ? ["Auto-open plan panel"]
@@ -441,10 +471,13 @@ export function useSettingsRestore(onRestored?: () => void) {
         ? ["Automatic Git fetch interval"]
         : []),
       ...(settings.defaultThreadEnvMode !== DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode
-        ? ["New thread mode"]
+        ? ["New chat workspace"]
+        : []),
+      ...(settings.chatClickBehavior !== DEFAULT_UNIFIED_SETTINGS.chatClickBehavior
+        ? ["Single-click behavior"]
         : []),
       ...(settings.addProjectBaseDirectory !== DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory
-        ? ["Add project base directory"]
+        ? ["Add project starts in"]
         : []),
       ...(settings.confirmThreadArchive !== DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive
         ? ["Archive confirmation"]
@@ -452,7 +485,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.confirmThreadDelete !== DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete
         ? ["Delete confirmation"]
         : []),
-      ...(isGitWritingModelDirty ? ["Git writing model"] : []),
+      ...(isGitWritingModelDirty ? ["Text generation model"] : []),
     ],
     [
       isGitWritingModelDirty,
@@ -470,6 +503,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.continueBackgroundAnimations,
       settings.addProjectBaseDirectory,
       settings.defaultThreadEnvMode,
+      settings.chatClickBehavior,
       settings.defaultEditor,
       settings.appAccentColor,
       settings.brandWordmarkPrefix,
@@ -526,6 +560,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       enableAssistantStreaming: DEFAULT_UNIFIED_SETTINGS.enableAssistantStreaming,
       automaticGitFetchInterval: DEFAULT_UNIFIED_SETTINGS.automaticGitFetchInterval,
       defaultThreadEnvMode: DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode,
+      chatClickBehavior: DEFAULT_UNIFIED_SETTINGS.chatClickBehavior,
       addProjectBaseDirectory: DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory,
       confirmThreadArchive: DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive,
       confirmThreadDelete: DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete,
@@ -570,7 +605,7 @@ export function TextGenerationModelSettingsRow() {
   return (
     <SettingsRow
       title="Text generation model"
-      description="Choose the model and settings used for automatic chat titles and worktree branch names."
+      description="Writes chat titles and branch names."
       resetAction={
         isGitWritingModelDirty ? (
           <SettingResetButton
@@ -592,7 +627,7 @@ export function TextGenerationModelSettingsRow() {
             instanceEntries={gitModelInstanceEntries}
             modelOptionsByInstance={gitModelOptionsByInstance}
             triggerVariant="outline"
-            triggerClassName="min-w-0 max-w-none shrink-0 text-foreground/90 hover:text-foreground"
+            triggerClassName="min-w-0 max-w-none shrink-0 text-foreground"
             onInstanceModelChange={(instanceId, model) => {
               updateSettings({
                 textGenerationModelSelection: resolveAppModelSelectionState(
@@ -618,7 +653,7 @@ export function TextGenerationModelSettingsRow() {
             modelOptions={textGenModelOptions}
             allowPromptInjectedEffort={false}
             triggerVariant="outline"
-            triggerClassName="min-w-0 max-w-none shrink-0 text-foreground/90 hover:text-foreground"
+            triggerClassName="min-w-0 max-w-none shrink-0 text-foreground"
             onModelOptionsChange={(nextOptions) => {
               updateSettings({
                 textGenerationModelSelection: resolveAppModelSelectionState(
@@ -655,7 +690,6 @@ export function AppearanceSettingsPanel() {
   const [sidebarImageError, setSidebarImageError] = useState<string | null>(null);
   const [sidebarImagePreviewUrl, setSidebarImagePreviewUrl] = useState<string | null>(null);
   const [sidebarImageUploading, setSidebarImageUploading] = useState(false);
-  const renderedBrandPrefix = settings.brandWordmarkPrefix.trim() || DEFAULT_BRAND_WORDMARK_PREFIX;
   const savedSidebarImageSrc = useSidebarBrandImageSrc(settings.sidebarBrandImage);
   const sidebarImageSrc = sidebarImagePreviewUrl ?? savedSidebarImageSrc;
   const sidebarImageUsesDefault =
@@ -732,11 +766,10 @@ export function AppearanceSettingsPanel() {
   );
 
   return (
-    <SettingsPageContainer>
-      <SettingsSection title="Appearance">
+    <SettingsPageContainer title="Appearance">
+      <SettingsSection>
         <SettingsRow
           title="Theme"
-          description="Choose how Cafe Code looks across the app."
           resetAction={
             theme !== "system" ? (
               <SettingResetButton label="theme" onClick={() => setTheme("system")} />
@@ -769,7 +802,6 @@ export function AppearanceSettingsPanel() {
 
         <SettingsRow
           title="Interface size"
-          description="Scale text, controls, icons, and spacing across Cafe Code."
           resetAction={
             settings.interfaceScalePercent !== DEFAULT_INTERFACE_SCALE_PERCENT ? (
               <SettingResetButton
@@ -801,7 +833,7 @@ export function AppearanceSettingsPanel() {
 
         <SettingsRow
           title="Branding prefix"
-          description="Rename the first word of the sidebar wordmark while keeping the Code suffix."
+          description="Replaces 'Cafe' in the wordmark."
           resetAction={
             settings.brandWordmarkPrefix !== DEFAULT_UNIFIED_SETTINGS.brandWordmarkPrefix ? (
               <SettingResetButton
@@ -812,7 +844,6 @@ export function AppearanceSettingsPanel() {
               />
             ) : null
           }
-          status={`Preview: ${renderedBrandPrefix} Code`}
           control={
             <DraftInput
               aria-label="Branding prefix"
@@ -831,7 +862,7 @@ export function AppearanceSettingsPanel() {
 
         <SettingsRow
           title="Accent color"
-          description="Choose the primary color used for buttons, focused controls, and rings."
+          description="Used for buttons, selection and focus."
           resetAction={
             settings.appAccentColor !== DEFAULT_UNIFIED_SETTINGS.appAccentColor ? (
               <SettingResetButton
@@ -853,7 +884,7 @@ export function AppearanceSettingsPanel() {
 
         <SettingsRow
           title="Sidebar color"
-          description="Choose the color used by the animated sidebar stars and glow."
+          description="Colors the sidebar stars and glow."
           resetAction={
             settings.themeAccentColor !== DEFAULT_UNIFIED_SETTINGS.themeAccentColor ? (
               <SettingResetButton
@@ -875,7 +906,7 @@ export function AppearanceSettingsPanel() {
 
         <SettingsRow
           title="Sidebar image"
-          description="Use a local PNG, JPEG, GIF, or WebP image at the bottom of the sidebar."
+          description="PNG, JPEG, GIF or WebP, under 1 MB."
           resetAction={
             settings.sidebarBrandImage !== DEFAULT_UNIFIED_SETTINGS.sidebarBrandImage ? (
               <SettingResetButton
@@ -892,7 +923,9 @@ export function AppearanceSettingsPanel() {
             ) : null
           }
           status={
-            sidebarImageError ? <span className="text-destructive">{sidebarImageError}</span> : null
+            sidebarImageError ? (
+              <span className="text-destructive-foreground">{sidebarImageError}</span>
+            ) : null
           }
           control={
             <div className="flex w-full flex-col items-start gap-2 sm:w-72">
@@ -913,7 +946,10 @@ export function AppearanceSettingsPanel() {
                     variant="outline"
                     onClick={() => sidebarImageInputRef.current?.click()}
                   >
-                    {sidebarImageUploading ? "Uploading..." : "Choose image"}
+                    {sidebarImageUploading ? (
+                      <Spinner aria-hidden="true" className="size-3.5" />
+                    ) : null}
+                    Choose image
                   </Button>
                   {settings.sidebarBrandImage ? (
                     <Button
@@ -949,7 +985,6 @@ export function AppearanceSettingsPanel() {
 
         <SettingsRow
           title="Sidebar search"
-          description="Show the search button at the top of the sidebar."
           resetAction={
             settings.showSidebarSearch !== DEFAULT_UNIFIED_SETTINGS.showSidebarSearch ? (
               <SettingResetButton
@@ -968,12 +1003,11 @@ export function AppearanceSettingsPanel() {
         />
 
         <SettingsRow
-          title="Sidebar mascot"
-          description="Show the sidebar image at the bottom of the sidebar."
+          title="Show sidebar image"
           resetAction={
             settings.showSidebarMascot !== DEFAULT_UNIFIED_SETTINGS.showSidebarMascot ? (
               <SettingResetButton
-                label="sidebar mascot"
+                label="show sidebar image"
                 onClick={() => updateSettings({ showSidebarMascot: DEFAULT_SHOW_SIDEBAR_MASCOT })}
               />
             ) : null
@@ -982,14 +1016,13 @@ export function AppearanceSettingsPanel() {
             <Switch
               checked={settings.showSidebarMascot}
               onCheckedChange={(checked) => updateSettings({ showSidebarMascot: Boolean(checked) })}
-              aria-label="Show sidebar mascot"
+              aria-label="Show sidebar image"
             />
           }
         />
 
         <SettingsRow
           title="Sidebar attribution"
-          description="Show the attribution message below the sidebar image."
           resetAction={
             settings.showSidebarAttribution !== DEFAULT_UNIFIED_SETTINGS.showSidebarAttribution ? (
               <SettingResetButton
@@ -1013,7 +1046,7 @@ export function AppearanceSettingsPanel() {
 
         <SettingsRow
           title="Background animations"
-          description="Keep decorative animations running when Cafe Code is hidden or unfocused."
+          description="Keep decorations moving while Cafe is hidden or unfocused."
           resetAction={
             settings.continueBackgroundAnimations !==
             DEFAULT_UNIFIED_SETTINGS.continueBackgroundAnimations ? (
@@ -1040,7 +1073,6 @@ export function AppearanceSettingsPanel() {
 
         <SettingsRow
           title="Sidebar star speed"
-          description="Adjust how quickly the decorative sidebar stars drift."
           resetAction={
             settings.sidebarStarSpeed !== DEFAULT_UNIFIED_SETTINGS.sidebarStarSpeed ? (
               <SettingResetButton
@@ -1075,7 +1107,6 @@ export function AppearanceSettingsPanel() {
 
         <SettingsRow
           title="Time format"
-          description="System default follows your browser or OS clock preference."
           resetAction={
             settings.timestampFormat !== DEFAULT_UNIFIED_SETTINGS.timestampFormat ? (
               <SettingResetButton
@@ -1162,11 +1193,49 @@ export function ChatSettingsPanel() {
   }, [canOpenLocalEditor]);
 
   return (
-    <SettingsPageContainer>
-      <SettingsSection title="Chat & Threads">
+    <SettingsPageContainer title="Chats">
+      <SettingsSection>
+        <SettingsRow
+          title="Single-click behavior"
+          description="Preview temporarily, or keep each chat open as a tab."
+          resetAction={
+            settings.chatClickBehavior !== DEFAULT_UNIFIED_SETTINGS.chatClickBehavior ? (
+              <SettingResetButton
+                label="single-click behavior"
+                onClick={() =>
+                  updateSettings({ chatClickBehavior: DEFAULT_UNIFIED_SETTINGS.chatClickBehavior })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Select
+              value={settings.chatClickBehavior}
+              onValueChange={(value) => {
+                if (value === "preview" || value === "open")
+                  updateSettings({ chatClickBehavior: value });
+              }}
+            >
+              <SelectTrigger className="w-full sm:w-44" aria-label="Chat click behavior">
+                <SelectValue>
+                  {settings.chatClickBehavior === "open" ? "Open" : "Preview"}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectPopup align="end" alignItemWithTrigger={false}>
+                <SelectItem hideIndicator value="preview">
+                  Preview
+                </SelectItem>
+                <SelectItem hideIndicator value="open">
+                  Open
+                </SelectItem>
+              </SelectPopup>
+            </Select>
+          }
+        />
+
         <SettingsRow
           title="Assistant output"
-          description="Show token-by-token output while a response is in progress."
+          description="Show replies while they are being written."
           resetAction={
             settings.enableAssistantStreaming !==
             DEFAULT_UNIFIED_SETTINGS.enableAssistantStreaming ? (
@@ -1193,7 +1262,7 @@ export function ChatSettingsPanel() {
 
         <SettingsRow
           title="Auto-open plan panel"
-          description="Open the right-side panel when a provider finishes an authored plan. Runtime task steps stay in the composer progress control."
+          description="Open the side panel when a provider finishes a plan."
           resetAction={
             settings.autoOpenPlanSidebar !== DEFAULT_UNIFIED_SETTINGS.autoOpenPlanSidebar ? (
               <SettingResetButton
@@ -1219,7 +1288,7 @@ export function ChatSettingsPanel() {
 
         <SettingsRow
           title="Chat selection copy"
-          description="Choose what Ctrl-C and right-click Copy put on the clipboard for selected chat message text."
+          description="What Copy puts on the clipboard for selected message text."
           resetAction={
             settings.chatCopyFormat !== DEFAULT_UNIFIED_SETTINGS.chatCopyFormat ? (
               <SettingResetButton
@@ -1257,12 +1326,12 @@ export function ChatSettingsPanel() {
         />
 
         <SettingsRow
-          title="New threads"
-          description="Pick the default workspace mode for newly created draft threads."
+          title="New chats"
+          description="Default workspace for new chats."
           resetAction={
             settings.defaultThreadEnvMode !== DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode ? (
               <SettingResetButton
-                label="new threads"
+                label="new chats"
                 onClick={() =>
                   updateSettings({
                     defaultThreadEnvMode: DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode,
@@ -1280,7 +1349,7 @@ export function ChatSettingsPanel() {
                 }
               }}
             >
-              <SelectTrigger className="w-full sm:w-44" aria-label="Default thread mode">
+              <SelectTrigger className="w-full sm:w-44" aria-label="Default chat workspace">
                 <SelectValue>
                   {settings.defaultThreadEnvMode === "worktree" ? "New worktree" : "Local"}
                 </SelectValue>
@@ -1299,7 +1368,7 @@ export function ChatSettingsPanel() {
 
         <SettingsRow
           title="System prompt"
-          description="Edit the file prepended to the first message in each new thread."
+          description="Added before the first message of each new chat."
           control={
             <Button
               type="button"
@@ -1309,7 +1378,7 @@ export function ChatSettingsPanel() {
               onClick={openSystemPromptFile}
             >
               {isOpeningSystemPromptFile ? (
-                <LoaderIcon className="size-4 animate-spin" aria-hidden />
+                <Spinner className="size-4" aria-hidden="true" />
               ) : canOpenLocalEditor ? (
                 <FileTextIcon className="size-4" aria-hidden />
               ) : (
@@ -1322,7 +1391,7 @@ export function ChatSettingsPanel() {
 
         <SettingsRow
           title="Archive confirmation"
-          description="Require a second click on the inline archive action before a thread is archived."
+          description="Click archive twice to confirm."
           resetAction={
             settings.confirmThreadArchive !== DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive ? (
               <SettingResetButton
@@ -1341,14 +1410,13 @@ export function ChatSettingsPanel() {
               onCheckedChange={(checked) =>
                 updateSettings({ confirmThreadArchive: Boolean(checked) })
               }
-              aria-label="Confirm thread archiving"
+              aria-label="Confirm chat archiving"
             />
           }
         />
 
         <SettingsRow
           title="Delete confirmation"
-          description="Ask before deleting a thread and its chat history."
           resetAction={
             settings.confirmThreadDelete !== DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete ? (
               <SettingResetButton
@@ -1367,7 +1435,7 @@ export function ChatSettingsPanel() {
               onCheckedChange={(checked) =>
                 updateSettings({ confirmThreadDelete: Boolean(checked) })
               }
-              aria-label="Confirm thread deletion"
+              aria-label="Confirm chat deletion"
             />
           }
         />
@@ -1394,11 +1462,11 @@ export function FilesSettingsPanel() {
       : (defaultEditorOption?.label ?? "System default");
 
   return (
-    <SettingsPageContainer>
-      <SettingsSection title="Files">
+    <SettingsPageContainer title="Files">
+      <SettingsSection>
         <SettingsRow
           title="Default editor"
-          description="Choose how file links open from chats and activity."
+          description="Opens file links from chats."
           resetAction={
             settings.defaultEditor !== DEFAULT_UNIFIED_SETTINGS.defaultEditor ? (
               <SettingResetButton
@@ -1453,7 +1521,6 @@ export function FilesSettingsPanel() {
 
         <SettingsRow
           title="Add project starts in"
-          description='Leave empty to use "~/" when the Add Project browser opens.'
           resetAction={
             settings.addProjectBaseDirectory !==
             DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory ? (
@@ -1496,11 +1563,11 @@ export function SystemSettingsPanel() {
   });
 
   return (
-    <SettingsPageContainer>
-      <SettingsSection title="System">
+    <SettingsPageContainer title="System">
+      <SettingsSection>
         <SettingsRow
           title="Keep awake"
-          description="Prevent your computer and screen from sleeping while Cafe Code is working."
+          description="Stop your computer and screen sleeping while Cafe works."
           resetAction={
             settings.powerSaveBlockerMode !== DEFAULT_UNIFIED_SETTINGS.powerSaveBlockerMode ? (
               <SettingResetButton
@@ -1675,7 +1742,7 @@ export function ProviderSettingsPanel() {
       try {
         const api = ensureWorkspaceApi();
         const confirmed = await api.dialogs.confirm(
-          `Restart the ${input.displayName} provider runtime?\n\nActive turns for this provider may be interrupted. Future messages will reconnect using saved session state.`,
+          `Restart ${input.displayName}? Running turns may be interrupted.`,
         );
         if (!confirmed) {
           return;
@@ -1686,11 +1753,11 @@ export function ProviderSettingsPanel() {
         });
         toastManager.add({
           type: "success",
-          title: `${input.displayName} runtime restarted`,
+          title: `${input.displayName} restarted`,
           description:
             result.stoppedSessionCount === 1
-              ? "Stopped 1 active provider session."
-              : `Stopped ${result.stoppedSessionCount} active provider sessions.`,
+              ? "Stopped 1 active session."
+              : `Stopped ${result.stoppedSessionCount} active sessions.`,
         });
       } catch (error) {
         toastManager.add(
@@ -1938,9 +2005,8 @@ export function ProviderSettingsPanel() {
   };
 
   return (
-    <SettingsPageContainer className="max-w-6xl">
+    <SettingsPageContainer title="Providers">
       <SettingsSection
-        title="Providers"
         headerAction={
           <div className="flex items-center gap-1.5">
             <ProviderLastChecked lastCheckedAt={lastCheckedAt} />
@@ -1972,7 +2038,7 @@ export function ProviderSettingsPanel() {
                     aria-label="Refresh provider status"
                   >
                     {isRefreshingProviders ? (
-                      <LoaderIcon className="size-3 animate-spin" />
+                      <Spinner aria-hidden="true" className="size-3" />
                     ) : (
                       <RefreshCwIcon className="size-3" />
                     )}
@@ -2129,6 +2195,51 @@ function useThreadHistoryEnvironmentIds() {
   return useMemo(() => (environmentId ? [environmentId] : []), [environmentId]);
 }
 
+/** Layout-matching first-load placeholder for the Archive and Recycle Bin lists. */
+function ThreadHistorySkeleton() {
+  return (
+    <SettingsSection aria-busy="true" aria-label="Loading chats">
+      {[0, 1, 2].map((index) => (
+        <div
+          key={index}
+          className="flex items-center justify-between gap-3 border-t border-border-subtle px-4 py-3.5 first:border-t-0 sm:px-5"
+        >
+          <div className="min-w-0 flex-1 space-y-2">
+            <Skeleton className="h-3.5 w-48 max-w-full rounded-full" />
+            <Skeleton className="h-3 w-64 max-w-full rounded-full" />
+          </div>
+          <Skeleton className="h-7 w-24 rounded-lg" />
+        </div>
+      ))}
+    </SettingsSection>
+  );
+}
+
+/** Shown only after the first load finishes with nothing to list (or an error). */
+function ThreadHistoryEmpty({
+  icon,
+  title,
+  description,
+}: {
+  readonly icon: ReactNode;
+  readonly title: string;
+  readonly description?: string | null;
+}) {
+  return (
+    <SettingsSection>
+      <Empty className="min-h-56 animate-enter-fade">
+        <EmptyMedia variant="icon">{icon}</EmptyMedia>
+        <EmptyHeader>
+          <EmptyTitle className="text-base">{title}</EmptyTitle>
+          {description ? (
+            <EmptyDescription className="text-xs">{description}</EmptyDescription>
+          ) : null}
+        </EmptyHeader>
+      </Empty>
+    </SettingsSection>
+  );
+}
+
 export function ArchivedThreadsPanel() {
   const environmentIds = useThreadHistoryEnvironmentIds();
   const { unarchiveThread, confirmAndDeleteThread } = useThreadActions();
@@ -2143,6 +2254,7 @@ export function ArchivedThreadsPanel() {
     () => groupThreadHistory(archivedSnapshots, "archived"),
     [archivedSnapshots],
   );
+  const showArchiveSkeleton = useDelayedFlag(isLoadingArchive && archivedGroups.length === 0);
 
   const handleArchivedThreadContextMenu = useCallback(
     async (threadRef: ScopedThreadRef, position: { x: number; y: number }) => {
@@ -2164,7 +2276,7 @@ export function ArchivedThreadsPanel() {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Failed to unarchive thread",
+              title: "Could not unarchive chat",
               description: error instanceof Error ? error.message : "An error occurred.",
             }),
           );
@@ -2181,31 +2293,19 @@ export function ArchivedThreadsPanel() {
   );
 
   return (
-    <SettingsPageContainer>
+    <SettingsPageContainer title="Archive">
       {archivedGroups.length === 0 ? (
-        <SettingsSection title="Archived threads">
-          <SettingsRow
-            title={
-              <span className="inline-flex items-center gap-2">
-                {isLoadingArchive ? (
-                  <LoaderIcon className="size-3.5 animate-spin text-muted-foreground" />
-                ) : (
-                  <ArchiveIcon className="size-3.5 text-muted-foreground" />
-                )}
-                {isLoadingArchive
-                  ? "Loading archived threads"
-                  : archiveError
-                    ? "Could not load archived threads"
-                    : "No archived threads"}
-              </span>
-            }
-            description={
-              isLoadingArchive
-                ? "Checking the selected server."
-                : (archiveError ?? "Archived threads will appear here.")
-            }
+        isLoadingArchive || showArchiveSkeleton ? (
+          showArchiveSkeleton ? (
+            <ThreadHistorySkeleton />
+          ) : null
+        ) : (
+          <ThreadHistoryEmpty
+            icon={<ArchiveIcon />}
+            title={archiveError ? "Could not load archived chats" : "No archived chats"}
+            description={archiveError}
           />
-        </SettingsSection>
+        )
       ) : (
         archivedGroups.map(({ groupKey, project, threads: projectThreads }) => (
           <SettingsSection
@@ -2253,7 +2353,7 @@ export function ArchivedThreadsPanel() {
                           toastManager.add(
                             stackedThreadToast({
                               type: "error",
-                              title: "Failed to unarchive thread",
+                              title: "Could not unarchive chat",
                               description:
                                 error instanceof Error ? error.message : "An error occurred.",
                             }),
@@ -2293,6 +2393,7 @@ export function RecentlyDeletedThreadsPanel() {
     () => collectRecentlyDeletedThreadRefs(deletedGroups),
     [deletedGroups],
   );
+  const showDeletedSkeleton = useDelayedFlag(isLoadingDeleted && deletedGroups.length === 0);
 
   const handleDeletedThreadContextMenu = useCallback(
     async (threadRef: ScopedThreadRef, position: { x: number; y: number }) => {
@@ -2301,7 +2402,7 @@ export function RecentlyDeletedThreadsPanel() {
       const clicked = await api.contextMenu.show(
         [
           { id: "restore", label: "Restore" },
-          { id: "delete-forever", label: "Delete Forever", destructive: true },
+          { id: "delete-forever", label: "Delete forever", destructive: true },
         ],
         position,
       );
@@ -2314,7 +2415,7 @@ export function RecentlyDeletedThreadsPanel() {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Failed to restore thread",
+              title: "Could not restore chat",
               description: error instanceof Error ? error.message : "An error occurred.",
             }),
           );
@@ -2330,7 +2431,7 @@ export function RecentlyDeletedThreadsPanel() {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Failed to delete thread",
+              title: "Could not delete chat",
               description: error instanceof Error ? error.message : "An error occurred.",
             }),
           );
@@ -2371,8 +2472,8 @@ export function RecentlyDeletedThreadsPanel() {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Failed to empty Recycle Bin",
-            description: `Deleted ${deletedCount} of ${deletedThreadRefs.length} threads. ${failures[0]}`,
+            title: "Could not empty Recycle Bin",
+            description: `Deleted ${deletedCount} of ${deletedThreadRefs.length} chats. ${failures[0]}`,
           }),
         );
         return;
@@ -2383,8 +2484,8 @@ export function RecentlyDeletedThreadsPanel() {
           title: "Recycle Bin emptied",
           description:
             deletedCount === 1
-              ? "Deleted 1 thread forever."
-              : `Deleted ${deletedCount} threads forever.`,
+              ? "Deleted 1 chat forever."
+              : `Deleted ${deletedCount} chats forever.`,
         }),
       );
     } finally {
@@ -2402,7 +2503,7 @@ export function RecentlyDeletedThreadsPanel() {
         onClick={() => void handleEmptyRecycleBin()}
       >
         {isEmptyingRecycleBin ? (
-          <LoaderIcon className="size-3.5 animate-spin" />
+          <Spinner aria-hidden="true" className="size-3.5" />
         ) : (
           <Trash2Icon className="size-3.5" />
         )}
@@ -2411,31 +2512,19 @@ export function RecentlyDeletedThreadsPanel() {
     ) : null;
 
   return (
-    <SettingsPageContainer>
+    <SettingsPageContainer title="Recently deleted">
       {deletedGroups.length === 0 ? (
-        <SettingsSection title="Recently Deleted">
-          <SettingsRow
-            title={
-              <span className="inline-flex items-center gap-2">
-                {isLoadingDeleted ? (
-                  <LoaderIcon className="size-3.5 animate-spin text-muted-foreground" />
-                ) : (
-                  <Trash2Icon className="size-3.5 text-muted-foreground" />
-                )}
-                {isLoadingDeleted
-                  ? "Loading recently deleted threads"
-                  : deletedError
-                    ? "Could not load recently deleted threads"
-                    : "No recently deleted threads"}
-              </span>
-            }
-            description={
-              isLoadingDeleted
-                ? "Checking the selected server."
-                : (deletedError ?? "Threads moved to the Recycle Bin will appear here.")
-            }
+        isLoadingDeleted || showDeletedSkeleton ? (
+          showDeletedSkeleton ? (
+            <ThreadHistorySkeleton />
+          ) : null
+        ) : (
+          <ThreadHistoryEmpty
+            icon={<Trash2Icon />}
+            title={deletedError ? "Could not load deleted chats" : "Recycle Bin is empty"}
+            description={deletedError}
           />
-        </SettingsSection>
+        )
       ) : (
         deletedGroups.map(({ groupKey, project, threads: projectThreads }, index) => (
           <SettingsSection

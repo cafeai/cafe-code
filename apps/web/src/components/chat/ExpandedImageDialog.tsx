@@ -65,7 +65,7 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
   // the pane's React ownership and keyboard guards.
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 px-4 py-6 [-webkit-app-region:no-drag]"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 px-4 py-6 animate-enter-fade [-webkit-app-region:no-drag]"
       role="dialog"
       aria-modal="true"
       aria-label="Expanded image preview"
@@ -88,24 +88,28 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
           <ChevronLeftIcon className="size-5" />
         </Button>
       )}
-      <div className="relative isolate z-10 flex max-h-full min-h-0 min-w-0 max-w-full flex-col items-center">
+      <div className="relative isolate z-10 flex max-h-full min-h-0 min-w-0 max-w-full flex-col items-center animate-enter-scale">
         <Button
           type="button"
           size="icon-xs"
           variant="ghost"
-          className="absolute right-2 top-2"
+          // Above the image: its entrance fade gives it a stacking context.
+          className="absolute right-2 top-2 z-10"
           onClick={onClose}
           aria-label="Close image preview"
         >
           <XIcon />
         </Button>
+        {/* Keyed by position so switching images crossfades the new one in
+            instead of swapping pixels in place. */}
         <img
+          key={`${preview.index}:${item.src}`}
           src={item.src}
           alt={item.name}
-          className="max-h-[min(86dvh,calc(100dvh_-_5rem))] max-w-full select-none rounded-lg border border-border/70 bg-background object-contain shadow-2xl"
+          className="max-h-[min(86dvh,calc(100dvh_-_5rem))] max-w-full select-none rounded-lg border border-border bg-background object-contain shadow-2xl animate-enter-fade"
           draggable={false}
         />
-        <p className="mt-2 max-w-full shrink-0 truncate text-center text-xs text-muted-foreground/80">
+        <p className="mt-2 max-w-full shrink-0 truncate text-center text-xs text-white/80">
           {item.name}
           {preview.images.length > 1 ? ` (${preview.index + 1}/${preview.images.length})` : ""}
         </p>

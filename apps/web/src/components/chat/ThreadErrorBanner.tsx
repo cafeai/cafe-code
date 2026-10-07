@@ -139,7 +139,7 @@ export const ThreadErrorBanner = memo(function ThreadErrorBanner({
   const recoveryForScope =
     recoveryState?.scopeKey === scopeKey && recoveryState.error === error ? recoveryState : null;
   return (
-    <div className="pt-3 mx-auto max-w-3xl">
+    <div className="pt-3 mx-auto max-w-3xl animate-enter-rise">
       <Alert variant="error">
         <CircleAlertIcon />
         <AlertDescription>
@@ -161,8 +161,8 @@ export const ThreadErrorBanner = memo(function ThreadErrorBanner({
               </Button>
               {recoveryForScope?.failed ? (
                 <span role="status">
-                  Could not confirm the new chat. No prompt was sent. Check your chat list before
-                  trying again.
+                  Couldn&apos;t confirm the new chat. No prompt was sent — check your chat list
+                  before trying again.
                 </span>
               ) : null}
             </div>
@@ -172,7 +172,7 @@ export const ThreadErrorBanner = memo(function ThreadErrorBanner({
           <button
             type="button"
             aria-label="Dismiss error"
-            className="inline-flex size-6 items-center justify-center rounded-md text-destructive/60 transition-colors hover:text-destructive"
+            className="focus-ring inline-flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors duration-(--duration-fast) hover:text-foreground"
             onClick={dismiss}
           >
             <XIcon className="size-3.5" />

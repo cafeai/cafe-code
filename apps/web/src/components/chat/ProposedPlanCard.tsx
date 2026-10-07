@@ -1,4 +1,4 @@
-import { memo, useState, useId } from "react";
+import { memo, useEffect, useState, useId } from "react";
 import type { EnvironmentId } from "@cafecode/contracts";
 import {
   buildCollapsedProposedPlanPreviewMarkdown,
@@ -43,6 +43,13 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
   const [isSaveDialogOpen, setIsSaveDialogOpen] = useState(false);
   const [savePath, setSavePath] = useState("");
   const [isSavingToWorkspace, setIsSavingToWorkspace] = useState(false);
+  // Inline, transient confirmation of a workspace save (no success toast).
+  const [savedRelativePath, setSavedRelativePath] = useState<string | null>(null);
+  useEffect(() => {
+    if (savedRelativePath === null) return;
+    const timer = window.setTimeout(() => setSavedRelativePath(null), 4_000);
+    return () => window.clearTimeout(timer);
+  }, [savedRelativePath]);
   const { copyToClipboard, isCopied } = useCopyToClipboard({
     onError: (error) => {
       toastManager.add(
@@ -79,7 +86,7 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
         stackedThreadToast({
           type: "error",
           title: "Workspace path is unavailable",
-          description: "This thread does not have a workspace path to save into.",
+          description: "This chat doesn't have a workspace to save into.",
         }),
       );
       return;
@@ -111,11 +118,7 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
       })
       .then((result) => {
         setIsSaveDialogOpen(false);
-        toastManager.add({
-          type: "success",
-          title: "Plan saved to workspace",
-          description: result.relativePath,
-        });
+        setSavedRelativePath(result.relativePath);
       })
       .catch((error) => {
         toastManager.add(
@@ -137,12 +140,21 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
   };
 
   return (
-    <div className="rounded-[24px] border border-border/80 bg-card/70 p-4 sm:p-5">
+    <div className="rounded-2xl border border-border bg-card p-4 sm:p-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
           <Badge variant="secondary">Plan</Badge>
           <p className="truncate text-sm font-medium text-foreground">{title}</p>
         </div>
+        {savedRelativePath ? (
+          <p
+            role="status"
+            className="ml-auto min-w-0 truncate text-2xs text-subtle-foreground animate-enter-fade"
+            title={savedRelativePath}
+          >
+            Saved to {savedRelativePath}
+          </p>
+        ) : null}
         <Menu>
           <MenuTrigger
             render={<Button aria-label="Plan actions" size="icon-xs" variant="outline" />}
@@ -151,7 +163,7 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
           </MenuTrigger>
           <MenuPopup align="end">
             <MenuItem onClick={handleCopyPlan}>
-              {isCopied ? "Copied!" : "Copy to clipboard"}
+              {isCopied ? "Copied" : "Copy to clipboard"}
             </MenuItem>
             <MenuItem onClick={handleDownload}>Download as markdown</MenuItem>
             <MenuItem onClick={openSaveDialog} disabled={!workspaceRoot || isSavingToWorkspace}>
@@ -168,7 +180,7 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
             <ChatMarkdown text={displayedPlanMarkdown} cwd={cwd} isStreaming={false} />
           )}
           {canCollapse && !expanded ? (
-            <div className="pointer-events-none absolute inset-x-0 bottom-0 h-24 bg-linear-to-t from-card/95 via-card/80 to-transparent" />
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 h-24 bg-linear-to-t from-card via-card/80 to-transparent" />
           ) : null}
         </div>
         {canCollapse ? (
@@ -227,7 +239,7 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
               onClick={() => void handleSaveToWorkspace()}
               disabled={isSavingToWorkspace}
             >
-              {isSavingToWorkspace ? "Saving..." : "Save"}
+              {isSavingToWorkspace ? "Saving…" : "Save"}
             </Button>
           </DialogFooter>
         </DialogPopup>

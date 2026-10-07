@@ -42,13 +42,12 @@ import {
   BotIcon,
   CheckIcon,
   CircleAlertIcon,
+  ExternalLinkIcon,
   EyeIcon,
   GitForkIcon,
   GlobeIcon,
   HammerIcon,
-  ChevronDownIcon,
   ChevronRightIcon,
-  SparklesIcon,
   type LucideIcon,
   SquarePenIcon,
   TerminalIcon,
@@ -57,6 +56,9 @@ import {
   ZapIcon,
 } from "lucide-react";
 import { Button } from "../ui/button";
+import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
+import { Skeleton } from "../ui/skeleton";
+import { useDelayedFlag } from "../../hooks/useDelayedFlag";
 import { buildExpandedImagePreview, ExpandedImagePreview } from "./ExpandedImagePreview";
 import { ProposedPlanCard } from "./ProposedPlanCard";
 import { MessageCopyButton } from "./MessageCopyButton";
@@ -147,6 +149,75 @@ interface TimelineRowSharedState {
   onForkMessage?: ((messageId: MessageId) => void) | undefined;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   onOpenSubagentDetail: (workEntry: WorkLogEntry, trigger: HTMLButtonElement) => void;
+  /** Stable, mutable tracker of rows appended live after first ready. */
+  rowEntrances: TimelineRowEntranceTracker;
+}
+
+/**
+ * Only rows appended live after the timeline's first ready render get an
+ * entrance animation (docs/style-guide.md §8). LegendList keys row content by
+ * item id and re-mounts rows as they scroll back into view; those re-mounts,
+ * the initial history, bulk hydration and streaming updates never animate.
+ */
+interface TimelineRowEntranceTracker {
+  /** Row ids seen since first ready; null until the timeline is ready. */
+  knownIds: Set<string> | null;
+  /** Live-appended ids awaiting their first mount, with append time. */
+  readonly pendingSince: Map<string, number>;
+}
+
+// A live append only animates if its row mounts promptly; one scrolled into
+// view much later is just content, not a new message.
+const ROW_ENTRANCE_WINDOW_MS = 1_000;
+// A single update that introduces more rows than this is a history/backfill
+// load, not something the user just watched arrive.
+const ROW_ENTRANCE_MAX_BATCH = 4;
+
+function trackTimelineRowEntrances(
+  tracker: TimelineRowEntranceTracker,
+  rows: ReadonlyArray<MessagesTimelineRow>,
+  ready: boolean,
+): void {
+  if (!ready) {
+    // Hydration can deliver history in several commits. Everything present
+    // before the conversation is ready is the baseline, never "new".
+    tracker.knownIds = null;
+    tracker.pendingSince.clear();
+    return;
+  }
+  if (tracker.knownIds === null) {
+    tracker.knownIds = new Set(rows.map((row) => row.id));
+    return;
+  }
+  const known = tracker.knownIds;
+  const appended = rows.filter((row) => !known.has(row.id));
+  if (appended.length === 0) return;
+  const now = Date.now();
+  for (const row of appended) {
+    known.add(row.id);
+    if (appended.length <= ROW_ENTRANCE_MAX_BATCH) tracker.pendingSince.set(row.id, now);
+  }
+  for (const [id, since] of tracker.pendingSince) {
+    if (now - since > ROW_ENTRANCE_WINDOW_MS) tracker.pendingSince.delete(id);
+  }
+  // Rows leave the bounded projection window over multi-hour sessions; keep
+  // this set proportional to the current rows rather than all history.
+  if (known.size > rows.length * 2 + 256) {
+    tracker.knownIds = new Set(rows.map((row) => row.id));
+  }
+}
+
+/** Decided once per row mount, then consumed so a later re-mount stays still. */
+function useTimelineRowEntrance(rowId: string): boolean {
+  const { rowEntrances } = use(TimelineRowCtx);
+  const [animate] = useState(() => {
+    const since = rowEntrances.pendingSince.get(rowId);
+    return since !== undefined && Date.now() - since <= ROW_ENTRANCE_WINDOW_MS;
+  });
+  useEffect(() => {
+    rowEntrances.pendingSince.delete(rowId);
+  }, [rowEntrances, rowId]);
+  return animate;
 }
 
 interface TimelineRowActivityState {
@@ -317,6 +388,18 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     ],
   );
   const rows = useStableRows(rawRows);
+  // One stable, deliberately mutable tracker per mounted timeline (the
+  // timeline remounts per chat). Tracking runs during render so a
+  // live-appended row knows it is new on its first mount; it is idempotent for
+  // the same rows, so repeated or concurrent renders agree.
+  const [rowEntranceTracker] = useState<TimelineRowEntranceTracker>(() => ({
+    knownIds: null,
+    pendingSince: new Map(),
+  }));
+  const rowEntrances = useMemo(() => {
+    trackTimelineRowEntrances(rowEntranceTracker, rows, !isThreadHistoryHydrating);
+    return rowEntranceTracker;
+  }, [isThreadHistoryHydrating, rowEntranceTracker, rows]);
   const [internalSelectedSubagent, setInternalSelectedSubagent] =
     useState<SubagentDetailSelection | null>(null);
   const selectedSubagent =
@@ -411,6 +494,15 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     };
   }, [activeThreadEnvironmentId, activeThreadId, rows, selectedSubagent, subagentRuntimeSession]);
   const isSubagentDetailOpen = resolvedSelectedSubagent !== null;
+  // Returning from a subagent detail slides the (still mounted) timeline back
+  // in from the start edge. Adjusting state during render restarts the CSS
+  // animation exactly once per open→closed transition.
+  const [subagentDetailWasOpen, setSubagentDetailWasOpen] = useState(isSubagentDetailOpen);
+  const [returnedFromSubagentDetail, setReturnedFromSubagentDetail] = useState(false);
+  if (subagentDetailWasOpen !== isSubagentDetailOpen) {
+    setSubagentDetailWasOpen(isSubagentDetailOpen);
+    setReturnedFromSubagentDetail(!isSubagentDetailOpen);
+  }
   const stickToEndDeadlineMsRef = useRef(0);
   const submitStickScrollEventRepinFrameRef = useRef<number | null>(null);
   const tailFollowItemLayoutRepinFrameRef = useRef<number | null>(null);
@@ -960,6 +1052,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onForkMessage,
       onImageExpand,
       onOpenSubagentDetail: openSubagentDetail,
+      rowEntrances,
     }),
     [
       timestampFormat,
@@ -976,16 +1069,24 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onForkMessage,
       onImageExpand,
       openSubagentDetail,
+      // Same tracker object on every render; listed for completeness only.
+      rowEntrances,
     ],
   );
   const activityState = useMemo<TimelineRowActivityState>(
     () => ({
       isWorking,
-      messageForkDisabled,
+      messageForkDisabled: messageForkDisabled || activeTurnInProgress,
       isRevertingCheckpoint,
       subagentDetailOpen: isSubagentDetailOpen,
     }),
-    [isRevertingCheckpoint, isSubagentDetailOpen, isWorking, messageForkDisabled],
+    [
+      activeTurnInProgress,
+      isRevertingCheckpoint,
+      isSubagentDetailOpen,
+      isWorking,
+      messageForkDisabled,
+    ],
   );
 
   // Stable renderItem — no closure deps. Row components read shared state
@@ -1027,9 +1128,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 
   if (rows.length === 0 && !isWorking && resolvedSelectedSubagent === null) {
     return (
-      <div className="flex h-full min-w-0 flex-col overflow-y-auto px-3 sm:px-5">
+      <div className="flex h-full min-w-0 flex-col overflow-y-auto px-3 sm:px-5 animate-enter-fade">
         <div className="flex min-h-40 flex-1 shrink-0 items-center justify-center">
-          <p className="text-sm text-muted-foreground/30">
+          <p className="text-sm text-subtle-foreground">
             Send a message to start the conversation.
           </p>
         </div>
@@ -1039,13 +1140,20 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   }
 
   return (
-    <div ref={timelineElementRef} className="relative h-full min-h-0 min-w-0 overflow-hidden">
+    // The timeline remounts per chat (keyed by ChatView), so this fade plays
+    // once when a chat's content first becomes ready — never on row updates.
+    // Opacity only: it cannot disturb LegendList's measurement or anchoring.
+    <div
+      ref={timelineElementRef}
+      className="relative h-full min-h-0 min-w-0 overflow-hidden animate-enter-fade"
+    >
       <TimelineRowCtx value={sharedState}>
         <TimelineRowActivityCtx value={activityState}>
           <div
             className={cn(
               "h-full min-h-0",
               isSubagentDetailOpen && "pointer-events-none invisible",
+              !isSubagentDetailOpen && returnedFromSubagentDetail && "animate-enter-from-start",
             )}
             aria-hidden={isSubagentDetailOpen ? true : undefined}
             inert={isSubagentDetailOpen ? true : undefined}
@@ -1109,38 +1217,51 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 });
 
 /**
- * A deliberately lightweight loading scene. Only the constellation's
- * `transform` is animated, which browsers can composite without repainting
- * the conversation surface on every frame. Reduced-motion users receive the
- * same polished illustration with no animation.
+ * First-load placeholder for a chat whose history is still arriving. Fast
+ * loads show nothing; after ~300ms a bottom-anchored skeleton matching the
+ * message layout appears, and a short label only for waits over ~1.5s
+ * (docs/style-guide.md §9). The status text is always available to assistive
+ * technology.
  */
 function ThreadHistoryLoadingState() {
+  const showSkeleton = useDelayedFlag(true, { delayMs: 300, minVisibleMs: 0 });
+  const showLabel = useDelayedFlag(true, { delayMs: 1_500, minVisibleMs: 0 });
   return (
     <div
       role="status"
       aria-live="polite"
+      aria-busy="true"
       data-thread-history-loading="true"
-      className="flex h-full items-center justify-center px-6"
+      className="flex h-full min-h-0 flex-col justify-end overflow-hidden px-3 pb-4 sm:px-5"
     >
-      <div className="flex max-w-sm flex-col items-center text-center">
-        <div className="relative mb-5 flex size-24 items-center justify-center" aria-hidden="true">
-          <div className="absolute inset-1 rounded-full border border-primary/15 bg-gradient-to-br from-primary/10 via-card/20 to-cyan-400/10 shadow-[0_0_38px_rgba(56,189,248,0.12)]" />
-          <div className="absolute inset-3 rounded-full border border-dashed border-foreground/15" />
-          <div className="absolute inset-0 animate-spin will-change-transform [--cafe-spin-duration:5s] [--cafe-spin-steps:300] motion-reduce:animate-none">
-            <span className="absolute left-1/2 top-0 size-2.5 -translate-x-1/2 rounded-full bg-primary shadow-[0_0_12px_currentColor]" />
-            <span className="absolute bottom-2 left-2.5 size-2 rounded-full bg-cyan-300/90 shadow-[0_0_10px_currentColor]" />
-            <span className="absolute bottom-3 right-1.5 size-1.5 rounded-full bg-foreground/70" />
+      {showSkeleton ? (
+        <div
+          aria-hidden="true"
+          className="mx-auto w-full min-w-0 max-w-3xl space-y-4 animate-enter-fade"
+          data-thread-history-skeleton="true"
+        >
+          <div className="flex justify-end">
+            <Skeleton className="h-11 w-2/5 rounded-2xl rounded-br-sm" />
           </div>
-          <div className="relative flex size-11 items-center justify-center rounded-full border border-primary/20 bg-card/80 text-primary shadow-sm">
-            <SparklesIcon className="size-5" strokeWidth={1.6} />
+          <div className="space-y-2 px-1">
+            <Skeleton className="h-3 w-11/12" />
+            <Skeleton className="h-3 w-4/5" />
+            <Skeleton className="h-3 w-3/5" />
+          </div>
+          <div className="flex justify-end">
+            <Skeleton className="h-9 w-1/3 rounded-2xl rounded-br-sm" />
           </div>
         </div>
-        <p className="font-medium text-foreground text-lg">Restoring your conversation</p>
-        <p className="mt-1.5 text-balance text-muted-foreground text-sm leading-relaxed">
-          Cafe is gathering this thread&apos;s history. It&apos;ll be ready to continue in just a
-          moment.
-        </p>
-      </div>
+      ) : null}
+      <p
+        className={
+          showLabel
+            ? "mx-auto mt-3 w-full max-w-3xl text-center text-2xs text-subtle-foreground animate-enter-fade"
+            : "sr-only"
+        }
+      >
+        Loading conversation…
+      </p>
     </div>
   );
 }
@@ -1209,11 +1330,15 @@ function hasActiveTextSelection(): boolean {
 }
 
 const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: TimelineRow }) {
+  const entering = useTimelineRowEntrance(row.id);
   return (
     <div
       className={cn(
         "pb-4",
         row.kind === "message" && row.message.role === "assistant" ? "group/assistant" : null,
+        // Translate on the row's own content never changes the size LegendList
+        // measures on its container.
+        entering && "animate-enter-rise",
       )}
       data-timeline-row-id={row.id}
       data-timeline-row-kind={row.kind}
@@ -1252,12 +1377,12 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
             {userImages.map((image) => (
               <div
                 key={image.id}
-                className="overflow-hidden rounded-lg border border-border/80 bg-background/70"
+                className="overflow-hidden rounded-lg border border-border-subtle bg-muted"
               >
                 {image.previewUrl ? (
                   <button
                     type="button"
-                    className="h-full w-full cursor-zoom-in"
+                    className="block w-full cursor-zoom-in"
                     aria-label={`Preview ${image.name}`}
                     onClick={() => {
                       const preview = buildExpandedImagePreview(userImages, image.id);
@@ -1265,14 +1390,10 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
                       ctx.onImageExpand(preview);
                     }}
                   >
-                    <img
-                      src={image.previewUrl}
-                      alt={image.name}
-                      className="block h-auto max-h-[220px] w-full object-cover"
-                    />
+                    <TimelineUserImage src={image.previewUrl} alt={image.name} />
                   </button>
                 ) : (
-                  <div className="flex min-h-[72px] items-center justify-center px-2 py-3 text-center text-[11px] text-muted-foreground/70">
+                  <div className="flex aspect-[4/3] items-center justify-center px-2 py-3 text-center text-2xs text-muted-foreground">
                     {image.name}
                   </div>
                 )}
@@ -1296,12 +1417,18 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
           skills={ctx.skills}
           footer={
             <>
-              <div className="flex items-center gap-1.5 opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover:opacity-100">
+              <div className={USER_MESSAGE_META_REVEAL_CLASS_NAME}>
                 {copyText && <MessageCopyButton text={copyText} />}
                 {canRevertAgentWork && <RevertUserMessageButton messageId={row.message.id} />}
                 {!row.message.streaming && <ForkMessageButton messageId={row.message.id} />}
               </div>
-              <p className="text-right text-xs text-muted-foreground/50">
+              <p
+                className={cn(
+                  "text-right text-2xs text-subtle-foreground tabular-nums",
+                  USER_MESSAGE_META_REVEAL_CLASS_NAME,
+                )}
+                data-message-meta="true"
+              >
                 {formatTimestamp(row.message.createdAt, ctx.timestampFormat)}
               </p>
             </>
@@ -1309,6 +1436,51 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
         />
       </div>
     </div>
+  );
+}
+
+// Message metadata and actions appear on hover or keyboard focus within the
+// message. Devices without hover (touch) keep them visible, matching the
+// existing fork button.
+const USER_MESSAGE_META_REVEAL_CLASS_NAME =
+  "flex items-center gap-1.5 opacity-0 transition-opacity duration-(--duration-fast) focus-within:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100";
+const ASSISTANT_MESSAGE_META_REVEAL_CLASS_NAME =
+  "opacity-0 transition-opacity duration-(--duration-fast) focus-within:opacity-100 group-hover/assistant:opacity-100 group-focus-within/assistant:opacity-100 [@media(hover:none)]:opacity-100";
+const MESSAGE_ACTION_BUTTON_CLASS_NAME =
+  "border-border-subtle bg-transparent text-subtle-foreground shadow-none hover:border-border hover:bg-accent hover:text-foreground";
+
+// Chat image previews are reserved at a fixed 4:3 box (attachments carry no
+// pixel size), filled once loaded, and fade in only on their first load in
+// this session so virtualized re-mounts of an already-seen image stay still.
+const LOADED_TIMELINE_IMAGE_SRCS = new Set<string>();
+const LOADED_TIMELINE_IMAGE_SRC_LIMIT = 256;
+
+function rememberLoadedTimelineImage(src: string): void {
+  LOADED_TIMELINE_IMAGE_SRCS.delete(src);
+  LOADED_TIMELINE_IMAGE_SRCS.add(src);
+  if (LOADED_TIMELINE_IMAGE_SRCS.size > LOADED_TIMELINE_IMAGE_SRC_LIMIT) {
+    const oldest = LOADED_TIMELINE_IMAGE_SRCS.values().next().value;
+    if (oldest !== undefined) LOADED_TIMELINE_IMAGE_SRCS.delete(oldest);
+  }
+}
+
+function TimelineUserImage({ src, alt }: { src: string; alt: string }) {
+  const [loaded, setLoaded] = useState(() => LOADED_TIMELINE_IMAGE_SRCS.has(src));
+  return (
+    <img
+      src={src}
+      alt={alt}
+      onLoad={() => {
+        rememberLoadedTimelineImage(src);
+        setLoaded(true);
+      }}
+      // Show the browser's broken-image/alt state rather than an empty box.
+      onError={() => setLoaded(true)}
+      className={cn(
+        "block aspect-[4/3] w-full object-cover transition-opacity duration-(--duration-base) ease-out",
+        loaded ? "opacity-100" : "opacity-0",
+      )}
+    />
   );
 }
 
@@ -1333,21 +1505,25 @@ function RevertUserMessageButton({ messageId }: { messageId: MessageId }) {
 function ForkMessageButton({ messageId }: { messageId: MessageId }) {
   const ctx = use(TimelineRowCtx);
   const activity = use(TimelineRowActivityCtx);
-  if (ctx.activeProvider !== "claudeAgent" || !ctx.onForkMessage) return null;
+  if (
+    ctx.activeProvider !== "claudeAgent" ||
+    !ctx.onForkMessage ||
+    activity.messageForkDisabled ||
+    activity.isWorking ||
+    activity.isRevertingCheckpoint
+  )
+    return null;
   return (
     <Button
       type="button"
       size="icon-xs"
-      variant="ghost"
+      variant="outline"
       aria-label="Fork from this message"
-      title={
-        activity.messageForkDisabled
-          ? "Wait for this chat and its background work to finish"
-          : "Fork from this message"
-      }
-      disabled={
-        activity.messageForkDisabled || activity.isWorking || activity.isRevertingCheckpoint
-      }
+      title="Fork from this message"
+      className={cn(
+        MESSAGE_ACTION_BUTTON_CLASS_NAME,
+        "opacity-0 transition-[opacity,color,background-color,border-color] duration-(--duration-fast) focus-visible:opacity-100 group-hover:opacity-100 group-hover/assistant:opacity-100 [@media(hover:none)]:opacity-100",
+      )}
       onClick={() => ctx.onForkMessage?.(messageId)}
     >
       <GitForkIcon className="size-3" />
@@ -1446,6 +1622,14 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
     row.message.id,
     sourceMessageText,
   );
+  // Native context-menu copies have no button to flip, so confirm inline in
+  // the message's meta row instead of a toast.
+  const [contextCopied, setContextCopied] = useState(false);
+  useEffect(() => {
+    if (!contextCopied) return;
+    const timer = window.setTimeout(() => setContextCopied(false), 1_200);
+    return () => window.clearTimeout(timer);
+  }, [contextCopied]);
   const handleContextMenu = useCallback(
     async (event: ReactMouseEvent<HTMLDivElement>) => {
       // On touch devices the contextmenu event comes from a long-press, which
@@ -1477,7 +1661,7 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
         });
         try {
           await copyTextToClipboard(copyText);
-          toastManager.add(stackedThreadToast({ type: "success", title: "Copied message" }));
+          setContextCopied(true);
         } catch (error) {
           toastManager.add(
             stackedThreadToast({
@@ -1506,7 +1690,13 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
         />
       </div>
       <div className="mt-1.5 flex items-center gap-2">
-        <p className="text-[10px] text-muted-foreground/30">
+        <p
+          className={cn(
+            "text-2xs text-subtle-foreground tabular-nums",
+            ASSISTANT_MESSAGE_META_REVEAL_CLASS_NAME,
+          )}
+          data-message-meta="true"
+        >
           {row.message.streaming ? (
             <LiveMessageMeta
               createdAt={row.message.createdAt}
@@ -1523,6 +1713,11 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
         </p>
         <AssistantCopyButton row={row} />
         {!row.message.streaming && <ForkMessageButton messageId={row.message.id} />}
+        {contextCopied ? (
+          <span role="status" className="text-2xs text-subtle-foreground animate-enter-fade">
+            Copied
+          </span>
+        ) : null}
       </div>
     </div>
   );
@@ -1530,12 +1725,14 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
 
 function AssistantCompletionDivider({ completionSummary }: { completionSummary: string | null }) {
   return (
-    <div className="my-3 flex items-center gap-3">
-      <span className="h-px flex-1 bg-border" />
-      <span className="rounded-full border border-border bg-background px-2.5 py-1 text-[10px] uppercase tracking-[0.14em] text-muted-foreground/80">
-        {completionSummary ? `Response • ${completionSummary}` : "Response"}
-      </span>
-      <span className="h-px flex-1 bg-border" />
+    <div className="my-3 flex items-center gap-3" data-completion-divider="true">
+      <span className="h-px flex-1 bg-border-subtle" />
+      {completionSummary ? (
+        <>
+          <span className="text-2xs text-subtle-foreground tabular-nums">{completionSummary}</span>
+          <span className="h-px flex-1 bg-border-subtle" />
+        </>
+      ) : null}
     </div>
   );
 }
@@ -1553,14 +1750,14 @@ function AssistantCopyButton({ row }: { row: Extract<TimelineRow, { kind: "messa
   }
 
   return (
-    <div className="flex items-center opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover/assistant:opacity-100">
+    <div className={cn("flex items-center", ASSISTANT_MESSAGE_META_REVEAL_CLASS_NAME)}>
       <MessageCopyButton
         text={prepareChatMessageMarkdownCopyText(assistantCopyState.text ?? "", {
           provider: ctx.activeProvider,
         })}
         size="icon-xs"
         variant="outline"
-        className="border-border/50 bg-background/35 text-muted-foreground/45 shadow-none hover:border-border/70 hover:bg-background/55 hover:text-muted-foreground/70"
+        className={MESSAGE_ACTION_BUTTON_CLASS_NAME}
       />
     </div>
   );
@@ -1588,7 +1785,7 @@ function ProposedPlanTimelineRow({
 function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "working" }> }) {
   return (
     <div className="py-0.5 pl-1.5">
-      <div className="flex items-center gap-2 pt-1 text-[11px] text-muted-foreground/70">
+      <div className="flex items-center gap-2 pt-1 text-2xs text-muted-foreground">
         <span className="inline-flex items-center gap-[3px]">
           <span className="h-1 w-1 rounded-full bg-muted-foreground/30 animate-pulse" />
           <span className="h-1 w-1 rounded-full bg-muted-foreground/30 animate-pulse [animation-delay:200ms]" />
@@ -1600,7 +1797,7 @@ function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "workin
               Working for <WorkingTimer createdAt={row.createdAt} />
             </>
           ) : (
-            "Working..."
+            "Working…"
           )}
         </span>
       </div>
@@ -1728,7 +1925,7 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
     const activeThreadId = ctx.activeThreadId;
     if (!api || activeThreadId === null) {
       setInitialPageLoaded(true);
-      setLoadError("Work log is unavailable while this environment is disconnected.");
+      setLoadError("Work log unavailable while disconnected.");
       return;
     }
 
@@ -1768,7 +1965,7 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
         setInitialPageLoaded(true);
       } catch {
         if (!cancelled) {
-          setLoadError("Unable to load this work log page.");
+          setLoadError("Couldn’t load the work log.");
         }
       } finally {
         if (!cancelled) {
@@ -1817,11 +2014,10 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
     rawTotalCount: totalCount,
     loadedOffset,
   });
-  const displayCount = historicalWorkLogDisplayState.displayCount;
   const countLabel = historicalWorkLogDisplayState.countLabel;
-  const compactSummary =
-    row.summary.previewEntries.at(-1)?.label ??
-    (displayCount > 0 ? "Saved activity" : "Fetch on demand");
+  // The latest saved label previews a collapsed log; nothing else is shown
+  // when no preview exists (no implementation placeholders).
+  const compactSummary = row.summary.previewEntries.at(-1)?.label ?? null;
   const hasOlder =
     loadedOffset !== null
       ? loadedOffset > 0
@@ -1852,7 +2048,7 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
     const api = readEnvironmentApi(ctx.activeThreadEnvironmentId);
     const activeThreadId = ctx.activeThreadId;
     if (!api || activeThreadId === null) {
-      setLoadError("Work log is unavailable while this environment is disconnected.");
+      setLoadError("Work log unavailable while disconnected.");
       return;
     }
     const nextOffset = Math.max(0, loadedOffset - HISTORICAL_WORK_LOG_PAGE_SIZE);
@@ -1870,7 +2066,7 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
       setActivityRows((current) => mergeHistoricalActivityRows([...page.activities, ...current]));
       setLoadedOffset(page.offset);
     } catch {
-      setLoadError("Unable to load older work log entries.");
+      setLoadError("Couldn’t load older entries.");
     } finally {
       setIsLoadingOlder(false);
     }
@@ -1883,7 +2079,7 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
     const api = readEnvironmentApi(ctx.activeThreadEnvironmentId);
     const activeThreadId = ctx.activeThreadId;
     if (!api || activeThreadId === null) {
-      setLoadError("Work log is unavailable while this environment is disconnected.");
+      setLoadError("Work log unavailable while disconnected.");
       return;
     }
     setIsLoadingOlder(true);
@@ -1899,7 +2095,7 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
       setActivityRows(page.activities);
       setLoadedOffset(page.offset);
     } catch {
-      setLoadError("Unable to load the full work log.");
+      setLoadError("Couldn’t load the full work log.");
     } finally {
       setIsLoadingOlder(false);
     }
@@ -1910,93 +2106,91 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
   // empty derived command/tool list proves that the Work Log itself is empty.
   const workKnownEmpty = initialPageLoaded && loadedOffset === 0 && visibleEntries.length === 0;
 
+  const showLoading = useDelayedFlag(isLoading && visibleEntries.length === 0);
+
   if (workKnownEmpty) {
     return <SubagentGroupSection entries={subagentEntries} />;
   }
 
-  if (!isExpanded) {
-    return (
-      <div className="space-y-2">
-        <SubagentGroupSection entries={subagentEntries} />
-        <button
-          type="button"
-          className="flex w-full items-center justify-between gap-2 rounded-lg border border-border/35 bg-card/15 px-2.5 py-1.5 text-left text-[11px] text-muted-foreground/70 transition-colors hover:border-border/60 hover:bg-card/25 hover:text-foreground/80"
-          data-historical-work-log-row="collapsed"
-          onClick={() => setIsExpanded(true)}
-        >
-          <span className="inline-flex min-w-0 items-center gap-1.5">
-            <ChevronRightIcon className="size-3 shrink-0 text-muted-foreground/45" />
-            <span className="shrink-0 font-medium text-muted-foreground/75">
-              Work log{countLabel}
-            </span>
-            <span className="truncate text-muted-foreground/45">{compactSummary}</span>
-          </span>
-          <span className="shrink-0 text-[10px] uppercase tracking-[0.12em] text-muted-foreground/45">
-            Expand
-          </span>
-        </button>
-      </div>
-    );
-  }
-
+  // Collapsed and expanded share one surface and one header style; the
+  // chevron rotates and the revealed rows rise in (docs/style-guide.md §8).
   return (
     <div className="space-y-2">
       <SubagentGroupSection entries={subagentEntries} />
       <div
-        className="rounded-xl border border-border/45 bg-card/20 px-2 py-1.5"
-        data-historical-work-log-row="expanded"
+        className="rounded-xl border border-border-subtle bg-card"
+        data-historical-work-log-row={isExpanded ? "expanded" : "collapsed"}
       >
-        <div className="mb-1.5 flex items-center justify-between gap-2 px-0.5">
+        <div className="flex min-w-0 items-center justify-between gap-2 pr-2">
           <button
             type="button"
-            className="inline-flex min-w-0 items-center gap-1.5 text-[9px] uppercase tracking-[0.16em] text-muted-foreground/60 transition-colors hover:text-foreground/75"
-            onClick={() => setIsExpanded(false)}
+            className="focus-ring flex min-w-0 flex-1 items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-left text-2xs text-subtle-foreground transition-colors duration-(--duration-fast) hover:text-foreground"
+            aria-expanded={isExpanded}
+            onClick={() => setIsExpanded((value) => !value)}
           >
-            <ChevronDownIcon className="size-3 shrink-0" />
-            <span>Work log{countLabel}</span>
+            <ChevronRightIcon
+              aria-hidden="true"
+              className={cn(
+                "size-3 shrink-0 transition-transform duration-(--duration-fast) ease-out",
+                isExpanded && "rotate-90",
+              )}
+            />
+            <span className="shrink-0 font-medium text-muted-foreground">Work log{countLabel}</span>
+            {!isExpanded && compactSummary ? (
+              <span className="truncate">{compactSummary}</span>
+            ) : null}
           </button>
-          <div className="flex shrink-0 items-center gap-2">
-            {canShowAll ? (
-              <button
-                type="button"
-                className="text-[9px] uppercase tracking-[0.12em] text-muted-foreground/55 transition-colors duration-150 hover:text-foreground/75 disabled:opacity-45"
-                disabled={isLoadingOlder}
-                onClick={loadAllPages}
-              >
-                Show all
-              </button>
-            ) : null}
-            {hasOlder ? (
-              <button
-                type="button"
-                className="text-[9px] uppercase tracking-[0.12em] text-muted-foreground/55 transition-colors duration-150 hover:text-foreground/75 disabled:opacity-45"
-                disabled={isLoadingOlder}
-                onClick={loadOlderPage}
-              >
-                {isLoadingOlder ? "Loading..." : "Show older"}
-              </button>
-            ) : null}
-          </div>
+          {isExpanded ? (
+            <div className="flex shrink-0 items-center gap-2">
+              {canShowAll ? (
+                <button
+                  type="button"
+                  className="focus-ring rounded-sm text-2xs text-subtle-foreground transition-colors duration-(--duration-fast) hover:text-foreground disabled:opacity-50"
+                  disabled={isLoadingOlder}
+                  onClick={loadAllPages}
+                >
+                  Show all
+                </button>
+              ) : null}
+              {hasOlder ? (
+                <button
+                  type="button"
+                  className="focus-ring rounded-sm text-2xs text-subtle-foreground transition-colors duration-(--duration-fast) hover:text-foreground disabled:opacity-50"
+                  disabled={isLoadingOlder}
+                  onClick={loadOlderPage}
+                >
+                  {isLoadingOlder ? "Loading…" : "Show older"}
+                </button>
+              ) : null}
+            </div>
+          ) : null}
         </div>
-        {isLoading && visibleEntries.length === 0 ? (
-          <p className="px-0.5 py-1 text-[11px] text-muted-foreground/50">Loading work log...</p>
-        ) : visibleEntries.length === 0 ? (
-          <p className="px-0.5 py-1 text-[11px] text-muted-foreground/50">
-            No command or tool entries in this loaded activity page.
-          </p>
-        ) : (
-          <div className="space-y-0.5">
-            {visibleEntries.map((workEntry) => (
-              <SimpleWorkEntryRow
-                key={`historical-work-row:${workEntry.id}`}
-                workEntry={workEntry}
-                workspaceRoot={workspaceRoot}
-              />
-            ))}
+        {isExpanded ? (
+          <div className="px-2 pb-1.5 animate-enter-rise">
+            {isLoading && visibleEntries.length === 0 ? (
+              showLoading ? (
+                <div role="status" aria-label="Loading work log" className="space-y-1.5 px-1 py-1">
+                  <Skeleton className="h-3 w-3/5" />
+                  <Skeleton className="h-3 w-2/5" />
+                </div>
+              ) : null
+            ) : visibleEntries.length === 0 ? (
+              <p className="px-0.5 py-1 text-2xs text-subtle-foreground">No commands or tools.</p>
+            ) : (
+              <div className="space-y-0.5">
+                {visibleEntries.map((workEntry) => (
+                  <SimpleWorkEntryRow
+                    key={`historical-work-row:${workEntry.id}`}
+                    workEntry={workEntry}
+                    workspaceRoot={workspaceRoot}
+                  />
+                ))}
+              </div>
+            )}
+            {loadError ? (
+              <p className="mt-1 px-0.5 text-2xs text-destructive-foreground">{loadError}</p>
+            ) : null}
           </div>
-        )}
-        {loadError ? (
-          <p className="mt-1 px-0.5 text-[10px] text-destructive/75">{loadError}</p>
         ) : null}
       </div>
     </div>
@@ -2013,12 +2207,11 @@ const SubagentGroupSection = memo(function SubagentGroupSection(props: {
   return (
     <section
       aria-label={`${props.entries.length} ${props.entries.length === 1 ? "subagent" : "subagents"}`}
-      className="rounded-xl border border-border/45 bg-card/25 px-2 py-1.5"
+      className="rounded-xl border border-border-subtle bg-card px-2 py-1.5"
       data-subagent-turn-group="true"
     >
-      <p className="mb-1 px-0.5 text-[9px] uppercase tracking-[0.16em] text-muted-foreground/55">
-        Subagents ({props.entries.length})
-      </p>
+      {/* Every row is shown, so the heading carries no count. */}
+      <p className="mb-1 px-0.5 text-2xs font-medium text-subtle-foreground">Subagents</p>
       <div className="space-y-0.5">
         {props.entries.map((entry) => (
           <SubagentRosterRow
@@ -2043,6 +2236,7 @@ const WORK_LOG_FOLLOW_THRESHOLD_PX = 32;
 const IntentAwareWorkLogList = memo(function IntentAwareWorkLogList(props: {
   readonly entries: ReadonlyArray<WorkLogEntry>;
   readonly scrollable: boolean;
+  readonly entering?: boolean;
   readonly workspaceRoot: string | undefined;
 }) {
   const scrollerRef = useRef<HTMLDivElement | null>(null);
@@ -2072,7 +2266,7 @@ const IntentAwareWorkLogList = memo(function IntentAwareWorkLogList(props: {
   };
 
   return (
-    <div className="relative min-h-0">
+    <div className={cn("relative min-h-0", props.entering && "animate-enter-rise")}>
       <div
         ref={scrollerRef}
         className={cn(
@@ -2101,7 +2295,7 @@ const IntentAwareWorkLogList = memo(function IntentAwareWorkLogList(props: {
       {newEntries > 0 ? (
         <button
           type="button"
-          className="absolute bottom-1 left-1/2 -translate-x-1/2 rounded-full border border-border/60 bg-card/95 px-2.5 py-1 text-[10px] text-foreground shadow-sm"
+          className="absolute bottom-1 left-1/2 -translate-x-1/2 rounded-full border border-border bg-raised px-2.5 py-1 text-2xs text-foreground shadow-sm transition-colors duration-(--duration-fast) hover:bg-accent"
           data-work-log-jump-to-latest="true"
           onClick={jumpToLatest}
         >
@@ -2138,28 +2332,38 @@ const WorkGroupSection = memo(function WorkGroupSection({
       <SubagentGroupSection entries={subagentEntries} />
       {ordinaryEntries.length > 0 ? (
         <section
-          className="rounded-xl border border-border/45 bg-card/25 px-2 py-1.5"
+          className="rounded-xl border border-border-subtle bg-card px-2 py-1.5"
           data-work-log="true"
         >
           {showHeader ? (
+            // The count is shown only where rows are hidden ("Show N more").
             <div className="mb-1.5 flex items-center justify-between gap-2 px-0.5">
-              <p className="text-[9px] uppercase tracking-[0.16em] text-muted-foreground/55">
-                {groupLabel} ({ordinaryEntries.length})
-              </p>
+              <p className="text-2xs font-medium text-subtle-foreground">{groupLabel}</p>
               {hasOverflow ? (
                 <button
                   type="button"
-                  className="text-[9px] uppercase tracking-[0.12em] text-muted-foreground/55 transition-colors duration-150 hover:text-foreground/75"
+                  className="focus-ring inline-flex items-center gap-1 rounded-sm text-2xs text-subtle-foreground transition-colors duration-(--duration-fast) hover:text-foreground"
+                  aria-expanded={isExpanded}
                   onClick={() => setIsExpanded((value) => !value)}
                 >
                   {isExpanded ? "Show less" : `Show ${hiddenCount} more`}
+                  <ChevronRightIcon
+                    aria-hidden="true"
+                    className={cn(
+                      "size-3 transition-transform duration-(--duration-fast) ease-out",
+                      isExpanded ? "-rotate-90" : "rotate-90",
+                    )}
+                  />
                 </button>
               ) : null}
             </div>
           ) : null}
           <IntentAwareWorkLogList
+            // Re-key on expand so the revealed history rises in once.
+            key={isExpanded ? "expanded" : "collapsed"}
             entries={visibleEntries}
             scrollable={hasOverflow && isExpanded}
+            entering={isExpanded}
             workspaceRoot={workspaceRoot}
           />
         </section>
@@ -2235,7 +2439,7 @@ const CollapsibleUserMessageBody = memo(function CollapsibleUserMessageBody(prop
               aria-expanded={expanded}
               data-scroll-anchor-ignore
               onClick={() => setExpanded((value) => !value)}
-              className="-ml-1 h-6 rounded-md px-1.5 text-xs text-muted-foreground/72 hover:bg-muted/55 hover:text-foreground/85"
+              className="-ml-1 h-6 rounded-md px-1.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
             >
               {expanded ? "Show less" : "Show full message"}
             </Button>
@@ -2317,32 +2521,32 @@ function workToneIcon(tone: TimelineWorkEntry["tone"]): {
   if (tone === "error") {
     return {
       icon: CircleAlertIcon,
-      className: "text-foreground/92",
+      className: "text-destructive-foreground",
     };
   }
   if (tone === "thinking") {
     return {
       icon: BotIcon,
-      className: "text-foreground/92",
+      className: "text-muted-foreground",
     };
   }
   if (tone === "info") {
     return {
       icon: CheckIcon,
-      className: "text-foreground/92",
+      className: "text-muted-foreground",
     };
   }
   return {
     icon: ZapIcon,
-    className: "text-foreground/92",
+    className: "text-muted-foreground",
   };
 }
 
 function workToneClass(tone: "thinking" | "tool" | "info" | "error"): string {
-  if (tone === "error") return "text-rose-300/50 dark:text-rose-300/50";
-  if (tone === "tool") return "text-muted-foreground/70";
-  if (tone === "thinking") return "text-muted-foreground/50";
-  return "text-muted-foreground/40";
+  if (tone === "error") return "text-destructive-foreground";
+  if (tone === "tool") return "text-muted-foreground";
+  if (tone === "thinking") return "text-muted-foreground";
+  return "text-subtle-foreground";
 }
 
 function workEntryPreview(
@@ -2506,14 +2710,18 @@ const OrdinaryWorkEntryContent = memo(function OrdinaryWorkEntryContent(props: {
       }),
     [activeThreadEnvironmentId, availableEditors, defaultEditor, workspaceRoot],
   );
-  const commandPathTokens = useMemo(
-    () =>
-      extractOpenablePathTokens(
-        [workEntry.command, rawCommand, workEntry.detail].filter(Boolean).join(" "),
-        workspaceRoot,
-      ),
-    [rawCommand, workEntry.command, workEntry.detail, workspaceRoot],
-  );
+  // Paths named in the command/detail are already visible in its text, so
+  // they no longer repeat as chips; the open/copy action stays available from
+  // one revealed control. Changed files that are also listed below are skipped.
+  const commandPathTokens = useMemo(() => {
+    const changed = new Set(workEntry.changedFiles ?? []);
+    return extractOpenablePathTokens(
+      [workEntry.command, rawCommand, workEntry.detail].filter(Boolean).join(" "),
+      workspaceRoot,
+    ).filter((filePath) => !changed.has(filePath));
+  }, [rawCommand, workEntry.changedFiles, workEntry.command, workEntry.detail, workspaceRoot]);
+  const openVerb = canOpenLocalEditor ? "Open" : "Copy";
+  const extraChangedFiles = workEntry.changedFiles?.slice(1) ?? [];
   const rowContent = (
     <>
       <div className="flex items-center gap-2 transition-[opacity,translate] duration-200">
@@ -2525,14 +2733,8 @@ const OrdinaryWorkEntryContent = memo(function OrdinaryWorkEntryContent(props: {
         <div className="min-w-0 flex-1 overflow-hidden">
           {rawCommand ? (
             <div className="max-w-full">
-              <p
-                className={cn(
-                  "truncate text-xs leading-5",
-                  workToneClass(workEntry.tone),
-                  preview ? "text-muted-foreground/70" : "",
-                )}
-              >
-                <span className={cn("text-foreground/80", workToneClass(workEntry.tone))}>
+              <p className={cn("truncate text-xs leading-5", workToneClass(workEntry.tone))}>
+                <span className={cn("text-foreground", workToneClass(workEntry.tone))}>
                   {heading}
                 </span>
                 {preview && (
@@ -2541,7 +2743,7 @@ const OrdinaryWorkEntryContent = memo(function OrdinaryWorkEntryContent(props: {
                       closeDelay={0}
                       delay={75}
                       render={
-                        <span className="max-w-full cursor-default text-muted-foreground/55 transition-colors hover:text-muted-foreground/75 hover:underline focus-visible:text-muted-foreground/75 focus-visible:underline group-hover/file-open:underline group-focus-visible/file-open:underline underline-offset-2">
+                        <span className="max-w-full cursor-default text-subtle-foreground transition-colors hover:text-muted-foreground hover:underline focus-visible:text-muted-foreground focus-visible:underline group-hover/file-open:underline group-focus-visible/file-open:underline underline-offset-2">
                           {" "}
                           - {preview}
                         </span>
@@ -2552,7 +2754,7 @@ const OrdinaryWorkEntryContent = memo(function OrdinaryWorkEntryContent(props: {
                       className="max-w-[min(56rem,calc(100vw-2rem))] px-0 py-0"
                       side="top"
                     >
-                      <div className="max-w-[min(56rem,calc(100vw-2rem))] overflow-x-auto px-1.5 py-1 font-mono text-[11px] leading-4 whitespace-nowrap">
+                      <div className="max-w-[min(56rem,calc(100vw-2rem))] overflow-x-auto px-1.5 py-1 font-mono text-2xs leading-4 whitespace-nowrap">
                         {rawCommand}
                       </div>
                     </TooltipPopup>
@@ -2563,18 +2765,12 @@ const OrdinaryWorkEntryContent = memo(function OrdinaryWorkEntryContent(props: {
           ) : (
             <Tooltip>
               <TooltipTrigger className="block min-w-0 w-full text-left" aria-label={displayText}>
-                <p
-                  className={cn(
-                    "truncate text-[11px] leading-5",
-                    workToneClass(workEntry.tone),
-                    preview ? "text-muted-foreground/70" : "",
-                  )}
-                >
-                  <span className={cn("text-foreground/80", workToneClass(workEntry.tone))}>
+                <p className={cn("truncate text-2xs leading-5", workToneClass(workEntry.tone))}>
+                  <span className={cn("text-foreground", workToneClass(workEntry.tone))}>
                     {heading}
                   </span>
                   {preview && (
-                    <span className="text-muted-foreground/55 group-hover/file-open:underline group-focus-visible/file-open:underline underline-offset-2">
+                    <span className="text-subtle-foreground group-hover/file-open:underline group-focus-visible/file-open:underline underline-offset-2">
                       {" "}
                       - {preview}
                     </span>
@@ -2589,65 +2785,55 @@ const OrdinaryWorkEntryContent = memo(function OrdinaryWorkEntryContent(props: {
             </Tooltip>
           )}
         </div>
+        {commandPathTokens.length > 0 ? (
+          <WorkEntryOpenPaths
+            paths={commandPathTokens}
+            workspaceRoot={workspaceRoot}
+            openVerb={openVerb}
+            onOpen={openResolvedFile}
+          />
+        ) : null}
       </div>
-      {hasChangedFiles && !previewIsChangedFiles && (
-        <div className="mt-1 flex flex-wrap gap-1 pl-6">
-          {workEntry.changedFiles?.slice(0, 4).map((filePath) => {
-            const displayPath = formatWorkspaceRelativePath(filePath, workspaceRoot);
-            const canOpenFile = resolveWorkspaceFilePath(filePath, workspaceRoot) !== null;
-            return (
-              <button
-                key={`${workEntry.id}:${filePath}`}
-                data-work-log-path-pill="changed-file"
-                className={cn(
-                  "max-w-full rounded-md border border-border/55 bg-background/75 px-1.5 py-0.5 text-left font-mono text-[10px] text-muted-foreground/75 break-words",
-                  canOpenFile
-                    ? "cursor-pointer transition-colors hover:border-primary/45 hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/45 focus-visible:underline underline-offset-2"
-                    : "cursor-default",
-                )}
-                disabled={!canOpenFile}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  openResolvedFile(filePath);
-                }}
-                title={
-                  canOpenFile
-                    ? `${canOpenLocalEditor ? "Open" : "Copy"} ${displayPath}`
-                    : displayPath
-                }
-                type="button"
+      {hasChangedFiles && !previewIsChangedFiles && primaryChangedFile !== null && (
+        // The row already describes the change, so list one file and fold the
+        // rest behind "+N more" (each still opens from that menu).
+        <div className="mt-1 flex flex-wrap items-center gap-1 pl-6">
+          <ChangedFileChip
+            entryId={workEntry.id}
+            filePath={primaryChangedFile}
+            workspaceRoot={workspaceRoot}
+            openVerb={openVerb}
+            onOpen={openResolvedFile}
+          />
+          {extraChangedFiles.length > 0 ? (
+            <Menu>
+              <MenuTrigger
+                className="focus-ring rounded-sm px-1 text-2xs text-subtle-foreground transition-colors duration-(--duration-fast) hover:text-foreground"
+                data-work-log-more-files="true"
+                aria-label={`${extraChangedFiles.length} more changed ${
+                  extraChangedFiles.length === 1 ? "file" : "files"
+                }`}
               >
-                {displayPath}
-              </button>
-            );
-          })}
-          {(workEntry.changedFiles?.length ?? 0) > 4 && (
-            <span className="px-1 text-[10px] text-muted-foreground/55">
-              +{(workEntry.changedFiles?.length ?? 0) - 4}
-            </span>
-          )}
-        </div>
-      )}
-      {commandPathTokens.length > 0 && (
-        <div className="mt-1 flex flex-wrap gap-1 pl-6">
-          {commandPathTokens.map((filePath) => {
-            const displayPath = formatWorkspaceRelativePath(filePath, workspaceRoot);
-            return (
-              <button
-                key={`${workEntry.id}:command-path:${filePath}`}
-                data-work-log-path-pill="command-token"
-                className="max-w-full rounded-md border border-border/55 bg-background/75 px-1.5 py-0.5 text-left font-mono text-[10px] text-muted-foreground/75 break-words cursor-pointer transition-colors hover:border-primary/45 hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/45 focus-visible:underline underline-offset-2"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  openResolvedFile(filePath);
-                }}
-                title={`${canOpenLocalEditor ? "Open" : "Copy"} ${displayPath}`}
-                type="button"
-              >
-                {displayPath}
-              </button>
-            );
-          })}
+                +{extraChangedFiles.length} more
+              </MenuTrigger>
+              <MenuPopup align="start" className="max-w-[min(32rem,calc(100vw-2rem))]">
+                {extraChangedFiles.map((filePath) => {
+                  const displayPath = formatWorkspaceRelativePath(filePath, workspaceRoot);
+                  const canOpenFile = resolveWorkspaceFilePath(filePath, workspaceRoot) !== null;
+                  return (
+                    <MenuItem
+                      key={`${workEntry.id}:more:${filePath}`}
+                      disabled={!canOpenFile}
+                      className="font-mono text-2xs"
+                      onClick={() => openResolvedFile(filePath)}
+                    >
+                      <span className="truncate">{displayPath}</span>
+                    </MenuItem>
+                  );
+                })}
+              </MenuPopup>
+            </Menu>
+          ) : null}
         </div>
       )}
     </>
@@ -2656,9 +2842,9 @@ const OrdinaryWorkEntryContent = memo(function OrdinaryWorkEntryContent(props: {
   if (canOpenPrimaryChangedFile && previewIsChangedFiles) {
     return (
       <button
-        className="group/file-open block w-full rounded-lg px-1 py-1 text-left transition-colors hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/35"
+        className="group/file-open block w-full rounded-lg px-1 py-1 text-left transition-colors duration-(--duration-fast) hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         onClick={() => openResolvedFile(primaryChangedFile)}
-        title={`${canOpenLocalEditor ? "Open" : "Copy"} ${formatWorkspaceRelativePath(primaryChangedFile, workspaceRoot)}`}
+        title={`${openVerb} ${formatWorkspaceRelativePath(primaryChangedFile, workspaceRoot)}`}
         type="button"
       >
         {rowContent}
@@ -2666,5 +2852,102 @@ const OrdinaryWorkEntryContent = memo(function OrdinaryWorkEntryContent(props: {
     );
   }
 
-  return <div className="rounded-lg px-1 py-1">{rowContent}</div>;
+  return <div className="group/work-row rounded-lg px-1 py-1">{rowContent}</div>;
+});
+
+const ChangedFileChip = memo(function ChangedFileChip(props: {
+  readonly entryId: string;
+  readonly filePath: string;
+  readonly workspaceRoot: string | undefined;
+  readonly openVerb: "Open" | "Copy";
+  readonly onOpen: (filePath: string) => void;
+}) {
+  const displayPath = formatWorkspaceRelativePath(props.filePath, props.workspaceRoot);
+  const canOpenFile = resolveWorkspaceFilePath(props.filePath, props.workspaceRoot) !== null;
+  return (
+    <button
+      key={`${props.entryId}:${props.filePath}`}
+      data-work-log-path-pill="changed-file"
+      className={cn(
+        "max-w-full rounded-sm border border-border-subtle bg-background px-1.5 py-0.5 text-left font-mono text-2xs text-muted-foreground break-words",
+        canOpenFile
+          ? "cursor-pointer transition-colors duration-(--duration-fast) hover:border-primary/45 hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:underline underline-offset-2"
+          : "cursor-default",
+      )}
+      disabled={!canOpenFile}
+      onClick={(event) => {
+        event.stopPropagation();
+        props.onOpen(props.filePath);
+      }}
+      title={canOpenFile ? `${props.openVerb} ${displayPath}` : displayPath}
+      type="button"
+    >
+      {displayPath}
+    </button>
+  );
+});
+
+/**
+ * Hover/focus-revealed open (or copy, without a local editor) action for the
+ * workspace paths a command names. One path opens directly; several open
+ * from a menu. Always visible on devices without hover.
+ */
+const WorkEntryOpenPaths = memo(function WorkEntryOpenPaths(props: {
+  readonly paths: ReadonlyArray<string>;
+  readonly workspaceRoot: string | undefined;
+  readonly openVerb: "Open" | "Copy";
+  readonly onOpen: (filePath: string) => void;
+}) {
+  const revealClassName =
+    "focus-ring inline-flex size-5 shrink-0 items-center justify-center rounded-sm text-subtle-foreground opacity-0 transition-[opacity,color] duration-(--duration-fast) hover:text-foreground focus-visible:opacity-100 group-hover/work-row:opacity-100 data-[popup-open]:opacity-100 [@media(hover:none)]:opacity-100";
+  const [singlePath] = props.paths;
+  if (props.paths.length === 1 && singlePath !== undefined) {
+    const displayPath = formatWorkspaceRelativePath(singlePath, props.workspaceRoot);
+    const label = `${props.openVerb} ${displayPath}`;
+    return (
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <button
+              type="button"
+              className={revealClassName}
+              aria-label={label}
+              data-work-log-open-path="true"
+              onClick={(event) => {
+                event.stopPropagation();
+                props.onOpen(singlePath);
+              }}
+            />
+          }
+        >
+          <ExternalLinkIcon aria-hidden="true" className="size-3" />
+        </TooltipTrigger>
+        <TooltipPopup className="font-mono text-2xs">{label}</TooltipPopup>
+      </Tooltip>
+    );
+  }
+  return (
+    <Menu>
+      <MenuTrigger
+        className={revealClassName}
+        aria-label={`${props.openVerb} a file from this command`}
+        data-work-log-open-path="true"
+      >
+        <ExternalLinkIcon aria-hidden="true" className="size-3" />
+      </MenuTrigger>
+      <MenuPopup align="end" className="max-w-[min(32rem,calc(100vw-2rem))]">
+        {props.paths.map((filePath) => (
+          <MenuItem
+            key={filePath}
+            className="font-mono text-2xs"
+            onClick={() => props.onOpen(filePath)}
+          >
+            <span className="truncate">
+              {formatWorkspaceRelativePath(filePath, props.workspaceRoot)}
+            </span>
+          </MenuItem>
+        ))}
+      </MenuPopup>
+    </Menu>
+  );
 });

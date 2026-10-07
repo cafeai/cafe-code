@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { MessageId } from "@cafecode/contracts";
 import { Button } from "../ui/button";
+import { Spinner } from "../ui/spinner";
 import {
   Dialog,
   DialogPopup,
@@ -59,19 +60,14 @@ export function MessageForkDialog({
         </DialogHeader>
         <DialogPanel className="space-y-4">
           <p className="text-sm text-muted-foreground">
-            The original chat stays unchanged. Both chats share the current workspace files; this
-            does not rewind files or start a model request.
+            Original stays unchanged; workspace files are shared, not rewound.
           </p>
-          <p className="text-sm text-muted-foreground">
-            Cafe must verify the exact native message and complete source history. Older, very large
-            or compacted-away histories may be unavailable. The chat and all its background work
-            must be idle.
-          </p>
+          {/* Why a fork can be refused only matters once it has been. */}
           {failed ? (
-            <p role="alert" className="text-sm text-destructive">
-              The fork could not be confirmed. This message may no longer have a verifiable native
-              boundary, or the session may not be idle. Check the chat and connection before trying
-              again; Cafe did not automatically resend it.
+            <p role="alert" className="text-sm text-destructive-foreground">
+              The fork could not be confirmed. Older, very large or compacted histories may be
+              unavailable, and the chat and its background work must be idle. Check the chat and
+              connection, then try again; nothing was resent.
             </p>
           ) : null}
           <div className="flex justify-end gap-2">
@@ -79,6 +75,7 @@ export function MessageForkDialog({
               Cancel
             </Button>
             <Button
+              className="min-w-32"
               disabled={disabled || pending || busy || failed}
               onClick={async () => {
                 if (disabled || pendingRef.current || busy || failed) return;
@@ -97,7 +94,9 @@ export function MessageForkDialog({
                 }
               }}
             >
-              {pending || busy ? "Creating fork…" : "Create fork"}
+              {/* Keep the label and width while working. */}
+              {pending || busy ? <Spinner aria-hidden="true" /> : null}
+              Create fork
             </Button>
           </div>
         </DialogPanel>

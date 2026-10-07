@@ -90,6 +90,163 @@ function step(state: DeskState, action: DeskAction): DeskState {
 }
 
 describe("Desk navigation model", () => {
+  it("replaces a preview in place and dismisses it when a kept tab is selected", () => {
+    let state = populated(2);
+    state = reduceDesk(state, { type: "open", target: server("preview-a"), preview: true });
+    expect(state.groups.g1?.previewTabKey).toBe(key("preview-a"));
+    state = reduceDesk(state, { type: "open", target: server("preview-b"), preview: true });
+    expect(state.groups.g1?.tabs).toEqual([key("t0"), key("t1"), key("preview-b")]);
+    expect(state.targets[key("preview-a")]).toBeUndefined();
+    expect(state.closed).toEqual([]);
+    state = reduceDesk(state, { type: "select", tabKey: key("t0") });
+    expect(state.groups.g1?.tabs).toEqual([key("t0"), key("t1")]);
+    expect(state.groups.g1?.previewTabKey).toBeUndefined();
+    expect(state.groups.g1?.activeTabKey).toBe(key("t0"));
+    expect(state.closed).toEqual([]);
+    assertInvariants(state);
+  });
+
+  it("keeps a preview without moving it and never converts an existing kept tab to preview", () => {
+    let state = reduceDesk(createDeskState(environmentId), {
+      type: "open",
+      target: server("one"),
+      preview: true,
+    });
+    state = reduceDesk(state, { type: "keepOpen", tabKey: key("one") });
+    const kept = state;
+    state = reduceDesk(state, { type: "open", target: server("one"), preview: true });
+    expect(state).toBe(kept);
+    state = reduceDesk(state, { type: "open", target: server("two"), preview: true });
+    expect(state.groups.g1?.tabs).toEqual([key("one"), key("two")]);
+    state = reduceDesk(state, { type: "open", target: server("two") });
+    expect(state.groups.g1?.previewTabKey).toBeUndefined();
+    expect(state.groups.g1?.tabs).toEqual([key("one"), key("two")]);
+    assertInvariants(state);
+  });
+
+  it("excludes previews from persistence and reopen history without changing the live layout", () => {
+    let state = populated(1);
+    state = reduceDesk(state, { type: "open", target: server("preview"), preview: true });
+    const restored = hydrateDesk(serializeDesk(state), environmentId);
+    expect(restored.groups.g1?.tabs).toEqual([key("t0")]);
+    expect(restored.targets[key("preview")]).toBeUndefined();
+    expect(state.groups.g1?.previewTabKey).toBe(key("preview"));
+    state = reduceDesk(state, { type: "close", tabKey: key("preview") });
+    expect(state.closed).toEqual([]);
+    expect(reduceDesk(state, { type: "reopen" })).toBe(state);
+    assertInvariants(state);
+  });
+
+  it("keeps a preview when selected again but dismisses it for a new permanent tab", () => {
+    let state = reduceDesk(createDeskState(environmentId), {
+      type: "open",
+      target: server("preview"),
+      preview: true,
+    });
+    expect(reduceDesk(state, { type: "select", tabKey: key("preview") })).toBe(state);
+    state = reduceDesk(state, { type: "open", target: draft("new-editor"), preview: true });
+    expect(state.groups.g1?.tabs).toEqual([deskTabKey(draft("new-editor"))]);
+    expect(state.groups.g1?.previewTabKey).toBeUndefined();
+    assertInvariants(state);
+  });
+
+  it("keeps previews independent across groups and collapses preview-only panes in saved layouts", () => {
+    let state = populated(2);
+    state = reduceDesk(state, {
+      type: "split",
+      tabKey: key("t1"),
+      targetGroupId: "g1",
+      edge: "right",
+    });
+    const right = state.activeGroupId;
+    state = reduceDesk(state, { type: "open", target: server("right-preview"), preview: true });
+    state = reduceDesk(state, {
+      type: "open",
+      target: server("left-preview"),
+      groupId: "g1",
+      preview: true,
+    });
+    expect(state.groups[right]?.previewTabKey).toBe(key("right-preview"));
+    expect(state.groups.g1?.previewTabKey).toBe(key("left-preview"));
+    state = reduceDesk(state, { type: "close", tabKey: key("t1") });
+    const restored = hydrateDesk(serializeDesk(state), environmentId);
+    expect(Object.keys(restored.groups)).toEqual(["g1"]);
+    expect(restored.groups.g1?.tabs).toEqual([key("t0")]);
+    expect(state.groups[right]?.tabs).toEqual([key("right-preview")]);
+  });
+
+  it("keeps preview tabs when explicitly moved, split or merged", () => {
+    let state = populated(2);
+    state = reduceDesk(state, { type: "open", target: server("preview"), preview: true });
+    state = reduceDesk(state, {
+      type: "split",
+      tabKey: key("preview"),
+      targetGroupId: "g1",
+      edge: "right",
+    });
+    const right = state.activeGroupId;
+    expect(state.groups[right]?.previewTabKey).toBeUndefined();
+    state = reduceDesk(state, { type: "open", target: server("right-preview"), preview: true });
+    state = reduceDesk(state, {
+      type: "open",
+      target: server("left-preview"),
+      groupId: "g1",
+      preview: true,
+    });
+    state = reduceDesk(state, {
+      type: "move",
+      tabKey: key("left-preview"),
+      groupId: right,
+      index: 1,
+    });
+    expect(state.groups[right]?.previewTabKey).toBeUndefined();
+    expect(state.targets[key("right-preview")]).toBeUndefined();
+    assertInvariants(state);
+    state = reduceDesk(state, { type: "open", target: server("merge-preview"), preview: true });
+    state = reduceDesk(state, { type: "merge", sourceGroupId: "g1", targetGroupId: right });
+    expect(state.groups[right]?.previewTabKey).toBeUndefined();
+    assertInvariants(state);
+  });
+
+  it("can replace a preview at the tab cap and rejects invalid opens without dismissing it", () => {
+    let state = populated(DESK_LIMITS.tabs - 1);
+    state = reduceDesk(state, { type: "open", target: server("preview"), preview: true });
+    expect(
+      reduceDesk(state, {
+        type: "open",
+        target: server("foreign", anotherEnvironment),
+        preview: true,
+      }),
+    ).toBe(state);
+    state = reduceDesk(state, { type: "open", target: server("replacement"), preview: true });
+    expect(state.groups.g1?.tabs).toHaveLength(DESK_LIMITS.tabs);
+    expect(state.groups.g1?.previewTabKey).toBe(key("replacement"));
+    expect(state.targets[key("preview")]).toBeUndefined();
+  });
+
+  it("preserves insertion order when a drag dismisses the destination preview", () => {
+    let state = populated(3);
+    state = reduceDesk(state, {
+      type: "split",
+      tabKey: key("t2"),
+      targetGroupId: "g1",
+      edge: "right",
+    });
+    const right = state.activeGroupId;
+    state = reduceDesk(state, { type: "open", target: server("preview"), preview: true });
+    state = reduceDesk(state, { type: "open", target: server("background"), activate: false });
+    expect(reduceDesk(state, { type: "move", tabKey: key("t1"), groupId: right, index: 4 })).toBe(
+      state,
+    );
+    state = reduceDesk(state, { type: "move", tabKey: key("t1"), groupId: right, index: 3 });
+    expect(state.groups[right]?.tabs).toEqual([key("t2"), key("background"), key("t1")]);
+    expect(state.closed).toEqual([]);
+    state = reduceDesk(state, { type: "open", target: server("self-preview"), preview: true });
+    state = reduceDesk(state, { type: "move", tabKey: key("t2"), groupId: right, index: 2 });
+    expect(state.groups[right]?.tabs).toEqual([key("background"), key("t1"), key("t2")]);
+    assertInvariants(state);
+  });
+
   it("starts empty with the familiar project catalog and inherited rail preference", () => {
     const state = createDeskState(environmentId);
     assertInvariants(state);

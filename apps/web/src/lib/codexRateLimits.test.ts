@@ -455,9 +455,7 @@ describe("codexRateLimits", () => {
       { locale: "en-US", timeZone: "UTC" },
     );
     expect(summary?.details.map((line) => line.text)).toEqual([
-      "Individual spend limit: 12.50 used of 12.50",
-      "Individual spend remaining: 0% left",
-      expect.stringContaining("Individual spend reset:"),
+      expect.stringMatching(/^Individual spend limit: 12\.50 used of 12\.50 \(0% left\), resets /),
       "Spend control: Limit reached",
       "Limit reached: Workspace member usage limit reached",
     ]);
@@ -472,10 +470,8 @@ describe("codexRateLimits", () => {
         rateLimitReachedType: "__proto__",
       },
     });
-    expect(summary?.details.map((line) => line.text)).toEqual([
-      "Spend control: Not reached",
-      "Limit reached: __proto__",
-    ]);
+    // An unreached spend control is the normal state and gets no row.
+    expect(summary?.details.map((line) => line.text)).toEqual(["Limit reached: __proto__"]);
   });
 
   it.each([

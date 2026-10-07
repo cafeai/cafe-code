@@ -1,12 +1,89 @@
 import type { ChatFileAttachment, EnvironmentId } from "@cafecode/contracts";
 import { useState } from "react";
-import { DownloadIcon, FileIcon, LoaderCircleIcon, XIcon } from "lucide-react";
+import { CircleAlertIcon, DownloadIcon, FileIcon, LoaderCircleIcon, XIcon } from "lucide-react";
 import {
   downloadFileAttachment,
   getFileAttachmentPreview,
 } from "../../attachments/fileAttachments";
 import { getFileAttachmentErrorMessage } from "../../attachments/fileAttachmentErrors";
 import { Button } from "../ui/button";
+import { cn } from "~/lib/utils";
+
+/** Every attachment state (uploading, failed, ready) uses this one pill shape. */
+const FILE_PILL_CLASS_NAME =
+  "inline-flex max-w-full items-center gap-1 rounded-lg border border-border bg-background/60 px-2 py-0.5 text-xs";
+
+function formatAttachmentSize(sizeBytes: number): string {
+  return sizeBytes < 1024 ? `${sizeBytes} B` : `${Math.ceil(sizeBytes / 1024)} KB`;
+}
+
+/**
+ * The composer's not-yet-ready attachment. It keeps the ready pill's layout
+ * (icon, name, size, an action slot) so the upload finishing swaps contents in
+ * place instead of reflowing the attachment row.
+ */
+export function FileAttachmentPendingPill({
+  name,
+  sizeBytes,
+  status,
+  error,
+  onRetry,
+  onRemove,
+}: {
+  name: string;
+  sizeBytes: number;
+  status: "uploading" | "failed" | "ready";
+  error?: string | undefined;
+  onRetry?: (() => void) | undefined;
+  onRemove: () => void;
+}) {
+  const uploading = status === "uploading";
+  return (
+    <span
+      className={cn(FILE_PILL_CLASS_NAME, !uploading && "border-destructive/40")}
+      role="status"
+      data-file-attachment-pending={uploading ? "uploading" : "failed"}
+    >
+      {uploading ? (
+        <LoaderCircleIcon aria-hidden="true" className="size-3.5 shrink-0 animate-spin" />
+      ) : (
+        <CircleAlertIcon
+          aria-hidden="true"
+          className="size-3.5 shrink-0 text-destructive-foreground"
+        />
+      )}
+      <span className="min-w-0 truncate" title={name}>
+        {name}
+      </span>
+      {uploading ? (
+        <>
+          <span className="shrink-0 text-muted-foreground">{formatAttachmentSize(sizeBytes)}</span>
+          <span className="sr-only">Uploading copy…</span>
+          {/* Holds the download button's slot so the ready pill matches this width. */}
+          <span aria-hidden="true" className="size-7 shrink-0 sm:size-6" />
+        </>
+      ) : (
+        <span className="min-w-0 truncate text-destructive-foreground" title={error}>
+          {error ?? "Upload failed."}
+        </span>
+      )}
+      {onRetry ? (
+        <Button type="button" size="xs" variant="ghost" onClick={onRetry}>
+          Retry upload
+        </Button>
+      ) : null}
+      <Button
+        type="button"
+        size="icon-xs"
+        variant="ghost"
+        aria-label={`Remove ${name}`}
+        onClick={onRemove}
+      >
+        <XIcon className="size-3" />
+      </Button>
+    </span>
+  );
+}
 
 /** No file URL is navigable here: active formats are downloaded or escaped as plain text. */
 export function FileAttachmentPill({
@@ -49,7 +126,7 @@ export function FileAttachmentPill({
   };
   return (
     <span className="inline-flex max-w-full flex-col gap-1" data-file-attachment="true">
-      <span className="inline-flex max-w-full items-center gap-1 rounded-lg border border-border/70 bg-background/60 px-2 py-1 text-xs">
+      <span className={FILE_PILL_CLASS_NAME}>
         {busy ? (
           <LoaderCircleIcon className="size-3.5 shrink-0 animate-spin" />
         ) : (
@@ -58,7 +135,7 @@ export function FileAttachmentPill({
         <button
           type="button"
           disabled={busy}
-          className="min-w-0 truncate text-left hover:underline"
+          className="focus-ring min-w-0 truncate rounded-sm text-left hover:underline"
           title={`${attachment.name} · ${attachment.mimeType} · ${attachment.sizeBytes.toLocaleString()} bytes · Uploaded copy`}
           onClick={() => {
             void run("preview");
@@ -67,9 +144,7 @@ export function FileAttachmentPill({
           {attachment.name}
         </button>
         <span className="shrink-0 text-muted-foreground">
-          {attachment.sizeBytes < 1024
-            ? `${attachment.sizeBytes} B`
-            : `${Math.ceil(attachment.sizeBytes / 1024)} KB`}
+          {formatAttachmentSize(attachment.sizeBytes)}
         </span>
         <Button
           type="button"
@@ -101,7 +176,7 @@ export function FileAttachmentPill({
         </span>
       ) : null}
       {preview ? (
-        <span className="max-w-full rounded-lg border border-border bg-background p-2">
+        <span className="max-w-full animate-enter-rise rounded-lg border border-border bg-background p-2">
           <span className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
             Plain-text preview{preview.truncated ? " (truncated)" : ""}
             <Button

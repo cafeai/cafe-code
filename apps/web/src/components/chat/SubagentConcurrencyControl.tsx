@@ -1,5 +1,5 @@
 import type { ProviderDriverKind } from "@cafecode/contracts";
-import { useState } from "react";
+import { useId, useState, type ReactNode } from "react";
 import { InfoIcon } from "lucide-react";
 import {
   formatSubagentConcurrencyLimit,
@@ -19,13 +19,43 @@ import {
   DialogFooter,
 } from "../ui/dialog";
 
+const SUBAGENT_LIMIT_HELP =
+  "This is the saved limit. Changes take effect before a new turn when the session can safely restart. Cafe can’t independently confirm the limit the provider enforces.";
+
+/** The labelled info tooltip is the one explanation surface for subagent limits. */
+function SubagentLimitHelp({ extra }: { readonly extra?: ReactNode }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            size="icon-xs"
+            variant="ghost"
+            className="size-5 shrink-0 rounded-sm p-0 text-muted-foreground hover:text-foreground"
+            aria-label="About subagent limits"
+          />
+        }
+      >
+        <InfoIcon aria-hidden="true" className="size-3" />
+      </TooltipTrigger>
+      <TooltipPopup className="max-w-[min(20rem,calc(100vw-2rem))]">
+        <span className="block">{SUBAGENT_LIMIT_HELP}</span>
+        {extra}
+      </TooltipPopup>
+    </Tooltip>
+  );
+}
+
 export function SubagentConcurrencyDetails({
   presentation,
   showHeading = true,
+  extraHelp,
 }: {
   readonly presentation: SubagentConcurrencyPresentation | null | undefined;
   /** The editor already has a dialog title; context/rail labels act as headings. */
   readonly showHeading?: boolean;
+  /** Editor-only notes appended to the shared tooltip. */
+  readonly extraHelp?: ReactNode;
 }) {
   const label = formatSubagentConcurrencyLimit(presentation);
   if (label === null) return null;
@@ -39,24 +69,7 @@ export function SubagentConcurrencyDetails({
       ) : (
         <span className="min-w-0">{label}</span>
       )}
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <Button
-              size="icon-xs"
-              variant="ghost"
-              className="size-5 shrink-0 rounded-sm p-0 text-muted-foreground hover:text-foreground"
-              aria-label="About subagent limits"
-            />
-          }
-        >
-          <InfoIcon aria-hidden="true" className="size-3" />
-        </TooltipTrigger>
-        <TooltipPopup className="max-w-[min(20rem,calc(100vw-2rem))]">
-          This is the saved limit. Changes take effect before a new turn when the session can safely
-          restart. Cafe can’t independently confirm the limit the provider enforces.
-        </TooltipPopup>
-      </Tooltip>
+      <SubagentLimitHelp extra={extraHelp} />
     </div>
   );
 }
@@ -107,53 +120,70 @@ function SubagentConcurrencyEditor(props: SubagentConcurrencyControlProps) {
       setPending(false);
     }
   };
+  // Running-state and provider-specific notes extend the one labelled tooltip
+  // instead of repeating its explanation as extra paragraphs.
+  const editorHelp = (
+    <>
+      {props.isRunning ? (
+        <span className="mt-1 block">Your current work won’t be interrupted.</span>
+      ) : null}
+      <span className="mt-1 block">
+        {props.provider === "claudeAgent"
+          ? "Claude limits Agent-tool admission, not all running work. Resumes, manual forks, Ultracode and teams have different limits."
+          : "Codex limits spawned resident agents. The primary agent is not counted."}
+      </span>
+    </>
+  );
+  const hasSavedLimit = formatSubagentConcurrencyLimit(props.presentation) !== null;
+  const inputId = useId();
   return (
     <>
       <DialogHeader>
         <DialogTitle>Subagent limit</DialogTitle>
-        <DialogDescription>
-          For this chat only. Enter 1–64; blank uses the instance or provider's inherited
-          configuration.
-        </DialogDescription>
+        <DialogDescription>For this chat (1–64). Blank uses the account default.</DialogDescription>
       </DialogHeader>
       <DialogPanel className="grid gap-3">
-        <label className="grid gap-1.5">
-          <span className="text-sm">Maximum concurrent subagents</span>
+        <div className="grid gap-1.5">
+          <div className="flex items-center gap-1.5">
+            <label htmlFor={inputId} className="text-sm">
+              Maximum concurrent subagents
+            </label>
+            {/* With no saved limit there is no status row; keep the one
+                explanation surface beside the field instead. */}
+            {hasSavedLimit ? null : <SubagentLimitHelp extra={editorHelp} />}
+          </div>
           <Input
+            id={inputId}
             type="number"
             min={1}
             max={64}
             step={1}
             value={value}
             disabled={pending || !props.supported}
-            placeholder="Provider / inherited default"
+            placeholder="Account default"
             onChange={(event) => setValue(event.target.value)}
             aria-invalid={!valid}
           />
-        </label>
+        </div>
         {!valid ? (
-          <p role="alert" className="text-xs text-destructive">
+          <p role="alert" className="text-xs text-destructive-foreground">
             Enter a whole number from 1 to 64.
           </p>
         ) : null}
-        <SubagentConcurrencyDetails presentation={props.presentation} showHeading={false} />
+        {hasSavedLimit ? (
+          <SubagentConcurrencyDetails
+            presentation={props.presentation}
+            showHeading={false}
+            extraHelp={editorHelp}
+          />
+        ) : null}
         {!props.supported ? (
           <p className="text-xs text-muted-foreground">
-            This runtime cannot apply a numeric override. Reset removes this chat's saved request.
+            This account can’t apply a numeric limit. Reset clears this chat’s saved value.
           </p>
         ) : null}
-        <p className="text-xs text-muted-foreground">
-          {props.isRunning
-            ? "Your current work won’t be interrupted. A saved change waits for a new turn when the session can safely restart."
-            : "Saving does not change the current session immediately. A new turn uses the saved setting when the session can safely start or restart."}
-        </p>
-        <p className="text-xs text-muted-foreground">
-          {props.provider === "claudeAgent"
-            ? "Claude limits Agent-tool admission, not all running work. Resumes, manual forks, Ultracode and teams have different limits."
-            : "Codex limits spawned resident agent threads. The primary agent is not counted."}
-        </p>
         {error ? (
-          <p role="alert" className="text-xs text-destructive">
+          <p role="alert" className="text-xs text-destructive-foreground">
             {error}
           </p>
         ) : null}

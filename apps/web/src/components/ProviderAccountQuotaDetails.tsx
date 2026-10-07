@@ -33,7 +33,7 @@ export function ProviderAccountQuotaDetails(props: {
   return (
     <div
       className={cn(
-        "flex min-h-0 min-w-0 flex-col gap-1.5 text-xs leading-snug text-muted-foreground/80 [overflow-wrap:anywhere]",
+        "flex min-h-0 min-w-0 flex-col gap-1.5 text-xs leading-snug text-muted-foreground [overflow-wrap:anywhere]",
         layout === "popover" && "max-w-[min(28rem,calc(100vw-2rem))]",
       )}
       data-account-quota
@@ -84,14 +84,14 @@ export function ProviderAccountQuotaDetails(props: {
                     {window ? (
                       layout === "panel" ? (
                         <>
-                          <div className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground/40">
-                            {window.label}
-                          </div>
+                          {/* The rail already has its one overline ("Context
+                              window"); window names are ordinary labels. */}
+                          <div className="text-xs text-muted-foreground">{window.label}</div>
                           <UsageMeterBar
                             percent={window.remainingPercent}
                             testId={`${kind}-window`}
                           />
-                          <div className="text-[13px] font-medium text-foreground">
+                          <div className="text-ui font-medium text-foreground tabular-nums">
                             {window.value}
                           </div>
                         </>

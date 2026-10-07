@@ -1,5 +1,5 @@
 import { useId, useState } from "react";
-import { ChevronRightIcon, ImageIcon, LoaderCircleIcon } from "lucide-react";
+import { ChevronRightIcon, ImageIcon } from "lucide-react";
 import {
   DESKTOP_OBSERVATION_MAX_BYTES,
   DESKTOP_OBSERVATION_PATH,
@@ -10,7 +10,9 @@ import type { WorkLogEntry } from "../../session-logic";
 import { formatTimestamp } from "../../timestampFormat";
 import type { TimestampFormat } from "@cafecode/contracts/settings";
 import { Button } from "../ui/button";
+import { Skeleton } from "../ui/skeleton";
 import { Dialog, DialogPopup, DialogHeader, DialogTitle, DialogDescription } from "../ui/dialog";
+import { cn } from "~/lib/utils";
 import { useDesktopImage } from "./useDesktopImage";
 
 function ObservationImage({
@@ -64,19 +66,35 @@ function ObservationImage({
         )}
       </div>
     );
+  // The saved reference knows the capture's pixel size, so the frame reserves
+  // the final box while bytes load and the image fades in without a jump.
+  const frameStyle =
+    reference && reference.width > 0 && reference.height > 0
+      ? { aspectRatio: `${reference.width} / ${reference.height}` }
+      : undefined;
+  const frameClassName = cn(
+    "relative block w-full max-w-sm max-h-56 overflow-hidden rounded-lg border border-border bg-muted",
+    !frameStyle && "h-40",
+  );
   if (!src)
     return (
-      <p role="status" className="flex items-center gap-2 text-xs text-muted-foreground">
-        <LoaderCircleIcon className="size-3 animate-spin" />
-        Loading screenshot…
-      </p>
+      <div role="status" className={frameClassName} style={frameStyle}>
+        <Skeleton aria-hidden="true" className="absolute inset-0 rounded-none" />
+        <span className="absolute inset-0 flex items-center justify-center text-2xs text-muted-foreground">
+          Loading screenshot…
+        </span>
+      </div>
     );
   return (
     <>
       <button
         type="button"
         aria-label="View full resolution screenshot"
-        className="block w-full max-w-sm cursor-zoom-in overflow-hidden rounded-lg border border-border focus-visible:outline-2 focus-visible:outline-ring"
+        className={cn(
+          frameClassName,
+          "cursor-zoom-in focus-visible:outline-2 focus-visible:outline-ring",
+        )}
+        style={frameStyle}
         onClick={() => setFullSize(true)}
       >
         <img
@@ -84,7 +102,7 @@ function ObservationImage({
           alt="Desktop screenshot observed by the model"
           onError={onError}
           draggable={false}
-          className="max-h-56 w-full object-contain"
+          className="size-full object-contain animate-enter-fade"
         />
       </button>
       <Dialog open={fullSize} onOpenChange={setFullSize}>
@@ -138,7 +156,7 @@ export function DesktopObservation({
     <div>
       <button
         type="button"
-        className="flex w-full items-center gap-2 rounded-lg px-1 py-1 text-left text-[11px] leading-5 hover:bg-accent/25 focus-visible:outline-2 focus-visible:outline-ring"
+        className="flex w-full items-center gap-2 rounded-lg px-1 py-1 text-left text-2xs leading-5 transition-colors duration-(--duration-fast) hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring"
         aria-label="View desktop screenshot"
         aria-expanded={open}
         aria-controls={panelId}
@@ -147,7 +165,7 @@ export function DesktopObservation({
         <span className="flex size-5 shrink-0 items-center justify-center text-muted-foreground">
           <ImageIcon className="size-3" />
         </span>
-        <span className="min-w-0 flex-1 truncate text-foreground/80">
+        <span className="min-w-0 flex-1 truncate text-foreground">
           {observation.pending ? "Viewing desktop" : "Viewed desktop"}
         </span>
         <span className="text-muted-foreground">
@@ -160,18 +178,21 @@ export function DesktopObservation({
                 : "View screenshot"}
         </span>
         <ChevronRightIcon
-          className={`size-3 text-muted-foreground transition-transform ${open ? "rotate-90" : ""}`}
+          className={cn(
+            "size-3 text-muted-foreground transition-transform duration-(--duration-fast)",
+            open && "rotate-90",
+          )}
         />
       </button>
       {open && (
-        <div id={panelId} className="space-y-2 py-2 pl-8 pr-2">
+        <div id={panelId} className="space-y-2 py-2 pl-8 pr-2 animate-enter-rise">
           <ObservationImage
             key={`${environmentId}:${threadId}:${reference?.id ?? entry.id}`}
             environmentId={environmentId}
             threadId={threadId}
             observation={observation}
           />
-          <div className="text-[11px] text-muted-foreground">
+          <div className="text-2xs text-subtle-foreground">
             {formatTimestamp(reference?.capturedAt ?? entry.createdAt, timestampFormat)}
             <details className="mt-1">
               <summary className="cursor-pointer">Details</summary>Desktop screenshot

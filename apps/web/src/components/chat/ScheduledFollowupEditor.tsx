@@ -10,11 +10,13 @@ import {
 } from "@cafecode/contracts";
 import { nextScheduleOccurrences } from "@cafecode/shared/scheduledFollowups";
 import * as Schema from "effect/Schema";
-import { ArrowLeftIcon } from "lucide-react";
+import { ArrowLeftIcon, ChevronRightIcon } from "lucide-react";
 import { useId, useMemo, useState, type FormEvent, type ReactNode } from "react";
 
 import { Button } from "../ui/button";
+import { InfoTip } from "../ui/info-tip";
 import { Input } from "../ui/input";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Textarea } from "../ui/textarea";
 import type { ScheduledFollowupsContext } from "./ScheduledFollowups";
 import {
@@ -30,9 +32,59 @@ import {
 type RepeatPreset = "once" | "interval" | "daily" | "weekdays" | "weekly" | "custom";
 const decodeDraft = Schema.decodeUnknownSync(ScheduledFollowupDraft);
 const decodeRecurrence = Schema.decodeUnknownSync(ScheduledFollowupRecurrence);
-const selectClass =
-  "min-h-8 w-full min-w-0 rounded-lg border border-input bg-background px-2 py-1 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const REPEAT_OPTIONS: ReadonlyArray<{ value: RepeatPreset; label: string }> = [
+  { value: "once", label: "Once" },
+  { value: "interval", label: "Interval" },
+  { value: "daily", label: "Daily" },
+  { value: "weekdays", label: "Weekdays" },
+  { value: "weekly", label: "Weekly" },
+  { value: "custom", label: "Custom calendar" },
+];
+const NOTIFICATION_OPTIONS: ReadonlyArray<{
+  value: ScheduledFollowupDraft["notificationPolicy"];
+  label: string;
+}> = [
+  { value: "changes-and-errors", label: "Changes and errors" },
+  { value: "all-runs", label: "Every run" },
+  { value: "errors-only", label: "Errors only" },
+];
+
+/** A labelled dropdown for the editor's fixed choices. The trigger takes the
+ * Field's id so its visible label stays the accessible name. */
+function EditorSelect<Value extends string>(props: {
+  id: string;
+  value: Value;
+  options: ReadonlyArray<{ value: Value; label: string; disabled?: boolean }>;
+  onChange: (value: Value) => void;
+}) {
+  const selected = props.options.find((option) => option.value === props.value);
+  return (
+    <Select
+      value={props.value}
+      onValueChange={(next) => {
+        const match = props.options.find((option) => option.value === next);
+        if (match && !match.disabled) props.onChange(match.value);
+      }}
+    >
+      <SelectTrigger id={props.id} size="sm" className="w-full min-w-0">
+        <SelectValue>{selected?.label ?? props.value}</SelectValue>
+      </SelectTrigger>
+      <SelectPopup alignItemWithTrigger={false}>
+        {props.options.map((option) => (
+          <SelectItem
+            hideIndicator
+            key={option.value}
+            value={option.value}
+            disabled={option.disabled ?? false}
+          >
+            {option.label}
+          </SelectItem>
+        ))}
+      </SelectPopup>
+    </Select>
+  );
+}
 
 function recurrencePreset(recurrence: ScheduledFollowupRecurrence | undefined): RepeatPreset {
   if (!recurrence || recurrence.kind === "interval") return "interval";
@@ -51,9 +103,7 @@ function Field(props: { label: string; children: (id: string) => ReactNode; help
         {props.label}
       </label>
       {props.children(id)}
-      {props.help ? (
-        <p className="text-[11px] leading-4 text-muted-foreground">{props.help}</p>
-      ) : null}
+      {props.help ? <p className="text-2xs text-muted-foreground">{props.help}</p> : null}
     </div>
   );
 }
@@ -244,6 +294,14 @@ export function ScheduledFollowupEditor(props: {
       aria-label="Scheduled follow-up editor"
       className="min-w-0 space-y-3"
       onKeyDown={(event) => {
+        // React bubbles portalled dropdown keystrokes through this form; Escape
+        // inside an open Select closes only that dropdown, not the editor.
+        if (
+          event.target instanceof Element &&
+          event.target.closest('[data-slot="select-popup"]') !== null
+        ) {
+          return;
+        }
         if (event.key === "Escape" && !props.saving) {
           event.preventDefault();
           event.stopPropagation();
@@ -292,27 +350,7 @@ export function ScheduledFollowupEditor(props: {
       </Field>
       <Field label="Repeat">
         {(id) => (
-          <select
-            id={id}
-            className={selectClass}
-            value={repeat}
-            onChange={(event) => setRepeat(event.target.value as RepeatPreset)}
-          >
-            {(
-              [
-                ["once", "Once"],
-                ["interval", "Interval"],
-                ["daily", "Daily"],
-                ["weekdays", "Weekdays"],
-                ["weekly", "Weekly"],
-                ["custom", "Custom calendar"],
-              ] as const
-            ).map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
+          <EditorSelect id={id} value={repeat} options={REPEAT_OPTIONS} onChange={setRepeat} />
         )}
       </Field>
       {repeat === "interval" ? (
@@ -361,18 +399,12 @@ export function ScheduledFollowupEditor(props: {
       {repeat === "weekly" ? (
         <Field label="Day">
           {(id) => (
-            <select
+            <EditorSelect
               id={id}
-              className={selectClass}
               value={weekday}
-              onChange={(event) => setWeekday(event.target.value)}
-            >
-              {WEEKDAYS.map((label, index) => (
-                <option key={label} value={index}>
-                  {label}
-                </option>
-              ))}
-            </select>
+              options={WEEKDAYS.map((label, index) => ({ value: String(index), label }))}
+              onChange={setWeekday}
+            />
           )}
         </Field>
       ) : null}
@@ -388,7 +420,7 @@ export function ScheduledFollowupEditor(props: {
         )}
       </Field>
       {repeat === "custom" ? (
-        <div className="space-y-3 rounded-lg border border-border/60 p-3">
+        <div className="animate-enter-rise space-y-3 rounded-lg border border-border-subtle p-3">
           <Field label="Weekdays (0–6)" help="Sunday is 0. Comma-separated; blank means every day.">
             {(id) => (
               <Input
@@ -424,63 +456,74 @@ export function ScheduledFollowupEditor(props: {
           </Field>
         </div>
       ) : null}
-      <div className="rounded-lg bg-muted/35 p-3 text-xs" aria-label="Upcoming runs">
+      <div className="rounded-lg bg-muted p-3 text-xs" aria-label="Upcoming runs">
         <p className="mb-1 font-medium">Next runs · {timeZone}</p>
         {calendar.error ? (
           <p className="text-muted-foreground">{calendar.error}</p>
         ) : (
-          <ol className="space-y-1 text-muted-foreground">
+          <ol className="space-y-1 text-muted-foreground tabular-nums">
             {calendar.occurrences.map((instant) => (
               <li key={instant}>{formatScheduleTime(instant, timeZone)}</li>
             ))}
           </ol>
         )}
       </div>
-      <details className="rounded-lg border border-border/60 p-3">
-        <summary className="cursor-pointer text-xs font-medium">Model and run settings</summary>
-        <div className="mt-3 min-w-0 space-y-3">
+      <details className="group/run-settings rounded-lg border border-border-subtle p-3">
+        <summary className="focus-ring flex cursor-pointer list-none items-center gap-1.5 rounded-sm text-xs font-medium [&::-webkit-details-marker]:hidden">
+          <ChevronRightIcon
+            aria-hidden="true"
+            className="size-3.5 shrink-0 text-muted-foreground transition-transform duration-(--duration-fast) ease-out group-open/run-settings:rotate-90"
+          />
+          Model and run settings
+        </summary>
+        <div className="mt-3 min-w-0 animate-enter-rise space-y-3">
+          {/* Billing disclosure stays visible; scope details live in the tip. */}
           <p className="break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
-            Account: {scheduleAccountLabel(context.modelSelection, context.provider)}. This account
-            will execute and pay for these follow-ups. Scheduling never changes accounts or expands
-            permissions; an account change requires reviewing and enabling the schedule again.
+            <span>
+              Account: {scheduleAccountLabel(context.modelSelection, context.provider)}. This
+              account will execute and pay for these follow-ups.
+            </span>{" "}
+            <InfoTip label="About the follow-up account">
+              Scheduling never changes accounts or expands permissions; an account change requires
+              reviewing and enabling the schedule again.
+            </InfoTip>
           </p>
           <Field label="Model settings">
             {(id) => (
-              <select
+              <EditorSelect
                 id={id}
-                className={selectClass}
                 value={override ? "override" : "inherit"}
-                onChange={(event) => setOverride(event.target.value === "override")}
-              >
-                <option value="inherit">Use this chat’s settings</option>
-                <option value="override">Choose settings for follow-ups</option>
-              </select>
+                options={[
+                  { value: "inherit", label: "Use this chat’s settings" },
+                  { value: "override", label: "Choose settings for follow-ups" },
+                ]}
+                onChange={(next) => setOverride(next === "override")}
+              />
             )}
           </Field>
           {override ? (
             <>
               <Field label="Model">
                 {(id) => (
-                  <select
+                  <EditorSelect
                     id={id}
                     value={selection.model}
-                    className={selectClass}
-                    onChange={(event) =>
+                    options={[
+                      ...(!context.provider?.models.some((entry) => entry.slug === selection.model)
+                        ? [{ value: selection.model, label: selection.model }]
+                        : []),
+                      ...(context.provider?.models.map((entry) => ({
+                        value: entry.slug,
+                        label: entry.name,
+                      })) ?? []),
+                    ]}
+                    onChange={(model) =>
                       setSelection({
                         instanceId: context.modelSelection.instanceId,
-                        model: event.target.value,
+                        model,
                       })
                     }
-                  >
-                    {!context.provider?.models.some((entry) => entry.slug === selection.model) ? (
-                      <option value={selection.model}>{selection.model}</option>
-                    ) : null}
-                    {context.provider?.models.map((entry) => (
-                      <option key={entry.slug} value={entry.slug}>
-                        {entry.name}
-                      </option>
-                    ))}
-                  </select>
+                  />
                 )}
               </Field>
               {descriptors.map((descriptor) => (
@@ -499,26 +542,23 @@ export function ScheduledFollowupEditor(props: {
                         onChange={(event) => setOption(descriptor.id, event.target.checked)}
                       />
                     ) : (
-                      <select
+                      <EditorSelect
                         id={id}
-                        className={selectClass}
                         value={String(
                           selection.options?.find((item) => item.id === descriptor.id)?.value ??
                             descriptor.currentValue ??
                             descriptor.options.find((item) => item.isDefault)?.id ??
                             "",
                         )}
-                        onChange={(event) => setOption(descriptor.id, event.target.value)}
-                      >
-                        <option value="" disabled>
-                          Provider default
-                        </option>
-                        {descriptor.options.map((option) => (
-                          <option key={option.id} value={option.id}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
+                        options={[
+                          { value: "", label: "Provider default", disabled: true },
+                          ...descriptor.options.map((option) => ({
+                            value: option.id,
+                            label: option.label,
+                          })),
+                        ]}
+                        onChange={(next) => setOption(descriptor.id, next)}
+                      />
                     )
                   }
                 </Field>
@@ -531,20 +571,12 @@ export function ScheduledFollowupEditor(props: {
           )}
           <Field label="Notifications">
             {(id) => (
-              <select
+              <EditorSelect
                 id={id}
-                className={selectClass}
                 value={notificationPolicy}
-                onChange={(event) =>
-                  setNotificationPolicy(
-                    event.target.value as ScheduledFollowupDraft["notificationPolicy"],
-                  )
-                }
-              >
-                <option value="changes-and-errors">Changes and errors</option>
-                <option value="all-runs">Every run</option>
-                <option value="errors-only">Errors only</option>
-              </select>
+                options={NOTIFICATION_OPTIONS}
+                onChange={setNotificationPolicy}
+              />
             )}
           </Field>
           <Field label="End at (UTC)" help="Optional. Leave blank for no end date.">
@@ -586,12 +618,15 @@ export function ScheduledFollowupEditor(props: {
           </label>
         </div>
       </details>
-      <p className="text-[11px] leading-4 text-muted-foreground">
-        Runs in this chat while its Cafe backend is online and awake. Busy chats wait; missed checks
-        are combined, not replayed in a flood. Existing approval requirements remain in effect.
+      <p className="flex items-center gap-1 text-2xs text-muted-foreground">
+        Runs in this chat while its Cafe server is online.
+        <InfoTip label="About follow-up runs">
+          Runs only while the server is awake. Busy chats wait; missed checks are combined, not
+          replayed in a flood. Existing approval requirements remain in effect.
+        </InfoTip>
       </p>
       {validationError || props.error ? (
-        <p role="alert" className="break-words text-xs text-destructive">
+        <p role="alert" className="break-words text-xs text-destructive-foreground">
           {validationError ?? props.error}
         </p>
       ) : null}

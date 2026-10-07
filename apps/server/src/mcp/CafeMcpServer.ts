@@ -778,7 +778,7 @@ function registerThreadTools(server: McpServer, dependencies: CafeMcpDependencie
         "Create a standalone chat or a thread in a project. Provider/model defaults resolve from Cafe settings and the selected project when omitted.",
       inputSchema: {
         projectId: entityId.nullable().default(null),
-        title: nonEmptyString.default("New thread"),
+        title: nonEmptyString.default("New chat"),
         providerInstanceId: providerInstanceId.optional(),
         model: nonEmptyString.optional(),
         providerOptions: z.array(providerOption).optional(),

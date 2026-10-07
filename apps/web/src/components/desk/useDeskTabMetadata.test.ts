@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   threads: new Map<string, SidebarThreadSummary>(),
   projects: new Map<string, { name: string }>(),
   summaries: vi.fn(),
+  lastVisitedAtById: {} as Record<string, string>,
 }));
 vi.mock("../../composerDraftStore", () => ({
   useComposerDraftStore: { getState: () => ({ draftThreadsByThreadKey: mocks.drafts }) },
@@ -25,8 +26,10 @@ vi.mock("../../store", () => ({
     mocks.projects.get(`${ref.environmentId}/${ref.projectId}`),
 }));
 vi.mock("../../uiStateStore", () => ({
-  useUiStateStore: { getState: () => ({ threadLastVisitedAtById: {} }) },
+  useUiStateStore: { getState: () => ({ threadLastVisitedAtById: mocks.lastVisitedAtById }) },
 }));
+import { scopedThreadKey } from "@cafecode/client-runtime";
+import { resolveThreadStatusPill } from "../Sidebar.logic";
 import { readDeskTabMetadata } from "./useDeskTabMetadata";
 
 function fixture(environment: string): SidebarThreadSummary {
@@ -53,6 +56,65 @@ beforeEach(() => {
   mocks.threads.clear();
   mocks.projects.clear();
   mocks.summaries.mockClear();
+  mocks.lastVisitedAtById = {};
+});
+
+const completedTurn = {
+  turnId: "turn-1" as never,
+  state: "completed" as const,
+  assistantMessageId: null,
+  requestedAt: "2026-09-29T00:00:00.000Z",
+  startedAt: "2026-09-29T00:00:00.000Z",
+  completedAt: "2026-09-29T00:05:00.000Z",
+};
+const runningSession = {
+  provider: "codex" as never,
+  status: "running" as const,
+  createdAt: "2026-09-29T00:00:00.000Z",
+  updatedAt: "2026-09-29T00:00:00.000Z",
+  orchestrationStatus: "running" as const,
+};
+
+// One status vocabulary (docs/style-guide.md §2): a Desk tab must show exactly
+// what the chat's sidebar row shows, from the same helper and the same visit
+// cursor, for every state a chat can be in.
+describe("Desk tab status parity with sidebar rows", () => {
+  it.each([
+    { state: "working", expected: "Working", patch: { session: runningSession } },
+    {
+      state: "connecting",
+      expected: "Connecting",
+      patch: { session: { ...runningSession, status: "connecting" as const } },
+    },
+    { state: "needs approval", expected: "Pending Approval", patch: { hasPendingApprovals: true } },
+    { state: "needs input", expected: "Awaiting Input", patch: { hasPendingUserInput: true } },
+    { state: "unread completion", expected: "Completed", patch: { latestTurn: completedTurn } },
+    {
+      state: "unread failure",
+      expected: "Failed",
+      patch: { latestTurn: { ...completedTurn, state: "error" as const } },
+    },
+    {
+      state: "viewed completion",
+      expected: null,
+      patch: { latestTurn: completedTurn },
+      lastVisitedAt: "2026-09-29T00:06:00.000Z",
+    },
+    { state: "idle", expected: null, patch: {} },
+  ])("$state renders the same pill as the sidebar row", (testCase) => {
+    const thread = { ...fixture("local"), ...testCase.patch } as SidebarThreadSummary;
+    const threadRef = { environmentId: thread.environmentId, threadId: thread.id };
+    mocks.threads.set("local/same-id", thread);
+    if (testCase.lastVisitedAt) {
+      mocks.lastVisitedAtById[scopedThreadKey(threadRef)] = testCase.lastVisitedAt;
+    }
+    const sidebarStatus = resolveThreadStatusPill({
+      thread: { ...thread, lastVisitedAt: testCase.lastVisitedAt },
+    });
+    const deskStatus = readDeskTabMetadata({ kind: "server", threadRef }).status;
+    expect(deskStatus).toEqual(sidebarStatus);
+    expect(deskStatus?.label ?? null).toBe(testCase.expected);
+  });
 });
 describe("Desk tab shell metadata", () => {
   it("uses environment-scoped summaries without reading full transcripts", () => {

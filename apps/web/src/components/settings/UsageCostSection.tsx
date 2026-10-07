@@ -2,6 +2,7 @@ import { useMemo, useState, type ReactNode } from "react";
 import type { ProviderDriverKind, UsageStatsGetResult } from "@cafecode/contracts";
 import { rollUpCost, resolveModelRate, type ModelRate } from "@cafecode/shared/modelPricing";
 
+import { useDelayedFlag } from "../../hooks/useDelayedFlag";
 import { useSettings } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
 import { PROVIDER_ICON_BY_PROVIDER } from "../chat/providerIconUtils";
@@ -10,6 +11,10 @@ import { useCountUp } from "../stats/useCountUp";
 import { dailyUsageCost } from "../stats/dailyUsageCost";
 import { selectUsageRange, type UsageRangeKey } from "../stats/usageRange";
 import { UsageRangeSelector } from "../stats/UsageRangeSelector";
+import { Button } from "../ui/button";
+import { InfoTip } from "../ui/info-tip";
+import { SegmentedControl } from "../ui/segmented-control";
+import { Skeleton } from "../ui/skeleton";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { SettingsSection } from "./settingsLayout";
 import {
@@ -35,6 +40,11 @@ import {
  * counted but never costed, and the priced share is shown so a partial figure
  * cannot read as the whole spend. Days recorded before token detail existed
  * carry output only, so their input reads as zero rather than as free.
+ *
+ * Currency is named once per surface (AGENTS.md usage-cost presentation): the
+ * Settings section heading reads "Cost (USD)", while standalone content such as
+ * Atrium labels its headline estimate instead. Individual values keep the
+ * familiar dollar sign without repeating the currency code.
  */
 
 const currency = new Intl.NumberFormat("en-US", {
@@ -43,9 +53,8 @@ const currency = new Intl.NumberFormat("en-US", {
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,
 });
-/** Keep the familiar dollar sign while naming the accounting currency. */
 function formatUsd(value: number): string {
-  return `${currency.format(value)} USD`;
+  return currency.format(value);
 }
 
 /**
@@ -60,7 +69,18 @@ function formatShare(percent: number, tokens: number): string {
 }
 
 type Mode = "cost" | "tokens";
+const MODE_OPTIONS = [
+  { value: "cost", label: "Cost" },
+  { value: "tokens", label: "Tokens" },
+] as const satisfies ReadonlyArray<{ value: Mode; label: string }>;
 const INITIAL_VISIBLE_MODEL_ROWS = 12;
+/** Narrow enough that all five composition figures share one row on a wide page. */
+const COMPOSITION_GRID_CLASS =
+  "grid grid-cols-[repeat(auto-fit,minmax(min(100%,10rem),1fr))] gap-x-6 gap-y-4 border-t border-border-subtle px-4 py-4 sm:px-5";
+const OVERVIEW_GRID_CLASS =
+  "grid gap-5 px-4 py-4 sm:px-5 @min-[52rem]/usage-cost:grid-cols-[minmax(0,22rem)_minmax(0,1fr)]";
+const CHART_DISPLAY_HEIGHT = "clamp(12rem, 24cqw, 20rem)";
+const TOOLBAR_CLASS = "flex flex-wrap items-center justify-end gap-3 px-4 pt-3 sm:px-5";
 
 interface ModelCostRow {
   readonly provider: ProviderDriverKind;
@@ -72,65 +92,83 @@ interface ModelCostRow {
   generatingMs: number | undefined;
 }
 
+/**
+ * Chart series colours are theme custom properties, so they follow light and
+ * dark mode. The stacked token bands need four distinguishable hues that do not
+ * depend on the user's accent: info blue (cache reads), neutral grey (uncached
+ * input), warning amber (cache writes) and success green (output). The single
+ * cost series uses the accent, like the Activity calendar.
+ */
 const TOKEN_BAND_COLORS = {
-  cached: "#48cfff",
-  fresh: "#a78bfa",
-  written: "#fbbf24",
-  output: "#4ade80",
+  cached: "var(--info)",
+  fresh: "var(--muted-foreground)",
+  written: "var(--warning)",
+  output: "var(--success)",
 } as const;
+const COST_SERIES_COLOR = "var(--primary)";
 
 type TokenFigureContext =
   | "provider"
   | "range"
   | "model"
+  | "unattributed"
   | "reasoning"
   | `composition-${"processed" | "cached" | "uncached" | "output"}`;
 
 /**
- * Every usage surface follows one hierarchy: the complete counter is the
- * readable, animated value; the abbreviated figure is supporting context.
- * Keeping the order here prevents the Settings and Atrium copies from drifting
- * back into different visual conventions.
+ * Every token total on the usage surfaces shows its compact K/M/B readout. The
+ * exact comma-separated count is the figure's hover/focus tooltip and its
+ * accessible text, so small changes stay inspectable and screen readers hear
+ * the precise value. Keeping this in one component stops the Settings and
+ * Atrium copies from drifting into different conventions.
  */
 function TokenCountFigure({
   value,
   context,
-  primarySuffix = " tokens",
+  suffix = " tokens",
   className,
-  primaryClassName,
-  compactClassName,
+  valueClassName,
   align = "left",
 }: {
   value: number;
   context: TokenFigureContext;
-  primarySuffix?: ReactNode;
+  suffix?: string;
   className?: string;
-  primaryClassName?: string;
-  compactClassName?: string;
+  valueClassName?: string;
   align?: "left" | "right";
 }) {
+  const exact = `${formatFullTokenCount(value)}${suffix}`;
   return (
     <div
       className={cn("min-w-0", align === "right" && "text-right", className)}
       data-usage-token-figure={context}
     >
-      <div
-        className={cn(
-          "break-words text-sm font-medium tabular-nums text-foreground [overflow-wrap:anywhere]",
-          primaryClassName,
-        )}
-        data-usage-token-full={context}
-      >
-        {formatFullTokenCount(value)}
-        {primarySuffix}
-      </div>
-      <div
-        className={cn("mt-0.5 text-[10px] tabular-nums text-muted-foreground/70", compactClassName)}
-        aria-hidden="true"
-        data-usage-token-compact={context}
-      >
-        {formatCompactTokenCount(value)}
-      </div>
+      <Tooltip>
+        <TooltipTrigger
+          delay={150}
+          render={
+            <span
+              // Focusable so keyboard users can reveal the exact count too.
+              tabIndex={0}
+              className={cn(
+                // `relative` keeps the absolutely positioned screen-reader
+                // copy inside any horizontal scroller (the model table).
+                "focus-ring relative inline-block max-w-full cursor-default rounded-sm text-sm font-medium tabular-nums text-foreground",
+                valueClassName,
+              )}
+            />
+          }
+        >
+          <span aria-hidden="true" data-usage-token-compact={context}>
+            {formatCompactTokenCount(value)}
+            {suffix}
+          </span>
+          <span className="sr-only" data-usage-token-full={context}>
+            {exact}
+          </span>
+        </TooltipTrigger>
+        <TooltipPopup className="tabular-nums">{exact}</TooltipPopup>
+      </Tooltip>
     </div>
   );
 }
@@ -145,19 +183,20 @@ function UsageModelRow({ entry }: { entry: ModelCostRow }) {
   const displayedCost = useCountUp(entry.cost, { decimals: 2 });
   const displayedTokens = useCountUp(entry.tokens);
   const displayedGeneratingMs = useCountUp(entry.generatingMs ?? 0);
+  const label = formatUsageModelLabel(entry.model);
+  const explanation = getUsageModelExplanation(entry.model);
 
   return (
     <tr
-      className="border-t border-border/50"
+      className="border-t border-border-subtle"
       data-usage-model={entry.model}
       data-usage-provider={entry.provider}
     >
       <td className="max-w-[20rem] py-1.5 pr-3">
         <span className="flex min-w-0 items-center gap-1.5">
           {Icon ? <Icon className="size-3.5 shrink-0 opacity-70" /> : null}
-          <span className="truncate" title={getUsageModelExplanation(entry.model)}>
-            {formatUsageModelLabel(entry.model)}
-          </span>
+          <span className="truncate">{label}</span>
+          {explanation ? <InfoTip label={`About ${label}`}>{explanation}</InfoTip> : null}
         </span>
       </td>
       <td className="py-1.5 pl-3 text-right tabular-nums" data-usage-model-cost-value="true">
@@ -166,14 +205,20 @@ function UsageModelRow({ entry }: { entry: ModelCostRow }) {
         ) : entry.priced ? (
           formatUsd(displayedCost)
         ) : (
-          <span className="text-muted-foreground">unpriced</span>
+          <span className="text-muted-foreground">Unpriced</span>
         )}
       </td>
-      <td className="py-1.5 pl-3 text-right tabular-nums text-muted-foreground">
-        <TokenCountFigure value={displayedTokens} context="model" primarySuffix="" align="right" />
+      <td className="py-1.5 pl-3 text-right">
+        <TokenCountFigure
+          value={displayedTokens}
+          context="model"
+          suffix=""
+          align="right"
+          valueClassName="font-normal text-muted-foreground"
+        />
       </td>
       <td
-        className="whitespace-nowrap py-1.5 pl-4 text-right text-[11px] tabular-nums text-muted-foreground"
+        className="whitespace-nowrap py-1.5 pl-4 text-right text-2xs tabular-nums text-muted-foreground"
         data-usage-model-generating-time
       >
         {entry.generatingMs === undefined
@@ -185,45 +230,107 @@ function UsageModelRow({ entry }: { entry: ModelCostRow }) {
 }
 
 type TokenCompositionId = "processed" | "cached" | "uncached" | "output";
-type StatTileProps =
+type StatTileProps = (
   | {
       id: TokenCompositionId;
-      label: string;
       rawTokens: number;
-      detail?: ReactNode;
     }
   | {
       id: "cache-savings";
-      label: string;
       value: string;
-      detail?: ReactNode;
-    };
+    }
+) & {
+  label: string;
+  /** Optional explanation, shown in an info tooltip beside the label. */
+  info?: ReactNode;
+  detail?: ReactNode;
+};
 
 function StatTile(props: StatTileProps) {
   return (
-    <div className="min-w-0 px-4 py-3" data-usage-composition-tile={props.id}>
-      <div className="text-[11px] text-muted-foreground">{props.label}</div>
+    <div className="min-w-0" data-usage-composition-tile={props.id}>
+      <div className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
+        <span className="truncate">{props.label}</span>
+        {props.info ? <InfoTip label={`About ${props.label}`}>{props.info}</InfoTip> : null}
+      </div>
       {"rawTokens" in props ? (
         <TokenCountFigure
           value={props.rawTokens}
           context={`composition-${props.id}`}
           className="mt-1"
-          primaryClassName="text-lg sm:text-xl"
-          compactClassName="text-[11px]"
+          valueClassName="text-lg sm:text-xl"
         />
       ) : (
         <div
-          className="mt-1 break-words text-lg font-medium tabular-nums text-foreground [overflow-wrap:anywhere]"
+          className="mt-1 break-words text-lg font-medium tabular-nums text-foreground [overflow-wrap:anywhere] sm:text-xl"
           data-usage-composition-value={props.id}
         >
           {props.value}
         </div>
       )}
       {props.detail ? (
-        <div className="mt-0.5 break-words text-[11px] text-muted-foreground/70 [overflow-wrap:anywhere]">
+        <div className="mt-0.5 break-words text-2xs text-subtle-foreground [overflow-wrap:anywhere]">
           {props.detail}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * First-load placeholder with the same blocks as the loaded content, so data
+ * arriving does not move the page. It stays invisible (but reserves space)
+ * until `useDelayedFlag` says the wait is noticeable, so fast loads show
+ * nothing at all (docs/style-guide.md §9).
+ */
+function UsageCostSkeleton({
+  visible,
+  showRangeSelector,
+}: {
+  visible: boolean;
+  showRangeSelector: boolean;
+}) {
+  return (
+    <div
+      aria-hidden="true"
+      className={cn("@container/usage-cost min-w-0", !visible && "invisible")}
+      data-usage-cost-skeleton
+    >
+      <div className={TOOLBAR_CLASS}>
+        {showRangeSelector ? <Skeleton className="h-7 w-52 rounded-lg" /> : null}
+        <Skeleton className="h-7 w-32 rounded-lg" />
+      </div>
+      <div className={OVERVIEW_GRID_CLASS}>
+        <div className="flex min-w-0 flex-col gap-2">
+          <Skeleton className="h-4 w-28" />
+          <Skeleton className="h-10 w-40" />
+          <div className="mt-4 flex flex-col gap-4">
+            {[0, 1].map((row) => (
+              <div key={row} className="flex flex-col gap-1.5">
+                <Skeleton className="h-4 w-full" />
+                <Skeleton className="h-1 w-full rounded-full" />
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="flex min-w-0 flex-col gap-2">
+          <Skeleton className="h-4 w-40" />
+          <Skeleton className="w-full rounded-xl" style={{ height: CHART_DISPLAY_HEIGHT }} />
+        </div>
+      </div>
+      <div className={COMPOSITION_GRID_CLASS}>
+        {[0, 1, 2, 3, 4].map((tile) => (
+          <div key={tile} className="flex flex-col gap-1.5">
+            <Skeleton className="h-3.5 w-20" />
+            <Skeleton className="h-6 w-24" />
+          </div>
+        ))}
+      </div>
+      <div className="flex flex-col gap-2.5 border-t border-border-subtle px-4 py-4 sm:px-5">
+        {[0, 1, 2].map((row) => (
+          <Skeleton key={row} className="h-5 w-full" />
+        ))}
+      </div>
     </div>
   );
 }
@@ -239,10 +346,16 @@ export function UsageCostContent({
   usage,
   range: controlledRange,
   showRangeSelector = true,
+  labelCurrency = true,
 }: {
   usage: UsageStatsGetResult | null;
   range?: UsageRangeKey;
   showRangeSelector?: boolean;
+  /**
+   * Name the USD currency on the headline estimate. Settings turns this off
+   * because its section heading already reads "Cost (USD)".
+   */
+  labelCurrency?: boolean;
 }) {
   const [localRange, setLocalRange] = useState<UsageRangeKey>("30");
   const range = controlledRange ?? localRange;
@@ -251,37 +364,53 @@ export function UsageCostContent({
     () => (usage === null ? null : selectUsageRange(usage, range)),
     [usage, range],
   );
+  const rangeSelectorVisible = showRangeSelector && controlledRange === undefined;
+  // Until the first detailed response arrives there is nothing to estimate:
+  // show a layout-matching skeleton (only once the wait is noticeable), never
+  // zero figures or "nothing recorded" copy that the data may contradict.
+  const showSkeleton = useDelayedFlag(selected === null);
+  if (selected === null || showSkeleton) {
+    return <UsageCostSkeleton visible={showSkeleton} showRangeSelector={rangeSelectorVisible} />;
+  }
 
-  // The mode survives period changes, but the numeric odometers must not:
-  // tweening lifetime counters into a seven-day figure briefly labels values
-  // from another period as if they belonged to the new one.
   return (
-    <UsageCostMetrics
-      key={`${range}:${selected?.today.day ?? "loading"}`}
-      usage={selected}
-      mode={mode}
-      setMode={setMode}
-      range={range}
-      setRange={setLocalRange}
-      showRangeSelector={showRangeSelector && controlledRange === undefined}
-    />
+    // This content also appears in Atrium. Container queries must live here,
+    // rather than assume either surface occupies the full browser viewport.
+    <div className="@container/usage-cost min-w-0" data-usage-cost-layout>
+      {/* The controls sit outside the keyed metrics so a period change does not
+          remount (and re-measure) them. */}
+      <div className={TOOLBAR_CLASS}>
+        {rangeSelectorVisible ? (
+          <UsageRangeSelector value={range} onChange={setLocalRange} />
+        ) : null}
+        <SegmentedControl
+          aria-label="Chart measure"
+          value={mode}
+          onValueChange={setMode}
+          options={MODE_OPTIONS}
+        />
+      </div>
+      {/* The mode survives period changes, but the numeric odometers must not:
+          tweening lifetime counters into a seven-day figure briefly labels
+          values from another period as if they belonged to the new one. */}
+      <UsageCostMetrics
+        key={`${range}:${selected.today.day}`}
+        usage={selected}
+        mode={mode}
+        labelCurrency={labelCurrency}
+      />
+    </div>
   );
 }
 
 function UsageCostMetrics({
   usage,
   mode,
-  setMode,
-  range,
-  setRange,
-  showRangeSelector,
+  labelCurrency,
 }: {
-  usage: UsageStatsGetResult | null;
+  usage: UsageStatsGetResult;
   mode: Mode;
-  setMode: (mode: Mode) => void;
-  range: UsageRangeKey;
-  setRange: (range: UsageRangeKey) => void;
-  showRangeSelector: boolean;
+  labelCurrency: boolean;
 }) {
   const [showAllModels, setShowAllModels] = useState(false);
   const overrides = useSettings((settings) => settings.modelPricingOverrides) as
@@ -289,7 +418,7 @@ function UsageCostMetrics({
     | undefined;
 
   const view = useMemo(() => {
-    const breakdown = usage?.tokenBreakdown ?? [];
+    const breakdown = usage.tokenBreakdown;
     const rollup = rollUpCost(breakdown, overrides);
 
     // Per provider, for the split bars.
@@ -336,8 +465,8 @@ function UsageCostMetrics({
       }
       providerRows.set(entry.model, entry);
     }
-    let modelTimeAvailable = usage?.modelGeneratingTime !== undefined;
-    for (const time of usage?.modelGeneratingTime?.totals ?? []) {
+    let modelTimeAvailable = usage.modelGeneratingTime !== undefined;
+    for (const time of usage.modelGeneratingTime?.totals ?? []) {
       let providerRows = modelRows.get(time.provider);
       if (providerRows === undefined) {
         providerRows = new Map();
@@ -385,11 +514,18 @@ function UsageCostMetrics({
         (right.generatingMs ?? 0) - (left.generatingMs ?? 0),
     );
 
-    const totals = usage?.totals;
-    const cached = totals?.cachedInputTokens ?? 0;
-    const written = totals?.cacheWriteInputTokens ?? 0;
-    const input = totals?.inputTokens ?? 0;
-    const output = totals?.outputTokens ?? 0;
+    const totals = usage.totals;
+    const cached = totals.cachedInputTokens;
+    const written = totals.cacheWriteInputTokens;
+    const input = totals.inputTokens;
+    const output = totals.outputTokens;
+    // Recorded volume without provider/model attribution (for example usage
+    // recorded before attribution existed) is real, counted and unpriced. Show
+    // it as its own row instead of silently assigning it to a model.
+    const attributedTokens = models.reduce(
+      (sum, entry) => (entry.hasTokenUsage ? sum + entry.tokens : sum),
+      0,
+    );
 
     return {
       rollup,
@@ -402,7 +538,8 @@ function UsageCostMetrics({
       written,
       fresh: Math.max(0, input - cached - written),
       output,
-      reasoning: totals?.reasoningOutputTokens ?? 0,
+      reasoning: totals.reasoningOutputTokens,
+      unattributed: Math.max(0, input + output - attributedTokens),
       // The ledger only began recording input later; a history with output but
       // no input at all is unmeasured, not free, and must not be costed.
       hasInputDetail: input > 0,
@@ -421,9 +558,10 @@ function UsageCostMetrics({
   const cacheSavingsDisplay = useCountUp(view.rollup.cacheSavings, { decimals: 2 });
   const cachedInputPercent = view.input > 0 ? (view.cached / view.input) * 100 : 0;
   const cachedInputPercentDisplay = useCountUp(cachedInputPercent, { decimals: 1 });
+  const unattributedDisplay = useCountUp(view.unattributed);
 
   const chart = useMemo(() => {
-    const days = usage?.days ?? [];
+    const days = usage.days;
     const labels = days.map((day) => day.day.slice(5));
     // All may contain lifetime volume predating the daily ledger. Keep the
     // range counter consistent with the dashboard rather than silently drop
@@ -439,7 +577,7 @@ function UsageCostMetrics({
         },
         {
           key: "fresh",
-          label: "Fresh input",
+          label: "Uncached input",
           color: TOKEN_BAND_COLORS.fresh,
           values: days.map((day) =>
             Math.max(0, day.inputTokens - day.cachedInputTokens - day.cacheWriteInputTokens),
@@ -471,13 +609,13 @@ function UsageCostMetrics({
       };
     }
 
-    const pricedDays = usage === null ? [] : dailyUsageCost(usage, overrides);
+    const pricedDays = dailyUsageCost(usage, overrides);
     const dailyCosts = new Map(pricedDays.map((day) => [day.day, day]));
     const series: UsageChartSeries[] = [
       {
         key: "cost",
         label: "Estimated cost",
-        color: TOKEN_BAND_COLORS.cached,
+        color: COST_SERIES_COLOR,
         values: days.map((day) => dailyCosts.get(day.day)?.cost ?? 0),
       },
     ];
@@ -502,70 +640,41 @@ function UsageCostMetrics({
   const displayedUnpricedPercent = 100 - displayedPricedPercent;
   const maxProviderCost = Math.max(0, ...view.providers.map((entry) => entry.cost));
   const recordingStartedAt = view.modelTimeAvailable
-    ? usage?.modelGeneratingTime?.startedAt
+    ? usage.modelGeneratingTime?.startedAt
     : undefined;
   const recordedSince =
     recordingStartedAt === undefined ? undefined : formatUsageRecordingDate(recordingStartedAt);
   const recordingUtc =
     recordedSince && recordingStartedAt ? new Date(recordingStartedAt).toISOString() : undefined;
   const modelTimeExplanation =
-    "Time spent generating covers full active-turn time, including tools and waits. Concurrent chats count separately. " +
+    "Counts full active-turn time, including tools and waits. Concurrent chats count separately. " +
     (recordingUtc
-      ? `Recording began ${recordingUtc} (UTC); earlier history is not included. `
+      ? `Recorded since ${recordingUtc} (UTC); earlier history is not included. `
       : "Earlier history is not included. ") +
-    "Models without a recorded time row show Not recorded.";
+    "Not recorded means no time was measured for that model.";
 
   return (
-    // This content also appears in Atrium. Container queries must live here,
-    // rather than assume either surface occupies the full browser viewport.
-    <div className="@container/usage-cost min-w-0" data-usage-cost-layout>
-      <div className="flex flex-wrap items-center justify-end gap-3 px-4 pt-3 sm:px-5">
-        {showRangeSelector ? <UsageRangeSelector value={range} onChange={setRange} /> : null}
-        <div className="flex overflow-hidden rounded-md border border-border/70 text-[11px]">
-          {(["cost", "tokens"] as const).map((option) => (
-            <button
-              key={option}
-              type="button"
-              onClick={() => setMode(option)}
-              aria-pressed={mode === option}
-              className={cn(
-                "px-2.5 py-1 uppercase tracking-wide transition-colors",
-                mode === option
-                  ? "bg-foreground text-background"
-                  : "text-muted-foreground hover:text-foreground",
-              )}
-            >
-              {option}
-            </button>
-          ))}
-        </div>
-      </div>
-      <div
-        className="grid gap-5 px-4 py-4 sm:px-5 @min-[52rem]/usage-cost:grid-cols-[minmax(0,22rem)_minmax(0,1fr)]"
-        data-usage-cost-overview
-      >
+    <>
+      <div className={OVERVIEW_GRID_CLASS} data-usage-cost-overview>
         {/* Hero + provider split */}
         <div className="min-w-0">
-          <div className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
-            Raw token cost (USD)
+          <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+            <span>{labelCurrency ? "Estimated cost (USD)" : "Estimated cost"}</span>
+            <InfoTip label="About estimated cost">
+              Published standard API rates, or your custom rates if set. Excludes long-context and
+              speed-tier adjustments; not your subscription bill.
+            </InfoTip>
           </div>
           <div
             className="mt-1 max-w-full break-words text-3xl font-light tracking-tight tabular-nums text-foreground [overflow-wrap:anywhere] sm:text-4xl"
             data-usage-cost-hero-value="true"
           >
             {formatUsd(costDisplay)}
-            <span className="align-super text-base text-muted-foreground">*</span>
-          </div>
-          <div className="mt-1 text-[11px] text-muted-foreground/70">
-            * USD estimate at standard API rates or your custom rates. Excludes long-context and
-            speed-tier adjustments; not your subscription bill.
           </div>
 
           <div className="mt-5 flex flex-col gap-3">
             {view.providers.length === 0 ? (
-              <p className="text-xs text-muted-foreground">
-                No model-attributed token usage recorded yet.
-              </p>
+              <p className="text-xs text-muted-foreground">No usage by model in this period.</p>
             ) : (
               view.providers.map((entry) => {
                 const Icon = PROVIDER_ICON_BY_PROVIDER[entry.provider as never];
@@ -579,10 +688,13 @@ function UsageCostMetrics({
                         <span className="truncate">{formatUsageProviderLabel(entry.provider)}</span>
                       </span>
                       <span
-                        className="ml-auto max-w-full break-words text-right text-sm tabular-nums text-foreground [overflow-wrap:anywhere]"
+                        className={cn(
+                          "ml-auto max-w-full break-words text-right text-sm tabular-nums [overflow-wrap:anywhere]",
+                          entry.priced ? "text-foreground" : "text-muted-foreground",
+                        )}
                         data-usage-provider-cost-value="true"
                       >
-                        {entry.priced ? formatUsd(entry.cost) : "unpriced"}
+                        {entry.priced ? formatUsd(entry.cost) : "Unpriced"}
                       </span>
                     </div>
                     <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-muted">
@@ -591,7 +703,12 @@ function UsageCostMetrics({
                         style={{ width: `${width}%` }}
                       />
                     </div>
-                    <TokenCountFigure value={entry.tokens} context="provider" className="mt-1" />
+                    <TokenCountFigure
+                      value={entry.tokens}
+                      context="provider"
+                      className="mt-1"
+                      valueClassName="text-xs font-normal text-muted-foreground"
+                    />
                   </div>
                 );
               })
@@ -601,41 +718,25 @@ function UsageCostMetrics({
 
         {/* Chart */}
         <div className="min-w-0">
-          <div className="mb-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
-            <span data-usage-cost-chart-label="true">
-              {mode === "cost" ? "Estimated daily cost (USD)" : "Daily tokens"}
+          <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-2">
+            <span
+              className="text-xs font-medium text-muted-foreground"
+              data-usage-cost-chart-label="true"
+            >
+              {mode === "cost" ? "Daily cost" : "Daily tokens"}
             </span>
-            {chart.hasUnpriced ? (
-              <span className="text-muted-foreground/70">
-                Partial estimate: usage without daily model pricing is excluded.
-              </span>
-            ) : null}
             <TokenCountFigure
               value={chart.rangeTokens}
               context="range"
-              primarySuffix=" tokens in range"
-              className="min-w-[9rem]"
-              primaryClassName="text-xs"
+              suffix=" tokens in range"
+              valueClassName="text-xs font-normal text-muted-foreground"
             />
-            {mode === "tokens" ? (
-              <span className="ml-auto flex items-center gap-3">
-                {(
-                  [
-                    ["Cached", TOKEN_BAND_COLORS.cached],
-                    ["Fresh", TOKEN_BAND_COLORS.fresh],
-                    ["Cache writes", TOKEN_BAND_COLORS.written],
-                    ["Output", TOKEN_BAND_COLORS.output],
-                  ] as const
-                ).map(([label, color]) => (
-                  <span key={label} className="flex items-center gap-1.5">
-                    <span
-                      aria-hidden="true"
-                      className="size-1.5 rounded-full"
-                      style={{ background: color }}
-                    />
-                    {label}
-                  </span>
-                ))}
+            {chart.hasUnpriced ? (
+              <span className="flex items-center gap-1 text-xs text-subtle-foreground">
+                Partial estimate
+                <InfoTip label="About partial estimate">
+                  Usage without a daily model rate is left out of the daily cost.
+                </InfoTip>
               </span>
             ) : null}
           </div>
@@ -643,24 +744,41 @@ function UsageCostMetrics({
             labels={chart.labels}
             series={chart.series}
             format={chart.format}
-            displayHeight="clamp(12rem, 24cqw, 20rem)"
+            displayHeight={CHART_DISPLAY_HEIGHT}
           />
+          {mode === "tokens" ? (
+            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-muted-foreground">
+              {(
+                [
+                  ["Cached input", TOKEN_BAND_COLORS.cached],
+                  ["Uncached input", TOKEN_BAND_COLORS.fresh],
+                  ["Cache writes", TOKEN_BAND_COLORS.written],
+                  ["Output", TOKEN_BAND_COLORS.output],
+                ] as const
+              ).map(([label, color]) => (
+                <span key={label} className="flex items-center gap-1.5">
+                  <span
+                    aria-hidden="true"
+                    className="size-1.5 rounded-full"
+                    style={{ background: color }}
+                  />
+                  {label}
+                </span>
+              ))}
+            </div>
+          ) : null}
         </div>
       </div>
 
-      {/* Composition tiles */}
-      {/* Fit readable metrics instead of dividing a narrow settings column
-          into five cells merely because the overall window is wide. */}
-      <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,17rem),1fr))] divide-x divide-y divide-border/60 border-t border-border/60">
+      {/* Composition tiles. Spacing, not dividers, separates the figures so
+          wrapping rows never leave stray borders. */}
+      <div className={COMPOSITION_GRID_CLASS}>
         <StatTile
           id="processed"
           label="Processed tokens"
           rawTokens={processedDisplay}
-          detail={
-            view.hasInputDetail
-              ? "Includes cached input read again on each request"
-              : "output only before token detail"
-          }
+          info="Input plus output. Cached input counts again each time a request reads it."
+          detail={view.hasInputDetail ? undefined : "Older history recorded output only"}
         />
         <StatTile
           id="cached"
@@ -678,55 +796,49 @@ function UsageCostMetrics({
               <TokenCountFigure
                 value={reasoningDisplay}
                 context="reasoning"
-                primarySuffix=" reasoning tokens"
-                primaryClassName="text-[11px] font-normal text-muted-foreground/70"
+                suffix=" reasoning tokens"
+                valueClassName="text-2xs font-normal text-subtle-foreground"
               />
             ) : undefined
           }
         />
         <StatTile
           id="cache-savings"
-          label="Net cache savings (USD)"
+          label="Net cache savings"
           value={formatUsd(cacheSavingsDisplay)}
+          info="Cache-read discounts minus cache-write premiums."
           detail={
             view.rollup.cacheSavings < 0
               ? "Cache writes cost more than reads have saved"
-              : "Read discounts minus cache-write premiums"
+              : undefined
           }
         />
       </div>
 
       {/* Breakdown + cost quality */}
       <div
-        className="grid gap-5 border-t border-border/60 px-4 py-4 sm:px-5 @min-[52rem]/usage-cost:grid-cols-[minmax(0,1fr)_minmax(0,18rem)]"
+        className="grid gap-5 border-t border-border-subtle px-4 py-4 sm:px-5 @min-[52rem]/usage-cost:grid-cols-[minmax(0,1fr)_minmax(0,18rem)]"
         data-usage-cost-breakdown
       >
         <div className="min-w-0">
           <div className="min-w-0 max-w-full overflow-x-auto" data-usage-model-table-scroll>
             <table className="w-full min-w-[36rem] border-collapse text-sm" data-usage-model-table>
               <thead>
-                <tr className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                <tr className="text-xs text-muted-foreground">
                   <th scope="col" className="min-w-[8rem] py-1.5 text-left font-medium">
                     Model
                   </th>
                   <th scope="col" className="py-1.5 pl-3 text-right font-medium">
-                    Cost (USD)
+                    Cost
                   </th>
                   <th scope="col" className="py-1.5 pl-3 text-right font-medium">
                     Tokens
                   </th>
                   <th scope="col" className="min-w-[8rem] py-1.5 pl-4 text-right font-medium">
-                    <Tooltip>
-                      <TooltipTrigger
-                        className="cursor-help text-right uppercase underline decoration-dotted underline-offset-2"
-                        aria-label="About time spent generating"
-                      >
-                        Time spent generating
-                      </TooltipTrigger>
-                      <TooltipPopup role="tooltip" className="max-w-[20rem]">
-                        {modelTimeExplanation}
-                      </TooltipPopup>
-                    </Tooltip>
+                    <span className="inline-flex items-center justify-end gap-1">
+                      Time spent generating
+                      <InfoTip label="About time spent generating">{modelTimeExplanation}</InfoTip>
+                    </span>
                   </th>
                 </tr>
               </thead>
@@ -734,7 +846,7 @@ function UsageCostMetrics({
                 {view.models.length === 0 ? (
                   <tr>
                     <td colSpan={4} className="py-3 text-xs text-muted-foreground">
-                      Nothing recorded yet.
+                      Nothing recorded in this period.
                     </td>
                   </tr>
                 ) : (
@@ -748,36 +860,59 @@ function UsageCostMetrics({
                     />
                   ))
                 )}
+                {view.unattributed > 0 ? (
+                  <tr className="border-t border-border-subtle" data-usage-unattributed-row>
+                    <td className="py-1.5 pr-3">
+                      <span className="flex min-w-0 items-center gap-1.5">
+                        <span className="truncate">Unattributed usage</span>
+                        <InfoTip label="About unattributed usage">
+                          Usage recorded without a provider or model, such as older history.
+                          It&apos;s counted but not priced.
+                        </InfoTip>
+                      </span>
+                    </td>
+                    <td className="py-1.5 pl-3 text-right text-muted-foreground">Unpriced</td>
+                    <td className="py-1.5 pl-3 text-right">
+                      <TokenCountFigure
+                        value={unattributedDisplay}
+                        context="unattributed"
+                        suffix=""
+                        align="right"
+                        valueClassName="font-normal text-muted-foreground"
+                      />
+                    </td>
+                    <td className="py-1.5 pl-4 text-right text-2xs text-muted-foreground">—</td>
+                  </tr>
+                ) : null}
               </tbody>
             </table>
           </div>
-          <div className="mt-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[11px] leading-relaxed text-muted-foreground/70">
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-2xs text-subtle-foreground">
             <p data-usage-model-time-coverage>
               {recordedSince && recordingUtc ? (
                 <>
-                  Recorded since <time dateTime={recordingUtc}>{recordedSince}</time>
+                  Time recorded since <time dateTime={recordingUtc}>{recordedSince}</time>
                 </>
               ) : (
                 "Per-model time is unavailable on this server."
               )}
             </p>
             {view.models.length > INITIAL_VISIBLE_MODEL_ROWS ? (
-              <button
-                type="button"
-                className="shrink-0 text-foreground underline underline-offset-2 hover:text-primary"
+              <Button
+                variant="link"
+                size="xs"
+                className="px-0 text-foreground"
                 aria-expanded={showAllModels}
                 onClick={() => setShowAllModels((value) => !value)}
               >
                 {showAllModels ? "Show fewer models" : `Show all ${view.models.length} models`}
-              </button>
+              </Button>
             ) : null}
           </div>
         </div>
 
         <div className="min-w-0">
-          <div className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
-            Cost quality (USD estimates)
-          </div>
+          <div className="text-xs font-medium text-muted-foreground">Cost quality</div>
           <dl className="mt-2 flex flex-col gap-1.5 text-sm">
             <div className="flex items-baseline gap-2">
               <dt className="text-muted-foreground">Priced</dt>
@@ -801,32 +936,24 @@ function UsageCostMetrics({
                     )}
               </dd>
             </div>
-            <div className="flex items-baseline gap-2">
-              <dt className="text-muted-foreground">Net cache savings (USD)</dt>
-              <dd
-                className="ml-auto break-words text-right tabular-nums [overflow-wrap:anywhere]"
-                data-usage-cost-quality-cache-savings="true"
-              >
-                {formatUsd(cacheSavingsDisplay)}
-              </dd>
-            </div>
           </dl>
-          <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground/70">
-            Rates come from a bundled table. Add your own in Settings to price a model this build
-            does not know.
-          </p>
-          <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground/70">
-            Priced share covers recorded tokens only. Interrupted provider requests may not report
-            all usage, so these totals are estimates, not a complete billing record.
-          </p>
-          <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground/70">
-            Codex subagent usage includes only observed increments after a baseline. Earlier or
-            unavailable child usage is not backfilled; child tokens do not increase the main chat’s
-            context-window meter.
+          {/* Priced share describes recorded volume only (AGENTS.md); the
+              visible line keeps that caveat at the figures, details on demand. */}
+          <p
+            className="mt-3 flex items-center gap-1.5 text-2xs text-subtle-foreground"
+            data-usage-cost-coverage
+          >
+            Estimates from recorded usage; may be incomplete.
+            <InfoTip label="About cost estimates">
+              Priced share covers recorded tokens only; interrupted requests may not report all
+              usage, so this is not a complete billing record. Codex subagent usage includes only
+              observed increments after a baseline; earlier child usage is not backfilled, and child
+              tokens do not increase the main chat’s context-window meter.
+            </InfoTip>
           </p>
         </div>
       </div>
-    </div>
+    </>
   );
 }
 
@@ -840,7 +967,12 @@ export function UsageCostSection({
 }) {
   return (
     <SettingsSection title="Cost (USD)">
-      <UsageCostContent usage={usage} range={range} showRangeSelector={false} />
+      <UsageCostContent
+        usage={usage}
+        range={range}
+        showRangeSelector={false}
+        labelCurrency={false}
+      />
     </SettingsSection>
   );
 }

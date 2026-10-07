@@ -1,7 +1,7 @@
 import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@cafecode/contracts";
 import { describe, expect, it } from "vitest";
 
-import { getProviderSummary } from "./providerStatus";
+import { PROVIDER_STATUS_STYLES, getProviderSummary } from "./providerStatus";
 
 function makeProvider(overrides: Partial<ServerProvider> = {}): ServerProvider {
   return {
@@ -87,5 +87,46 @@ describe("Grok sandbox provider summary", () => {
       getProviderSummary(makeProvider({ sandbox: { status: "unavailable" }, ...overrides }))
         .headline,
     ).toBe(expected);
+  });
+});
+
+describe("provider status summary copy", () => {
+  it("shows a short neutral checking state before the server reports a provider", () => {
+    expect(getProviderSummary(undefined)).toEqual({ headline: "Checking…", detail: null });
+    expect(PROVIDER_STATUS_STYLES.checking.dot).toContain("bg-status-idle");
+    expect(PROVIDER_STATUS_STYLES.checking.dot).toContain("animate-pulse");
+    expect(PROVIDER_STATUS_STYLES.checking.dot).not.toMatch(/warning|amber/);
+  });
+
+  it("uses neutral grey for disabled providers without restating the switch", () => {
+    expect(getProviderSummary(makeProvider({ enabled: false }))).toEqual({
+      headline: "Disabled",
+      detail: null,
+    });
+    expect(PROVIDER_STATUS_STYLES.disabled.dot).toBe("bg-status-idle");
+  });
+
+  it("reports an unverified sign-in when a ready provider omits authentication state", () => {
+    expect(
+      getProviderSummary(
+        makeProvider({
+          driver: ProviderDriverKind.make("codex"),
+          status: "ready",
+          auth: { status: "unknown" },
+        }),
+      ),
+    ).toEqual({ headline: "Sign-in not verified", detail: null });
+  });
+
+  it("keeps server-supplied detail for every state", () => {
+    expect(getProviderSummary(makeProvider({ enabled: false, message: "Off by policy" }))).toEqual({
+      headline: "Disabled",
+      detail: "Off by policy",
+    });
+    expect(
+      getProviderSummary(
+        makeProvider({ status: "ready", auth: { status: "unknown" }, message: "Account ready" }),
+      ).detail,
+    ).toBe("Account ready");
   });
 });

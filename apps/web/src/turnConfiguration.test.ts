@@ -4,7 +4,11 @@ import {
   type ProviderTurnConfiguration,
 } from "@cafecode/contracts";
 import { describe, expect, it } from "vitest";
-import { presentTurnConfiguration, readTurnConfiguration } from "./turnConfiguration";
+import {
+  presentTurnConfiguration,
+  presentTurnConfigurationSummary,
+  readTurnConfiguration,
+} from "./turnConfiguration";
 
 const configuration: ProviderTurnConfiguration = {
   version: 1,
@@ -202,5 +206,122 @@ describe("accepted turn configuration presentation", () => {
         modelDisplayName: "Grok Build",
       }).settings,
     ).toBe("Grok Build · Effort: provider default");
+  });
+});
+
+describe("one-line work-log turn configuration summary", () => {
+  it("keeps model, effort, Fast, the exact account label and both modes on one line", () => {
+    expect(presentTurnConfigurationSummary(configuration)).toEqual({
+      summary: "GPT-6.1 Sol · Ultra · Fast on · Codex Personal · Build · Full access",
+      detail:
+        "Submitted settings. Settings Cafe submitted for this accepted turn. Provider defaults may be inherited; this is not independent execution or billing confirmation.",
+    });
+  });
+
+  it.each([
+    ["default", "Fast off", "Standard"],
+    ["priority", "Fast on", "Fast"],
+    ["fast", "Fast on", "Fast"],
+    ["ultrafast", "Ultra fast", "Ultra fast"],
+  ])("collapses native %s routing to %s and keeps the tier in the tooltip", (tier, fast, name) => {
+    const { fastMode: _fast, ...inherited } = configuration;
+    const presentation = presentTurnConfigurationSummary({
+      ...inherited,
+      resolvedServiceTier: tier,
+    });
+    expect(presentation.summary).toBe(
+      `GPT-6.1 Sol · Ultra · ${fast} · Codex Personal · Build · Full access`,
+    );
+    expect(presentation.summary).not.toContain("Service tier");
+    expect(presentation.detail).toContain(`Service tier: ${name}.`);
+    expect(presentation.detail).toContain("native session routing");
+  });
+
+  it("keeps unknown future tiers exact on the line", () => {
+    expect(
+      presentTurnConfigurationSummary({ ...configuration, resolvedServiceTier: "future_tier" })
+        .summary,
+    ).toContain("Service tier: future_tier");
+  });
+
+  it("states unknown Fast and provider defaults explicitly", () => {
+    const { fastMode: _fast, effort: _effort, interactionMode: _mode, ...defaults } = configuration;
+    const { model: _model, modelDisplayName: _label, ...noModel } = defaults;
+    expect(presentTurnConfigurationSummary(noModel).summary).toBe(
+      "Default model · Default effort · Fast status not recorded · Codex Personal · Default mode · Full access",
+    );
+  });
+
+  it("uses the composer's Supervised access name for approval-required turns", () => {
+    expect(
+      presentTurnConfigurationSummary({ ...configuration, runtimeMode: "approval-required" })
+        .summary,
+    ).toBe("GPT-6.1 Sol · Ultra · Fast on · Codex Personal · Build · Supervised");
+    expect(
+      presentTurnConfiguration({ ...configuration, runtimeMode: "approval-required" }).modes,
+    ).toBe("Build · Supervised");
+  });
+
+  it.each([
+    ["default", "approval-required", "Ask permissions"],
+    ["default", "auto-accept-edits", "Accept edits"],
+    ["default", "full-access", "Bypass permissions"],
+    ["plan", "auto-accept-edits", "Plan"],
+    ["auto", "full-access", "Auto"],
+  ] as const)(
+    "names the single native Claude mode for %s + %s",
+    (interactionMode, runtimeMode, label) => {
+      const summary = presentTurnConfigurationSummary({
+        ...configuration,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        providerDisplayName: "Claude Work",
+        modelDisplayName: "Opus 5.5",
+        effort: "max",
+        interactionMode,
+        runtimeMode,
+      }).summary;
+      expect(summary).toBe(`Opus 5.5 · Max · Fast on · Claude Work · ${label}`);
+    },
+  );
+
+  it("keeps the generic pair when a Claude snapshot has no interaction mode", () => {
+    const { interactionMode: _mode, ...providerDefault } = configuration;
+    expect(
+      presentTurnConfigurationSummary({
+        ...providerDefault,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        providerDisplayName: "Claude Work",
+        modelDisplayName: "Opus 5.5",
+        runtimeMode: "approval-required",
+      }).summary,
+    ).toBe("Opus 5.5 · Ultra · Fast on · Claude Work · Default mode · Supervised");
+  });
+
+  it("names Grok's native mode from its own option list", () => {
+    const { fastMode: _fast, ...noFast } = configuration;
+    expect(
+      presentTurnConfigurationSummary({
+        ...noFast,
+        provider: ProviderDriverKind.make("grok"),
+        providerDisplayName: "Grok",
+        modelDisplayName: "Grok Build",
+        interactionMode: "default",
+        runtimeMode: "auto-accept-edits",
+      }).summary,
+    ).toBe("Grok Build · Ultra · Grok · Accept edits");
+  });
+
+  it("omits Fast for providers without it and keeps the session source in the tooltip", () => {
+    const presentation = presentTurnConfigurationSummary({
+      ...configuration,
+      provider: ProviderDriverKind.make("opencode"),
+      modelDisplayName: "Local OpenCode model",
+      effort: "balanced",
+      settingsSource: "session",
+    });
+    expect(presentation.summary).toBe(
+      "Local OpenCode model · balanced · Codex Personal · Build · Full access",
+    );
+    expect(presentation.detail.startsWith("Existing session settings.")).toBe(true);
   });
 });

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useDelayedFlag } from "~/hooks/useDelayedFlag";
 import { CircleAlertIcon, LoaderCircleIcon, RefreshCwIcon, WifiOffIcon } from "lucide-react";
 import type { EnvironmentId } from "@cafecode/contracts";
 
@@ -66,14 +67,14 @@ const ISSUE_VISUALS: Record<
 > = {
   reconnecting: {
     label: "Reconnecting…",
-    tone: "text-amber-600 dark:text-amber-500",
+    tone: "text-status-attention-foreground",
     icon: LoaderCircleIcon,
     spin: true,
   },
   offline: { label: "Offline", tone: "text-muted-foreground", icon: WifiOffIcon },
   exhausted: {
     label: "Disconnected",
-    tone: "text-rose-600 dark:text-rose-500",
+    tone: "text-status-error-foreground",
     icon: CircleAlertIcon,
   },
   disconnected: {
@@ -83,11 +84,19 @@ const ISSUE_VISUALS: Record<
   },
 };
 
+/** Brief reconnects (focus/visibility wakeups) settle within this window. */
+const CONNECTION_ISSUE_SHOW_DELAY_MS = 1_000;
+/** Keep a shown chip up long enough to read, so it never blinks. */
+const CONNECTION_ISSUE_MIN_VISIBLE_MS = 600;
+
 /**
  * Compact connection-status chip for the chat header. Replaces the full-size
  * reconnect toast: the chip shows only a spinner + short label, and the retry
  * countdown / attempt detail lives in a popover opened on hover (desktop) or
  * tap (mobile). Renders nothing while the socket is healthy.
+ *
+ * Per docs/style-guide.md §9 it waits about a second before appearing, so a
+ * reconnect that finishes quickly never flashes, then fades in and out.
  */
 export function ConnectionStatusIndicator({
   environmentId,
@@ -109,6 +118,27 @@ export function ConnectionStatusIndicator({
       });
   const [nowMs, setNowMs] = useState(() => Date.now());
   const savedNextRetryAt = savedRuntime?.nextRetryAt ?? null;
+  const shown = useDelayedFlag(issue !== null, {
+    delayMs: CONNECTION_ISSUE_SHOW_DELAY_MS,
+    minVisibleMs: CONNECTION_ISSUE_MIN_VISIBLE_MS,
+  });
+  // While the chip fades out after recovery, keep showing the last issue it
+  // described rather than collapsing mid-fade.
+  const [lastIssue, setLastIssue] = useState<ConnectionIssue | null>(issue);
+  if (issue !== null && issue !== lastIssue) {
+    setLastIssue(issue);
+  }
+  const [rendered, setRendered] = useState(false);
+  if (shown && !rendered) {
+    setRendered(true);
+  }
+  useEffect(() => {
+    if (shown || !rendered) return;
+    // Exit fade (fast) before unmounting.
+    const timer = window.setTimeout(() => setRendered(false), 150);
+    return () => window.clearTimeout(timer);
+  }, [rendered, shown]);
+  const displayIssue = issue ?? lastIssue;
 
   const isCountingDown =
     issue === "reconnecting" &&
@@ -125,11 +155,11 @@ export function ConnectionStatusIndicator({
     return () => window.clearInterval(intervalId);
   }, [isCountingDown, savedNextRetryAt, status.nextRetryAt]);
 
-  if (issue === null) {
+  if (!rendered || displayIssue === null) {
     return null;
   }
 
-  const visual = ISSUE_VISUALS[issue];
+  const visual = ISSUE_VISUALS[displayIssue];
   const Icon = visual.icon;
   const attemptLabel = isPrimaryEnvironment
     ? formatAttemptCount(status)
@@ -158,8 +188,9 @@ export function ConnectionStatusIndicator({
         render={
           <button
             type="button"
+            data-state={shown ? "open" : "closed"}
             className={cn(
-              "inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border/60 bg-muted/20 px-2 py-0.5 text-[11px] font-medium transition-colors hover:bg-muted/50",
+              "inline-flex shrink-0 animate-enter-fade items-center gap-1.5 rounded-full border border-border bg-muted px-2 py-0.5 text-2xs font-medium transition-[background-color,opacity] duration-(--duration-fast) ease-out hover:bg-accent data-[state=closed]:pointer-events-none data-[state=closed]:opacity-0",
               visual.tone,
               className,
             )}
@@ -170,28 +201,23 @@ export function ConnectionStatusIndicator({
           </button>
         }
       />
-      <PopoverPopup
-        tooltipStyle
-        side="bottom"
-        align="end"
-        className="w-max max-w-[260px] px-3 py-2"
-      >
+      <PopoverPopup tooltipStyle side="bottom" align="end" className="w-max max-w-64 px-3 py-2">
         <div className="space-y-1.5 leading-tight">
-          <div className="text-[12px] font-medium text-foreground">
-            {issue === "offline" ? "Offline" : `Disconnected from ${connectionDisplayName}`}
+          <div className="text-xs font-medium text-foreground">
+            {displayIssue === "offline" ? "Offline" : `Disconnected from ${connectionDisplayName}`}
           </div>
-          <div className="space-y-0.5 text-[11px] text-muted-foreground">
-            {issue === "offline" ? (
+          <div className="space-y-0.5 text-2xs text-muted-foreground">
+            {displayIssue === "offline" ? (
               <div>Waiting for network.</div>
-            ) : issue === "exhausted" ? (
+            ) : displayIssue === "exhausted" ? (
               <div>
                 {attemptLabel
                   ? isPrimaryEnvironment
-                    ? `Backoff stopped after ${attemptLabel} — retrying on activity.`
+                    ? `Paused after ${attemptLabel}; retries when you're back.`
                     : `Retries exhausted after ${attemptLabel}.`
                   : "Retries exhausted trying to reconnect."}
               </div>
-            ) : issue === "disconnected" ? (
+            ) : displayIssue === "disconnected" ? (
               <div>This connection is inactive.</div>
             ) : (
               <>
@@ -203,16 +229,16 @@ export function ConnectionStatusIndicator({
                 {attemptLabel ? <div>{attemptLabel}</div> : null}
               </>
             )}
-            {lastError ? <div className="text-muted-foreground/80">{lastError}</div> : null}
+            {lastError ? <div className="text-subtle-foreground">{lastError}</div> : null}
           </div>
-          {issue !== "offline" ? (
+          {displayIssue !== "offline" ? (
             <button
               type="button"
               onClick={handleRetry}
-              className="mt-1 inline-flex items-center gap-1 rounded-md border border-border/60 bg-background px-2 py-1 text-[11px] font-medium text-foreground transition-colors hover:bg-muted"
+              className="mt-1 inline-flex items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-2xs font-medium text-foreground transition-colors duration-(--duration-fast) hover:bg-muted"
             >
               <RefreshCwIcon className="size-3" aria-hidden="true" />
-              {issue === "exhausted" ? "Retry" : "Retry now"}
+              {displayIssue === "exhausted" ? "Retry" : "Retry now"}
             </button>
           ) : null}
         </div>

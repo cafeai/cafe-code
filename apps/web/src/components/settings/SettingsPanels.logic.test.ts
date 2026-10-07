@@ -146,8 +146,8 @@ describe("collectRecentlyDeletedThreadRefs", () => {
 
 describe("buildEmptyRecycleBinConfirmationMessage", () => {
   it("formats singular and plural permanent-delete prompts", () => {
-    expect(buildEmptyRecycleBinConfirmationMessage(1)).toContain("Delete 1 thread forever?");
-    expect(buildEmptyRecycleBinConfirmationMessage(3)).toContain("Delete 3 threads forever?");
+    expect(buildEmptyRecycleBinConfirmationMessage(1)).toContain("Delete 1 chat forever?");
+    expect(buildEmptyRecycleBinConfirmationMessage(3)).toContain("Delete 3 chats forever?");
     expect(buildEmptyRecycleBinConfirmationMessage(3)).toContain("This cannot be undone.");
   });
 });

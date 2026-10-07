@@ -187,7 +187,7 @@ export const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
           commandId: CommandId.make(crypto.randomUUID()),
           threadId: createdThreadId,
           projectId: nextProjectId,
-          title: "New thread",
+          title: "New chat",
           modelSelection: nextProjectDefaultModelSelection,
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
           runtimeMode: "full-access",

@@ -12,7 +12,6 @@ import {
   ArrowRightIcon,
   CheckIcon,
   CopyIcon,
-  LoaderIcon,
   LogInIcon,
   RefreshCwIcon,
   UploadIcon,
@@ -50,6 +49,7 @@ import {
 } from "./settings/providerStatus";
 import { RedactedSensitiveText } from "./settings/RedactedSensitiveText";
 import { Button } from "./ui/button";
+import { SegmentedControl } from "./ui/segmented-control";
 import { DraftInput } from "./ui/draft-input";
 import { Spinner } from "./ui/spinner";
 import { stackedThreadToast, toastManager } from "./ui/toast";
@@ -152,7 +152,7 @@ function ProviderLoginGuidance({
 
   return (
     <div className="mt-2 grid gap-1.5">
-      <span className="text-muted-foreground text-xs">Log in by running:</span>
+      <span className="text-muted-foreground text-xs">Log in by running</span>
       <LoginCommand command={loginCommand} />
       {canLogIn ? (
         <Button
@@ -163,11 +163,11 @@ function ProviderLoginGuidance({
           variant="outline"
         >
           {isLoggingIn ? (
-            <LoaderIcon aria-hidden="true" className="size-3.5 animate-spin" />
+            <Spinner aria-hidden="true" className="size-3.5" />
           ) : (
             <LogInIcon aria-hidden="true" className="size-3.5" />
           )}
-          Log In
+          Log in
         </Button>
       ) : null}
     </div>
@@ -274,7 +274,7 @@ function ProviderStatusDot({ provider }: { readonly provider: ServerProvider | u
       aria-hidden="true"
       className={cn(
         "size-2 shrink-0 rounded-full ring-2 ring-current/15",
-        dotClass ?? "bg-muted-foreground/50",
+        dotClass ?? "bg-status-idle",
       )}
     />
   );
@@ -298,8 +298,8 @@ function IntroPage() {
         <h1 className="text-balance font-semibold text-3xl tracking-tight">
           Welcome to {APP_BASE_NAME}
         </h1>
-        <p className="text-balance text-[0.95rem] text-muted-foreground leading-7">
-          A calm, dependable home for long coding sessions with your AI agents.
+        <p className="text-balance text-sm text-muted-foreground leading-6">
+          A calm home for long coding sessions with your AI agents.
         </p>
       </div>
     </div>
@@ -331,8 +331,7 @@ function ProvidersPage() {
         <div className="grid gap-2">
           <h1 className="font-semibold text-2xl tracking-tight">Connect a provider</h1>
           <p className="text-balance text-sm text-muted-foreground leading-6">
-            {APP_BASE_NAME} works with these coding agents. Install or sign in to whichever you use
-            — you can always change this later in Settings.
+            Install or sign in to the agents you use. You can change this later in Settings.
           </p>
         </div>
         <Button
@@ -362,7 +361,7 @@ function ProvidersPage() {
           return (
             <li
               key={definition.value}
-              className="cafe-onboarding-item flex items-start gap-3.5 rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs transition-colors duration-200 hover:border-primary/30 hover:bg-accent/30"
+              className="cafe-onboarding-item flex items-start gap-3.5 rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs transition-colors duration-(--duration-fast) hover:border-border-strong"
               style={staggerStyle(index + 1)}
             >
               <span className="mt-0.5 grid size-10 shrink-0 place-items-center rounded-lg border border-border bg-background">
@@ -372,7 +371,7 @@ function ProvidersPage() {
                 <div className="flex items-center gap-2">
                   <h2 className="font-semibold text-sm">{definition.label}</h2>
                   {versionLabel ? (
-                    <span className="rounded-full bg-muted px-1.5 py-0.5 text-[0.7rem] text-muted-foreground">
+                    <span className="rounded-full bg-muted px-1.5 py-0.5 text-2xs text-muted-foreground">
                       {versionLabel}
                     </span>
                   ) : null}
@@ -476,10 +475,9 @@ function CustomizePage() {
   return (
     <div className="cafe-onboarding-step grid w-full max-w-xl gap-6">
       <div className="cafe-onboarding-item grid gap-2" style={staggerStyle(0)}>
-        <h1 className="font-semibold text-2xl tracking-tight">Optional — Make it yours</h1>
+        <h1 className="font-semibold text-2xl tracking-tight">Make it yours</h1>
         <p className="text-balance text-sm text-muted-foreground leading-6">
-          Give {APP_BASE_NAME} your own name, colors, and image — or keep the defaults. You can
-          change any of this later in Settings.
+          Optional. You can change any of this later in Settings.
         </p>
       </div>
       <ul className="grid gap-3">
@@ -500,7 +498,7 @@ function CustomizePage() {
           }
           description={`Shown as “${brandPrefix} Code” in the sidebar.`}
           index={1}
-          title="Code Name"
+          title="Code name"
         />
         <CustomizeRow
           control={
@@ -518,23 +516,12 @@ function CustomizePage() {
         />
         <CustomizeRow
           control={
-            <div className="flex items-center gap-0.5 rounded-lg border border-border bg-background p-0.5">
-              {THEME_CHOICES.map((choice) => (
-                <button
-                  key={choice.value}
-                  className={cn(
-                    "cursor-pointer rounded-md px-2.5 py-1 font-medium text-xs transition-colors",
-                    theme === choice.value
-                      ? "bg-primary text-primary-foreground"
-                      : "text-muted-foreground hover:text-foreground",
-                  )}
-                  onClick={() => setTheme(choice.value)}
-                  type="button"
-                >
-                  {choice.label}
-                </button>
-              ))}
-            </div>
+            <SegmentedControl
+              aria-label="Theme"
+              onValueChange={setTheme}
+              options={THEME_CHOICES}
+              value={theme}
+            />
           }
           description="Match your system, or pick light or dark."
           index={3}
@@ -560,7 +547,7 @@ function CustomizePage() {
                 variant="outline"
               >
                 {imageUploading ? (
-                  <LoaderIcon aria-hidden="true" className="size-3.5 animate-spin" />
+                  <Spinner aria-hidden="true" className="size-3.5" />
                 ) : (
                   <UploadIcon aria-hidden="true" className="size-3.5" />
                 )}
@@ -591,10 +578,7 @@ function CustomizePage() {
               />
             </div>
           }
-          description={
-            imageError ??
-            "Upload your own PNG, JPEG, GIF, or WebP (under 1 MB), or keep the default."
-          }
+          description={imageError ?? "PNG, JPEG, GIF or WebP, under 1 MB."}
           descriptionError={Boolean(imageError)}
           index={4}
           title="Sidebar image"

@@ -4,6 +4,19 @@ import { sanitizeMermaidSvg, type MermaidResult } from "./sanitizeSvg";
 export type { MermaidResult } from "./sanitizeSvg";
 export type MermaidTheme = "dark" | "light";
 type Renderer = (source: string, theme: MermaidTheme) => Promise<MermaidResult>;
+/**
+ * `peek` is a synchronous, read-only lookup of an already sanitized cached
+ * result so a re-mounted block (virtualized scroll, chat switch) can show its
+ * diagram on first paint instead of flashing source. It never renders, never
+ * admits new source and returns `undefined` on a miss. Optional so test
+ * doubles that only mock the async renderer keep working.
+ */
+export type MermaidRenderService = ((
+  source: string,
+  theme: MermaidTheme,
+) => Promise<MermaidResult>) & {
+  readonly peek?: (source: string, theme: MermaidTheme) => MermaidResult | null | undefined;
+};
 
 export async function renderInMermaidSandbox(
   source: string,
@@ -70,12 +83,16 @@ export async function renderInMermaidSandbox(
 }
 
 /** Injectable renderer keeps scheduling/cache tests independent of browser layout. */
-export function createMermaidRenderService(renderer: Renderer) {
+export function createMermaidRenderService(renderer: Renderer): MermaidRenderService {
   const cache = new Map<string, { value: MermaidResult | null; bytes: number }>();
   const inFlight = new Map<string, Promise<MermaidResult>>();
   let bytes = 0;
   let tail: Promise<unknown> = Promise.resolve();
-  return (source: string, theme: MermaidTheme): Promise<MermaidResult> => {
+  const peek = (source: string, theme: MermaidTheme): MermaidResult | null | undefined =>
+    // Same full-source key as the renderer below; only admitted, sanitized
+    // results (or a cached failure marker) can ever be present.
+    cache.get(JSON.stringify([MERMAID_POLICY, theme, source]))?.value;
+  const render = (source: string, theme: MermaidTheme): Promise<MermaidResult> => {
     try {
       admitMermaidSource(source);
     } catch {
@@ -128,6 +145,7 @@ export function createMermaidRenderService(renderer: Renderer) {
     tail = job.catch(() => undefined);
     return job;
   };
+  return Object.assign(render, { peek });
 }
 
 export const renderMermaid = createMermaidRenderService(renderInMermaidSandbox);

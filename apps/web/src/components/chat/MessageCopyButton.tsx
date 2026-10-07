@@ -7,20 +7,9 @@ import { anchoredToastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
 const ANCHORED_TOAST_TIMEOUT_MS = 1000;
-const onCopy = (ref: React.RefObject<HTMLButtonElement | null>) => {
-  if (ref.current) {
-    anchoredToastManager.add({
-      data: {
-        tooltipStyle: true,
-      },
-      positionerProps: {
-        anchor: ref.current,
-      },
-      timeout: ANCHORED_TOAST_TIMEOUT_MS,
-      title: "Copied!",
-    });
-  }
-};
+// Success stays inline (check icon + "Copied" tooltip label) per the style
+// guide; only a failure uses the anchored tooltip-style notice.
+const COPIED_STATE_MS = 1200;
 
 const onCopyError = (ref: React.RefObject<HTMLButtonElement | null>, error: Error) => {
   if (ref.current) {
@@ -51,9 +40,8 @@ export const MessageCopyButton = memo(function MessageCopyButton({
 }) {
   const ref = useRef<HTMLButtonElement>(null);
   const { copyToClipboard, isCopied } = useCopyToClipboard<void>({
-    onCopy: () => onCopy(ref),
     onError: (error: Error) => onCopyError(ref, error),
-    timeout: ANCHORED_TOAST_TIMEOUT_MS,
+    timeout: COPIED_STATE_MS,
   });
 
   return (
@@ -61,8 +49,7 @@ export const MessageCopyButton = memo(function MessageCopyButton({
       <TooltipTrigger
         render={
           <Button
-            aria-label="Copy link"
-            disabled={isCopied}
+            aria-label={isCopied ? "Copied" : "Copy message"}
             onClick={() => copyToClipboard(text)}
             ref={ref}
             type="button"
@@ -75,7 +62,7 @@ export const MessageCopyButton = memo(function MessageCopyButton({
         {isCopied ? <CheckIcon className="size-3 text-success" /> : <CopyIcon className="size-3" />}
       </TooltipTrigger>
       <TooltipPopup>
-        <p>Copy to clipboard</p>
+        <p>{isCopied ? "Copied" : "Copy message"}</p>
       </TooltipPopup>
     </Tooltip>
   );

@@ -28,7 +28,7 @@ describe("renameThread", () => {
     expect(mocks.readApi).not.toHaveBeenCalled();
   });
   it("rejects blank titles without dispatch", async () => {
-    await expect(renameThread(target, " \n ", "Old")).rejects.toThrow("cannot be empty");
+    await expect(renameThread(target, " \n ", "Old")).rejects.toThrow("can't be empty");
     expect(mocks.dispatch).not.toHaveBeenCalled();
   });
   it("reports unavailable environments rather than pretending the rename succeeded", async () => {

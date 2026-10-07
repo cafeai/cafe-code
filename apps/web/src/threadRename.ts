@@ -13,10 +13,10 @@ export async function renameThread(
   originalTitle: string,
 ): Promise<void> {
   const trimmed = title.trim();
-  if (!trimmed) throw new Error("Thread title cannot be empty.");
+  if (!trimmed) throw new Error("Chat title can't be empty.");
   if (trimmed === originalTitle) return;
   const api = readEnvironmentApi(target.environmentId);
-  if (!api) throw new Error("Reconnect to this thread’s environment before renaming it.");
+  if (!api) throw new Error("Reconnect to this chat’s server to rename it.");
   await api.orchestration.dispatchCommand({
     type: "thread.meta.update",
     commandId: newCommandId(),

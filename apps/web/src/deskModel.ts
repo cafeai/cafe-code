@@ -10,6 +10,8 @@ export interface DeskGroup {
   readonly name: string;
   readonly tabs: readonly string[];
   readonly activeTabKey: string | null;
+  /** One temporary chat per pane. Excluded from saved navigation and history. */
+  readonly previewTabKey?: string;
   /** Null inherits the pre-Desk global preference until this group is pinned
    * or unpinned explicitly. Never copy one pane's new preference to a sibling. */
   readonly sessionRailDocked: boolean | null;
@@ -51,7 +53,10 @@ export type DeskAction =
       readonly groupId?: string;
       /** Background first-send promotion must not select another editor. */
       readonly activate?: boolean;
+      readonly preview?: boolean;
     }
+  | { readonly type: "keepOpen"; readonly tabKey: string }
+  | { readonly type: "dismissPreview"; readonly groupId: string }
   | { readonly type: "select"; readonly tabKey: string }
   | { readonly type: "activateGroup"; readonly groupId: string }
   | { readonly type: "close"; readonly tabKey: string }
@@ -219,13 +224,36 @@ function withoutTab(group: DeskGroup, tabKey: string): DeskGroup {
   const index = group.tabs.indexOf(tabKey);
   const tabs = group.tabs.filter((key) => key !== tabKey);
   return {
-    ...group,
+    ...(group.previewTabKey === tabKey ? withoutPreviewMarker(group) : group),
     tabs,
     activeTabKey:
       group.activeTabKey === tabKey
         ? (tabs[Math.min(index, tabs.length - 1)] ?? null)
         : group.activeTabKey,
   };
+}
+
+function withoutPreviewMarker(group: DeskGroup): DeskGroup {
+  const { previewTabKey: _preview, ...kept } = group;
+  return kept;
+}
+
+function keepTab(state: DeskState, tabKey: string): DeskState {
+  const group = deskGroupForTab(state, tabKey);
+  return group?.previewTabKey === tabKey
+    ? { ...state, groups: { ...state.groups, [group.id]: withoutPreviewMarker(group) } }
+    : state;
+}
+
+/** Replacement keeps the destination pane, even when its only tab was a preview. */
+function dismissPreview(state: DeskState, groupId: string): DeskState {
+  const group = ownGroup(state, groupId);
+  return group?.previewTabKey
+    ? pruneTargets({
+        ...state,
+        groups: { ...state.groups, [group.id]: withoutTab(group, group.previewTabKey) },
+      })
+    : state;
 }
 
 function withTab(group: DeskGroup, tabKey: string, index: number): DeskGroup {
@@ -280,8 +308,12 @@ function pruneTargets(state: DeskState): DeskState {
 }
 
 function selectTab(state: DeskState, tabKey: string): DeskState {
-  const group = deskGroupForTab(state, tabKey);
+  let group = deskGroupForTab(state, tabKey);
   if (!group) return state;
+  if (group.previewTabKey && group.previewTabKey !== tabKey) {
+    state = dismissPreview(state, group.id);
+    group = ownGroup(state, group.id)!;
+  }
   const focusedGroupId = state.focusedGroupId === null ? null : group.id;
   if (
     group.activeTabKey === tabKey &&
@@ -306,7 +338,8 @@ function closeTabs(state: DeskState, keys: readonly string[], remember = true): 
     const group = deskGroupForTab(next, tabKey);
     if (!group) continue;
     const closed = next.closed.filter((entry) => entry.tabKey !== tabKey);
-    if (remember) closed.push({ tabKey, groupId: group.id, index: group.tabs.indexOf(tabKey) });
+    if (remember && group.previewTabKey !== tabKey)
+      closed.push({ tabKey, groupId: group.id, index: group.tabs.indexOf(tabKey) });
     next = collapseEmpty(
       {
         ...next,
@@ -347,7 +380,7 @@ function replaceTargetIdentity(
     // transition. Keep the destination's existing location, whether the draft
     // still owns initialization or the server has accepted its first turn.
     // Rewriting both open tabs and reopen history prevents a second owner.
-    next = closeTabs(state, [oldKey], false);
+    next = closeTabs(keepTab(state, newKey), [oldKey], false);
     if (oldGroup.activeTabKey === oldKey && state.activeGroupId === oldGroup.id)
       next = selectTab(next, newKey);
   } else if (oldGroup) {
@@ -356,7 +389,7 @@ function replaceTargetIdentity(
       groups: {
         ...state.groups,
         [oldGroup.id]: {
-          ...oldGroup,
+          ...withoutPreviewMarker(oldGroup),
           tabs: oldGroup.tabs.map((key) => (key === oldKey ? newKey : key)),
           activeTabKey: oldGroup.activeTabKey === oldKey ? newKey : oldGroup.activeTabKey,
         },
@@ -381,22 +414,35 @@ export function reduceDesk(state: DeskState, action: DeskAction): DeskState {
   switch (action.type) {
     case "open": {
       const target = decodeTarget(action.target, state.environmentId);
-      const group = ownGroup(state, action.groupId ?? state.activeGroupId);
+      let group = ownGroup(state, action.groupId ?? state.activeGroupId);
       if (!target || !group) return state;
       const tabKey = deskTabKey(target);
-      if (deskGroupForTab(state, tabKey))
-        return action.activate === false ? state : selectTab(state, tabKey);
+      const preview =
+        action.preview === true && target.kind === "server" && action.activate !== false;
+      if (deskGroupForTab(state, tabKey)) {
+        const next = preview ? state : keepTab(state, tabKey);
+        return action.activate === false ? next : selectTab(next, tabKey);
+      }
       if (
-        Object.values(state.groups).reduce((count, item) => count + item.tabs.length, 0) >=
+        Object.values(state.groups).reduce((count, item) => count + item.tabs.length, 0) -
+          (action.activate !== false && group.previewTabKey ? 1 : 0) >=
         DESK_LIMITS.tabs
       )
         return state;
+      const index = group.previewTabKey
+        ? group.tabs.indexOf(group.previewTabKey)
+        : group.tabs.length;
+      if (action.activate !== false) {
+        state = dismissPreview(state, group.id);
+        group = ownGroup(state, group.id)!;
+      }
       return {
         ...state,
         groups: {
           ...state.groups,
           [group.id]: {
-            ...withTab(group, tabKey, group.tabs.length),
+            ...withTab(group, tabKey, preview ? index : group.tabs.length),
+            ...(preview ? { previewTabKey: tabKey } : {}),
             ...(action.activate === false ? { activeTabKey: group.activeTabKey ?? tabKey } : {}),
           },
         },
@@ -409,6 +455,10 @@ export function reduceDesk(state: DeskState, action: DeskAction): DeskState {
         closed: state.closed.filter((entry) => entry.tabKey !== tabKey),
       };
     }
+    case "keepOpen":
+      return keepTab(state, action.tabKey);
+    case "dismissPreview":
+      return dismissPreview(state, action.groupId);
     case "select":
       return selectTab(state, action.tabKey);
     case "activateGroup": {
@@ -452,8 +502,8 @@ export function reduceDesk(state: DeskState, action: DeskAction): DeskState {
       });
     }
     case "move": {
-      const source = deskGroupForTab(state, action.tabKey);
-      const target = ownGroup(state, action.groupId);
+      let source = deskGroupForTab(state, action.tabKey);
+      let target = ownGroup(state, action.groupId);
       if (
         !source ||
         !target ||
@@ -463,7 +513,19 @@ export function reduceDesk(state: DeskState, action: DeskAction): DeskState {
       )
         return state;
       if (source.id === target.id && source.tabs.indexOf(action.tabKey) === action.index)
-        return selectTab(state, action.tabKey);
+        return selectTab(keepTab(state, action.tabKey), action.tabKey);
+      let index = action.index;
+      if (target.previewTabKey && target.previewTabKey !== action.tabKey) {
+        // The dragged chat becomes selected. Dismiss the destination's old
+        // preview and translate the insertion slot without reordering kept tabs.
+        const previewIndex = target.tabs
+          .filter((key) => key !== action.tabKey)
+          .indexOf(target.previewTabKey);
+        if (previewIndex < index) index -= 1;
+        state = dismissPreview(state, target.id);
+        source = deskGroupForTab(state, action.tabKey)!;
+        target = ownGroup(state, target.id)!;
+      }
       const remaining = withoutTab(source, action.tabKey);
       const next = collapseEmpty(
         {
@@ -474,7 +536,7 @@ export function reduceDesk(state: DeskState, action: DeskAction): DeskState {
             [target.id]: withTab(
               source.id === target.id ? remaining : target,
               action.tabKey,
-              action.index,
+              index,
             ),
           },
           activeGroupId: target.id,
@@ -563,7 +625,7 @@ export function reduceDesk(state: DeskState, action: DeskAction): DeskState {
             ...state.groups,
             [source.id]: { ...source, tabs: [], activeTabKey: null },
             [target.id]: {
-              ...target,
+              ...withoutPreviewMarker(target),
               tabs: [...target.tabs, ...source.tabs],
               activeTabKey: target.activeTabKey ?? source.activeTabKey,
             },
@@ -820,5 +882,12 @@ export function hydrateDesk(raw: string | null, environmentId: EnvironmentId): D
 }
 
 export function serializeDesk(desk: DeskState): string {
-  return JSON.stringify({ version: 1, desk });
+  const previews = Object.values(desk.groups).flatMap((group) =>
+    group.previewTabKey ? [group.previewTabKey] : [],
+  );
+  let saved = closeTabs(desk, previews, false);
+  // An active pending editor can keep a pane whose preview was dismissed.
+  // Only persisted navigation collapses that empty pane; editor ownership stays live.
+  for (const groupId of deskGroupIds(saved.layout)) saved = collapseEmpty(saved, groupId);
+  return JSON.stringify({ version: 1, desk: saved });
 }

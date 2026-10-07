@@ -27,8 +27,8 @@ project association. A project provides optional repository/folder execution
 context; Desk is a client-local open-view arrangement, never the owner of chat
 history. Project IDs remain genuine IDs, with no sentinel or synthetic project.
 
-The new-thread icons in Projects' Chats heading and Desk's Open chats heading,
-along with the existing global shortcut, share one pending-editor action. There
+The New chat icon in Projects' Chats heading and the existing global shortcut
+share one pending-editor action. Desk has no heading creation button. There
 is no full-width New chat button and creation never switches the sidebar mode.
 Capture the primary environment and active group before asynchronous navigation.
 Reuse the current or most recent unpromoted standalone draft in that environment,

@@ -39,7 +39,7 @@ export function ContextWindowMeter(props: {
         render={
           <button
             type="button"
-            className="group inline-flex items-center justify-center rounded-full transition-opacity hover:opacity-85"
+            className="focus-ring group inline-flex items-center justify-center rounded-full transition-opacity duration-(--duration-fast) hover:opacity-85"
             aria-label={
               usage.maxTokens !== null && usedPercentage
                 ? `Context window ${usedPercentage} used`
@@ -75,7 +75,10 @@ export function ContextWindowMeter(props: {
               </svg>
               <span
                 className={cn(
-                  "relative flex h-[15px] w-[15px] items-center justify-center rounded-full bg-background text-[8px] font-medium",
+                  // The gauge numeral is a glyph inside a 24px ring, a deliberate
+                  // exception to the 11px text floor. Rem units keep it scaling
+                  // with the ring at every interface size.
+                  "relative flex size-[0.9375rem] items-center justify-center rounded-full bg-background text-[0.5rem] font-medium tabular-nums",
                   "text-muted-foreground",
                 )}
               >

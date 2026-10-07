@@ -10,7 +10,6 @@ import {
   ArrowLeftIcon,
   FilePenLineIcon,
   FileSearchIcon,
-  LoaderCircleIcon,
   MessageSquareIcon,
   TerminalIcon,
   WrenchIcon,
@@ -29,8 +28,14 @@ import { readEnvironmentApi } from "../../environmentApi";
 import { formatElapsed, type WorkLogEntry } from "../../session-logic";
 import ChatMarkdown from "../ChatMarkdown";
 import { SubagentAvatar } from "../subagents/SubagentAvatar";
+import { SUBAGENT_STATUS_UNAVAILABLE_DETAIL } from "../subagents/SubagentRosterRow";
 import { cn } from "~/lib/utils";
 import { useChatPane } from "../../chatPaneContext";
+import { useDelayedFlag } from "../../hooks/useDelayedFlag";
+import { Button } from "../ui/button";
+import { InfoTip } from "../ui/info-tip";
+import { Skeleton } from "../ui/skeleton";
+import { Spinner } from "../ui/spinner";
 import { SubagentTaskControls } from "./SubagentTaskControls";
 
 type SubagentWorkEntry = WorkLogEntry & {
@@ -209,6 +214,9 @@ function BoundSubagentDetailView({
   );
   const [newUpdateCount, setNewUpdateCount] = useState(0);
   const [retryRevision, setRetryRevision] = useState(0);
+  // Fast history reads show nothing; slower ones show message-shaped
+  // skeletons (style guide §9) rather than a spinner line.
+  const showLoadingSkeleton = useDelayedFlag(loadState.status === "loading");
 
   useEffect(() => {
     if (!pane.active || !pane.visible) return;
@@ -455,16 +463,16 @@ function BoundSubagentDetailView({
 
   return (
     <section
-      className="absolute inset-0 z-40 flex min-h-0 min-w-0 flex-col overflow-hidden bg-background"
+      className="absolute inset-0 z-40 flex min-h-0 min-w-0 flex-col overflow-hidden bg-background animate-enter-from-end"
       aria-label={`Subagent detail: ${subagent.label}`}
       data-subagent-detail-view="true"
     >
-      <header className="shrink-0 border-b border-border/55 bg-background/95 px-3 py-2.5 backdrop-blur sm:px-5 sm:py-3">
+      <header className="shrink-0 border-b border-border-subtle bg-background/95 px-3 py-2.5 backdrop-blur sm:px-5 sm:py-3">
         <div className="mx-auto flex w-full max-w-3xl min-w-0 items-center gap-2.5">
           <button
             ref={backButtonRef}
             type="button"
-            className="-ml-1 inline-flex size-11 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted/55 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+            className="-ml-1 inline-flex size-11 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors duration-(--duration-fast) hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
             aria-label="Back to conversation"
             onClick={onBack}
           >
@@ -477,15 +485,21 @@ function BoundSubagentDetailView({
             </h2>
             <p
               className={cn(
-                "text-[10px] font-medium uppercase tracking-[0.12em]",
+                "flex items-center gap-1 text-2xs font-medium",
                 subagent.status === "failed"
-                  ? "text-destructive/80"
+                  ? "text-destructive-foreground"
                   : live
-                    ? "text-sky-500"
-                    : "text-muted-foreground/60",
+                    ? "text-primary"
+                    : "text-muted-foreground",
               )}
+              data-subagent-detail-status="true"
             >
               {statusLabel(subagent.status)}
+              {subagent.status === "unknown" ? (
+                <InfoTip label="About this status" side="bottom">
+                  {SUBAGENT_STATUS_UNAVAILABLE_DETAIL}
+                </InfoTip>
+              ) : null}
             </p>
           </div>
         </div>
@@ -514,21 +528,19 @@ function BoundSubagentDetailView({
         }}
       >
         <div className="mx-auto w-full min-w-0 max-w-3xl space-y-5 pb-[calc(env(safe-area-inset-bottom)+1rem)]">
-          <section className="min-w-0 rounded-xl border border-border/45 bg-card/25 p-3 sm:p-4">
-            <p className="text-[9px] font-medium uppercase tracking-[0.16em] text-muted-foreground/55">
-              Current work
-            </p>
-            <p className="mt-1.5 text-sm leading-5 text-foreground/90 break-words">
+          <section className="min-w-0 rounded-xl border border-border-subtle bg-card p-3 sm:p-4">
+            <p className="label-overline">Current work</p>
+            <p className="mt-1.5 text-sm leading-5 text-foreground break-words">
               {primaryDescription}
             </p>
             {subagent.objective && subagent.objective !== primaryDescription ? (
-              <p className="mt-2 text-xs leading-5 text-muted-foreground/70 break-words">
+              <p className="mt-2 text-xs leading-5 text-muted-foreground break-words">
                 {subagent.objective}
               </p>
             ) : null}
             {elapsed ? (
               <p
-                className="mt-3 border-t border-border/40 pt-2 font-mono text-[11px] text-muted-foreground/65 tabular-nums"
+                className="mt-3 border-t border-border-subtle pt-2 font-mono text-2xs text-subtle-foreground tabular-nums"
                 data-subagent-detail-elapsed="true"
               >
                 {live ? "Working" : "Worked"} for {elapsed}
@@ -537,12 +549,22 @@ function BoundSubagentDetailView({
           </section>
 
           {loadState.status === "loading" ? (
-            <div
-              className="flex items-center gap-2 py-3 text-sm text-muted-foreground/60"
-              role="status"
-            >
-              <LoaderCircleIcon className="size-4 animate-spin" />
-              Loading subagent history…
+            <div role="status" data-subagent-detail-loading="true">
+              <span className="sr-only">Loading subagent history…</span>
+              {showLoadingSkeleton ? (
+                <div aria-hidden="true" className="space-y-5 animate-enter-fade">
+                  <Skeleton className="h-16 rounded-xl" />
+                  <div className="space-y-2">
+                    <Skeleton className="h-3 w-20" />
+                    <Skeleton className="h-3 w-full" />
+                    <Skeleton className="h-3 w-4/5" />
+                  </div>
+                  <div className="space-y-2">
+                    <Skeleton className="h-3 w-16" />
+                    <Skeleton className="h-3 w-11/12" />
+                  </div>
+                </div>
+              ) : null}
             </div>
           ) : null}
 
@@ -568,18 +590,16 @@ function BoundSubagentDetailView({
                   className={cn(
                     "min-w-0",
                     message.role === "user" &&
-                      "rounded-xl border border-border/40 bg-muted/20 px-3 py-3 sm:px-4",
+                      "rounded-xl border border-border-subtle bg-muted/40 px-3 py-3 sm:px-4",
                   )}
                   data-subagent-detail-message={message.role}
                   data-subagent-detail-message-key={message.key}
                 >
-                  <div className="mb-2 flex min-w-0 flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-muted-foreground/55">
-                    <p className="text-[9px] font-medium uppercase tracking-[0.16em]">
-                      {messageLabel}
-                    </p>
+                  <div className="mb-2 flex min-w-0 flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-subtle-foreground">
+                    <p className="text-2xs font-medium">{messageLabel}</p>
                     {message.timestamp ? (
                       <time
-                        className="max-w-full text-right font-mono text-[10px] leading-4 tabular-nums break-words"
+                        className="max-w-full text-right font-mono text-2xs tabular-nums break-words"
                         dateTime={message.timestamp}
                       >
                         {SUBAGENT_MESSAGE_TIMESTAMP_FORMATTER.format(new Date(message.timestamp))}
@@ -599,7 +619,7 @@ function BoundSubagentDetailView({
                     {message.omission ? (
                       <>
                         <p
-                          className="my-3 border-border/45 border-y py-2 text-[11px] leading-5 text-muted-foreground/55"
+                          className="my-3 border-border-subtle border-y py-2 text-2xs leading-5 text-subtle-foreground"
                           role="note"
                           data-subagent-detail-content-omission="true"
                         >
@@ -631,11 +651,9 @@ function BoundSubagentDetailView({
           (activities.length > 0 || loadState.detail.activityHistoryIncomplete === true) ? (
             <section
               aria-label="Subagent activity"
-              className="min-w-0 border-t border-border/40 pt-4"
+              className="min-w-0 border-t border-border-subtle pt-4"
             >
-              <h3 className="mb-2 text-[9px] font-medium uppercase tracking-[0.16em] text-muted-foreground/55">
-                Activity
-              </h3>
+              <h3 className="mb-2 text-2xs font-medium text-subtle-foreground">Activity</h3>
               {/* Provider times can be absent. Keep this bounded activity tail
                   in its supplied order instead of inventing chronology among
                   the separately retained public messages above. The optional
@@ -648,17 +666,20 @@ function BoundSubagentDetailView({
                     <li
                       key={activity.key}
                       data-subagent-detail-activity={activity.kind}
-                      className="min-w-0 py-1.5 text-xs text-muted-foreground/80"
+                      className="min-w-0 py-1.5 text-xs text-muted-foreground"
                     >
                       <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
                         <span className="inline-flex min-w-0 items-center gap-2">
-                          <Icon aria-hidden="true" className="size-3.5 shrink-0 opacity-70" />
+                          <Icon
+                            aria-hidden="true"
+                            className="size-3.5 shrink-0 text-subtle-foreground"
+                          />
                           {label}
                         </span>
                         {activity.timestamp ? (
                           <time
                             dateTime={activity.timestamp}
-                            className="max-w-full text-right font-mono text-[10px] leading-4 tabular-nums break-words text-muted-foreground/55"
+                            className="max-w-full text-right font-mono text-2xs tabular-nums break-words text-subtle-foreground"
                           >
                             {SUBAGENT_MESSAGE_TIMESTAMP_FORMATTER.format(
                               new Date(activity.timestamp),
@@ -672,7 +693,7 @@ function BoundSubagentDetailView({
                         // nested scrollbar or a hover-only truncated command.
                         <code
                           data-subagent-detail-activity-detail="true"
-                          className="mt-1 block min-w-0 pl-5.5 font-mono text-[11px] leading-5 whitespace-pre-wrap text-foreground/85 [overflow-wrap:anywhere]"
+                          className="mt-1 block min-w-0 pl-5.5 font-mono text-2xs leading-5 whitespace-pre-wrap text-foreground [overflow-wrap:anywhere]"
                         >
                           {activity.detail}
                         </code>
@@ -685,10 +706,9 @@ function BoundSubagentDetailView({
                 <p
                   role="note"
                   data-subagent-detail-activity-incomplete="true"
-                  className="mt-2 text-[11px] leading-5 text-muted-foreground/55"
+                  className="mt-2 text-2xs leading-5 text-subtle-foreground"
                 >
-                  Activity is incomplete. Some operations could not be loaded within this view’s
-                  retrieval limits.
+                  Some activity couldn’t be loaded.
                 </p>
               ) : null}
             </section>
@@ -696,17 +716,15 @@ function BoundSubagentDetailView({
 
           {loadState.status === "unavailable" ? (
             <div
-              className="rounded-xl border border-border/40 bg-muted/15 px-3 py-3 text-xs leading-5 text-muted-foreground/65"
+              className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl border border-border-subtle bg-card px-3 py-2.5 text-xs leading-5 text-muted-foreground animate-enter-fade"
               role="status"
               data-subagent-detail-unavailable="true"
             >
-              <p>
-                The provider transcript is unavailable right now. The saved task summary and timing
-                above remain available.
-              </p>
-              <button
+              <p>Transcript unavailable.</p>
+              <Button
                 type="button"
-                className="mt-2 rounded-md border border-border/55 bg-background/45 px-2.5 py-1 text-xs font-medium text-foreground transition-colors hover:bg-muted/55 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                size="xs"
+                variant="outline"
                 data-subagent-detail-retry="true"
                 onClick={() => {
                   setLoadState({ status: "loading" });
@@ -720,28 +738,27 @@ function BoundSubagentDetailView({
                 }}
               >
                 Retry
-              </button>
+              </Button>
             </div>
           ) : null}
 
           {loadState.status === "loaded" && loadState.refreshStatus !== "current" ? (
             <div
-              className="rounded-xl border border-border/40 bg-muted/15 px-3 py-3 text-xs leading-5 text-muted-foreground/65"
+              className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl border border-border-subtle bg-card px-3 py-2.5 text-xs leading-5 text-muted-foreground animate-enter-fade"
               role="status"
               data-subagent-detail-refresh-unavailable="true"
             >
-              <p>
-                New provider updates could not be loaded. This is the last available transcript.
-              </p>
+              <p>Couldn’t refresh. Showing the last loaded transcript.</p>
               {loadState.refreshStatus === "retrying" ? (
-                <span className="mt-2 inline-flex items-center gap-1.5 text-foreground/75">
-                  <LoaderCircleIcon className="size-3.5 animate-spin" />
+                <span className="inline-flex items-center gap-1.5 text-foreground">
+                  <Spinner aria-hidden="true" role={undefined} className="size-3.5" />
                   Retrying…
                 </span>
               ) : (
-                <button
+                <Button
                   type="button"
-                  className="mt-2 rounded-md border border-border/55 bg-background/45 px-2.5 py-1 text-xs font-medium text-foreground transition-colors hover:bg-muted/55 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                  size="xs"
+                  variant="outline"
                   data-subagent-detail-retry="true"
                   onClick={() => {
                     // Retain the authenticated snapshot while retrying. The
@@ -759,26 +776,24 @@ function BoundSubagentDetailView({
                   }}
                 >
                   Retry
-                </button>
+                </Button>
               )}
             </div>
           ) : null}
 
           {loadState.status === "loaded" && messages.length === 0 && activities.length === 0 ? (
-            <p className="text-xs leading-5 text-muted-foreground/60" role="status">
-              No public subagent messages are available in this view. The task summary above is
-              still available.
+            <p className="text-xs leading-5 text-muted-foreground" role="status">
+              No messages yet.
             </p>
           ) : null}
 
           {loadState.status === "loaded" && loadState.detail.historyIncomplete === true ? (
             <p
-              className="rounded-lg border border-dashed border-border/45 bg-muted/10 px-3 py-2 text-center text-[11px] leading-5 text-muted-foreground/55"
+              className="rounded-lg border border-dashed border-border-subtle px-3 py-2 text-center text-2xs leading-5 text-subtle-foreground"
               role="note"
               data-subagent-detail-history-incomplete="true"
             >
-              History is incomplete. Some public messages could not be loaded within this view’s
-              retrieval limits.
+              Some messages couldn’t be loaded.
             </p>
           ) : null}
 
@@ -787,8 +802,8 @@ function BoundSubagentDetailView({
           loadState.detail.historyIncomplete !== true &&
           loadState.detail.gaps.length === 0 &&
           !messages.some((message) => message.omission) ? (
-            <p className="text-[11px] leading-5 text-muted-foreground/55" role="note">
-              This long subagent history was shortened to keep the chat responsive.
+            <p className="text-2xs leading-5 text-subtle-foreground" role="note">
+              Older messages hidden.
             </p>
           ) : null}
         </div>
@@ -796,7 +811,7 @@ function BoundSubagentDetailView({
       {newUpdateCount > 0 ? (
         <button
           type="button"
-          className="absolute right-4 bottom-4 z-10 rounded-full border border-border/60 bg-card/95 px-3 py-1.5 text-xs text-foreground shadow-sm backdrop-blur"
+          className="absolute right-4 bottom-4 z-10 rounded-full border border-border bg-raised px-3 py-1.5 text-xs text-foreground shadow-sm transition-colors duration-(--duration-fast) hover:bg-accent animate-enter-rise"
           data-subagent-detail-jump-to-latest="true"
           onClick={() => {
             const scroller = detailScrollRef.current;
@@ -815,7 +830,7 @@ function BoundSubagentDetailView({
 function TranscriptGap(props: { readonly gap: LoadedSubagentDetail["gaps"][number] }) {
   return (
     <p
-      className="rounded-lg border border-dashed border-border/45 bg-muted/10 px-3 py-2 text-center text-[11px] leading-5 text-muted-foreground/55"
+      className="rounded-lg border border-dashed border-border-subtle px-3 py-2 text-center text-2xs leading-5 text-subtle-foreground"
       role="note"
       data-subagent-detail-gap="true"
     >
@@ -824,7 +839,6 @@ function TranscriptGap(props: { readonly gap: LoadedSubagentDetail["gaps"][numbe
       {props.gap.omittedUtf8Bytes > 0
         ? ` (${props.gap.omittedUtf8Bytes.toLocaleString()} bytes)`
         : ""}
-      . Showing the original assignment and latest activity.
     </p>
   );
 }

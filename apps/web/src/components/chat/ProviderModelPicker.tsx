@@ -40,10 +40,13 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   triggerVariant?: VariantProps<typeof buttonVariants>["variant"];
   triggerClassName?: string;
   onOpenChange?: (open: boolean) => void;
-  onRequestModelsRefresh?: (instanceId: ProviderInstanceId) => void;
+  /** Return the in-flight read to let the picker show a delayed progress line. */
+  onRequestModelsRefresh?: (instanceId: ProviderInstanceId) => void | Promise<unknown>;
   onInstanceModelChange: (instanceId: ProviderInstanceId, model: string) => void;
 }) {
   const [uncontrolledIsMenuOpen, setUncontrolledIsMenuOpen] = useState(false);
+  const [refreshingRequest, setRefreshingRequest] = useState<number | null>(null);
+  const refreshRequestRef = useRef(0);
   const isMenuOpen = props.open ?? uncontrolledIsMenuOpen;
   const wasMenuOpenRef = useRef(false);
   const isDisabled = props.disabled;
@@ -97,7 +100,16 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
       // popover closed. Existing props remain rendered while the bounded
       // server request runs, so selection, keyboard highlight, and stale
       // options survive both latency and failure.
-      requestModelsRefresh?.(activeInstanceId);
+      const pending = requestModelsRefresh?.(activeInstanceId);
+      if (pending instanceof Promise) {
+        // Presentation only: the request itself stays single-flight per open.
+        // A later open's request supersedes this one's indicator.
+        const request = ++refreshRequestRef.current;
+        setRefreshingRequest(request);
+        const settle = () =>
+          setRefreshingRequest((current) => (current === request ? null : current));
+        pending.then(settle, settle);
+      }
     }
   }, [activeInstanceId, isDisabled, isMenuOpen, requestModelsRefresh]);
 
@@ -125,7 +137,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
             variant={props.triggerVariant ?? "ghost"}
             data-chat-provider-model-picker="true"
             className={cn(
-              "min-w-0 justify-start overflow-hidden whitespace-nowrap px-2 text-muted-foreground/70 hover:text-foreground/80 [&_svg]:mx-0",
+              "min-w-0 justify-start overflow-hidden whitespace-nowrap px-2 text-muted-foreground hover:text-foreground [&_svg]:mx-0",
               props.compact ? "max-w-64 flex-1 shrink" : "max-w-48 shrink sm:max-w-56 sm:px-3",
               props.triggerClassName,
             )}
@@ -193,6 +205,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
           instanceEntries={props.instanceEntries}
           {...(props.keybindings ? { keybindings: props.keybindings } : {})}
           modelOptionsByInstance={props.modelOptionsByInstance}
+          refreshing={refreshingRequest !== null}
           onRequestClose={() => setIsMenuOpen(false)}
           onInstanceModelChange={handleInstanceModelChange}
         />

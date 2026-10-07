@@ -204,7 +204,7 @@ describe("SessionRail", () => {
         "No tasks yet.",
       );
       expect(document.querySelector('[data-session-rail-usage="true"]')?.textContent).toContain(
-        "Waiting for usage from this thread.",
+        "Waiting for usage from this chat.",
       );
     } finally {
       await screen.unmount();

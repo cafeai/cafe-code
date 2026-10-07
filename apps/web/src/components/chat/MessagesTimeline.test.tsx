@@ -189,9 +189,10 @@ describe("MessagesTimeline file open helpers", () => {
     );
     expect(markup).toContain('data-turn-configuration-row="true"');
     expect(markup).toContain('data-turn-configuration-settings="true"');
-    expect(markup).toContain("GPT-6.1 Sol · Effort: Ultra · Fast on");
-    expect(markup).toContain("Account: Original account &lt;label&gt;");
-    expect(markup).toContain("Build · Full access");
+    // One escaped line: model, effort, Fast, exact account label and modes.
+    expect(markup).toContain(
+      "GPT-6.1 Sol · Ultra · Fast on · Original account &lt;label&gt; · Build · Full access",
+    );
     expect(markup).not.toContain("codex_personal");
     expect(markup).not.toContain("Original account <label>");
   });
@@ -302,7 +303,7 @@ describe("MessagesTimeline", () => {
       />,
     );
 
-    expect(markup).toContain('aria-label="Copy link"');
+    expect(markup).toContain('aria-label="Copy message"');
     expect(markup).toContain('data-user-message-collapsed="true"');
     expect(markup).toContain('data-user-message-footer="true"');
   });
@@ -316,7 +317,7 @@ describe("MessagesTimeline", () => {
       />,
     );
 
-    expect(markup).toContain('aria-label="Copy link"');
+    expect(markup).toContain('aria-label="Copy message"');
     expect(markup).toContain("Assistant token output.");
   });
 
@@ -333,7 +334,7 @@ describe("MessagesTimeline", () => {
       />,
     );
 
-    expect(markup).toContain('aria-label="Copy link"');
+    expect(markup).toContain('aria-label="Copy message"');
     expect(markup).toContain("Partial assistant output.");
   });
 
@@ -405,12 +406,13 @@ describe("MessagesTimeline", () => {
         'aria-label="Locate footer label, Working. Refining trigger label filtering. Open details"',
       );
       expect(markup).toContain("Locate footer label");
-      // Both strings must be real row text. The provider's latest description
-      // is primary while the original objective remains visible beneath it;
-      // neither may regress into a hover-only title attribute.
+      // The provider's latest description stays visible as one line of real
+      // row text. The differing original objective moves to the row's
+      // focusable tooltip (and the detail screen), never a title attribute.
       expect(markup).toMatch(
-        /data-subagent-description="true"[^>]*>Refining trigger label filtering<\/p>[\s\S]*>Find where the footer status label is assembled<\/p>/,
+        /data-subagent-description="true"[^>]*>Refining trigger label filtering<\/p>/,
       );
+      expect(markup).not.toContain(">Find where the footer status label is assembled</p>");
       expect(markup).not.toContain('title="Find where the footer status label is assembled"');
       expect(markup).not.toContain('title="Refining trigger label filtering"');
       expect(markup).toContain("Working");
@@ -531,7 +533,7 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain('data-work-log-path-pill="changed-file"');
   });
 
-  it("renders openable path pills from runtime warning details", async () => {
+  it("keeps paths named in runtime warning details openable without duplicate chips", async () => {
     const { MessagesTimeline } = readMessagesTimelineModule();
     const markup = renderToStaticMarkup(
       <MessagesTimeline
@@ -555,7 +557,11 @@ describe("MessagesTimeline", () => {
     );
 
     expect(markup).toContain("Runtime warning");
-    expect(markup).toContain('data-work-log-path-pill="command-token"');
+    // The path already appears in the detail text, so it is not repeated as a
+    // chip; a single revealed control keeps the open/copy action.
+    expect(markup).not.toContain('data-work-log-path-pill="command-token"');
+    expect(markup).toContain('data-work-log-open-path="true"');
+    expect(markup).toContain('aria-label="Copy selia/cafe-code/2/5"');
   });
 
   it("does not add native title tooltips to tool-call summary text", async () => {

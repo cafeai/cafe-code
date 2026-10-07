@@ -5,9 +5,23 @@ Use **Projects** to browse the saved project/chat catalog, including the separat
 show only your open chats, grouped the way you are working. Atrium, Settings,
 project actions and the chat composer stay in their usual places.
 
-- Open a chat from Projects or search to add/select its tab in the current group.
-- Use **New chat** above the Desk/Projects switch or Desk's **Open chats** plus
-  to create a standalone conversation in the active group without a folder.
+The tabs now occupy the top window bar, with a taller row instead of a separate
+chat header above them. Native window controls retain their own space. Project
+context remains in each tab's hover title and the sidebar. Source-build badges
+such as **Newer dev** sit beside **Settings** at the bottom of the sidebar.
+
+- In **Settings → Chats → Single-click behavior**, choose **Preview** (the default)
+  or **Open**. Open keeps each clicked chat as a regular tab.
+- With Preview selected, click a chat in Projects, Chats or search to preview it in the current group.
+  Preview titles are italic. Opening another chat replaces that group's preview;
+  selecting a kept tab dismisses it. Each visible split group has its own preview.
+  Double-click the chat row or its tab to keep it open, or choose **Keep open**
+  from the tab's context menu. Kept tabs retain normal titles and restore on restart.
+  Previews are excluded from saved layouts and reopen history. Dragging a tab to
+  rearrange or split it keeps it open. Closing a preview retains its input and work.
+- Use the **New chat** icon beside **Chats** in Projects, or the global New chat
+  shortcut, to create a standalone conversation in the active group without a folder.
+  Desk's **Open chats** heading has no creation button.
   Existing per-project New chat actions still create project-associated chats.
 - Drag tabs to reorder, into another group to move, or to a chat pane edge to
   split. Hover the left or right half of a tab to see an insertion line before
@@ -17,6 +31,10 @@ project actions and the chat composer stay in their usual places.
   to that group. Escape or dropping outside the workspace cancels the move.
 - Use a tab's right-click menu or the group's `…` button for close, close others,
   close right, close all, reopen, split, move, merge and focus actions.
+- Choose **Open** in that menu to open the clicked chat's project/worktree in
+  an installed editor, the file manager, or a terminal. The existing favorite-editor
+  keyboard shortcut still acts on the focused chat pane. These actions are
+  available only for local projects with the corresponding desktop capability.
 - Right-click an open chat in the Desk sidebar, or press Shift+F10 / the keyboard
   menu key while its row or tab is focused, to rename, archive, move it to the
   Recycle Bin, delete it permanently, or close its tab. Opening this menu does
@@ -58,7 +76,7 @@ project actions and the chat composer stay in their usual places.
   without shifting the title (touch shows the actions directly). The pencil
   edits the title inline: Enter or clicking away saves, Escape cancels.
   Rename failures keep the edited text for retry; no modal interrupts the chat.
-- Use the chevron to search a group's open tabs. Arrow keys/Home/End navigate
+- Choose **Search open tabs…** from the group's `…` menu to find an open tab. Arrow keys/Home/End navigate
   a focused tab strip. Menus offer alternatives to dragging.
 - Pin task/context/quota information from its existing composer popover, or
   choose **Pin session information** from a group's menu. Each group remembers

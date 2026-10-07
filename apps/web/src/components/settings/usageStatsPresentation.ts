@@ -1,4 +1,4 @@
-import type { ProviderDriverKind, UsageStatsTokenBreakdownEntry } from "@cafecode/contracts";
+import type { ProviderDriverKind } from "@cafecode/contracts";
 
 const tokenIntegerFormat = new Intl.NumberFormat("en-US");
 const padDurationUnit = (value: number) => String(value).padStart(2, "0");
@@ -44,12 +44,12 @@ function normalizedTokenCount(value: number): number {
   return Number.isFinite(value) ? Math.max(0, value) : 0;
 }
 
-/** Full comma-separated token count used as the primary usage readout. */
+/** Exact comma-separated token count, available on hover/focus of a compact readout. */
 export function formatFullTokenCount(value: number): string {
   return tokenIntegerFormat.format(Math.round(normalizedTokenCount(value)));
 }
 
-/** Compact companion readout, such as `3.54B`, `3.00M`, or `9.5K`. */
+/** Compact token readout shown on usage surfaces, such as `3.54B`, `3.00M`, or `9.5K`. */
 export function formatCompactTokenCount(value: number): string {
   const normalized = normalizedTokenCount(value);
   const formatMagnitude = (
@@ -83,104 +83,6 @@ export function formatCompactTokenCount(value: number): string {
   return tokenIntegerFormat.format(Math.round(normalized));
 }
 
-export interface UsageModelBreakdownView {
-  readonly model: string;
-  readonly outputTokens: number;
-  readonly processedTokens: number;
-}
-
-export interface UsageProviderBreakdownView {
-  readonly provider: ProviderDriverKind;
-  readonly outputTokens: number;
-  readonly processedTokens: number;
-  readonly models: ReadonlyArray<UsageModelBreakdownView>;
-}
-
-export interface UsageTokenBreakdownView {
-  readonly providers: ReadonlyArray<UsageProviderBreakdownView>;
-  readonly attributedOutputTokens: number;
-  readonly unattributedOutputTokens: number;
-}
-
-const compareText = (left: string, right: string): number =>
-  left < right ? -1 : left > right ? 1 : 0;
-
-/**
- * Collapse defensive duplicate rows and prepare a deterministic dense view.
- * The server normally returns one row per provider/model, but merging here
- * keeps stale or mixed-version servers from rendering duplicated model lines.
- * Known input-only observations must stay visible without inventing output.
- * Input already includes cache reads/writes; reasoning already belongs to
- * output, so none of those subset counters are added to processed tokens.
- */
-export function buildUsageTokenBreakdownView(
-  rows: ReadonlyArray<UsageStatsTokenBreakdownEntry>,
-  recordedOutputTokens: number,
-): UsageTokenBreakdownView {
-  const byProvider = new Map<
-    ProviderDriverKind,
-    Map<string, { outputTokens: number; processedTokens: number }>
-  >();
-
-  for (const row of rows) {
-    const outputTokens = normalizedTokenCount(row.outputTokens);
-    const processedTokens = normalizedTokenCount(row.inputTokens) + outputTokens;
-    if (processedTokens <= 0) {
-      continue;
-    }
-    let models = byProvider.get(row.provider);
-    if (models === undefined) {
-      models = new Map();
-      byProvider.set(row.provider, models);
-    }
-    const existing = models.get(row.model);
-    models.set(row.model, {
-      outputTokens: (existing?.outputTokens ?? 0) + outputTokens,
-      processedTokens: (existing?.processedTokens ?? 0) + processedTokens,
-    });
-  }
-
-  const providers = Array.from(byProvider.entries(), ([provider, models]) => {
-    const modelRows = Array.from(models.entries(), ([model, tokens]) => ({
-      model,
-      ...tokens,
-    })).toSorted(
-      (left, right) =>
-        right.outputTokens - left.outputTokens ||
-        right.processedTokens - left.processedTokens ||
-        compareText(left.model, right.model),
-    );
-    return {
-      provider,
-      outputTokens: modelRows.reduce((sum, row) => sum + row.outputTokens, 0),
-      processedTokens: modelRows.reduce((sum, row) => sum + row.processedTokens, 0),
-      models: modelRows,
-    };
-  }).toSorted(
-    (left, right) =>
-      right.outputTokens - left.outputTokens ||
-      right.processedTokens - left.processedTokens ||
-      compareText(left.provider, right.provider),
-  );
-
-  const attributedOutputTokens = providers.reduce(
-    (sum, provider) => sum + provider.outputTokens,
-    0,
-  );
-
-  return {
-    providers,
-    attributedOutputTokens,
-    // Migration 61 intentionally did not guess provider/model attribution for
-    // older aggregate rows. Surface that honest remainder instead of silently
-    // making the visible provider totals appear to equal lifetime usage.
-    unattributedOutputTokens: Math.max(
-      0,
-      normalizedTokenCount(recordedOutputTokens) - attributedOutputTokens,
-    ),
-  };
-}
-
 export function formatUsageProviderLabel(provider: ProviderDriverKind): string {
   switch (provider) {
     case "codex":
@@ -205,22 +107,11 @@ export function formatUsageModelLabel(model: string): string {
 /**
  * A known provider with an absent effective model is different from missing
  * provider attribution. Helpers and older observations can legitimately lack
- * that field; never present the requested model as the one that served them.
- * Keep the explanation shared by output breakdown and estimated-cost rows.
+ * that field; never present the requested model as the one that served them,
+ * and never claim every such row came from a helper.
  */
 export function getUsageModelExplanation(model: string): string | undefined {
   return model === "unknown"
-    ? "The provider reported token usage without identifying the effective model. Tokens remain counted; cost is unpriced unless you set a custom rate."
+    ? "The provider didn't report which model served these tokens. They're counted but not priced."
     : undefined;
-}
-
-export function formatUsagePercentage(part: number, whole: number): string {
-  if (part <= 0 || whole <= 0) {
-    return "0%";
-  }
-  const percentage = Math.min(100, (part / whole) * 100);
-  if (percentage < 0.1) {
-    return "<0.1%";
-  }
-  return percentage < 10 ? `${percentage.toFixed(1)}%` : `${Math.round(percentage)}%`;
 }

@@ -15,24 +15,45 @@ import {
   CommandShortcut,
 } from "./ui/command";
 import { cn } from "~/lib/utils";
+import { useDelayedFlag } from "~/hooks/useDelayedFlag";
+import { Spinner } from "./ui/spinner";
 
 interface CommandPaletteResultsProps {
   emptyStateMessage?: string;
   groups: ReadonlyArray<CommandPaletteGroup>;
   highlightedItemValue?: string | null;
   isActionsOnly: boolean;
+  /** Browsing folders: empty results describe folders, not commands. */
+  isBrowsing?: boolean;
+  /** Results for the current query are still loading; never show "no matches" yet. */
+  isLoading?: boolean;
   keybindings: ResolvedKeybindingsConfig;
   onExecuteItem: (item: CommandPaletteActionItem | CommandPaletteSubmenuItem) => void;
 }
 
 export function CommandPaletteResults(props: CommandPaletteResultsProps) {
-  if (props.groups.length === 0) {
+  const isEmpty = props.groups.length === 0;
+  // A spinner appears only for a noticeable wait (docs/style-guide.md §9).
+  const showLoadingIndicator = useDelayedFlag(isEmpty && props.isLoading === true);
+
+  if (isEmpty) {
+    if (props.isLoading) {
+      return (
+        <div className="flex min-h-28 items-center justify-center py-10" aria-busy="true">
+          {showLoadingIndicator ? (
+            <Spinner className="size-4 animate-enter-fade text-subtle-foreground" />
+          ) : null}
+        </div>
+      );
+    }
     return (
-      <div className="py-10 text-center text-sm text-muted-foreground">
+      <div className="animate-enter-fade py-10 text-center text-sm text-muted-foreground">
         {props.emptyStateMessage ??
           (props.isActionsOnly
             ? "No matching actions."
-            : "No matching commands, projects, or threads.")}
+            : props.isBrowsing
+              ? "No matching folders."
+              : "No matching commands, projects or chats.")}
       </div>
     );
   }
@@ -75,9 +96,7 @@ function DisabledCommandPaletteResultRow(props: {
             {props.item.titleLeadingContent}
             <span className="truncate">{props.item.title}</span>
           </span>
-          <span className="truncate text-muted-foreground/70 text-xs">
-            {props.item.description}
-          </span>
+          <span className="truncate text-subtle-foreground text-xs">{props.item.description}</span>
         </span>
       ) : (
         <span className="flex min-w-0 flex-1 items-center gap-1.5 text-sm text-foreground">
@@ -121,9 +140,7 @@ function CommandPaletteResultRow(props: {
             {props.item.titleLeadingContent}
             <span className="truncate">{props.item.title}</span>
           </span>
-          <span className="truncate text-muted-foreground/70 text-xs">
-            {props.item.description}
-          </span>
+          <span className="truncate text-subtle-foreground text-xs">{props.item.description}</span>
         </span>
       ) : (
         <span className="flex min-w-0 flex-1 items-center gap-1.5 text-sm text-foreground">
@@ -131,15 +148,29 @@ function CommandPaletteResultRow(props: {
           <span className="truncate">{props.item.title}</span>
         </span>
       )}
+      {props.item.detail ? (
+        // Metadata on demand: the path shows on the highlighted row only, on
+        // the same line so highlighting never changes the row height.
+        <span
+          data-slot="command-palette-item-detail"
+          className={cn(
+            "min-w-0 max-w-[55%] shrink truncate text-right font-mono text-2xs text-subtle-foreground transition-opacity duration-(--duration-fast)",
+            props.isActive ? "opacity-100" : "opacity-0",
+          )}
+          aria-hidden={!props.isActive}
+        >
+          {props.item.detail}
+        </span>
+      ) : null}
       {props.item.titleTrailingContent}
       {props.item.timestamp ? (
-        <span className="min-w-12 shrink-0 text-right text-[10px] tabular-nums text-muted-foreground/70">
+        <span className="min-w-12 shrink-0 text-right text-2xs tabular-nums text-subtle-foreground">
           {props.item.timestamp}
         </span>
       ) : null}
       {shortcutLabel ? <CommandShortcut>{shortcutLabel}</CommandShortcut> : null}
       {props.item.kind === "submenu" ? (
-        <ChevronRightIcon className="ml-auto size-4 shrink-0 text-muted-foreground/50" />
+        <ChevronRightIcon className="ml-auto size-4 shrink-0 text-subtle-foreground" />
       ) : null}
     </CommandItem>
   );

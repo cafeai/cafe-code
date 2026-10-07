@@ -44,7 +44,7 @@ export function RedactedSensitiveText(props: {
           <button
             type="button"
             className={cn(
-              "min-w-0 cursor-pointer rounded-sm font-mono text-[11px] leading-none transition hover:text-foreground",
+              "focus-ring min-w-0 cursor-pointer rounded-sm font-mono text-2xs leading-none transition-[color,filter] duration-(--duration-fast) hover:text-foreground",
               revealed ? "text-muted-foreground" : "select-none text-muted-foreground blur-[2px]",
               props.className,
             )}

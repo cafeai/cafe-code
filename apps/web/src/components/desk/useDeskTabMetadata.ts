@@ -51,6 +51,31 @@ export function readDeskTabMetadata(target: ThreadRouteTarget) {
   return deriveMetadata(target, draft, thread, projectName, lastVisitedAt);
 }
 
+/** Resolve a menu's exact shell/draft workspace without loading its transcript. */
+export function readDeskTabOpenContext(target: ThreadRouteTarget) {
+  const metadata = readDeskTabMetadata(target);
+  const draft =
+    target.kind === "draft"
+      ? useComposerDraftStore.getState().draftThreadsByThreadKey[target.draftId]
+      : undefined;
+  const thread = selectSidebarThreadSummaryByRef(useStore.getState(), metadata.threadRef);
+  const environmentId = thread?.environmentId ?? draft?.environmentId;
+  const projectId = thread?.projectId ?? draft?.projectId;
+  const project =
+    environmentId && projectId
+      ? selectProjectByRef(useStore.getState(), scopeProjectRef(environmentId, projectId))
+      : undefined;
+  return {
+    environmentId,
+    cwd:
+      metadata.exists && project
+        ? thread
+          ? (thread.worktreePath ?? project.cwd)
+          : (draft?.worktreePath ?? project.cwd)
+        : null,
+  };
+}
+
 /** Navigation reads shell summaries only. Opening a tab must not subscribe to
  * its full transcript, queue, provider runtime or a second detail controller.
  * Draft titles remain the existing “New chat” until the first send creates

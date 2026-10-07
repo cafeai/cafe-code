@@ -5,7 +5,6 @@ import {
   ArrowUpIcon,
   EyeIcon,
   EyeOffIcon,
-  InfoIcon,
   PlusIcon,
   StarIcon,
   XIcon,
@@ -22,6 +21,7 @@ import { cn } from "../../lib/utils";
 import { sortModelsForProviderInstance } from "../../modelOrdering";
 import { MAX_CUSTOM_MODEL_LENGTH } from "../../modelSelection";
 import { Button } from "../ui/button";
+import { InfoTip } from "../ui/info-tip";
 import { Input } from "../ui/input";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
@@ -183,10 +183,10 @@ export function ProviderModelsSection({
   };
 
   return (
-    <div className="border-t border-border/60 px-4 py-3 sm:px-5">
-      <div className="text-xs font-medium text-foreground">Models</div>
-      <div className="mt-1 text-xs text-muted-foreground">
-        {models.length} model{models.length === 1 ? "" : "s"} available.
+    <div className="border-t border-border-subtle px-4 py-3 sm:px-5">
+      <div className="flex items-baseline gap-1.5 text-xs">
+        <span className="font-medium text-foreground">Models</span>
+        <span className="text-subtle-foreground tabular-nums">{models.length}</span>
       </div>
       <div ref={listRef} className="mt-2 max-h-40 overflow-y-auto pb-1">
         {orderedModels.map((model, index) => {
@@ -233,46 +233,28 @@ export function ProviderModelsSection({
                 <span
                   className={cn(
                     "min-w-0 truncate text-xs",
-                    isHidden ? "text-muted-foreground line-through" : "text-foreground/90",
+                    isHidden ? "text-muted-foreground line-through" : "text-foreground",
                   )}
                 >
                   {model.name}
                 </span>
                 {hasDetails ? (
-                  <Tooltip>
-                    <TooltipTrigger
-                      render={
-                        <Button
-                          size="icon-xs"
-                          variant="ghost"
-                          className="size-5 rounded-sm p-0 text-muted-foreground/60 hover:text-muted-foreground"
-                          aria-label={`Details for ${model.name}`}
-                        />
-                      }
-                    >
-                      <InfoIcon className="size-3" />
-                    </TooltipTrigger>
-                    <TooltipPopup side="top" className="max-w-56">
-                      <div className="space-y-1">
-                        <code className="block text-[11px] text-foreground">{model.slug}</code>
-                        {capLabels.length > 0 ? (
-                          <div className="flex flex-wrap gap-x-2 gap-y-0.5">
-                            {capLabels.map((label) => (
-                              <span key={label} className="text-[10px] text-muted-foreground">
-                                {label}
-                              </span>
-                            ))}
-                          </div>
-                        ) : null}
-                      </div>
-                    </TooltipPopup>
-                  </Tooltip>
+                  <InfoTip label={`Details for ${model.name}`} popupClassName="max-w-56">
+                    <span className="grid gap-1">
+                      <code className="block font-mono text-2xs text-foreground">{model.slug}</code>
+                      {capLabels.length > 0 ? (
+                        <span className="flex flex-wrap gap-x-2 gap-y-0.5 text-2xs text-muted-foreground">
+                          {capLabels.map((label) => (
+                            <span key={label}>{label}</span>
+                          ))}
+                        </span>
+                      ) : null}
+                    </span>
+                  </InfoTip>
                 ) : null}
-                {isHidden ? (
-                  <span className="text-[10px] text-muted-foreground">hidden</span>
-                ) : null}
+                {isHidden ? <span className="text-2xs text-subtle-foreground">hidden</span> : null}
                 {model.isCustom ? (
-                  <span className="text-[10px] text-muted-foreground">custom</span>
+                  <span className="text-2xs text-subtle-foreground">custom</span>
                 ) : null}
               </div>
               <div className="flex shrink-0 items-center gap-0.5">
@@ -284,7 +266,7 @@ export function ProviderModelsSection({
                         variant="ghost"
                         className={cn(
                           "size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground",
-                          isFavorite && "text-yellow-500 hover:text-yellow-600",
+                          isFavorite && "text-warning hover:text-warning",
                         )}
                         onClick={() => handleToggleFavorite(model.slug)}
                         aria-label={`${isFavorite ? "Remove" : "Add"} ${model.name} ${

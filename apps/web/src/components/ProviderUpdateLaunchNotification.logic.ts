@@ -521,9 +521,9 @@ function getProviderUpdateInitialToastTitle(
   if (providers.length === 1) {
     const provider = providers[0]!;
     const providerName = PROVIDER_DISPLAY_NAMES[provider.driver] ?? provider.driver;
-    return `Update Available: ${providerName} ${formatVersion(provider.versionAdvisory.latestVersion)}`;
+    return `Update available: ${providerName} ${formatVersion(provider.versionAdvisory.latestVersion)}`;
   }
-  return `Updates Available: ${providers.length} providers`;
+  return `Updates available: ${providers.length} providers`;
 }
 
 function getFailedProviderUpdateDescription(providers: ReadonlyArray<ServerProvider>): string {

@@ -304,6 +304,7 @@ vi.mock("../../hooks/useTheme", () => ({
 
 vi.mock("../../store", () => ({
   selectAnyThreadRunning: () => true,
+  selectProjectByRef: () => undefined,
   useStore: atriumHarness.useStore,
 }));
 
@@ -325,6 +326,10 @@ vi.mock("../../environments/workspace", () => ({
 vi.mock("../../environments/runtime/service", () => ({
   retainThreadDetailSubscription: atriumHarness.retainThreadDetailSubscription,
 }));
+
+// Card status reuses the sidebar's ThreadStatusLabel; its module also hosts
+// git-status row helpers whose transport is irrelevant to this fixture.
+vi.mock("../../lib/gitStatusState", () => ({ useGitStatus: () => ({ data: null }) }));
 
 vi.mock("../stats/useUsageCostSummary", () => ({
   useUsageCostSummary: () => atriumHarness.usage,
@@ -688,7 +693,7 @@ describe("TaskAtriumBoard", () => {
       expect(
         legacyCard.querySelector<HTMLElement>('[data-cafe-atrium-turn-configuration="true"]')
           ?.textContent,
-      ).toContain("Turn settings unavailable");
+      ).toContain("Settings unavailable");
     } finally {
       restoreConfigurations();
       await screen.unmount();
@@ -829,9 +834,7 @@ describe("TaskAtriumBoard", () => {
         () => {
           const nextCard = taskCard(host, summary.title);
           expect(nextCard.textContent).toContain("GPT-6 Astra · Effort: Max · Fast off");
-          expect(nextCard.textContent).toContain(
-            "Account: Codex Review · Plan · Approval required",
-          );
+          expect(nextCard.textContent).toContain("Account: Codex Review · Plan · Supervised");
           expect(nextCard.textContent).not.toContain("GPT-6.1 Sol");
         },
         { timeout: 3_000 },
@@ -1003,7 +1006,7 @@ describe("TaskAtriumBoard", () => {
       if (!overview || !headline || !metrics) throw new Error("Atrium overview did not mount");
 
       expect(Array.from(headline.children, (line) => line.textContent)).toEqual([
-        "2 threads,",
+        "2 chats,",
         "3 subagents,",
         "all working.",
       ]);
@@ -1594,7 +1597,7 @@ describe("TaskAtriumBoard", () => {
       await vi.waitFor(() => {
         expect(host.querySelectorAll('[data-cafe-atrium-task-card="true"]')).toHaveLength(3);
       });
-      expect(host.textContent).toContain("3 threads,");
+      expect(host.textContent).toContain("3 chats,");
       expect(host.textContent).toContain("0 subagents,");
       expect(host.textContent).toContain("all working.");
       expect(host.textContent).toContain(
@@ -1623,7 +1626,7 @@ describe("TaskAtriumBoard", () => {
         expect(Math.abs(next[0]!.top - next[1]!.top)).toBeLessThanOrEqual(1);
         expect(Math.abs(next[0]!.top - next[2]!.top)).toBeLessThanOrEqual(1);
       });
-      expect(host.textContent).toContain("3 threads,");
+      expect(host.textContent).toContain("3 chats,");
       expect(host.textContent).toContain("all working.");
       expect(host.textContent).toContain("mapping canvas call sites");
     } finally {
@@ -1728,7 +1731,10 @@ describe("TaskAtriumBoard", () => {
         | [string, string]
         | null;
       expect(lastCardKey).not.toBeNull();
-      scroller.scrollTop = scroller.scrollHeight;
+      // Scroll the final card itself into view: the usage summary (or its
+      // layout-matching placeholder) follows the grid in the same pane, so
+      // the pane's very bottom can sit beyond the detail prefetch margin.
+      lastCard.scrollIntoView({ block: "end" });
       scroller.dispatchEvent(new Event("scroll"));
 
       await vi.waitFor(() => {

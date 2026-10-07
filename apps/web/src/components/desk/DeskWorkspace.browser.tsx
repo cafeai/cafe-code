@@ -8,10 +8,18 @@ import { cdp, page, userEvent } from "vitest/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
-import { createDeskState, deskGroupIds, deskTabKey } from "../../deskModel";
+import {
+  createDeskState,
+  deskGroupIds,
+  deskTabKey,
+  hydrateDesk,
+  serializeDesk,
+} from "../../deskModel";
 import { useDeskStore } from "../../deskStore";
 import { applyInterfaceScalePercent } from "../../interfaceScale";
 import type { ThreadRouteTarget } from "../../threadRoutes";
+import { resolveThreadStatusPill, type ThreadStatusPill } from "../Sidebar.logic";
+import { ThreadStatusLabel } from "../ThreadStatusLabel";
 import DeskWorkspace from "./DeskWorkspace";
 
 const mocks = vi.hoisted(() => ({
@@ -25,6 +33,10 @@ const mocks = vi.hoisted(() => ({
   confirm: vi.fn(async () => true),
   palette: vi.fn(),
   macPlatform: false,
+  openInEditor: vi.fn(async () => undefined),
+  openTerminal: vi.fn(async () => undefined),
+  // Status rendered by every tab's metadata; null keeps the fixture idle.
+  tabStatus: null as ThreadStatusPill | null,
   // Synthetic authoritative inventory and reactive route parameters exercise
   // route echo reconciliation without providers, transports or user profiles.
   params: {} as Record<string, string>,
@@ -72,6 +84,7 @@ vi.mock("../../environments/primary", () => ({
   readPrimaryEnvironmentDescriptor: () => ({ environmentId: mocks.primaryEnvironmentId }),
   getPrimaryKnownEnvironment: () => null,
 }));
+vi.mock("../../env", () => ({ isElectron: true }));
 vi.mock("../../store", () => ({
   useStore: (selector: (state: object) => unknown) => selector({}),
   selectEnvironmentState: () => mocks.environment,
@@ -95,6 +108,7 @@ vi.mock("../../localApi", () => ({
   readLocalApi: () => ({
     contextMenu: { show: mocks.showMenu },
     dialogs: { confirm: mocks.confirm },
+    shell: { openInEditor: mocks.openInEditor, openTerminal: mocks.openTerminal },
   }),
   ensureLocalApi: () => ({
     contextMenu: { show: mocks.showMenu },
@@ -137,11 +151,40 @@ vi.mock("./useDeskTabMetadata", () => {
     working: false,
     attention: false,
     exists: true,
-    status: null,
+    status: mocks.tabStatus,
   });
-  return { useDeskTabMetadata: metadata, readDeskTabMetadata: metadata };
+  return {
+    useDeskTabMetadata: metadata,
+    readDeskTabMetadata: metadata,
+    readDeskTabOpenContext: (target: ThreadRouteTarget) => ({
+      environmentId:
+        target.kind === "server" ? target.threadRef.environmentId : mocks.primaryEnvironmentId,
+      cwd: target.kind === "server" ? `/fixture/${target.threadRef.threadId}` : null,
+    }),
+  };
 });
-vi.mock("../NoActiveThreadState", () => ({ NoActiveThreadState: () => <p>No active chat</p> }));
+vi.mock("../../rpc/serverState", () => ({
+  useServerAvailableEditors: () => ["vscode", "file-manager"],
+  useServerTerminal: () => ({ available: true, label: "Terminal" }),
+}));
+vi.mock("../../localCapabilities", () => ({
+  getLocalShellCapabilities: () => ({ canOpenLocalEditor: true, canOpenLocalTerminal: true }),
+}));
+vi.mock("../../editorOpenOptions", () => ({
+  resolveEditorOpenOptions: () => [{ value: "vscode", label: "VS Code" }],
+}));
+vi.mock("../../editorPreferences", () => ({
+  usePreferredEditor: () => ["vscode", vi.fn()],
+}));
+vi.mock("../NoActiveThreadState", () => ({
+  // Render the Desk-supplied actions so the empty-state controls stay testable.
+  NoActiveThreadState: (props: { secondaryActions?: import("react").ReactNode }) => (
+    <div>
+      <p>No active chat</p>
+      {props.secondaryActions}
+    </div>
+  ),
+}));
 vi.mock("../ChatView", async () => {
   const { useChatPane } = await import("../../chatPaneContext");
   return {
@@ -152,7 +195,7 @@ vi.mock("../ChatView", async () => {
     }: {
       threadId: string;
       draftId?: string;
-      navigationSlot?: import("react").ReactNode;
+      navigationSlot?: (controls: import("react").ReactNode) => import("react").ReactNode;
     }) {
       const pane = useChatPane();
       return (
@@ -163,7 +206,7 @@ vi.mock("../ChatView", async () => {
           data-pane-active={pane.active}
           data-pane-visible={pane.visible}
         >
-          {navigationSlot}
+          {navigationSlot?.(null)}
           <div className="p-3">
             <p>Existing chat {threadId}</p>
             <button
@@ -202,6 +245,8 @@ beforeEach(async () => {
   mocks.params = {};
   mocks.primaryEnvironmentId = environmentId;
   mocks.macPlatform = false;
+  mocks.openInEditor.mockClear();
+  mocks.openTerminal.mockClear();
   mocks.composer.draftThreadsByThreadKey = {};
   mocks.environment = {
     bootstrapComplete: true,
@@ -377,6 +422,122 @@ function expectUsablePanes(host: HTMLElement, count: number) {
 }
 
 describe("Desk workspace navigation chrome", () => {
+  it.each(["open-editor:vscode", "open-terminal"])(
+    "opens %s for the clicked tab without selecting it",
+    async (choice) => {
+      const { screen, cleanup } = await setup(["one", "two"]);
+      try {
+        mocks.showMenu.mockResolvedValueOnce(choice);
+        await screen.getByRole("tab", { name: "Chat one", exact: true }).click({ button: "right" });
+        expect(mocks.showMenu.mock.lastCall?.[0]).toContainEqual({
+          id: "open-project",
+          label: "Open",
+          children: [
+            { id: "open-editor:vscode", label: "VS Code" },
+            { id: "open-terminal", label: "Open Terminal here", disabled: false },
+          ],
+        });
+        await vi.waitFor(() => {
+          if (choice === "open-terminal")
+            expect(mocks.openTerminal).toHaveBeenCalledWith("/fixture/one");
+          else expect(mocks.openInEditor).toHaveBeenCalledWith("/fixture/one", "vscode");
+        });
+        expect(useDeskStore.getState().desk.groups.g1?.activeTabKey).toBe(key("two"));
+      } finally {
+        await cleanup();
+      }
+    },
+  );
+
+  it("rejects a pending Open choice after the original Desk is replaced", async () => {
+    const { screen, cleanup } = await setup(["one", "two"]);
+    try {
+      const finish = deferMenu();
+      await screen.getByRole("tab", { name: "Chat one", exact: true }).click({ button: "right" });
+      useDeskStore.setState({ desk: createDeskState(environmentId) });
+      await finish("open-editor:vscode");
+      expect(mocks.openInEditor).not.toHaveBeenCalled();
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("reserves native control space only in the top right split pane", async () => {
+    document.documentElement.classList.add("wco");
+    const { host, cleanup } = await setup(["one", "two", "three"]);
+    try {
+      useDeskStore
+        .getState()
+        .dispatch({ type: "split", tabKey: key("two"), targetGroupId: "g1", edge: "right" });
+      useDeskStore
+        .getState()
+        .dispatch({ type: "split", tabKey: key("three"), targetGroupId: "g1", edge: "bottom" });
+      await vi.waitFor(() => {
+        const bars = [...host.querySelectorAll<HTMLElement>(".desk-group-bar")];
+        expect(bars).toHaveLength(3);
+        const right = bars.find((bar) => bar.dataset.windowRight === "true")!;
+        const lower = bars.find((bar) => bar.dataset.windowTop === "false")!;
+        const left = bars.find((bar) => bar !== right && bar !== lower)!;
+        expect(parseFloat(getComputedStyle(right).paddingRight)).toBeGreaterThan(130);
+        expect(parseFloat(getComputedStyle(left).paddingRight)).toBe(0);
+        expect(parseFloat(getComputedStyle(lower).paddingRight)).toBe(0);
+        expect(lower.classList.contains("drag-region")).toBe(false);
+        expect(lower.getBoundingClientRect().height).toBeCloseTo(44, 0);
+      });
+    } finally {
+      await cleanup();
+      document.documentElement.classList.remove("wco");
+    }
+  });
+
+  it.each([
+    { platform: "mac", scale: 100, x: 0, controls: 0, dark: true },
+    { platform: "windows", scale: 80, x: 0, controls: 138, dark: true },
+    { platform: "windows", scale: 130, x: 0, controls: 138, dark: false },
+    { platform: "linux", scale: 100, x: 0, controls: 138, dark: true },
+    { platform: "linux-left", scale: 130, x: 100, controls: 0, dark: false },
+  ])(
+    "keeps taller titlebar tabs clear of $platform controls at $scale%",
+    async ({ platform, scale, x, controls, dark }) => {
+      applyInterfaceScalePercent(scale);
+      document.documentElement.classList.toggle("dark", dark);
+      document.documentElement.classList.toggle("wco", platform !== "mac");
+      document.documentElement.style.setProperty("--app-titlebar-area-x", `${x}px`);
+      document.documentElement.style.setProperty(
+        "--app-titlebar-area-width",
+        `${1440 - x - controls}px`,
+      );
+      const { host, cleanup } = await setup(["one", "two"]);
+      try {
+        const bar = host.querySelector<HTMLElement>(".desk-group-bar")!;
+        const box = bar.getBoundingClientRect();
+        const style = getComputedStyle(bar);
+        expect(box.height).toBeGreaterThanOrEqual(Math.max(44, (44 * scale) / 100) - 0.1);
+        expect(bar.dataset.desktopTitlebar).toBe("true");
+        expect(box.top).toBeLessThanOrEqual(1);
+        expect(parseFloat(style.paddingLeft)).toBeCloseTo(Math.max(0, x - box.left), 0);
+        expect(parseFloat(style.paddingRight)).toBeCloseTo(
+          Math.max(0, controls - (1440 - box.right)),
+          0,
+        );
+        for (const button of bar.querySelectorAll("button")) {
+          const bounds = button.getBoundingClientRect();
+          expect(bounds.left).toBeGreaterThanOrEqual(x);
+          expect(bounds.right).toBeLessThanOrEqual(1440 - controls);
+        }
+        await page.screenshot({
+          element: host,
+          path: `../../../../../.explorations/titlebar-visual/${platform}-${scale}-${dark ? "dark" : "light"}.png`,
+        });
+      } finally {
+        await cleanup();
+        document.documentElement.classList.remove("wco");
+        document.documentElement.style.removeProperty("--app-titlebar-area-x");
+        document.documentElement.style.removeProperty("--app-titlebar-area-width");
+        applyInterfaceScalePercent(100);
+      }
+    },
+  );
   it("keeps the chat selected through Focus group when a hidden editor's first send completes", async () => {
     const draftId = DraftId.make("sending-editor");
     const draft = {
@@ -983,15 +1144,19 @@ describe("Desk workspace navigation chrome", () => {
             ] as const) {
               await moveTo(point);
               await vi.waitFor(() => expect(preview()?.dataset.edge).toBe(edge));
-              const bounds = preview()!.getBoundingClientRect();
               const horizontal = edge === "left" || edge === "right";
               const vertical = edge === "top" || edge === "bottom";
-              expect(Math.abs(bounds.width - (box.width - 2) / (horizontal ? 2 : 1))).toBeLessThan(
-                2,
-              );
-              expect(Math.abs(bounds.height - (box.height - 2) / (vertical ? 2 : 1))).toBeLessThan(
-                2,
-              );
+              // The preview glides between edges with a short transform
+              // transition, so assert the rectangle it settles on.
+              await vi.waitFor(() => {
+                const bounds = preview()!.getBoundingClientRect();
+                expect(Math.abs(bounds.width - box.width / (horizontal ? 2 : 1))).toBeLessThan(2);
+                expect(Math.abs(bounds.height - box.height / (vertical ? 2 : 1))).toBeLessThan(2);
+                const expectedLeft = edge === "right" ? box.left + box.width / 2 : box.left;
+                const expectedTop = edge === "bottom" ? box.top + box.height / 2 : box.top;
+                expect(Math.abs(bounds.left - expectedLeft)).toBeLessThan(2);
+                expect(Math.abs(bounds.top - expectedTop)).toBeLessThan(2);
+              });
             }
           },
         );
@@ -1074,7 +1239,7 @@ describe("Desk workspace navigation chrome", () => {
         .toBeVisible();
       for (const bar of host.querySelectorAll<HTMLElement>(".desk-group-bar")) {
         const bounds = bar.getBoundingClientRect();
-        expect(bounds.height).toBeLessThanOrEqual((32 * scale) / 100 + 1);
+        expect(bounds.height).toBeLessThanOrEqual(Math.max(44, (44 * scale) / 100) + 1);
         expect(bounds.width).toBeLessThanOrEqual(
           bar.closest(".desk-pane")!.getBoundingClientRect().width,
         );
@@ -1212,12 +1377,13 @@ describe("Desk workspace navigation chrome", () => {
     }
   });
 
-  it("keeps compact tab chrome and existing chat content while selecting with click and keyboard", async () => {
+  it("keeps taller tab chrome and existing chat content while selecting with click and keyboard", async () => {
     const { screen, host, cleanup } = await setup();
     try {
-      expect(
-        host.querySelector(".desk-group-bar")!.getBoundingClientRect().height,
-      ).toBeLessThanOrEqual(34);
+      expect(host.querySelector(".desk-group-bar")!.getBoundingClientRect().height).toBeCloseTo(
+        44,
+        0,
+      );
       await screen.getByRole("tab", { name: "Chat one", exact: true }).click();
       await expect
         .element(screen.getByRole("textbox", { name: "Existing composer one" }))
@@ -1237,6 +1403,127 @@ describe("Desk workspace navigation chrome", () => {
       expect(useDeskStore.getState().desk.groups.g1?.activeTabKey).toBe(key("three"));
       expect(host.querySelectorAll('[data-mock-chat][data-pane-active="true"]')).toHaveLength(1);
     } finally {
+      await cleanup();
+    }
+  });
+
+  it("keeps an italic preview by double-clicking its tab and dismisses another preview on selection", async () => {
+    const { screen, host, cleanup } = await setup(["one"]);
+    try {
+      useDeskStore.getState().dispatch({ type: "open", target: target("two"), preview: true });
+      const preview = screen.getByRole("tab", { name: "Chat two", exact: true });
+      await expect.element(preview).toHaveAttribute("data-preview", "true");
+      const title = host.querySelector('.desk-tab[data-preview="true"] .desk-tab-title')!;
+      expect(getComputedStyle(title).fontStyle).toBe("italic");
+      await preview.dblClick();
+      await expect.element(preview).toHaveAttribute("data-preview", "false");
+      expect(getComputedStyle(title).fontStyle).toBe("normal");
+      useDeskStore.getState().dispatch({ type: "open", target: target("three"), preview: true });
+      await expect
+        .element(screen.getByRole("tab", { name: "Chat three", exact: true }))
+        .toBeVisible();
+      await screen.getByRole("tab", { name: "Chat one", exact: true }).click();
+      expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual([key("one"), key("two")]);
+      await expect
+        .element(screen.getByRole("tab", { name: "Chat three", exact: true }))
+        .not.toBeInTheDocument();
+      expect(useDeskStore.getState().desk.closed).toEqual([]);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("offers Keep open only for preview tabs and applies it without changing selection", async () => {
+    const { screen, cleanup } = await setup(["one"]);
+    try {
+      useDeskStore.getState().dispatch({ type: "open", target: target("two"), preview: true });
+      mocks.showMenu.mockResolvedValueOnce("keep-open");
+      await screen.getByRole("tab", { name: "Chat two", exact: true }).click({ button: "right" });
+      await vi.waitFor(() =>
+        expect(useDeskStore.getState().desk.groups.g1?.previewTabKey).toBeUndefined(),
+      );
+      expect(mocks.showMenu.mock.calls[0]![0]).toContainEqual({
+        id: "keep-open",
+        label: "Keep open",
+        disabled: false,
+      });
+      expect(useDeskStore.getState().desk.groups.g1?.activeTabKey).toBe(key("two"));
+      await screen.getByRole("tab", { name: "Chat two", exact: true }).click({ button: "right" });
+      expect(mocks.showMenu.mock.calls[1]![0].some((item) => item.id === "keep-open")).toBe(false);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("restores a current preview URL without making it a kept tab", async () => {
+    const first = await setup(["one"]);
+    useDeskStore.getState().dispatch({ type: "open", target: target("two"), preview: true });
+    await expect
+      .element(first.screen.getByRole("tab", { name: "Chat two", exact: true }))
+      .toHaveAttribute("aria-selected", "true");
+    await vi.waitFor(() => expect(mocks.params.threadId).toBe("two"));
+    const saved = serializeDesk(useDeskStore.getState().desk);
+    await first.cleanup();
+    useDeskStore.setState({ desk: hydrateDesk(saved, environmentId) });
+    const reopened = await setup([]);
+    try {
+      await expect
+        .element(reopened.screen.getByRole("tab", { name: "Chat two", exact: true }))
+        .toHaveAttribute("data-preview", "true");
+      const persisted = hydrateDesk(serializeDesk(useDeskStore.getState().desk), environmentId);
+      expect(persisted.groups.g1?.tabs).toEqual([key("one")]);
+      expect(persisted.closed).toEqual([]);
+    } finally {
+      await reopened.cleanup();
+    }
+  });
+
+  it("renders a tab's chat status with the same spinner used by sidebar rows", async () => {
+    // A running chat, resolved by the same helper the sidebar row uses.
+    const status = resolveThreadStatusPill({
+      thread: {
+        hasActionableProposedPlan: false,
+        hasPendingApprovals: false,
+        hasPendingUserInput: false,
+        interactionMode: "default",
+        latestTurn: null,
+        session: {
+          provider: "codex" as never,
+          status: "running",
+          createdAt: "2026-09-29T00:00:00.000Z",
+          updatedAt: "2026-09-29T00:00:00.000Z",
+          orchestrationStatus: "running",
+        },
+      },
+    });
+    expect(status?.label).toBe("Working");
+    mocks.tabStatus = status;
+    const { host, cleanup } = await setup(["one"]);
+    const referenceHost = document.createElement("div");
+    document.body.append(referenceHost);
+    const reference = await render(<ThreadStatusLabel status={status} />, {
+      container: referenceHost,
+    });
+    try {
+      const tabShell = host.querySelector<HTMLElement>(
+        "[data-desk-tab-key] .thread-status-dot-shell",
+      );
+      expect(tabShell).not.toBeNull();
+      // Same component, same props: byte-identical markup to a sidebar row's label.
+      expect(tabShell!.outerHTML).toBe(referenceHost.firstElementChild!.outerHTML);
+      expect(tabShell!.dataset.status).toBe("Working");
+      const dot = tabShell!.querySelector<SVGElement>('[data-slot="thread-status-dot"]')!;
+      expect(dot.classList).toContain("text-status-running-foreground");
+      expect(dot.classList).toContain("animate-spin");
+      // The shared spinner is 0.75rem at 100% interface size.
+      await vi.waitFor(() => {
+        expect(parseFloat(getComputedStyle(dot).width)).toBe(12);
+        expect(parseFloat(getComputedStyle(dot).height)).toBe(12);
+      });
+    } finally {
+      mocks.tabStatus = null;
+      await reference.unmount();
+      referenceHost.remove();
       await cleanup();
     }
   });
@@ -1875,7 +2162,8 @@ describe("Desk workspace navigation chrome", () => {
       await screen.getByRole("button", { name: "Main", exact: true }).click();
       await screen.getByRole("textbox", { name: "Group name" }).fill("Proof pipeline");
       await screen.getByRole("button", { name: "Save", exact: true }).click();
-      await screen.getByRole("button", { name: "All tabs in Proof pipeline" }).click();
+      mocks.showMenu.mockResolvedValueOnce("all-tabs");
+      await screen.getByRole("button", { name: "Proof pipeline tab actions" }).click();
       await screen.getByRole("searchbox", { name: "Search open tabs" }).fill("one");
       await screen.getByRole("button", { name: "Chat one Fixture project" }).click();
       expect(useDeskStore.getState().desk.groups.g1?.activeTabKey).toBe(key("one"));

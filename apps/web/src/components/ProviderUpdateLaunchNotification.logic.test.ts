@@ -267,7 +267,7 @@ describe("provider update launch notification logic", () => {
     expect(view).toMatchObject({
       phase: "initial",
       type: "warning",
-      title: "Update Available: Codex v1.1.0",
+      title: "Update available: Codex v1.1.0",
       description: "Install the update now or review provider settings.",
     });
   });

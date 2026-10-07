@@ -6,11 +6,26 @@ import type {
   ServerRuntimeLayerSummary,
 } from "@cafecode/contracts";
 
+/** Sentence-case label for a runtime layer or diagnostic source id ("provider-daemon" → "Provider daemon"). */
 export function formatRuntimeLayerRole(role: string): string {
-  return role
-    .split("-")
-    .map((part) => (part.length === 0 ? part : `${part[0]?.toUpperCase() ?? ""}${part.slice(1)}`))
-    .join(" ");
+  const words = role.split("-").join(" ");
+  return words.length === 0 ? words : `${words[0]?.toUpperCase() ?? ""}${words.slice(1)}`;
+}
+
+/** Display label for a runtime layer status; `not-configured` reads as a neutral state. */
+export function formatRuntimeLayerStatus(status: ServerRuntimeLayerStatus): string {
+  switch (status) {
+    case "online":
+      return "Online";
+    case "degraded":
+      return "Degraded";
+    case "offline":
+      return "Offline";
+    case "unknown":
+      return "Unknown";
+    case "not-configured":
+      return "Not configured";
+  }
 }
 
 export function runtimeLayerStatusTone(
@@ -31,11 +46,11 @@ export function runtimeLayerStatusTone(
 export function runtimeLayerStatusClasses(status: ServerRuntimeLayerStatus): string {
   switch (status) {
     case "online":
-      return "bg-emerald-500/10 text-emerald-600 dark:text-emerald-300";
+      return "bg-success/10 text-success-foreground";
     case "degraded":
-      return "bg-amber-500/10 text-amber-600 dark:text-amber-300";
+      return "bg-warning/10 text-warning-foreground";
     case "offline":
-      return "bg-destructive/10 text-destructive";
+      return "bg-destructive/10 text-destructive-foreground";
     case "unknown":
       return "bg-muted text-muted-foreground";
     case "not-configured":
@@ -83,7 +98,7 @@ export function visibleRuntimeErrors(
   if (providerRuntimeIngestion && providerRuntimeIngestion.status !== "online") {
     errors.push({
       source: "provider-runtime-ingestion",
-      message: `Provider daemon is ${providerRuntimeIngestion.lag} runtime events ahead of backend ingestion. Provider output may still be running while chat projection catches up.`,
+      message: `Backend ingestion is ${providerRuntimeIngestion.lag} provider daemon events behind; chats may lag provider output.`,
     });
   }
   return errors;

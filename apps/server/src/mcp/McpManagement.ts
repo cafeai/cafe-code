@@ -105,7 +105,7 @@ export function makeMcpInstallationFiles(options: McpInstallationOptions) {
             id: original.id,
             name: original.name,
             status: "unavailable",
-            detail: "This provider is not supported on this platform yet.",
+            detail: "Not supported on this platform yet.",
           };
         try {
           const entries = await Promise.all(
@@ -119,7 +119,7 @@ export function makeMcpInstallationFiles(options: McpInstallationOptions) {
               id: client.id,
               name: client.name,
               status: "conflict",
-              detail: "A different cafe-code MCP registration exists. It was left unchanged.",
+              detail: "Another cafe-code registration exists and was left unchanged.",
             };
           if (entries.some((entry) => entry === undefined))
             return {
@@ -129,22 +129,21 @@ export function makeMcpInstallationFiles(options: McpInstallationOptions) {
                 ? "needs-repair"
                 : "not-installed",
               detail: entries.some((entry) => entry !== undefined)
-                ? "Installation is incomplete. Install to connect both Cafe and your terminal's default profile."
-                : "Available to install for your default user profile.",
+                ? "Partly installed. Install again to finish."
+                : "Available to install for your default profile.",
             };
           if (entries.some((entry) => !isMcpEntryReady(client, entry, launch)))
             return {
               id: client.id,
               name: client.name,
               status: "needs-repair",
-              detail: "The Cafe MCP configuration changed. Reinstall to restore the local bridge.",
+              detail: "The registration was edited. Install again to repair it.",
             };
           return {
             id: client.id,
             name: client.name,
             status: "installed",
-            detail:
-              "Installed for your user account. Reload MCP or restart the provider to pick up changes.",
+            detail: "Restart the agent to apply.",
           };
         } catch (error) {
           return {
@@ -154,7 +153,7 @@ export function makeMcpInstallationFiles(options: McpInstallationOptions) {
             detail:
               error instanceof McpFileError
                 ? error.message
-                : "Cannot read this provider's configuration.",
+                : "Cannot read this agent's configuration.",
           };
         }
       }),

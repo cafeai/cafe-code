@@ -54,11 +54,11 @@ export function buildSidebarThreadContextMenuItems(input: {
   readonly forkDisabled?: boolean;
 }): ReadonlyArray<SidebarThreadContextMenuItem> {
   const items: SidebarThreadContextMenuItem[] = [
-    { id: "rename", label: "Rename thread" },
-    { id: "fork", label: "Fork thread", disabled: input.forkDisabled === true },
-    { id: "move", label: "Move Thread..." },
-    { id: "copy-path", label: "Copy Path" },
-    { id: "copy-thread-id", label: "Copy Thread ID" },
+    { id: "rename", label: "Rename chat" },
+    { id: "fork", label: "Fork chat", disabled: input.forkDisabled === true },
+    { id: "move", label: "Move chat…" },
+    { id: "copy-path", label: "Copy path" },
+    { id: "copy-thread-id", label: "Copy chat ID" },
   ];
 
   if (input.debugEnabled) {
@@ -73,11 +73,19 @@ export function buildSidebarThreadContextMenuItems(input: {
   return items;
 }
 
+/**
+ * The single chat-status vocabulary (docs/style-guide.md §2). Sidebar rows,
+ * project rows, Desk tabs, the Desk list and the command palette all render
+ * this pill so "working", "needs you", "unread" and "idle" look identical
+ * everywhere: running uses the accent colour, attention is amber, an unseen
+ * completion is green, an unseen failure is red, and an idle chat has no dot.
+ */
 export interface ThreadStatusPill {
   label:
     | "Working"
     | "Connecting"
     | "Completed"
+    | "Failed"
     | "Pending Approval"
     | "Awaiting Input"
     | "Plan Ready";
@@ -87,13 +95,52 @@ export interface ThreadStatusPill {
 }
 
 const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
-  "Pending Approval": 5,
-  "Awaiting Input": 4,
+  "Pending Approval": 6,
+  "Awaiting Input": 5,
+  Failed: 4,
   Working: 3,
   Connecting: 3,
   "Plan Ready": 2,
   Completed: 1,
 };
+
+const RUNNING_STATUS_CLASSES = {
+  colorClass: "text-primary",
+  dotClass: "bg-status-running",
+} as const;
+const ATTENTION_STATUS_CLASSES = {
+  colorClass: "text-status-attention-foreground",
+  dotClass: "bg-status-attention",
+} as const;
+
+/**
+ * One presentation for each status. Read/unread navigation derives the label
+ * below; the Atrium also retains terminal work after it has been read, but
+ * uses these same colours and pulse rather than maintaining its own palette.
+ */
+const THREAD_STATUS_PILLS: Record<ThreadStatusPill["label"], ThreadStatusPill> = {
+  Working: { label: "Working", ...RUNNING_STATUS_CLASSES, pulse: true },
+  Connecting: { label: "Connecting", ...RUNNING_STATUS_CLASSES, pulse: true },
+  "Pending Approval": { label: "Pending Approval", ...ATTENTION_STATUS_CLASSES, pulse: false },
+  "Awaiting Input": { label: "Awaiting Input", ...ATTENTION_STATUS_CLASSES, pulse: false },
+  "Plan Ready": { label: "Plan Ready", ...ATTENTION_STATUS_CLASSES, pulse: false },
+  Completed: {
+    label: "Completed",
+    colorClass: "text-status-done-foreground",
+    dotClass: "bg-status-done",
+    pulse: false,
+  },
+  Failed: {
+    label: "Failed",
+    colorClass: "text-status-error-foreground",
+    dotClass: "bg-status-error",
+    pulse: false,
+  },
+};
+
+export function getThreadStatusPill(label: ThreadStatusPill["label"]): ThreadStatusPill {
+  return THREAD_STATUS_PILLS[label];
+}
 
 type ThreadStatusInput = Pick<
   SidebarThreadSummary,
@@ -378,9 +425,11 @@ export function resolveThreadRowClassName(input: {
   }
 
   if (input.isActive) {
+    // The sidebar stylesheet adds the shared accent wash for the open chat in
+    // both themes (index.css, `.cafe-thread-sidebar ... [data-active]`).
     return cn(
       baseClassName,
-      "bg-accent/85 text-foreground font-medium hover:bg-accent hover:text-foreground dark:bg-accent/55 dark:hover:bg-accent/70",
+      "bg-sidebar-accent text-foreground font-medium hover:bg-sidebar-accent hover:text-foreground",
     );
   }
 
@@ -393,39 +442,19 @@ export function resolveThreadStatusPill(input: {
   const { thread } = input;
 
   if (thread.hasPendingApprovals) {
-    return {
-      label: "Pending Approval",
-      colorClass: "text-amber-600 dark:text-amber-300/90",
-      dotClass: "bg-amber-500 dark:bg-amber-300/90",
-      pulse: false,
-    };
+    return getThreadStatusPill("Pending Approval");
   }
 
   if (thread.hasPendingUserInput) {
-    return {
-      label: "Awaiting Input",
-      colorClass: "text-indigo-600 dark:text-indigo-300/90",
-      dotClass: "bg-indigo-500 dark:bg-indigo-300/90",
-      pulse: false,
-    };
+    return getThreadStatusPill("Awaiting Input");
   }
 
   if (thread.session?.status === "running") {
-    return {
-      label: "Working",
-      colorClass: "text-slate-500 dark:text-slate-300/80",
-      dotClass: "bg-slate-500/80 dark:bg-slate-300/75",
-      pulse: true,
-    };
+    return getThreadStatusPill("Working");
   }
 
   if (thread.session?.status === "connecting") {
-    return {
-      label: "Connecting",
-      colorClass: "text-slate-500 dark:text-slate-300/80",
-      dotClass: "bg-slate-500/80 dark:bg-slate-300/75",
-      pulse: true,
-    };
+    return getThreadStatusPill("Connecting");
   }
 
   const hasPlanReadyPrompt =
@@ -434,21 +463,16 @@ export function resolveThreadStatusPill(input: {
     isLatestTurnSettled(thread.latestTurn, thread.session) &&
     thread.hasActionableProposedPlan;
   if (hasPlanReadyPrompt) {
-    return {
-      label: "Plan Ready",
-      colorClass: "text-violet-600 dark:text-violet-300/90",
-      dotClass: "bg-violet-500 dark:bg-violet-300/90",
-      pulse: false,
-    };
+    return getThreadStatusPill("Plan Ready");
   }
 
   if (hasUnseenCompletion(thread)) {
-    return {
-      label: "Completed",
-      colorClass: "text-cyan-700 dark:text-cyan-300/90",
-      dotClass: "bg-cyan-500 dark:bg-cyan-300/90",
-      pulse: false,
-    };
+    // An unseen turn that ended in error is surfaced as a failure rather than
+    // an ordinary unread completion; both clear once the chat is viewed.
+    if (thread.latestTurn?.state === "error") {
+      return getThreadStatusPill("Failed");
+    }
+    return getThreadStatusPill("Completed");
   }
 
   return null;
@@ -470,6 +494,62 @@ export function resolveProjectStatusIndicator(
   }
 
   return highestPriorityStatus;
+}
+
+/**
+ * Short, count-aware phrases for the collapsed overflow toggle. The full
+ * status label stays available through each row once the list is expanded.
+ */
+const HIDDEN_THREAD_STATUS_PHRASES: Record<
+  ThreadStatusPill["label"],
+  { readonly one: string; readonly other: string }
+> = {
+  "Pending Approval": { one: "needs approval", other: "need approval" },
+  "Awaiting Input": { one: "needs input", other: "need input" },
+  Working: { one: "working", other: "working" },
+  Connecting: { one: "connecting", other: "connecting" },
+  "Plan Ready": { one: "plan ready", other: "plans ready" },
+  Failed: { one: "failed", other: "failed" },
+  Completed: { one: "unread", other: "unread" },
+};
+
+export interface HiddenThreadStatusSummary {
+  /** Pill whose dot/color represents the summarized group. */
+  readonly status: ThreadStatusPill;
+  readonly count: number;
+  /** Visible summary text, e.g. "1 needs approval" or "2 working". */
+  readonly text: string;
+}
+
+/**
+ * Summarizes chats hidden behind a collapsed sidebar list by their most
+ * urgent status, using the same priority as the collapsed-project dot.
+ *
+ * The "updated" sort follows each chat's latest user message rather than
+ * provider activity, so a long-running turn, or a later approval/input
+ * request, can sink below the preview count. Working and Connecting share a
+ * priority and are counted together; the group is presented as working when
+ * any member is actually running.
+ */
+export function summarizeHiddenThreadStatuses(
+  statuses: ReadonlyArray<ThreadStatusPill | null>,
+): HiddenThreadStatusSummary | null {
+  const highestPriorityStatus = resolveProjectStatusIndicator(statuses);
+  if (highestPriorityStatus === null) {
+    return null;
+  }
+  const priority = THREAD_STATUS_PRIORITY[highestPriorityStatus.label];
+  const group = statuses.filter(
+    (status): status is ThreadStatusPill =>
+      status !== null && THREAD_STATUS_PRIORITY[status.label] === priority,
+  );
+  const status = group.find((member) => member.label === "Working") ?? highestPriorityStatus;
+  const phrases = HIDDEN_THREAD_STATUS_PHRASES[status.label];
+  return {
+    status,
+    count: group.length,
+    text: `${group.length} ${group.length === 1 ? phrases.one : phrases.other}`,
+  };
 }
 
 export function getVisibleThreadsForProject<T extends Pick<Thread, "id">>(input: {

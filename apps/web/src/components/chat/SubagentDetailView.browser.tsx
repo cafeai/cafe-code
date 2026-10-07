@@ -194,16 +194,8 @@ describe("subagent activity detail", () => {
       expect(rows[0]?.querySelector("time")?.getAttribute("datetime")).toBe(timestamp);
       expect(document.querySelector("[data-subagent-detail-activity-detail]")).toBeNull();
       expect(document.body.textContent).not.toContain("PRIVATE_");
-      expect(document.body.textContent).not.toContain(
-        "No public subagent messages are available in this view.",
-      );
-      await expect
-        .element(
-          page.getByText(
-            "Activity is incomplete. Some operations could not be loaded within this view’s retrieval limits.",
-          ),
-        )
-        .toBeVisible();
+      expect(document.body.textContent).not.toContain("No messages yet.");
+      await expect.element(page.getByText("Some activity couldn’t be loaded.")).toBeVisible();
       expect(read).toHaveBeenCalledWith({
         threadId,
         turnId,
@@ -233,20 +225,10 @@ describe("subagent activity detail", () => {
         .element(page.getByText("The retained public summary remains readable.", { exact: true }))
         .toBeVisible();
       await expect
-        .element(
-          page.getByText(
-            "History is incomplete. Some public messages could not be loaded within this view’s retrieval limits.",
-            { exact: true },
-          ),
-        )
+        .element(page.getByText("Some messages couldn’t be loaded.", { exact: true }))
         .toBeVisible();
       await expect
-        .element(
-          page.getByText(
-            "Activity is incomplete. Some operations could not be loaded within this view’s retrieval limits.",
-            { exact: true },
-          ),
-        )
+        .element(page.getByText("Some activity couldn’t be loaded.", { exact: true }))
         .toBeVisible();
       expect(document.querySelectorAll("[data-subagent-detail-activity]")).toHaveLength(0);
       expect(document.querySelector("[data-subagent-detail-unavailable]")).toBeNull();
@@ -273,29 +255,12 @@ describe("subagent activity detail", () => {
     }));
     const view = await render(<DetailFixture />);
     try {
+      await expect.element(page.getByText("No messages yet.", { exact: true })).toBeVisible();
       await expect
-        .element(
-          page.getByText(
-            "No public subagent messages are available in this view. The task summary above is still available.",
-            { exact: true },
-          ),
-        )
+        .element(page.getByText("Some messages couldn’t be loaded.", { exact: true }))
         .toBeVisible();
       await expect
-        .element(
-          page.getByText(
-            "History is incomplete. Some public messages could not be loaded within this view’s retrieval limits.",
-            { exact: true },
-          ),
-        )
-        .toBeVisible();
-      await expect
-        .element(
-          page.getByText(
-            "Activity is incomplete. Some operations could not be loaded within this view’s retrieval limits.",
-            { exact: true },
-          ),
-        )
+        .element(page.getByText("Some activity couldn’t be loaded.", { exact: true }))
         .toBeVisible();
       expect(document.querySelector("[data-subagent-detail-message]")).toBeNull();
       expect(document.querySelector("[data-subagent-detail-activity]")).toBeNull();

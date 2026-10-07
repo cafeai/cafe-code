@@ -33,6 +33,7 @@ vi.mock("../../environments/runtime", () => ({
 }));
 
 import {
+  readRetainedScheduledFollowupNotices,
   readScheduledFollowupsSnapshot,
   refreshScheduledFollowups,
   subscribeScheduledFollowups,
@@ -425,6 +426,45 @@ describe("shared scheduled follow-up reads", () => {
     refreshScheduledFollowups(environmentId, threadId);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(mocks.list).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains only instruction-free card rows for an instant return after the final unsubscribe", async () => {
+    const otherThread = ThreadId.make("schedule-resource-retained-other-chat");
+    mocks.list.mockResolvedValueOnce(
+      response(
+        record({
+          lastRun: {
+            occurrenceAt: now,
+            state: "completed",
+            commandId: "retained-command",
+            finishedAt: now,
+            summary: "private run output",
+          } as unknown as ScheduledFollowupRecord["lastRun"],
+        }),
+      ),
+    );
+    const observer = subscribe();
+    await settle();
+    observer.stop();
+    // The shared read resource itself still retires at the last unsubscribe.
+    expect(readScheduledFollowupsSnapshot(environmentId, threadId).schedules).toEqual([]);
+    const retained = readRetainedScheduledFollowupNotices(environmentId, threadId);
+    expect(retained).toHaveLength(1);
+    expect(retained?.[0]).toMatchObject({
+      name: "Check synthetic build",
+      prompt: "",
+      lastRun: null,
+    });
+    expect(JSON.stringify(retained)).not.toContain("Report meaningful changes.");
+    expect(JSON.stringify(retained)).not.toContain("private run output");
+    expect(readRetainedScheduledFollowupNotices(environmentId, otherThread)).toBeUndefined();
+
+    // A later successful empty read forgets the chat's retained rows.
+    mocks.list.mockResolvedValueOnce(response());
+    const again = subscribe();
+    await settle();
+    again.stop();
+    expect(readRetainedScheduledFollowupNotices(environmentId, threadId)).toBeUndefined();
   });
 
   it("ignores a retired resource's late result after the same scope is subscribed again", async () => {

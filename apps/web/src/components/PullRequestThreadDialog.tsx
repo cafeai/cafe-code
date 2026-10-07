@@ -183,7 +183,7 @@ export function PullRequestThreadDialog({
       : preparePullRequestThreadMutation.error instanceof Error
         ? preparePullRequestThreadMutation.error.message
         : preparePullRequestThreadMutation.error
-          ? `Failed to prepare ${terminology.singular} thread.`
+          ? `Couldn't prepare a chat for this ${terminology.singular}. Check the repository, then try again.`
           : null);
 
   return (
@@ -202,8 +202,8 @@ export function PullRequestThreadDialog({
             Checkout {terminology.singular}
           </DialogTitle>
           <DialogDescription>
-            Resolve a {sourceControlPresentation.providerName} {terminology.singular}, then create
-            the draft thread in the main repo or in a dedicated worktree.
+            Open a {sourceControlPresentation.providerName} {terminology.singular} in a new chat, in
+            the main repo or a worktree.
           </DialogDescription>
         </DialogHeader>
         <DialogPanel className="space-y-4">
@@ -232,7 +232,7 @@ export function PullRequestThreadDialog({
           </label>
 
           {resolvedPullRequest ? (
-            <div className="rounded-xl border border-border/70 bg-muted/24 p-3">
+            <div className="rounded-xl border border-border bg-muted p-3">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <p className="truncate font-medium text-sm">{resolvedPullRequest.title}</p>
@@ -250,12 +250,14 @@ export function PullRequestThreadDialog({
 
           {isResolving ? (
             <div className="flex items-center gap-2 text-muted-foreground text-xs">
-              <Spinner className="size-3.5" />
-              Resolving {terminology.singular}...
+              <Spinner aria-hidden="true" className="size-3.5" />
+              Resolving {terminology.singular}…
             </div>
           ) : null}
 
-          {errorMessage ? <p className="text-destructive text-xs">{errorMessage}</p> : null}
+          {errorMessage ? (
+            <p className="text-destructive-foreground text-xs">{errorMessage}</p>
+          ) : null}
         </DialogPanel>
         <DialogFooter>
           <Button
@@ -271,6 +273,7 @@ export function PullRequestThreadDialog({
             type="button"
             size="sm"
             variant="outline"
+            className="min-w-20"
             onClick={() => {
               void handleConfirm("local");
             }}
@@ -281,11 +284,14 @@ export function PullRequestThreadDialog({
               preparePullRequestThreadMutation.isPending
             }
           >
-            {preparingMode === "local" ? "Preparing local..." : "Local"}
+            {/* Labels and widths stay put while preparing. */}
+            {preparingMode === "local" ? <Spinner aria-hidden="true" className="size-3.5" /> : null}
+            Local
           </Button>
           <Button
             type="button"
             size="sm"
+            className="min-w-24"
             onClick={() => {
               void handleConfirm("worktree");
             }}
@@ -296,7 +302,10 @@ export function PullRequestThreadDialog({
               preparePullRequestThreadMutation.isPending
             }
           >
-            {preparingMode === "worktree" ? "Preparing worktree..." : "Worktree"}
+            {preparingMode === "worktree" ? (
+              <Spinner aria-hidden="true" className="size-3.5" />
+            ) : null}
+            Worktree
           </Button>
         </DialogFooter>
       </DialogPopup>

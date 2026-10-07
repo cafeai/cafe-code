@@ -680,7 +680,13 @@ describe("virtual desktops", () => {
     expect(page.getByText("D-Bus", { exact: true }).element().closest("li")?.textContent).toContain(
       "Installed",
     );
-    await expect.element(page.getByText(/Package names vary between distributions/)).toBeVisible();
+    await expect
+      .element(page.getByText(/Install the missing system components with your package manager/))
+      .toBeVisible();
+    await page.getByRole("button", { name: "About package names" }).hover();
+    await expect
+      .element(page.getByText(/Package names vary between Linux distributions/))
+      .toBeVisible();
     await expect
       .element(page.getByRole("button", { name: /copy|install/i }))
       .not.toBeInTheDocument();
@@ -694,7 +700,7 @@ describe("virtual desktops", () => {
       request.operation === "recheck" ? recheck : Promise.resolve(state),
     );
     await page.getByRole("button", { name: "Check again" }).click();
-    await expect.element(page.getByRole("button", { name: "Checking…" })).toBeDisabled();
+    await expect.element(page.getByRole("button", { name: "Check again" })).toBeDisabled();
     state = initial;
     resolveRecheck(state);
     await expect.element(page.getByText("Required components installed")).toBeVisible();

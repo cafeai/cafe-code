@@ -9,6 +9,8 @@ import { ensureScheduledFollowupsApi } from "../../lib/scheduledFollowupsApi";
 const REFRESH_INTERVAL_MS = 15_000;
 const REFRESH_ERROR = "Schedules could not be refreshed. Reconnect or try again.";
 const EMPTY_SCHEDULES: readonly ScheduledFollowupRecord[] = Object.freeze([]);
+/** Chats whose last successful card summary survives the final unsubscribe. */
+const RETAINED_NOTICE_LIMIT = 32;
 
 export interface ScheduledFollowupsSnapshot {
   readonly schedules: readonly ScheduledFollowupRecord[];
@@ -41,6 +43,49 @@ interface ScheduledFollowupsResource {
  * entry; the last unsubscribe removes all cached instructions immediately. */
 const resources = new Map<EnvironmentId, Map<ThreadId, ScheduledFollowupsResource>>();
 
+/**
+ * Bounded, presentation-only memory of each chat's last successful card rows,
+ * so switching back to a chat can show its schedules on the first frame
+ * instead of an empty tail that grows when the read completes. This is not the
+ * shared read resource (which still retires at the last unsubscribe) and it
+ * never retains instructions or run output: prompts and last-run details are
+ * blanked. Consumers must treat these rows as loading/last-known until the
+ * authoritative read lands, and they never authorize review or execution.
+ */
+const retainedNotices = new Map<string, readonly ScheduledFollowupRecord[]>();
+
+function retainedNoticeKey(environmentId: EnvironmentId, threadId: ThreadId): string {
+  return JSON.stringify([environmentId, threadId]);
+}
+
+function retainNotices(
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+  schedules: readonly ScheduledFollowupRecord[],
+): void {
+  const key = retainedNoticeKey(environmentId, threadId);
+  retainedNotices.delete(key);
+  const visible = schedules.filter((record) => record.state !== "deleted");
+  if (visible.length === 0) return;
+  retainedNotices.set(
+    key,
+    visible.map((record) => ({ ...record, prompt: "", lastRun: null })),
+  );
+  while (retainedNotices.size > RETAINED_NOTICE_LIMIT) {
+    const oldest = retainedNotices.keys().next().value;
+    if (oldest === undefined) break;
+    retainedNotices.delete(oldest);
+  }
+}
+
+/** Last successful, instruction-free card rows for an exact chat, if any. */
+export function readRetainedScheduledFollowupNotices(
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+): readonly ScheduledFollowupRecord[] | undefined {
+  return retainedNotices.get(retainedNoticeKey(environmentId, threadId));
+}
+
 function createResource(environmentId: EnvironmentId, threadId: ThreadId) {
   let disposed = false;
   let generation = 0;
@@ -69,13 +114,11 @@ function createResource(environmentId: EnvironmentId, threadId: ThreadId) {
     try {
       const response = await ensureScheduledFollowupsApi(environmentId).list({ threadId });
       if (!disposed && generation === requestGeneration) {
-        publish({
-          // The backend scopes this read too. Keep the client projection bound
-          // to its exact chat if malformed or stale rows ever cross that layer.
-          schedules: response.schedules.filter((record) => record.threadId === threadId),
-          loading: false,
-          error: null,
-        });
+        // The backend scopes this read too. Keep the client projection bound
+        // to its exact chat if malformed or stale rows ever cross that layer.
+        const schedules = response.schedules.filter((record) => record.threadId === threadId);
+        retainNotices(environmentId, threadId, schedules);
+        publish({ schedules, loading: false, error: null });
       }
     } catch {
       if (!disposed && generation === requestGeneration) {

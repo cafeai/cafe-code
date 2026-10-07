@@ -282,6 +282,60 @@ it("edits a scoped new-chat concurrency default without changing runtime config 
   expect(fixture.onRestartRuntime).not.toHaveBeenCalled();
 });
 
+it("keeps runtime settings in a collapsed Advanced section with the reload warning", async () => {
+  const fixture = cardFixture("minimal", true);
+  const instance = {
+    ...fixture.instance,
+    config: { homePath: "/test/codex-home", binaryPath: "codex" },
+  };
+  mounted = await render(
+    <TooltipProvider>
+      <ProviderInstanceCard
+        instanceId={fixture.instanceId}
+        instance={instance}
+        driverOption={DRIVER_OPTION_BY_VALUE[fixture.instance.driver]}
+        liveProvider={fixture.provider}
+        isSettingsOpen
+        onSettingsOpenChange={fixture.onSettingsOpenChange}
+        isDefaultProvider={false}
+        onSetDefaultProvider={fixture.onSetDefaultProvider}
+        onUpdate={fixture.onUpdate}
+        hiddenModels={[]}
+        favoriteModels={[]}
+        modelOrder={[]}
+        onHiddenModelsChange={vi.fn()}
+        onFavoriteModelsChange={vi.fn()}
+        onModelOrderChange={vi.fn()}
+      />
+    </TooltipProvider>,
+  );
+  // Collapsed by default; the trigger still says a stored value differs from
+  // its default (the default binary path does not count).
+  const trigger = page.getByRole("button", { name: "Advanced · 1 customized" });
+  await expect.element(trigger).toHaveAttribute("aria-expanded", "false");
+  await expect
+    .element(page.getByRole("textbox", { name: "Codex home folder" }))
+    .not.toBeInTheDocument();
+  await trigger.click();
+  await expect.element(trigger).toHaveAttribute("aria-expanded", "true");
+  await expect
+    .element(page.getByText("Saving these reloads the account and can end active chats."))
+    .toBeVisible();
+  await expect
+    .element(page.getByRole("textbox", { name: "Codex home folder" }))
+    .toHaveValue("/test/codex-home");
+  await expect
+    .element(page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }))
+    .toBeVisible();
+  await expect
+    .element(page.getByRole("textbox", { name: "VARIABLE_NAME" }))
+    .not.toBeInTheDocument();
+  // The bundled runtime is Windows-only, so a server that did not report
+  // Windows hides the Runtime choice.
+  await expect.element(page.getByText("Runtime", { exact: true })).not.toBeInTheDocument();
+  expect(fixture.onUpdate).not.toHaveBeenCalled();
+});
+
 function unwrappedTextWidth(element: HTMLElement) {
   // Measure the same synthetic text/font without wrapping. Deriving the fit
   // from the rendered row alone would let a stretched half-card column hide
@@ -651,14 +705,11 @@ describe("Provider instance card layout", () => {
     for (const rights of percentageRights.values())
       expect(Math.max(...rights) - Math.min(...rights)).toBeLessThanOrEqual(1);
     const credits = page.getByText("Credits: 120 available", { exact: true }).element();
-    const spendControl = page.getByText("Spend control: Not reached", { exact: true }).element();
-    expect(credits.getBoundingClientRect().top).toBeCloseTo(
-      spendControl.getBoundingClientRect().top,
-      0,
+    expect(credits.getBoundingClientRect().height).toBeLessThanOrEqual(
+      Number.parseFloat(getComputedStyle(credits).lineHeight) + 1,
     );
-    expect(spendControl.getBoundingClientRect().left).toBeGreaterThan(
-      credits.getBoundingClientRect().right,
-    );
+    // An unreached spend control is the normal state and gets no row.
+    expect(host.textContent).not.toContain("Spend control");
     await expect
       .element(page.getByText("researcher@example.invalid", { exact: true }))
       .not.toBeInTheDocument();
@@ -743,7 +794,7 @@ describe("Provider instance card layout", () => {
       .getByRole("button", { name: `Restart ${multiple!.displayName} runtime`, exact: true })
       .click();
     expect(multiple!.onRestartRuntime).toHaveBeenCalledOnce();
-    await page.getByRole("button", { name: "Log In", exact: true }).click();
+    await page.getByRole("button", { name: "Log in", exact: true }).click();
     expect(login!.onLogIn).toHaveBeenCalledOnce();
     await page
       .getByRole("button", {

@@ -69,7 +69,7 @@ function SettingsContentLayout() {
         {isElectron && (
           <div className="drag-region flex h-[52px] shrink-0 items-center border-b border-border px-5 wco:h-[env(titlebar-area-height)] wco:pr-[calc(100vw-env(titlebar-area-width)-env(titlebar-area-x)+1em)]">
             <ContentSidebarTriggerWithUnreadDot className="mr-2" />
-            <span className="text-xs font-medium tracking-wide text-muted-foreground/70">
+            <span className="text-xs font-medium tracking-wide text-subtle-foreground">
               Settings
             </span>
             {showRestoreDefaults ? (

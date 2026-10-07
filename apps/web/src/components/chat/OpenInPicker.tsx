@@ -22,18 +22,45 @@ function openFailureMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
+export function openProjectInEditor(cwd: string, editor: EditorId) {
+  void readLocalApi()
+    ?.shell.openInEditor(cwd, editor)
+    .catch((error: unknown) => {
+      toastManager.add({
+        title: "Unable to open project",
+        description: openFailureMessage(error, "The project was not opened."),
+        type: "error",
+      });
+    });
+}
+
+export function openProjectInTerminal(cwd: string, terminal: TerminalAvailability) {
+  if (!terminal.available) return;
+  void readLocalApi()
+    ?.shell.openTerminal(cwd)
+    .catch((error: unknown) => {
+      toastManager.add({
+        title: `Unable to open ${terminal.label}`,
+        description: openFailureMessage(error, "The terminal was not opened."),
+        type: "error",
+      });
+    });
+}
+
 export const OpenInPicker = memo(function OpenInPicker({
   environmentId,
   keybindings,
   availableEditors,
   terminal,
   openInCwd,
+  shortcutOnly = false,
 }: {
   environmentId?: EnvironmentId;
   keybindings: ResolvedKeybindingsConfig;
   availableEditors: ReadonlyArray<EditorId>;
   terminal: TerminalAvailability;
   openInCwd: string | null;
+  shortcutOnly?: boolean;
 }) {
   const pane = useChatPane();
   const primary = usePrimaryEnvironmentId();
@@ -52,13 +79,7 @@ export const OpenInPicker = memo(function OpenInPicker({
       if (remote || !api || !openInCwd) return;
       const editor = editorId ?? preferredEditor;
       if (!editor) return;
-      void api.shell.openInEditor(openInCwd, editor).catch((error: unknown) => {
-        toastManager.add({
-          title: "Unable to open project",
-          description: openFailureMessage(error, "The project was not opened."),
-          type: "error",
-        });
-      });
+      openProjectInEditor(openInCwd, editor);
       setPreferredEditor(editor);
     },
     [remote, preferredEditor, openInCwd, setPreferredEditor],
@@ -67,14 +88,8 @@ export const OpenInPicker = memo(function OpenInPicker({
   const openTerminal = useCallback(() => {
     const api = readLocalApi();
     if (remote || !api || !openInCwd || !terminal.available) return;
-    void api.shell.openTerminal(openInCwd).catch((error: unknown) => {
-      toastManager.add({
-        title: `Unable to open ${terminal.label}`,
-        description: openFailureMessage(error, "The terminal was not opened."),
-        type: "error",
-      });
-    });
-  }, [remote, openInCwd, terminal.available, terminal.label]);
+    openProjectInTerminal(openInCwd, terminal);
+  }, [remote, openInCwd, terminal]);
 
   const openFavoriteEditorShortcutLabel = useMemo(
     () => shortcutLabelForCommand(keybindings, "editor.openFavorite"),
@@ -90,19 +105,13 @@ export const OpenInPicker = memo(function OpenInPicker({
       if (!preferredEditor) return;
 
       e.preventDefault();
-      void api.shell.openInEditor(openInCwd, preferredEditor).catch((error: unknown) => {
-        toastManager.add({
-          title: "Unable to open project",
-          description: openFailureMessage(error, "The project was not opened."),
-          type: "error",
-        });
-      });
+      openProjectInEditor(openInCwd, preferredEditor);
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [remote, preferredEditor, keybindings, openInCwd, pane.active, pane.visible]);
 
-  if (remote) return null;
+  if (remote || shortcutOnly) return null;
   return (
     <Group aria-label="Subscription actions">
       <Button

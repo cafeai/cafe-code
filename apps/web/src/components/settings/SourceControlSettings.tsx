@@ -30,6 +30,8 @@ import {
   EmptyTitle,
 } from "../ui/empty";
 import { Skeleton } from "../ui/skeleton";
+import { InfoTip } from "../ui/info-tip";
+import { useDelayedFlag } from "../../hooks/useDelayedFlag";
 import {
   NumberField,
   NumberFieldDecrement,
@@ -137,7 +139,7 @@ function SourceControlItemMark({
 
   return (
     <span className="relative inline-flex size-5 shrink-0 items-center justify-center">
-      <Icon className="size-4.5 text-foreground/80" aria-hidden />
+      <Icon className="size-4.5 text-foreground" aria-hidden />
       <span
         className={cn(
           "pointer-events-none absolute -left-0.5 -top-0.5 size-2 rounded-full ring-2 ring-background",
@@ -184,9 +186,9 @@ function itemSummary({
     if (auth.status === "unauthenticated") {
       return (
         <span>
-          {item.label} is not authenticated on this server. Sign in or configure credentials using
-          the <code className="rounded bg-muted px-1 py-px text-[11px]">{item.executable}</code>{" "}
-          tool on the server host to enable pull request features.
+          Sign in with{" "}
+          <code className="rounded-sm bg-muted px-1 py-px text-2xs">{item.executable}</code> on the
+          server to enable pull requests.
         </span>
       );
     }
@@ -216,15 +218,13 @@ function DiscoveryItemRow({
   const hasDetails = children !== undefined;
 
   return (
-    <div className="border-t border-border/60 first:border-t-0">
+    <div className="border-t border-border-subtle first:border-t-0">
       <div className="px-4 py-3.5 sm:px-5">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0 flex-1 space-y-1">
             <div className="flex min-w-0 flex-wrap items-center gap-2">
               <SourceControlItemMark item={item} />
-              <span className="truncate text-[13px] font-semibold tracking-[-0.01em] text-foreground">
-                {item.label}
-              </span>
+              <span className="truncate text-ui font-semibold text-foreground">{item.label}</span>
               {version ? <code className="text-xs text-muted-foreground">{version}</code> : null}
               {authStatus?.badge ? (
                 <Badge variant={authStatus.badge} size="sm">
@@ -232,7 +232,7 @@ function DiscoveryItemRow({
                 </Badge>
               ) : null}
             </div>
-            <p className="flex min-w-0 flex-wrap items-center gap-x-1 text-xs text-muted-foreground/80">
+            <p className="flex min-w-0 flex-wrap items-center gap-x-1 text-xs text-muted-foreground">
               {itemSummary({ item, auth, authAccount })}
             </p>
           </div>
@@ -247,7 +247,10 @@ function DiscoveryItemRow({
                 aria-label={`Toggle ${item.label} details`}
               >
                 <ChevronDownIcon
-                  className={cn("size-3.5 transition-transform", isExpanded && "rotate-180")}
+                  className={cn(
+                    "size-3.5 transition-transform duration-(--duration-base) ease-out",
+                    isExpanded && "rotate-180",
+                  )}
                 />
               </Button>
             ) : null}
@@ -259,7 +262,9 @@ function DiscoveryItemRow({
       {hasDetails ? (
         <Collapsible open={isExpanded} onOpenChange={setIsExpanded}>
           <CollapsibleContent>
-            <div className="border-t border-border/60 px-4 py-3 sm:px-5">{children}</div>
+            <div className="animate-enter-rise border-t border-border-subtle px-4 py-3 sm:px-5">
+              {children}
+            </div>
           </CollapsibleContent>
         </Collapsible>
       ) : null}
@@ -302,9 +307,12 @@ function GitFetchIntervalSettings() {
               ) : null}
             </span>
           </div>
-          <p className="max-w-2xl text-xs leading-relaxed text-muted-foreground">
-            Refresh remote branch status in the background. Set this to 0 seconds if Git credentials
-            or security keys should only be prompted by explicit Git actions.
+          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            Checks remote branches in the background. 0 turns it off.
+            <InfoTip label="About the fetch interval">
+              Use 0 if Git credentials or security keys should only prompt during Git actions you
+              start.
+            </InfoTip>
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -343,7 +351,10 @@ function SourceControlSectionSkeleton({
   return (
     <SettingsSection title={title} headerAction={headerAction}>
       {SOURCE_CONTROL_SKELETON_ROWS.map((row) => (
-        <div key={row} className="border-t border-border/60 px-4 py-3.5 first:border-t-0 sm:px-5">
+        <div
+          key={row}
+          className="border-t border-border-subtle px-4 py-3.5 first:border-t-0 sm:px-5"
+        >
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="min-w-0 flex-1 space-y-2">
               <div className="flex items-center gap-2">
@@ -392,9 +403,7 @@ function EmptySourceControlDiscovery({
             {hasError ? "Could not scan the server environment" : "Nothing detected yet"}
           </EmptyTitle>
           <EmptyDescription>
-            {hasError
-              ? error
-              : "Install Git on the server, add optional hosting integrations or credentials your workspace needs, then rescan."}
+            {hasError ? error : "Install Git on the server, then rescan."}
           </EmptyDescription>
         </EmptyHeader>
         <EmptyContent>
@@ -420,6 +429,8 @@ export function SourceControlSettingsPanel() {
   const hasDiscoveryItems =
     result.versionControlSystems.length > 0 || result.sourceControlProviders.length > 0;
   const isInitialScanPending = discovery.isPending && discovery.data === null;
+  // Fast scans show nothing; slower ones get the layout-matching skeleton.
+  const showInitialScanSkeleton = useDelayedFlag(isInitialScanPending);
   const handleScan = () => {
     void refreshSourceControlDiscovery();
   };
@@ -444,20 +455,22 @@ export function SourceControlSettingsPanel() {
   );
 
   return (
-    <SettingsPageContainer>
-      <SettingsSection title="Generated Text">
+    <SettingsPageContainer title="Source control">
+      <SettingsSection title="Generated text">
         <TextGenerationModelSettingsRow />
       </SettingsSection>
 
-      {isInitialScanPending ? (
-        <>
-          <SourceControlSectionSkeleton title="Version Control" headerAction={scanButton} />
-          <SourceControlSectionSkeleton title="Source Control Providers" />
-        </>
+      {isInitialScanPending || showInitialScanSkeleton ? (
+        showInitialScanSkeleton ? (
+          <>
+            <SourceControlSectionSkeleton title="Version control" headerAction={scanButton} />
+            <SourceControlSectionSkeleton title="Source control providers" />
+          </>
+        ) : null
       ) : hasDiscoveryItems ? (
         <>
           {result.versionControlSystems.length > 0 ? (
-            <SettingsSection title="Version Control" headerAction={scanButton}>
+            <SettingsSection title="Version control" headerAction={scanButton}>
               {result.versionControlSystems.map((item) => (
                 <DiscoveryItemRow key={`vcs:${item.kind}`} item={item}>
                   {item.kind === "git" ? <GitFetchIntervalSettings /> : undefined}
@@ -468,7 +481,7 @@ export function SourceControlSettingsPanel() {
 
           {result.sourceControlProviders.length > 0 ? (
             <SettingsSection
-              title="Source Control Providers"
+              title="Source control providers"
               headerAction={result.versionControlSystems.length === 0 ? scanButton : null}
             >
               {result.sourceControlProviders.map((item) => (

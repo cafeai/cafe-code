@@ -7,7 +7,10 @@ import {
 } from "@cafecode/contracts";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
-import { Dialog, DialogPopup, DialogHeader, DialogTitle, DialogDescription } from "../ui/dialog";
+import { InfoTip } from "../ui/info-tip";
+import { Spinner } from "../ui/spinner";
+import { Dialog, DialogPopup, DialogHeader, DialogTitle } from "../ui/dialog";
+import { useDelayedFlag } from "~/hooks/useDelayedFlag";
 import { useVirtualDesktops } from "./useVirtualDesktops";
 import {
   DesktopResolutionFields,
@@ -36,6 +39,7 @@ export function DesktopSessionDialog({
   );
   const resolution = readResolutionDraft(draft);
   const current = desktop && controls.data?.desktops.find((d) => d.id === desktop.id);
+  const showBusy = useDelayedFlag(controls.busy);
   const canSubmit =
     resolution &&
     controls.data?.enabled &&
@@ -50,12 +54,14 @@ export function DesktopSessionDialog({
     >
       <DialogPopup showCloseButton={!controls.busy} bottomStickOnMobile={false}>
         <DialogHeader>
-          <DialogTitle>{desktop ? "Display settings" : "New desktop"}</DialogTitle>
-          <DialogDescription>
-            {desktop
-              ? `Change the resolution of ${desktop.name} for this session.`
-              : "Choose a name and display size for this temporary desktop."}
-          </DialogDescription>
+          <div className="flex items-center gap-1.5">
+            <DialogTitle>{desktop ? "Display settings" : "New desktop"}</DialogTitle>
+            <InfoTip label={desktop ? "About display settings" : "About desktops"}>
+              {desktop
+                ? `Changes ${desktop.name} for this session only; defaults for new desktops stay the same. Input pauses until a fresh screenshot is available.`
+                : "A temporary desktop. Closing the viewer keeps apps running; ending it or restarting your computer closes its apps. Saved files remain; unsaved work can be lost."}
+            </InfoTip>
+          </div>
         </DialogHeader>
         <form
           className="space-y-5 overflow-y-auto px-6 pb-6"
@@ -96,11 +102,6 @@ export function DesktopSessionDialog({
             </label>
           )}
           <DesktopResolutionFields value={draft} onChange={setDraft} disabled={controls.busy} />
-          <p className="text-xs text-muted-foreground">
-            {desktop
-              ? "Changing resolution pauses input until a fresh screenshot is available. Defaults for new desktops stay the same."
-              : "Closing the viewer keeps apps running. Ending this desktop or restarting your computer closes its apps and removes it. Saved files remain; unsaved work can be lost."}
-          </p>
           {controls.error && (
             <p role="alert" className="text-xs text-destructive">
               {controls.error}
@@ -110,14 +111,11 @@ export function DesktopSessionDialog({
             <Button type="button" variant="outline" disabled={controls.busy} onClick={onClose}>
               Cancel
             </Button>
-            <Button type="submit" disabled={controls.busy || !canSubmit}>
-              {controls.busy
-                ? desktop
-                  ? "Applying…"
-                  : "Creating…"
-                : desktop
-                  ? "Apply resolution"
-                  : "Create desktop"}
+            {/* The label and width stay put while working; a spinner shows
+                only once the wait is noticeable. */}
+            <Button type="submit" className="min-w-36" disabled={controls.busy || !canSubmit}>
+              {showBusy ? <Spinner aria-hidden="true" /> : null}
+              {desktop ? "Apply resolution" : "Create desktop"}
             </Button>
           </div>
         </form>

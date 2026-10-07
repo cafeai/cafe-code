@@ -146,11 +146,18 @@ it("shows historical turn settings even when the current provider is different",
     </div>,
   );
   try {
-    await expect.element(page.getByText("GPT-6.1 Sol · Effort: Ultra · Fast off")).toBeVisible();
-    await expect.element(page.getByText("Account: Original Codex account")).toBeVisible();
-    await expect.element(page.getByText("Existing session settings")).toBeVisible();
+    await expect
+      .element(
+        page.getByText(
+          "GPT-6.1 Sol · Ultra · Fast off · Original Codex account · Plan · Supervised",
+          { exact: true },
+        ),
+      )
+      .toBeVisible();
     const row = document.querySelector<HTMLElement>("[data-turn-configuration-row]")!;
-    expect(row.textContent).toContain("Plan · Approval required");
+    // The settings source moves to the row tooltip, shown on keyboard focus.
+    row.querySelector<HTMLElement>("[data-turn-configuration-settings]")!.focus();
+    await expect.element(page.getByText(/^Existing session settings/)).toBeVisible();
     expect(row.textContent).not.toContain("Claude");
     expect(row.textContent).not.toContain("codex_original");
   } finally {
@@ -242,8 +249,21 @@ it("offers exact selected-message forks on finished Claude user and assistant me
       messageForkDisabled
     />,
   );
-  await expect.element(buttons.nth(0)).toBeDisabled();
-  await expect.element(buttons.nth(1)).toBeDisabled();
+  await expect.element(buttons).not.toBeInTheDocument();
+  for (const blocked of [
+    { isWorking: true },
+    { activeTurnInProgress: true, activeTurnId: TurnId.make("turn-1") },
+    { isRevertingCheckpoint: true },
+  ]) {
+    await view.rerender(
+      <MessagesTimeline
+        {...props}
+        {...blocked}
+        activeProvider={ProviderDriverKind.make("claudeAgent")}
+      />,
+    );
+    await expect.element(buttons).not.toBeInTheDocument();
+  }
   await view.rerender(
     <MessagesTimeline {...props} activeProvider={ProviderDriverKind.make("codex")} />,
   );
@@ -256,6 +276,34 @@ it("offers exact selected-message forks on finished Claude user and assistant me
     />,
   );
   await expect.element(buttons).not.toBeInTheDocument();
+});
+
+it("keeps idle Claude fork actions quiet until message hover or keyboard focus", async () => {
+  const onForkMessage = vi.fn();
+  const view = await render(
+    <MessagesTimeline
+      {...buildProps()}
+      activeProvider={ProviderDriverKind.make("claudeAgent")}
+      onForkMessage={onForkMessage}
+      timelineEntries={[buildAssistantTimelineEntry()]}
+    />,
+  );
+  const fork = page.getByRole("button", { name: "Fork from this message", exact: true });
+  const button = fork.element();
+  await expect.poll(() => getComputedStyle(button).opacity).toBe("0");
+  await page.elementLocator(document.querySelector('[data-message-role="assistant"]')!).hover();
+  await expect.poll(() => getComputedStyle(button).opacity).toBe("1");
+  await page.screenshot({ path: "../../../../../.explorations/claude-fork-hover.png" });
+  await page.elementLocator(document.body).hover();
+  await expect.poll(() => getComputedStyle(button).opacity).toBe("0");
+  // Copy comes first in the real message footer, followed by Fork.
+  await userEvent.keyboard("{Tab}{Tab}");
+  await expect.element(fork).toHaveFocus();
+  await expect.poll(() => getComputedStyle(button).opacity).toBe("1");
+  expect(onForkMessage).not.toHaveBeenCalled();
+  await userEvent.keyboard("{Enter}");
+  expect(onForkMessage).toHaveBeenCalledExactlyOnceWith(MessageId.make("assistant:item-1"));
+  await view.unmount();
 });
 
 function buildUserTimelineEntry(text: string) {
@@ -568,29 +616,33 @@ describe("MessagesTimeline", () => {
     }
   });
 
-  it("shows a friendly loading scene until an empty thread detail snapshot is conclusive", async () => {
+  it("shows a delayed skeleton until an empty chat detail snapshot is conclusive", async () => {
     const props = buildProps();
     const screen = await render(
       <MessagesTimeline {...props} isThreadHistoryHydrating timelineEntries={[]} />,
     );
 
     try {
-      await expect.element(page.getByText("Restoring your conversation")).toBeVisible();
-      await expect
-        .element(
-          page.getByText(
-            "Cafe is gathering this thread's history. It'll be ready to continue in just a moment.",
-          ),
-        )
-        .toBeVisible();
-      await expect
-        .element(page.getByText("Send a message to start the conversation."))
-        .not.toBeInTheDocument();
-
       const loadingState = document.querySelector<HTMLElement>(
         '[data-thread-history-loading="true"]',
       );
       expect(loadingState?.getAttribute("role")).toBe("status");
+      // Nothing flashes for fast loads: the skeleton waits ~300ms and the
+      // short label only appears for waits over ~1.5s.
+      expect(document.querySelector('[data-thread-history-skeleton="true"]')).toBeNull();
+      await expect
+        .element(page.getByText("Send a message to start the conversation."))
+        .not.toBeInTheDocument();
+      await vi.waitFor(() =>
+        expect(document.querySelector('[data-thread-history-skeleton="true"]')).not.toBeNull(),
+      );
+      // The status text is screen-reader-only until the wait is long enough.
+      const label = page.getByText("Loading conversation…", { exact: true }).element();
+      expect(label.className).toContain("sr-only");
+      await vi.waitFor(() => expect(label.className).not.toContain("sr-only"), {
+        timeout: 3_000,
+      });
+      expect(document.body.textContent).not.toContain("Restoring your conversation");
 
       await screen.rerender(
         <MessagesTimeline {...props} isThreadHistoryHydrating={false} timelineEntries={[]} />,
@@ -599,7 +651,7 @@ describe("MessagesTimeline", () => {
       await expect
         .element(page.getByText("Send a message to start the conversation."))
         .toBeVisible();
-      await expect.element(page.getByText("Restoring your conversation")).not.toBeInTheDocument();
+      expect(document.querySelector('[data-thread-history-loading="true"]')).toBeNull();
     } finally {
       await screen.unmount();
     }
@@ -895,19 +947,12 @@ describe("MessagesTimeline", () => {
       expect(commentaryTime?.textContent).toBe(formatter.format(new Date(commentaryTimestamp)));
 
       await expect
-        .element(
-          page.getByText(
-            "History is incomplete. Some public messages could not be loaded within this view’s retrieval limits.",
-            { exact: true },
-          ),
-        )
+        .element(page.getByText("Some messages couldn’t be loaded.", { exact: true }))
         .toBeVisible();
       expect(
         document.querySelector('[data-subagent-detail-history-incomplete="true"]'),
       ).not.toBeNull();
-      expect(document.body.textContent).not.toContain(
-        "This long subagent history was shortened to keep the chat responsive.",
-      );
+      expect(document.body.textContent).not.toContain("Older messages hidden.");
     } finally {
       await screen.unmount();
     }
@@ -1061,10 +1106,7 @@ describe("MessagesTimeline", () => {
         .toBeVisible();
       await expect
         .element(
-          page.getByText(
-            "New provider updates could not be loaded. This is the last available transcript.",
-            { exact: true },
-          ),
+          page.getByText("Couldn’t refresh. Showing the last loaded transcript.", { exact: true }),
         )
         .toBeVisible();
       expect(document.body.textContent).not.toContain("private provider refresh failure");
@@ -1810,6 +1852,9 @@ describe("MessagesTimeline", () => {
       expect(getComputedStyle(scroller).overflowY).toBe("auto");
       expect(getComputedStyle(scroller).overflowX).toBe("hidden");
       expect(scroller.scrollHeight).toBeGreaterThan(scroller.clientHeight);
+      // The detail slides in from the end edge; measure its settled geometry
+      // rather than a mid-entrance translate.
+      await Promise.all(detail.getAnimations().map((animation) => animation.finished));
       expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth + 1);
       const bounds = detail.getBoundingClientRect();
       expect(bounds.left).toBeGreaterThanOrEqual(-1);

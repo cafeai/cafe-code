@@ -397,7 +397,7 @@ describe("ThreadErrorBanner", () => {
       await expect
         .element(page.getByRole("status"))
         .toHaveTextContent(
-          "Could not confirm the new chat. No prompt was sent. Check your chat list before trying again.",
+          "Couldn't confirm the new chat. No prompt was sent — check your chat list before trying again.",
         );
       await expect
         .element(page.getByText("private native path and provider token"))

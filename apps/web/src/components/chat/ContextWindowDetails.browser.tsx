@@ -78,7 +78,7 @@ describe("ContextWindowDetails reset availability", () => {
         await expect
           .element(page.getByRole("heading", { name: "Subagent limit", exact: false }))
           .not.toBeInTheDocument();
-        await expect.element(page.getByText("Waiting for usage from this thread.")).toBeVisible();
+        await expect.element(page.getByText("Waiting for usage from this chat.")).toBeVisible();
       }
     },
   );
@@ -116,7 +116,7 @@ describe("ContextWindowDetails reset availability", () => {
       />,
     );
     await expect.element(page.getByText("Usage limit resets available: 0")).not.toBeInTheDocument();
-    await expect.element(page.getByText("Waiting for usage from this thread.")).toBeVisible();
+    await expect.element(page.getByText("Waiting for usage from this chat.")).toBeVisible();
   });
 
   it.each(["popover", "panel"] as const)(
@@ -190,7 +190,7 @@ describe("ContextWindowDetails reset availability", () => {
     await expect.element(page.getByText("Credits: Available (balance not reported)")).toBeVisible();
     await expect.element(page.getByText("Credits: 0 available")).not.toBeInTheDocument();
     await expect
-      .element(page.getByText("Waiting for usage from this thread."))
+      .element(page.getByText("Waiting for usage from this chat."))
       .not.toBeInTheDocument();
     await mounted.rerender(
       <ContextWindowDetails
@@ -198,7 +198,7 @@ describe("ContextWindowDetails reset availability", () => {
         rateLimits={{ checkedAt: rateLimits.checkedAt, rateLimits: { credits: null } }}
       />,
     );
-    await expect.element(page.getByText("Waiting for usage from this thread.")).toBeVisible();
+    await expect.element(page.getByText("Waiting for usage from this chat.")).toBeVisible();
   });
 
   it.each(["popover", "panel"] as const)(

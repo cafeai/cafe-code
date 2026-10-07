@@ -38,6 +38,55 @@ function resizableStore() {
 }
 
 describe("Desk store", () => {
+  it("persists kept tabs but drops temporary previews across restart and environment changes", () => {
+    const storage = createMemoryStorage();
+    const store = createDeskStore(() => storage);
+    store.getState().bindEnvironment(environmentId);
+    store.getState().dispatch({ type: "open", target: target(), preview: true });
+    const reopened = createDeskStore(() => storage);
+    reopened.getState().bindEnvironment(environmentId);
+    expect(reopened.getState().desk.groups.g1?.tabs).toEqual([]);
+    store.getState().dispatch({ type: "keepOpen", tabKey: deskTabKey(target()) });
+    reopened.getState().bindEnvironment(null);
+    reopened.getState().bindEnvironment(environmentId);
+    expect(reopened.getState().desk.groups.g1?.tabs).toEqual([deskTabKey(target())]);
+    store.getState().bindEnvironment(otherEnvironment);
+    expect(store.getState().desk.groups.g1?.tabs).toEqual([]);
+    store.getState().bindEnvironment(environmentId);
+    expect(store.getState().desk.groups.g1?.previewTabKey).toBeUndefined();
+    expect(store.getState().desk.groups.g1?.tabs).toEqual([deskTabKey(target())]);
+  });
+
+  it("dismisses a preview for a pending editor without consuming editor ownership", () => {
+    const { store, storage } = resizableStore();
+    const groupId = store.getState().desk.activeGroupId;
+    const preview: ThreadRouteTarget = {
+      kind: "server",
+      threadRef: { environmentId, threadId: ThreadId.make("preview") },
+    };
+    store.getState().dispatch({ type: "open", target: preview, preview: true });
+    const previous = store
+      .getState()
+      .desk.groups[groupId]!.tabs.find((key) => key !== deskTabKey(preview))!;
+    store.getState().dispatch({ type: "close", tabKey: previous });
+    const draftId = DraftId.make("pending-preview-editor");
+    store.getState().showDraftEditor(draftId, groupId);
+    expect(store.getState().desk.groups[groupId]?.tabs).toEqual([]);
+    expect(store.getState().activeDraftId).toBe(draftId);
+    expect(store.getState().draftEditors[draftId]?.groupId).toBe(groupId);
+    const restored = createDeskStore(() => storage);
+    restored.getState().bindEnvironment(environmentId);
+    expect(Object.keys(restored.getState().desk.groups)).toEqual(["g1"]);
+    expect(
+      store.getState().promoteDraftEditor(draftId, {
+        environmentId,
+        threadId: ThreadId.make("sent-preview-editor"),
+      }),
+    ).toBe(true);
+    expect(store.getState().desk.groups[groupId]?.previewTabKey).toBeUndefined();
+    expect(store.getState().activeDraftId).toBeNull();
+  });
+
   it("opens a pending editor without changing the sidebar, saved tabs or persisted layout", () => {
     const storage = createMemoryStorage();
     const writes = vi.spyOn(storage, "setItem");

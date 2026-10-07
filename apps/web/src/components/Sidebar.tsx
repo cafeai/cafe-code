@@ -14,8 +14,10 @@ import {
   ChangeRequestStatusIcon,
   prStatusIndicator,
   resolveThreadPr,
+  ThreadStatusDot,
   ThreadStatusLabel,
 } from "./ThreadStatusIndicators";
+import { SegmentedControl } from "./ui/segmented-control";
 import { ProjectFavicon } from "./ProjectFavicon";
 import { autoAnimate } from "@formkit/auto-animate";
 import React, { useCallback, useEffect, memo, useMemo, useRef, useState } from "react";
@@ -177,12 +179,14 @@ import {
   orderItemsByPreferredIds,
   shouldClearThreadSelectionOnMouseDown,
   sortProjectsForSidebar,
+  summarizeHiddenThreadStatuses,
   useThreadJumpHintVisibility,
-  ThreadStatusPill,
+  type HiddenThreadStatusSummary,
 } from "./Sidebar.logic";
 import { sortThreads } from "../lib/threadSort";
 import { isLatestTurnSettled } from "../session-logic";
 import { SidebarUpdatePill } from "./sidebar/SidebarUpdatePill";
+import { SidebarSourceUpdateBadge } from "./sidebar/SidebarSourceUpdateBadge";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { useIsMobile } from "~/hooks/useMediaQuery";
 import { CommandDialogTrigger } from "./ui/command";
@@ -193,7 +197,7 @@ import {
   withDismissedHint,
 } from "../firstRunOnboarding";
 import { readEnvironmentApi } from "../environmentApi";
-import { useSettings, useUpdateSettings } from "~/hooks/useSettings";
+import { getClientSettings, useSettings, useUpdateSettings } from "~/hooks/useSettings";
 import { useServerKeybindings } from "../rpc/serverState";
 import {
   derivePhysicalProjectKey,
@@ -210,6 +214,7 @@ import {
 } from "../sidebarProjectGrouping";
 import { SidebarProviderUpdatePill } from "./sidebar/SidebarProviderUpdatePill";
 import { SidebarNewChatButton } from "./sidebar/SidebarNewChatButton";
+import { SidebarThreadOverflowToggle } from "./sidebar/SidebarThreadOverflowToggle";
 import { SidebarTriggerWithUnreadDot } from "./sidebar/unseenCompletions";
 import { DeskSidebar } from "./desk/DeskSidebar";
 import { useDeskStore } from "../deskStore";
@@ -380,6 +385,15 @@ function repairDialogSkippedCount(result: ProviderThreadAssistantMessagesRepairR
   );
 }
 
+function RepairCountCell({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-lg border border-border-subtle bg-muted px-3 py-2">
+      <span className="block text-xs text-muted-foreground">{label}</span>
+      <span className="font-medium tabular-nums">{value}</span>
+    </div>
+  );
+}
+
 function ThreadRepairProgressDialog({
   state,
   onClose,
@@ -402,9 +416,9 @@ function ThreadRepairProgressDialog({
     >
       <DialogPopup className="max-w-md" showCloseButton={!running}>
         <DialogHeader>
-          <DialogTitle>Repair thread messages</DialogTitle>
+          <DialogTitle>Repair chat messages</DialogTitle>
           <DialogDescription>
-            {state ? `"${state.thread.title}"` : "Repairing selected thread."}
+            {state ? `"${state.thread.title}"` : "Repairing the selected chat."}
           </DialogDescription>
         </DialogHeader>
         <DialogPanel className="space-y-4">
@@ -417,45 +431,37 @@ function ThreadRepairProgressDialog({
               >
                 <div className="h-full w-1/2 animate-pulse rounded-full bg-primary" />
               </div>
-              <p className="text-sm text-muted-foreground">
-                Checking local provider journal and upstream provider history.
-              </p>
+              <p className="text-sm text-muted-foreground">Checking saved and provider history…</p>
             </div>
           ) : null}
 
           {result ? (
-            <div className="grid grid-cols-2 gap-2 text-sm">
-              <div className="rounded-md border bg-muted/25 px-3 py-2">
-                <span className="block text-xs text-muted-foreground">Messages</span>
-                <span className="font-medium">{result.counts.totalMessages}</span>
+            <div className="space-y-2">
+              <div className="grid grid-cols-2 gap-2 text-sm">
+                <RepairCountCell label="Messages" value={result.counts.totalMessages} />
+                <RepairCountCell label="Repaired" value={result.counts.repaired} />
+                <RepairCountCell label="Already complete" value={result.counts.unchanged} />
+                <RepairCountCell label="Skipped" value={skipped} />
               </div>
-              <div className="rounded-md border bg-muted/25 px-3 py-2">
-                <span className="block text-xs text-muted-foreground">Repaired</span>
-                <span className="font-medium">{result.counts.repaired}</span>
-              </div>
-              <div className="rounded-md border bg-muted/25 px-3 py-2">
-                <span className="block text-xs text-muted-foreground">Already complete</span>
-                <span className="font-medium">{result.counts.unchanged}</span>
-              </div>
-              <div className="rounded-md border bg-muted/25 px-3 py-2">
-                <span className="block text-xs text-muted-foreground">Skipped</span>
-                <span className="font-medium">{skipped}</span>
-              </div>
-              <div className="rounded-md border bg-muted/25 px-3 py-2">
-                <span className="block text-xs text-muted-foreground">Local checks</span>
-                <span className="font-medium">{result.counts.localAttempts}</span>
-              </div>
-              <div className="rounded-md border bg-muted/25 px-3 py-2">
-                <span className="block text-xs text-muted-foreground">Upstream checks</span>
-                <span className="font-medium">{result.counts.upstreamAttempts}</span>
-              </div>
+              {/* Which history sources were consulted is diagnostic detail,
+                  so it stays collapsed (docs/style-guide.md §10). */}
+              <details className="group/repair-details text-xs text-muted-foreground">
+                <summary className="focus-ring inline-flex cursor-pointer list-none items-center gap-1 rounded-sm select-none hover:text-foreground [&::-webkit-details-marker]:hidden">
+                  <ChevronRightIcon className="size-3.5 transition-transform duration-(--duration-fast) group-open/repair-details:rotate-90" />
+                  Details
+                </summary>
+                <div className="mt-2 grid animate-enter-rise grid-cols-2 gap-2 text-sm">
+                  <RepairCountCell label="Local checks" value={result.counts.localAttempts} />
+                  <RepairCountCell label="Upstream checks" value={result.counts.upstreamAttempts} />
+                </div>
+              </details>
             </div>
           ) : null}
 
           {state?.phase === "error" ? (
             <Alert variant="error">
               <TriangleAlertIcon className="size-4" />
-              <AlertTitle>Unable to repair thread</AlertTitle>
+              <AlertTitle>Could not repair chat</AlertTitle>
               <AlertDescription>{state.message}</AlertDescription>
             </Alert>
           ) : null}
@@ -704,6 +710,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         render={rowButtonRender}
         size="sm"
         isActive={isActive}
+        data-thread-selected={isSelected ? "true" : undefined}
         data-testid={`thread-row-${thread.id}`}
         className={`${resolveThreadRowClassName({
           isActive,
@@ -736,7 +743,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             <input
               ref={handleRenameInputRef}
               aria-label="Chat title"
-              className="min-w-0 flex-1 truncate text-base sm:text-xs bg-transparent outline-none border border-ring rounded px-0.5"
+              className="min-w-0 flex-1 truncate rounded-sm border border-ring bg-transparent px-0.5 text-base outline-none sm:text-ui"
               value={renamingTitle}
               onChange={handleRenameInputChange}
               onKeyDown={handleRenameInputKeyDown}
@@ -748,7 +755,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               <TooltipTrigger
                 render={
                   <span
-                    className="min-w-0 flex-1 truncate text-xs"
+                    className="min-w-0 flex-1 truncate text-ui"
                     data-testid={`thread-title-${thread.id}`}
                   >
                     {thread.title}
@@ -767,21 +774,29 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         <div className="ml-auto flex min-w-12 shrink-0 justify-end max-md:min-w-20 pointer-coarse:min-w-20">
           <div className="pointer-events-none absolute top-1/2 right-1 flex -translate-y-1/2 items-center gap-1 opacity-0 transition-opacity duration-150 max-md:pointer-events-auto max-md:opacity-100 pointer-coarse:pointer-events-auto pointer-coarse:opacity-100 group-hover/menu-sub-item:pointer-events-auto group-hover/menu-sub-item:opacity-100 group-focus-within/menu-sub-item:pointer-events-auto group-focus-within/menu-sub-item:opacity-100">
             {renamingThreadKey !== threadKey && !isConfirmingArchive ? (
-              <button
-                type="button"
-                data-thread-selection-safe
-                aria-label={`Rename ${thread.title}`}
-                title="Rename chat (F2)"
-                className="inline-flex size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground/60 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring max-md:size-8 pointer-coarse:size-8"
-                onPointerDown={stopPropagationOnPointerDown}
-                onClick={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  beginRename(threadRef, thread.title);
-                }}
-              >
-                <PencilIcon className="size-3" />
-              </button>
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    // The button stays a direct child of the action cluster;
+                    // its own pointerdown guard still keeps row selection out.
+                    <button
+                      type="button"
+                      data-thread-selection-safe
+                      aria-label={`Rename ${thread.title}`}
+                      className="inline-flex size-5 shrink-0 items-center justify-center rounded-sm text-subtle-foreground transition-colors duration-(--duration-fast) hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring max-md:size-8 pointer-coarse:size-8"
+                      onPointerDown={stopPropagationOnPointerDown}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        beginRename(threadRef, thread.title);
+                      }}
+                    >
+                      <PencilIcon className="size-3" />
+                    </button>
+                  }
+                />
+                <TooltipPopup side="top">Rename (F2)</TooltipPopup>
+              </Tooltip>
             ) : null}
             {isConfirmingArchive ? (
               <button
@@ -790,7 +805,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                 data-thread-selection-safe
                 data-testid={`thread-archive-confirm-${thread.id}`}
                 aria-label={`Confirm archive ${thread.title}`}
-                className="inline-flex h-5 cursor-pointer items-center rounded-full bg-destructive/12 px-2 text-[10px] font-medium text-destructive transition-colors hover:bg-destructive/18 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-destructive/40"
+                className="inline-flex h-5 cursor-pointer items-center rounded-full bg-destructive/12 px-2 text-2xs font-medium text-destructive-foreground transition-colors duration-(--duration-fast) hover:bg-destructive/18 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-destructive/40"
                 onPointerDown={stopPropagationOnPointerDown}
                 onClick={handleConfirmArchiveClick}
               >
@@ -803,7 +818,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                   data-thread-selection-safe
                   data-testid={`thread-archive-${thread.id}`}
                   aria-label={`Archive ${thread.title}`}
-                  className="inline-flex size-5 cursor-pointer items-center justify-center text-muted-foreground/60 transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring max-md:size-8 pointer-coarse:size-8"
+                  className="inline-flex size-5 cursor-pointer items-center justify-center rounded-sm text-subtle-foreground transition-colors duration-(--duration-fast) hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring max-md:size-8 pointer-coarse:size-8"
                   onPointerDown={stopPropagationOnPointerDown}
                   onClick={handleStartArchiveConfirmation}
                 >
@@ -821,7 +836,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                           data-thread-selection-safe
                           data-testid={`thread-archive-${thread.id}`}
                           aria-label={`Archive ${thread.title}`}
-                          className="inline-flex size-5 cursor-pointer items-center justify-center text-muted-foreground/60 transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring max-md:size-8 pointer-coarse:size-8"
+                          className="inline-flex size-5 cursor-pointer items-center justify-center rounded-sm text-subtle-foreground transition-colors duration-(--duration-fast) hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring max-md:size-8 pointer-coarse:size-8"
                           onPointerDown={stopPropagationOnPointerDown}
                           onClick={handleArchiveImmediateClick}
                         >
@@ -837,18 +852,13 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
           </div>
           <span className={threadMetaClassName}>
             {jumpLabel ? (
-              <span
-                className="inline-flex h-5 items-center rounded-full border border-border/80 bg-background/90 px-1.5 font-mono text-[10px] font-medium tracking-tight text-foreground shadow-sm"
-                title={jumpLabel}
-              >
+              <span className="inline-flex h-5 items-center rounded-full border border-border bg-background px-1.5 font-mono text-2xs font-medium tracking-tight text-foreground shadow-sm">
                 {jumpLabel}
               </span>
             ) : (
               <span
-                className={`text-[10px] ${
-                  isHighlighted
-                    ? "text-foreground/72 dark:text-foreground/82"
-                    : "text-muted-foreground/40"
+                className={`text-2xs tabular-nums ${
+                  isHighlighted ? "text-muted-foreground" : "text-subtle-foreground"
                 }`}
               >
                 {formatRelativeTimeLabel(
@@ -885,7 +895,7 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
   expanded: boolean;
   activeTarget: ThreadRouteTarget | null;
   jumpLabelByKey: ReadonlyMap<string, string>;
-  onOpen: (target: ThreadRouteTarget) => void;
+  onOpen: (target: ThreadRouteTarget, preview?: boolean) => void;
   onExpansionChange: (expanded: boolean) => void;
   onNewChat: () => void;
   newChatDisabled?: boolean;
@@ -912,6 +922,37 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
     [entries],
   );
   const visibleEntries = expanded ? entries : entries.slice(0, previewCount);
+  const hiddenEntryCount = Math.max(0, entries.length - previewCount);
+  // Visible rows resolve their own status. Subscribe only to the hidden rows'
+  // visit cursors so the collapsed toggle can summarize what it hides.
+  const hiddenLastVisitedAts = useUiStateStore(
+    useShallow((state) =>
+      expanded
+        ? []
+        : entries
+            .slice(previewCount)
+            .map((entry) => state.threadLastVisitedAtById[entry.key] ?? null),
+    ),
+  );
+  const hiddenSummary = useMemo(
+    () =>
+      expanded
+        ? null
+        : summarizeHiddenThreadStatuses(
+            entries.slice(previewCount).map((entry, index) => {
+              const lastVisitedAt = hiddenLastVisitedAts[index];
+              return resolveThreadStatusPill({
+                thread: {
+                  ...entry.thread,
+                  ...(lastVisitedAt !== null && lastVisitedAt !== undefined
+                    ? { lastVisitedAt }
+                    : {}),
+                },
+              });
+            }),
+          ),
+    [entries, expanded, hiddenLastVisitedAts, previewCount],
+  );
   const cancelRename = useCallback(() => {
     setRenamingThreadKey(null);
     renamingInputRef.current = null;
@@ -994,10 +1035,10 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
         event.preventDefault();
         rangeSelectTo(key, keys);
       } else {
-        navigateToThread(threadRef);
+        onOpen({ kind: "server", threadRef }, event.detail < 2);
       }
     },
-    [navigateToThread, rangeSelectTo, toggleSelection],
+    [onOpen, rangeSelectTo, toggleSelection],
   );
   const handleThreadContextMenu = useCallback(
     async (threadRef: ScopedThreadRef, position: { x: number; y: number }) => {
@@ -1077,6 +1118,13 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
     },
     [confirmThreadDelete, deleteThread, removeFromSelection, rowsByKey],
   );
+  // Same list motion as project chat lists (docs/style-guide.md §8).
+  const animatedListRef = useRef<HTMLElement | null>(null);
+  const attachListAutoAnimate = useCallback((node: HTMLElement | null) => {
+    if (!node || animatedListRef.current === node) return;
+    autoAnimate(node, SIDEBAR_LIST_ANIMATION_OPTIONS);
+    animatedListRef.current = node;
+  }, []);
   // Standalone chats have no workspace PR action. Supplying this boundary to
   // the shared row keeps accidental imported branch data from launching links.
   const ignorePrLink = useCallback((event: React.MouseEvent<HTMLElement>) => {
@@ -1087,12 +1135,13 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
   return (
     <SidebarGroup aria-label="Standalone chats" className="px-2 pt-2 pb-1">
       <div className="mb-1 flex items-center justify-between pl-2 pr-1.5">
-        <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground/60">
-          Chats
-        </span>
+        <span className="label-overline">Chats</span>
         <SidebarNewChatButton disabled={newChatDisabled} onClick={onNewChat} />
       </div>
-      <SidebarMenuSub className="mx-1 my-0 w-full translate-x-0 gap-0.5 overflow-hidden px-1.5 py-0">
+      <SidebarMenuSub
+        ref={attachListAutoAnimate}
+        className="mx-1 my-0 w-full translate-x-0 gap-0.5 overflow-hidden px-1.5 py-0"
+      >
         {visibleEntries.map((entry) => (
           <SidebarThreadRow
             key={JSON.stringify(["server", entry.thread.environmentId, entry.thread.id])}
@@ -1125,21 +1174,17 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
             openPrLink={ignorePrLink}
           />
         ))}
+        {hiddenEntryCount > 0 ? (
+          <SidebarThreadOverflowToggle
+            expanded={expanded}
+            hiddenCount={hiddenEntryCount}
+            hiddenSummary={hiddenSummary}
+            onToggle={() => onExpansionChange(!expanded)}
+          />
+        ) : null}
       </SidebarMenuSub>
       {entries.length === 0 ? (
-        <p className="px-2 py-2 text-xs text-muted-foreground/60">No standalone chats yet</p>
-      ) : null}
-      {entries.length > previewCount ? (
-        <button
-          type="button"
-          className="w-full px-3 py-1 text-left text-[10px] text-muted-foreground/60 hover:text-foreground"
-          onClick={() => {
-            const next = !expanded;
-            onExpansionChange(next);
-          }}
-        >
-          {expanded ? "Show less" : `Show ${entries.length - previewCount} more`}
-        </button>
+        <p className="px-3 py-1 text-xs text-subtle-foreground">No chats yet</p>
       ) : null}
     </SidebarGroup>
   );
@@ -1149,7 +1194,8 @@ interface SidebarProjectThreadListProps {
   projectKey: string;
   projectExpanded: boolean;
   hasOverflowingThreads: boolean;
-  hiddenThreadStatus: ThreadStatusPill | null;
+  hiddenThreadCount: number;
+  hiddenThreadSummary: HiddenThreadStatusSummary | null;
   orderedProjectThreadKeys: readonly string[];
   renderedThreads: readonly SidebarThreadSummary[];
   showEmptyThreadState: boolean;
@@ -1200,7 +1246,8 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
     projectKey,
     projectExpanded,
     hasOverflowingThreads,
-    hiddenThreadStatus,
+    hiddenThreadCount,
+    hiddenThreadSummary,
     orderedProjectThreadKeys,
     renderedThreads,
     showEmptyThreadState,
@@ -1232,8 +1279,6 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
     expandThreadListForProject,
     collapseThreadListForProject,
   } = props;
-  const showMoreButtonRender = useMemo(() => <button type="button" />, []);
-  const showLessButtonRender = useMemo(() => <button type="button" />, []);
 
   return (
     <SidebarMenuSub
@@ -1244,9 +1289,10 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
         <SidebarMenuSubItem className="w-full" data-thread-selection-safe>
           <div
             data-thread-selection-safe
-            className="flex h-6 w-full translate-x-0 items-center px-2 text-left text-[10px] text-muted-foreground/60"
+            data-testid="sidebar-project-empty-chats"
+            className="flex h-7 w-full translate-x-0 items-center px-2 text-left text-xs text-subtle-foreground"
           >
-            <span>No threads yet</span>
+            <span>No chats yet</span>
           </div>
         </SidebarMenuSubItem>
       ) : null}
@@ -1284,39 +1330,20 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
           );
         })}
 
-      {projectExpanded && hasOverflowingThreads && !isThreadListExpanded && (
-        <SidebarMenuSubItem className="w-full">
-          <SidebarMenuSubButton
-            render={showMoreButtonRender}
-            data-thread-selection-safe
-            size="sm"
-            className="h-6 w-full translate-x-0 justify-start px-2 text-left text-[10px] text-muted-foreground/60 hover:bg-accent hover:text-muted-foreground/80"
-            onClick={() => {
-              expandThreadListForProject(projectKey);
-            }}
-          >
-            <span className="flex min-w-0 flex-1 items-center gap-2">
-              <ThreadStatusLabel status={hiddenThreadStatus} compact />
-              <span>Show more</span>
-            </span>
-          </SidebarMenuSubButton>
-        </SidebarMenuSubItem>
-      )}
-      {projectExpanded && hasOverflowingThreads && isThreadListExpanded && (
-        <SidebarMenuSubItem className="w-full">
-          <SidebarMenuSubButton
-            render={showLessButtonRender}
-            data-thread-selection-safe
-            size="sm"
-            className="h-6 w-full translate-x-0 justify-start px-2 text-left text-[10px] text-muted-foreground/60 hover:bg-accent hover:text-muted-foreground/80"
-            onClick={() => {
+      {projectExpanded && hasOverflowingThreads ? (
+        <SidebarThreadOverflowToggle
+          expanded={isThreadListExpanded}
+          hiddenCount={hiddenThreadCount}
+          hiddenSummary={hiddenThreadSummary}
+          onToggle={() => {
+            if (isThreadListExpanded) {
               collapseThreadListForProject(projectKey);
-            }}
-          >
-            <span>Show less</span>
-          </SidebarMenuSubButton>
-        </SidebarMenuSubItem>
-      )}
+            } else {
+              expandThreadListForProject(projectKey);
+            }
+          }}
+        />
+      ) : null}
     </SidebarMenuSub>
   );
 });
@@ -1395,44 +1422,23 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const clearSelection = useThreadSelectionStore((state) => state.clearSelection);
   const removeFromSelection = useThreadSelectionStore((state) => state.removeFromSelection);
   const setSelectionAnchor = useThreadSelectionStore((state) => state.setAnchor);
+  // Copying from a native context menu has no inline anchor for a "copied"
+  // confirmation, and a success toast for a trivial action is noise
+  // (docs/style-guide.md §10). Only failures are reported.
   const { copyToClipboard: copyThreadIdToClipboard } = useCopyToClipboard<{
     threadId: ThreadId;
   }>({
-    onCopy: (ctx) => {
-      toastManager.add({
-        type: "success",
-        title: "Thread ID copied",
-        description: ctx.threadId,
-      });
-    },
     onError: (error) => {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Failed to copy thread ID",
-          description: error instanceof Error ? error.message : "An error occurred.",
-        }),
-      );
+      console.warn("Failed to copy chat ID", { error });
+      toastManager.add(stackedThreadToast({ type: "error", title: "Could not copy chat ID" }));
     },
   });
   const { copyToClipboard: copyPathToClipboard } = useCopyToClipboard<{
     path: string;
   }>({
-    onCopy: (ctx) => {
-      toastManager.add({
-        type: "success",
-        title: "Path copied",
-        description: ctx.path,
-      });
-    },
     onError: (error) => {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Failed to copy path",
-          description: error instanceof Error ? error.message : "An error occurred.",
-        }),
-      );
+      console.warn("Failed to copy path", { error });
+      toastManager.add(stackedThreadToast({ type: "error", title: "Could not copy path" }));
     },
   });
   const openPrLink = useCallback((event: React.MouseEvent<HTMLElement>, prUrl: string) => {
@@ -1443,17 +1449,17 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     if (!api) {
       toastManager.add({
         type: "error",
-        title: "Link opening is unavailable.",
+        title: "Links can't be opened here",
       });
       return;
     }
 
     void api.shell.openExternal(prUrl).catch((error) => {
+      console.warn("Failed to open pull request link", { error });
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Unable to open pull request link",
-          description: error instanceof Error ? error.message : "An error occurred.",
+          title: "Could not open pull request link",
         }),
       );
     });
@@ -1607,7 +1613,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
   const {
     hasOverflowingThreads,
-    hiddenThreadStatus,
+    hiddenThreadCount,
+    hiddenThreadSummary,
     renderedThreads,
     showEmptyThreadState,
     shouldShowThreadPanel,
@@ -1650,7 +1657,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     );
     return {
       hasOverflowingThreads,
-      hiddenThreadStatus: resolveProjectStatusIndicator(
+      hiddenThreadCount: Math.max(0, visibleProjectThreads.length - sidebarThreadPreviewCount),
+      hiddenThreadSummary: summarizeHiddenThreadStatuses(
         hiddenThreads.map((thread) => resolveProjectThreadStatus(thread)),
       ),
       renderedThreads,
@@ -1795,12 +1803,12 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       const confirmed = await api.dialogs.confirm(
         latestProjectThreads.length > 0
           ? [
-              `Remove project "${member.name}" and delete its ${latestProjectThreads.length} thread${
+              `Remove project "${member.name}" and delete its ${latestProjectThreads.length} chat${
                 latestProjectThreads.length === 1 ? "" : "s"
               }?`,
               `Path: ${member.cwd}`,
               ...(member.environmentLabel ? [`Environment: ${member.environmentLabel}`] : []),
-              "This permanently clears conversation history for those threads.",
+              "This permanently clears conversation history for those chats.",
               "This removes only this project entry.",
               "This action cannot be undone.",
             ].join("\n")
@@ -1808,8 +1816,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
               `Force remove project "${member.name}"?`,
               `Path: ${member.cwd}`,
               ...(member.environmentLabel ? [`Environment: ${member.environmentLabel}`] : []),
-              "Cafe Code still sees hidden or stale thread state attached to this project.",
-              "This removes the project entry and any backend-visible project threads.",
+              "This project still has hidden or stale chats attached to it.",
+              "This removes the project entry and any chats still attached to it.",
               "This action cannot be undone.",
             ].join("\n"),
       );
@@ -1878,7 +1886,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           stackedThreadToast({
             type: "warning",
             title: "Project is not empty",
-            description: "Delete all threads in this project before removing it.",
+            description: "Delete its chats first, or delete the project anyway.",
             actionVariant: "destructive",
             actionProps: {
               children: "Delete anyway",
@@ -1935,7 +1943,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           });
           showForceRemoveProjectToast(
             member,
-            "Cafe Code still sees hidden or stale thread state attached to this project. You can force remove it and clear any backend-visible project threads.",
+            "This project still has hidden or stale chats. Force remove clears them too.",
           );
           return;
         }
@@ -2120,6 +2128,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       if (isMobile) {
         setOpenMobile(false);
       }
+      if (event.detail >= 2 || getClientSettings().chatClickBehavior === "open")
+        useDeskStore.getState().dispatch({ type: "open", target: { kind: "server", threadRef } });
       void router.navigate({
         to: "/$environmentId/$threadId",
         params: buildThreadRouteParams(threadRef),
@@ -2154,7 +2164,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       if (appSettingsConfirmThreadDelete) {
         const confirmed = await api.dialogs.confirm(
           [
-            `Move ${count} thread${count === 1 ? "" : "s"} to the Recycle Bin?`,
+            `Move ${count} chat${count === 1 ? "" : "s"} to the Recycle Bin?`,
             "You can review them later in Settings > Recently Deleted.",
           ].join("\n"),
         );
@@ -2272,13 +2282,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       try {
         await archiveThread(threadRef);
       } catch (error) {
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Failed to archive thread",
-            description: error instanceof Error ? error.message : "An error occurred.",
-          }),
-        );
+        console.warn("Failed to archive chat", { error });
+        toastManager.add(stackedThreadToast({ type: "error", title: "Could not archive chat" }));
       }
     },
     [archiveThread],
@@ -2310,7 +2315,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       if (trimmed.length === 0) {
         toastManager.add({
           type: "warning",
-          title: "Thread title cannot be empty",
+          title: "Chat title can't be empty",
         });
         finishRename();
         return;
@@ -2322,13 +2327,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       try {
         await renameThread(threadRef, trimmed, originalTitle);
       } catch (error) {
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Failed to rename thread",
-            description: error instanceof Error ? error.message : "An error occurred.",
-          }),
-        );
+        console.warn("Failed to rename chat", { error });
+        toastManager.add(stackedThreadToast({ type: "error", title: "Could not rename chat" }));
       }
       finishRename();
     },
@@ -2364,8 +2364,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Failed to rename project",
-          description: "Project API unavailable.",
+          title: "Could not rename project",
+          description: "Reconnect to the project's environment and try again.",
         }),
       );
       return;
@@ -2380,13 +2380,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       });
       closeProjectRenameDialog();
     } catch (error) {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Failed to rename project",
-          description: error instanceof Error ? error.message : "An error occurred.",
-        }),
-      );
+      console.warn("Failed to rename project", { error });
+      toastManager.add(stackedThreadToast({ type: "error", title: "Could not rename project" }));
     }
   }, [closeProjectRenameDialog, projectRenameTarget, projectRenameTitle]);
 
@@ -2523,7 +2518,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           stackedThreadToast({
             type: "warning",
             title: "No project folder to move to",
-            description: "Create another project in this environment before moving this thread.",
+            description: "Add another project in this environment first.",
           }),
         );
         return;
@@ -2562,7 +2557,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         stackedThreadToast({
           type: "error",
           title: "Project folder unavailable",
-          description: "Choose another project folder before moving this thread.",
+          description: "Choose another project folder.",
         }),
       );
       return;
@@ -2573,8 +2568,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Unable to move thread",
-          description: "The environment for this thread is not available.",
+          title: "Could not move chat",
+          description: "Reconnect to the chat's environment and try again.",
         }),
       );
       return;
@@ -2589,21 +2584,12 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         projectId: targetProject.id,
         worktreePath: null,
       });
-      toastManager.add({
-        type: "success",
-        title: "Thread moved",
-        description: targetProject.name,
-      });
+      // The chat visibly moves under its new project, so no success toast.
       closeThreadMoveDialog();
     } catch (error) {
       setThreadMoveSubmitting(false);
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Failed to move thread",
-          description: error instanceof Error ? error.message : "An error occurred.",
-        }),
-      );
+      console.warn("Failed to move chat", { error });
+      toastManager.add(stackedThreadToast({ type: "error", title: "Could not move chat" }));
     }
   }, [closeThreadMoveDialog, threadMoveCandidateProjects, threadMoveProjectId, threadMoveTarget]);
 
@@ -2617,8 +2603,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Unable to repair thread",
-          description: "The environment for this thread is not available.",
+          title: "Could not repair chat",
+          description: "Reconnect to the chat's environment and try again.",
         }),
       );
       return;
@@ -2676,8 +2662,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Unable to fork thread",
-              description: "The environment for this thread is not available.",
+              title: "Could not fork chat",
+              description: "Reconnect to the chat's environment and try again.",
             }),
           );
           return;
@@ -2698,13 +2684,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             params: buildThreadRouteParams(targetThreadRef),
           });
         } catch (error) {
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Failed to fork thread",
-              description: error instanceof Error ? error.message : "An error occurred.",
-            }),
-          );
+          console.warn("Failed to fork chat", { error });
+          toastManager.add(stackedThreadToast({ type: "error", title: "Could not fork chat" }));
         }
         return;
       }
@@ -2718,8 +2699,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Path unavailable",
-              description: "This thread does not have a workspace path to copy.",
+              title: "No folder to copy",
+              description: "This chat has no workspace folder.",
             }),
           );
           return;
@@ -2739,7 +2720,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       if (appSettingsConfirmThreadDelete) {
         const confirmed = await api.dialogs.confirm(
           [
-            `Move thread "${thread.title}" to the Recycle Bin?`,
+            `Move "${thread.title}" to the Recycle Bin?`,
             "You can review it later in Settings > Recently Deleted.",
           ].join("\n"),
         );
@@ -2790,34 +2771,36 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           onContextMenu={handleProjectButtonContextMenu}
         >
           {!projectExpanded && projectStatus ? (
+            // A collapsed project shows its most urgent chat's state with the
+            // same dot as the chat rows; hovering reveals the chevron.
             <span
-              aria-hidden="true"
               title={projectStatus.label}
+              data-project-status={projectStatus.label}
               className={`-ml-0.5 relative inline-flex size-3.5 shrink-0 items-center justify-center ${projectStatus.colorClass}`}
             >
-              <span className="absolute inset-0 flex items-center justify-center transition-opacity duration-150 group-hover/project-header:opacity-0">
-                <span
-                  className={`size-[9px] rounded-full ${projectStatus.dotClass} ${
-                    projectStatus.pulse ? "animate-pulse" : ""
-                  }`}
-                />
+              <span className="absolute inset-0 flex items-center justify-center transition-opacity duration-(--duration-fast) group-hover/project-header:opacity-0">
+                <ThreadStatusDot status={projectStatus} />
               </span>
-              <ChevronRightIcon className="absolute inset-0 m-auto size-3.5 text-muted-foreground/70 opacity-0 transition-opacity duration-150 group-hover/project-header:opacity-100" />
+              <span className="sr-only">{projectStatus.label}</span>
+              <ChevronRightIcon
+                aria-hidden="true"
+                className="absolute inset-0 m-auto size-3.5 text-subtle-foreground opacity-0 transition-opacity duration-(--duration-fast) group-hover/project-header:opacity-100"
+              />
             </span>
           ) : (
             <ChevronRightIcon
-              className={`-ml-0.5 size-3.5 shrink-0 text-muted-foreground/70 transition-transform duration-150 ${
+              className={`-ml-0.5 size-3.5 shrink-0 text-subtle-foreground transition-transform duration-(--duration-fast) ${
                 projectExpanded ? "rotate-90" : ""
               }`}
             />
           )}
           <ProjectFavicon environmentId={project.environmentId} cwd={project.cwd} />
           <span className="flex min-w-0 flex-1 items-center gap-2">
-            <span className="truncate text-xs font-medium text-foreground/90">
+            <span className="truncate text-ui font-medium text-foreground">
               {project.displayName}
             </span>
             {project.groupedProjectCount > 1 ? (
-              <span className="shrink-0 text-[10px] text-muted-foreground/60">
+              <span className="shrink-0 text-2xs text-subtle-foreground">
                 {project.groupedProjectCount} projects
               </span>
             ) : null}
@@ -2829,9 +2812,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
               <div className="pointer-events-none absolute top-1 right-1.5 opacity-0 transition-opacity duration-150 max-md:pointer-events-auto max-md:opacity-100 group-hover/project-header:pointer-events-auto group-hover/project-header:opacity-100 group-focus-within/project-header:pointer-events-auto group-focus-within/project-header:opacity-100">
                 <button
                   type="button"
-                  aria-label={`Create new thread in ${project.displayName}`}
+                  aria-label={`New chat in ${project.displayName}`}
                   data-testid="new-thread-button"
-                  className="inline-flex size-5 cursor-pointer items-center justify-center rounded-md text-muted-foreground/60 hover:bg-secondary hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring max-md:size-8"
+                  className="inline-flex size-5 cursor-pointer items-center justify-center rounded-sm text-subtle-foreground transition-colors duration-(--duration-fast) hover:bg-secondary hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring max-md:size-8"
                   onClick={handleCreateThreadClick}
                 >
                   <SquarePenIcon className="size-3.5" />
@@ -2840,7 +2823,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             }
           />
           <TooltipPopup side="top">
-            {newThreadShortcutLabel ? `New thread (${newThreadShortcutLabel})` : "New thread"}
+            {newThreadShortcutLabel ? `New chat (${newThreadShortcutLabel})` : "New chat"}
           </TooltipPopup>
         </Tooltip>
       </div>
@@ -2849,7 +2832,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         projectKey={project.projectKey}
         projectExpanded={projectExpanded}
         hasOverflowingThreads={hasOverflowingThreads}
-        hiddenThreadStatus={hiddenThreadStatus}
+        hiddenThreadCount={hiddenThreadCount}
+        hiddenThreadSummary={hiddenThreadSummary}
         orderedProjectThreadKeys={orderedProjectThreadKeys}
         renderedThreads={renderedThreads}
         showEmptyThreadState={showEmptyThreadState}
@@ -2951,7 +2935,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           <DialogPanel className="space-y-4">
             <div className="grid gap-1.5">
               <span className="text-xs font-medium text-foreground">Primary directory</span>
-              <div className="min-h-9 overflow-hidden rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+              <div className="min-h-9 overflow-hidden rounded-lg border bg-muted px-3 py-2 text-xs text-muted-foreground">
                 <span className="block truncate">{additionalDirectoriesTarget?.cwd ?? ""}</span>
               </div>
             </div>
@@ -2962,7 +2946,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                 <div className="grid gap-2">
                   {additionalDirectoriesDraft.map((directory, index) => (
                     <div key={directory} className="flex min-w-0 items-center gap-2">
-                      <div className="min-w-0 flex-1 rounded-md border bg-background px-3 py-2 text-xs">
+                      <div className="min-w-0 flex-1 rounded-lg border bg-background px-3 py-2 text-xs">
                         <span className="block truncate">{directory}</span>
                       </div>
                       <Button
@@ -2978,7 +2962,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                   ))}
                 </div>
               ) : (
-                <p className="rounded-md border border-dashed px-3 py-4 text-xs text-muted-foreground">
+                <p className="rounded-lg border border-dashed px-3 py-4 text-xs text-muted-foreground">
                   No additional directories configured.
                 </p>
               )}
@@ -3132,11 +3116,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       >
         <DialogPopup className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>Move Thread</DialogTitle>
+            <DialogTitle>Move chat</DialogTitle>
             <DialogDescription>
               {threadMoveTarget
                 ? `Move "${threadMoveTarget.title}" to another project folder.`
-                : "Move this thread to another project folder."}
+                : "Move this chat to another project folder."}
             </DialogDescription>
           </DialogHeader>
           <DialogPanel className="space-y-4">
@@ -3165,7 +3149,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                     <SelectItem hideIndicator key={candidate.id} value={candidate.id}>
                       <span className="flex min-w-0 flex-col">
                         <span className="truncate">{candidate.name}</span>
-                        <span className="truncate text-xs text-muted-foreground/70">
+                        <span className="truncate text-xs text-subtle-foreground">
                           {candidate.cwd}
                         </span>
                       </span>
@@ -3188,7 +3172,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
               disabled={threadMoveSubmitting || !threadMoveTarget || !selectedThreadMoveProject}
               onClick={() => void submitThreadMove()}
             >
-              {threadMoveSubmitting ? "Moving..." : "Move"}
+              {threadMoveSubmitting ? "Moving…" : "Move"}
             </Button>
           </DialogFooter>
         </DialogPopup>
@@ -3264,7 +3248,7 @@ function ProjectSortMenu({
       <Tooltip>
         <TooltipTrigger
           render={
-            <MenuTrigger className="inline-flex size-5 cursor-pointer items-center justify-center rounded-md text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground" />
+            <MenuTrigger className="inline-flex size-5 cursor-pointer items-center justify-center rounded-sm text-subtle-foreground transition-colors duration-(--duration-fast) hover:bg-accent hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring" />
           }
         >
           <ArrowUpDownIcon className="size-3.5" />
@@ -3293,7 +3277,7 @@ function ProjectSortMenu({
         </MenuGroup>
         <MenuGroup>
           <div className="px-2 pt-2 pb-1 sm:text-xs font-medium text-muted-foreground">
-            Sort threads
+            Sort chats
           </div>
           <MenuRadioGroup
             value={threadSortOrder}
@@ -3312,11 +3296,11 @@ function ProjectSortMenu({
         </MenuGroup>
         <MenuGroup>
           <div className="px-2 pt-2 pb-1 text-muted-foreground sm:text-xs font-medium">
-            Visible threads
+            Visible chats
           </div>
           <div className="px-2 py-1">
             <NumberField
-              aria-label="Visible thread count"
+              aria-label="Visible chat count"
               className="w-28 gap-0"
               max={MAX_SIDEBAR_THREAD_PREVIEW_COUNT}
               min={MIN_SIDEBAR_THREAD_PREVIEW_COUNT}
@@ -3327,11 +3311,11 @@ function ProjectSortMenu({
             >
               <NumberFieldGroup className="h-7 rounded-md sm:h-6.5">
                 <NumberFieldDecrement
-                  aria-label="Decrease visible thread count"
+                  aria-label="Decrease visible chat count"
                   className="px-2 sm:px-2 [&_svg]:size-3.5"
                 />
                 <NumberFieldInput
-                  aria-label="Visible thread count"
+                  aria-label="Visible chat count"
                   className="h-7 w-9 grow-0 px-0 text-xs leading-7 sm:h-6.5 sm:leading-6.5"
                   inputMode="numeric"
                   onKeyDownCapture={(event) => {
@@ -3339,7 +3323,7 @@ function ProjectSortMenu({
                   }}
                 />
                 <NumberFieldIncrement
-                  aria-label="Increase visible thread count"
+                  aria-label="Increase visible chat count"
                   className="px-2 sm:px-2 [&_svg]:size-3.5"
                 />
               </NumberFieldGroup>
@@ -3412,6 +3396,11 @@ function SortableProjectItem({
   );
 }
 
+/** The release-stage chip beside the wordmark. Sentence case at the 11px
+ * minimum keeps it readable instead of an 8px letter-spaced caption. */
+const SIDEBAR_STAGE_BADGE_CLASS_NAME =
+  "rounded-full bg-muted px-1.5 py-0.5 text-2xs leading-none font-medium text-subtle-foreground";
+
 export const SidebarChromeHeader = memo(function SidebarChromeHeader({
   isElectron,
 }: {
@@ -3445,7 +3434,7 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
                 <CafeCodeWordmark className={cn(isMacDesktop && "min-w-0 shrink truncate")} />
                 <span
                   className={cn(
-                    "rounded-full bg-muted/50 px-1.5 py-0.5 text-[8px] font-medium uppercase tracking-[0.18em] text-muted-foreground/60",
+                    SIDEBAR_STAGE_BADGE_CLASS_NAME,
                     isMacDesktop && "shrink-0 @max-[150px]/sidebar-header:hidden",
                   )}
                 >
@@ -3454,14 +3443,12 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
               </span>
             ) : (
               <Link
-                aria-label="Go to threads"
+                aria-label="Go to chats"
                 className="ml-1 flex min-w-0 flex-1 cursor-pointer items-center gap-1 rounded-md outline-hidden ring-ring transition-colors hover:text-foreground focus-visible:ring-2"
                 to="/"
               >
                 <CafeCodeWordmark />
-                <span className="rounded-full bg-muted/50 px-1.5 py-0.5 text-[8px] font-medium uppercase tracking-[0.18em] text-muted-foreground/60">
-                  {APP_STAGE_LABEL}
-                </span>
+                <span className={SIDEBAR_STAGE_BADGE_CLASS_NAME}>{APP_STAGE_LABEL}</span>
               </Link>
             )
           }
@@ -3478,7 +3465,7 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
     <SidebarHeader
       className={cn(
         persistentHeaderClassName,
-        "drag-region h-[52px] flex-row items-center gap-2 px-4 py-0 pl-[90px] wco:h-[env(titlebar-area-height)] wco:pl-[calc(env(titlebar-area-x)+1em)]",
+        "drag-region h-[max(var(--app-titlebar-height),2.75rem)] flex-row items-center gap-2 px-4 py-0 pl-[90px] wco:h-[max(var(--app-titlebar-height),2.75rem,env(titlebar-area-height,40px))] wco:pl-[calc(env(titlebar-area-x)+1em)]",
       )}
     >
       {wordmark}
@@ -3518,6 +3505,7 @@ const SidebarChromeFooter = memo(function SidebarChromeFooter() {
       <SidebarProviderUpdatePill />
       <SidebarUpdatePill />
       <SidebarFooterNavigation
+        settingsTrailing={<SidebarSourceUpdateBadge />}
         atriumEnabled={atriumEnabled}
         atriumOpen={atriumOpen}
         settingsActive={isOnSettingsFooter}
@@ -3578,6 +3566,11 @@ interface SidebarProjectsContentProps {
   sidebarBrandImage: SidebarBrandImageAsset | null;
   showSidebarAttribution: boolean;
 }
+
+const SIDEBAR_MODE_OPTIONS = [
+  { value: "desk", label: "Desk" },
+  { value: "projects", label: "Projects" },
+] as const;
 
 const SidebarProjectsContent = memo(function SidebarProjectsContent(
   props: SidebarProjectsContentProps,
@@ -3663,22 +3656,16 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
 
   return (
     <SidebarContent className="min-h-full gap-0">
-      <div
-        role="group"
-        aria-label="Sidebar view"
-        className="mx-3 mt-2 flex border-b border-border/60"
-      >
-        {(["desk", "projects"] as const).map((mode) => (
-          <button
-            key={mode}
-            type="button"
-            aria-pressed={sidebarMode === mode}
-            className={`flex-1 border-b px-2 py-1.5 text-xs transition-colors ${sidebarMode === mode ? "border-foreground/70 text-foreground" : "border-transparent text-muted-foreground hover:text-foreground"}`}
-            onClick={() => onSidebarModeChange(mode)}
-          >
-            {mode === "desk" ? "Desk" : "Projects"}
-          </button>
-        ))}
+      <div className="mx-3 mt-2">
+        {/* ToggleGroup keeps the existing group + pressed-button semantics. */}
+        <SegmentedControl
+          aria-label="Sidebar view"
+          size="sm"
+          value={sidebarMode}
+          onValueChange={onSidebarModeChange}
+          options={SIDEBAR_MODE_OPTIONS}
+          className="w-full [&>[data-segment]]:flex-1"
+        />
       </div>
       {showSidebarSearch ? (
         <SidebarGroup className="px-2 pt-2 pb-1">
@@ -3688,15 +3675,15 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                 render={
                   <SidebarMenuButton
                     size="sm"
-                    className="gap-2 px-2 py-1.5 text-muted-foreground/70 hover:bg-accent hover:text-foreground focus-visible:ring-0"
+                    className="gap-2 px-2 py-1.5 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:ring-0"
                     data-testid="command-palette-trigger"
                   />
                 }
               >
                 <SearchIcon className="size-3.5" />
-                <span className="flex-1 truncate text-left text-xs">Search</span>
+                <span className="flex-1 truncate text-left text-ui">Search</span>
                 {commandPaletteShortcutLabel ? (
-                  <Kbd className="h-4 min-w-0 rounded-sm px-1.5 text-[10px]">
+                  <Kbd className="h-4 min-w-0 rounded-sm px-1.5 text-2xs">
                     {commandPaletteShortcutLabel}
                   </Kbd>
                 ) : null}
@@ -3707,7 +3694,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
       ) : null}
       {showArm64IntelBuildWarning && arm64IntelBuildWarningDescription ? (
         <SidebarGroup className="px-2 pt-2 pb-0">
-          <Alert variant="warning" className="rounded-2xl border-warning/40 bg-warning/8">
+          <Alert variant="warning" className="rounded-xl">
             <TriangleAlertIcon />
             <AlertTitle>Intel build on Apple Silicon</AlertTitle>
             <AlertDescription>{arm64IntelBuildWarningDescription}</AlertDescription>
@@ -3737,9 +3724,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
           {standaloneContent}
           <SidebarGroup className="px-2 py-2">
             <div className="mb-1 flex items-center justify-between pl-2 pr-1.5">
-              <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground/60">
-                Projects
-              </span>
+              <span className="label-overline">Projects</span>
               <div className="flex items-center gap-1">
                 <ProjectSortMenu
                   projectSortOrder={projectSortOrder}
@@ -3759,7 +3744,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                         type="button"
                         aria-label="Add project"
                         data-testid="sidebar-add-project-trigger"
-                        className="inline-flex size-5 cursor-pointer items-center justify-center rounded-md text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground"
+                        className="inline-flex size-5 cursor-pointer items-center justify-center rounded-sm text-subtle-foreground transition-colors duration-(--duration-fast) hover:bg-accent hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
                         onClick={openAddProject}
                       />
                     }
@@ -3858,9 +3843,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
             )}
 
             {primaryEnvironmentBootstrapped && projectsLength === 0 && (
-              <div className="px-2 pt-4 text-center text-xs text-muted-foreground/60">
-                No projects yet
-              </div>
+              <p className="px-3 py-1 text-xs text-subtle-foreground">No projects yet</p>
             )}
           </SidebarGroup>
         </>
@@ -3872,7 +3855,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
           <img
             alt=""
             aria-hidden="true"
-            className="h-32 w-[6.4rem] select-none rounded-[1.35rem] object-cover ring-1 ring-black/10 dark:ring-white/10"
+            className="h-32 w-[6.4rem] select-none rounded-2xl object-cover ring-1 ring-border"
             draggable={false}
             height={128}
             sizes={DEFAULT_SIDEBAR_BRAND_IMAGE_SIZES}
@@ -3883,7 +3866,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
           {showSidebarAttribution ? (
             <a
               aria-label="Cafe Code on GitHub"
-              className="text-[10px] font-medium text-muted-foreground/35 underline-offset-2 transition-colors hover:text-muted-foreground/65 hover:underline focus-visible:rounded-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+              className="text-2xs font-medium text-disabled-foreground underline-offset-2 transition-colors duration-(--duration-fast) hover:text-muted-foreground hover:underline focus-visible:rounded-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
               href="https://github.com/cafeai/cafe-code"
               rel="noreferrer"
               target="_blank"
@@ -3924,6 +3907,14 @@ export default function Sidebar() {
   const navigate = useNavigate();
   const pathname = useLocation({ select: (loc) => loc.pathname });
   const isOnSettings = pathname.startsWith("/settings");
+  // Crossfade the sidebar body only when the user moves between chats and
+  // settings, never on first mount (derived state, settled before commit).
+  const [initialIsOnSettings] = useState(isOnSettings);
+  const [hasSwappedSettingsNav, setHasSwappedSettingsNav] = useState(false);
+  if (!hasSwappedSettingsNav && isOnSettings !== initialIsOnSettings) {
+    setHasSwappedSettingsNav(true);
+  }
+  const navSwapClassName = hasSwappedSettingsNav ? "animate-enter-fade" : undefined;
   const sidebarThreadSortOrder = useSettings((s) => s.sidebarThreadSortOrder);
   const sidebarProjectSortOrder = useSettings((s) => s.sidebarProjectSortOrder);
   const sidebarProjectGroupingMode = useSettings((s) => s.sidebarProjectGroupingMode);
@@ -4143,8 +4134,12 @@ export default function Sidebar() {
       });
   }, [clearSelection, handleNewStandaloneChat, isMobile, setOpenMobile, remoteWorkspace]);
   const openStandaloneTarget = useCallback(
-    (target: ThreadRouteTarget) => {
-      deskDispatch({ type: "open", target });
+    (target: ThreadRouteTarget, preview = true) => {
+      deskDispatch({
+        type: "open",
+        target,
+        preview: preview && getClientSettings().chatClickBehavior === "preview",
+      });
       const currentDesk = useDeskStore.getState().desk;
       const openedGroup = currentDesk.groups[currentDesk.activeGroupId];
       if (openedGroup?.activeTabKey !== deskTabKey(target)) {
@@ -4659,12 +4654,12 @@ export default function Sidebar() {
       <WorkspaceEnvironmentSelector />
 
       {isOnSettings ? (
-        <div className="flex min-h-0 flex-1 flex-col">
+        <div className={cn("flex min-h-0 flex-1 flex-col", navSwapClassName)}>
           <SettingsSidebarNav pathname={pathname} />
         </div>
       ) : (
         <>
-          <div className="flex min-h-0 flex-1 flex-col">
+          <div className={cn("flex min-h-0 flex-1 flex-col", navSwapClassName)}>
             <SidebarProjectsContent
               sidebarMode={desk.sidebarMode}
               onSidebarModeChange={changeSidebarMode}
@@ -4681,9 +4676,7 @@ export default function Sidebar() {
                   onExpansionChange={setStandaloneCatalogExpanded}
                 />
               }
-              deskContent={
-                <DeskSidebar onNavigate={navigateToDeskTarget} onNewChat={createStandaloneChat} />
-              }
+              deskContent={<DeskSidebar onNavigate={navigateToDeskTarget} />}
               primaryEnvironmentBootstrapped={primaryEnvironmentBootstrapped}
               bootstrappedEnvironmentIds={bootstrappedEnvironmentIdSet}
               showArm64IntelBuildWarning={showArm64IntelBuildWarning}

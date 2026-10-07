@@ -53,6 +53,16 @@ const decodeGrokSettings = Schema.decodeSync(GrokSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 
 describe("client settings", () => {
+  it("defaults chat clicks to preview and accepts only preview or open", () => {
+    expect(decodeClientSettings({}).chatClickBehavior).toBe("preview");
+    expect(DEFAULT_CLIENT_SETTINGS.chatClickBehavior).toBe("preview");
+    for (const chatClickBehavior of ["preview", "open"] as const) {
+      expect(decodeClientSettingsPatch({ chatClickBehavior })).toEqual({ chatClickBehavior });
+      expect(decodeClientSettings({ chatClickBehavior }).chatClickBehavior).toBe(chatClickBehavior);
+    }
+    expect(() => decodeClientSettingsPatch({ chatClickBehavior: "closed" })).toThrow();
+  });
+
   it("defaults power-save blocking to off", () => {
     expect(DEFAULT_CLIENT_SETTINGS.powerSaveBlockerMode).toBe(DEFAULT_POWER_SAVE_BLOCKER_MODE);
     expect(decodeClientSettings({}).powerSaveBlockerMode).toBe("off");

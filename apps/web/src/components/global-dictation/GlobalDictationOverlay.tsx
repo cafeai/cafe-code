@@ -39,33 +39,29 @@ export class GlobalDictationInsertError extends Error {
     let message: string;
     switch (reason) {
       case "target_changed":
-        message =
-          "The original text or selection changed. Nothing was inserted. Your draft is unchanged; you can copy or save it.";
+        message = "The original text or selection changed. Nothing was inserted.";
         break;
       case "target_unavailable":
-        message =
-          "The original app or text field is closed or unavailable. Nothing was inserted. You can still copy or save your draft.";
+        message = "The original app or text field is no longer open. Nothing was inserted.";
         break;
       case "target_unsupported":
-        message =
-          "The original field does not support this insertion. Nothing was inserted. You can still copy or save your draft.";
+        message = "That text field doesn't accept inserted text. Nothing was inserted.";
         break;
       case "accessibility_permission_required":
         message =
-          "Cafe needs Accessibility permission to insert into another app. Enable Cafe in System Settings → Privacy & Security → Accessibility. Nothing was inserted; you can still copy or save your draft.";
+          "Allow Cafe in System Settings → Privacy & Security → Accessibility, then try again. Nothing was inserted.";
         break;
       case "clipboard_unavailable":
-        message =
-          "Cafe could not prepare the clipboard. Nothing was pasted. Your draft is unchanged; you can copy or save it.";
+        message = "Cafe could not prepare the clipboard. Nothing was pasted.";
         break;
       case "insertion_uncertain":
         message =
           insertionMethod === "paste"
-            ? "Your draft may have been pasted. Check the original field before copying or trying again. The draft may remain on the clipboard; Cafe will not repeat the paste automatically."
-            : "Insert may have reached the original app. Check that field before copying or trying again; Cafe will not repeat the write automatically.";
+            ? "Your draft may have been pasted. Check the field before trying again; Cafe will not repeat the paste automatically. The draft may remain on the clipboard."
+            : "Insert may have reached the original app. Check that field before trying again; Cafe will not repeat the write automatically.";
         break;
       default:
-        message = "Could not insert. Your draft is unchanged. You can still copy or save it.";
+        message = "Could not insert. Your draft is unchanged.";
     }
     super(message);
     this.name = "GlobalDictationInsertError";
@@ -184,11 +180,6 @@ function RecordingCard(props: GlobalDictationOverlayProps) {
           <MicIcon size={20} />
         </div>
         <h1>{finalizing ? "Finishing your words…" : "Listening to you"}</h1>
-        <p className="cafe-global-dictation__subtle">
-          {finalizing
-            ? "Your editable draft is almost ready."
-            : "Speak naturally. Edit before anything is inserted."}
-        </p>
         <p
           className="cafe-global-dictation__live-transcript"
           aria-label="Current transcription preview"
@@ -300,9 +291,7 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
         setDraft(rewritten);
         setStyle(selection.style);
         setManualEdited(false);
-        setFeedback(
-          `${writingStyleLabels[selection.style]} draft ready. Review it before inserting.`,
-        );
+        setFeedback(`${writingStyleLabels[selection.style]} draft ready.`);
       } catch {
         if (!controller.signal.aborted && rewriteRevision.current === revision) {
           // Do not surface provider error text, which could contain private input.
@@ -454,9 +443,8 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
         setFeedback(error.message);
         return;
       }
-      const fallback = kind === "insert" ? " You can still copy it." : "";
       setFeedback(
-        `${kind === "insert" ? "Could not insert" : kind === "copy" ? "Could not copy" : "Could not save"}. Your draft is unchanged.${fallback}`,
+        `${kind === "insert" ? "Could not insert" : kind === "copy" ? "Could not copy" : "Could not save"}. Your draft is unchanged.`,
       );
     } finally {
       setActionBusy(null);
@@ -493,7 +481,6 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
           >
             Editable draft
           </label>
-          <span>{usesPaste ? "Review before pasting" : "Review before inserting"}</span>
         </div>
         <textarea
           id="cafe-global-dictation-draft"
@@ -536,7 +523,6 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
 
         <div className="cafe-global-dictation__style-heading">
           <span>Writing style</span>
-          <span>Choose one for this draft</span>
         </div>
         <div className="cafe-global-dictation__styles" role="group" aria-label="Writing style">
           {(
@@ -603,9 +589,7 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
               placeholder="For example: concise, warm, with short sentences"
               rows={3}
             />
-            <p id="cafe-global-dictation-custom-help">
-              Describe tone, length, or formatting. Apply uses the original transcript.
-            </p>
+            <p id="cafe-global-dictation-custom-help">Applies to the original transcript.</p>
             <div className="cafe-global-dictation__custom-actions">
               <span>
                 {customInstructions.length} / {DICTATION_REWRITE_INSTRUCTIONS_MAX_CHARS}
@@ -650,10 +634,10 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
         {consentRequest && (
           <div ref={styleNotice} className="cafe-global-dictation__notice" role="alert">
             <p>
+              {/* Required privacy and billing consent: keep it visible, one line. */}
               {consentRequest.style === "custom"
-                ? "Custom style sends the original transcript and your style instructions to OpenAI for a separate rewrite."
-                : "Formal sends the original transcript to OpenAI for a separate rewrite."}{" "}
-              It may use additional API credits. Review the result before inserting.
+                ? "Sends the original transcript and your style instructions to OpenAI for rewriting (uses additional API credits)."
+                : "Sends the original transcript to OpenAI for rewriting (uses additional API credits)."}
             </p>
             <div className="cafe-global-dictation__notice-actions">
               <button type="button" onClick={() => setConsentRequest(null)}>
@@ -675,7 +659,7 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
 
         {discardConfirm && (
           <div className="cafe-global-dictation__notice" role="alert">
-            <p>Discard this draft? Your text has not been inserted or saved automatically.</p>
+            <p>Discard this draft? It hasn't been inserted or saved.</p>
             <div className="cafe-global-dictation__notice-actions">
               <button type="button" onClick={() => setDiscardConfirm(false)}>
                 Keep drafting
@@ -690,7 +674,7 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
         <div className="cafe-global-dictation__command-row">
           <div>
             <span>Voice style command</span>
-            <small>Say “style lowercase” or describe a style, like “style warm and concise”.</small>
+            <small>Say “style lowercase” or “style warm and concise”.</small>
           </div>
           <button
             type="button"
@@ -749,8 +733,7 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
             id="cafe-global-dictation-paste-notice"
             className="cafe-global-dictation__paste-notice"
           >
-            Cafe verifies the original field, then temporarily uses your clipboard.
-            Clipboard-history apps may retain the draft.
+            Uses your clipboard briefly. Clipboard-history apps may retain the draft.
           </p>
         )}
         <button
@@ -778,12 +761,9 @@ function ReviewCard(props: GlobalDictationOverlayProps) {
           <button
             type="button"
             className="cafe-global-dictation__primary-button"
+            // The visible clipboard notice above describes this action; no
+            // duplicate hover title.
             aria-describedby={usesPaste ? "cafe-global-dictation-paste-notice" : undefined}
-            title={
-              usesPaste
-                ? "Verify the original app and text field, then paste using the clipboard. Clipboard-history apps may retain the draft."
-                : undefined
-            }
             disabled={!usableDraft || Boolean(actionBusy) || props.insertAvailable === false}
             onClick={() => void runAction("insert", props.onInsert)}
           >

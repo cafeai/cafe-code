@@ -11,7 +11,7 @@ import {
   type SourceControlProviderKind,
   type SourceControlRepositoryInfo,
 } from "@cafecode/contracts";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import * as Option from "effect/Option";
 import {
@@ -307,11 +307,16 @@ function buildAddProjectRemoteSourceReadiness(
   return readiness;
 }
 
-function errorMessage(error: unknown): string {
+/**
+ * A failure's own message when it has one (for example a missing folder), and
+ * nothing otherwise: a generic "An error occurred." adds no information, so
+ * the toast title stands alone.
+ */
+function errorDescription(error: unknown): { description?: string } {
   if (error instanceof Error && error.message.trim().length > 0) {
-    return error.message;
+    return { description: error.message };
   }
-  return "An error occurred.";
+  return {};
 }
 
 function inferCloneDirectoryNameFromReference(value: string): string | null {
@@ -503,7 +508,21 @@ function OpenCommandPaletteDialog() {
     [browseEnvironmentId, currentProjectCwdForBrowse],
   );
 
-  const { data: browseResult, isPending: isBrowsePending } = useQuery({
+  const isBrowseQueryEnabled =
+    isBrowsing &&
+    browseDirectoryPath.length > 0 &&
+    browseEnvironmentId !== null &&
+    !relativePathNeedsActiveProject;
+  // Keep the previous folder's entries on screen while the next folder loads
+  // (docs/style-guide.md §9: refreshes keep old content, "nothing here" only
+  // after loading). Placeholder data is display-only: path resolution and the
+  // create-folder decision below wait for the real result of this query.
+  const {
+    data: browseQueryData,
+    isPending: isBrowseQueryPending,
+    isPlaceholderData: isBrowsePlaceholderData,
+    isFetching: isBrowseFetching,
+  } = useQuery({
     queryKey: [
       "filesystemBrowse",
       browseEnvironmentId,
@@ -512,21 +531,31 @@ function OpenCommandPaletteDialog() {
     ],
     queryFn: () => fetchBrowseResult(browseDirectoryPath),
     staleTime: BROWSE_STALE_TIME_MS,
-    enabled:
-      isBrowsing &&
-      browseDirectoryPath.length > 0 &&
-      browseEnvironmentId !== null &&
-      !relativePathNeedsActiveProject,
+    enabled: isBrowseQueryEnabled,
+    // Only the browse view displays this data; see exactBrowseEntry below.
+    placeholderData: keepPreviousData,
   });
-  const browseEntries = browseResult?.entries ?? EMPTY_BROWSE_ENTRIES;
+  const isBrowsePending = isBrowseQueryPending || isBrowsePlaceholderData;
+  const browseResult =
+    isBrowsePlaceholderData || !isBrowseQueryEnabled ? undefined : browseQueryData;
+  const browseEntries = isBrowseQueryEnabled
+    ? (browseQueryData?.entries ?? EMPTY_BROWSE_ENTRIES)
+    : EMPTY_BROWSE_ENTRIES;
+  // Only an enabled query that has not produced this folder's result counts as
+  // loading; a disabled query is "pending" forever and must not hide messages.
+  const isBrowseLoading =
+    isBrowseQueryEnabled && (isBrowsePending || isBrowseFetching) && !browseResult;
   const {
     filteredEntries: filteredBrowseEntries,
     highlightedEntry: highlightedBrowseEntry,
-    exactEntry: exactBrowseEntry,
+    exactEntry: displayedExactBrowseEntry,
   } = useMemo(
     () => filterBrowseEntries({ browseEntries, browseFilterQuery, highlightedItemValue }),
     [browseEntries, browseFilterQuery, highlightedItemValue],
   );
+  // An entry from the previous folder's placeholder list must never decide
+  // which path gets added.
+  const exactBrowseEntry = isBrowsePlaceholderData ? null : displayedExactBrowseEntry;
 
   const prefetchBrowsePath = useCallback(
     (partialPath: string) => {
@@ -877,10 +906,10 @@ function OpenCommandPaletteDialog() {
       actionItems.push({
         kind: "action",
         value: "action:new-thread-in-current",
-        searchTerms: ["new thread", "chat", "create", "draft"],
+        searchTerms: ["new chat", "new thread", "chat", "create", "draft"],
         title: (
           <>
-            New thread in <span className="font-semibold">{activeProjectTitle}</span>
+            New chat in <span className="font-semibold">{activeProjectTitle}</span>
           </>
         ),
         icon: <SquarePenIcon className={ITEM_ICON_CLASS} />,
@@ -899,8 +928,8 @@ function OpenCommandPaletteDialog() {
     actionItems.push({
       kind: "submenu",
       value: "action:new-thread-in",
-      searchTerms: ["new thread", "project", "pick", "choose", "select"],
-      title: "New thread in...",
+      searchTerms: ["new chat", "new thread", "project", "pick", "choose", "select"],
+      title: "New chat in…",
       icon: <SquarePenIcon className={ITEM_ICON_CLASS} />,
       addonIcon: <SquarePenIcon className={ADDON_ICON_CLASS} />,
       groups: [{ value: "projects", label: "Projects", items: projectThreadItems }],
@@ -1041,7 +1070,7 @@ function OpenCommandPaletteDialog() {
           stackedThreadToast({
             type: "error",
             title: "Failed to add project",
-            description: error instanceof Error ? error.message : "An error occurred.",
+            ...errorDescription(error),
           }),
         );
       }
@@ -1162,7 +1191,7 @@ function OpenCommandPaletteDialog() {
           stackedThreadToast({
             type: "error",
             title: "Repository lookup failed",
-            description: errorMessage(error),
+            ...errorDescription(error),
           }),
         );
       } finally {
@@ -1222,7 +1251,7 @@ function OpenCommandPaletteDialog() {
         stackedThreadToast({
           type: "error",
           title: "Clone failed",
-          description: errorMessage(error),
+          ...errorDescription(error),
         }),
       );
     } finally {
@@ -1413,7 +1442,7 @@ function OpenCommandPaletteDialog() {
         stackedThreadToast({
           type: "error",
           title: "Unable to run command",
-          description: error instanceof Error ? error.message : "An unexpected error occurred.",
+          ...errorDescription(error),
         }),
       );
     });
@@ -1582,7 +1611,7 @@ function OpenCommandPaletteDialog() {
                   <span className="truncate text-foreground text-sm">
                     {remoteProjectContext.title}
                   </span>
-                  <span className="truncate text-muted-foreground/70 text-xs">
+                  <span className="truncate text-subtle-foreground text-xs">
                     {remoteProjectContext.description}
                   </span>
                 </span>
@@ -1593,6 +1622,8 @@ function OpenCommandPaletteDialog() {
             groups={displayedGroups}
             highlightedItemValue={highlightedItemValue}
             isActionsOnly={isActionsOnly}
+            isBrowsing={isBrowsing}
+            isLoading={isBrowseLoading}
             keybindings={keybindings}
             onExecuteItem={executeItem}
             {...(addProjectCloneFlow?.step === "repository"
@@ -1632,37 +1663,37 @@ function OpenCommandPaletteDialog() {
               <Kbd>
                 <ArrowDownIcon />
               </Kbd>
-              <span className={cn("text-muted-foreground/80")}>Navigate</span>
+              <span className="text-muted-foreground">Navigate</span>
             </KbdGroup>
             {addProjectCloneFlow?.step === "repository" ? (
               <KbdGroup className="items-center gap-1.5">
                 <Kbd>Enter</Kbd>
-                <span className={cn("text-muted-foreground/80")}>
+                <span className="text-muted-foreground">
                   {remoteProjectButtonLabel ?? "Continue"}
                 </span>
               </KbdGroup>
             ) : !canSubmitBrowsePath || hasHighlightedBrowseItem ? (
               <KbdGroup className="items-center gap-1.5">
                 <Kbd>Enter</Kbd>
-                <span className={cn("text-muted-foreground/80")}>Select</span>
+                <span className="text-muted-foreground">Select</span>
               </KbdGroup>
             ) : null}
             {isSubmenu ? (
               <KbdGroup className="items-center gap-1.5">
                 <Kbd>Backspace</Kbd>
-                <span className={cn("text-muted-foreground/80")}>Back</span>
+                <span className="text-muted-foreground">Back</span>
               </KbdGroup>
             ) : null}
             <KbdGroup className="items-center gap-1.5">
               <Kbd>Esc</Kbd>
-              <span className={cn("text-muted-foreground/80")}>Close</span>
+              <span className="text-muted-foreground">Close</span>
             </KbdGroup>
           </div>
           {canOpenProjectFromFileManager ? (
             <Button
               variant="ghost"
               size="xs"
-              className="h-auto px-2 text-xs text-muted-foreground/80 hover:bg-transparent hover:text-foreground"
+              className="h-auto px-2 text-xs text-muted-foreground hover:bg-transparent hover:text-foreground"
               disabled={isPickingProjectFolder}
               onClick={() => {
                 void handleOpenProjectFromFileManager();

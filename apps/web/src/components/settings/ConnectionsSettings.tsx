@@ -17,15 +17,19 @@ import { CAFE_CODE_HTTPS_CERTIFICATE_PATH } from "@cafecode/shared/environmentEn
 import * as DateTime from "effect/DateTime";
 
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
+import { useDelayedFlag } from "../../hooks/useDelayedFlag";
 import { cn } from "../../lib/utils";
 import { formatElapsedDurationLabel, formatExpiresInLabel } from "../../timestampFormat";
 import { resolveDesktopPairingUrl } from "./pairingUrls";
 import {
+  BusyButtonLabel,
   SettingsPageContainer,
   SettingsRow,
   SettingsSection,
   useRelativeTimeTick,
 } from "./settingsLayout";
+import { Badge } from "../ui/badge";
+import { InfoTip } from "../ui/info-tip";
 import { Input } from "../ui/input";
 import {
   Dialog,
@@ -48,6 +52,7 @@ import {
 } from "../ui/alert-dialog";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { QRCodeSvg } from "../ui/qr-code";
+import { Skeleton } from "../ui/skeleton";
 import { Spinner } from "../ui/spinner";
 import { Switch } from "../ui/switch";
 import { stackedThreadToast, toastManager } from "../ui/toast";
@@ -133,9 +138,8 @@ function ConnectionStatusDot({
   const dot = (
     <button
       type="button"
-      title={tooltipText}
       aria-label={tooltipText}
-      className="relative flex size-3 shrink-0 cursor-help items-center justify-center rounded-full outline-hidden"
+      className="focus-ring relative flex size-3 shrink-0 cursor-help items-center justify-center rounded-full"
     >
       {dotContent}
     </button>
@@ -152,8 +156,8 @@ function ConnectionStatusDot({
 }
 
 /** Direct row in the card – same pattern as the Provider / ACP-agent list rows. */
-const ITEM_ROW_CLASSNAME = "border-t border-border/60 px-4 py-4 first:border-t-0 sm:px-5";
-const ENDPOINT_ROW_CLASSNAME = "border-t border-border/60 px-4 py-2.5 first:border-t-0 sm:px-5";
+const ITEM_ROW_CLASSNAME = "border-t border-border-subtle px-4 py-4 first:border-t-0 sm:px-5";
+const ENDPOINT_ROW_CLASSNAME = "border-t border-border-subtle px-4 py-2.5 first:border-t-0 sm:px-5";
 
 const ITEM_ROW_INNER_CLASSNAME =
   "flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between";
@@ -167,7 +171,7 @@ function accessRowClassName(_presentation: AccessSectionPresentation) {
 function endpointRowClassName(presentation: AccessSectionPresentation, isAvailable: boolean) {
   if (presentation === "endpoint-rail") {
     return cn(
-      "relative border-t border-border/60 px-4 py-3 first:border-t-0 sm:px-5",
+      "relative border-t border-border-subtle px-4 py-3 first:border-t-0 sm:px-5",
       !isAvailable && "bg-muted/20",
     );
   }
@@ -346,7 +350,7 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
             key: endpointDefaultPreferenceKey(endpoint),
             label: endpoint.label,
             url,
-            detail: "Backend pairing URL",
+            detail: "Pairing URL",
           };
         }),
     [endpoints, pairingLink.credential],
@@ -368,8 +372,8 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
         title: kind === "link" ? "Pairing URL copied" : "Pairing code copied",
         description:
           kind === "link"
-            ? "Open it in the client you want to pair to this environment."
-            : "Paste it into another client to finish pairing.",
+            ? "Open it on the device you want to pair."
+            : "Enter it on the device you want to pair.",
       });
     },
     onError: (error, kind) => {
@@ -422,9 +426,7 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
         <span className="min-w-0 flex-1">
           <span className="block truncate">{option.label}</span>
           {renderDetail ? (
-            <span className="block truncate text-[11px] text-muted-foreground">
-              {option.detail}
-            </span>
+            <span className="block truncate text-2xs text-muted-foreground">{option.detail}</span>
           ) : null}
         </span>
       </MenuItem>
@@ -434,7 +436,7 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
       <span className="min-w-0 flex-1">
         <span className="block truncate">Copy code</span>
         {renderDetail ? (
-          <span className="block truncate text-[11px] text-muted-foreground">Token only</span>
+          <span className="block truncate text-2xs text-muted-foreground">Code only</span>
         ) : null}
       </span>
     </MenuItem>
@@ -488,9 +490,9 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
           <div className="flex min-h-5 items-center gap-1.5">
             <ConnectionStatusDot
               tooltipText={`Link created at ${formatAccessTimestamp(pairingLink.createdAt)}`}
-              dotClassName="bg-amber-400"
+              dotClassName="bg-warning"
             />
-            <h3 className="text-sm font-medium text-foreground">{primaryLabel}</h3>
+            <h3 className="text-ui font-medium text-foreground">{primaryLabel}</h3>
             <Popover>
               {shareablePairingUrl ? (
                 <>
@@ -501,7 +503,7 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
                     render={
                       <button
                         type="button"
-                        className="inline-flex size-4 shrink-0 items-center justify-center rounded-sm text-muted-foreground/50 outline-none hover:text-foreground"
+                        className="focus-ring inline-flex size-4 shrink-0 items-center justify-center rounded-sm text-subtle-foreground hover:text-foreground"
                         aria-label="Show QR code"
                       />
                     }
@@ -521,12 +523,18 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
               ) : null}
             </Popover>
           </div>
-          <p className="text-xs text-muted-foreground" title={expiresAbsolute}>
-            {[roleLabel, formatExpiresInLabel(pairingLink.expiresAt, nowMs)].join(" · ")}
-          </p>
+          <Tooltip>
+            <TooltipTrigger
+              delay={500}
+              render={<p className="w-fit text-xs text-muted-foreground tabular-nums" />}
+            >
+              {[roleLabel, formatExpiresInLabel(pairingLink.expiresAt, nowMs)].join(" · ")}
+            </TooltipTrigger>
+            <TooltipPopup side="top">Expires {expiresAbsolute}</TooltipPopup>
+          </Tooltip>
           {shareablePairingUrl === null ? (
-            <p className="text-[11px] text-muted-foreground/70">
-              Copy the token and pair from another client using this backend&apos;s reachable host.
+            <p className="text-2xs text-muted-foreground">
+              Copy the code and pair using this server&apos;s network address.
             </p>
           ) : null}
         </div>
@@ -540,7 +548,6 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
                       size="xs"
                       variant="outline"
                       className="max-w-56"
-                      title={`Copy pairing URL for: ${defaultEndpointCopyLabel}`}
                       onClick={handleCopyDefaultLink}
                     >
                       <span className="truncate">
@@ -581,8 +588,8 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
                 <DialogTitle>{shareablePairingUrl ? "Pairing link" : "Pairing code"}</DialogTitle>
                 <DialogDescription>
                   {shareablePairingUrl
-                    ? "Clipboard copy is unavailable here. Open or manually copy this full pairing URL on the device you want to connect."
-                    : "Clipboard copy is unavailable here. Manually copy this code into another client."}
+                    ? "Copying isn't available here, so copy this link by hand or scan the code."
+                    : "Copying isn't available here, so copy this code by hand."}
                 </DialogDescription>
               </DialogHeader>
               <DialogPanel className="space-y-4">
@@ -595,7 +602,7 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
                   onClick={(event) => event.currentTarget.select()}
                 />
                 {shareablePairingUrl ? (
-                  <div className="flex justify-center rounded-xl border border-border/60 bg-muted/30 p-4">
+                  <div className="flex justify-center rounded-xl border border-border-subtle bg-muted/30 p-4">
                     <QRCodeSvg
                       value={shareablePairingUrl}
                       size={132}
@@ -622,9 +629,12 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
             size="xs"
             variant="destructive-outline"
             disabled={revokingPairingLinkId === pairingLink.id}
+            aria-busy={revokingPairingLinkId === pairingLink.id || undefined}
             onClick={() => void onRevoke(pairingLink.id)}
           >
-            {revokingPairingLinkId === pairingLink.id ? "Revoking…" : "Revoke"}
+            <BusyButtonLabel busy={revokingPairingLinkId === pairingLink.id}>
+              Revoke
+            </BusyButtonLabel>
           </Button>
         </div>
       </div>
@@ -679,12 +689,8 @@ const ConnectedClientListRow = memo(function ConnectedClientListRow({
               dotClassName={isLive ? "bg-success" : "bg-muted-foreground/30"}
               pingClassName={isLive ? "bg-success/60 duration-2000" : null}
             />
-            <h3 className="text-sm font-medium text-foreground">{primaryLabel}</h3>
-            {clientSession.current ? (
-              <span className="text-[10px] text-muted-foreground/80 rounded-md border border-border/50 bg-muted/50 px-1 py-0.5">
-                This device
-              </span>
-            ) : null}
+            <h3 className="text-ui font-medium text-foreground">{primaryLabel}</h3>
+            {clientSession.current ? <Badge variant="secondary">This device</Badge> : null}
           </div>
           <p className="text-xs text-muted-foreground">
             {[roleLabel, ...deviceInfoBits].join(" · ")}
@@ -696,9 +702,12 @@ const ConnectedClientListRow = memo(function ConnectedClientListRow({
               size="xs"
               variant="destructive-outline"
               disabled={revokingClientSessionId === clientSession.sessionId}
+              aria-busy={revokingClientSessionId === clientSession.sessionId || undefined}
               onClick={() => void onRevokeSession(clientSession.sessionId)}
             >
-              {revokingClientSessionId === clientSession.sessionId ? "Revoking…" : "Revoke"}
+              <BusyButtonLabel busy={revokingClientSessionId === clientSession.sessionId}>
+                Revoke
+              </BusyButtonLabel>
             </Button>
           ) : null}
         </div>
@@ -754,9 +763,10 @@ const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderActio
         disabled={
           isRevokingOtherClients || clientSessions.every((clientSession) => clientSession.current)
         }
+        aria-busy={isRevokingOtherClients || undefined}
         onClick={() => void onRevokeOtherClients()}
       >
-        {isRevokingOtherClients ? "Revoking…" : "Revoke others"}
+        <BusyButtonLabel busy={isRevokingOtherClients}>Revoke others</BusyButtonLabel>
       </Button>
       <Dialog
         open={dialogOpen}
@@ -779,14 +789,13 @@ const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderActio
           <DialogHeader>
             <DialogTitle>Create pairing link</DialogTitle>
             <DialogDescription>
-              Generate a one-time link that another device can use to pair with this backend as an
-              authorized client.
+              Another device can use this one-time link to connect.
             </DialogDescription>
           </DialogHeader>
           <DialogPanel>
             <label className="block">
               <span className="mb-1.5 block text-xs font-medium text-foreground">
-                Client label (optional)
+                Device name (optional)
               </span>
               <Input
                 value={pairingLabel}
@@ -805,8 +814,12 @@ const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderActio
             >
               Cancel
             </Button>
-            <Button disabled={isCreatingPairingLink} onClick={() => void handleCreatePairingLink()}>
-              {isCreatingPairingLink ? "Creating…" : "Create link"}
+            <Button
+              disabled={isCreatingPairingLink}
+              aria-busy={isCreatingPairingLink || undefined}
+              onClick={() => void handleCreatePairingLink()}
+            >
+              <BusyButtonLabel busy={isCreatingPairingLink}>Create link</BusyButtonLabel>
             </Button>
           </DialogFooter>
         </DialogPopup>
@@ -887,23 +900,22 @@ const AdminPasswordManagementRow = memo(function AdminPasswordManagementRow({
 
   const isConfigured = configured === true;
   const controlsDisabled = isLoading || isSaving || configured === null;
+  const showLoadingSpinner = useDelayedFlag(isLoading);
 
   return (
     <>
       <SettingsRow
         title="Admin password"
-        description={isConfigured ? "Password sign-in is on." : "Password sign-in is off."}
-        status={
-          error ? (
-            <span className="block text-destructive">{error}</span>
-          ) : isLoading ? (
-            "Loading…"
-          ) : isConfigured ? (
-            "Available on the pairing screen."
-          ) : null
-        }
+        description="Lets owners sign in from the pairing screen with a password."
+        status={error ? <span className="block text-destructive-foreground">{error}</span> : null}
         control={
           <>
+            {showLoadingSpinner ? (
+              <Spinner
+                aria-label="Loading password status"
+                className="size-3.5 text-muted-foreground"
+              />
+            ) : null}
             {isConfigured ? (
               <Button
                 size="xs"
@@ -976,7 +988,9 @@ const AdminPasswordManagementRow = memo(function AdminPasswordManagementRow({
                 disabled={isSaving}
               />
             </label>
-            {dialogError ? <p className="text-xs text-destructive">{dialogError}</p> : null}
+            {dialogError ? (
+              <p className="text-xs text-destructive-foreground">{dialogError}</p>
+            ) : null}
           </DialogPanel>
           <DialogFooter variant="bare">
             <Button
@@ -989,17 +1003,14 @@ const AdminPasswordManagementRow = memo(function AdminPasswordManagementRow({
             >
               Cancel
             </Button>
-            <Button disabled={isSaving} onClick={() => void handleSavePassword()}>
-              {isSaving ? (
-                <>
-                  <Spinner className="size-3.5" />
-                  Saving…
-                </>
-              ) : passwordDialogMode === "enable" ? (
-                "Enable"
-              ) : (
-                "Save"
-              )}
+            <Button
+              disabled={isSaving}
+              aria-busy={isSaving || undefined}
+              onClick={() => void handleSavePassword()}
+            >
+              <BusyButtonLabel busy={isSaving}>
+                {passwordDialogMode === "enable" ? "Enable" : "Save"}
+              </BusyButtonLabel>
             </Button>
           </DialogFooter>
         </DialogPopup>
@@ -1023,7 +1034,7 @@ const AdminPasswordManagementRow = memo(function AdminPasswordManagementRow({
             </AlertDialogDescription>
           </AlertDialogHeader>
           {dialogError ? (
-            <div className="px-6 pb-2 text-xs text-destructive">{dialogError}</div>
+            <div className="px-6 pb-2 text-xs text-destructive-foreground">{dialogError}</div>
           ) : null}
           <AlertDialogFooter>
             <AlertDialogClose
@@ -1035,16 +1046,10 @@ const AdminPasswordManagementRow = memo(function AdminPasswordManagementRow({
             <Button
               variant="destructive"
               disabled={isSaving}
+              aria-busy={isSaving || undefined}
               onClick={() => void handleClearPassword()}
             >
-              {isSaving ? (
-                <>
-                  <Spinner className="size-3.5" />
-                  Disabling…
-                </>
-              ) : (
-                "Disable"
-              )}
+              <BusyButtonLabel busy={isSaving}>Disable</BusyButtonLabel>
             </Button>
           </AlertDialogFooter>
         </AlertDialogPopup>
@@ -1080,8 +1085,11 @@ const PairingClientsList = memo(function PairingClientsList({
   onRevokePairingLink,
   onRevokeClientSession,
 }: PairingClientsListProps) {
+  const isEmpty = pairingLinks.length === 0 && clientSessions.length === 0;
+  const showSkeleton = useDelayedFlag(isLoading && isEmpty);
   return (
     <>
+      {showSkeleton ? <PairingClientRowsSkeleton presentation={presentation} /> : null}
       {pairingLinks.map((pairingLink) => (
         <PairingLinkListRow
           key={pairingLink.id}
@@ -1105,14 +1113,36 @@ const PairingClientsList = memo(function PairingClientsList({
         />
       ))}
 
-      {pairingLinks.length === 0 && clientSessions.length === 0 && !isLoading ? (
+      {isEmpty && !isLoading ? (
         <div className={accessRowClassName(presentation)}>
-          <p className="text-xs text-muted-foreground/60">No pairing links or client sessions.</p>
+          <p className="text-xs text-muted-foreground">No pairing links or devices yet.</p>
         </div>
       ) : null}
     </>
   );
 });
+
+/** Layout-matching placeholder rows for the first device/pairing-link read. */
+function PairingClientRowsSkeleton({ presentation }: { presentation: AccessSectionPresentation }) {
+  return (
+    <>
+      {[0, 1].map((index) => (
+        <div key={index} aria-hidden className={accessRowClassName(presentation)}>
+          <div className={ITEM_ROW_INNER_CLASSNAME}>
+            <div className="min-w-0 flex-1 space-y-2">
+              <div className="flex items-center gap-2">
+                <Skeleton className="size-2 rounded-full" />
+                <Skeleton className="h-3.5 w-32" />
+              </div>
+              <Skeleton className="h-3 w-48" />
+            </div>
+            <Skeleton className="h-6 w-16 rounded-md" />
+          </div>
+        </div>
+      ))}
+    </>
+  );
+}
 
 type AdvertisedEndpointListRowProps = {
   endpoint: AdvertisedEndpoint;
@@ -1136,27 +1166,16 @@ const AdvertisedEndpointListRow = memo(function AdvertisedEndpointListRow({
       ) : null}
       <div className="flex min-h-6 min-w-0 flex-col gap-2 sm:-my-0.5 sm:flex-row sm:items-center">
         <div className="flex min-w-0 items-baseline gap-3">
-          <h3 className="shrink-0 text-sm leading-5 font-medium text-foreground">
+          <h3 className="shrink-0 text-ui leading-5 font-medium text-foreground">
             {endpoint.label}
           </h3>
-          <p
-            className="min-w-0 truncate text-xs leading-5 text-muted-foreground"
-            title={endpoint.httpBaseUrl}
-          >
+          <p className="min-w-0 truncate text-xs leading-5 text-muted-foreground">
             {endpoint.httpBaseUrl}
           </p>
-          {!isAvailable ? (
-            <span className="shrink-0 rounded-md border border-border/70 px-1 py-0.5 text-[10px] text-muted-foreground">
-              Unavailable
-            </span>
-          ) : null}
+          {!isAvailable ? <Badge variant="outline">Unavailable</Badge> : null}
         </div>
         <div className="ml-auto flex min-h-6 shrink-0 items-center justify-end gap-2">
-          {isDefault ? (
-            <span className="rounded-md border border-primary/30 bg-primary/10 px-1 py-0.5 text-[10px] text-primary">
-              Default
-            </span>
-          ) : null}
+          {isDefault ? <Badge className="bg-primary/10 text-primary">Default</Badge> : null}
           {isAvailable && !isDefault ? (
             <Button size="xs" variant="outline" onClick={() => onSetDefault(endpoint)}>
               Set as default
@@ -1167,6 +1186,35 @@ const AdvertisedEndpointListRow = memo(function AdvertisedEndpointListRow({
     </div>
   );
 });
+
+/**
+ * A restart takes long enough to deserve a "Restarting…" label (docs/style-guide.md
+ * §9), so both labels share one grid cell: the button is as wide as the longer
+ * one and never resizes when the state flips. Hidden labels stay out of the
+ * accessible name.
+ */
+function RestartButtonLabel({
+  restarting,
+  children,
+}: {
+  restarting: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <span className="grid justify-items-center">
+      <span className={cn("col-start-1 row-start-1", restarting && "invisible")}>{children}</span>
+      <span
+        className={cn(
+          "col-start-1 row-start-1 inline-flex items-center gap-1.5",
+          !restarting && "invisible",
+        )}
+      >
+        <Spinner className="size-3.5" />
+        Restarting…
+      </span>
+    </span>
+  );
+}
 
 function NetworkAccessDescription({
   endpoint,
@@ -1202,7 +1250,7 @@ function NetworkAccessDescription({
       {hiddenEndpointCount > 0 ? (
         <button
           type="button"
-          className="inline-flex min-w-0 max-w-full items-baseline gap-2 border-b border-dotted border-muted-foreground/60 text-left text-muted-foreground underline-offset-4 hover:border-foreground hover:text-foreground"
+          className="focus-ring inline-flex min-w-0 max-w-full items-baseline gap-2 border-b border-dotted border-subtle-foreground text-left text-muted-foreground underline-offset-4 hover:border-foreground hover:text-foreground"
           onClick={onToggleExpanded}
           aria-expanded={expanded}
         >
@@ -1407,8 +1455,8 @@ export function ConnectionsSettings() {
       const revokedCount = await revokeOtherServerClientSessions();
       toastManager.add({
         type: "success",
-        title: revokedCount === 1 ? "Revoked 1 other client" : `Revoked ${revokedCount} clients`,
-        description: "Other paired clients will need a new pairing link before reconnecting.",
+        title: revokedCount === 1 ? "Revoked 1 other device" : `Revoked ${revokedCount} devices`,
+        description: "They need a new pairing link to reconnect.",
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to revoke other clients.";
@@ -1675,6 +1723,17 @@ export function ConnectionsSettings() {
     },
     [setDefaultAdvertisedEndpointKey],
   );
+  // Exposure state arrives over desktop IPC and is normally instant; only a
+  // noticeable wait draws a skeleton line in place of the row descriptions.
+  const showExposureSkeleton = useDelayedFlag(
+    desktopBridge !== undefined &&
+      canManageLocalBackend &&
+      desktopServerExposureState === null &&
+      desktopServerExposureError === null,
+  );
+  const exposureSkeleton = showExposureSkeleton ? (
+    <Skeleton aria-hidden className="mt-0.5 h-3 w-40" />
+  ) : null;
   const renderNetworkAccessToggle = () => (
     <Switch
       checked={desktopServerExposureState?.mode === "network-accessible"}
@@ -1716,7 +1775,7 @@ export function ConnectionsSettings() {
     <>
       {desktopAccessManagementError ? (
         <div className={accessRowClassName(presentation)}>
-          <p className="text-xs text-destructive">{desktopAccessManagementError}</p>
+          <p className="text-xs text-destructive-foreground">{desktopAccessManagementError}</p>
         </div>
       ) : null}
       <PairingClientsList
@@ -1754,19 +1813,17 @@ export function ConnectionsSettings() {
               desktopServerExposureState?.endpointUrl
                 ? `Reachable at ${desktopServerExposureState.endpointUrl}`
                 : desktopServerExposureState?.advertisedHost
-                  ? `Exposed on all interfaces. Pairing links use ${desktopServerExposureState.advertisedHost}.`
-                  : "Exposed on all interfaces."
+                  ? `Reachable on your network; pairing links use ${desktopServerExposureState.advertisedHost}.`
+                  : "Reachable on your network."
             }
           />
-        ) : desktopServerExposureState ? (
-          "Limited to this machine."
-        ) : (
-          "Loading…"
+        ) : desktopServerExposureState ? null : (
+          exposureSkeleton
         )
       }
       status={
         desktopServerExposureError ? (
-          <span className="block text-destructive">{desktopServerExposureError}</span>
+          <span className="block text-destructive-foreground">{desktopServerExposureError}</span>
         ) : null
       }
       control={renderNetworkAccessToggle()}
@@ -1778,8 +1835,7 @@ export function ConnectionsSettings() {
       description={
         desktopServerExposureState ? (
           desktopServerExposureState.httpsEnabled ? (
-            <span className="flex flex-col items-start gap-1.5">
-              <span>WebUI uses HTTPS.</span>
+            <span className="inline-flex items-center gap-1.5">
               {/*
                * Phones reject the self-signed certificate until it is installed and
                * trusted. This downloads the public certificate (served by the backend,
@@ -1788,17 +1844,19 @@ export function ConnectionsSettings() {
               <a
                 href={CAFE_CODE_HTTPS_CERTIFICATE_PATH}
                 download="cafe-code.crt"
-                className="inline-flex items-center gap-1 font-medium text-primary hover:underline"
+                className="focus-ring inline-flex items-center gap-1 rounded-sm font-medium text-primary hover:underline"
               >
                 <DownloadIcon className="size-3.5" />
                 Download certificate
               </a>
+              <InfoTip label="About the certificate">
+                Other devices must install and trust this certificate before they can open the WebUI
+                over HTTPS.
+              </InfoTip>
             </span>
-          ) : (
-            "WebUI uses HTTP."
-          )
+          ) : null
         ) : (
-          "Loading…"
+          exposureSkeleton
         )
       }
       control={renderHttpsToggle()}
@@ -1809,8 +1867,8 @@ export function ConnectionsSettings() {
       title="Network access"
       description={
         currentAuthPolicy === "remote-reachable"
-          ? "This backend is already configured for remote access. Network exposure changes must be made where the server is launched."
-          : "This backend is only reachable on this machine. Restart it with a non-loopback host to enable remote pairing."
+          ? "Change this where the server is started."
+          : "Restart the server so other devices on your network can reach it."
       }
       control={
         <Tooltip>
@@ -1825,30 +1883,26 @@ export function ConnectionsSettings() {
               </span>
             }
           />
-          <TooltipPopup side="top">
-            Network exposure changes restart the backend and must be controlled where the server
-            process is launched.
-          </TooltipPopup>
+          <TooltipPopup side="top">Set where the server is started.</TooltipPopup>
         </Tooltip>
       }
     />
   );
 
   return (
-    <SettingsPageContainer>
+    <SettingsPageContainer title="WebUI">
       <SavedEnvironmentsSettings />
       {canManageLocalBackend ? (
         <>
-          <SettingsSection title={isPrimary ? "Manage local backend" : "Manage selected server"}>
+          <SettingsSection title={isPrimary ? "Local server" : "Selected server"}>
             {primaryVersionMismatch ? (
               <SettingsRow
                 title="Version drift"
                 description={
-                  <span className="flex items-center gap-1 text-warning">
+                  <span className="flex items-center gap-1 text-warning-foreground">
                     <TriangleAlertIcon className="size-3.5 shrink-0" />
-                    Client {primaryVersionMismatch.clientVersion}, server{" "}
-                    {primaryVersionMismatch.serverVersion}. Sync them if RPC calls or reconnects
-                    fail.
+                    Client {primaryVersionMismatch.clientVersion} and server{" "}
+                    {primaryVersionMismatch.serverVersion} differ; update both if connections fail.
                   </span>
                 }
               />
@@ -1874,7 +1928,7 @@ export function ConnectionsSettings() {
 
           {isLocalBackendRemotelyReachable ? (
             <SettingsSection
-              title="Authorized clients"
+              title="Paired devices"
               headerAction={
                 <AuthorizedClientsHeaderAction
                   createPairingCredential={createServerPairingCredential}
@@ -1926,16 +1980,11 @@ export function ConnectionsSettings() {
                     pendingDesktopServerExposureMode === null || isUpdatingDesktopServerExposure
                   }
                 >
-                  {isUpdatingDesktopServerExposure ? (
-                    <>
-                      <Spinner className="size-3.5" />
-                      Restarting…
-                    </>
-                  ) : pendingDesktopServerExposureMode === "network-accessible" ? (
-                    "Restart and enable"
-                  ) : (
-                    "Restart and disable"
-                  )}
+                  <RestartButtonLabel restarting={isUpdatingDesktopServerExposure}>
+                    {pendingDesktopServerExposureMode === "network-accessible"
+                      ? "Restart and enable"
+                      : "Restart and disable"}
+                  </RestartButtonLabel>
                 </Button>
               </AlertDialogFooter>
             </AlertDialogPopup>
@@ -1956,7 +2005,7 @@ export function ConnectionsSettings() {
                   {pendingDesktopServerHttpsEnabled ? "Enable HTTPS?" : "Disable HTTPS?"}
                 </AlertDialogTitle>
                 <AlertDialogDescription>
-                  Cafe Code will restart to update the backend listener.
+                  Cafe Code will restart to apply this.
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
@@ -1973,28 +2022,20 @@ export function ConnectionsSettings() {
                     pendingDesktopServerHttpsEnabled === null || isUpdatingDesktopServerHttps
                   }
                 >
-                  {isUpdatingDesktopServerHttps ? (
-                    <>
-                      <Spinner className="size-3.5" />
-                      Restarting…
-                    </>
-                  ) : pendingDesktopServerHttpsEnabled ? (
-                    "Restart and enable"
-                  ) : (
-                    "Restart and disable"
-                  )}
+                  <RestartButtonLabel restarting={isUpdatingDesktopServerHttps}>
+                    {pendingDesktopServerHttpsEnabled
+                      ? "Restart and enable"
+                      : "Restart and disable"}
+                  </RestartButtonLabel>
                 </Button>
               </AlertDialogFooter>
             </AlertDialogPopup>
           </AlertDialog>
         </>
       ) : (
-        <SettingsSection title="Local backend access">
-          <SettingsRow
-            title="Owner tools"
-            description="Pairing links and client-session management are only available to owner sessions for this backend."
-          />
-        </SettingsSection>
+        <p className="px-1 text-xs text-muted-foreground">
+          Only the owner can manage pairing and paired devices.
+        </p>
       )}
     </SettingsPageContainer>
   );

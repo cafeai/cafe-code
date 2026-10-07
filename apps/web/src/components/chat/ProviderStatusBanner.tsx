@@ -21,25 +21,26 @@ export const ProviderStatusBanner = memo(function ProviderStatusBanner({
   const statusDismissKey = [status.instanceId, status.status, status.message ?? ""].join("\u0000");
   const isDismissed = dismissedStatusKey === statusDismissKey;
   const providerLabel = status.displayName?.trim() || formatProviderDriverKindLabel(status.driver);
-  const defaultMessage =
-    status.status === "error"
-      ? `${providerLabel} provider is unavailable.`
-      : `${providerLabel} provider has limited availability.`;
-  const title = `${providerLabel} provider status`;
-  const message = status.message ?? defaultMessage;
+  // The title already states the condition, so the body carries only the
+  // provider's own explanation when it supplied one.
+  const title =
+    status.status === "error" ? `${providerLabel} unavailable` : `${providerLabel} limited`;
+  const message = status.message?.trim() || null;
 
   if (isDismissed) {
     return null;
   }
 
   return (
-    <div className="pt-3 mx-auto max-w-3xl">
+    <div className="pt-3 mx-auto max-w-3xl animate-enter-rise">
       <Alert variant={status.status === "error" ? "error" : "warning"}>
         <CircleAlertIcon />
         <AlertTitle>{title}</AlertTitle>
-        <AlertDescription className="line-clamp-3" title={message}>
-          {message}
-        </AlertDescription>
+        {message ? (
+          <AlertDescription className="line-clamp-3" title={message}>
+            {message}
+          </AlertDescription>
+        ) : null}
         <AlertAction>
           <button
             type="button"

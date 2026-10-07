@@ -50,6 +50,7 @@ import {
 } from "react";
 import { flushSync } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
+import { useAutoAnimate } from "@formkit/auto-animate/react";
 import { useDebouncedValue } from "@tanstack/react-pacer";
 import { projectSearchEntriesQueryOptions } from "~/lib/projectReactQuery";
 import {
@@ -87,7 +88,7 @@ import {
 import { ComposerTab } from "./ComposerTab";
 import { useUiStateStore } from "../../uiStateStore";
 import { ComposerAttachImageButton } from "./ComposerAttachImageButton";
-import { FileAttachmentPill } from "./FileAttachmentPill";
+import { FileAttachmentPendingPill, FileAttachmentPill } from "./FileAttachmentPill";
 import { uploadFileAttachment } from "../../attachments/fileAttachments";
 import { isComposerImageFile, type ComposerFileAttachment } from "../../attachments/composerFiles";
 import { ComposerDictationButton } from "./ComposerDictationButton";
@@ -122,13 +123,11 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { toastManager } from "../ui/toast";
 import {
   BotIcon,
-  ChevronDownIcon,
   ChevronRightIcon,
   CircleAlertIcon,
   ImageIcon,
   LoaderCircleIcon,
   ListTodoIcon,
-  FileIcon,
   FileSearchIcon,
   PencilIcon,
   Trash2Icon,
@@ -176,6 +175,18 @@ import {
 const IMAGE_SIZE_LIMIT_LABEL = `${Math.round(PROVIDER_SEND_TURN_MAX_IMAGE_BYTES / (1024 * 1024))}MB`;
 
 const COMPOSER_PATH_QUERY_DEBOUNCE_MS = 120;
+const PENDING_ANSWER_PLACEHOLDER = "Type an answer, or leave blank to use the selection";
+/** Add/remove motion for composer-owned lists (queued messages, attachments).
+ * Matches --duration-base with the style guide's ease-out curve; auto-animate
+ * already honours prefers-reduced-motion. */
+/** In-composer panels (approval, question, plan ready) share one surface and
+ * one entrance; keyed wrappers replay it when a new request replaces the last. */
+const COMPOSER_PANEL_CLASS_NAME =
+  "animate-enter-rise rounded-t-[calc(var(--radius-2xl)-2px)] border-b border-border-subtle bg-muted/20";
+const COMPOSER_LIST_ANIMATION = {
+  duration: 160,
+  easing: "cubic-bezier(0.2, 0.8, 0.2, 1)",
+} as const;
 
 /** Exact ownership identity for an editor and every asynchronous save it starts. */
 export function buildSubagentConcurrencyEditorKey(input: {
@@ -249,15 +260,11 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
           <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
           <Button
             variant="ghost"
-            className="shrink-0 whitespace-nowrap px-2 text-muted-foreground/70 hover:text-foreground/80 sm:px-3"
+            className="shrink-0 whitespace-nowrap px-2 text-muted-foreground hover:text-foreground sm:px-3"
             size="sm"
             type="button"
             onClick={props.onToggleInteractionMode}
-            title={
-              props.interactionMode === "plan"
-                ? "Plan mode — click to return to normal build mode"
-                : "Default mode — click to enter plan mode"
-            }
+            title={props.interactionMode === "plan" ? "Switch to Build" : "Switch to Plan"}
           >
             <BotIcon />
             <span className="sr-only sm:not-sr-only">
@@ -275,8 +282,8 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
             className={cn(
               "shrink-0 whitespace-nowrap px-2 sm:px-3",
               props.planSidebarOpen
-                ? "text-blue-400 hover:text-blue-300"
-                : "text-muted-foreground/70 hover:text-foreground/80",
+                ? "text-primary hover:text-primary"
+                : "text-muted-foreground hover:text-foreground",
             )}
             size="sm"
             type="button"
@@ -340,7 +347,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         />
       ) : null}
       {props.pendingStatusLabel ? (
-        <span className="text-muted-foreground/70 text-xs">{props.pendingStatusLabel}</span>
+        <span className="text-muted-foreground text-xs">{props.pendingStatusLabel}</span>
       ) : null}
       {!props.sessionRailVisible ? props.usageResetAction : null}
       {props.dictationAction}
@@ -521,6 +528,7 @@ function automaticSteerRetryStatus(item: FollowUpQueueViewItem): {
 }
 
 export function FollowUpQueueShelf(props: {
+  attached?: boolean;
   items: readonly FollowUpQueueViewItem[];
   steeringItems?: readonly SteeringFollowUpViewItem[];
   actionLabel: string;
@@ -533,6 +541,7 @@ export function FollowUpQueueShelf(props: {
   onExpandImage: (preview: ExpandedImagePreview) => void;
 }) {
   const steeringItems = props.steeringItems ?? [];
+  const [rowsRef] = useAutoAnimate<HTMLDivElement>(COMPOSER_LIST_ANIMATION);
   if (props.items.length === 0 && steeringItems.length === 0) {
     return null;
   }
@@ -547,7 +556,10 @@ export function FollowUpQueueShelf(props: {
 
   return (
     <div
-      className="cafe-followup-queue relative mb-2 overflow-hidden rounded-2xl border border-border/70 bg-card/80 px-3 py-2 text-sm shadow-lg/5 backdrop-blur-sm"
+      className={cn(
+        "cafe-followup-queue relative animate-enter-rise overflow-hidden rounded-2xl border border-border bg-card/80 px-3 py-2 text-sm backdrop-blur-sm",
+        props.attached ? "rounded-b-none border-b-0" : "mb-2",
+      )}
       data-cafe-followup-queue="true"
     >
       <div className="relative z-10 flex min-w-0 items-center justify-between gap-3">
@@ -557,23 +569,23 @@ export function FollowUpQueueShelf(props: {
             type="button"
             variant="ghost"
             size="sm"
-            className="h-7 shrink-0 px-2 text-muted-foreground/80 hover:text-foreground"
+            className="h-7 shrink-0 px-2 text-muted-foreground hover:text-foreground"
             onClick={props.onClear}
           >
             Clear
           </Button>
         ) : null}
       </div>
-      <div className="relative z-10 mt-1.5 grid gap-1">
+      <div ref={rowsRef} className="relative z-10 mt-1.5 grid gap-1">
         {steeringItems.map((item) => (
           <div
             key={item.id}
-            className="rounded-xl border border-border/50 bg-muted/20 p-2"
+            className="rounded-xl border border-border-subtle bg-muted/20 p-2"
             data-cafe-followup-steering="true"
           >
             <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2">
               <span
-                className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground/75"
+                className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground"
                 aria-hidden="true"
               >
                 <LoaderCircleIcon className="size-4 animate-spin" />
@@ -585,7 +597,7 @@ export function FollowUpQueueShelf(props: {
                 {item.preview}
               </div>
               <span
-                className="h-7 shrink-0 rounded-md border border-border/60 px-2 py-1 text-muted-foreground/85 text-xs"
+                className="h-7 shrink-0 rounded-md border border-border px-2 py-1 text-muted-foreground text-xs"
                 aria-label="Follow-up steering into active turn"
                 title="Follow-up accepted for the active turn; waiting for the provider to act on it."
               >
@@ -608,20 +620,26 @@ export function FollowUpQueueShelf(props: {
         {props.items.map((item) => {
           const retryStatus = automaticSteerRetryStatus(item);
           return (
-            <div key={item.id} className="rounded-xl border border-border/45 bg-background/42 p-2">
+            <div
+              key={item.id}
+              className="rounded-xl border border-border-subtle bg-background/40 p-2"
+            >
               <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto_auto_auto] items-center gap-2">
                 {item.canExpand ? (
                   <button
                     type="button"
-                    className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent/70 hover:text-foreground"
+                    className="focus-ring inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors duration-(--duration-fast) hover:bg-accent hover:text-foreground"
                     aria-label={item.expanded ? "Collapse queued message" : "Expand queued message"}
+                    aria-expanded={item.expanded}
                     onClick={() => props.onToggleExpanded(item.id)}
                   >
-                    {item.expanded ? (
-                      <ChevronDownIcon className="size-4" />
-                    ) : (
-                      <ChevronRightIcon className="size-4" />
-                    )}
+                    <ChevronRightIcon
+                      aria-hidden="true"
+                      className={cn(
+                        "size-4 transition-transform duration-(--duration-fast) ease-out",
+                        item.expanded && "rotate-90",
+                      )}
+                    />
                   </button>
                 ) : (
                   <span className="size-6 shrink-0" aria-hidden="true" />
@@ -653,7 +671,7 @@ export function FollowUpQueueShelf(props: {
                   </Button>
                 ) : retryStatus ? (
                   <span
-                    className="h-7 shrink-0 whitespace-nowrap rounded-md border border-border/60 px-2 py-1 text-muted-foreground/85 text-xs"
+                    className="h-7 shrink-0 whitespace-nowrap rounded-md border border-border px-2 py-1 text-muted-foreground text-xs"
                     aria-label={retryStatus.ariaLabel}
                     title={retryStatus.title}
                   >
@@ -690,7 +708,7 @@ export function FollowUpQueueShelf(props: {
                   type="button"
                   variant="ghost"
                   size="icon-sm"
-                  className="size-7 shrink-0 text-muted-foreground/75 hover:text-destructive"
+                  className="size-7 shrink-0 text-muted-foreground hover:text-destructive-foreground"
                   aria-label="Remove queued message"
                   onClick={() => props.onRemove(item.id)}
                 >
@@ -709,13 +727,13 @@ export function FollowUpQueueShelf(props: {
                 </div>
               ) : null}
               {item.canExpand && item.expanded ? (
-                <div className="mt-2 grid gap-2 rounded-lg border border-border/35 bg-background/55 p-2">
+                <div className="mt-2 grid animate-enter-rise gap-2 rounded-lg border border-border-subtle bg-background/60 p-2">
                   {item.images.length > 0 ? (
                     <div className="grid max-h-40 grid-cols-2 gap-2 overflow-y-auto pr-1 sm:grid-cols-3">
                       {item.images.map((image) => (
                         <div
                           key={image.id}
-                          className="overflow-hidden rounded-lg border border-border/70 bg-background/70"
+                          className="overflow-hidden rounded-lg border border-border bg-background"
                         >
                           {image.previewUrl ? (
                             <button
@@ -735,7 +753,7 @@ export function FollowUpQueueShelf(props: {
                               />
                             </button>
                           ) : (
-                            <div className="flex min-h-20 items-center justify-center px-2 py-3 text-center text-[11px] text-muted-foreground/70">
+                            <div className="flex min-h-20 items-center justify-center px-2 py-3 text-center text-2xs text-muted-foreground">
                               {image.name}
                             </div>
                           )}
@@ -747,13 +765,15 @@ export function FollowUpQueueShelf(props: {
                     readOnly
                     aria-label="Queued message prompt"
                     value={item.promptText.trim().length > 0 ? item.promptText : item.preview}
-                    className="max-h-36 min-h-20 w-full resize-none overflow-y-auto rounded-md border border-border/30 bg-background/40 p-2 text-muted-foreground text-xs leading-5 outline-none [overflow-wrap:anywhere]"
+                    className="max-h-36 min-h-20 w-full resize-none overflow-y-auto rounded-md border border-border-subtle bg-background/40 p-2 text-muted-foreground text-xs leading-5 outline-none [overflow-wrap:anywhere]"
                     onChange={() => undefined}
                   />
                 </div>
               ) : null}
               {item.blockedReason ? (
-                <div className="mt-2 text-[11px] text-destructive/85">{item.blockedReason}</div>
+                <div className="mt-2 text-2xs text-destructive-foreground">
+                  {item.blockedReason}
+                </div>
               ) : null}
             </div>
           );
@@ -1272,6 +1292,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     nativeReviewAvailable && !nativeReviewDisabled ? (
       <MenuItem
         aria-haspopup="dialog"
+        className="[&>svg]:mx-0"
         onClick={() => setNativeReviewState({ key: nativeReviewKey, open: true })}
       >
         <FileSearchIcon aria-hidden="true" className="size-4 shrink-0" />
@@ -1297,15 +1318,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       }
 
       try {
-        void requireEnvironmentConnection(environmentId)
-          .client.server.refreshProviders({ instanceId, scope: "models" })
-          // The picker intentionally keeps its stale catalogue on failure.
-          // The server records a redacted phase marker; avoid surfacing raw
-          // provider causes in the renderer console or a disruptive toast.
-          .catch(() => undefined);
+        // Returned only so the picker can show a delayed progress line.
+        return (
+          requireEnvironmentConnection(environmentId)
+            .client.server.refreshProviders({ instanceId, scope: "models" })
+            // The picker intentionally keeps its stale catalogue on failure.
+            // The server records a redacted phase marker; avoid surfacing raw
+            // provider causes in the renderer console or a disruptive toast.
+            .catch(() => undefined)
+        );
       } catch {
         // A connection can disappear between the pointer event and this
         // lookup. The next picker open will retry after reconnect.
+        return;
       }
     },
     [environmentId, providerInstanceEntries],
@@ -1477,6 +1502,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   };
   const concurrencyMenuItem = concurrencyKey ? (
     <MenuItem
+      inset
       disabled={!concurrencySupported && desiredSubagentLimits?.[concurrencyKey] === undefined}
       title={
         !concurrencySupported
@@ -1650,6 +1676,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const mobileComposerExpandInFlightRef = useRef(false);
   const dragDepthRef = useRef(0);
   const composerFileInputRef = useRef<HTMLInputElement>(null);
+  const [composerFilesListRef] = useAutoAnimate<HTMLDivElement>(COMPOSER_LIST_ANIMATION);
+  const [composerImagesListRef] = useAutoAnimate<HTMLDivElement>(COMPOSER_LIST_ANIMATION);
   // A Send/queue action issued while dictation is active must cross exactly
   // one finalization boundary. Keeping the single-flight here prevents a
   // double click from dispatching the same final transcript twice while the
@@ -1775,6 +1803,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   );
   const selectedProviderSkills =
     selectedProvider === "codex" ? discoveredSkills.skills : (selectedProviderStatus?.skills ?? []);
+  // The placeholder advertises `$` only where skills can actually be inserted.
+  const composerSkillsSupported =
+    selectedProvider === "codex" || (selectedProviderStatus?.skills?.length ?? 0) > 0;
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const connectionStatus = useWsConnectionStatus();
   const savedConnectionState = useSavedEnvironmentRuntimeStore(
@@ -1861,21 +1892,21 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           type: "slash-command",
           command: "model",
           label: "/model",
-          description: "Switch response model for this thread",
+          description: "Switch the model for this chat",
         },
         {
           id: "slash:plan",
           type: "slash-command",
           command: "plan",
           label: "/plan",
-          description: "Switch this thread into plan mode",
+          description: "Switch to Plan",
         },
         {
           id: "slash:default",
           type: "slash-command",
           command: "default",
           label: "/default",
-          description: "Switch this thread back to normal build mode",
+          description: "Switch back to Build",
         },
         ...(selectedProvider === "codex" || selectedProvider === "opencode"
           ? [
@@ -3313,25 +3344,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   // Render
   // ------------------------------------------------------------------
+  const hasFollowUpQueue = followUpQueueItems.length > 0 || steeringFollowUpItems.length > 0;
   return (
     <form
       ref={composerFormRef}
       onSubmit={submitComposer}
-      className="mx-auto flow-root w-full min-w-0 max-w-208"
+      className="@container/composer mx-auto flow-root w-full min-w-0 max-w-208"
       data-chat-composer-form="true"
     >
-      <FollowUpQueueShelf
-        items={followUpQueueItems}
-        steeringItems={steeringFollowUpItems}
-        actionLabel={followUpQueueActionLabel}
-        actionTitle={followUpQueueActionTitle}
-        onToggleExpanded={onToggleFollowUpQueueItem}
-        onAction={onActivateFollowUpQueueItem}
-        onRemove={onRemoveFollowUpQueueItem}
-        onEdit={props.onEditFollowUpQueueItem}
-        onClear={onClearFollowUpQueue}
-        onExpandImage={onExpandImage}
-      />
       <input
         ref={composerFileInputRef}
         type="file"
@@ -3343,7 +3363,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       />
       <div
         className={cn(
-          "group relative isolate rounded-[22px] p-px transition-[color,background-color,border-color] duration-200 motion-reduce:transition-none",
+          "group relative isolate rounded-2xl p-px transition-[color,background-color,border-color] duration-(--duration-slow) motion-reduce:transition-none",
           hasComposerTab && "mt-9 pointer-coarse:mt-12",
           composerProviderState.composerFrameClassName ??
             (ambianceComposerRing ? "cafe-ambiance-composer-frame" : undefined),
@@ -3390,9 +3410,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     side="top"
                     className="no-drag pointer-events-none max-w-64 leading-relaxed"
                   >
-                    Ask Codex to review code for bugs and risks. Choose changes, a branch, a commit,
-                    or custom instructions. Findings appear in this chat.
-                    {nativeReviewControlDisabled ? ` ${nativeReviewDisabledReason}` : null}
+                    Review code with Codex
+                    {nativeReviewControlDisabled && nativeReviewDisabledReason ? (
+                      <span className="block text-muted-foreground">
+                        {nativeReviewDisabledReason}
+                      </span>
+                    ) : null}
                   </TooltipPopup>
                 </Tooltip>
               ) : null}
@@ -3409,6 +3432,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             </ComposerTab>
           </div>
         ) : null}
+        <FollowUpQueueShelf
+          attached
+          items={followUpQueueItems}
+          steeringItems={steeringFollowUpItems}
+          actionLabel={followUpQueueActionLabel}
+          actionTitle={followUpQueueActionTitle}
+          onToggleExpanded={onToggleFollowUpQueueItem}
+          onAction={onActivateFollowUpQueueItem}
+          onRemove={onRemoveFollowUpQueueItem}
+          onEdit={props.onEditFollowUpQueueItem}
+          onClear={onClearFollowUpQueue}
+          onExpandImage={onExpandImage}
+        />
         <div
           ref={composerSurfaceRef}
           data-chat-composer-mobile-collapsed={isComposerCollapsedMobile ? "true" : "false"}
@@ -3416,8 +3452,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             isOnScreenKeyboardDevice && isComposerFocused ? "true" : "false"
           }
           className={cn(
-            "rounded-[20px] border bg-card transition-colors duration-200 has-focus-visible:border-ring/45",
-            isDragOverComposer ? "border-primary/70 bg-accent/30" : "border-border",
+            "rounded-[calc(var(--radius-2xl)-1px)] border bg-card transition-colors duration-(--duration-slow) has-focus-visible:border-ring/45",
+            hasFollowUpQueue && "rounded-t-none",
+            isDragOverComposer ? "border-primary bg-accent/30" : "border-border",
             environmentUnavailable ? "opacity-75" : null,
             composerProviderState.composerSurfaceClassName,
           )}
@@ -3473,14 +3510,20 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         >
           {!isComposerCollapsedMobile &&
             (activePendingApproval ? (
-              <div className="rounded-t-[19px] border-b border-border/65 bg-muted/20">
+              <div
+                key={`approval:${activePendingApproval.requestId}`}
+                className={COMPOSER_PANEL_CLASS_NAME}
+              >
                 <ComposerPendingApprovalPanel
                   approval={activePendingApproval}
                   pendingCount={pendingApprovals.length}
                 />
               </div>
             ) : pendingUserInputs.length > 0 ? (
-              <div className="rounded-t-[19px] border-b border-border/65 bg-muted/20">
+              <div
+                key={`user-input:${pendingUserInputs[0]?.requestId ?? ""}`}
+                className={COMPOSER_PANEL_CLASS_NAME}
+              >
                 <ComposerPendingUserInputPanel
                   pendingUserInputs={pendingUserInputs}
                   respondingRequestIds={respondingRequestIds}
@@ -3495,7 +3538,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 />
               </div>
             ) : showPlanFollowUpPrompt && activeProposedPlan ? (
-              <div className="rounded-t-[19px] border-b border-border/65 bg-muted/20">
+              <div key={`plan:${activeProposedPlan.id}`} className={COMPOSER_PANEL_CLASS_NAME}>
                 <ComposerPlanFollowUpBanner
                   key={activeProposedPlan.id}
                   planTitle={proposedPlanTitle(activeProposedPlan.planMarkdown) ?? null}
@@ -3505,7 +3548,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
           {isComposerCollapsedMobile && activePendingApproval ? (
             <div
-              className="rounded-t-[19px] border-b border-border/65 bg-muted/20"
+              key={`approval:${activePendingApproval.requestId}`}
+              className={COMPOSER_PANEL_CLASS_NAME}
               data-chat-composer-collapsed-controls="true"
             >
               <ComposerPendingApprovalPanel
@@ -3517,6 +3561,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   requestId={activePendingApproval.requestId}
                   defaultToNo={activePendingApproval.defaultToNo === true}
                   suppressAlwaysAllowRule={activePendingApproval.suppressAlwaysAllowRule === true}
+                  networkApproval={activePendingApproval.networkApproval !== undefined}
                   isResponding={respondingRequestIds.includes(activePendingApproval.requestId)}
                   onRespondToApproval={onRespondToApproval}
                 />
@@ -3524,7 +3569,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             </div>
           ) : isComposerCollapsedMobile && pendingUserInputs.length > 0 ? (
             <div
-              className="rounded-t-[19px] border-b border-border/65 bg-muted/20"
+              key={`user-input:${pendingUserInputs[0]?.requestId ?? ""}`}
+              className={COMPOSER_PANEL_CLASS_NAME}
               data-chat-composer-collapsed-controls="true"
             >
               <ComposerPendingUserInputPanel
@@ -3546,7 +3592,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 <div
                   data-chat-composer-mobile-pending-compact="true"
                   className={cn(
-                    "flex min-w-0 items-center gap-2 rounded-lg border border-border/55 bg-background/55 p-1.5 pl-3 transition-colors hover:bg-background/80",
+                    "flex min-w-0 items-center gap-2 rounded-lg border border-border bg-background/60 p-1.5 pl-3 transition-colors duration-(--duration-fast) hover:bg-background",
                     !activePendingProgress?.activeQuestion?.multiSelect && "p-0",
                   )}
                 >
@@ -3556,7 +3602,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       "min-w-0 flex-1 truncate bg-transparent py-1.5 text-left text-sm",
                       activePendingProgress?.customAnswer
                         ? "text-foreground"
-                        : "text-muted-foreground/60",
+                        : "text-subtle-foreground",
                       !activePendingProgress?.activeQuestion?.multiSelect && "px-3 py-2",
                     )}
                     onPointerDown={(event) => event.preventDefault()}
@@ -3604,16 +3650,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   "min-w-0 flex-1 truncate bg-transparent py-0 pl-2 pr-0 text-left text-[16px] leading-relaxed focus:outline-none",
                   (activePendingProgress ? activePendingProgress.customAnswer : prompt.trim())
                     ? "text-foreground"
-                    : "text-muted-foreground/35",
+                    : "text-subtle-foreground",
                 )}
                 onPointerDown={(event) => event.preventDefault()}
                 onClick={expandMobileComposer}
                 aria-label="Expand composer"
               >
                 {activePendingProgress
-                  ? activePendingProgress.customAnswer ||
-                    "Type your own answer, or leave this blank to use the selected option"
-                  : prompt.trim() || "Ask anything..."}
+                  ? activePendingProgress.customAnswer || PENDING_ANSWER_PLACEHOLDER
+                  : prompt.trim() || "Ask anything…"}
               </button>
               {composerImages.length + composerFiles.length > 0 ? (
                 // The image preview strip is hidden while collapsed, so surface
@@ -3648,7 +3693,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             )}
           >
             {composerMenuOpen && !isComposerApprovalState && (
-              <div className="absolute inset-x-0 bottom-full z-20 mb-2 px-1">
+              <div className="absolute inset-x-0 bottom-full z-20 mb-2 origin-bottom animate-enter-rise px-1">
                 <ComposerCommandMenu
                   items={composerMenuItems}
                   resolvedTheme={resolvedTheme}
@@ -3662,11 +3707,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   statusText={
                     composerTriggerKind === "slash-command" && selectedProvider === "claudeAgent"
                       ? commandsInput === null
-                        ? "Claude commands are available after this chat connects. You can type a command manually."
+                        ? "Claude commands load once this chat connects."
                         : discoveredCommands.status === "loading"
                           ? "Refreshing Claude commands…"
                           : discoveredCommands.status === "unavailable"
-                            ? "Claude commands unavailable. Reopen the picker to retry, or type a command manually."
+                            ? "Claude commands unavailable. Reopen to retry, or type one."
                             : undefined
                       : undefined
                   }
@@ -3678,8 +3723,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             )}
 
             {props.queueEditing ? (
-              <div className="mb-2 flex flex-wrap items-center gap-2 rounded-lg border border-border p-2 text-xs">
-                <span className="grow">Editing queued message. Your previous draft is saved.</span>
+              <div className="mb-2 flex animate-enter-rise flex-wrap items-center gap-2 rounded-lg border border-border p-2 text-xs">
+                <span className="grow">Editing queued message. Your draft is saved.</span>
                 <Button
                   type="button"
                   size="sm"
@@ -3702,12 +3747,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               </div>
             ) : null}
             {composerFiles.length > 0 && !isComposerCollapsedMobile ? (
-              <div className="mb-3 flex flex-wrap gap-2" aria-label="Uploaded file copies">
-                {composerFiles.map((file) =>
-                  file.status === "ready" &&
-                  file.attachment &&
-                  file.environmentId === environmentId &&
-                  file.targetThreadId === activeThreadId ? (
+              <div
+                ref={composerFilesListRef}
+                className="mb-3 flex flex-wrap gap-2"
+                aria-label="Uploaded file copies"
+              >
+                {composerFiles.map((file) => {
+                  const sameDestination =
+                    file.environmentId === environmentId && file.targetThreadId === activeThreadId;
+                  return file.status === "ready" && file.attachment && sameDestination ? (
                     <FileAttachmentPill
                       key={file.id}
                       attachment={file.attachment}
@@ -3715,72 +3763,42 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       onRemove={() => removeComposerFile(file.id)}
                     />
                   ) : (
-                    <div
+                    <FileAttachmentPendingPill
                       key={file.id}
-                      className="flex max-w-full items-center gap-2 rounded-lg border border-border px-2 py-1 text-xs"
-                      role="status"
-                    >
-                      {file.status === "uploading" ? (
-                        <LoaderCircleIcon className="size-3 animate-spin" />
-                      ) : (
-                        <FileIcon className="size-3" />
-                      )}
-                      <span className="min-w-0 break-all">
-                        {file.name}
-                        <span className="block text-muted-foreground">
-                          {file.environmentId !== environmentId ||
-                          file.targetThreadId !== activeThreadId
-                            ? "Uploaded to another destination. Remove and select again."
-                            : file.status === "uploading"
-                              ? "Uploading copy…"
-                              : file.error}
-                        </span>
-                      </span>
-                      {file.status === "failed" &&
-                      file.file &&
-                      file.environmentId === environmentId &&
-                      file.targetThreadId === activeThreadId ? (
-                        <Button
-                          type="button"
-                          size="xs"
-                          variant="ghost"
-                          onClick={() => queueFileUpload(file)}
-                        >
-                          Retry upload
-                        </Button>
-                      ) : null}
-                      <Button
-                        type="button"
-                        size="icon-xs"
-                        variant="ghost"
-                        aria-label={`Remove ${file.name}`}
-                        onClick={() => removeComposerFile(file.id)}
-                      >
-                        <XIcon />
-                      </Button>
-                    </div>
-                  ),
-                )}
+                      name={file.name}
+                      sizeBytes={file.sizeBytes}
+                      status={!sameDestination ? "failed" : file.status}
+                      error={
+                        !sameDestination
+                          ? "Uploaded to another destination. Remove and select again."
+                          : file.error
+                      }
+                      onRetry={
+                        file.status === "failed" && file.file && sameDestination
+                          ? () => queueFileUpload(file)
+                          : undefined
+                      }
+                      onRemove={() => removeComposerFile(file.id)}
+                    />
+                  );
+                })}
                 {fileDraftPersistenceFailed ? (
-                  <span role="alert" className="basis-full text-xs text-destructive">
+                  <span role="alert" className="basis-full text-xs text-destructive-foreground">
                     These file handles could not be saved in browser storage. Keep this page open
                     and free storage before reloading.
                   </span>
                 ) : null}
-                <span className="basis-full text-[10px] text-muted-foreground">
-                  Uploaded copies · Workspace @ references remain linked.
-                </span>
               </div>
             ) : null}
             {!isComposerCollapsedMobile &&
               !isComposerApprovalState &&
               pendingUserInputs.length === 0 &&
               composerImages.length > 0 && (
-                <div className="mb-3 flex flex-wrap gap-2">
+                <div ref={composerImagesListRef} className="mb-3 flex flex-wrap gap-2">
                   {composerImages.map((image) => (
                     <div
                       key={image.id}
-                      className="relative h-16 w-16 overflow-hidden rounded-lg border border-border/80 bg-background"
+                      className="relative h-16 w-16 overflow-hidden rounded-lg border border-border bg-background"
                     >
                       {image.previewUrl ? (
                         <button
@@ -3800,7 +3818,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                           />
                         </button>
                       ) : (
-                        <div className="flex h-full w-full items-center justify-center px-1 text-center text-[10px] text-muted-foreground/70">
+                        <div className="flex h-full w-full items-center justify-center px-1 text-center text-2xs text-muted-foreground">
                           {image.name}
                         </div>
                       )}
@@ -3811,7 +3829,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                               <span
                                 role="img"
                                 aria-label="Draft attachment may not persist"
-                                className="absolute left-1 top-1 inline-flex items-center justify-center rounded bg-background/85 p-0.5 text-amber-600"
+                                className="absolute left-1 top-1 inline-flex items-center justify-center rounded-sm bg-background/85 p-0.5 text-warning-foreground"
                               >
                                 <CircleAlertIcon className="size-3" />
                               </span>
@@ -3859,20 +3877,22 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 onPaste={onComposerPaste}
                 placeholder={
                   isComposerApprovalState
-                    ? (activePendingApproval?.detail ?? "Resolve this approval request to continue")
+                    ? "Approve or decline to continue"
                     : activePendingProgress
-                      ? "Type your own answer, or leave this blank to use the selected option"
+                      ? PENDING_ANSWER_PLACEHOLDER
                       : showPlanFollowUpPrompt && activeProposedPlan
-                        ? "Add feedback to refine the plan, or leave this blank to implement it"
+                        ? "Add feedback, or leave blank to implement"
                         : environmentUnavailable
                           ? `${environmentUnavailable.label} is ${
                               environmentUnavailable.connectionState === "connecting"
                                 ? "connecting"
                                 : "disconnected"
                             }`
-                          : phase === "disconnected"
-                            ? "Ask for follow-up changes or attach files"
-                            : "Ask anything, @tag files/folders, $use skills, or / for commands"
+                          : phase === "disconnected" && (activeThread?.messages.length ?? 0) > 0
+                            ? "Ask for follow-up changes…"
+                            : composerSkillsSupported
+                              ? "Ask anything · @ files · $ skills · / commands"
+                              : "Ask anything · @ files · / commands"
                 }
                 disabled={composerEditorDisabled}
               />
@@ -3947,6 +3967,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 requestId={activePendingApproval.requestId}
                 defaultToNo={activePendingApproval.defaultToNo === true}
                 suppressAlwaysAllowRule={activePendingApproval.suppressAlwaysAllowRule === true}
+                networkApproval={activePendingApproval.networkApproval !== undefined}
                 isResponding={respondingRequestIds.includes(activePendingApproval.requestId)}
                 onRespondToApproval={onRespondToApproval}
               />
@@ -3957,7 +3978,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               data-chat-composer-footer-compact={isComposerFooterCompact ? "true" : "false"}
               data-chat-composer-collapsed-controls="true"
               className={cn(
-                "flex min-w-0 flex-nowrap items-center justify-between gap-2 overflow-visible px-2.5 pb-2.5 sm:px-3 sm:pb-3",
+                // A tiny pane beside an open sidebar can be narrower than
+                // Tasks plus the primary actions. Let those actions use a
+                // second row instead of overflowing the usable chat width.
+                "flex min-w-0 flex-nowrap items-center justify-between gap-2 overflow-visible px-2.5 pb-2.5 sm:px-3 sm:pb-3 @max-[20rem]/composer:flex-wrap",
                 isComposerFooterCompact ? "gap-1.5" : "gap-2 sm:gap-0",
               )}
             >
@@ -4086,7 +4110,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 data-chat-composer-primary-actions-compact={
                   isComposerPrimaryActionsCompact ? "true" : "false"
                 }
-                className="flex shrink-0 flex-nowrap items-center justify-end gap-2"
+                className="ml-2 flex shrink-0 flex-nowrap items-center justify-end gap-2 @max-[20rem]/composer:ml-auto"
               >
                 <ComposerFooterPrimaryActions
                   compact={isComposerPrimaryActionsCompact}

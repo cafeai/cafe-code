@@ -2,14 +2,12 @@ import { ProviderDriverKind } from "@cafecode/contracts";
 import { describe, expect, it } from "vitest";
 
 import {
-  buildUsageTokenBreakdownView,
   formatCompactTokenCount,
   formatFullTokenCount,
   formatGeneratingTime,
   formatUsageRecordingDate,
   formatUsageModelLabel,
   getUsageModelExplanation,
-  formatUsagePercentage,
   formatUsageProviderLabel,
 } from "./usageStatsPresentation";
 
@@ -44,162 +42,7 @@ describe("usageStatsPresentation", () => {
     expect(formatUsageRecordingDate(`2026-10-01${" ".repeat(1_000)}`)).toBeUndefined();
   });
 
-  it("groups duplicate rows and sorts providers and models by generated tokens", () => {
-    expect(
-      buildUsageTokenBreakdownView(
-        [
-          {
-            provider: CODEX,
-            model: "gpt-small",
-            outputTokens: 20,
-            inputTokens: 0,
-            cachedInputTokens: 0,
-            cacheWriteInputTokens: 0,
-            reasoningOutputTokens: 0,
-          },
-          {
-            provider: CLAUDE,
-            model: "claude-opus",
-            outputTokens: 75,
-            inputTokens: 0,
-            cachedInputTokens: 0,
-            cacheWriteInputTokens: 0,
-            reasoningOutputTokens: 0,
-          },
-          {
-            provider: CODEX,
-            model: "gpt-large",
-            outputTokens: 40,
-            inputTokens: 0,
-            cachedInputTokens: 0,
-            cacheWriteInputTokens: 0,
-            reasoningOutputTokens: 0,
-          },
-          {
-            provider: CODEX,
-            model: "gpt-small",
-            outputTokens: 10,
-            inputTokens: 0,
-            cachedInputTokens: 0,
-            cacheWriteInputTokens: 0,
-            reasoningOutputTokens: 0,
-          },
-          {
-            provider: CLAUDE,
-            model: "unused",
-            outputTokens: 0,
-            inputTokens: 0,
-            cachedInputTokens: 0,
-            cacheWriteInputTokens: 0,
-            reasoningOutputTokens: 0,
-          },
-        ],
-        200,
-      ),
-    ).toEqual({
-      providers: [
-        {
-          provider: CLAUDE,
-          outputTokens: 75,
-          processedTokens: 75,
-          models: [{ model: "claude-opus", outputTokens: 75, processedTokens: 75 }],
-        },
-        {
-          provider: CODEX,
-          outputTokens: 70,
-          processedTokens: 70,
-          models: [
-            { model: "gpt-large", outputTokens: 40, processedTokens: 40 },
-            { model: "gpt-small", outputTokens: 30, processedTokens: 30 },
-          ],
-        },
-      ],
-      attributedOutputTokens: 145,
-      unattributedOutputTokens: 55,
-    });
-  });
-
-  it("retains input-only Fable without changing generated-output totals or adding cache twice", () => {
-    const detail = [
-      {
-        provider: CODEX,
-        model: "gpt-6-astra",
-        inputTokens: 1_453_045_932,
-        outputTokens: 5_037_075,
-      },
-      {
-        provider: CODEX,
-        model: "gpt-6.1-sol",
-        inputTokens: 1_174_928_287,
-        outputTokens: 4_975_605,
-      },
-      { provider: CLAUDE, model: "claude-fable-5-1", inputTokens: 2_853_296, outputTokens: 0 },
-    ].map((row) => ({
-      ...row,
-      cachedInputTokens: 1_000_000,
-      cacheWriteInputTokens: 10_000,
-      reasoningOutputTokens: 0,
-    }));
-    const view = buildUsageTokenBreakdownView(detail, 10_012_680);
-    expect(view.attributedOutputTokens).toBe(10_012_680);
-    expect(view.unattributedOutputTokens).toBe(0);
-    expect(view.providers.map((provider) => provider.provider)).toEqual([CODEX, CLAUDE]);
-    expect(view.providers[1]).toEqual({
-      provider: CLAUDE,
-      outputTokens: 0,
-      processedTokens: 2_853_296,
-      models: [{ model: "claude-fable-5-1", outputTokens: 0, processedTokens: 2_853_296 }],
-    });
-    expect(view.providers.reduce((sum, provider) => sum + provider.processedTokens, 0)).toBe(
-      2_640_840_195,
-    );
-    expect(
-      formatUsagePercentage(view.providers[1]!.outputTokens, view.attributedOutputTokens),
-    ).toBe("0%");
-  });
-
-  it("merges input-only duplicates and orders them without fabricating output or unattributed usage", () => {
-    const base = {
-      provider: CLAUDE,
-      inputTokens: 100,
-      cachedInputTokens: 90,
-      cacheWriteInputTokens: 10,
-      outputTokens: 0,
-      reasoningOutputTokens: 0,
-    };
-    const view = buildUsageTokenBreakdownView(
-      [
-        { ...base, model: "small" },
-        { ...base, model: "large", inputTokens: 150 },
-        { ...base, model: "large" },
-        { ...base, model: "empty", inputTokens: 0, cachedInputTokens: 0, cacheWriteInputTokens: 0 },
-        {
-          ...base,
-          model: "invalid",
-          inputTokens: Number.NaN,
-          outputTokens: Number.POSITIVE_INFINITY,
-        },
-      ],
-      0,
-    );
-    expect(view).toEqual({
-      providers: [
-        {
-          provider: CLAUDE,
-          outputTokens: 0,
-          processedTokens: 350,
-          models: [
-            { model: "large", outputTokens: 0, processedTokens: 250 },
-            { model: "small", outputTokens: 0, processedTokens: 100 },
-          ],
-        },
-      ],
-      attributedOutputTokens: 0,
-      unattributedOutputTokens: 0,
-    });
-  });
-
-  it("formats known providers, unknown models, and compact percentages", () => {
+  it("formats known providers and explains unknown models without pricing them", () => {
     expect(formatUsageProviderLabel(CODEX)).toBe("Codex");
     expect(formatUsageProviderLabel(CLAUDE)).toBe("Claude");
     expect(formatUsageProviderLabel(ProviderDriverKind.make("custom_driver"))).toBe(
@@ -208,15 +51,12 @@ describe("usageStatsPresentation", () => {
     expect(formatUsageModelLabel("unknown")).toBe("Model not reported");
     expect(formatUsageModelLabel("gpt-5.6-codex")).toBe("gpt-5.6-codex");
     expect(getUsageModelExplanation("unknown")).toBe(
-      "The provider reported token usage without identifying the effective model. Tokens remain counted; cost is unpriced unless you set a custom rate.",
+      "The provider didn't report which model served these tokens. They're counted but not priced.",
     );
     expect(getUsageModelExplanation("gpt-5.6-codex")).toBeUndefined();
-    expect(formatUsagePercentage(1, 2_000)).toBe("<0.1%");
-    expect(formatUsagePercentage(5, 100)).toBe("5.0%");
-    expect(formatUsagePercentage(1, 0)).toBe("0%");
   });
 
-  it("formats full token counts and their compact companion consistently", () => {
+  it("formats compact token readouts and their exact hover values consistently", () => {
     expect(formatFullTokenCount(3_539_966_200)).toBe("3,539,966,200");
     expect(formatCompactTokenCount(3_539_966_200)).toBe("3.54B");
     expect(formatCompactTokenCount(3_000_000)).toBe("3.00M");

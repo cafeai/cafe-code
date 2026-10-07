@@ -167,5 +167,20 @@ describe("killall process matching", () => {
         [20, "desktop-client"],
       ],
     );
+    // Planned restarts give the owning desktop and backend their shutdown
+    // window before touching provider runtimes. Ancestor protection still
+    // applies, and the emergency command above remains children-first.
+    assert.deepEqual(
+      selectCafeKillallTargets(processes, {
+        currentPid: 11,
+        currentParentPid: 10,
+        graceful: true,
+      }).map((target) => [target.pid, target.role]),
+      [
+        [20, "desktop-client"],
+        [21, "server"],
+        [22, "provider-runtime"],
+      ],
+    );
   });
 });

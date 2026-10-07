@@ -23,6 +23,7 @@ import {
 import { CommandPalette } from "../components/CommandPalette";
 import { InitialBackendBootstrapSurface } from "../components/InitialBackendBootstrapSurface";
 import { OnboardingSurface } from "../components/OnboardingSurface";
+import { SplashScreen } from "../components/SplashScreen";
 import { DesktopNotificationWatcher } from "../components/DesktopNotificationWatcher";
 import { ProviderUpdateLaunchNotification } from "../components/ProviderUpdateLaunchNotification";
 import {
@@ -36,6 +37,7 @@ import {
   ToastProvider,
   toastManager,
 } from "../components/ui/toast";
+import { TooltipProvider } from "../components/ui/tooltip";
 import { resolveAndPersistPreferredEditor } from "../editorPreferences";
 import { readLocalApi } from "../localApi";
 import { useSettings } from "../hooks/useSettings";
@@ -91,12 +93,31 @@ export const Route = createRootRouteWithContext<{
       authGateState,
     };
   },
-  component: RootRouteView,
+  component: RootRouteWithTooltipGroup,
   errorComponent: RootRouteErrorView,
+  // While the environment/auth gate resolves on first load, keep showing the
+  // same logo index.html painted instead of a blank page. No minimum display
+  // time: the splash must never hold back a ready app.
+  pendingComponent: SplashScreen,
+  pendingMinMs: 0,
   head: () => ({
     meta: [{ name: "title", content: APP_DISPLAY_NAME }],
   }),
 });
+
+/**
+ * One app-wide tooltip group: the first tooltip waits for a deliberate hover,
+ * then neighbouring tooltips open instantly while the pointer moves between
+ * controls (until `timeout` passes with none open). Triggers that set their
+ * own `delay` keep it.
+ */
+function RootRouteWithTooltipGroup() {
+  return (
+    <TooltipProvider delay={400} closeDelay={0} timeout={400}>
+      <RootRouteView />
+    </TooltipProvider>
+  );
+}
 
 function RootRouteView() {
   const pathname = useLocation({ select: (location) => location.pathname });

@@ -21,7 +21,11 @@ describe("ComposerDictationButton", () => {
     await expect.element(button).toHaveAttribute("aria-pressed", "false");
     await button.click();
     expect(onToggle).toHaveBeenCalledOnce();
-    expect(document.querySelector('[data-composer-dictation="true"] svg')).not.toBeNull();
+    expect(
+      document.querySelector(
+        '[data-composer-dictation="true"] svg[data-dictation-glyph="mic"][data-visible="true"]',
+      ),
+    ).not.toBeNull();
   });
 
   it("announces recording and finalization without making the transcript a live region", async () => {
@@ -36,7 +40,9 @@ describe("ComposerDictationButton", () => {
       .element(page.getByRole("button", { name: "Stop dictation" }))
       .toHaveAttribute("aria-pressed", "true");
     expect(
-      document.querySelector('[data-composer-dictation="true"] svg.fill-current'),
+      document.querySelector(
+        '[data-composer-dictation="true"] svg.fill-current[data-dictation-glyph="stop"][data-visible="true"]',
+      ),
     ).not.toBeNull();
     await expect.element(page.getByRole("status")).toMatchTextContent("Listening");
 
@@ -49,8 +55,14 @@ describe("ComposerDictationButton", () => {
     );
     await expect.element(page.getByRole("button", { name: "Finishing dictation" })).toBeDisabled();
     expect(
-      document.querySelector('[data-composer-dictation="true"] svg.animate-spin'),
+      document.querySelector(
+        '[data-composer-dictation="true"] svg.animate-spin[data-dictation-glyph="spinner"][data-visible="true"]',
+      ),
     ).not.toBeNull();
+    // Hidden glyphs stay mounted for the crossfade but never animate.
+    expect(
+      document.querySelectorAll('[data-composer-dictation="true"] svg.animate-spin'),
+    ).toHaveLength(1);
     await expect.element(page.getByRole("status")).toMatchTextContent("Finishing dictation");
   });
 });

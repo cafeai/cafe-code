@@ -67,13 +67,8 @@ export function SidebarUpdatePill() {
         .downloadUpdate()
         .then((result) => {
           setDesktopUpdateStateQueryData(queryClient, result.state);
-          if (result.completed) {
-            toastManager.add({
-              type: "success",
-              title: "Update downloaded",
-              description: "Restart the app from the update button to install it.",
-            });
-          }
+          // A completed download needs no toast: this pill itself turns into
+          // "Restart to update".
           if (!shouldToastDesktopUpdateActionResult(result)) return;
           const actionError = getDesktopUpdateActionError(result);
           if (!actionError) return;
@@ -90,7 +85,8 @@ export function SidebarUpdatePill() {
             stackedThreadToast({
               type: "error",
               title: "Could not start update download",
-              description: error instanceof Error ? error.message : "An unexpected error occurred.",
+              description:
+                error instanceof Error ? error.message : "Try again from the update button.",
             }),
           );
         });
@@ -120,7 +116,8 @@ export function SidebarUpdatePill() {
             stackedThreadToast({
               type: "error",
               title: "Could not install update",
-              description: error instanceof Error ? error.message : "An unexpected error occurred.",
+              description:
+                error instanceof Error ? error.message : "Try again from the update button.",
             }),
           );
         });
@@ -132,7 +129,7 @@ export function SidebarUpdatePill() {
   return (
     <div className="flex flex-col gap-1">
       {showArm64Warning && arm64Description && (
-        <Alert variant="warning" className="rounded-2xl border-warning/40 bg-warning/8 text-xs">
+        <Alert variant="warning" className="rounded-2xl text-xs">
           <TriangleAlertIcon />
           <AlertTitle>Intel build on Apple Silicon</AlertTitle>
           <AlertDescription>{arm64Description}</AlertDescription>
@@ -144,7 +141,7 @@ export function SidebarUpdatePill() {
             disabled ? " cursor-not-allowed opacity-60" : ""
           }`}
         >
-          <div className="pointer-events-none absolute inset-0 rounded-lg transition-colors group-has-[button.update-main:hover]/update:bg-primary/22" />
+          <div className="pointer-events-none absolute inset-0 rounded-lg transition-colors duration-(--duration-fast) group-has-[button.update-main:hover]/update:bg-primary/22" />
           <Tooltip>
             <TooltipTrigger
               render={
@@ -194,7 +191,7 @@ export function SidebarUpdatePill() {
                   <button
                     type="button"
                     aria-label="Dismiss update"
-                    className="mr-1 inline-flex size-5 items-center justify-center rounded-md text-primary/60 transition-colors hover:text-primary"
+                    className="focus-ring mr-1 inline-flex size-5 items-center justify-center rounded-md text-subtle-foreground transition-colors duration-(--duration-fast) hover:text-primary"
                     onClick={() => setDismissed(true)}
                   >
                     <XIcon className="size-3.5" />

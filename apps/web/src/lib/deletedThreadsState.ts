@@ -69,7 +69,7 @@ function readDeletedThreadsError(
   }
 
   const error = Cause.squash(result.cause);
-  return error instanceof Error ? error.message : "Failed to load recently deleted threads.";
+  return error instanceof Error ? error.message : "Couldn't load recently deleted chats.";
 }
 
 export function refreshDeletedThreadsForEnvironment(environmentId: EnvironmentId): void {

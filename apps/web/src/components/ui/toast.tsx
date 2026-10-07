@@ -15,7 +15,6 @@ import { type ScopedThreadRef, type ThreadId } from "@cafecode/contracts";
 import {
   CheckIcon,
   ChevronDownIcon,
-  ChevronUpIcon,
   CircleAlertIcon,
   CircleCheckIcon,
   CopyIcon,
@@ -27,6 +26,7 @@ import {
 
 import { cn } from "~/lib/utils";
 import { buttonVariants } from "~/components/ui/button";
+import { POPUP_MOTION_CLASS_NAME } from "~/components/ui/popupMotion";
 import { useComposerDraftStore } from "~/composerDraftStore";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { resolveThreadRouteTarget } from "~/threadRoutes";
@@ -97,8 +97,8 @@ function errorDescriptionClampClass(type: unknown, description: unknown): string
 /** Dismiss-only: circular control overlapping the card corner (iOS notification–style). */
 const toastCornerDismissClass = "absolute z-20 -top-1.5 -right-1.5";
 const toastCornerOrbClass = cn(
-  "inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-full border border-border/60 bg-popover/92 text-muted-foreground shadow-sm outline-none backdrop-blur-sm",
-  "transition-[color,background-color,box-shadow] hover:bg-popover hover:text-foreground",
+  "inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-full border border-border-subtle bg-popover/92 text-muted-foreground shadow-sm outline-none backdrop-blur-sm",
+  "transition-[color,background-color,box-shadow] duration-(--duration-fast) hover:bg-popover hover:text-foreground",
   "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background",
 );
 
@@ -116,7 +116,7 @@ function CopyErrorButton({ text }: { text: string }) {
 
   return (
     <button
-      className="inline-flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-md p-0 text-muted-foreground/80 transition-colors hover:text-muted-foreground"
+      className="inline-flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-md p-0 text-subtle-foreground transition-colors duration-(--duration-fast) hover:text-foreground"
       onClick={() => copyToClipboard(text)}
       title="Copy error"
       type="button"
@@ -126,9 +126,25 @@ function CopyErrorButton({ text }: { text: string }) {
   );
 }
 
-/** Scrollable cap for long expandable lists (~10rem); keeps the toast from growing without bound. */
+/** Scrollable cap for long expandable lists (~10rem); keeps the toast from growing without bound.
+ * Revealed details rise in once (docs/style-guide.md §8, expand/collapse). */
 const toastExpandablePanelClassName =
-  "mt-2 max-h-40 min-h-0 overflow-y-auto overscroll-contain pr-0.5 select-text";
+  "mt-2 max-h-40 min-h-0 animate-enter-rise overflow-y-auto overscroll-contain pr-0.5 select-text";
+
+/** One chevron that turns to show the expanded state, instead of swapping icons. */
+function ToastDisclosureChevron({ open, className }: { open: boolean; className?: string }) {
+  return (
+    <ChevronDownIcon
+      aria-hidden
+      className={cn(
+        "size-3.5 shrink-0 opacity-80 transition-[rotate] duration-(--duration-fast) ease-out motion-reduce:transition-none",
+        open && "rotate-180",
+        className,
+      )}
+      strokeWidth={2.25}
+    />
+  );
+}
 
 function ToastExpandableSection({
   children,
@@ -145,15 +161,11 @@ function ToastExpandableSection({
     <div className="min-w-0">
       <button
         aria-expanded={open}
-        className="inline-flex cursor-pointer items-center gap-1 rounded-md py-0.5 text-left text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+        className="inline-flex cursor-pointer items-center gap-1 rounded-md py-0.5 text-left text-xs font-medium text-muted-foreground transition-colors duration-(--duration-fast) hover:text-foreground"
         onClick={() => setOpen((prev) => !prev)}
         type="button"
       >
-        {open ? (
-          <ChevronUpIcon className="size-3.5 shrink-0 opacity-80" strokeWidth={2.25} />
-        ) : (
-          <ChevronDownIcon className="size-3.5 shrink-0 opacity-80" strokeWidth={2.25} />
-        )}
+        <ToastDisclosureChevron open={open} />
         {open ? collapseLabel : expandLabel}
       </button>
       {open ? <div className={toastExpandablePanelClassName}>{children}</div> : null}
@@ -228,19 +240,7 @@ function ToastDescriptionAndExpandable({
             data-slot="toast-description"
           />
         </div>
-        {open ? (
-          <ChevronUpIcon
-            aria-hidden
-            className="mt-0.5 size-3.5 shrink-0 text-muted-foreground opacity-80"
-            strokeWidth={2.25}
-          />
-        ) : (
-          <ChevronDownIcon
-            aria-hidden
-            className="mt-0.5 size-3.5 shrink-0 text-muted-foreground opacity-80"
-            strokeWidth={2.25}
-          />
-        )}
+        <ToastDisclosureChevron open={open} className="mt-0.5 text-muted-foreground" />
       </div>
       {open ? <div className={toastExpandablePanelClassName}>{expandableContent}</div> : null}
     </>
@@ -551,7 +551,19 @@ function Toasts({ position = "top-right" }: { position: ToastPosition }) {
           return (
             <Toast.Root
               className={cn(
-                "absolute z-[calc(9999-var(--toast-index))] w-full overflow-visible select-none rounded-lg border bg-popover not-dark:bg-clip-padding text-popover-foreground shadow-lg/5 [transition:transform_.5s_cubic-bezier(.22,1,.36,1),opacity_.5s,height_.15s] before:pointer-events-none before:absolute before:inset-0 before:rounded-[calc(var(--radius-lg)-1px)] before:shadow-[0_1px_--theme(--color-black/4%)] dark:before:shadow-[0_-1px_--theme(--color-white/6%)]",
+                "absolute z-[calc(9999-var(--toast-index))] w-full overflow-visible select-none rounded-lg border bg-popover not-dark:bg-clip-padding text-popover-foreground shadow-lg/5 before:pointer-events-none before:absolute before:inset-0 before:rounded-[calc(var(--radius-lg)-1px)] before:shadow-[0_1px_--theme(--color-black/4%)] dark:before:shadow-[0_-1px_--theme(--color-white/6%)]",
+                // Motion (docs/style-guide.md §8): slide + fade in over the emphasis
+                // duration with ease-out (stack reflow uses the same curve), and
+                // leave faster with ease-in. Base UI disables the transition inline
+                // while a swipe is in progress, so drags still track the pointer.
+                "[transition:transform_var(--duration-emphasis)_var(--ease-out),opacity_var(--duration-emphasis)_var(--ease-out),height_.15s] data-starting-style:opacity-0",
+                "data-ending-style:[transition:transform_var(--duration-base)_var(--ease-in),opacity_var(--duration-base)_var(--ease-in),height_.15s]",
+                // Reduced motion: the stack transforms (not covered by the global
+                // translate/scale rule) jump instead of sliding and only opacity
+                // fades. On exit the off-screen transform waits until the fade has
+                // finished, so the toast fades in place rather than vanishing.
+                "motion-reduce:[transition:opacity_var(--duration-base)_var(--ease-out),height_.15s]",
+                "motion-reduce:data-ending-style:[transition:opacity_var(--duration-fast)_var(--ease-in),transform_0s_linear_var(--duration-fast),height_.15s]",
                 // Base positioning using data-position
                 "data-[position*=right]:right-0 data-[position*=right]:left-auto",
                 "data-[position*=left]:right-auto data-[position*=left]:left-0",
@@ -641,7 +653,7 @@ function Toasts({ position = "top-right" }: { position: ToastPosition }) {
                 className={cn(
                   // `overflow-x: clip` avoids the CSS quirk where pairing `hidden` + `y: visible`
                   // forces `y` to `auto`. Expandable detail panels can extend below without being cut off.
-                  "pointer-events-auto min-h-0 overflow-y-visible pl-3.5 text-sm transition-opacity duration-250 [overflow-x:clip] data-expanded:opacity-100",
+                  "pointer-events-auto min-h-0 overflow-y-visible pl-3.5 text-sm transition-opacity duration-(--duration-slow) ease-out [overflow-x:clip] data-expanded:opacity-100",
                   stackedActionLayout
                     ? "flex flex-col gap-2 py-2.5 pr-3.5"
                     : cn("py-3", "flex items-center justify-between gap-1.5", inlineContentEndPad),
@@ -703,7 +715,9 @@ function AnchoredToasts() {
               >
                 <Toast.Root
                   className={cn(
-                    "relative overflow-visible text-balance border bg-popover not-dark:bg-clip-padding text-popover-foreground text-xs transition-[scale,opacity] before:pointer-events-none before:absolute before:inset-0 before:shadow-[0_1px_--theme(--color-black/4%)] data-ending-style:scale-98 data-starting-style:scale-98 data-ending-style:opacity-0 data-starting-style:opacity-0 dark:before:shadow-[0_-1px_--theme(--color-white/6%)]",
+                    "relative overflow-visible text-balance border bg-popover not-dark:bg-clip-padding text-popover-foreground text-xs transition-[scale,opacity] before:pointer-events-none before:absolute before:inset-0 before:shadow-[0_1px_--theme(--color-black/4%)] dark:before:shadow-[0_-1px_--theme(--color-white/6%)]",
+                    // Anchored toasts behave like popovers at their anchor.
+                    POPUP_MOTION_CLASS_NAME,
                     tooltipStyle
                       ? "rounded-md shadow-md/5 before:rounded-[calc(var(--radius-md)-1px)]"
                       : "rounded-lg shadow-lg/5 before:rounded-[calc(var(--radius-lg)-1px)]",

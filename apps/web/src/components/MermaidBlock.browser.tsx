@@ -89,9 +89,7 @@ describe("Mermaid block", () => {
     const screen = await render(<MermaidBlock code={source} complete theme="light" />);
     try {
       await expect
-        .element(
-          page.getByText("This diagram could not be rendered. Its source is available below."),
-        )
+        .element(page.getByText("Couldn't render this diagram. Showing its source."))
         .toBeVisible();
       expect(document.querySelector(".mermaid-source code")?.textContent).toBe(source);
       expect(document.body.textContent).not.toContain("private-exception");

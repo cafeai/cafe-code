@@ -1,12 +1,15 @@
 import { type ApprovalRequestId, type ProviderApprovalDecision } from "@cafecode/contracts";
 import { memo, useEffect, useRef } from "react";
 import { Button } from "../ui/button";
+import { InfoTip } from "../ui/info-tip";
 
 interface ComposerPendingApprovalActionsProps {
   requestId: ApprovalRequestId;
   isResponding: boolean;
   defaultToNo?: boolean;
   suppressAlwaysAllowRule?: boolean;
+  /** Session approval of a network request grants its destination, not one call. */
+  networkApproval?: boolean;
   onRespondToApproval: (
     requestId: ApprovalRequestId,
     decision: ProviderApprovalDecision,
@@ -18,6 +21,7 @@ export const ComposerPendingApprovalActions = memo(function ComposerPendingAppro
   isResponding,
   defaultToNo = false,
   suppressAlwaysAllowRule = false,
+  networkApproval = false,
   onRespondToApproval,
 }: ComposerPendingApprovalActionsProps) {
   const declineRef = useRef<HTMLButtonElement>(null);
@@ -46,14 +50,21 @@ export const ComposerPendingApprovalActions = memo(function ComposerPendingAppro
         Decline
       </Button>
       {!suppressAlwaysAllowRule && (
-        <Button
-          size="sm"
-          variant="outline"
-          disabled={isResponding}
-          onClick={() => void onRespondToApproval(requestId, "acceptForSession")}
-        >
-          Always allow this session
-        </Button>
+        <span className="inline-flex items-center gap-1">
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={isResponding}
+            onClick={() => void onRespondToApproval(requestId, "acceptForSession")}
+          >
+            Always allow this session
+          </Button>
+          <InfoTip label="About session approval">
+            {networkApproval
+              ? "Allows this network destination until the provider session ends."
+              : "Allows matching requests until the provider session ends."}
+          </InfoTip>
+        </span>
       )}
       <Button
         size="sm"

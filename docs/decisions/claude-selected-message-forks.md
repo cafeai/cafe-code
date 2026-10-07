@@ -54,6 +54,19 @@ root changes invalidate preparation; unrelated conversations remain independent.
 The writer-held authority check uses two indexed latest-event seeks, not a scan
 of growing transcript history.
 
+The engine's startup command snapshot intentionally omits message and checkpoint
+bodies. A selected-fork commit reloads only its bounded source detail under the
+same SQLite writer and source-version guard before checking the message boundary
+and projecting the target prefix. It rechecks complete message-count admission
+and restores the source's lightweight command-cache entry after committing. A
+restart must not turn a verified native fork into a false missing-message error.
+
+Inline fork controls use the existing message-action hover/focus treatment. Hide
+them while the chat is working, its turn is unsettled, a fork is pending, or its
+known subagents/approvals/questions are active. Require the selected account to
+match a ready Claude session; stopped or unavailable sources do not expose the
+action. Server-native whole-tree and exact-message admission remain authoritative.
+
 ## Immutable snapshot and unchanged source
 
 Both full and selected Claude forks use the rewind reader's bounded, no-follow,

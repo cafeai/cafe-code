@@ -35,6 +35,18 @@ function activity(itemId: string, digest = "a".repeat(64)): OrchestrationThreadA
 }
 
 describe("inline async question identity", () => {
+  it("reads server handling without any local receipts and keeps question identities stable", async () => {
+    const row = activity("item");
+    const original = await deriveAsyncQuestions("local", "thread", [row]);
+    const resolved = await deriveAsyncQuestions("local", "thread", [
+      { ...row, payload: { ...(row.payload as object), handledQuestionIndexes: [0] } },
+    ]);
+    expect(resolved.map((question) => question.id)).toEqual(
+      original.map((question) => question.id),
+    );
+    expect(resolved[0]).toMatchObject({ handled: true, activityId: row.id, questionIndex: 0 });
+    expect(resolved[1]).toMatchObject({ handled: false, activityId: row.id, questionIndex: 1 });
+  });
   it("retains SHA-256 identity on a plain HTTP client without SubtleCrypto", async () => {
     vi.stubGlobal("crypto", undefined);
     try {

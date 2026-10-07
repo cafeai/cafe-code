@@ -1,6 +1,8 @@
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Exit from "effect/Exit";
+import * as Deferred from "effect/Deferred";
+import * as Scope from "effect/Scope";
 import * as PlatformError from "effect/PlatformError";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
@@ -111,6 +113,56 @@ const exitZeroSpawnerLayer = Layer.succeed(
       }),
     ),
   ),
+);
+
+it.effect("retires a parent-scoped runtime without recording an unexpected exit", () =>
+  Effect.gen(function* () {
+    const exited = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
+    const scope = yield* Scope.make("sequential");
+    let released = false;
+    const spawner = ChildProcessSpawner.make(() =>
+      Effect.acquireRelease(
+        Effect.succeed(
+          ChildProcessSpawner.makeHandle({
+            pid: ChildProcessSpawner.ProcessId(7_002),
+            exitCode: Deferred.await(exited),
+            isRunning: Effect.succeed(true),
+            kill: () =>
+              Deferred.succeed(exited, ChildProcessSpawner.ExitCode(0)).pipe(Effect.asVoid),
+            unref: Effect.succeed(Effect.void),
+            stdin: Sink.drain,
+            stdout: Stream.never,
+            stderr: Stream.never,
+            all: Stream.never,
+            getInputFd: () => Sink.drain,
+            getOutputFd: () => Stream.never,
+          }),
+        ),
+        () =>
+          Effect.gen(function* () {
+            released = true;
+            yield* Deferred.succeed(exited, ChildProcessSpawner.ExitCode(0));
+          }),
+      ),
+    );
+    const runtime = yield* makeCodexSessionRuntime({
+      threadId: ThreadId.make("thread-planned-exit"),
+      binaryPath: "/test-only/codex",
+      cwd: "/test-only/workspace",
+      runtimeMode: "full-access",
+    }).pipe(
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      Effect.provideService(Scope.Scope, scope),
+    );
+    yield* Scope.close(scope, Exit.void);
+    assert.equal(released, true);
+    const session = yield* runtime.getSession;
+    assert.notEqual(session.status, "error");
+    assert.equal(session.lastError, undefined);
+    // Parent retirement fences subsequent idle admission even when explicit
+    // runtime.close was not called by the owner before its scope ended.
+    assert.equal(yield* runtime.closeIfIdle!, false);
+  }),
 );
 
 it.effect("publishes an unrequested zero exit as a visible error before session/exited", () =>

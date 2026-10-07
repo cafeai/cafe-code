@@ -4,11 +4,12 @@ Cafe chats can exist without a project or repository. **Desk** organizes open
 tabs; **Projects** contains the saved project/chat catalog. A tab's group does
 not determine its project association.
 
-- Click the new-thread icon beside **Chats** in Projects, or beside **Open chats**
-  in Desk, to open a standalone editor. The selected sidebar view stays selected.
+- Click the New chat icon beside **Chats** in Projects, or use the global New chat
+  shortcut, to open a standalone editor. Desk has no new-chat heading button.
+  The selected sidebar view stays selected.
   No folder is required, even when you have no projects.
 - To create a project-associated chat, use that project's existing New chat
-  action. The standalone new-thread icons do not choose the current project.
+  action. The standalone New chat icon does not choose the current project.
 - A new chat stays in a pending editor until you press **Send**, just like a
   project draft. It adds no tab, Open chats row/count or saved Chats entry before
   that send. Pressing the icon again reopens your unfinished draft with its text,

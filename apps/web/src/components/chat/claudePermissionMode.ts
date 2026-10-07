@@ -22,7 +22,7 @@ export interface ClaudePermissionModeState {
 
 const CLAUDE_MANUAL_PERMISSION_MODE_OPTION = {
   id: "default",
-  label: "Manual",
+  label: "Ask permissions",
   description: "Ask before edits and commands.",
 } as const;
 
@@ -72,7 +72,7 @@ export const GROK_PERMISSION_MODE_OPTIONS: typeof CLAUDE_PERMISSION_MODE_OPTIONS
   {
     id: "auto",
     label: "Auto",
-    description: "Run autonomously with Grok's native Auto permission mode.",
+    description: "Run autonomously with Grok's Auto permission mode.",
   },
   {
     id: "bypassPermissions",
@@ -110,7 +110,7 @@ export function getClaudePermissionModeOption(mode: ClaudePermissionMode): {
 /**
  * Match Claude Code's Shift+Tab cycle. Bypass permissions is an explicit
  * dangerous opt-in outside the normal four-state cycle; pressing Shift+Tab
- * while it is selected returns to Manual instead of silently cycling back
+ * while it is selected returns to Ask permissions instead of silently cycling back
  * into an unrestricted mode later.
  */
 export function getNextClaudePermissionMode(mode: ClaudePermissionMode): ClaudePermissionMode {
@@ -146,7 +146,7 @@ export function deriveClaudePermissionMode(state: ClaudePermissionModeState): Cl
  * Plan and Auto are upstream interaction modes, so they preserve the access
  * policy underneath them. This allows a session to leave Plan/Auto through a
  * live SDK `setPermissionMode` request without restarting merely to rewrite
- * the generic runtime policy. Selecting Manual, Accept edits, or Bypass is an
+ * the generic runtime policy. Selecting Ask permissions, Accept edits, or Bypass is an
  * explicit access-policy choice and therefore updates both fields.
  */
 export function applyClaudePermissionMode(

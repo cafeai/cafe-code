@@ -169,7 +169,7 @@ export function gitPreparePullRequestThreadMutationOptions(input: {
       threadId?: ThreadId;
     }) => {
       if (!input.cwd || !input.environmentId) {
-        throw new Error("Pull request thread preparation is unavailable.");
+        throw new Error("Opening a pull request in a chat isn't available.");
       }
       const api = ensureEnvironmentApi(input.environmentId);
       return api.git.preparePullRequestThread({

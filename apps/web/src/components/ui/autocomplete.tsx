@@ -5,6 +5,7 @@ import { ChevronsUpDownIcon, XIcon } from "lucide-react";
 
 import { cn } from "~/lib/utils";
 import { Input } from "~/components/ui/input";
+import { POPUP_MOTION_CLASS_NAME } from "~/components/ui/popupMotion";
 import { ScrollArea } from "~/components/ui/scroll-area";
 
 const Autocomplete = AutocompletePrimitive.Root;
@@ -26,7 +27,7 @@ function AutocompleteInput({
   const sizeValue = (size ?? "default") as "sm" | "default" | "lg" | number;
 
   return (
-    <div className="relative not-has-[>*.w-full]:w-fit w-full text-foreground has-disabled:opacity-64">
+    <div className="relative not-has-[>*.w-full]:w-fit w-full text-foreground has-disabled:opacity-50">
       {startAddon && (
         <div
           aria-hidden="true"
@@ -102,20 +103,19 @@ function AutocompletePopup({
         side={side}
         sideOffset={sideOffset}
       >
-        <span
+        {/* The surface lives on the Popup itself so Base UI's starting/ending
+            attributes and exit wait apply to what the user sees. */}
+        <AutocompletePrimitive.Popup
           className={cn(
-            "relative flex max-h-full min-w-(--anchor-width) max-w-(--available-width) origin-(--transform-origin) rounded-lg border bg-popover not-dark:bg-clip-padding shadow-lg/5 transition-[scale,opacity] before:pointer-events-none before:absolute before:inset-0 before:rounded-[calc(var(--radius-lg)-1px)] before:shadow-[0_1px_--theme(--color-black/4%)] dark:before:shadow-[0_-1px_--theme(--color-white/6%)]",
+            "relative flex max-h-[min(var(--available-height),23rem)] min-w-(--anchor-width) max-w-(--available-width) flex-col rounded-lg border bg-popover not-dark:bg-clip-padding text-foreground shadow-lg/5 transition-[scale,opacity] before:pointer-events-none before:absolute before:inset-0 before:rounded-[calc(var(--radius-lg)-1px)] before:shadow-[0_1px_--theme(--color-black/4%)] dark:before:shadow-[0_-1px_--theme(--color-white/6%)]",
+            POPUP_MOTION_CLASS_NAME,
             className,
           )}
+          data-slot="autocomplete-popup"
+          {...props}
         >
-          <AutocompletePrimitive.Popup
-            className="flex max-h-[min(var(--available-height),23rem)] flex-1 flex-col text-foreground"
-            data-slot="autocomplete-popup"
-            {...props}
-          >
-            {children}
-          </AutocompletePrimitive.Popup>
-        </span>
+          {children}
+        </AutocompletePrimitive.Popup>
       </AutocompletePrimitive.Positioner>
     </AutocompletePrimitive.Portal>
   );
@@ -125,7 +125,7 @@ function AutocompleteItem({ className, children, ...props }: AutocompletePrimiti
   return (
     <AutocompletePrimitive.Item
       className={cn(
-        "flex min-h-8 cursor-default select-none items-center rounded-sm px-2 py-1 text-base outline-none hover:bg-accent data-disabled:pointer-events-none data-selected:bg-accent/50 data-selected:text-foreground data-highlighted:bg-accent data-highlighted:text-accent-foreground [&[data-highlighted][data-selected]]:bg-accent [&[data-highlighted][data-selected]]:text-accent-foreground data-disabled:opacity-64 sm:min-h-7 sm:text-sm",
+        "flex min-h-8 cursor-default select-none items-center rounded-sm px-2 py-1 text-base outline-none hover:bg-accent data-disabled:pointer-events-none data-selected:bg-accent/50 data-selected:text-foreground data-highlighted:bg-accent data-highlighted:text-accent-foreground [&[data-highlighted][data-selected]]:bg-accent [&[data-highlighted][data-selected]]:text-accent-foreground data-disabled:opacity-50 sm:min-h-7 sm:text-sm",
         className,
       )}
       data-slot="autocomplete-item"

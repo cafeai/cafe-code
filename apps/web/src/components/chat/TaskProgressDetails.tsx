@@ -37,12 +37,10 @@ export const TaskProgressDetails = memo(function TaskProgressDetails(props: {
       {subagents.length > 0 ? (
         <section
           aria-label="Active subagents"
-          className={cn(hasPlan && "mb-3 border-border/55 border-b pb-3")}
+          className={cn(hasPlan && "mb-3 border-border-subtle border-b pb-3")}
           data-composer-subagent-list="true"
         >
-          <p className="mb-1 text-[9px] font-medium uppercase tracking-[0.16em] text-muted-foreground/55">
-            Active subagents
-          </p>
+          <p className="mb-1 text-xs font-medium text-muted-foreground">Active subagents</p>
           <div className="space-y-0.5">
             {subagents.map((entry) => (
               <SubagentRosterRow
@@ -85,9 +83,9 @@ export const TaskProgressDetails = memo(function TaskProgressDetails(props: {
                 <span
                   className={cn(
                     "mt-0.5 inline-flex size-4 shrink-0 items-center justify-center",
-                    status === "completed" && "text-emerald-600 dark:text-emerald-400",
-                    status === "current" && "text-primary",
-                    status === "pending" && "text-muted-foreground/65",
+                    status === "completed" && "text-status-done",
+                    status === "current" && "text-status-running",
+                    status === "pending" && "text-subtle-foreground",
                   )}
                   aria-hidden="true"
                 >

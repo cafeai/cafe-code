@@ -43,7 +43,7 @@ export function SessionPlacementButton(props: {
       title={label}
       data-session-rail-dock={props.placement === "side" ? "true" : undefined}
       data-session-rail-undock={props.placement === "composer" ? "true" : undefined}
-      className="text-muted-foreground/50 hover:text-foreground/70"
+      className="text-subtle-foreground hover:text-foreground"
     >
       <Icon className="size-3.5" />
     </Button>
@@ -85,13 +85,17 @@ export const SessionRail = memo(
         ref={ref}
         tabIndex={-1}
         data-session-rail="true"
-        className={cn("flex min-h-0 w-full flex-1 flex-col outline-none", props.className)}
+        className={cn(
+          // Docking slides the rail in from its edge (docs/style-guide.md §8).
+          "flex min-h-0 w-full flex-1 animate-enter-from-end flex-col outline-none",
+          props.className,
+        )}
       >
-        <div className="flex h-12 shrink-0 items-center justify-between border-b border-border/60 px-3">
+        <div className="flex h-12 shrink-0 items-center justify-between border-b border-border-subtle px-3">
           <div className="flex min-w-0 items-baseline gap-2">
             <h2 className="text-sm font-medium leading-5">Tasks</h2>
             {hasPlan || hasSubagents ? (
-              <span className="shrink-0 text-muted-foreground text-xs">
+              <span className="shrink-0 text-muted-foreground text-xs tabular-nums">
                 {hasPlan ? `${completedCount} of ${total} completed` : null}
                 {hasPlan && hasSubagents ? " · " : null}
                 {hasSubagents ? `${subagents.length} active` : null}
@@ -116,7 +120,7 @@ export const SessionRail = memo(
                 onOpenSubagentDetail={props.onOpenSubagentDetail}
               />
             ) : !hasProviderTasks ? (
-              <p className="text-[13px] text-muted-foreground/40">No tasks yet.</p>
+              <p className="text-ui text-subtle-foreground">No tasks yet.</p>
             ) : null}
             {props.scheduledFollowups ? (
               <ScheduledFollowups
@@ -131,7 +135,7 @@ export const SessionRail = memo(
             even when a plan shares the side column. The min-height flex chain
             shrinks only the quota list; reset availability stays below it. */}
         <div
-          className="flex max-h-[70%] min-h-0 shrink-0 flex-col border-t border-border/60 px-3 py-3"
+          className="flex max-h-[70%] min-h-0 shrink-0 flex-col border-t border-border-subtle px-3 py-3"
           data-session-rail-usage="true"
         >
           <ContextWindowDetails

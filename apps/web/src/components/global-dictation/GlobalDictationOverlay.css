@@ -15,13 +15,9 @@ body:has(.cafe-global-dictation) {
   height: 100%;
   padding: 9px;
   color: var(--gd-white);
-  font-family:
-    Inter,
-    ui-sans-serif,
-    -apple-system,
-    BlinkMacSystemFont,
-    "Segoe UI",
-    sans-serif;
+  /* The app's bundled DM Sans (index.css loads it for this window too); Inter
+     was never loaded, so the panel previously fell back to the system font. */
+  font-family: var(--font-sans, ui-sans-serif, system-ui, sans-serif);
   -webkit-app-region: no-drag;
 }
 
@@ -60,7 +56,7 @@ body:has(.cafe-global-dictation) {
 
 .cafe-global-dictation__brand {
   color: #b5c3d2;
-  font-size: 10px;
+  font-size: 0.6875rem;
   font-weight: 750;
   letter-spacing: 0.17em;
   text-transform: uppercase;
@@ -83,8 +79,8 @@ body:has(.cafe-global-dictation) {
   color: #e6f1fa;
   cursor: pointer;
   transition:
-    background-color 140ms ease,
-    border-color 140ms ease;
+    background-color var(--duration-fast) cubic-bezier(0.2, 0.8, 0.2, 1),
+    border-color var(--duration-fast) cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .cafe-global-dictation__icon-button:hover,
@@ -102,13 +98,6 @@ body:has(.cafe-global-dictation) {
 .cafe-global-dictation button:disabled {
   cursor: not-allowed;
   opacity: 0.5;
-}
-
-.cafe-global-dictation__subtle {
-  margin: 0;
-  color: var(--gd-muted);
-  font-size: 12px;
-  line-height: 1.45;
 }
 
 .cafe-global-dictation__recording {
@@ -147,14 +136,10 @@ body:has(.cafe-global-dictation) {
 .cafe-global-dictation__recording h1 {
   margin: 0;
   color: var(--gd-white);
-  font-size: 21px;
+  font-size: 1.3125rem;
   font-weight: 675;
   letter-spacing: -0.035em;
   line-height: 1.15;
-}
-
-.cafe-global-dictation__recording-center .cafe-global-dictation__subtle {
-  margin-top: 5px;
 }
 
 .cafe-global-dictation__live-transcript {
@@ -165,7 +150,7 @@ body:has(.cafe-global-dictation) {
   overflow: hidden;
   margin: 14px 0 0;
   color: #dae6f0;
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 1.75;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -183,7 +168,7 @@ body:has(.cafe-global-dictation) {
 
 .cafe-global-dictation__recording-footer > span {
   color: #a8b8c8;
-  font-size: 11px;
+  font-size: 0.6875rem;
 }
 
 .cafe-global-dictation__recording button,
@@ -204,11 +189,11 @@ body:has(.cafe-global-dictation) {
   box-shadow: 0 4px 15px rgba(80, 209, 235, 0.17);
   color: #142831;
   cursor: pointer;
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 750;
   transition:
-    filter 140ms ease,
-    transform 140ms ease;
+    filter var(--duration-fast) cubic-bezier(0.2, 0.8, 0.2, 1),
+    transform var(--duration-fast) cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .cafe-global-dictation__primary-button:not(:disabled):hover {
@@ -257,7 +242,7 @@ body:has(.cafe-global-dictation) {
 .cafe-global-dictation__style-heading > span:first-child,
 .cafe-global-dictation__command-row > div > span {
   color: #e6f0f8;
-  font-size: 11px;
+  font-size: 0.6875rem;
   font-weight: 700;
 }
 
@@ -275,7 +260,7 @@ body:has(.cafe-global-dictation) {
   box-shadow: inset 0 1px 5px rgba(0, 0, 0, 0.1);
   color: #f5fbff;
   font-family: inherit;
-  font-size: 14px;
+  font-size: 0.875rem;
   line-height: 1.55;
 }
 
@@ -294,7 +279,7 @@ body:has(.cafe-global-dictation) {
 .cafe-global-dictation__draft-meta {
   margin: 6px 1px;
   color: #91a5b7;
-  font-size: 10px;
+  font-size: 0.6875rem;
 }
 
 .cafe-global-dictation__draft-meta button,
@@ -303,7 +288,7 @@ body:has(.cafe-global-dictation) {
   background: transparent;
   color: #b8e5f0;
   cursor: pointer;
-  font-size: 11px;
+  font-size: 0.6875rem;
   font-weight: 600;
 }
 
@@ -316,7 +301,7 @@ body:has(.cafe-global-dictation) {
 .cafe-global-dictation__original-comparison {
   margin: 0 0 10px;
   color: #a8bdcb;
-  font-size: 10px;
+  font-size: 0.6875rem;
 }
 
 .cafe-global-dictation__original-comparison summary {
@@ -331,16 +316,10 @@ body:has(.cafe-global-dictation) {
   border-left: 2px solid rgba(142, 225, 244, 0.3);
   padding: 3px 0 3px 9px;
   color: #c8d7e2;
-  font-size: 11px;
+  font-size: 0.6875rem;
   line-height: 1.45;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-}
-
-.cafe-global-dictation__style-heading > span:last-child,
-.cafe-global-dictation__draft-heading > span {
-  color: #8da1b2;
-  font-size: 10px;
 }
 
 .cafe-global-dictation__styles {
@@ -362,11 +341,11 @@ body:has(.cafe-global-dictation) {
   background: rgba(229, 242, 255, 0.08);
   color: #e8f2f9;
   cursor: pointer;
-  font-size: 11px;
+  font-size: 0.6875rem;
   font-weight: 620;
   transition:
-    background-color 140ms ease,
-    border-color 140ms ease;
+    background-color var(--duration-fast) cubic-bezier(0.2, 0.8, 0.2, 1),
+    border-color var(--duration-fast) cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .cafe-global-dictation__style-chip {
@@ -405,7 +384,7 @@ body:has(.cafe-global-dictation) {
   background: rgba(7, 15, 23, 0.4);
   color: var(--gd-white);
   font: inherit;
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.4;
 }
 
@@ -413,7 +392,7 @@ body:has(.cafe-global-dictation) {
 .cafe-global-dictation__custom-actions > span {
   margin: 0;
   color: var(--gd-muted);
-  font-size: 10px;
+  font-size: 0.6875rem;
   line-height: 1.4;
 }
 
@@ -431,7 +410,7 @@ body:has(.cafe-global-dictation) {
   padding: 10px 12px;
   background: rgba(137, 96, 30, 0.18);
   color: #f9e9bd;
-  font-size: 11px;
+  font-size: 0.6875rem;
   line-height: 1.4;
 }
 
@@ -453,7 +432,7 @@ body:has(.cafe-global-dictation) {
   background: rgba(249, 233, 189, 0.09);
   color: #fff4d5;
   cursor: pointer;
-  font-size: 10px;
+  font-size: 0.6875rem;
 }
 
 .cafe-global-dictation__command-row {
@@ -474,7 +453,7 @@ body:has(.cafe-global-dictation) {
 
 .cafe-global-dictation__command-row small {
   color: #9aabba;
-  font-size: 10px;
+  font-size: 0.6875rem;
   line-height: 1.35;
 }
 
@@ -493,7 +472,7 @@ body:has(.cafe-global-dictation) {
 .cafe-global-dictation__feedback {
   margin: 0 0 9px;
   color: #c9eaf2;
-  font-size: 11px;
+  font-size: 0.6875rem;
   line-height: 1.4;
 }
 
@@ -506,7 +485,7 @@ body:has(.cafe-global-dictation) {
   width: 100%;
   margin: 0;
   color: #a8bdcb;
-  font-size: 10px;
+  font-size: 0.6875rem;
   line-height: 1.35;
 }
 

@@ -117,6 +117,35 @@ function Catalog() {
   );
 }
 
+it("steps between servers with arrows, respects list bounds and preserves Settings", async () => {
+  fixture.pathname = "/settings/appearance";
+  const screen = await render(
+    <WorkspaceEnvironmentProvider>
+      <WorkspaceEnvironmentSelector />
+      <Current />
+    </WorkspaceEnvironmentProvider>,
+  );
+  try {
+    await expect.element(screen.getByRole("button", { name: "Previous server" })).toBeDisabled();
+    await screen.getByRole("button", { name: "Next server" }).click();
+    await expect.element(screen.getByTestId("workspace")).toHaveTextContent(remote);
+    await expect.element(screen.getByRole("button", { name: "Next server" })).toBeDisabled();
+    expect(fixture.navigate).not.toHaveBeenCalled();
+    fixture.pathname = "/remote/chat";
+    await screen.rerender(
+      <WorkspaceEnvironmentProvider>
+        <WorkspaceEnvironmentSelector />
+        <Current />
+      </WorkspaceEnvironmentProvider>,
+    );
+    await screen.getByRole("button", { name: "Previous server" }).click();
+    await expect.element(screen.getByTestId("workspace")).toHaveTextContent(local);
+    expect(fixture.navigate).toHaveBeenCalledWith({ to: "/" });
+  } finally {
+    await screen.unmount();
+  }
+});
+
 function ThemeAndBack() {
   const { theme, setTheme } = useTheme();
   const back = useSettingsBackNavigation();
@@ -464,7 +493,9 @@ it("supports keyboard server selection and canceling without switching, while re
     await userEvent.keyboard("{Escape}");
     await expect.element(screen.getByTestId("workspace")).toHaveTextContent(local);
     expect(fixture.navigate).not.toHaveBeenCalled();
-    expect(document.activeElement).toBe(trigger.element());
+    // Base UI returns focus to the trigger once the popup's exit transition
+    // has finished and it unmounts, so wait for that rather than sampling once.
+    await expect.element(trigger).toHaveFocus();
     await userEvent.keyboard("{ArrowDown}");
     await expect.element(page.getByRole("listbox")).toBeVisible();
     await userEvent.keyboard("{End}");

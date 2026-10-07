@@ -295,15 +295,20 @@ function formatSnapshot(
   }
   const individual = snapshot.individualLimit;
   if (individual) {
-    append("Individual spend limit", `${individual.used} used of ${individual.limit}`);
-    if (Number.isFinite(individual.remainingPercent)) {
-      append("Individual spend remaining", `${formatPercentage(individual.remainingPercent)} left`);
-    }
+    // One row for one limit: amount, remaining share and reset together.
+    const remaining = Number.isFinite(individual.remainingPercent)
+      ? ` (${formatPercentage(individual.remainingPercent)} left)`
+      : "";
     const reset = formatResetTime(individual.resetsAt, options);
-    if (reset) append("Individual spend reset", reset);
+    append(
+      "Individual spend limit",
+      `${individual.used} used of ${individual.limit}${remaining}${reset ? `, resets ${reset}` : ""}`,
+    );
   }
-  if (typeof snapshot.spendControlReached === "boolean") {
-    append("Spend control", snapshot.spendControlReached ? "Limit reached" : "Not reached");
+  // Only a reached spend control is worth a row; "not reached" is the normal
+  // state and restates nothing the usage windows don't already show.
+  if (snapshot.spendControlReached === true) {
+    append("Spend control", "Limit reached");
   }
   const reason = snapshot.rateLimitReachedType?.trim();
   if (reason) {

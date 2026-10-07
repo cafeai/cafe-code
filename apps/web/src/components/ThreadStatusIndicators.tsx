@@ -6,9 +6,10 @@ import { useGitStatus } from "../lib/gitStatusState";
 import { type AppState, selectProjectByRef, useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
 import { resolveChangeRequestPresentation } from "../sourceControlPresentation";
-import { resolveThreadStatusPill, type ThreadStatusPill } from "./Sidebar.logic";
+import { resolveThreadStatusPill } from "./Sidebar.logic";
 import type { SidebarThreadSummary } from "../types";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
+import { ThreadStatusLabel } from "./ThreadStatusLabel";
 
 export interface PrStatusIndicator {
   label: string;
@@ -29,7 +30,7 @@ export function prStatusIndicator(
   if (pr.state === "open") {
     return {
       label: `${presentation.shortName} open`,
-      colorClass: "text-emerald-600 dark:text-emerald-300/90",
+      colorClass: "text-success-foreground",
       tooltip: `#${pr.number} ${presentation.shortName} open: ${pr.title}`,
       url: pr.url,
     };
@@ -37,7 +38,7 @@ export function prStatusIndicator(
   if (pr.state === "closed") {
     return {
       label: `${presentation.shortName} closed`,
-      colorClass: "text-zinc-500 dark:text-zinc-400/80",
+      colorClass: "text-subtle-foreground",
       tooltip: `#${pr.number} ${presentation.shortName} closed: ${pr.title}`,
       url: pr.url,
     };
@@ -45,7 +46,9 @@ export function prStatusIndicator(
   if (pr.state === "merged") {
     return {
       label: `${presentation.shortName} merged`,
-      colorClass: "text-violet-600 dark:text-violet-300/90",
+      // Merged keeps the source-control hosts' conventional violet; there is
+      // no semantic token for it and recolouring it would hurt recognition.
+      colorClass: "text-violet-600 dark:text-violet-300",
       tooltip: `#${pr.number} ${presentation.shortName} merged: ${pr.title}`,
       url: pr.url,
     };
@@ -68,33 +71,9 @@ export function resolveThreadPr(
   return gitStatus.pr ?? null;
 }
 
-export function ThreadStatusLabel({
-  status,
-  compact = false,
-}: {
-  status: ThreadStatusPill | null;
-  compact?: boolean;
-}) {
-  const visible = status !== null;
-  const dotSizeClass = compact ? "size-[9px]" : "size-1.5";
-
-  return (
-    <span
-      title={status?.label}
-      data-visible={visible ? "true" : "false"}
-      data-compact={compact ? "true" : "false"}
-      aria-hidden={!visible}
-      className={`thread-status-dot-shell inline-flex shrink-0 items-center justify-center ${status?.colorClass ?? ""}`}
-    >
-      <span
-        className={`thread-status-dot rounded-full ${dotSizeClass} ${status?.dotClass ?? ""} ${
-          status?.pulse ? "animate-pulse" : ""
-        }`}
-      />
-      {status ? <span className="sr-only">{status.label}</span> : null}
-    </span>
-  );
-}
+// The shared status dot and label live in a dependency-light module; they are
+// re-exported here for existing callers.
+export { ThreadStatusDot, ThreadStatusLabel } from "./ThreadStatusLabel";
 
 /**
  * Non-interactive leading status icons for a thread row in compact contexts

@@ -8,6 +8,7 @@ import type {
 } from "@cafecode/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import { normalizeCodexAsyncQuestions } from "@cafecode/shared/codexAsyncQuestions";
 
 import { OrchestrationCommandInvariantError } from "./Errors.ts";
 import {
@@ -1655,6 +1656,66 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           turnCount: command.turnCount,
+        },
+      };
+    }
+
+    case "thread.async-questions.resolve": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      const activity = thread.activities.find((entry) => entry.id === command.activityId);
+      const payload = activity?.payload;
+      if (
+        activity?.kind !== "provider.async-questions" ||
+        !/^codex-async-questions:[a-f0-9]{64}$/u.test(command.activityId) ||
+        !payload ||
+        typeof payload !== "object" ||
+        Array.isArray(payload)
+      )
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "This question is no longer available.",
+        });
+      const source = payload as Record<string, unknown>;
+      const questions = normalizeCodexAsyncQuestions(source.questions);
+      if (
+        !command.questionIndexes.length ||
+        command.questionIndexes.length > 16 ||
+        command.questionIndexes.some(
+          (index) => !Number.isSafeInteger(index) || index < 0 || index >= questions.length,
+        )
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "The question selection is invalid.",
+        });
+      }
+      const previous = Array.isArray(source.handledQuestionIndexes)
+        ? source.handledQuestionIndexes
+            .slice(0, 16)
+            .filter(
+              (index): index is number =>
+                Number.isSafeInteger(index) && index >= 0 && index < questions.length,
+            )
+        : [];
+      return {
+        ...withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        }),
+        type: "thread.activity-appended",
+        payload: {
+          threadId: command.threadId,
+          activity: {
+            ...activity,
+            payload: {
+              ...source,
+              handledQuestionIndexes: [...new Set([...previous, ...command.questionIndexes])].sort(
+                (a, b) => a - b,
+              ),
+            },
+          },
         },
       };
     }

@@ -275,7 +275,14 @@ export const SidebarThreadPreviewCount = Schema.Int.check(
 export type SidebarThreadPreviewCount = typeof SidebarThreadPreviewCount.Type;
 export const DEFAULT_SIDEBAR_THREAD_PREVIEW_COUNT: SidebarThreadPreviewCount = 6;
 
+export const ChatClickBehavior = Schema.Literals(["preview", "open"]);
+export type ChatClickBehavior = typeof ChatClickBehavior.Type;
+export const DEFAULT_CHAT_CLICK_BEHAVIOR: ChatClickBehavior = "preview";
+
 export const ClientSettingsSchema = Schema.Struct({
+  chatClickBehavior: ChatClickBehavior.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_CHAT_CLICK_BEHAVIOR)),
+  ),
   // The persisted key predates the composer task-progress control. It now
   // applies only to completed authored-plan documents. Runtime checklists
   // stay in the composer popover unless the user docks the separate session
@@ -611,14 +618,12 @@ export const CodexSettings = makeProviderSettingsSchema(
     binaryPath: makeBinaryPathSetting("codex").pipe(
       Schema.annotateKey({
         title: "Binary path",
-        description: "Path to the Codex binary used by this instance in System CLI mode.",
         providerSettingsForm: { placeholder: "codex", clearWhenEmpty: "omit" },
       }),
     ),
     runtimeSource: ProviderCliRuntimeSourceSetting.pipe(
       Schema.annotateKey({
         title: "Runtime",
-        description: "Choose the Codex CLI runtime used by this instance.",
         providerSettingsForm: {
           control: "select",
           options: ProviderCliRuntimeSourceOptions,
@@ -629,8 +634,8 @@ export const CodexSettings = makeProviderSettingsSchema(
     homePath: TrimmedString.pipe(
       Schema.withDecodingDefault(Effect.succeed("")),
       Schema.annotateKey({
-        title: "CODEX_HOME path",
-        description: "Custom Codex home and config directory.",
+        title: "Codex home folder",
+        documentation: "Sets CODEX_HOME, the folder for Codex config, sign-in and history.",
         providerSettingsForm: {
           placeholder: "~/.codex",
           clearWhenEmpty: "omit",
@@ -640,9 +645,10 @@ export const CodexSettings = makeProviderSettingsSchema(
     shadowHomePath: TrimmedString.pipe(
       Schema.withDecodingDefault(Effect.succeed("")),
       Schema.annotateKey({
-        title: "Shadow home path",
-        description:
-          "Optional authentication overlay. Shares Codex configuration, conversation history, and SQLite state by default while keeping authentication in a private file. Use a direct home for separate conversation state.",
+        title: "Shadow home folder",
+        description: "Separate sign-in that shares this home's history and config.",
+        documentation:
+          "Sign-in is kept in a private file; config, history and the history database stay shared. Use a different Codex home folder for separate history.",
         providerSettingsForm: {
           placeholder: "~/.codex-cafecode/personal",
           clearWhenEmpty: "omit",
@@ -657,7 +663,9 @@ export const CodexSettings = makeProviderSettingsSchema(
       Schema.annotateKey({
         title: "Maximum concurrent subagents",
         description:
-          "Optional maximum number of spawned Codex agent threads that may be open concurrently. Enter 1–64, or leave blank to use Codex's model, backend, and configuration defaults. Without an upstream override, V2 provides 3 spawned slots and V1 provides 6. The primary agent is not counted.",
+          "Spawned agents open at once (1–64; main agent excluded). Blank: Codex default.",
+        documentation:
+          "Blank uses the model, backend and config defaults: without an override, V2 models allow 3 spawned agents and V1 models allow 6.",
         providerSettingsForm: {
           control: "number",
           step: 1,
@@ -672,8 +680,7 @@ export const CodexSettings = makeProviderSettingsSchema(
     autoCompactTokenLimit: Schema.optionalKey(CodexAutoCompactTokenLimit).pipe(
       Schema.annotateKey({
         title: "Auto-compact override",
-        description:
-          "Optional token threshold override. Leave blank to use Codex app-server's model-specific automatic compaction policy.",
+        description: "Token count that triggers compaction. Blank: Codex's per-model default.",
         providerSettingsForm: {
           control: "number",
           step: 1_000,
@@ -718,14 +725,12 @@ export const ClaudeSettings = makeProviderSettingsSchema(
     binaryPath: makeBinaryPathSetting("claude").pipe(
       Schema.annotateKey({
         title: "Binary path",
-        description: "Path to the Claude binary used by this instance in System CLI mode.",
         providerSettingsForm: { placeholder: "claude", clearWhenEmpty: "omit" },
       }),
     ),
     runtimeSource: ProviderCliRuntimeSourceSetting.pipe(
       Schema.annotateKey({
         title: "Runtime",
-        description: "Choose the Claude CLI runtime used by this instance.",
         providerSettingsForm: {
           control: "select",
           options: ProviderCliRuntimeSourceOptions,
@@ -736,9 +741,9 @@ export const ClaudeSettings = makeProviderSettingsSchema(
     homePath: TrimmedString.pipe(
       Schema.withDecodingDefault(Effect.succeed("")),
       Schema.annotateKey({
-        title: "Claude HOME path",
-        description:
-          "Custom HOME used when running this Claude instance. Keeps .claude.json and .claude separate.",
+        title: "Claude home folder",
+        description: "Keeps this account's Claude sign-in and settings separate.",
+        documentation: "Sets HOME when running Claude, so its .claude.json and .claude live here.",
         providerSettingsForm: { placeholder: "~", clearWhenEmpty: "omit" },
       }),
     ),
@@ -750,7 +755,9 @@ export const ClaudeSettings = makeProviderSettingsSchema(
       Schema.annotateKey({
         title: "Agent-tool concurrency limit",
         description:
-          "Optional CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS override on Claude Code 2.1.217+. Enter 1–64, or leave blank to preserve the inherited environment and provider default (20). Saving provider settings reloads this instance; change between sessions. Limits Agent-tool spawning, not all running work: resumes and manual forks can exceed it, ultracode is exempt, and workflows/teams use separate limits.",
+          "Max Agent-tool subagents, 1–64. Blank: inherited or 20. Change between sessions.",
+        documentation:
+          "Sets CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS (Claude Code 2.1.217+). Saving reloads this account. Limits Agent-tool spawning, not all running work: resumes and manual forks can exceed it, ultracode is exempt, and workflows/teams use separate limits.",
         providerSettingsForm: {
           control: "number",
           step: 1,
@@ -796,15 +803,15 @@ export const GrokSettings = makeProviderSettingsSchema(
     binaryPath: makeBinaryPathSetting("grok").pipe(
       Schema.annotateKey({
         title: "Binary path",
-        description: "Path to the Grok Build CLI binary.",
         providerSettingsForm: { placeholder: "grok", clearWhenEmpty: "omit" },
       }),
     ),
     homePath: TrimmedString.pipe(
       Schema.withDecodingDefault(Effect.succeed("")),
       Schema.annotateKey({
-        title: "GROK_HOME path",
-        description: "Optional Grok home used by this instance. Leave blank to reuse grok login.",
+        title: "Grok home folder",
+        description: "Blank reuses your existing grok login.",
+        documentation: "Sets GROK_HOME for this account.",
         providerSettingsForm: { placeholder: "Default Grok home", clearWhenEmpty: "omit" },
       }),
     ),
@@ -826,7 +833,6 @@ export const OpenCodeSettings = makeProviderSettingsSchema(
     binaryPath: makeBinaryPathSetting("opencode").pipe(
       Schema.annotateKey({
         title: "Binary path",
-        description: "Path to the OpenCode binary.",
         providerSettingsForm: { placeholder: "opencode", clearWhenEmpty: "omit" },
       }),
     ),
@@ -834,7 +840,7 @@ export const OpenCodeSettings = makeProviderSettingsSchema(
       Schema.withDecodingDefault(Effect.succeed("")),
       Schema.annotateKey({
         title: "Server URL",
-        description: "Leave blank to let Cafe Code start a loopback OpenCode server.",
+        description: "Blank: Cafe Code starts a local OpenCode server.",
         providerSettingsForm: {
           placeholder: "http://127.0.0.1:4096",
           clearWhenEmpty: "omit",
@@ -845,7 +851,7 @@ export const OpenCodeSettings = makeProviderSettingsSchema(
       Schema.withDecodingDefault(Effect.succeed("")),
       Schema.annotateKey({
         title: "Server password",
-        description: "Optional password for an external OpenCode server.",
+        description: "Only needed for an external server.",
         providerSettingsForm: {
           control: "password",
           placeholder: "Optional",
@@ -1046,6 +1052,7 @@ export const ServerSettingsPatch = Schema.Struct({
 export type ServerSettingsPatch = typeof ServerSettingsPatch.Type;
 
 export const ClientSettingsPatch = Schema.Struct({
+  chatClickBehavior: Schema.optionalKey(ChatClickBehavior),
   autoOpenPlanSidebar: Schema.optionalKey(Schema.Boolean),
   onboardingCompleted: Schema.optionalKey(Schema.Boolean),
   dismissedFirstRunHints: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),

@@ -24,6 +24,7 @@ import { TooltipProvider } from "../ui/tooltip";
 import type { ProviderInstanceEntry } from "../../providerInstances";
 import { providerModelKey, sortProviderModelItems } from "../../modelOrdering";
 import { useChatPane } from "../../chatPaneContext";
+import { useDelayedFlag } from "../../hooks/useDelayedFlag";
 
 type ModelPickerItem = {
   slug: string;
@@ -80,10 +81,16 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
    * model set but are free to diverge via customModels).
    */
   modelOptionsByInstance: ReadonlyMap<ProviderInstanceId, ReadonlyArray<ModelEsque>>;
+  /** True while the picker-open catalogue refresh is in flight. */
+  refreshing?: boolean;
   onRequestClose?: () => void;
   onInstanceModelChange: (instanceId: ProviderInstanceId, model: string) => void;
 }) {
   const pane = useChatPane();
+  // Stale models stay usable during the refresh; only a noticeable wait earns
+  // the thin progress line (docs/style-guide.md §9).
+  const showRefreshProgress = useDelayedFlag(props.refreshing === true);
+  const surfaceRef = useRef<HTMLDivElement>(null);
   const {
     keybindings: providedKeybindings,
     modelOptionsByInstance,
@@ -479,6 +486,25 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     pane.visible,
   ]);
 
+  // The popup sizes to its content (up to max-h-96) instead of reserving a
+  // fixed screen-height box. Once open it may grow but never shrinks, so
+  // typing a search or switching to a shorter list cannot make the anchored
+  // popup jump. The floor is per-open: the content remounts on every open.
+  useLayoutEffect(() => {
+    const surface = surfaceRef.current;
+    if (!surface || typeof ResizeObserver === "undefined") return;
+    let floor = 0;
+    const observer = new ResizeObserver(() => {
+      const height = surface.offsetHeight;
+      if (height > floor) {
+        floor = height;
+        surface.style.minHeight = `${floor}px`;
+      }
+    });
+    observer.observe(surface);
+    return () => observer.disconnect();
+  }, []);
+
   useLayoutEffect(() => {
     const listRegion = listRegionRef.current;
     if (!listRegion) {
@@ -525,14 +551,23 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   return (
     <TooltipProvider delay={0}>
       <div
+        ref={surfaceRef}
         className={cn(
-          "relative flex h-screen max-h-96 w-screen max-w-100 overflow-hidden rounded-lg border bg-popover not-dark:bg-clip-padding text-popover-foreground shadow-lg/5 before:pointer-events-none before:absolute before:inset-0 before:rounded-[calc(var(--radius-lg)-1px)] before:shadow-[0_1px_--theme(--color-black/4%)] dark:before:shadow-[0_-1px_--theme(--color-white/6%)]",
+          "relative flex max-h-96 w-screen max-w-100 overflow-hidden rounded-lg border bg-popover not-dark:bg-clip-padding text-popover-foreground shadow-lg/5 before:pointer-events-none before:absolute before:inset-0 before:rounded-[calc(var(--radius-lg)-1px)] before:shadow-[0_1px_--theme(--color-black/4%)] dark:before:shadow-[0_-1px_--theme(--color-white/6%)]",
           isLocked && !showLockedInstanceSidebar ? "flex-col" : "flex-row",
         )}
+        data-model-picker-refreshing={props.refreshing === true ? "true" : undefined}
       >
+        {showRefreshProgress ? (
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-x-0 top-0 z-20 h-0.5 animate-pulse bg-primary/60"
+            data-model-picker-refresh-progress="true"
+          />
+        ) : null}
         {/* Locked provider header (only shown in locked mode) */}
         {isLocked && !showLockedInstanceSidebar && LockedProviderIcon && lockedHeaderLabel && (
-          <div className="flex items-center gap-2 px-4 py-3 border-b">
+          <div className="flex items-center gap-2 border-b border-border-subtle px-4 py-3">
             <LockedProviderIcon className="size-5 shrink-0" />
             <span className="font-medium text-sm">{lockedHeaderLabel}</span>
           </div>
@@ -571,18 +606,22 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
           <div
             className={cn(
               "flex min-h-0 flex-1 flex-col overflow-hidden",
-              isLocked && !showLockedInstanceSidebar ? "min-w-0" : showSidebar && "border-l",
+              isLocked && !showLockedInstanceSidebar
+                ? "min-w-0"
+                : showSidebar && "border-l border-border-subtle",
             )}
           >
             {/* Search bar */}
-            <div className="border-b px-3 py-2">
+            <div className="border-b border-border-subtle px-3 py-2">
               <ComboboxInput
                 ref={searchInputRef}
                 className="[&_input]:font-sans rounded-md"
-                inputClassName="border-0 shadow-none ring-0 focus-visible:ring-0"
+                // A borderless search field inside the popup: a 1px accent
+                // ring is enough focus indication (the default is 3px).
+                inputClassName="border-0 shadow-none ring-0 focus-visible:ring-0 has-focus-visible:ring-1"
                 placeholder="Search models..."
                 showTrigger={false}
-                startAddon={<SearchIcon className="size-4 shrink-0 text-muted-foreground/50" />}
+                startAddon={<SearchIcon className="size-4 shrink-0 text-subtle-foreground" />}
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 onKeyDown={(e) => {
@@ -617,7 +656,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
               ref={listRegionRef}
               className="relative min-h-0 flex-1 before:pointer-events-none before:absolute before:inset-0 before:bg-muted/40"
             >
-              <ComboboxList className="model-picker-list size-full divide-y px-2 py-1">
+              <ComboboxList className="model-picker-list size-full space-y-0.5 px-2 py-1">
                 {filteredModelKeys.map((modelKey, index) => {
                   const model = filteredModelByKey.get(modelKey);
                   if (!model) {
@@ -633,7 +672,11 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                       providerDisplayName={model.instanceDisplayName}
                       providerAccentColor={model.instanceAccentColor}
                       isFavorite={favoritesSet.has(modelKey)}
-                      showProvider={!isLocked || showLockedInstanceSidebar}
+                      // The sidebar (or locked header) already names a single
+                      // instance; repeat it only where rows mix instances.
+                      showProvider={
+                        isSearching || (!isLocked && selectedInstanceId === "favorites")
+                      }
                       preferShortName={!isLocked}
                       useTriggerLabel={isLocked && !showLockedInstanceSidebar}
                       showNewBadge={isModelPickerNewModel(model.driverKind, model.slug)}

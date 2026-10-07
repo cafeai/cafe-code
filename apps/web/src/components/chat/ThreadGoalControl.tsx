@@ -182,7 +182,7 @@ export const ThreadGoalFooterButton = memo(function ThreadGoalFooterButton(props
       size="sm"
       variant="ghost"
       className={cn(
-        "shrink-0 px-2 text-muted-foreground/70 hover:text-foreground/80 sm:px-3",
+        "shrink-0 px-2 text-muted-foreground hover:text-foreground sm:px-3",
         props.className,
       )}
       aria-label={props.goal === null ? "Create goal" : "Open goal"}
@@ -363,7 +363,7 @@ export const ThreadGoalDialog = memo(function ThreadGoalDialog(props: {
             ) : props.goal !== null ? (
               <>
                 <p className="whitespace-pre-wrap text-sm leading-6">{props.goal.objective}</p>
-                <dl className="grid grid-cols-[auto_1fr] gap-x-5 gap-y-2 border-t border-border/60 pt-4 text-sm">
+                <dl className="grid grid-cols-[auto_1fr] gap-x-5 gap-y-2 border-t border-border-subtle pt-4 text-sm">
                   <dt className="text-muted-foreground">Time</dt>
                   <dd>{formatDuration(effectiveTime, false)}</dd>
                   <dt className="text-muted-foreground">Tokens</dt>

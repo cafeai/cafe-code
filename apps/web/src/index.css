@@ -1,5 +1,9 @@
 @import "tailwindcss";
 @import "katex/dist/katex.min.css";
+/* DM Sans ships with the app so offline launches and first paint use the same
+   face; it was previously fetched from Google Fonts on every start. */
+@import "@fontsource-variable/dm-sans/opsz.css";
+@import "@fontsource-variable/dm-sans/opsz-italic.css";
 
 @custom-variant dark (&:is(.dark, .dark *));
 /* Window Controls Overlay: active when Electron exposes native titlebar control geometry. */
@@ -44,7 +48,60 @@
   --color-card-foreground: var(--card-foreground);
   --color-card: var(--card);
   --color-foreground: var(--foreground);
+  --color-chat-foreground: var(--chat-foreground);
   --color-background: var(--background);
+  /* Style guide tokens (docs/style-guide.md). Surfaces step up from sunken
+     chrome to raised floating panels; text and border tiers replace ad-hoc
+     opacity modifiers such as text-muted-foreground/55 or border-border/45. */
+  --color-sunken: var(--sunken);
+  --color-raised: var(--raised);
+  --color-subtle-foreground: var(--subtle-foreground);
+  --color-disabled-foreground: var(--disabled-foreground);
+  --color-border-subtle: var(--border-subtle);
+  --color-border-strong: var(--border-strong);
+  /* One status vocabulary shared by sidebar rows, project rows, Desk tabs,
+     Atrium and banners: running uses the user's accent colour. */
+  --color-status-running: var(--status-running);
+  --color-status-attention: var(--status-attention);
+  --color-status-attention-foreground: var(--status-attention-foreground);
+  --color-status-done: var(--status-done);
+  --color-status-done-foreground: var(--status-done-foreground);
+  --color-status-error: var(--status-error);
+  --color-status-error-foreground: var(--status-error-foreground);
+  --color-status-idle: var(--status-idle);
+  /* ui/sidebar.tsx has always referenced these; without definitions its
+     hover/active backgrounds generated no CSS. */
+  --color-sidebar: var(--sunken);
+  --color-sidebar-foreground: var(--foreground);
+  --color-sidebar-primary: var(--primary);
+  --color-sidebar-primary-foreground: var(--primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent-surface);
+  --color-sidebar-accent-foreground: var(--foreground);
+  --color-sidebar-border: var(--border);
+  --color-sidebar-ring: var(--ring);
+  --font-sans:
+    "DM Sans Variable", "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
+    sans-serif;
+  --font-mono:
+    "SF Mono", "SFMono-Regular", ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
+  /* Type scale additions. Tailwind supplies xs 12, sm 14, base 16, lg 18, xl 20
+     and 2xl 24; 2xs and ui fill the dense-interface gaps. All are rem-based so
+     the Interface size setting scales them. */
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
+  --text-ui: 0.8125rem;
+  --text-ui--line-height: 1.25rem;
+  /* Motion curves. Things appearing or settling use ease-out; things leaving
+     use ease-in. Durations live on :root so reduced motion can collapse them. */
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --animate-enter-rise: cafe-enter-rise var(--duration-base) var(--ease-out) both;
+  --animate-enter-fade: cafe-enter-fade var(--duration-base) var(--ease-out) both;
+  --animate-enter-scale: cafe-enter-scale var(--duration-slow) var(--ease-out) both;
+  --animate-enter-from-end: cafe-enter-from-end var(--duration-slow) var(--ease-out) both;
+  --animate-enter-from-start: cafe-enter-from-start var(--duration-slow) var(--ease-out) both;
+  --animate-enter-from-bottom: cafe-enter-from-bottom var(--duration-base) var(--ease-out) both;
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -55,6 +112,44 @@
   @keyframes skeleton {
     to {
       background-position: -200% 0;
+    }
+  }
+  /* Finite entrance keyframes for views, panels and newly appended rows. They
+     animate opacity plus the independent translate/scale properties so they
+     never fight a component's own transform. */
+  @keyframes cafe-enter-rise {
+    from {
+      opacity: 0;
+      translate: 0 4px;
+    }
+  }
+  @keyframes cafe-enter-fade {
+    from {
+      opacity: 0;
+    }
+  }
+  @keyframes cafe-enter-scale {
+    from {
+      opacity: 0;
+      scale: 0.985;
+    }
+  }
+  @keyframes cafe-enter-from-end {
+    from {
+      opacity: 0;
+      translate: 12px 0;
+    }
+  }
+  @keyframes cafe-enter-from-start {
+    from {
+      opacity: 0;
+      translate: -12px 0;
+    }
+  }
+  @keyframes cafe-enter-from-bottom {
+    from {
+      opacity: 0;
+      translate: 0 8px;
     }
   }
   /* Tailwind's bounce puts easing on the keyframes themselves, which would
@@ -111,10 +206,15 @@
 :root {
   color-scheme: light;
   --radius: 0.625rem;
-  --background: var(--color-white);
+  /* Light mode steps from an off-white page to white cards and popovers so
+     panels read as surfaces instead of hairline outlines on pure white. */
+  --background: color-mix(in srgb, var(--color-neutral-100) 55%, var(--color-white));
   --cafe-sidebar-star-drift-duration: 60s;
   --app-chrome-background: var(--background);
   --foreground: var(--color-neutral-800);
+  /* Preserve the softer reading colour used by assistant prose before the
+     UI refresh, independently of full-strength labels and controls. */
+  --chat-foreground: --alpha(var(--foreground) / 80%);
   --card: var(--color-white);
   --card-foreground: var(--color-neutral-800);
   --popover: var(--color-white);
@@ -139,6 +239,27 @@
   --warning: var(--color-amber-500);
   --warning-foreground: var(--color-amber-700);
   --cafe-sidebar-accent: #44beda;
+  --sunken: color-mix(in srgb, var(--color-neutral-100) 80%, var(--color-white));
+  --raised: var(--popover);
+  --subtle-foreground: color-mix(in srgb, var(--color-neutral-500) 95%, var(--color-black));
+  --disabled-foreground: var(--color-neutral-400);
+  --border-subtle: --alpha(var(--color-black) / 5%);
+  --border-strong: --alpha(var(--color-black) / 14%);
+  --sidebar-accent-surface: --alpha(var(--color-black) / 5%);
+  --status-running: var(--primary);
+  --status-attention: var(--color-amber-500);
+  --status-attention-foreground: var(--color-amber-700);
+  --status-done: var(--color-emerald-500);
+  --status-done-foreground: var(--color-emerald-700);
+  --status-error: var(--color-red-500);
+  --status-error-foreground: var(--color-red-700);
+  --status-idle: var(--color-neutral-400);
+  /* Motion durations (docs/style-guide.md): fast for hover/colour/exits, base
+     for menus/popovers/view swaps, slow for dialogs/sheets/panels. */
+  --duration-fast: 120ms;
+  --duration-base: 160ms;
+  --duration-slow: 220ms;
+  --duration-emphasis: 300ms;
 
   @variant dark {
     color-scheme: dark;
@@ -147,7 +268,8 @@
     --foreground: var(--color-neutral-100);
     --card: color-mix(in srgb, var(--background) 98%, var(--color-white));
     --card-foreground: var(--color-neutral-100);
-    --popover: color-mix(in srgb, var(--background) 98%, var(--color-white));
+    /* Floating panels sit one step above cards so menus read over content. */
+    --popover: color-mix(in srgb, var(--background) 95%, var(--color-white));
     --popover-foreground: var(--color-neutral-100);
     --primary: oklch(0.588 0.217 264);
     --primary-foreground: var(--color-white);
@@ -158,7 +280,7 @@
     --accent: --alpha(var(--color-white) / 4%);
     --accent-foreground: var(--color-neutral-100);
     --destructive: color-mix(in srgb, var(--color-red-500) 90%, var(--color-white));
-    --border: --alpha(var(--color-white) / 6%);
+    --border: --alpha(var(--color-white) / 7%);
     --input: --alpha(var(--color-white) / 8%);
     --ring: oklch(0.588 0.217 264);
     --destructive-foreground: var(--color-red-400);
@@ -169,17 +291,25 @@
     --warning: var(--color-amber-500);
     --warning-foreground: var(--color-amber-400);
     --cafe-sidebar-accent: #48cfff;
+    --sunken: #101011;
+    --raised: var(--popover);
+    --subtle-foreground: var(--color-neutral-400);
+    --disabled-foreground: var(--color-neutral-600);
+    --border-subtle: --alpha(var(--color-white) / 4%);
+    --border-strong: --alpha(var(--color-white) / 12%);
+    --sidebar-accent-surface: --alpha(var(--color-white) / 6.5%);
+    --status-attention: var(--color-amber-400);
+    --status-attention-foreground: var(--color-amber-300);
+    --status-done: var(--color-emerald-400);
+    --status-done-foreground: var(--color-emerald-300);
+    --status-error: var(--color-red-400);
+    --status-error-foreground: var(--color-red-300);
+    --status-idle: var(--color-neutral-500);
   }
 }
 
 body {
-  font-family:
-    "DM Sans",
-    -apple-system,
-    BlinkMacSystemFont,
-    "Segoe UI",
-    system-ui,
-    sans-serif;
+  font-family: var(--font-sans);
   margin: 0;
   padding: 0;
 }
@@ -395,6 +525,24 @@ body::after {
 .cafe-thread-sidebar [data-slot="sidebar-menu-button"],
 .cafe-thread-sidebar [data-slot="sidebar-menu-sub-button"] {
   transition-property: background-color, color, box-shadow, opacity;
+  transition-duration: var(--duration-fast);
+}
+
+/* One status dot for every surface that shows a chat's state (sidebar rows,
+   collapsed projects, the hidden-chats toggle, Desk tabs and list, command
+   palette). ThreadStatusDot renders it; only the shell around it differs. */
+:root {
+  --thread-status-dot-size: 0.375rem;
+  /* Electron's frameless title bar band (traffic lights / window controls).
+     Pixel-based on purpose: it matches native chrome, not the interface size. */
+  --app-titlebar-height: 44px;
+}
+
+.thread-status-dot {
+  display: inline-block;
+  flex-shrink: 0;
+  inline-size: var(--thread-status-dot-size);
+  block-size: var(--thread-status-dot-size);
 }
 
 .thread-status-dot-shell {
@@ -403,13 +551,23 @@ body::after {
   opacity: 0;
   overflow: hidden;
   transition:
-    inline-size 170ms ease,
-    margin-inline-end 170ms ease,
-    opacity 140ms ease;
+    inline-size var(--duration-base) var(--ease-out),
+    margin-inline-end var(--duration-base) var(--ease-out),
+    opacity var(--duration-fast) var(--ease-out);
+}
+
+.thread-status-dot[data-spinning="true"] {
+  inline-size: 0.75rem;
+  block-size: 0.75rem;
+  background: none;
+}
+.thread-status-dot-shell[data-visible="true"]:has([data-spinning="true"]) {
+  inline-size: 0.75rem;
+  margin-inline-end: 0.25rem;
 }
 
 .thread-status-dot-shell[data-visible="true"] {
-  inline-size: 0.375rem;
+  inline-size: var(--thread-status-dot-size);
   margin-inline-end: 0.125rem;
   opacity: 1;
 }
@@ -419,44 +577,55 @@ body::after {
   margin-inline-end: 0.25rem;
 }
 
-.thread-status-dot {
+.thread-status-dot-shell .thread-status-dot {
   opacity: 0;
-  transition: opacity 140ms ease;
+  transition: opacity var(--duration-fast) var(--ease-out);
 }
 
 .thread-status-dot-shell[data-visible="true"] .thread-status-dot {
   opacity: 1;
 }
 
-/* Desk actions are sibling buttons. Treat their parent as the hover surface,
-   with matching specificity so the selected row's shadow still takes priority. */
-.dark .cafe-thread-sidebar [data-slot="sidebar-menu-button"]:hover,
-.dark
-  .cafe-thread-sidebar
-  [data-desk-chat-row]:hover
-  > :where([data-slot="sidebar-menu-sub-button"]),
-.dark .cafe-thread-sidebar [data-slot="sidebar-menu-sub-button"]:hover {
-  background-color: rgba(255, 255, 255, 0.065);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.025);
+/* Row hover and selection share one recipe in both themes: hover is one
+   surface step, the open chat adds a faint sidebar-accent wash. Multi-selected
+   rows keep their primary tint, so they are excluded. Desk actions are sibling
+   buttons, so their parent row is treated as the hover surface too. */
+.cafe-thread-sidebar [data-slot="sidebar-menu-button"]:hover,
+.cafe-thread-sidebar [data-desk-chat-row]:hover > :where([data-slot="sidebar-menu-sub-button"]),
+.cafe-thread-sidebar
+  [data-slot="sidebar-menu-sub-button"]:not([data-thread-selected="true"]):hover {
+  background-color: var(--sidebar-accent-surface);
 }
 
-.dark .cafe-thread-sidebar [data-slot="sidebar-menu-button"][data-active="true"],
-.dark .cafe-thread-sidebar [data-slot="sidebar-menu-sub-button"][data-active="true"] {
+.cafe-thread-sidebar [data-slot="sidebar-menu-button"][data-active="true"],
+.cafe-thread-sidebar
+  [data-slot="sidebar-menu-sub-button"][data-active="true"]:not([data-thread-selected="true"]) {
   background:
-    linear-gradient(90deg, rgba(72, 207, 255, 0.08), transparent 62%), rgba(255, 255, 255, 0.078);
-  box-shadow:
-    inset 0 0 0 1px rgba(255, 255, 255, 0.035),
-    0 8px 24px rgba(0, 0, 0, 0.12);
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--cafe-sidebar-accent) 8%, transparent),
+      transparent 62%
+    ),
+    color-mix(in srgb, var(--foreground) 8%, transparent);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+  color: var(--foreground);
 }
 
-.dark .cafe-thread-sidebar [data-slot="sidebar-menu-button"][data-active="true"]:hover,
-.dark
-  .cafe-thread-sidebar
+.cafe-thread-sidebar [data-slot="sidebar-menu-button"][data-active="true"]:hover,
+.cafe-thread-sidebar
   [data-desk-chat-row]:hover
   > :where([data-slot="sidebar-menu-sub-button"])[data-active="true"],
-.dark .cafe-thread-sidebar [data-slot="sidebar-menu-sub-button"][data-active="true"]:hover {
+.cafe-thread-sidebar
+  [data-slot="sidebar-menu-sub-button"][data-active="true"]:not(
+    [data-thread-selected="true"]
+  ):hover {
   background:
-    linear-gradient(90deg, rgba(72, 207, 255, 0.1), transparent 62%), rgba(255, 255, 255, 0.09);
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--cafe-sidebar-accent) 10%, transparent),
+      transparent 62%
+    ),
+    color-mix(in srgb, var(--foreground) 9%, transparent);
 }
 
 .cafe-followup-queue {
@@ -875,19 +1044,6 @@ code {
   display: none;
 }
 
-/* Reasoning select -- clickable label surface */
-label:has(> select#reasoning-effort) {
-  position: relative;
-}
-label:has(> select#reasoning-effort) select {
-  position: absolute;
-  inset: 0;
-  opacity: 0;
-  cursor: pointer;
-  width: 100%;
-  height: 100%;
-}
-
 /* Chat markdown rendering */
 .chat-markdown {
   min-width: 0;
@@ -961,7 +1117,7 @@ label:has(> select#reasoning-effort) select {
 
 .chat-markdown :not(pre) > code {
   border: 1px solid var(--border);
-  border-radius: 0.375rem;
+  border-radius: calc(var(--radius) - 4px);
   background: var(--muted);
   padding: 0.1rem 0.35rem;
   color: var(--foreground);
@@ -973,7 +1129,7 @@ label:has(> select#reasoning-effort) select {
   align-items: center;
   gap: 0.28rem;
   border: 1px solid color-mix(in srgb, var(--border) 92%, transparent);
-  border-radius: 0.375rem;
+  border-radius: calc(var(--radius) - 4px);
   background: color-mix(in srgb, var(--muted) 88%, var(--background));
   padding: 0.08rem 0.34rem;
   color: var(--foreground);
@@ -982,10 +1138,10 @@ label:has(> select#reasoning-effort) select {
   line-height: 1.15;
   vertical-align: text-bottom;
   transition:
-    background-color 120ms ease,
-    border-color 120ms ease,
-    color 120ms ease,
-    opacity 120ms ease;
+    background-color var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out),
+    opacity var(--duration-fast) var(--ease-out);
 }
 
 .chat-markdown-file-link:hover {
@@ -1013,7 +1169,7 @@ label:has(> select#reasoning-effort) select {
   max-width: 100%;
   overflow-x: auto;
   border: 1px solid var(--border);
-  border-radius: 0.75rem;
+  border-radius: calc(var(--radius) + 4px);
   background: var(--muted);
   padding: 0.8rem 0.9rem;
 }
@@ -1081,7 +1237,7 @@ label:has(> select#reasoning-effort) select {
   justify-content: center;
   height: 1.5rem;
   width: 1.5rem;
-  border-radius: 0.375rem;
+  border-radius: calc(var(--radius) - 4px);
   border: 1px solid var(--border);
   background: color-mix(in srgb, var(--background) 82%, transparent);
   color: var(--muted-foreground);
@@ -1089,9 +1245,9 @@ label:has(> select#reasoning-effort) select {
   opacity: 0;
   pointer-events: none;
   transition:
-    opacity 120ms ease,
-    color 120ms ease,
-    border-color 120ms ease;
+    opacity var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
 }
 
 .chat-markdown .chat-markdown-codeblock:hover .chat-markdown-copy-button,
@@ -1182,14 +1338,15 @@ label:has(> select#reasoning-effort) select {
 }
 
 /* Composer tabs sit behind the frame, which paints over their curved base.
-   Only the width changes on collapse: the right-anchored caret, tab height and
-   reserved composer margin stay fixed so the same pointer gesture can undo it. */
+   Collapse shrinks the decoration into a shallow lip and lowers its caret.
+   The layout box and button hit area stay fixed so the editor never jumps. */
 .cafe-composer-tab {
   --composer-tab-background: color-mix(in srgb, var(--card) 86%, var(--foreground));
   --composer-tab-border: var(--border);
   --composer-tab-base-overlap: max(0px, calc(0.25rem - 1px));
   --composer-tab-edge-width: 1.875rem;
   --composer-tab-height: 2rem;
+  --composer-tab-visible-height: var(--composer-tab-height);
   --composer-tab-right-extension: 0.375rem;
   position: relative;
   display: inline-flex;
@@ -1208,6 +1365,7 @@ label:has(> select#reasoning-effort) select {
 
 .cafe-composer-tab[data-collapsed="true"] {
   --composer-tab-edge-width: 0.583333rem;
+  --composer-tab-visible-height: 0.875rem;
   --composer-tab-right-extension: 0rem;
   width: 3.5rem;
 }
@@ -1278,11 +1436,15 @@ label:has(> select#reasoning-effort) select {
   position: absolute;
   /* Add breathing room beyond the expanded caret by moving the decoration,
      while its button stays anchored to the unchanged layout box. */
-  inset: 0 calc(-1 * var(--composer-tab-right-extension)) 0 0;
-  height: 100%;
+  inset: auto calc(-1 * var(--composer-tab-right-extension)) 0 0;
+  height: var(--composer-tab-visible-height);
   overflow: visible;
   pointer-events: none;
-  transition: right 200ms ease;
+  /* This absolutely positioned decoration can change height without
+     relaying out the composer or moving its click target. */
+  transition:
+    right 200ms ease,
+    height 200ms ease;
 }
 
 .cafe-composer-tab-edge {
@@ -1305,7 +1467,7 @@ label:has(> select#reasoning-effort) select {
 
 .cafe-composer-tab-middle {
   position: absolute;
-  inset: calc(var(--composer-tab-height) / 32 - 0.5px) var(--composer-tab-edge-width) 0;
+  inset: calc(var(--composer-tab-visible-height) / 32 - 0.5px) var(--composer-tab-edge-width) 0;
   background: var(--composer-tab-background);
   border-top: 1px solid var(--composer-tab-border);
   transition:
@@ -1341,16 +1503,20 @@ label:has(> select#reasoning-effort) select {
 }
 
 .cafe-composer-tab:has(button:focus-visible) .cafe-composer-tab-middle {
-  top: calc(var(--composer-tab-height) / 32 - 1px);
+  top: calc(var(--composer-tab-visible-height) / 32 - 1px);
   border-top-width: 2px;
 }
 
 .cafe-composer-tab-caret {
-  transition: transform 200ms ease;
+  translate: 0 0;
+  transition:
+    transform 200ms ease,
+    translate 200ms ease;
 }
 
 .cafe-composer-tab[data-collapsed="true"] .cafe-composer-tab-caret {
   transform: rotate(180deg);
+  translate: 0 calc((var(--composer-tab-height) - var(--composer-tab-visible-height)) / 2);
 }
 
 .cafe-composer-tab-action:disabled {
@@ -1499,21 +1665,15 @@ label:has(> select#reasoning-effort) select {
   width: 4px;
 }
 
+/* --input is black 10% / white 8%, the same thumb tint as before, so one rule
+   covers both themes; hover steps up to the strong border tier. */
 .model-picker-list::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.1);
+  background: var(--input);
   border-radius: 2px;
 }
 
 .model-picker-list::-webkit-scrollbar-thumb:hover {
-  background: rgba(0, 0, 0, 0.2);
-}
-
-.dark .model-picker-list::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.08);
-}
-
-.dark .model-picker-list::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.15);
+  background: var(--border-strong);
 }
 
 /* ── First-run onboarding ─────────────────────────────────────────── */
@@ -1551,32 +1711,33 @@ label:has(> select#reasoning-effort) select {
 
 /* The whole surface fades in when onboarding mounts. */
 .cafe-onboarding {
-  animation: cafe-onboarding-surface-in 320ms ease-out both;
+  animation: cafe-onboarding-surface-in var(--duration-emphasis) var(--ease-out) both;
 }
 
 /* Each step's content rises + fades. Keyed by step so switching pages
    replays the entrance for a smooth cross-step transition. */
 .cafe-onboarding-step {
-  animation: cafe-onboarding-rise 360ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: cafe-onboarding-rise var(--duration-emphasis) var(--ease-out) both;
 }
 
 /* Staggered children within a step. `--cafe-onboarding-index` sets the
    per-item delay so rows cascade in. */
 .cafe-onboarding-item {
-  animation: cafe-onboarding-rise 420ms cubic-bezier(0.22, 1, 0.36, 1) both;
-  animation-delay: calc(var(--cafe-onboarding-index, 0) * 70ms + 90ms);
+  animation: cafe-onboarding-rise var(--duration-emphasis) var(--ease-out) both;
+  animation-delay: calc(var(--cafe-onboarding-index, 0) * 60ms + 60ms);
 }
 
 .cafe-onboarding-logo {
   animation: cafe-onboarding-logo-in 480ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
 }
 
+/* Reduced motion keeps the fades (they convey state) but drops travel and
+   scale, matching the global entrance rule in the style guide utilities. */
 @media (prefers-reduced-motion: reduce) {
-  .cafe-onboarding,
   .cafe-onboarding-step,
   .cafe-onboarding-item,
   .cafe-onboarding-logo {
-    animation: none;
+    animation-name: cafe-onboarding-surface-in;
   }
 }
 
@@ -1928,5 +2089,48 @@ html[data-cafe-background-animations="paused"][data-cafe-window-focus="blurred"]
   .cafe-ambiance-preview::before,
   .cafe-ambiance-preview::after {
     animation: none;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Style guide utilities (docs/style-guide.md)
+   --------------------------------------------------------------------------- */
+
+/* The single uppercase section-label treatment. Use at most once per surface,
+   without counts; ordinary headings stay sentence case. */
+@utility label-overline {
+  font-size: var(--text-2xs);
+  line-height: var(--text-2xs--line-height);
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--subtle-foreground);
+}
+
+/* Shared keyboard focus ring for custom interactive elements. Primitives in
+   components/ui already apply the same ring through their own classes. */
+@utility focus-ring {
+  outline: none;
+  &:focus-visible {
+    box-shadow:
+      0 0 0 1px var(--background),
+      0 0 0 3px var(--ring);
+  }
+}
+
+/* Reduced motion keeps opacity fades (they convey state without movement) but
+   removes travel and scaling from every primitive and entrance animation. */
+@media (prefers-reduced-motion: reduce) {
+  [data-starting-style],
+  [data-ending-style] {
+    translate: none !important;
+    scale: 1 !important;
+  }
+  .animate-enter-rise,
+  .animate-enter-scale,
+  .animate-enter-from-end,
+  .animate-enter-from-start,
+  .animate-enter-from-bottom {
+    animation-name: cafe-enter-fade !important;
   }
 }

@@ -104,7 +104,10 @@ export function createDeskStore(resolveStorage: () => StateStorage | null = brow
         ? destination
         : current.desk.activeGroupId;
       const next = activate
-        ? reduceDesk(current.desk, { type: "activateGroup", groupId: admittedGroup })
+        ? reduceDesk(reduceDesk(current.desk, { type: "dismissPreview", groupId: admittedGroup }), {
+            type: "activateGroup",
+            groupId: admittedGroup,
+          })
         : current.desk;
       if (
         previous?.groupId === admittedGroup &&

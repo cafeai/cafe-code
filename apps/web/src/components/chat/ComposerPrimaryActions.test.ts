@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { formatPendingPrimaryActionLabel } from "./ComposerPrimaryActions";
 
 describe("formatPendingPrimaryActionLabel", () => {
-  it("returns 'Submitting...' while responding", () => {
+  it("returns 'Submitting…' while responding", () => {
     expect(
       formatPendingPrimaryActionLabel({
         compact: false,
@@ -11,10 +11,10 @@ describe("formatPendingPrimaryActionLabel", () => {
         isResponding: true,
         questionIndex: 0,
       }),
-    ).toBe("Submitting...");
+    ).toBe("Submitting…");
   });
 
-  it("returns 'Submitting...' while responding regardless of other flags", () => {
+  it("returns 'Submitting…' while responding regardless of other flags", () => {
     expect(
       formatPendingPrimaryActionLabel({
         compact: true,
@@ -22,7 +22,7 @@ describe("formatPendingPrimaryActionLabel", () => {
         isResponding: true,
         questionIndex: 3,
       }),
-    ).toBe("Submitting...");
+    ).toBe("Submitting…");
   });
 
   it("returns 'Submit' in compact mode on the last question", () => {

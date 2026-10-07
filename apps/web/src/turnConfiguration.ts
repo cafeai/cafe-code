@@ -1,6 +1,41 @@
-import { ProviderTurnConfiguration } from "@cafecode/contracts";
+import { ProviderTurnConfiguration, type RuntimeMode } from "@cafecode/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import {
+  CLAUDE_PERMISSION_MODE_OPTIONS,
+  deriveClaudePermissionMode,
+  GROK_PERMISSION_MODE_OPTIONS,
+} from "./components/chat/claudePermissionMode";
+
+/** Access names shared with the composer's access control. */
+const RUNTIME_MODE_LABELS: Readonly<Record<RuntimeMode, string>> = {
+  "approval-required": "Supervised",
+  "auto-accept-edits": "Auto-accept edits",
+  "full-access": "Full access",
+};
+
+/**
+ * Claude and Grok present one native permission mode (Ask permissions,
+ * Accept edits, Plan, Auto, Bypass permissions) rather than Cafe's
+ * interaction/access pair. Reuse the composer's own mapping so the work log
+ * names the mode exactly as it was selected. An omitted interaction mode
+ * (provider default) is ambiguous, so it keeps the generic pair.
+ */
+function nativePermissionModeLabel(configuration: ProviderTurnConfiguration): string | null {
+  if (configuration.interactionMode === undefined) return null;
+  const options =
+    configuration.provider === "claudeAgent"
+      ? CLAUDE_PERMISSION_MODE_OPTIONS
+      : configuration.provider === "grok"
+        ? GROK_PERMISSION_MODE_OPTIONS
+        : null;
+  if (options === null) return null;
+  const mode = deriveClaudePermissionMode({
+    interactionMode: configuration.interactionMode,
+    runtimeMode: configuration.runtimeMode,
+  });
+  return options.find((option) => option.id === mode)?.label ?? null;
+}
 
 const decodeTurnConfiguration = Schema.decodeUnknownOption(ProviderTurnConfiguration);
 
@@ -42,6 +77,100 @@ function presentServiceTier(tier: string): string {
   }
 }
 
+/** Compact Fast label for the one-line work-log summary; the exact tier moves
+ * to the row's tooltip. Unknown future tiers stay exact because their
+ * speed/cost semantics are not known to Cafe. */
+function presentCompactServiceTier(tier: string): string {
+  switch (tier) {
+    case "default":
+      return "Fast off";
+    case "priority":
+    case "fast":
+      return "Fast on";
+    case "ultrafast":
+      return "Ultra fast";
+    default:
+      return `Service tier: ${tier}`;
+  }
+}
+
+/** Known native tier names for the tooltip; unknown ids are already exact on the line. */
+function knownServiceTierName(tier: string): string | null {
+  switch (tier) {
+    case "default":
+      return "Standard";
+    case "priority":
+    case "fast":
+      return "Fast";
+    case "ultrafast":
+      return "Ultra fast";
+    default:
+      return null;
+  }
+}
+
+/**
+ * One-line work-log summary of the frozen snapshot, e.g.
+ * "GPT-6.1 Sol · Ultra · Fast on · Codex Personal · Build · Full access".
+ * It keeps the exact configured account label, model, effort, Fast and mode
+ * settings visible; the settings source, exact service tier and the
+ * not-billing-confirmation caveat move to `detail` (shown in a tooltip).
+ * Plain text only: these labels are never Markdown, HTML, or link targets.
+ */
+export function presentTurnConfigurationSummary(configuration: ProviderTurnConfiguration): {
+  readonly summary: string;
+  readonly detail: string;
+} {
+  const full = presentTurnConfiguration(configuration);
+  const isOpenCode = configuration.provider === "opencode";
+  const model = configuration.modelDisplayName ?? configuration.model ?? "Default model";
+  const effort =
+    configuration.effort === undefined
+      ? isOpenCode
+        ? "Default variant"
+        : "Default effort"
+      : Object.hasOwn(EFFORT_LABELS, configuration.effort)
+        ? EFFORT_LABELS[configuration.effort]!
+        : configuration.effort;
+  const routedTier =
+    configuration.provider === "codex"
+      ? (configuration.resolvedServiceTier ?? configuration.serviceTier)
+      : undefined;
+  const fast =
+    routedTier !== undefined
+      ? presentCompactServiceTier(routedTier)
+      : configuration.provider === "codex" || configuration.provider === "claudeAgent"
+        ? configuration.fastMode === undefined
+          ? "Fast status not recorded"
+          : configuration.fastMode
+            ? "Fast on"
+            : "Fast off"
+        : undefined;
+  const interactionMode =
+    configuration.interactionMode === undefined
+      ? "Default mode"
+      : { default: "Build", plan: "Plan", auto: "Auto" }[configuration.interactionMode];
+  const nativeMode = nativePermissionModeLabel(configuration);
+  const modes = nativeMode
+    ? [nativeMode]
+    : [interactionMode, RUNTIME_MODE_LABELS[configuration.runtimeMode]];
+  const tierName = routedTier === undefined ? null : knownServiceTierName(routedTier);
+  const tierDetail = tierName ? ` · Service tier: ${tierName}` : "";
+  return {
+    summary: [
+      model,
+      effort,
+      fast,
+      // The configured instance label, never an auth email or account id.
+      configuration.providerDisplayName,
+      ...modes,
+    ]
+      .filter((value) => value !== undefined)
+      .join(" · "),
+    detail: `${full.source}${tierDetail}. ${full.sourceDescription}`,
+  };
+}
+
 /** Plain text only: these labels are never Markdown, HTML, or link targets. */
 export function presentTurnConfiguration(configuration: ProviderTurnConfiguration): {
   readonly settings: string;
@@ -72,11 +201,7 @@ export function presentTurnConfiguration(configuration: ProviderTurnConfiguratio
             ? "Fast on"
             : "Fast off"
         : undefined;
-  const runtimeMode = {
-    "approval-required": "Approval required",
-    "auto-accept-edits": "Auto-accept edits",
-    "full-access": "Full access",
-  }[configuration.runtimeMode];
+  const runtimeMode = RUNTIME_MODE_LABELS[configuration.runtimeMode];
   const interactionMode =
     configuration.interactionMode === undefined
       ? "Mode: provider default"

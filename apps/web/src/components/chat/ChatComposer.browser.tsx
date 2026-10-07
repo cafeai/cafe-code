@@ -10,6 +10,7 @@ import { DEFAULT_UNIFIED_SETTINGS } from "@cafecode/contracts/settings";
 import { createModelCapabilities, createModelSelection } from "@cafecode/shared/model";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createRef } from "react";
+import { flushSync } from "react-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { render } from "vitest-browser-react";
@@ -326,7 +327,7 @@ describe("provider-specific composer menu actions", () => {
     { width: 390, scale: 80, dark: true },
     { width: 390, scale: 130, dark: false },
   ])(
-    "anchors the shared tab caret across providers at width $width and $scale% scale",
+    "folds the shared tab into a shallow lip at width $width and $scale% scale",
     async ({ width, scale, dark }) => {
       applyInterfaceScalePercent(scale);
       document.documentElement.classList.toggle("dark", dark);
@@ -352,19 +353,33 @@ describe("provider-specific composer menu actions", () => {
           .getByRole("button", { name: "Minimize composer tools", exact: true })
           .element();
         const initial = caret.getBoundingClientRect();
+        const caretIcon = caret.querySelector("svg")!;
+        const initialIconY = caretIcon.getBoundingClientRect().y;
         const frame = document.querySelector('[data-chat-composer-tab="true"]')!.parentElement!;
         const initialFrameTop = frame.getBoundingClientRect().top;
         const expandedWidth = document
           .querySelector(".cafe-composer-tab")!
           .getBoundingClientRect().width;
-        // Repeatedly use the same DOM button. Its hit target must stay fixed even
-        // while the width animation is running, not just at the final endpoint.
+        // The visible caret lowers into the lip, while the same larger hit
+        // target stays fixed throughout the animation and repeated toggles.
         for (let count = 0; count < 4; count++) {
-          await page.elementLocator(caret).click();
+          // Capture and pause in the renderer before a browser-command round
+          // trip can consume the entire 200ms transition on a loaded runner.
+          flushSync(() => (caret as HTMLButtonElement).click());
+          const transitions = sharedTab!.getAnimations({ subtree: true });
+          const widthTransition = transitions.find(
+            (animation) =>
+              animation instanceof CSSTransition && animation.transitionProperty === "width",
+          );
+          expect(widthTransition).toBeDefined();
+          const duration = Number(widthTransition!.effect!.getTiming().duration);
+          expect(duration).toBeGreaterThan(0);
+          transitions.forEach((animation) => animation.pause());
           const widths = new Set<number>();
-          const end = performance.now() + 230;
-          while (performance.now() < end) {
-            await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+          for (const progress of [0, 0.25, 0.5, 0.75, 1]) {
+            transitions.forEach((animation) => {
+              animation.currentTime = duration * progress;
+            });
             const current = caret.getBoundingClientRect();
             expect(current.x).toBeCloseTo(initial.x, 1);
             expect(current.y).toBeCloseTo(initial.y, 1);
@@ -373,6 +388,7 @@ describe("provider-specific composer menu actions", () => {
             expect(frame.getBoundingClientRect().top).toBeCloseTo(initialFrameTop, 1);
             widths.add(Math.round(sharedTab!.getBoundingClientRect().width));
           }
+          transitions.forEach((animation) => animation.finish());
           // An endpoint-only assertion missed the max-content regression: the
           // tab reached both sizes but jumped between them without animating.
           expect(widths.size).toBeGreaterThan(2);
@@ -380,9 +396,71 @@ describe("provider-specific composer menu actions", () => {
           const tab = document.querySelector(".cafe-composer-tab")!.getBoundingClientRect();
           expect(tab.left).toBeGreaterThanOrEqual(0);
           expect(tab.right).toBeLessThanOrEqual(window.innerWidth);
-          if (count % 2 === 0) expect(tab.width).toBeLessThan(expandedWidth);
+          const shape = document.querySelector(".cafe-composer-tab-shape")!.getBoundingClientRect();
+          const icon = caretIcon.getBoundingClientRect();
+          if (count % 2 === 0) {
+            expect(tab.width).toBeLessThan(expandedWidth);
+            expect(shape.height).toBeLessThan(tab.height / 2);
+            const exposedHeight = initialFrameTop - shape.top;
+            expect(exposedHeight).toBeGreaterThan(0);
+            expect(exposedHeight).toBeLessThan(tab.height / 3);
+            expect(icon.y).toBeGreaterThan(initialIconY);
+            expect(icon.y + icon.height / 2).toBeGreaterThan(shape.top);
+            expect(icon.y + icon.height / 2).toBeLessThan(initialFrameTop);
+          } else {
+            expect(shape.height).toBeCloseTo(tab.height, 1);
+            expect(icon.y).toBeCloseTo(initialIconY, 1);
+          }
           if (count === 0) await capture("minimized");
         }
+        await fixture.update({
+          followUpQueueItems: [
+            {
+              id: "attached-queue-message",
+              preview: "Keep the next changes together",
+              promptText: "Keep the next changes together",
+              images: [],
+              queuedAt: createdAt,
+              expanded: false,
+              canExpand: false,
+              blockedReason: null,
+            },
+          ],
+          steeringFollowUpItems: [
+            {
+              id: "attached-steering-message",
+              preview: "Just checking in, what's the current progress?",
+              promptText: "Just checking in, what's the current progress?",
+              dispatchedAt: createdAt,
+            },
+          ],
+        });
+        const queue = document.querySelector('[data-cafe-followup-queue="true"]')!;
+        const typingArea = document.querySelector("[data-chat-composer-mobile-collapsed]")!;
+        const expectAttachedQueue = async () => {
+          await vi.waitFor(() => {
+            const queueRect = queue.getBoundingClientRect();
+            const typingRect = typingArea.getBoundingClientRect();
+            expect(queueRect.bottom).toBeCloseTo(typingRect.top, 1);
+            expect(queueRect.left).toBeCloseTo(typingRect.left, 1);
+            expect(queueRect.right).toBeCloseTo(typingRect.right, 1);
+            // The curved tab's decorative base sits behind the shared frame;
+            // its buttons must stay clear of the queue's heading and actions.
+            const headingTop = queue.firstElementChild!.getBoundingClientRect().top;
+            for (const button of document.querySelectorAll(".cafe-composer-tab button")) {
+              expect(button.getBoundingClientRect().bottom).toBeLessThanOrEqual(headingTop);
+            }
+          });
+        };
+        await expectAttachedQueue();
+        await capture("queue-expanded");
+        await page.getByRole("button", { name: "Minimize composer tools", exact: true }).click();
+        await waitForTabEntrance();
+        await expectAttachedQueue();
+        await capture("queue-minimized");
+        await page.getByRole("button", { name: "Expand composer tools", exact: true }).click();
+        await waitForTabEntrance();
+        await fixture.update({ followUpQueueItems: [], steeringFollowUpItems: [] });
       }
       expect(fixture.onSend).not.toHaveBeenCalled();
       expect(fixture.onStartCodeReview).not.toHaveBeenCalled();
@@ -625,7 +703,9 @@ describe("provider-specific composer menu actions", () => {
         .toBeVisible();
       // The native reviewer runs the saved session, including its full-access
       // policy, even when the unsent composer policy has changed to supervised.
-      await expect.element(page.getByText(/This chat currently has full access/)).toBeVisible();
+      await expect
+        .element(page.getByText(/· Full access · runs without approval prompts$/))
+        .toBeVisible();
       await page.getByRole("button", { name: "Start review", exact: true }).click();
       expect(fixture.onStartCodeReview).toHaveBeenCalledExactlyOnceWith({
         type: "uncommittedChanges",
@@ -707,7 +787,8 @@ describe("provider-specific composer menu actions", () => {
       await using fixture = await mountComposer(1100);
       await page.getByRole("button", { name: "More composer controls", exact: true }).click();
       await page.getByRole("menuitem", { name: "Codex review", exact: true }).click();
-      await page.getByRole("combobox", { name: "Review target" }).selectOptions("custom");
+      await page.getByRole("combobox", { name: "Review target" }).click();
+      await page.getByRole("option", { name: "Custom instructions", exact: true }).click();
       await page
         .getByRole("textbox", { name: "Review instructions" })
         .fill("Review private account changes");
@@ -726,7 +807,7 @@ describe("provider-specific composer menu actions", () => {
       await page.getByRole("menuitem", { name: "Codex review", exact: true }).click();
       await expect
         .element(page.getByRole("combobox", { name: "Review target" }))
-        .toHaveValue("uncommittedChanges");
+        .toHaveTextContent("Uncommitted changes");
       await expect
         .element(page.getByText("Review private account changes"))
         .not.toBeInTheDocument();

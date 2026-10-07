@@ -92,8 +92,10 @@ function getIconOption(
   });
 }
 
+// Match the renderer's boot-shell page colours (apps/web/index.html) so the
+// native window does not flash a different shade before the first paint.
 function getInitialWindowBackgroundColor(shouldUseDarkColors: boolean): string {
-  return shouldUseDarkColors ? "#0a0a0a" : "#ffffff";
+  return shouldUseDarkColors ? "#161616" : "#f9f9f9";
 }
 
 function getWindowTitleBarOptions(shouldUseDarkColors: boolean): WindowTitleBarOptions {

@@ -137,7 +137,7 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
   );
 
   const triggerClassName =
-    "h-6 shrink-0 gap-1.5 rounded-full border-border/60 bg-muted/35 px-2 text-muted-foreground text-xs before:rounded-full hover:bg-muted/60 hover:text-foreground";
+    "h-6 shrink-0 gap-1.5 rounded-full border-border bg-muted px-2 text-muted-foreground text-xs tabular-nums before:rounded-full hover:bg-accent hover:text-foreground";
 
   return (
     <Popover open={open} onOpenChange={handleOpenChange}>
@@ -182,11 +182,11 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
             without it, Linux Chromium can leave the last task row clipped by
             the outer popover even though the inner list itself scrolls. */}
         <div className="flex max-h-[min(28rem,calc(100dvh-3rem))] min-h-0 w-full flex-col">
-          <div className="shrink-0 border-border/70 border-b px-4 py-3">
+          <div className="shrink-0 border-border-subtle border-b px-4 py-3">
             <div className="flex items-baseline justify-between gap-3">
               <PopoverTitle className="text-sm leading-5">Tasks</PopoverTitle>
               <div className="flex shrink-0 items-center gap-1">
-                <span className="text-muted-foreground text-xs">
+                <span className="text-muted-foreground text-xs tabular-nums">
                   {hasPlan ? `${completedCount} of ${total} completed` : null}
                   {hasPlan && hasSubagents ? " · " : null}
                   {hasSubagents ? `${subagents.length} active` : null}

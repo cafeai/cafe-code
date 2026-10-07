@@ -35,13 +35,13 @@ import {
   DialogPopup,
   DialogTitle,
 } from "../ui/dialog";
-import { Group } from "../ui/group";
 import { Input } from "../ui/input";
+import { SegmentedControl } from "../ui/segmented-control";
 import { Spinner } from "../ui/spinner";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { SettingsRow, SettingsSection } from "./settingsLayout";
+import { BusyButtonLabel, SettingsSection } from "./settingsLayout";
 
-const ITEM_ROW_CLASSNAME = "border-t border-border/60 px-4 py-4 first:border-t-0 sm:px-5";
+const ITEM_ROW_CLASSNAME = "border-t border-border-subtle px-4 py-4 first:border-t-0 sm:px-5";
 
 export interface SavedEnvironmentActions {
   readonly add: typeof import("~/environments/runtime/service").addSavedEnvironment;
@@ -179,19 +179,19 @@ function SavedEnvironmentRow({
     <div className={ITEM_ROW_CLASSNAME}>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex min-w-0 flex-1 items-start gap-3">
-          <div className="flex size-8 shrink-0 items-center justify-center rounded-md border border-border/50 bg-muted/50 text-muted-foreground">
+          <div className="flex size-8 shrink-0 items-center justify-center rounded-md border border-border-subtle bg-muted text-muted-foreground">
             <ServerIcon className="size-4" />
           </div>
           <div className="flex min-w-0 flex-1 flex-col gap-1">
             <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-              <span className="min-w-0 break-words font-medium leading-tight">{displayLabel}</span>
+              <span className="min-w-0 break-words text-ui font-medium">{displayLabel}</span>
               <SavedEnvironmentStatus
                 label={statusText}
                 dotClassName={dotColor}
                 connecting={isConnecting}
               />
             </div>
-            <span className="break-all text-sm text-muted-foreground">
+            <span className="break-all text-xs text-muted-foreground">
               {safeSavedEnvironmentHost(record.httpBaseUrl)}
             </span>
             {versionMismatch ? (
@@ -202,8 +202,12 @@ function SavedEnvironmentRow({
                 </span>
               </span>
             ) : null}
-            {runtimeError ? <span className="text-sm text-destructive">{runtimeError}</span> : null}
-            {actionError ? <span className="text-sm text-destructive">{actionError}</span> : null}
+            {runtimeError ? (
+              <span className="text-xs text-destructive-foreground">{runtimeError}</span>
+            ) : null}
+            {actionError ? (
+              <span className="text-xs text-destructive-foreground">{actionError}</span>
+            ) : null}
           </div>
         </div>
 
@@ -278,10 +282,10 @@ function SavedEnvironmentRow({
             <Button
               variant="destructive"
               disabled={pendingAction !== null}
+              aria-busy={pendingAction === "remove" || undefined}
               onClick={() => void runAction("remove")}
             >
-              {pendingAction === "remove" ? <Spinner className="size-4" /> : null}
-              {pendingAction === "remove" ? "Removing" : "Remove"}
+              <BusyButtonLabel busy={pendingAction === "remove"}>Remove</BusyButtonLabel>
             </Button>
           </AlertDialogFooter>
         </AlertDialogPopup>
@@ -399,38 +403,16 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
         </DialogHeader>
         <form onSubmit={handleSubmit} className="flex min-h-0 flex-col">
           <DialogPanel className="flex flex-col gap-4">
-            <Group className="w-full" aria-label="Connection method">
-              <Button
-                type="button"
-                variant={tab === "url" ? "secondary" : "outline"}
-                className="flex-1"
-                aria-pressed={tab === "url"}
-                onClick={() => changeTab("url")}
-                disabled={isSubmitting}
-              >
-                Pairing URL
-              </Button>
-              <Button
-                type="button"
-                variant={tab === "code" ? "secondary" : "outline"}
-                className="flex-1"
-                aria-pressed={tab === "code"}
-                onClick={() => changeTab("code")}
-                disabled={isSubmitting}
-              >
-                Host + Code
-              </Button>
-              <Button
-                type="button"
-                variant={tab === "login" ? "secondary" : "outline"}
-                className="flex-1"
-                aria-pressed={tab === "login"}
-                onClick={() => changeTab("login")}
-                disabled={isSubmitting}
-              >
-                Host + Password
-              </Button>
-            </Group>
+            <SegmentedControl
+              aria-label="Connection method"
+              value={tab}
+              onValueChange={changeTab}
+              options={[
+                { value: "url", label: "Pairing URL", disabled: isSubmitting },
+                { value: "code", label: "Host + code", disabled: isSubmitting },
+                { value: "login", label: "Host + password", disabled: isSubmitting },
+              ]}
+            />
 
             <div className="flex flex-col gap-2">
               <label htmlFor="env-label" className="text-sm font-medium">
@@ -477,9 +459,6 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
                 </div>
                 {tab === "login" ? (
                   <>
-                    <p className="text-sm text-muted-foreground">
-                      Use the server’s admin password.
-                    </p>
                     <div className="flex flex-col gap-2">
                       <label htmlFor="env-password" className="text-sm font-medium">
                         Admin password
@@ -514,7 +493,7 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
               </>
             )}
 
-            {error ? <p className="text-sm text-destructive">{error}</p> : null}
+            {error ? <p className="text-sm text-destructive-foreground">{error}</p> : null}
           </DialogPanel>
 
           <DialogFooter className="shrink-0">
@@ -526,15 +505,8 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
             >
               Cancel
             </Button>
-            <Button type="submit" disabled={isSubmitting}>
-              {isSubmitting ? (
-                <>
-                  <Spinner className="mr-2 size-4" />
-                  Adding
-                </>
-              ) : (
-                "Add environment"
-              )}
+            <Button type="submit" disabled={isSubmitting} aria-busy={isSubmitting || undefined}>
+              <BusyButtonLabel busy={isSubmitting}>Add environment</BusyButtonLabel>
             </Button>
           </DialogFooter>
         </form>
@@ -561,7 +533,9 @@ export function SavedEnvironmentsSettings({
       headerAction={<AddSavedEnvironmentDialog actions={actions} />}
     >
       {records.length === 0 ? (
-        <SettingsRow title="No remote servers paired" description={null} />
+        <p className="px-4 py-3.5 text-xs text-muted-foreground sm:px-5">
+          No remote servers paired.
+        </p>
       ) : (
         records.map((record) => (
           <SavedEnvironmentRow

@@ -69,7 +69,7 @@ function readArchivedThreadsError(
   }
 
   const error = Cause.squash(result.cause);
-  return error instanceof Error ? error.message : "Failed to load archived threads.";
+  return error instanceof Error ? error.message : "Couldn't load archived chats.";
 }
 
 export function refreshArchivedThreadsForEnvironment(environmentId: EnvironmentId): void {

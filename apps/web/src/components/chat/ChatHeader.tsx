@@ -1,6 +1,5 @@
 import {
   type EnvironmentId,
-  type DesktopSourceUpdateState,
   type EditorId,
   type ResolvedKeybindingsConfig,
   type TerminalAvailability,
@@ -11,7 +10,6 @@ import { ContentSidebarTriggerWithUnreadDot } from "../sidebar/unseenCompletions
 import { ConnectionStatusIndicator } from "./ConnectionStatusIndicator";
 import { OpenInPicker } from "./OpenInPicker";
 import { usePrimaryEnvironmentId } from "../../environments/primary";
-import { useDesktopSourceUpdateState } from "../../lib/desktopSourceUpdateReactQuery";
 import { getLocalShellCapabilities } from "../../localCapabilities";
 
 interface ChatHeaderProps {
@@ -23,6 +21,7 @@ interface ChatHeaderProps {
   keybindings: ResolvedKeybindingsConfig;
   availableEditors: ReadonlyArray<EditorId>;
   terminal: TerminalAvailability;
+  compact?: boolean;
 }
 
 export function shouldShowOpenInPicker(input: {
@@ -39,16 +38,6 @@ export function shouldShowOpenInPicker(input: {
   );
 }
 
-function shouldShowSourceRebuildBadge(state: DesktopSourceUpdateState | null): boolean {
-  return Boolean(
-    state?.trackedBranch &&
-    state.localHash &&
-    state.runtimeHash &&
-    state.localHash !== state.runtimeHash &&
-    state.status !== "behind",
-  );
-}
-
 export const ChatHeader = memo(function ChatHeader({
   activeThreadEnvironmentId,
   activeThreadTitle,
@@ -58,64 +47,72 @@ export const ChatHeader = memo(function ChatHeader({
   keybindings,
   availableEditors,
   terminal,
+  compact = false,
 }: ChatHeaderProps) {
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const localShellCapabilities = getLocalShellCapabilities();
-  const sourceUpdateState = useDesktopSourceUpdateState().data ?? null;
   const showOpenInPicker = shouldShowOpenInPicker({
     activeProjectName,
     activeThreadEnvironmentId,
     primaryEnvironmentId,
     canOpenLocalEditor: localShellCapabilities.canOpenLocalEditor,
   });
-  const shouldShowSourceUpdateBadge =
-    sourceUpdateState?.status === "behind" && sourceUpdateState.trackedBranch !== null;
-  const shouldShowSourceRebuildBadgeValue = shouldShowSourceRebuildBadge(sourceUpdateState);
-  const sourceUpdateTooltip =
-    shouldShowSourceRebuildBadgeValue && sourceUpdateState?.trackedBranch
-      ? `Current checkout differs from the running Cafe Code build. Rebuild and restart to apply ${sourceUpdateState.trackedBranch}.`
-      : shouldShowSourceUpdateBadge && sourceUpdateState.remoteHash
-        ? `Newer origin/${sourceUpdateState.trackedBranch} commit available: ${sourceUpdateState.remoteHash.slice(0, 12)}`
-        : shouldShowSourceUpdateBadge
-          ? `Newer origin/${sourceUpdateState.trackedBranch} commit available.`
-          : null;
 
+  if (compact)
+    return (
+      <>
+        <ContentSidebarTriggerWithUnreadDot />
+        <h2 data-chat-header-title className="sr-only">
+          {activeThreadTitle}
+        </h2>
+        <ConnectionStatusIndicator environmentId={activeThreadEnvironmentId} />
+        {showOpenInPicker && (
+          <OpenInPicker
+            environmentId={activeThreadEnvironmentId}
+            keybindings={keybindings}
+            availableEditors={availableEditors}
+            terminal={terminal}
+            openInCwd={openInCwd}
+            shortcutOnly
+          />
+        )}
+      </>
+    );
   return (
     <div className="@container/header-actions flex min-w-0 flex-1 items-center gap-2">
       <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden sm:gap-3">
         <ContentSidebarTriggerWithUnreadDot />
         <h2
           // Desktop keeps a single truncated line; on mobile (max-md) allow up to
-          // two lines so the thread title is not cut off as aggressively.
+          // two lines so the chat title is not cut off as aggressively. Inside a
+          // Desk pane the tab already shows the title, so desk.css keeps this
+          // heading for assistive technology only (one title per view).
+          data-chat-header-title
           className="min-w-0 shrink truncate text-sm font-medium text-foreground max-md:line-clamp-2 max-md:whitespace-normal"
           title={activeThreadTitle}
         >
           {activeThreadTitle}
         </h2>
         {activeProjectName && (
-          <Badge variant="outline" className="min-w-0 shrink overflow-hidden">
+          // Context, not a control: a quiet chip rather than an outlined badge.
+          <Badge
+            variant="secondary"
+            data-chat-header-project
+            className="min-w-0 shrink overflow-hidden font-normal text-muted-foreground"
+          >
             <span className="min-w-0 truncate">{activeProjectName}</span>
           </Badge>
         )}
         {activeProjectName && !isGitRepo && (
-          <Badge variant="outline" className="shrink-0 text-[10px] text-amber-700">
+          <Badge
+            variant="outline"
+            className="shrink-0 text-2xs text-status-attention-foreground sm:text-2xs"
+          >
             No Git
           </Badge>
         )}
       </div>
       <div className="flex shrink-0 items-center justify-end gap-2 @3xl/header-actions:gap-3">
-        {(shouldShowSourceUpdateBadge || shouldShowSourceRebuildBadgeValue) && (
-          <Badge
-            variant="outline"
-            size="sm"
-            className="hidden border-muted-foreground/20 bg-muted/20 text-[10px] font-medium text-muted-foreground sm:inline-flex"
-            title={sourceUpdateTooltip ?? undefined}
-          >
-            {shouldShowSourceRebuildBadgeValue
-              ? `Rebuild to apply (${sourceUpdateState?.trackedBranch})`
-              : `Newer ${sourceUpdateState?.trackedBranch}`}
-          </Badge>
-        )}
         <ConnectionStatusIndicator environmentId={activeThreadEnvironmentId} />
         {showOpenInPicker && (
           <OpenInPicker

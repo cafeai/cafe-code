@@ -68,22 +68,27 @@ restarted by opening Usage. See the [child accounting decision](decisions/codex-
 
 The cost table's tokens are **processed tokens**: recorded input plus output.
 Input already includes cache reads/writes, and output already includes reasoning;
-neither subset is added again. **Output tokens by provider and model** instead
-measures only recorded generated output, matching the headline Tokens generated.
-Its percentages therefore need not match processed-token or estimated-cost shares.
+neither subset is added again. The headline Tokens generated counts only recorded
+output, so a model's share of it need not match its processed-token or
+estimated-cost share. Settings no longer shows a separate output-by-model
+breakdown; the cost table and headline cover the same data without repeating it.
 
-Models with recorded input but zero recorded output remain visible in the output
-breakdown with their processed volume. Provider groups with zero recorded output
-also display **No output recorded**. Input-only models contribute zero to output
-totals and percentages. This does not mean the model generated nothing: Claude
-can publish a known input/cache lower bound before validated
-terminal model totals become available. Missing/inconclusive results or an
-unavailable resumed cumulative baseline can retain that input-only observation.
-Cafe does not guess missing output, reconstruct it from cost/input shares, retry
-inference, or rewrite historical usage to make the tables match. A later detailed
-response with confirmed output replaces the zero-output explanation normally.
-Aggregate usage rows cannot identify which of these causes affected one historical
-observation; diagnosing a missing terminal event requires separate evidence.
+Models with recorded input but zero recorded output stay in the cost table with
+their processed volume and contribute zero to output totals. This does not mean
+the model generated nothing: Claude can publish a known input/cache lower bound
+before validated terminal model totals become available. Missing/inconclusive
+results or an unavailable resumed cumulative baseline can retain that input-only
+observation. Cafe does not guess missing output, reconstruct it from cost/input
+shares, retry inference, or rewrite historical usage to make the tables match. A
+later detailed response with confirmed output replaces the input-only row
+normally. Aggregate usage rows cannot identify which of these causes affected one
+historical observation; diagnosing a missing terminal event requires separate
+evidence.
+
+Usage recorded without any provider/model attribution, such as pre-attribution
+history, appears in the cost table as one **Unattributed usage** row: counted,
+labelled Unpriced, and explained in an info tooltip. It is never assigned to a
+guessed model.
 
 Settings Activity adapts to the available card width: square cells grow within a
 readable cap, shorter calendars are centered, and the color legend stays aligned
@@ -95,9 +100,11 @@ with no fabricated history, added polling or changed collection/accounting.
 
 Long activity histories retain their complete scrollable extent while rendering only visible week columns plus a small overscan. This bounds page content even for an unusually old calendar, without imposing a historical date cutoff or hiding older records.
 
-Money is an API-equivalent USD estimate using the shared pricing table or explicit user overrides, not a subscription invoice. Long-context and speed-tier adjustments cannot be reconstructed from aggregate counters and remain excluded. Unknown model rates and missing model attribution remain unpriced; the priced/unpriced percentages include the recorded unattributed gap. The output breakdown identifies unattributed output separately.
+Money is an API-equivalent USD estimate using the shared pricing table or explicit user overrides, not a subscription invoice. Long-context and speed-tier adjustments cannot be reconstructed from aggregate counters and remain excluded. Unknown model rates and missing model attribution remain unpriced; the priced/unpriced percentages include the recorded unattributed gap. The cost table shows unattributed usage as its own unpriced row.
 
-“Model not reported” means the provider is known but the effective serving model is absent from the recorded observation. One-shot Codex `exec --json` helpers report terminal token counts without authoritative model attribution; requested model settings and generic reroute text cannot reliably assign aggregate usage. Older ordinary records can also lack a model. Both the token breakdown and cost table explain this category on hover. Its tokens stay counted and unpriced by default, unless the user explicitly supplies a custom rate for that category; the UI never hides them or relabels historical usage with a guessed model. The [pinned Codex exec event definitions](https://github.com/openai/codex/blob/ff6aec96948b70d94983af2641a6b67c94faeff5/codex-rs/exec/src/exec_events.rs#L36-L68) and [terminal/reroute mapping](https://github.com/openai/codex/blob/ff6aec96948b70d94983af2641a6b67c94faeff5/codex-rs/exec/src/event_processor_with_jsonl_output.rs#L473-L514) document this attribution limitation.
+Each surface labels the currency once (for example "Cost (USD)") and keeps the `$` on individual figures. Token totals display in compact `K`/`M`/`B` notation; hovering or focusing a total shows the exact comma-separated count. The long-context/speed-tier exclusion sits in an info tooltip beside the estimate, while "Estimates from recorded usage; may be incomplete." stays visible.
+
+“Model not reported” means the provider is known but the effective serving model is absent from the recorded observation. One-shot Codex `exec --json` helpers report terminal token counts without authoritative model attribution; requested model settings and generic reroute text cannot reliably assign aggregate usage. Older ordinary records can also lack a model. The cost table explains this category on hover. Its tokens stay counted and unpriced by default, unless the user explicitly supplies a custom rate for that category; the UI never hides them or relabels historical usage with a guessed model. The [pinned Codex exec event definitions](https://github.com/openai/codex/blob/ff6aec96948b70d94983af2641a6b67c94faeff5/codex-rs/exec/src/exec_events.rs#L36-L68) and [terminal/reroute mapping](https://github.com/openai/codex/blob/ff6aec96948b70d94983af2641a6b67c94faeff5/codex-rs/exec/src/event_processor_with_jsonl_output.rs#L473-L514) document this attribution limitation.
 
 Older servers may omit daily model attribution. Finite ranges still show their recorded aggregate counters, but cannot assign costs by borrowing lifetime model shares. Similarly, old history may contain output without input/cache/reasoning measurements. Missing dimensions are not fabricated or backfilled. All's lifetime total can exceed the daily graph when historical daily detail is unavailable; the graph remains a daily-ledger view rather than inventing dates or rates for that difference. Interrupted requests may not report complete usage, so cost-quality percentages cover recorded counters only.
 

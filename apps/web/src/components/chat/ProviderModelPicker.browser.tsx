@@ -647,14 +647,15 @@ describe("ProviderModelPicker", () => {
           document.querySelector<HTMLElement>('[data-model-picker-provider="codex_personal"]')
             ?.dataset.providerAccentColor,
         ).toBe("#dc2626");
-        expect(getModelPickerListText()).toContain("Codex Work");
+        // The sidebar names the single selected instance; rows don't repeat it.
+        expect(getModelPickerListText()).not.toContain("Codex Work");
         expect(getVisibleModelNames()).toEqual(["GPT Work"]);
       });
 
       await page.getByRole("button", { name: "Codex Personal" }).click();
 
       await vi.waitFor(() => {
-        expect(getModelPickerListText()).toContain("Codex Personal");
+        expect(getModelPickerListText()).not.toContain("Codex Personal");
         expect(getVisibleModelNames()).toEqual(["GPT Personal"]);
       });
     } finally {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, type ReactNode } from "react";
+import { useMemo } from "react";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import type {
@@ -10,9 +10,9 @@ import type {
   ProviderSettingsFormSchemaAnnotation,
 } from "@cafecode/contracts";
 
-import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
 import { DraftInput } from "../ui/draft-input";
+import { InfoTip } from "../ui/info-tip";
 import { Input } from "../ui/input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
@@ -24,6 +24,12 @@ export interface ProviderSettingsFieldModel {
   readonly control: ProviderSettingsFormControl;
   readonly label: string;
   readonly description?: string | undefined;
+  /**
+   * Secondary detail from the schema's `documentation` annotation: environment
+   * variable names, version requirements and caveats. Rendered in an InfoTip
+   * beside the label so the visible description stays one short line.
+   */
+  readonly detail?: string | undefined;
   readonly placeholder?: string | undefined;
   readonly options?: ReadonlyArray<ProviderSettingsFormOption> | undefined;
   readonly clearWhenEmpty: "omit" | "persist";
@@ -51,7 +57,7 @@ function readFieldAnnotations(
 
 function readFieldAnnotationString(
   fieldSchema: ProviderClientDefinition["settingsSchema"]["fields"][string],
-  key: "title" | "description",
+  key: "title" | "description" | "documentation",
 ): string | undefined {
   const annotations = readFieldAnnotations(fieldSchema);
   const value = annotations?.[key];
@@ -119,12 +125,15 @@ export function deriveProviderSettingsFields(
 
       const annotatedTitle = readFieldAnnotationString(fieldSchema, "title");
       const annotatedDescription = readFieldAnnotationString(fieldSchema, "description");
+      const annotatedDetail = readFieldAnnotationString(fieldSchema, "documentation");
+      const control = formAnnotation.control ?? "text";
       return [
         {
           key,
-          control: formAnnotation.control ?? "text",
+          control,
           label: annotatedTitle ?? titleizeFieldKey(key),
           ...(annotatedDescription !== undefined ? { description: annotatedDescription } : {}),
+          ...(annotatedDetail !== undefined ? { detail: annotatedDetail } : {}),
           ...(formAnnotation.placeholder !== undefined
             ? { placeholder: formAnnotation.placeholder }
             : {}),
@@ -133,7 +142,10 @@ export function deriveProviderSettingsFields(
           ...(formAnnotation.control === "switch"
             ? { defaultBooleanValue: readFieldBooleanDefault(fieldSchema) }
             : {}),
-          ...(formAnnotation.control === "select"
+          // Text defaults are read only to tell customized values apart from
+          // decoded defaults (e.g. a binary path of "codex"); writes still
+          // treat select defaults alone as "empty".
+          ...(control === "select" || control === "text"
             ? { defaultStringValue: readFieldStringDefault(fieldSchema) }
             : {}),
           ...(formAnnotation.control === "number"
@@ -280,22 +292,49 @@ function clearProviderConfigPassword(
   return Object.keys(base).length > 0 ? base : undefined;
 }
 
+/**
+ * Whether `config` stores a value for `field` that differs from its decoded
+ * default. Collapsed runtime sections use this to say how many values are
+ * customized, so configured settings stay discoverable without expanding.
+ */
+export function isProviderSettingCustomized(
+  config: unknown,
+  field: ProviderSettingsFieldModel,
+): boolean {
+  if (config === null || typeof config !== "object") return false;
+  const record = config as Record<string, unknown>;
+  const value = record[field.key];
+  switch (field.control) {
+    case "switch":
+      return typeof value === "boolean" && value !== (field.defaultBooleanValue ?? false);
+    case "number":
+      return (
+        typeof value === "number" && Number.isFinite(value) && value !== field.defaultNumberValue
+      );
+    case "password":
+      return (
+        record[`${field.key}Redacted`] === true ||
+        (typeof value === "string" && value.trim().length > 0)
+      );
+    default: {
+      if (typeof value !== "string") return false;
+      const trimmed = value.trim();
+      return trimmed.length > 0 && trimmed !== (field.defaultStringValue ?? "");
+    }
+  }
+}
+
 interface ProviderSettingsFormProps {
   readonly definition: ProviderClientDefinition;
   readonly value: unknown;
   readonly idPrefix: string;
   readonly variant: "card" | "dialog";
+  /**
+   * Field keys to leave out of the form, e.g. a platform-specific setting the
+   * current server cannot use. Hidden fields keep their stored values.
+   */
+  readonly hiddenFieldKeys?: ReadonlySet<string> | undefined;
   readonly onChange: (nextConfig: Record<string, unknown> | undefined) => void;
-}
-
-function FieldFrame(props: {
-  readonly variant: ProviderSettingsFormProps["variant"];
-  readonly children: ReactNode;
-}) {
-  if (props.variant === "card") {
-    return <div className="border-t border-border/60 px-4 py-3 sm:px-5">{props.children}</div>;
-  }
-  return <div className="grid gap-1.5">{props.children}</div>;
 }
 
 interface ProviderSettingsFieldRowProps {
@@ -304,6 +343,36 @@ interface ProviderSettingsFieldRowProps {
   readonly idPrefix: string;
   readonly variant: ProviderSettingsFormProps["variant"];
   readonly onChange: ProviderSettingsFormProps["onChange"];
+}
+
+const FIELD_LABEL_CLASS_NAME = "text-xs font-medium text-foreground";
+
+/**
+ * Field label plus an optional InfoTip for the schema's secondary detail. The
+ * InfoTip sits outside the `<label>` (or labelling span) on purpose: a button
+ * inside it would otherwise become part of the control's accessible name.
+ */
+function FieldLabel(props: {
+  readonly field: ProviderSettingsFieldModel;
+  readonly htmlFor?: string | undefined;
+  readonly id?: string | undefined;
+}) {
+  return (
+    <div className="flex min-w-0 items-center gap-1">
+      {props.htmlFor !== undefined ? (
+        <label htmlFor={props.htmlFor} className={FIELD_LABEL_CLASS_NAME}>
+          {props.field.label}
+        </label>
+      ) : (
+        <span id={props.id} className={FIELD_LABEL_CLASS_NAME}>
+          {props.field.label}
+        </span>
+      )}
+      {props.field.detail ? (
+        <InfoTip label={`About ${props.field.label}`}>{props.field.detail}</InfoTip>
+      ) : null}
+    </div>
+  );
 }
 
 function ProviderSettingsFieldRow({
@@ -315,55 +384,50 @@ function ProviderSettingsFieldRow({
 }: ProviderSettingsFieldRowProps) {
   const inputId = `${idPrefix}-${field.key}`;
   const descriptionId = field.description ? `${inputId}-description` : undefined;
-  const descriptionClassName =
-    variant === "card"
-      ? "mt-1 block text-xs text-muted-foreground"
-      : "text-[11px] text-muted-foreground";
-  const label = <span className="text-xs font-medium text-foreground">{field.label}</span>;
+  // The add dialog sits on a muted panel, so its inputs need their own surface.
+  const inputClassName = variant === "dialog" ? "bg-background" : undefined;
   const description = field.description ? (
-    <span id={descriptionId} className={descriptionClassName}>
+    <p id={descriptionId} className="text-xs text-muted-foreground">
       {field.description}
-    </span>
+    </p>
   ) : null;
 
   if (field.control === "switch") {
     return (
-      <FieldFrame variant={variant}>
-        <div className="flex items-center justify-between gap-3">
-          <div className="min-w-0">
-            {label}
-            {description}
-          </div>
-          <Switch
-            checked={readProviderConfigBoolean(value, field.key, field.defaultBooleanValue)}
-            onCheckedChange={(checked) =>
-              onChange(nextProviderConfigWithFieldValue(value, field, Boolean(checked)))
-            }
-            aria-label={field.label}
-          />
+      <div className="flex items-center justify-between gap-3">
+        <div className="grid min-w-0 gap-0.5">
+          <FieldLabel field={field} />
+          {description}
         </div>
-      </FieldFrame>
+        <Switch
+          checked={readProviderConfigBoolean(value, field.key, field.defaultBooleanValue)}
+          onCheckedChange={(checked) =>
+            onChange(nextProviderConfigWithFieldValue(value, field, Boolean(checked)))
+          }
+          aria-label={field.label}
+          aria-describedby={descriptionId}
+        />
+      </div>
     );
   }
 
   if (field.control === "textarea") {
     return (
-      <FieldFrame variant={variant}>
-        <label htmlFor={inputId} className={cn(variant === "card" && "block")}>
-          {label}
-          <Textarea
-            id={inputId}
-            className={cn(variant === "card" && "mt-1.5")}
-            value={readProviderConfigString(value, field.key)}
-            onChange={(event) =>
-              onChange(nextProviderConfigWithFieldValue(value, field, event.target.value))
-            }
-            placeholder={field.placeholder}
-            spellCheck={false}
-          />
-          {description}
-        </label>
-      </FieldFrame>
+      <div className="grid gap-1.5">
+        <FieldLabel field={field} htmlFor={inputId} />
+        <Textarea
+          id={inputId}
+          className={inputClassName}
+          aria-describedby={descriptionId}
+          value={readProviderConfigString(value, field.key)}
+          onChange={(event) =>
+            onChange(nextProviderConfigWithFieldValue(value, field, event.target.value))
+          }
+          placeholder={field.placeholder}
+          spellCheck={false}
+        />
+        {description}
+      </div>
     );
   }
 
@@ -373,43 +437,38 @@ function ProviderSettingsFieldRow({
     );
 
     return (
-      <FieldFrame variant={variant}>
-        <div className={cn(variant === "card" && "block")}>
-          <label htmlFor={inputId}>
-            {label}
-            {variant === "card" ? (
-              <DraftInput
-                id={inputId}
-                className="mt-1.5"
-                type="number"
-                step={field.step ?? 1}
-                min={field.minimum}
-                max={field.maximum}
-                aria-describedby={descriptionId}
-                value={currentValue}
-                onCommit={(next) => onChange(nextProviderConfigWithFieldValue(value, field, next))}
-                placeholder={field.placeholder}
-              />
-            ) : (
-              <Input
-                id={inputId}
-                className="bg-background"
-                type="number"
-                step={field.step ?? 1}
-                min={field.minimum}
-                max={field.maximum}
-                aria-describedby={descriptionId}
-                value={currentValue}
-                onChange={(event) =>
-                  onChange(nextProviderConfigWithFieldValue(value, field, event.target.value))
-                }
-                placeholder={field.placeholder}
-              />
-            )}
-          </label>
-          {description}
-        </div>
-      </FieldFrame>
+      <div className="grid gap-1.5">
+        <FieldLabel field={field} htmlFor={inputId} />
+        {variant === "card" ? (
+          <DraftInput
+            id={inputId}
+            type="number"
+            step={field.step ?? 1}
+            min={field.minimum}
+            max={field.maximum}
+            aria-describedby={descriptionId}
+            value={currentValue}
+            onCommit={(next) => onChange(nextProviderConfigWithFieldValue(value, field, next))}
+            placeholder={field.placeholder}
+          />
+        ) : (
+          <Input
+            id={inputId}
+            className={inputClassName}
+            type="number"
+            step={field.step ?? 1}
+            min={field.minimum}
+            max={field.maximum}
+            aria-describedby={descriptionId}
+            value={currentValue}
+            onChange={(event) =>
+              onChange(nextProviderConfigWithFieldValue(value, field, event.target.value))
+            }
+            placeholder={field.placeholder}
+          />
+        )}
+        {description}
+      </div>
     );
   }
 
@@ -422,43 +481,42 @@ function ProviderSettingsFieldRow({
       "";
 
     return (
-      <FieldFrame variant={variant}>
-        <div className={cn(variant === "card" && "block")}>
-          <span id={inputId}>{label}</span>
-          <Select
-            modal={false}
-            value={currentValue}
-            onValueChange={(next) => {
-              if (next !== null) {
-                onChange(nextProviderConfigWithFieldValue(value, field, next));
-              }
-            }}
-            items={options}
+      <div className="grid gap-1.5">
+        <FieldLabel field={field} id={inputId} />
+        <Select
+          modal={false}
+          value={currentValue}
+          onValueChange={(next) => {
+            if (next !== null) {
+              onChange(nextProviderConfigWithFieldValue(value, field, next));
+            }
+          }}
+          items={options}
+        >
+          <SelectTrigger
+            aria-labelledby={inputId}
+            aria-describedby={descriptionId}
+            className={inputClassName}
           >
-            <SelectTrigger
-              aria-labelledby={inputId}
-              className={cn(variant === "card" ? "mt-1.5" : "bg-background")}
-            >
-              <SelectValue />
-            </SelectTrigger>
-            <SelectPopup>
-              {options.map((option) => (
-                <SelectItem key={option.value} value={option.value}>
-                  <span className="grid min-w-0 gap-0.5">
-                    <span className="truncate">{option.label}</span>
-                    {option.description ? (
-                      <span className="whitespace-normal text-xs text-muted-foreground">
-                        {option.description}
-                      </span>
-                    ) : null}
-                  </span>
-                </SelectItem>
-              ))}
-            </SelectPopup>
-          </Select>
-          {description}
-        </div>
-      </FieldFrame>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectPopup>
+            {options.map((option) => (
+              <SelectItem key={option.value} value={option.value}>
+                <span className="grid min-w-0 gap-0.5">
+                  <span className="truncate">{option.label}</span>
+                  {option.description ? (
+                    <span className="whitespace-normal text-xs text-muted-foreground">
+                      {option.description}
+                    </span>
+                  ) : null}
+                </span>
+              </SelectItem>
+            ))}
+          </SelectPopup>
+        </Select>
+        {description}
+      </div>
     );
   }
 
@@ -466,72 +524,78 @@ function ProviderSettingsFieldRow({
   const passwordRedacted =
     field.control === "password" && readProviderConfigBoolean(value, `${field.key}Redacted`);
   const placeholder = passwordRedacted
-    ? "Stored secret - enter a new value to replace"
+    ? "Saved. Type a new value to replace it."
     : field.placeholder;
   return (
-    <FieldFrame variant={variant}>
-      <div className={cn(variant === "card" && "block")}>
-        <label htmlFor={inputId}>
-          {label}
-          {variant === "card" ? (
-            <DraftInput
-              id={inputId}
-              className="mt-1.5"
-              type={type}
-              autoComplete={field.control === "password" ? "off" : undefined}
-              value={readProviderConfigString(value, field.key)}
-              onCommit={(next) => onChange(nextProviderConfigWithFieldValue(value, field, next))}
-              placeholder={placeholder}
-              spellCheck={false}
-            />
-          ) : (
-            <Input
-              id={inputId}
-              className="bg-background"
-              type={type}
-              autoComplete={field.control === "password" ? "off" : undefined}
-              value={readProviderConfigString(value, field.key)}
-              onChange={(event) =>
-                onChange(nextProviderConfigWithFieldValue(value, field, event.target.value))
-              }
-              placeholder={placeholder}
-              spellCheck={false}
-            />
-          )}
-        </label>
-        {passwordRedacted ? (
-          <Button
-            type="button"
-            size="xs"
-            variant="ghost"
-            className="mt-1 h-6 px-1.5 text-[11px] text-muted-foreground"
-            onClick={() => onChange(clearProviderConfigPassword(value, field))}
-          >
-            Clear stored password
-          </Button>
-        ) : null}
-        {description}
-      </div>
-    </FieldFrame>
+    <div className="grid gap-1.5">
+      <FieldLabel field={field} htmlFor={inputId} />
+      {variant === "card" ? (
+        <DraftInput
+          id={inputId}
+          type={type}
+          autoComplete={field.control === "password" ? "off" : undefined}
+          aria-describedby={descriptionId}
+          value={readProviderConfigString(value, field.key)}
+          onCommit={(next) => onChange(nextProviderConfigWithFieldValue(value, field, next))}
+          placeholder={placeholder}
+          spellCheck={false}
+        />
+      ) : (
+        <Input
+          id={inputId}
+          className={inputClassName}
+          type={type}
+          autoComplete={field.control === "password" ? "off" : undefined}
+          aria-describedby={descriptionId}
+          value={readProviderConfigString(value, field.key)}
+          onChange={(event) =>
+            onChange(nextProviderConfigWithFieldValue(value, field, event.target.value))
+          }
+          placeholder={placeholder}
+          spellCheck={false}
+        />
+      )}
+      {description}
+      {passwordRedacted ? (
+        <Button
+          type="button"
+          size="xs"
+          variant="ghost"
+          className="justify-self-start text-muted-foreground"
+          onClick={() => onChange(clearProviderConfigPassword(value, field))}
+        >
+          Clear saved password
+        </Button>
+      ) : null}
+    </div>
   );
 }
 
+/**
+ * Schema-driven provider config fields. Renders the fields as siblings so the
+ * caller owns their layout: the instance dialog stacks them inside its
+ * collapsed Advanced section, the add dialog inside its wizard step.
+ */
 export function ProviderSettingsForm({
   definition,
   value,
   idPrefix,
   variant,
+  hiddenFieldKeys,
   onChange,
 }: ProviderSettingsFormProps) {
   const fields = useMemo(() => deriveProviderSettingsFields(definition), [definition]);
+  const visibleFields = hiddenFieldKeys
+    ? fields.filter((field) => !hiddenFieldKeys.has(field.key))
+    : fields;
 
-  if (fields.length === 0) {
+  if (visibleFields.length === 0) {
     return null;
   }
 
   return (
     <>
-      {fields.map((field) => (
+      {visibleFields.map((field) => (
         <ProviderSettingsFieldRow
           key={field.key}
           field={field}

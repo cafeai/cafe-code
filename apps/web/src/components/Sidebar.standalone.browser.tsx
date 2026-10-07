@@ -1,5 +1,5 @@
 import "../index.css";
-import { EnvironmentId, ThreadId } from "@cafecode/contracts";
+import { EnvironmentId, ProviderDriverKind, ThreadId } from "@cafecode/contracts";
 import { scopeThreadRef, scopedThreadKey } from "@cafecode/client-runtime";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
@@ -61,6 +61,14 @@ const saved: SidebarThreadSummary = {
   hasPendingUserInput: false,
   hasActionableProposedPlan: false,
 };
+function standaloneFixture(
+  id: string,
+  title: string,
+  latestUserMessageAt: string,
+  extra: Partial<SidebarThreadSummary> = {},
+): SidebarThreadSummary {
+  return { ...saved, id: ThreadId.make(id), title, latestUserMessageAt, ...extra };
+}
 const draftId = DraftId.make("unsent-standalone-draft");
 beforeEach(async () => {
   await page.viewport(1100, 800);
@@ -139,7 +147,7 @@ describe("standalone Chats catalog", () => {
     const original = useComposerDraftStore.getState().getDraftSession(draftId);
     const { screen, onOpen, onNewChat } = await setup([]);
     try {
-      await expect.element(screen.getByText("No standalone chats yet")).toBeVisible();
+      await expect.element(screen.getByText("No chats yet")).toBeVisible();
       await screen.getByRole("button", { name: "New chat", exact: true }).click();
       expect(onNewChat).toHaveBeenCalledTimes(1);
       expect(document.querySelector('[data-testid^="thread-row-"]')).toBeNull();
@@ -184,10 +192,13 @@ describe("standalone Chats catalog", () => {
     try {
       const row = screen.getByTestId(`thread-row-${saved.id}`);
       await row.click();
-      expect(onOpen).toHaveBeenCalledWith({
-        kind: "server",
-        threadRef: scopeThreadRef(environmentId, saved.id),
-      });
+      expect(onOpen).toHaveBeenCalledExactlyOnceWith(
+        {
+          kind: "server",
+          threadRef: scopeThreadRef(environmentId, saved.id),
+        },
+        true,
+      );
       const rename = screen.getByRole("button", { name: `Rename ${saved.title}`, exact: true });
       const archive = screen.getByTestId(`thread-archive-${saved.id}`);
       (row.element() as HTMLElement).blur();
@@ -219,6 +230,81 @@ describe("standalone Chats catalog", () => {
       expect(mocks.archive).toHaveBeenCalledExactlyOnceWith(
         scopeThreadRef(environmentId, saved.id),
       );
+    } finally {
+      await screen.unmount();
+    }
+  });
+  it("aligns its overflow toggle with chat titles and summarizes urgent hidden chats", async () => {
+    // The "updated" sort follows the latest user message, so a long-running
+    // chat and a later approval request can both sit below the preview.
+    const threads = [
+      standaloneFixture("overflow-newest", "Newest chat", "2026-09-05T00:00:00Z"),
+      standaloneFixture("overflow-second", "Second chat", "2026-09-04T00:00:00Z"),
+      standaloneFixture("overflow-running", "Long running chat", "2026-09-03T00:00:00Z", {
+        session: {
+          provider: ProviderDriverKind.make("codex"),
+          status: "running",
+          createdAt: "2026-09-03T00:00:00Z",
+          updatedAt: "2026-09-05T00:00:00Z",
+          orchestrationStatus: "running",
+        },
+      }),
+      standaloneFixture("overflow-approval", "Approval chat", "2026-09-02T00:00:00Z", {
+        hasPendingApprovals: true,
+      }),
+    ];
+    const entries = buildStandaloneCatalog({ threads, sortOrder: "updated_at" });
+    const onExpansionChange = vi.fn();
+    const view = (expanded: boolean) => (
+      <div className="w-72">
+        <SidebarStandaloneChats
+          onNewChat={vi.fn()}
+          entries={entries}
+          previewCount={2}
+          expanded={expanded}
+          activeTarget={null}
+          jumpLabelByKey={new Map()}
+          onOpen={vi.fn()}
+          onExpansionChange={onExpansionChange}
+        />
+      </div>
+    );
+    const screen = await render(view(false));
+    try {
+      const label = screen.getByTestId("sidebar-thread-overflow-label");
+      const referenceRow = screen.getByTestId("thread-row-overflow-second");
+      const referenceTitle = screen.getByTestId("thread-title-overflow-second");
+      const collapsed = screen.getByRole("button", {
+        name: "Show 2 more chats, 1 needs approval",
+        exact: true,
+      });
+      await expect.element(collapsed).toHaveAttribute("aria-expanded", "false");
+      await expect.element(label).toHaveTextContent("2 more");
+      await expect
+        .element(screen.getByTestId("sidebar-thread-overflow-summary"))
+        .toHaveTextContent("1 needs approval");
+      await expect.element(screen.getByText("Long running chat")).not.toBeInTheDocument();
+      const collapsedLeft = label.element().getBoundingClientRect().left;
+      expect(collapsedLeft).toBeCloseTo(referenceTitle.element().getBoundingClientRect().left, 1);
+      expect(collapsed.element().getBoundingClientRect().height).toBeCloseTo(
+        referenceRow.element().getBoundingClientRect().height,
+        1,
+      );
+      await collapsed.click();
+      expect(onExpansionChange).toHaveBeenCalledExactlyOnceWith(true);
+
+      await screen.rerender(view(true));
+      const expanded = screen.getByRole("button", { name: "Show fewer chats", exact: true });
+      await expect.element(expanded).toHaveAttribute("aria-expanded", "true");
+      await expect.element(label).toHaveTextContent("Show fewer");
+      await expect
+        .element(screen.getByTestId("sidebar-thread-overflow-summary"))
+        .not.toBeInTheDocument();
+      await expect.element(screen.getByText("Long running chat")).toBeVisible();
+      // The label must not jump horizontally when the list is toggled.
+      expect(label.element().getBoundingClientRect().left).toBeCloseTo(collapsedLeft, 1);
+      await expanded.click();
+      expect(onExpansionChange).toHaveBeenLastCalledWith(false);
     } finally {
       await screen.unmount();
     }

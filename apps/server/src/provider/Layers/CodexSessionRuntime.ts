@@ -8530,6 +8530,10 @@ export const makeCodexSessionRuntime = (
       return true;
     });
 
+    // Parent-scope teardown is an intentional retirement too. Reserve it before
+    // the command layer releases its child, so a clean daemon shutdown cannot
+    // race the exit watcher into persisting an unexpected provider failure.
+    yield* Effect.addFinalizer(() => Ref.set(closedRef, true));
     return {
       start,
       closeIfIdle,

@@ -535,10 +535,10 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             : undefined;
         const guardedForkCommand =
           envelope.command.type === "thread.fork.commit" ? envelope.command : undefined;
-        const decide = (scheduledFollowUpVerified = false) =>
+        const decide = (scheduledFollowUpVerified = false, readModel = commandReadModel) =>
           decideOrchestrationCommand({
             command: envelope.command,
-            readModel: commandReadModel,
+            readModel,
             runtimeRecoveryBarrierVerified,
             codexRootReplacementVerified,
             scheduledFollowUpVerified,
@@ -560,6 +560,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
         const committedCommand = yield* sql
           .withTransaction(
             Effect.gen(function* () {
+              let decisionReadModel = commandReadModel;
               if (guardedForkCommand !== undefined) {
                 // Reserve the SQLite writer before reading exact source and
                 // project authority. This closes same-thread/project races
@@ -574,6 +575,33 @@ const makeOrchestrationEngine = Effect.gen(function* () {
                     commandType: guardedForkCommand.type,
                     detail: "The source context changed during native fork preparation. Try again.",
                   });
+                }
+                if (guardedForkCommand.messageCutoff !== undefined) {
+                  // Startup deliberately omits transcript/checkpoint bodies.
+                  // Read only this bounded source under the same writer/CAS;
+                  // an empty command cache is not evidence a message vanished.
+                  const messageCount = yield* projectionSnapshotQuery.getThreadForkMessageCount(
+                    guardedForkCommand.sourceThreadId,
+                  );
+                  const source = yield* projectionSnapshotQuery.getThreadDetailById(
+                    guardedForkCommand.sourceThreadId,
+                  );
+                  if (
+                    Option.isNone(source) ||
+                    messageCount > 2000 ||
+                    messageCount !== source.value.messages.length
+                  ) {
+                    return yield* new OrchestrationCommandInvariantError({
+                      commandType: guardedForkCommand.type,
+                      detail: "The selected fork has no complete persisted source history.",
+                    });
+                  }
+                  decisionReadModel = {
+                    ...commandReadModel,
+                    threads: commandReadModel.threads.map((thread) =>
+                      thread.id === guardedForkCommand.sourceThreadId ? source.value : thread,
+                    ),
+                  };
                 }
               }
               if (guardedRevertCommand !== undefined) {
@@ -608,10 +636,11 @@ const makeOrchestrationEngine = Effect.gen(function* () {
                     (yield* verifyScheduledFollowUpAdmission(scheduledCommand).pipe(
                       Effect.provideService(SqlClient.SqlClient, sql),
                     )),
+                  decisionReadModel,
                 ));
               const eventBases = Array.isArray(eventBase) ? eventBase : [eventBase];
               const committedEvents: OrchestrationEvent[] = [];
-              let nextCommandReadModel = commandReadModel;
+              let nextCommandReadModel = decisionReadModel;
 
               for (const nextEvent of eventBases) {
                 const savedEvent = yield* eventStore.append(nextEvent);
@@ -626,6 +655,18 @@ const makeOrchestrationEngine = Effect.gen(function* () {
                   );
                 }
                 committedEvents.push(savedEvent);
+              }
+              if (decisionReadModel !== commandReadModel) {
+                // The fork events affect only the target. Do not retain the
+                // temporary source body or expand every thread's startup cache.
+                nextCommandReadModel = {
+                  ...nextCommandReadModel,
+                  threads: nextCommandReadModel.threads.map((thread) =>
+                    thread.id === guardedForkCommand?.sourceThreadId
+                      ? commandReadModel.threads.find((source) => source.id === thread.id)!
+                      : thread,
+                  ),
+                };
               }
 
               const lastSavedEvent = committedEvents.at(-1) ?? null;

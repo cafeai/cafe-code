@@ -9,6 +9,7 @@ import {
 import * as Schema from "effect/Schema";
 import { useState } from "react";
 import { isSubagentRuntimeCurrent, type SubagentRuntimeContext } from "../../subagent-activity";
+import { Button } from "../ui/button";
 import { IndividualTaskControls } from "./SubagentTaskControls";
 
 const isControl = Schema.is(ProviderIndividualTaskControl);
@@ -87,17 +88,19 @@ export function ProviderTasks({ context }: { context: ProviderTasksContext }) {
   const pages = Math.ceil(tasks.length / 5);
   const selectedPage = Math.min(page, pages - 1);
   return (
-    <section aria-label="Active provider tasks" className="mb-3 border-b border-border/55 pb-3">
+    <section aria-label="Active provider tasks" className="mb-3 border-b border-border-subtle pb-3">
       <p className="mb-2 text-xs font-medium text-muted-foreground">
-        Provider tasks · {tasks.length} active
+        Provider tasks · <span className="tabular-nums">{tasks.length}</span> active
       </p>
       <div className="space-y-2">
         {tasks.slice(selectedPage * 5, (selectedPage + 1) * 5).map((task) => (
           <div
             key={`${task.key}:${task.reference.capability.taskGeneration}`}
-            className="rounded-md border border-border/50"
+            className="rounded-lg border border-border-subtle"
           >
-            <p className="break-words px-3 py-2 text-xs [overflow-wrap:anywhere]">{task.title}</p>
+            <p className="break-words px-3 py-2 text-xs text-foreground [overflow-wrap:anywhere]">
+              {task.title}
+            </p>
             <IndividualTaskControls
               environmentId={context.environmentId}
               threadId={context.threadId}
@@ -112,25 +115,25 @@ export function ProviderTasks({ context }: { context: ProviderTasksContext }) {
           aria-label="Provider task pages"
           className="mt-2 flex items-center justify-between text-xs"
         >
-          <button
-            type="button"
+          <Button
+            size="xs"
+            variant="ghost"
             disabled={selectedPage === 0}
             onClick={() => setPage(selectedPage - 1)}
-            className="disabled:opacity-40"
           >
             Previous
-          </button>
-          <span>
+          </Button>
+          <span className="tabular-nums text-muted-foreground">
             {selectedPage + 1} / {pages}
           </span>
-          <button
-            type="button"
+          <Button
+            size="xs"
+            variant="ghost"
             disabled={selectedPage + 1 === pages}
             onClick={() => setPage(selectedPage + 1)}
-            className="disabled:opacity-40"
           >
             Next
-          </button>
+          </Button>
         </nav>
       )}
     </section>

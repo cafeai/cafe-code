@@ -31,7 +31,7 @@ interface NormalizedRestartOptions extends RestartCafeCodeArgs {
 const usage = `Usage:
   yarn restart:desktop [options] [-- command ...]
 
-Schedules a detached Node helper that waits briefly, runs Cafe Code's killall entrypoint, then
+Schedules a detached Node helper that waits briefly, runs Cafe Code's killall --graceful entrypoint, then
 relaunches Cafe Code. The default launch command is:
   node apps/desktop/scripts/start-electron.mjs
 
@@ -314,7 +314,7 @@ async function scheduleRestart(options: NormalizedRestartOptions): Promise<void>
 
 async function runHelper(options: NormalizedRestartOptions): Promise<void> {
   const launchCommand = options.launchCommand ?? defaultLaunchCommand();
-  const killallCommand = [process.execPath, "apps/server/src/bin.ts", "killall"];
+  const killallCommand = [process.execPath, "apps/server/src/bin.ts", "killall", "--graceful"];
 
   console.log(`[restart] helper pid=${process.pid}`);
   console.log(`[restart] waitMs=${options.waitMs} restartDelayMs=${options.restartDelayMs}`);

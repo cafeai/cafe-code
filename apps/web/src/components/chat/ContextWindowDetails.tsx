@@ -39,9 +39,7 @@ export function ContextWindowDetails(props: {
   const hasSubagentLimit = formatSubagentConcurrencyLimit(props.subagentConcurrency) !== null;
 
   if (!hasUsage && !hasRateLimits && !hasSubagentLimit) {
-    return (
-      <p className="text-[13px] text-muted-foreground/40">Waiting for usage from this thread.</p>
-    );
+    return <p className="text-ui text-subtle-foreground">Waiting for usage from this chat.</p>;
   }
 
   return (
@@ -53,15 +51,11 @@ export function ContextWindowDetails(props: {
     >
       {layout === "popover" ? (
         <div className="flex items-center justify-between gap-2">
-          <div className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
-            Context window
-          </div>
+          <div className="label-overline">Context window</div>
           {props.headerAction}
         </div>
       ) : (
-        <div className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground/40">
-          Context window
-        </div>
+        <div className="label-overline">Context window</div>
       )}
 
       {hasUsage && layout === "panel" ? (
@@ -73,8 +67,8 @@ export function ContextWindowDetails(props: {
           className={cn(
             "text-foreground",
             layout === "panel"
-              ? "text-[13px] font-medium"
-              : "whitespace-nowrap text-xs font-medium",
+              ? "text-ui font-medium tabular-nums"
+              : "whitespace-nowrap text-xs font-medium tabular-nums",
           )}
         >
           <span>{usedPercentage}</span>
@@ -85,7 +79,9 @@ export function ContextWindowDetails(props: {
         </div>
       ) : hasUsage ? (
         <div
-          className={layout === "panel" ? "text-[13px] text-foreground" : "text-sm text-foreground"}
+          className={
+            layout === "panel" ? "text-ui text-foreground tabular-nums" : "text-sm text-foreground"
+          }
         >
           {formatContextWindowTokens(usage.usedTokens)} tokens used so far
         </div>
@@ -114,7 +110,7 @@ export function ContextWindowDetails(props: {
           className={cn(
             "text-xs",
             layout === "panel" ? "flex min-h-0 flex-col" : "space-y-1",
-            hasUsage && "border-t border-border/60 pt-2",
+            hasUsage && "border-t border-border-subtle pt-2",
             layout === "panel" && hasUsage && "mt-1",
           )}
         >
@@ -126,7 +122,7 @@ export function ContextWindowDetails(props: {
         </div>
       ) : null}
       {hasSubagentLimit ? (
-        <div className="border-t border-border/60 pt-2">
+        <div className="border-t border-border-subtle pt-2">
           <SubagentConcurrencyDetails presentation={props.subagentConcurrency} />
         </div>
       ) : null}

@@ -1,3 +1,4 @@
+import { ChevronRightIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
@@ -17,6 +18,8 @@ import {
   type AsyncQuestionDraft,
   type AsyncQuestion,
 } from "./asyncQuestions";
+import { Button } from "../ui/button";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 
 export interface ComposerAsyncQuestionsPanelProps {
   readonly environmentId: string;
@@ -25,6 +28,7 @@ export interface ComposerAsyncQuestionsPanelProps {
   readonly deliveryDisabled: boolean;
   /** True only after Cafe has durably accepted the ordinary follow-up. */
   readonly onAnswer: (text: string, messageId: string) => Promise<boolean>;
+  readonly onResolve: (questions: readonly AsyncQuestion[]) => Promise<boolean>;
 }
 
 /**
@@ -46,6 +50,7 @@ function ScopedAsyncQuestionsPanel({
   activities,
   deliveryDisabled,
   onAnswer,
+  onResolve,
 }: ComposerAsyncQuestionsPanelProps) {
   const [questions, setQuestions] = useState<readonly AsyncQuestion[]>([]);
   const [handled, setHandled] = useState(() => readHandledAsyncQuestions(asyncQuestionStorage));
@@ -57,6 +62,10 @@ function ScopedAsyncQuestionsPanel({
   // React may not paint disabled controls before a second click. Admission is
   // synchronous and remains tied to the original question through async save.
   const inFlight = useRef(false);
+  const acceptedAnswers = useRef(new Map<string, string>());
+  const migratedReceipts = useRef(new Set<string>());
+  const resolveRef = useRef(onResolve);
+  resolveRef.current = onResolve;
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -69,7 +78,21 @@ function ScopedAsyncQuestionsPanel({
     let current = true;
     void deriveAsyncQuestions(environmentId, threadId, activities).then(
       (next) => {
-        if (current) setQuestions(next);
+        if (current) {
+          setQuestions(next);
+          // Remember a remote resolution when its activity later leaves the
+          // bounded live window, without consuming an edited draft.
+          const resolved = next.filter((question) => question.handled);
+          if (resolved.length)
+            setHandled(
+              (existing) =>
+                new Set(
+                  [...existing, ...resolved.map((question) => question.id)].slice(
+                    -MAX_HANDLED_ASYNC_QUESTIONS,
+                  ),
+                ),
+            );
+        }
       },
       () => {
         if (current) setError("Could not prepare these questions. Reload to try again.");
@@ -90,22 +113,41 @@ function ScopedAsyncQuestionsPanel({
     return () => window.removeEventListener("storage", refresh);
   }, []);
 
+  // Older versions remembered skips only in this browser. Publish those
+  // receipts to the owning server without resending any answer, so other
+  // clients and future launches see the same handled state.
+  useEffect(() => {
+    if (deliveryDisabled) return;
+    const receipts = questions.filter(
+      (question) =>
+        handled.has(question.id) && !question.handled && !migratedReceipts.current.has(question.id),
+    );
+    if (!receipts.length) return;
+    for (const question of receipts) migratedReceipts.current.add(question.id);
+    void withAsyncQuestionLock(() => resolveRef.current(receipts)).catch(() => {
+      // The receipt remains local when the server is unavailable; another
+      // launch can retry migration without creating provider input.
+    });
+  }, [questions, handled, deliveryDisabled]);
+
   const pending = useMemo(
     () =>
       retainAsyncQuestionDrafts(questions, drafts).filter(
-        (question) => !handled.has(question.id) || drafts[question.id] !== undefined,
+        (question) =>
+          (!handled.has(question.id) && !question.handled) || drafts[question.id] !== undefined,
       ),
     [questions, drafts, handled],
   );
   const question = pending.find((entry) => entry.id === selectedId) ?? pending[0];
   const answer = question ? (drafts[question.id]?.text ?? "") : "";
-  const handledElsewhere = question !== undefined && handled.has(question.id);
+  const handledElsewhere =
+    question !== undefined && (handled.has(question.id) || question.handled === true);
 
   const editAnswer = (question: AsyncQuestion, text: string) => {
     const next = updateAsyncQuestionDraft(draftsRef.current, question, text);
     if (next === null) {
       setError(
-        "The answer draft limit is reached. Queue or skip an existing answer before adding more.",
+        "The answer draft limit is reached. Send or skip an existing answer before adding more.",
       );
       return;
     }
@@ -116,7 +158,7 @@ function ScopedAsyncQuestionsPanel({
   };
 
   const complete = (ids: readonly string[]) => {
-    const persisted = rememberHandledAsyncQuestions(asyncQuestionStorage, ids);
+    rememberHandledAsyncQuestions(asyncQuestionStorage, ids);
     if (!mounted.current) return;
     setHandled((current) => {
       const next = new Set(current);
@@ -127,19 +169,19 @@ function ScopedAsyncQuestionsPanel({
       return new Set([...next].slice(-MAX_HANDLED_ASYNC_QUESTIONS));
     });
     const next = { ...draftsRef.current };
-    for (const id of ids) delete next[id];
+    for (const id of ids) {
+      delete next[id];
+      acceptedAnswers.current.delete(id);
+    }
     draftsRef.current = next;
     setDrafts(next);
-    if (!persisted)
-      setError(
-        ids.length === 1
-          ? "This question is handled, but browser storage could not remember it after reload."
-          : "These questions are handled, but browser storage could not remember them after reload.",
-      );
+    setQuestions((current) =>
+      current.map((entry) => (ids.includes(entry.id) ? { ...entry, handled: true } : entry)),
+    );
   };
 
   const submit = async () => {
-    if (!question || deliveryDisabled || inFlight.current) return;
+    if (!question || deliveryDisabled || handledElsewhere || inFlight.current) return;
     const text = formatCodexAsyncQuestionAnswer(question.title, answer);
     if (text === null) return;
     const id = question.id;
@@ -154,15 +196,24 @@ function ScopedAsyncQuestionsPanel({
           // draft's exact text. Keep it available to copy or explicitly skip.
           if (mounted.current)
             setHandled((current) => new Set([...current, id].slice(-MAX_HANDLED_ASYNC_QUESTIONS)));
-        } else if (await onAnswer(text, id)) {
-          complete([id]);
+        } else if (acceptedAnswers.current.get(id) === text || (await onAnswer(text, id))) {
+          acceptedAnswers.current.set(id, text);
+          if (await onResolve([question])) complete([id]);
+          else if (mounted.current)
+            setError(
+              "Your answer was accepted, but its question state could not be saved. Try again.",
+            );
         } else if (mounted.current) {
           setError("The answer was not queued. Your draft is still here; try again.");
         }
       });
     } catch {
       if (mounted.current)
-        setError("The answer was not queued. Your draft is still here; try again.");
+        setError(
+          acceptedAnswers.current.get(id) === text
+            ? "Your answer was accepted, but its question state could not be saved. Try again."
+            : "The answer was not queued. Your draft is still here; try again.",
+        );
     } finally {
       inFlight.current = false;
       if (mounted.current) setSubmitting(false);
@@ -173,13 +224,15 @@ function ScopedAsyncQuestionsPanel({
     if (!question || deliveryDisabled || inFlight.current) return;
     // Capture the visible pending set at the click. Questions arriving while
     // another tab owns the handling lock must not be silently dismissed.
-    const ids = all ? pending.map((entry) => entry.id) : [question.id];
+    const selection = all ? pending : [question];
+    const ids = selection.map((entry) => entry.id);
     inFlight.current = true;
     setSubmitting(true);
     setError(null);
     try {
       await withAsyncQuestionLock(async () => {
-        complete(ids);
+        if (await onResolve(selection)) complete(ids);
+        else if (mounted.current) setError("Could not save the skipped questions. Try again.");
       });
     } catch {
       if (mounted.current)
@@ -205,39 +258,46 @@ function ScopedAsyncQuestionsPanel({
     ) : null;
 
   return (
-    <details className="mx-auto mb-2 w-full min-w-0 max-w-208 rounded-lg border border-border/60 bg-card text-sm">
-      <summary className="cursor-pointer px-3 py-2 text-muted-foreground">
+    <details className="group/async-questions mx-auto mb-2 w-full min-w-0 max-w-208 animate-enter-rise rounded-xl border border-border bg-card text-sm">
+      <summary className="focus-ring flex cursor-pointer list-none items-center gap-1.5 rounded-xl px-3 py-2 text-muted-foreground transition-colors duration-(--duration-fast) hover:text-foreground [&::-webkit-details-marker]:hidden">
+        <ChevronRightIcon
+          aria-hidden="true"
+          className="size-3.5 shrink-0 transition-transform duration-(--duration-fast) ease-out group-open/async-questions:rotate-90"
+        />
         {pending.length} {pending.length === 1 ? "question" : "questions"} from Codex
       </summary>
-      <div className="max-h-[40vh] space-y-3 overflow-y-auto overscroll-contain px-3 pb-3">
-        <p className="text-xs text-muted-foreground">
-          You can answer while Codex continues. Your main draft stays below.
-        </p>
+      <div className="max-h-[40vh] animate-enter-rise space-y-3 overflow-y-auto overscroll-contain px-3 pb-3">
         {handledElsewhere && (
           <p role="status" className="text-xs text-muted-foreground">
             Handled in another view. Your draft is kept here; copy it or Skip to dismiss.
           </p>
         )}
         {pending.length > 1 && (
-          <label className="flex items-center gap-2 text-xs text-muted-foreground">
-            Question
-            <select
-              aria-label="Choose question"
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <span aria-hidden="true">Question</span>
+            <Select
               value={question.id}
               disabled={submitting}
-              onChange={(event) => {
-                setSelectedId(event.target.value);
+              onValueChange={(next) => {
+                if (typeof next !== "string") return;
+                setSelectedId(next);
                 setError(null);
               }}
-              className="rounded border border-border bg-background p-1 text-foreground"
             >
-              {pending.map((entry, index) => (
-                <option key={entry.id} value={entry.id}>
-                  {index + 1} of {pending.length}
-                </option>
-              ))}
-            </select>
-          </label>
+              <SelectTrigger size="xs" className="w-auto min-w-24" aria-label="Choose question">
+                <SelectValue>
+                  {pending.findIndex((entry) => entry.id === question.id) + 1} of {pending.length}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectPopup alignItemWithTrigger={false}>
+                {pending.map((entry, index) => (
+                  <SelectItem hideIndicator key={entry.id} value={entry.id}>
+                    {index + 1} of {pending.length}
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
+          </div>
         )}
         <p className="whitespace-pre-wrap break-words font-medium">{question.title}</p>
         {question.options.length > 0 && (
@@ -249,7 +309,7 @@ function ScopedAsyncQuestionsPanel({
                 aria-pressed={answer === option}
                 disabled={submitting}
                 onClick={() => editAnswer(question, option)}
-                className="block w-full whitespace-pre-wrap break-words rounded-md border border-border px-3 py-2 text-left hover:bg-accent aria-pressed:bg-accent"
+                className="focus-ring block w-full whitespace-pre-wrap break-words rounded-lg border border-border px-3 py-2 text-left transition-colors duration-(--duration-fast) hover:bg-accent aria-pressed:border-primary/40 aria-pressed:bg-primary/8"
               >
                 {option}
               </button>
@@ -265,17 +325,17 @@ function ScopedAsyncQuestionsPanel({
             maxLength={PROVIDER_SEND_TURN_MAX_INPUT_CHARS}
             onChange={(event) => editAnswer(question, event.target.value)}
             rows={3}
-            className="block w-full resize-y rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground"
+            className="focus-ring block w-full resize-y rounded-lg border border-input bg-background px-2.5 py-1.5 text-sm text-foreground"
           />
         </label>
         {error && (
-          <p role="alert" className="text-xs text-destructive">
+          <p role="alert" className="text-xs text-destructive-foreground">
             {error}
           </p>
         )}
         <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
+          <Button
+            size="xs"
             disabled={
               deliveryDisabled ||
               submitting ||
@@ -285,31 +345,32 @@ function ScopedAsyncQuestionsPanel({
             onClick={() => {
               void submit();
             }}
-            className="rounded-md bg-primary px-3 py-1.5 text-xs text-primary-foreground disabled:opacity-50"
           >
-            {submitting ? "Queueing…" : "Queue answer"}
-          </button>
-          <button
-            type="button"
+            {submitting ? "Sending…" : "Send answer"}
+          </Button>
+          <Button
+            size="xs"
+            variant="ghost"
+            className="text-muted-foreground"
             disabled={deliveryDisabled || submitting}
             onClick={() => {
               void skip();
             }}
-            className="rounded-md px-3 py-1.5 text-xs text-muted-foreground hover:bg-accent disabled:opacity-50"
           >
             Skip
-          </button>
+          </Button>
           {pending.length > 1 && (
-            <button
-              type="button"
+            <Button
+              size="xs"
+              variant="ghost"
+              className="text-muted-foreground"
               disabled={deliveryDisabled || submitting}
               onClick={() => {
                 void skip(true);
               }}
-              className="rounded-md px-3 py-1.5 text-xs text-muted-foreground hover:bg-accent disabled:opacity-50"
             >
               Skip all
-            </button>
+            </Button>
           )}
         </div>
       </div>

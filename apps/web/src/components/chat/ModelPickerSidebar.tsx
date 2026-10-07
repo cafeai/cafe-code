@@ -34,7 +34,7 @@ const SELECTED_INDICATOR_CLASS =
   "pointer-events-none absolute -right-1 top-1/2 z-10 h-5 w-0.5 -translate-y-1/2 rounded-l-full bg-primary";
 const BADGE_BASE_CLASS =
   "pointer-events-none absolute -right-0.5 top-0.5 z-10 flex size-3.5 items-center justify-center rounded-full bg-transparent shadow-sm ";
-const NEW_BADGE_CLASS = `${BADGE_BASE_CLASS} text-amber-600  dark:text-amber-300 `;
+const NEW_BADGE_CLASS = `${BADGE_BASE_CLASS} text-warning-foreground`;
 
 /** Opens toward the rail so the list stays readable (not over the model names). */
 const PICKER_TOOLTIP_SIDE = "left" as const;
@@ -75,13 +75,13 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
     <ScrollArea
       hideScrollbars
       scrollFade
-      className="w-12 shrink-0 border-r bg-muted/30"
+      className="w-12 shrink-0 border-r border-border-subtle bg-muted/30"
       data-model-picker-sidebar="true"
     >
       <div className="flex min-h-full flex-col gap-1 p-1">
         {/* Favorites section */}
         {showFavorites ? (
-          <div className="pb-1 mb-1 border-b">
+          <div className="mb-1 border-b border-border-subtle pb-1">
             <div className="relative w-full">
               {props.selectedInstanceId === "favorites" && (
                 <div className={SELECTED_INDICATOR_CLASS} />
@@ -91,7 +91,7 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
                   render={
                     <button
                       className={cn(
-                        "relative isolate flex w-full cursor-pointer aspect-square items-center justify-center rounded transition-colors hover:bg-muted",
+                        "focus-ring relative isolate flex aspect-square w-full cursor-pointer items-center justify-center rounded-md transition-colors duration-(--duration-fast) hover:bg-muted",
                         props.selectedInstanceId === "favorites" && SELECTED_BUTTON_CLASS,
                       )}
                       onClick={() => handleSelect("favorites")}
@@ -133,7 +133,7 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
             <button
               data-model-picker-provider={entry.instanceId}
               className={cn(
-                "relative isolate flex w-full cursor-pointer aspect-square items-center justify-center rounded transition-colors hover:bg-muted",
+                "focus-ring relative isolate flex aspect-square w-full cursor-pointer items-center justify-center rounded-md transition-colors duration-(--duration-fast) hover:bg-muted",
                 isSelected && SELECTED_BUTTON_CLASS,
                 isDisabled && "opacity-50 cursor-not-allowed hover:bg-transparent",
               )}

@@ -141,9 +141,15 @@ describe("DictationSettings", () => {
       .toBeVisible();
     await expect.element(page.getByText("Not configured", { exact: true })).toBeVisible();
     await expect
-      .element(
-        page.getByText("No key is stored, so Dictation does not access the microphone or OpenAI."),
-      )
+      .element(page.getByText("Stored only on the server; never shown again.", { exact: true }))
+      .toBeVisible();
+    // The security detail moved from its own section into the key's info tip.
+    await page.getByRole("button", { name: "About the OpenAI API key" }).hover();
+    await expect
+      .element(page.getByText(/Only an owner can add, replace or remove the key/))
+      .toBeVisible();
+    await expect
+      .element(page.getByText(/Audio is sent to OpenAI only while you dictate/))
       .toBeVisible();
 
     const inputLocator = page.getByLabelText("New OpenAI API key");
@@ -174,7 +180,7 @@ describe("DictationSettings", () => {
     await expect.element(page.getByText("Configured", { exact: true })).toBeVisible();
     await expect
       .element(
-        page.getByText("OpenAI API key saved. Cafe will verify access when dictation starts.", {
+        page.getByText("Key saved. Access is checked when dictation starts.", {
           exact: true,
         }),
       )
@@ -193,7 +199,7 @@ describe("DictationSettings", () => {
 
     await expect.element(page.getByText("Configured", { exact: true })).toBeVisible();
     await expect
-      .element(page.getByText("Only an owner session can add, replace, or remove this credential."))
+      .element(page.getByText("Only an owner can add, replace or remove this key."))
       .toBeVisible();
     await expect.element(page.getByLabelText("New OpenAI API key")).toBeDisabled();
     await expect.element(page.getByRole("button", { name: "Replace key" })).toBeDisabled();
@@ -218,7 +224,7 @@ describe("DictationSettings", () => {
     });
     await expect.element(page.getByRole("alertdialog")).not.toBeInTheDocument();
     await expect.element(page.getByText("Not configured", { exact: true })).toBeVisible();
-    await expect.element(page.getByText("OpenAI API key removed.", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("Key removed.", { exact: true })).toBeVisible();
   });
 
   it("does not echo a rejected credential or raw RPC error details", async () => {
@@ -266,13 +272,13 @@ describe("DictationSettings", () => {
 
     await renderSettings();
     await expect
-      .element(page.getByRole("heading", { name: "Dictate anywhere on Mac" }))
+      .element(page.getByRole("heading", { name: "Global dictation", exact: true }))
       .toBeVisible();
     await expect
       .element(
-        page.getByText(
-          "Open a floating recorder from another Mac app. Review and edit the text before choosing Copy, Save, or Insert. Insertion needs macOS Accessibility permission.",
-        ),
+        page.getByText("Dictate into any Mac app. Insert needs Accessibility permission.", {
+          exact: true,
+        }),
       )
       .toBeVisible();
     await expect
@@ -281,10 +287,14 @@ describe("DictationSettings", () => {
     await page.getByRole("switch", { name: "Enable Mac global dictation" }).click();
     await vi.waitFor(() => expect(setEnabled).toHaveBeenCalledWith(true));
     await expect
-      .element(page.getByText("Ready. Press the shortcut to start, then press it again to stop."))
+      .element(page.getByText("Press the shortcut to start, and again to stop."))
       .toBeVisible();
 
+    await expect.element(page.getByText("⌘⇧ + one key", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Change", exact: true }).click();
+    await expect
+      .element(page.getByText("⌘⇧ + one key · Esc cancels", { exact: true }))
+      .toBeVisible();
     window.dispatchEvent(
       new KeyboardEvent("keydown", {
         code: "KeyD",

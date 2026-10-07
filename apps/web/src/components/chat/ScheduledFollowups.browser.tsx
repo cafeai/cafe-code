@@ -167,6 +167,12 @@ function installApi(initial: readonly ScheduledFollowupRecord[] = []) {
   return api;
 }
 
+/** Editor dropdowns are Select primitives: open by their field label, pick by name. */
+async function chooseOption(label: string, option: string) {
+  await page.getByLabelText(label, { exact: true }).click();
+  await page.getByRole("option", { name: option, exact: true }).click();
+}
+
 async function fillRequired() {
   await page.getByLabelText("Name", { exact: true }).fill("Watch the build");
   await page
@@ -230,7 +236,7 @@ describe("scheduled follow-ups Tasks UI", () => {
       await expect
         .element(
           page.getByText(
-            "Account: Personal Codex. This account will execute and pay for these follow-ups. Scheduling never changes accounts or expands permissions; an account change requires reviewing and enabling the schedule again.",
+            "Account: Personal Codex. This account will execute and pay for these follow-ups.",
             { exact: true },
           ),
         )
@@ -308,16 +314,16 @@ describe("scheduled follow-ups Tasks UI", () => {
     try {
       await page.getByRole("button", { name: "New follow-up" }).click();
       await fillRequired();
-      await page.getByLabelText("Repeat", { exact: true }).selectOptions("weekdays");
+      await chooseOption("Repeat", "Weekdays");
       await page.getByLabelText("Time in selected timezone").fill("10:30");
       await page.getByLabelText("Timezone", { exact: true }).fill("Asia/Tokyo");
       await expect.element(page.getByLabelText("Upcoming runs")).toBeVisible();
       await page.getByText("Model and run settings", { exact: true }).click();
-      await page.getByLabelText("Model settings", { exact: true }).selectOptions("override");
-      await page.getByLabelText("Model", { exact: true }).selectOptions("gpt-6.1-sol");
-      await page.getByLabelText("Reasoning effort", { exact: true }).selectOptions("medium");
+      await chooseOption("Model settings", "Choose settings for follow-ups");
+      await chooseOption("Model", "GPT-6.1 Sol");
+      await chooseOption("Reasoning effort", "Medium");
       await page.getByLabelText("Fast mode", { exact: true }).click();
-      await page.getByLabelText("Notifications", { exact: true }).selectOptions("errors-only");
+      await chooseOption("Notifications", "Errors only");
       await page.getByLabelText("Maximum runs", { exact: true }).fill("10");
       await page
         .getByLabelText(
@@ -362,7 +368,7 @@ describe("scheduled follow-ups Tasks UI", () => {
     const screen = await render(<ScheduledFollowups context={context} />);
     try {
       await page.getByRole("button", { name: "Edit", exact: true }).click();
-      await page.getByLabelText("Repeat", { exact: true }).selectOptions("custom");
+      await chooseOption("Repeat", "Custom calendar");
       await page.getByLabelText("Weekdays (0–6)").fill("1,3");
       await page.getByLabelText("Days of month (1–31)").fill("1,15");
       await page.getByLabelText("Months (1–12)").fill("1,6,12");
@@ -421,12 +427,7 @@ describe("scheduled follow-ups Tasks UI", () => {
     try {
       await expect.element(page.getByText("Needs your approval", { exact: true })).toBeVisible();
       await expect
-        .element(
-          page.getByText(
-            "Proposed by an agent. Review the instructions and the account that will run and pay for these follow-ups before enabling them.",
-            { exact: true },
-          ),
-        )
+        .element(page.getByText("Proposed by an agent — review before enabling.", { exact: true }))
         .toBeVisible();
       await expect
         .element(page.getByText("Account: Personal Codex", { exact: true }))
@@ -635,7 +636,7 @@ describe("scheduled follow-ups Tasks UI", () => {
     try {
       await page.getByRole("button", { name: "New follow-up" }).click();
       await fillRequired();
-      await page.getByLabelText("Repeat", { exact: true }).selectOptions("once");
+      await chooseOption("Repeat", "Once");
       await page.getByLabelText("Run at (UTC)").fill("2099-10-04T09:30");
       await page.getByRole("button", { name: "Create follow-up" }).click();
       await vi.waitFor(() => expect(api.save).toHaveBeenCalledTimes(1));
@@ -759,7 +760,7 @@ describe("scheduled follow-ups Tasks UI", () => {
       await fillRequired();
       await page.getByText("Model and run settings", { exact: true }).click();
       expect(document.body.textContent).toContain(`Account: ${label}`);
-      await page.getByLabelText("Model settings", { exact: true }).selectOptions("override");
+      await chooseOption("Model settings", "Choose settings for follow-ups");
       await page.getByRole("button", { name: "Create follow-up" }).click();
       await vi.waitFor(() => expect(api.save).toHaveBeenCalledTimes(1));
       expect(api.save.mock.calls[0]?.[0].modelSelection).toEqual({ instanceId: account, model });

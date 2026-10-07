@@ -20,9 +20,7 @@ it("explains inclusive native cutoff and shares files without dispatching before
   await expect
     .element(page.getByText(/including this message and everything before it/))
     .toBeVisible();
-  await expect
-    .element(page.getByText(/Both chats share the current workspace files/))
-    .toBeVisible();
+  await expect.element(page.getByText(/workspace files are shared, not rewound/)).toBeVisible();
   expect(onFork).not.toHaveBeenCalled();
   await page.getByRole("button", { name: "Create fork", exact: true }).click();
   expect(onFork).toHaveBeenCalledExactlyOnceWith(id);
@@ -50,7 +48,7 @@ it("cancel does nothing, disables busy sources, and never exposes raw failure or
   await expect
     .element(page.getByRole("alert"))
     .toHaveTextContent(
-      "The fork could not be confirmed. This message may no longer have a verifiable native boundary, or the session may not be idle. Check the chat and connection before trying again; Cafe did not automatically resend it.",
+      "The fork could not be confirmed. Older, very large or compacted histories may be unavailable, and the chat and its background work must be idle. Check the chat and connection, then try again; nothing was resent.",
     );
   await expect
     .element(page.getByRole("button", { name: "Create fork", exact: true }))
@@ -76,8 +74,9 @@ it("does not let a previous owner's late completion close a replacement confirma
     />,
   );
   await page.getByRole("button", { name: "Create fork", exact: true }).click();
+  // The label stays put while pending; the button is disabled instead.
   await expect
-    .element(page.getByRole("button", { name: "Creating fork…", exact: true }))
+    .element(page.getByRole("button", { name: "Create fork", exact: true }))
     .toBeDisabled();
   await view.rerender(
     <MessageForkDialog

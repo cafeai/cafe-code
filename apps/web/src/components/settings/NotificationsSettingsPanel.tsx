@@ -68,16 +68,26 @@ export function NotificationsSettingsPanel() {
     }
   };
 
-  const description = isElectron
-    ? "Show a system notification when a thread finishes running. Applies to this computer only."
-    : "Show a system notification when a thread finishes running, even while this browser is in the background. Applies to this device only.";
+  const unsupportedReason =
+    !isElectron && !webPushSupport.supported
+      ? webPushSupport.reason === "insecure-context"
+        ? "Needs an HTTPS connection to the server."
+        : "This browser can't show push notifications. On iOS, add Cafe to your home screen first."
+      : null;
 
   return (
-    <SettingsPageContainer>
-      <SettingsSection title="Notifications">
+    <SettingsPageContainer title="Notifications">
+      <SettingsSection>
         <SettingsRow
-          title="Thread completion notifications"
-          description={description}
+          title="Chat completion notifications"
+          description="Notify when a chat finishes, even in the background. This device only."
+          status={
+            toggleError ? (
+              <span className="text-destructive-foreground">{toggleError}</span>
+            ) : (
+              unsupportedReason
+            )
+          }
           control={
             <Switch
               checked={settings.notificationsEnabled}
@@ -85,18 +95,10 @@ export function NotificationsSettingsPanel() {
               onCheckedChange={(checked) => {
                 void handleToggle(Boolean(checked));
               }}
-              aria-label="Enable thread completion notifications"
+              aria-label="Enable chat completion notifications"
             />
           }
         />
-        {!isElectron && !webPushSupport.supported ? (
-          <p className="px-1 text-xs text-muted-foreground">
-            {webPushSupport.reason === "insecure-context"
-              ? "Push notifications require an HTTPS connection to the server. Reconnect over HTTPS to enable them on this device."
-              : "This browser does not support push notifications. On iOS, add the app to your home screen first."}
-          </p>
-        ) : null}
-        {toggleError ? <p className="px-1 text-xs text-destructive">{toggleError}</p> : null}
       </SettingsSection>
     </SettingsPageContainer>
   );

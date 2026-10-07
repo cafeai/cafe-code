@@ -125,9 +125,11 @@ async function createPersistentOrchestrationSystem(dbPath: string, baseDir: stri
   const runtime = ManagedRuntime.make(orchestrationLayer);
   const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
   const sql = await runtime.runPromise(Effect.service(SqlClient.SqlClient));
+  const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
   return {
     engine,
     sql,
+    snapshotQuery,
     run: <A, E>(effect: Effect.Effect<A, E>) => runtime.runPromise(effect),
     dispose: () => runtime.dispose(),
   };
@@ -136,6 +138,88 @@ async function createPersistentOrchestrationSystem(dbPath: string, baseDir: stri
 function now() {
   return "2026-01-01T00:00:00.000Z";
 }
+
+describe("durable inline question handling", () => {
+  it("merges clients' skips, survives restart and does not reopen on provider replay", async () => {
+    const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "cafe-question-resolution-"));
+    const dbPath = path.join(baseDir, "questions.sqlite");
+    let system: Awaited<ReturnType<typeof createPersistentOrchestrationSystem>> | undefined;
+    const threadId = ThreadId.make("question-handling-thread");
+    const activity = {
+      id: EventId.make(`codex-async-questions:${"a".repeat(64)}`),
+      createdAt: now(),
+      tone: "info" as const,
+      kind: "provider.async-questions",
+      summary: "Codex has questions",
+      turnId: null,
+      payload: {
+        itemId: "question-item",
+        questions: [
+          { title: "Which route?", options: ["A", "B"] },
+          { title: "Anything else?", options: [] },
+        ],
+      },
+    };
+    const append: OrchestrationCommand = {
+      type: "thread.activity.append",
+      commandId: CommandId.make(`provider-async-questions:${activity.id}`),
+      threadId,
+      activity,
+      createdAt: now(),
+    };
+    try {
+      system = await createPersistentOrchestrationSystem(dbPath, baseDir);
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("question-thread-create"),
+          threadId,
+          projectId: null,
+          title: "Question fixture",
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-6-astra" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt: now(),
+        }),
+      );
+      await system.run(system.engine.dispatch(append));
+      const resolution = (id: string, indexes: number[]): OrchestrationCommand => ({
+        type: "thread.async-questions.resolve",
+        commandId: CommandId.make(id),
+        threadId,
+        activityId: activity.id,
+        questionIndexes: indexes,
+        createdAt: now(),
+      });
+      const first = resolution("client-a-skip", [0]);
+      const receipt = await system.run(system.engine.dispatch(first));
+      expect(await system.run(system.engine.dispatch(first))).toEqual(receipt);
+      await system.run(system.engine.dispatch(resolution("client-b-skip", [1])));
+      const invalid = await system.run(
+        Effect.exit(system.engine.dispatch(resolution("invalid-skip", [2]))),
+      );
+      expect(invalid._tag).toBe("Failure");
+      const snapshot = await system.run(system.snapshotQuery.getSnapshot());
+      expect(snapshot.threads[0]?.activities).toHaveLength(1);
+      expect(snapshot.threads[0]?.activities[0]).toMatchObject({
+        ...activity,
+        payload: { ...activity.payload, handledQuestionIndexes: [0, 1] },
+      });
+      await system.dispose();
+      system = await createPersistentOrchestrationSystem(dbPath, baseDir);
+      // The original deterministic ingest receipt wins even when its provider
+      // replays the unhandled source item after reconnecting.
+      await system.run(system.engine.dispatch(append));
+      const reopened = await system.run(system.snapshotQuery.getSnapshot());
+      expect(reopened.threads[0]?.activities).toEqual(snapshot.threads[0]?.activities);
+    } finally {
+      await system?.dispose();
+      fs.rmSync(baseDir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("OrchestrationEngine scheduled admission transaction", () => {
   const threadId = ThreadId.make("scheduled-engine-thread");
@@ -2578,6 +2662,133 @@ describe("OrchestrationEngine", () => {
       "thread.deleted",
     ]);
     await system.dispose();
+  });
+
+  it("commits selected Claude message forks from persisted history after restart", async () => {
+    const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "cafe-message-fork-restart-"));
+    const dbPath = path.join(baseDir, "orchestration.sqlite");
+    const sourceId = ThreadId.make("message-fork-restart-source");
+    const instanceId = ProviderInstanceId.make("claudeAgent");
+    const turnId = TurnId.make("message-fork-restart-turn");
+    const messages = [MessageId.make("assistant:intermediate"), MessageId.make("assistant:final")];
+    let system: Awaited<ReturnType<typeof createPersistentOrchestrationSystem>> | undefined;
+    try {
+      system = await createPersistentOrchestrationSystem(dbPath, baseDir);
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("message-fork-restart-create"),
+          threadId: sourceId,
+          projectId: null,
+          title: "Source",
+          modelSelection: { instanceId, model: "sonnet" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt: now(),
+        }),
+      );
+      for (const [index, messageId] of messages.entries()) {
+        await system.run(
+          system.engine.dispatch({
+            type: "thread.message.assistant.complete",
+            commandId: CommandId.make(`message-fork-restart-message-${index}`),
+            threadId: sourceId,
+            messageId,
+            turnId,
+            finalText: `Response ${index}`,
+            createdAt: index === 0 ? now() : "2026-01-01T00:00:01.000Z",
+          }),
+        );
+      }
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.turn.diff.complete",
+          commandId: CommandId.make("message-fork-restart-checkpoint"),
+          threadId: sourceId,
+          turnId,
+          completedAt: now(),
+          checkpointRef: CheckpointRef.make("refs/cafe/fixture/turn/1"),
+          status: "ready",
+          files: [],
+          assistantMessageId: messages[1]!,
+          checkpointTurnCount: 1,
+          createdAt: now(),
+        }),
+      );
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("message-fork-restart-session"),
+          threadId: sourceId,
+          session: {
+            threadId: sourceId,
+            status: "ready",
+            providerName: "claudeAgent",
+            providerInstanceId: instanceId,
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: now(),
+          },
+          createdAt: now(),
+        }),
+      );
+      await system.dispose();
+      system = await createPersistentOrchestrationSystem(dbPath, baseDir);
+      const query = system.snapshotQuery;
+      const shell = (await system.run(query.getCommandReadModel())).threads.find(
+        (t) => t.id === sourceId,
+      )!;
+      expect(shell.messages).toEqual([]);
+      expect(shell.checkpoints).toEqual([]);
+      const sourceBefore = Option.getOrThrow(await system.run(query.getThreadDetailById(sourceId)));
+      for (const [index, sourceMessageId] of messages.entries()) {
+        const targetId = ThreadId.make(`message-fork-restart-target-${index}`);
+        const command = {
+          type: "thread.fork.commit" as const,
+          commandId: CommandId.make(`message-fork-restart-commit-${index}`),
+          sourceThreadId: sourceId,
+          targetThreadId: targetId,
+          sourceVersion: await system.run(readThreadForkSourceVersion(system.sql, sourceId)),
+          messageCutoff: {
+            sourceMessageId,
+            turnId,
+            retainedTurnCount: 1,
+            includesCompleteTurn: index === 1,
+          },
+          retainedMessageIds: messages.slice(0, index + 1),
+          title: "Fork",
+          createdAt: now(),
+          session: {
+            threadId: targetId,
+            status: "stopped" as const,
+            providerName: "claudeAgent" as const,
+            providerInstanceId: instanceId,
+            runtimeMode: "full-access" as const,
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: now(),
+          },
+        };
+        const receipt = await system.run(system.engine.dispatch(command));
+        expect(await system.run(system.engine.dispatch(command))).toEqual(receipt);
+        const target = Option.getOrThrow(await system.run(query.getThreadDetailById(targetId)));
+        expect(target.messages.map((m) => m.id)).toEqual(
+          messages.slice(0, index + 1).map((id) => `copy:${targetId}:${id}`),
+        );
+        expect(target.checkpoints).toHaveLength(index);
+        expect(target.latestTurn?.state).toBe("interrupted");
+        expect(target.session?.status).toBe("stopped");
+      }
+      expect(Option.getOrThrow(await system.run(query.getThreadDetailById(sourceId)))).toEqual(
+        sourceBefore,
+      );
+    } finally {
+      await system?.dispose();
+      fs.rmSync(baseDir, { recursive: true, force: true });
+    }
   });
 
   it("rejects delayed native-fork publication after source or project authority changes", async () => {

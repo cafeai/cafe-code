@@ -18,6 +18,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { Button } from "../ui/button";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
   CLAUDE_PERMISSION_MODE_OPTIONS,
   GROK_PERMISSION_MODE_OPTIONS,
@@ -51,13 +52,13 @@ const RUNTIME_MODE_OPTIONS: ReadonlyArray<{
   {
     id: "auto-accept-edits",
     label: "Auto-accept edits",
-    description: "Auto-approve edits, ask before other actions.",
+    description: "Approve edits automatically; ask before other actions.",
     icon: PenLineIcon,
   },
   {
     id: "full-access",
     label: "Full access",
-    description: "Allow commands and edits without prompts.",
+    description: "Run commands and edits without asking.",
     icon: LockOpenIcon,
   },
 ];
@@ -70,16 +71,53 @@ const NATIVE_PERMISSION_MODE_ICONS: Record<ClaudePermissionMode, LucideIcon> = {
   bypassPermissions: LockOpenIcon,
 };
 
-function ComposerModeOption(props: { icon: LucideIcon; label: string; description: string }) {
+const MODE_GROUP_LABEL_CLASS_NAME = "px-2 py-1.5 font-medium text-muted-foreground text-xs";
+
+/**
+ * One radio row per mode. Routine explanations live in a hover/focus tooltip;
+ * only a dangerous mode (Bypass permissions) keeps its warning visible at the
+ * point of choice, as AGENTS.md requires it to be separately labelled.
+ */
+function ComposerModeRadioItem(props: {
+  value: string;
+  icon: LucideIcon;
+  label: string;
+  description: string;
+  dangerous?: boolean;
+}) {
   const Icon = props.icon;
-  return (
-    <span className="grid min-w-0 gap-0.5 py-0.5">
-      <span className="inline-flex items-center gap-1.5 font-medium text-foreground">
+  const item = (
+    <span className="grid min-w-0 gap-0.5">
+      <span className="inline-flex items-center gap-1.5 text-foreground">
         <Icon aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
         {props.label}
       </span>
-      <span className="text-muted-foreground text-xs leading-4">{props.description}</span>
+      {props.dangerous ? (
+        <span className="text-destructive-foreground text-xs leading-4">{props.description}</span>
+      ) : null}
     </span>
+  );
+  if (props.dangerous) {
+    return (
+      <MenuRadioItem value={props.value} className="min-w-0">
+        {item}
+      </MenuRadioItem>
+    );
+  }
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        delay={400}
+        // Keep the radio item's slot: TooltipTrigger otherwise stamps its own.
+        data-slot="menu-radio-item"
+        render={<MenuRadioItem value={props.value} className="min-w-0" />}
+      >
+        {item}
+      </TooltipTrigger>
+      <TooltipPopup role="tooltip" side="right" className="no-drag pointer-events-none max-w-56">
+        {props.description}
+      </TooltipPopup>
+    </Tooltip>
   );
 }
 
@@ -124,7 +162,7 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
           <Button
             size="sm"
             variant="ghost"
-            className="max-w-40 shrink-0 justify-start gap-1.5 px-2 text-muted-foreground/70 hover:text-foreground/80"
+            className="max-w-40 shrink-0 justify-start gap-1.5 px-2 text-muted-foreground hover:text-foreground"
             aria-label="More composer controls"
             title={props.traitsTriggerLabel ?? undefined}
           />
@@ -158,7 +196,7 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
         {props.showInteractionModeToggle ? (
           <>
             {hasTraits || hasSecondaryControls ? <MenuDivider /> : null}
-            <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">Mode</div>
+            <div className={MODE_GROUP_LABEL_CLASS_NAME}>Mode</div>
             <MenuRadioGroup
               value={usesNativePermissionModes ? claudePermissionMode : props.interactionMode}
               onValueChange={(value) => {
@@ -175,21 +213,19 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
               }}
             >
               {usesNativePermissionModes ? (
-                permissionModeOptions.map((option) => {
-                  const icon = NATIVE_PERMISSION_MODE_ICONS[option.id];
-                  return (
-                    <MenuRadioItem key={option.id} value={option.id} className="min-w-0 py-1.5">
-                      <ComposerModeOption
-                        icon={icon}
-                        label={option.label}
-                        description={option.description}
-                      />
-                    </MenuRadioItem>
-                  );
-                })
+                permissionModeOptions.map((option) => (
+                  <ComposerModeRadioItem
+                    key={option.id}
+                    value={option.id}
+                    icon={NATIVE_PERMISSION_MODE_ICONS[option.id]}
+                    label={option.label}
+                    description={option.description}
+                    dangerous={option.id === "bypassPermissions"}
+                  />
+                ))
               ) : (
                 <>
-                  <MenuRadioItem value="default">Chat</MenuRadioItem>
+                  <MenuRadioItem value="default">Build</MenuRadioItem>
                   <MenuRadioItem value="plan">Plan</MenuRadioItem>
                 </>
               )}
@@ -201,7 +237,7 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
             {hasTraits || hasSecondaryControls || props.showInteractionModeToggle ? (
               <MenuDivider />
             ) : null}
-            <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">Access</div>
+            <div className={MODE_GROUP_LABEL_CLASS_NAME}>Access</div>
             <MenuRadioGroup
               value={props.runtimeMode}
               onValueChange={(value) => {
@@ -210,13 +246,13 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
               }}
             >
               {RUNTIME_MODE_OPTIONS.map((option) => (
-                <MenuRadioItem key={option.id} value={option.id} className="min-w-0 py-1.5">
-                  <ComposerModeOption
-                    icon={option.icon}
-                    label={option.label}
-                    description={option.description}
-                  />
-                </MenuRadioItem>
+                <ComposerModeRadioItem
+                  key={option.id}
+                  value={option.id}
+                  icon={option.icon}
+                  label={option.label}
+                  description={option.description}
+                />
               ))}
             </MenuRadioGroup>
           </>
@@ -229,7 +265,7 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
             showAccessControls ? (
               <MenuDivider />
             ) : null}
-            <MenuItem onClick={props.onOpenGoal}>
+            <MenuItem className="[&>svg]:mx-0" onClick={props.onOpenGoal}>
               <TargetIcon className="size-4 shrink-0" />
               {props.goalStatus == null
                 ? "Goal"
@@ -246,7 +282,7 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
             props.showGoalControl ? (
               <MenuDivider />
             ) : null}
-            <MenuItem onClick={props.onTogglePlanSidebar}>
+            <MenuItem className="[&>svg]:mx-0" onClick={props.onTogglePlanSidebar}>
               <ListTodoIcon className="size-4 shrink-0" />
               {props.planSidebarOpen
                 ? `Hide ${props.planSidebarLabel.toLowerCase()} sidebar`

@@ -10,25 +10,25 @@ import {
 } from "../../environments/primary";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { SegmentedControl } from "../ui/segmented-control";
+import { Spinner } from "../ui/spinner";
 
 export function PairingPendingSurface() {
   return (
     <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-background px-4 py-10 text-foreground sm:px-6">
+      {/* A quiet accent glow; the user's accent colour, never a fixed hue. */}
       <div className="pointer-events-none absolute inset-0 opacity-80">
-        <div className="absolute inset-x-0 top-0 h-44 bg-[radial-gradient(44rem_16rem_at_top,color-mix(in_srgb,var(--color-emerald-500)_14%,transparent),transparent)]" />
-        <div className="absolute inset-y-0 left-0 w-72 bg-[radial-gradient(28rem_18rem_at_left,color-mix(in_srgb,var(--color-sky-500)_10%,transparent),transparent)]" />
-        <div className="absolute inset-0 bg-[linear-gradient(145deg,color-mix(in_srgb,var(--background)_90%,var(--color-black))_0%,var(--background)_55%)]" />
+        <div className="absolute inset-x-0 top-0 h-44 bg-[radial-gradient(44rem_16rem_at_top,color-mix(in_srgb,var(--primary)_12%,transparent),transparent)]" />
       </div>
 
-      <section className="relative w-full max-w-xl rounded-2xl border border-border/80 bg-card/90 p-6 shadow-2xl shadow-black/20 backdrop-blur-md sm:p-8">
-        <p className="text-[11px] font-semibold tracking-[0.18em] text-muted-foreground uppercase">
-          {APP_DISPLAY_NAME}
-        </p>
+      <section className="relative w-full max-w-xl animate-enter-rise rounded-2xl border border-border bg-card p-6 shadow-lg/5 sm:p-8">
+        <p className="label-overline">{APP_DISPLAY_NAME}</p>
         <h1 className="mt-3 text-2xl font-semibold tracking-tight sm:text-3xl">
           Pairing with this environment
         </h1>
-        <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-          Validating the pairing link and preparing your session.
+        <p className="mt-2 flex items-center gap-2 text-sm text-muted-foreground">
+          <Spinner aria-hidden="true" className="size-3.5" />
+          Checking the pairing link…
         </p>
       </section>
     </div>
@@ -129,16 +129,13 @@ export function PairingRouteSurface({
 
   return (
     <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-background px-4 py-10 text-foreground sm:px-6">
+      {/* A quiet accent glow; the user's accent colour, never a fixed hue. */}
       <div className="pointer-events-none absolute inset-0 opacity-80">
-        <div className="absolute inset-x-0 top-0 h-44 bg-[radial-gradient(44rem_16rem_at_top,color-mix(in_srgb,var(--color-emerald-500)_14%,transparent),transparent)]" />
-        <div className="absolute inset-y-0 left-0 w-72 bg-[radial-gradient(28rem_18rem_at_left,color-mix(in_srgb,var(--color-sky-500)_10%,transparent),transparent)]" />
-        <div className="absolute inset-0 bg-[linear-gradient(145deg,color-mix(in_srgb,var(--background)_90%,var(--color-black))_0%,var(--background)_55%)]" />
+        <div className="absolute inset-x-0 top-0 h-44 bg-[radial-gradient(44rem_16rem_at_top,color-mix(in_srgb,var(--primary)_12%,transparent),transparent)]" />
       </div>
 
-      <section className="relative w-full max-w-xl rounded-2xl border border-border/80 bg-card/90 p-6 shadow-2xl shadow-black/20 backdrop-blur-md sm:p-8">
-        <p className="text-[11px] font-semibold tracking-[0.18em] text-muted-foreground uppercase">
-          {APP_DISPLAY_NAME}
-        </p>
+      <section className="relative w-full max-w-xl animate-enter-rise rounded-2xl border border-border bg-card p-6 shadow-lg/5 sm:p-8">
+        <p className="label-overline">{APP_DISPLAY_NAME}</p>
         <h1 className="mt-3 text-2xl font-semibold tracking-tight sm:text-3xl">
           Pair with this environment
         </h1>
@@ -148,28 +145,15 @@ export function PairingRouteSurface({
 
         <form className="mt-6 space-y-4" onSubmit={(event) => void handleSubmit(event)}>
           {supportsPassword && supportsPairingToken ? (
-            <div className="inline-flex rounded-md border border-border bg-background p-0.5">
-              <Button
-                aria-pressed={authMode === "password"}
-                disabled={isSubmitting}
-                onClick={() => setAuthMode("password")}
-                size="sm"
-                type="button"
-                variant={authMode === "password" ? "secondary" : "ghost"}
-              >
-                Password
-              </Button>
-              <Button
-                aria-pressed={authMode === "pairing-token"}
-                disabled={isSubmitting}
-                onClick={() => setAuthMode("pairing-token")}
-                size="sm"
-                type="button"
-                variant={authMode === "pairing-token" ? "secondary" : "ghost"}
-              >
-                Pairing token
-              </Button>
-            </div>
+            <SegmentedControl
+              aria-label="Sign-in method"
+              value={authMode}
+              onValueChange={setAuthMode}
+              options={[
+                { value: "password", label: "Password", disabled: isSubmitting },
+                { value: "pairing-token", label: "Pairing token", disabled: isSubmitting },
+              ]}
+            />
           ) : null}
 
           {authMode === "password" && supportsPassword ? (
@@ -209,18 +193,19 @@ export function PairingRouteSurface({
           )}
 
           {errorMessage ? (
-            <div className="rounded-lg border border-destructive/30 bg-destructive/6 px-3 py-2 text-sm text-destructive">
+            <div
+              role="alert"
+              className="rounded-lg bg-destructive/8 px-3 py-2 text-sm text-destructive-foreground"
+            >
               {errorMessage}
             </div>
           ) : null}
 
           <div className="flex flex-wrap gap-2">
-            <Button disabled={isSubmitting} size="sm" type="submit">
-              {isSubmitting
-                ? authMode === "password"
-                  ? "Signing in..."
-                  : "Pairing..."
-                : "Continue"}
+            {/* Keep the label and width while signing in. */}
+            <Button className="min-w-24" disabled={isSubmitting} size="sm" type="submit">
+              {isSubmitting ? <Spinner aria-hidden="true" className="size-3.5" /> : null}
+              Continue
             </Button>
             <Button
               disabled={isSubmitting}
@@ -232,10 +217,6 @@ export function PairingRouteSurface({
             </Button>
           </div>
         </form>
-
-        <div className="mt-6 rounded-lg border border-border/70 bg-background/55 px-3 py-3 text-xs leading-relaxed text-muted-foreground">
-          {describeSupportedMethods(auth.bootstrapMethods)}
-        </div>
       </section>
     </div>
   );
@@ -250,40 +231,20 @@ function errorMessageFromUnknown(error: unknown): string {
     return error;
   }
 
-  return "Authentication failed.";
+  return "Couldn't sign in. Check the password or token, then try again.";
 }
 
+/** One line saying how to get in; the form below shows the matching field. */
 function describeAuthGate(bootstrapMethods: ReadonlyArray<string>): string {
   if (bootstrapMethods.includes("password")) {
-    return "Sign in with the admin password or pair this browser with a one-time token.";
+    return bootstrapMethods.includes("one-time-token")
+      ? "Sign in with the admin password or a one-time pairing token."
+      : "Sign in with the admin password.";
   }
 
   if (bootstrapMethods.includes("desktop-bootstrap")) {
-    return "This environment expects a trusted pairing credential before the app can connect.";
+    return "Open this from the Cafe desktop app, or paste a pairing credential.";
   }
 
-  return "Enter a pairing token to start a session with this environment.";
-}
-
-function describeSupportedMethods(bootstrapMethods: ReadonlyArray<string>): string {
-  if (bootstrapMethods.includes("password") && bootstrapMethods.includes("one-time-token")) {
-    return "This environment accepts admin password sign-in and one-time pairing tokens.";
-  }
-
-  if (bootstrapMethods.includes("password")) {
-    return "This environment accepts admin password sign-in.";
-  }
-
-  if (
-    bootstrapMethods.includes("desktop-bootstrap") &&
-    bootstrapMethods.includes("one-time-token")
-  ) {
-    return "Desktop-managed pairing and one-time pairing tokens are both accepted for this environment.";
-  }
-
-  if (bootstrapMethods.includes("desktop-bootstrap")) {
-    return "This environment is desktop-managed. Open it from the desktop app or paste a bootstrap credential if one was issued explicitly.";
-  }
-
-  return "This environment accepts one-time pairing tokens. Pairing links can open this page directly, or you can paste the token here.";
+  return "Open a pairing link, or paste a one-time pairing token.";
 }

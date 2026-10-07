@@ -306,7 +306,15 @@ describe("shared context menu", () => {
       expect(rect.bottom).toBeLessThanOrEqual(350);
       expect(rect.top).toBeGreaterThanOrEqual(0);
       expect(getComputedStyle(panel.element()).borderRadius).not.toBe("0px");
-      expect(getComputedStyle(panel.element()).backdropFilter).not.toBe("none");
+      // The fallback uses the shared Menu surface: the opaque, themed popover
+      // colour rather than a translucent blurred panel.
+      const surfaceProbe = document.createElement("div");
+      surfaceProbe.className = "bg-popover";
+      document.body.append(surfaceProbe);
+      expect(getComputedStyle(panel.element()).backgroundColor).toBe(
+        getComputedStyle(surfaceProbe).backgroundColor,
+      );
+      surfaceProbe.remove();
       expect(panel.element().querySelectorAll('[role="separator"]')).toHaveLength(2);
       await userEvent.keyboard("{Escape}");
       await expect(promise).resolves.toBeNull();

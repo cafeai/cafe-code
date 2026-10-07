@@ -164,7 +164,7 @@ function RemoteDesktopDialog({
     } catch {
       leaseRef.current = null;
       setLease(null);
-      setError("Control did not change. Check server access and refresh before trying again.");
+      setError("Control didn't change. Check server access, then try again.");
     } finally {
       setBusy(false);
     }
@@ -194,7 +194,7 @@ function RemoteDesktopDialog({
       leaseRef.current = null;
       setLease(null);
       setError(
-        "Input did not complete or control changed. Take control again before sending more input. Input is never replayed.",
+        "Input didn't complete or control changed. Take control again; nothing was replayed.",
       );
     });
   }
@@ -210,12 +210,12 @@ function RemoteDesktopDialog({
           <DialogTitle>Desktop · {host}</DialogTitle>
           <DialogDescription>
             {lease
-              ? "You have control. Agent input is paused until control is returned or reclaimed."
-              : "Viewing the host desktop. Take control to send input."}
+              ? "You have control; agent input is paused."
+              : "Viewing only. Take control to send input."}
           </DialogDescription>
         </DialogHeader>
         {error && (
-          <p role="alert" className="px-6 text-sm text-destructive">
+          <p role="alert" className="px-6 text-sm text-destructive-foreground">
             {error}
           </p>
         )}

@@ -5,10 +5,11 @@ import {
   useCallback,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
-  type CSSProperties,
+  type RefObject,
 } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { scopeThreadRef } from "@cafecode/client-runtime";
@@ -17,13 +18,21 @@ import { CircleCheckIcon } from "lucide-react";
 import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
 import { useTheme } from "../../hooks/useTheme";
 import { normalizeAccentColor } from "../../themeAccent";
-import { useStore } from "../../store";
+import { useStore, type AppState } from "../../store";
 import { useWorkspaceEnvironmentId } from "../../environments/workspace";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { cn, isWindowsPlatform } from "../../lib/utils";
 import { isElectron } from "../../env";
 import { retainThreadDetailSubscription } from "../../environments/runtime/service";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { Skeleton } from "../ui/skeleton";
+import { ThreadStatusLabel } from "../ThreadStatusIndicators";
+import {
+  getThreadStatusPill,
+  resolveThreadStatusPill,
+  type ThreadStatusPill,
+} from "../Sidebar.logic";
+import { PROVIDER_ICON_BY_PROVIDER } from "../chat/providerIconUtils";
 import { SubagentAvatar } from "../subagents/SubagentAvatar";
 import { UsageCostContent } from "../settings/UsageCostSection";
 import { formatCompactTokenCount, formatFullTokenCount } from "../settings/usageStatsPresentation";
@@ -69,14 +78,14 @@ const AtriumSubagentDetail = lazy(() =>
  * going on, but the decision happens in the thread where the request is
  * visible. Its local controls filter/page retained child observations or clear
  * exact historical error cards; none alters provider or orchestration state.
+ *
+ * Everything above the scene uses the theme's surface/text/status tokens, so
+ * cards read like the rest of the app in both themes; only the scene itself is
+ * tinted by the Atrium colour.
  */
 
 const FALLBACK_TINT = "#48cfff";
 const MemoizedUsageCostContent = memo(UsageCostContent);
-/** Matches the engine's state palette so the two views never disagree. */
-const HOLD_COLOR = "#f5a524";
-const FAULT_COLOR = "#ef4444";
-const SETTLED_COLOR = "#9aa3ad";
 /** Compact supporting estimate for the restored Atrium metrics grid. */
 const compactUsdFormat = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -96,12 +105,104 @@ const ATRIUM_DETAIL_PREFETCH_MARGIN_PX = 320;
 /** Give the tiny usage RPC priority over multi-megabyte thread detail hydration. */
 const ATRIUM_USAGE_PRIORITY_WINDOW_MS = 750;
 
-const STATE_LABEL: Record<AtriumCardState, string> = {
-  holding: "Waiting on you",
-  running: "Running",
-  error: "Error",
-  done: "Done",
+/**
+ * Card status in the shared chat-status vocabulary (docs/style-guide.md §2):
+ * working uses the accent colour, attention amber, completed green and failed
+ * red, rendered through the same `ThreadStatusLabel` dot as the sidebar.
+ *
+ * The Atrium's card state is its own read-only derivation — it deliberately
+ * keeps recently finished or failed work on the wall whether or not the chat
+ * was viewed — so terminal and running cards cannot be resolved from the
+ * sidebar's unseen-completion rule. A card waiting on the user, though, is
+ * resolved through `resolveThreadStatusPill` from the same shell summary, so
+ * an approval and a question read exactly as they do in the sidebar.
+ */
+const ATRIUM_CARD_STATUS: Record<Exclude<AtriumCardState, "holding">, ThreadStatusPill> = {
+  running: getThreadStatusPill("Working"),
+  error: getThreadStatusPill("Failed"),
+  done: getThreadStatusPill("Completed"),
 };
+/** Used only if the summary is momentarily missing for a waiting card. */
+const ATRIUM_HOLDING_FALLBACK_STATUS = getThreadStatusPill("Awaiting Input");
+
+/** "Pending Approval" → "Pending approval": sentence case for visible text. */
+function statusText(status: ThreadStatusPill): string {
+  return status.label.charAt(0) + status.label.slice(1).toLowerCase();
+}
+
+type AtriumCardPresentation = {
+  readonly status: ThreadStatusPill;
+  /** True until the card's detail stream has delivered any activity slice. */
+  readonly detailPending: boolean;
+};
+
+/**
+ * Presentation-only facts read alongside the snapshot on the board's existing
+ * one-second clock. It never subscribes to the store, so streamed tokens still
+ * cannot re-render the board.
+ */
+function readCardPresentation(state: AppState, card: AtriumCard): AtriumCardPresentation {
+  const environment = state.environmentStateById[card.environmentId];
+  const detailPending = environment?.activityIdsByThreadId[card.threadId] === undefined;
+  if (card.state !== "holding") {
+    return { status: ATRIUM_CARD_STATUS[card.state], detailPending };
+  }
+  const summary = environment?.sidebarThreadSummaryById[card.threadId];
+  return {
+    status:
+      (summary ? resolveThreadStatusPill({ thread: summary }) : null) ??
+      ATRIUM_HOLDING_FALLBACK_STATUS,
+    detailPending,
+  };
+}
+
+/**
+ * A sliding selection indicator for a row of toggle buttons that are not a
+ * plain exclusive choice (the provider filter can be cleared by pressing the
+ * active pill again, so it keeps button/aria-pressed semantics instead of the
+ * shared SegmentedControl). The indicator moves with `translate`; the first
+ * measurement places it without sliding in from the edge.
+ */
+function useSlidingIndicator(
+  trackRef: RefObject<HTMLElement | null>,
+): { left: number; width: number; animate: boolean } | null {
+  const [indicator, setIndicator] = useState<{ left: number; width: number } | null>(null);
+  const [animate, setAnimate] = useState(false);
+  const measure = useCallback(() => {
+    const track = trackRef.current;
+    if (!track) return;
+    const selected = track.querySelector<HTMLElement>(
+      '[data-cafe-atrium-segment][aria-pressed="true"]',
+    );
+    if (!selected) {
+      setIndicator(null);
+      return;
+    }
+    setIndicator((previous) =>
+      previous?.left === selected.offsetLeft && previous.width === selected.offsetWidth
+        ? previous
+        : { left: selected.offsetLeft, width: selected.offsetWidth },
+    );
+  }, [trackRef]);
+  // Re-measure after every render: selection and pill counts change through
+  // ordinary renders, and an unchanged measurement bails out without a render.
+  useLayoutEffect(() => {
+    measure();
+  });
+  useEffect(() => {
+    const track = trackRef.current;
+    if (!track || typeof ResizeObserver === "undefined") return undefined;
+    const observer = new ResizeObserver(measure);
+    observer.observe(track);
+    return () => observer.disconnect();
+  }, [trackRef, measure]);
+  useEffect(() => {
+    if (!indicator || animate) return undefined;
+    const frame = window.requestAnimationFrame(() => setAnimate(true));
+    return () => window.cancelAnimationFrame(frame);
+  }, [indicator, animate]);
+  return indicator ? { ...indicator, animate } : null;
+}
 
 function useAtriumTint(): string {
   const atriumColor = useSettings((settings) => settings.ambianceAtriumColor);
@@ -117,19 +218,6 @@ function useAtriumTint(): string {
       FALLBACK_TINT,
     [atriumColor, ambianceColor, appAccentColor, themeAccentColor],
   );
-}
-
-function stateColor(state: AtriumCardState, tint: string): string {
-  switch (state) {
-    case "holding":
-      return HOLD_COLOR;
-    case "error":
-      return FAULT_COLOR;
-    case "done":
-      return SETTLED_COLOR;
-    default:
-      return tint;
-  }
 }
 
 /** Display name for a provider driver slug. Unknown slugs render as-is. */
@@ -148,12 +236,11 @@ function providerLabel(provider: string): string {
   }
 }
 
-const PROVIDER_DOT: Record<string, string> = {
-  claudeAgent: "#d97757",
-  codex: "#8d858b",
-  grok: "#a78bfa",
-  opencode: "#4ade80",
-};
+/** The same provider marks used by Settings → Usage, instead of colour dots. */
+function ProviderMark({ provider }: { provider: string }) {
+  const Icon = PROVIDER_ICON_BY_PROVIDER[provider as never];
+  return Icon ? <Icon aria-hidden="true" className="size-3 shrink-0" /> : null;
+}
 
 /**
  * The scene canvas. Owns its own RAF loop and inherits the same battery rules
@@ -275,33 +362,21 @@ function Stat({
   value,
   detail,
   detailAriaHidden,
-  tone,
-  muted,
-  color,
 }: {
   label: string;
   value: string;
   detail?: string | undefined;
   detailAriaHidden?: boolean;
-  tone: string;
-  muted: string;
-  color?: string;
 }) {
   return (
     <div className="min-w-0 py-1">
-      <dt className={cn("font-mono text-[10px] uppercase tracking-[0.1em]", muted)}>{label}</dt>
-      <dd
-        className={cn(
-          "mt-1 break-words text-xl leading-none font-medium tracking-tight tabular-nums [overflow-wrap:anywhere] sm:text-2xl",
-          tone,
-        )}
-        style={color ? { color } : undefined}
-      >
+      <dt className="text-xs text-muted-foreground">{label}</dt>
+      <dd className="mt-1 break-words text-xl leading-none font-medium tracking-tight tabular-nums text-foreground [overflow-wrap:anywhere] sm:text-2xl">
         {value}
       </dd>
       {detail ? (
         <dd
-          className={cn("mt-0.5 text-[10px] tabular-nums", muted)}
+          className="mt-0.5 text-2xs tabular-nums text-subtle-foreground"
           aria-hidden={detailAriaHidden || undefined}
         >
           {detail}
@@ -328,21 +403,36 @@ function formatCacheSavings(value: number, loaded: boolean): string {
 interface TaskAtriumCardViewProps {
   card: AtriumCard;
   now: number;
-  tint: string;
+  status: ThreadStatusPill;
+  detailPending: boolean;
   onOpen: (card: AtriumCard) => void;
   onOpenSubagent: (card: AtriumCard, rowKey: string) => void;
   onCardElement: (key: string, element: HTMLElement | null) => void;
 }
 
+/** Child status text colour: live work in the accent, failures red, the rest quiet. */
+function subagentStatusClass(status: AtriumCard["subagents"][number]["status"]): string {
+  switch (status) {
+    case "active":
+      return "text-primary";
+    case "waiting":
+      return "text-status-attention-foreground";
+    case "failed":
+      return "text-status-error-foreground";
+    default:
+      return "text-subtle-foreground";
+  }
+}
+
 const TaskAtriumCardView = memo(function TaskAtriumCardView({
   card,
   now,
-  tint,
+  status,
+  detailPending,
   onOpen,
   onOpenSubagent,
   onCardElement,
 }: TaskAtriumCardViewProps) {
-  const accent = stateColor(card.state, tint);
   const elapsed = formatAtriumCardElapsed(card, now);
   const configuration = useMemo(
     () => (card.turnConfiguration ? presentTurnConfiguration(card.turnConfiguration) : null),
@@ -384,15 +474,12 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
       aria-labelledby={titleId}
       data-cafe-atrium-card-key={card.key}
       data-cafe-atrium-task-card="true"
-      style={{ "--cafe-atrium-accent": accent } as CSSProperties}
       className={cn(
         "group relative w-full shrink-0 overflow-hidden rounded-2xl p-4 text-left [contain-intrinsic-size:auto_14rem] [content-visibility:auto]",
-        "border backdrop-blur-md transition-shadow duration-200",
-        // Paper stock on a light sky, dark glass on a dusk one — the card has
-        // to belong to the theme, not just to the scene behind it.
-        "border-black/5 bg-[#f5f2ee] text-[#241f22] shadow-2xl shadow-black/40",
-        "dark:border-white/12 dark:bg-[#1b1620]/88 dark:text-[#eee7ec]",
-        "hover:shadow-[0_30px_60px_-18px_rgba(0,0,0,0.6)]",
+        // Theme card surfaces, slightly translucent so the scene still reads
+        // through: white paper on a light sky, the dark card on a dusk one.
+        "border border-border bg-card/90 text-card-foreground backdrop-blur-md",
+        "shadow-xl shadow-black/10 transition-shadow duration-(--duration-base) ease-out hover:shadow-2xl dark:shadow-black/40",
         card.state === "done" && "opacity-80",
       )}
     >
@@ -406,28 +493,24 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
         aria-label={`Open ${card.title}`}
         aria-describedby={configurationId}
         title={configuration?.sourceDescription}
-        className="absolute inset-0 z-10 rounded-2xl outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--cafe-atrium-accent)]"
-      />
-      <span
-        aria-hidden="true"
-        className="pointer-events-none absolute inset-x-[8%] top-0 h-0.5 rounded-full"
-        style={{ background: accent }}
+        className="absolute inset-0 z-10 rounded-2xl outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
       />
 
-      <div className="flex items-center gap-2">
-        <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-[#8a8189] dark:text-white/50">
-          <span
-            aria-hidden="true"
-            className="size-1.5 shrink-0 rounded-full"
-            style={{ background: PROVIDER_DOT[card.provider] ?? SETTLED_COLOR }}
-          />
-          {providerLabel(card.provider)}
+      <div className="flex items-center gap-2 text-2xs">
+        <span className="flex min-w-0 items-center gap-1.5 font-medium text-muted-foreground">
+          <ProviderMark provider={card.provider} />
+          <span className="truncate">{providerLabel(card.provider)}</span>
         </span>
         <span
-          className="ml-auto text-[10px] font-semibold uppercase tracking-[0.04em]"
-          style={{ color: accent }}
+          className={cn("ml-auto flex shrink-0 items-center gap-1 font-medium", status.colorClass)}
+          data-cafe-atrium-card-status={card.state}
         >
-          {STATE_LABEL[card.state]}
+          {/* The dot is the shared sidebar indicator; the visible text below
+              carries the accessible label, so the dot itself is decorative. */}
+          <span aria-hidden="true" className="inline-flex">
+            <ThreadStatusLabel status={status} />
+          </span>
+          {statusText(status)}
         </span>
       </div>
 
@@ -437,46 +520,70 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
       <div
         id={configurationId}
         data-cafe-atrium-turn-configuration="true"
-        className="mt-1.5 min-w-0 text-[11px] leading-4 [overflow-wrap:anywhere]"
+        className="mt-1.5 min-w-0 text-2xs [overflow-wrap:anywhere]"
         title={configuration?.sourceDescription}
       >
         {configuration ? (
           <>
-            <div className="font-medium text-[#4a4248] dark:text-white/75">
-              {configuration.settings}
-            </div>
-            <div className="mt-0.5 text-[10px] text-[#8a8189] dark:text-white/50">
+            <div className="font-medium text-muted-foreground">{configuration.settings}</div>
+            <div className="mt-0.5 text-subtle-foreground">
               {configuration.account} · {configuration.modes}
             </div>
           </>
         ) : (
-          <div className="text-[#8a8189] dark:text-white/50">Turn settings unavailable</div>
+          // Missing or not-yet-hydrated records must read as unavailable
+          // rather than borrowing today's composer defaults.
+          <div className="text-subtle-foreground">Settings unavailable</div>
         )}
       </div>
 
       <div
         id={titleId}
-        className="mt-2 line-clamp-2 text-[17px] leading-tight font-medium tracking-tight"
+        className="mt-2 line-clamp-2 text-base leading-tight font-medium tracking-tight text-foreground"
       >
         {card.title}
       </div>
       {card.projectName ? (
-        <div className="mt-1 truncate font-mono text-[10px] text-[#9a9199] dark:text-white/40">
-          {card.projectName}
-        </div>
+        <div className="mt-1 truncate text-2xs text-subtle-foreground">{card.projectName}</div>
       ) : null}
 
       {/* The reference's photo window becomes the live subagent list. */}
+      {card.subagents.length === 0 &&
+      detailPending &&
+      (card.state === "running" || card.state === "holding") ? (
+        // Reserve one row while this live card's detail is still hydrating so
+        // the grid does not jump when its subagents arrive.
+        <div
+          aria-hidden="true"
+          className="mt-3 flex items-center gap-2.5 rounded-xl bg-muted p-2.5"
+          data-cafe-atrium-subagent-placeholder="true"
+        >
+          <Skeleton className="size-7 shrink-0 rounded-full" />
+          <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+            <Skeleton className="h-3 w-1/3" />
+            <Skeleton className="h-3 w-2/3" />
+          </div>
+        </div>
+      ) : null}
       {card.subagents.length > 0 ? (
         <div
-          className="mt-3 rounded-xl bg-[#ece7e2] p-2.5 dark:bg-white/8"
+          className="mt-3 rounded-xl bg-muted p-2.5"
           data-cafe-atrium-subagent-view={subagentSelection.view}
         >
           <div
             role="group"
             aria-label={`Subagent view for ${card.title}`}
-            className="relative z-20 mb-2 grid grid-cols-2 gap-1 rounded-lg bg-black/5 p-1 dark:bg-black/15"
+            className="relative z-20 mb-2 grid grid-cols-2 gap-1 rounded-lg bg-muted p-1"
           >
+            {/* One indicator slides between the two equal columns. */}
+            <span
+              aria-hidden="true"
+              className={cn(
+                "pointer-events-none absolute inset-y-1 left-1 w-[calc(50%-0.375rem)] rounded-md bg-card shadow-xs/5 dark:bg-input/70",
+                "transition-[translate] duration-(--duration-base) ease-out motion-reduce:transition-none",
+                subagentSelection.view === "history" && "translate-x-[calc(100%+0.25rem)]",
+              )}
+            />
             {(["active", "history"] as const).map((view) => (
               <button
                 key={view}
@@ -484,11 +591,10 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
                 aria-pressed={subagentSelection.view === view}
                 aria-controls={subagentListId}
                 className={cn(
-                  "min-h-8 min-w-0 rounded-md px-2 text-[11px] font-medium tabular-nums",
-                  "outline-none focus-visible:ring-2 focus-visible:ring-[var(--cafe-atrium-accent)]",
+                  "focus-ring relative min-h-8 min-w-0 rounded-md px-2 text-2xs font-medium tabular-nums transition-colors duration-(--duration-fast)",
                   subagentSelection.view === view
-                    ? "bg-white/80 text-[#3c353a] shadow-sm dark:bg-white/12 dark:text-white/90"
-                    : "text-[#6c636a] hover:bg-white/40 dark:text-white/60 dark:hover:bg-white/5",
+                    ? "text-foreground"
+                    : "text-muted-foreground hover:text-foreground",
                 )}
                 onClick={(event) => {
                   // These are local presentation controls above the card's
@@ -512,22 +618,22 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
             {subagentPage.rows.map((subagent) => (
               <li
                 key={subagent.rowKey}
-                className="min-w-0 text-[11px] text-[#4a4248] dark:text-white/75"
+                className="min-w-0 text-2xs text-muted-foreground"
                 data-cafe-atrium-subagent-row="true"
               >
                 <button
                   type="button"
                   onClick={() => onOpenSubagent(card, subagent.rowKey)}
                   aria-label={`View ${subagent.label} activity`}
-                  className="relative z-20 grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2.5 rounded-lg px-0.5 py-1.5 text-left hover:bg-black/5 dark:hover:bg-white/5 focus-visible:outline-2 focus-visible:outline-[var(--cafe-atrium-accent)]"
+                  className="focus-ring relative z-20 grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2.5 rounded-lg px-0.5 py-1.5 text-left transition-colors duration-(--duration-fast) hover:bg-accent"
                 >
                   <SubagentAvatar seed={subagent.id} className="size-7" />
                   <span className="min-w-0">
-                    <span className="block truncate font-semibold text-[#3c353a] dark:text-white/85">
+                    <span className="block truncate text-xs font-medium text-foreground">
                       {subagent.label}
                     </span>
                     <span
-                      className="mt-0.5 line-clamp-2 leading-4 text-[#6c636a] break-words dark:text-white/50"
+                      className="mt-0.5 line-clamp-2 break-words text-muted-foreground"
                       data-cafe-atrium-subagent-detail="true"
                       title={subagent.detail}
                     >
@@ -535,10 +641,7 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
                     </span>
                   </span>
                   <span className="w-[5.5rem] min-w-0 shrink-0 pt-0.5 text-right break-words">
-                    <span
-                      className="block text-[9px] font-semibold uppercase tracking-[0.06em]"
-                      style={{ color: subagent.running ? accent : SETTLED_COLOR }}
-                    >
+                    <span className={cn("block font-medium", subagentStatusClass(subagent.status))}>
                       {subagent.status === "waiting"
                         ? "Waiting"
                         : subagent.status === "active"
@@ -554,7 +657,7 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
                     {subagent.status !== "unknown" &&
                     subagent.startedAt !== null &&
                     (subagent.running || subagent.completedAt !== null) ? (
-                      <span className="mt-0.5 block font-mono text-[10px] tabular-nums text-[#8a8189] dark:text-white/45">
+                      <span className="mt-0.5 block font-mono tabular-nums text-subtle-foreground">
                         {formatElapsed(
                           subagent.startedAt,
                           subagent.running ? now : subagent.completedAt!,
@@ -567,18 +670,18 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
             ))}
           </ul>
           {subagentPage.total === 0 ? (
-            <p className="px-1 py-3 text-center text-[11px] text-[#6c636a] dark:text-white/55">
+            <p className="px-1 py-3 text-center text-2xs text-muted-foreground">
               {subagentSelection.view === "active" ? "No active subagents" : "No subagent history"}
             </p>
           ) : subagentPage.pageCount > 1 ? (
             <div
               role="group"
               aria-label={`Subagent pages for ${card.title}`}
-              className="relative z-20 mt-2 border-t border-black/10 pt-2 dark:border-white/10"
+              className="relative z-20 mt-2 border-t border-border-subtle pt-2"
             >
               <p
                 role="status"
-                className="text-center text-[10px] text-[#6c636a] tabular-nums dark:text-white/55"
+                className="text-center text-2xs text-subtle-foreground tabular-nums"
                 data-cafe-atrium-subagent-page-status="true"
               >
                 {subagentPage.start}–{subagentPage.end} of {subagentPage.total} · Page{" "}
@@ -598,7 +701,7 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
                         ? subagentPage.pageIndex === 0
                         : subagentPage.pageIndex + 1 >= subagentPage.pageCount
                     }
-                    className="min-h-8 min-w-0 rounded-md px-2 text-[11px] font-medium text-[#4a4248] outline-none hover:bg-black/5 focus-visible:ring-2 focus-visible:ring-[var(--cafe-atrium-accent)] disabled:cursor-default disabled:opacity-40 dark:text-white/75 dark:hover:bg-white/5"
+                    className="focus-ring min-h-8 min-w-0 rounded-md px-2 text-2xs font-medium text-muted-foreground transition-colors duration-(--duration-fast) hover:bg-accent hover:text-foreground disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
                     onClick={(event) => {
                       event.stopPropagation();
                       setSubagentSelection({
@@ -617,15 +720,15 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
       ) : null}
 
       {card.activityLabel ? (
-        <div className="mt-3 flex items-center gap-2 border-t border-black/10 pt-2.5 text-[11px] text-[#6c636a] dark:border-white/10 dark:text-white/55">
+        <div className="mt-3 flex items-center gap-2 border-t border-border-subtle pt-2.5 text-2xs text-muted-foreground">
           <span className="truncate">
             {card.activityLabel}
             {card.activityDetail ? (
-              <span className="text-[#948b92] dark:text-white/40"> · {card.activityDetail}</span>
+              <span className="text-subtle-foreground"> · {card.activityDetail}</span>
             ) : null}
           </span>
           {elapsed ? (
-            <span className="ml-auto shrink-0 font-mono text-[10px] tabular-nums text-[#948b92] dark:text-white/40">
+            <span className="ml-auto shrink-0 font-mono tabular-nums text-subtle-foreground">
               {elapsed}
             </span>
           ) : null}
@@ -653,7 +756,10 @@ function areAtriumCardPropsEqual(
     previous.card.subagents === next.card.subagents;
   if (
     !cardUnchanged ||
-    previous.tint !== next.tint ||
+    // Status objects are rebuilt on each clock tick; their label identifies
+    // the presentation (approval vs input for a waiting card).
+    previous.status.label !== next.status.label ||
+    previous.detailPending !== next.detailPending ||
     previous.onOpenSubagent !== next.onOpenSubagent ||
     previous.onOpen !== next.onOpen ||
     previous.onCardElement !== next.onCardElement
@@ -680,6 +786,7 @@ export function TaskAtriumBoard() {
   const navigate = useNavigate();
   const closeAtrium = useTaskAtriumStore((state) => state.setOpen);
   const stageRef = useRef<HTMLDivElement | null>(null);
+  const providerTrackRef = useRef<HTMLDivElement | null>(null);
   const [pointer, setPointer] = useState({ x: 0, y: 0 });
   // null = "All work". Cleared automatically if that provider stops running.
   const [providerFilter, setProviderFilter] = useState<string | null>(null);
@@ -705,6 +812,9 @@ export function TaskAtriumBoard() {
   // signals — which also drives the elapsed readouts.
   const [now, setNow] = useState(() => Date.now());
   const [snapshot, setSnapshot] = useState(EMPTY_ATRIUM);
+  const [cardPresentation, setCardPresentation] = useState<
+    ReadonlyMap<string, AtriumCardPresentation>
+  >(() => new Map());
   const [selectedWorker, setSelectedWorker] = useState<{ cardKey: string; rowKey: string } | null>(
     null,
   );
@@ -729,14 +839,17 @@ export function TaskAtriumBoard() {
     let interval: number | null = null;
     const tick = () => {
       const timestamp = Date.now();
+      const state = useStore.getState();
+      const nextSnapshot = selectAtriumSnapshot(
+        state,
+        timestamp,
+        dismissedTaskAtriumErrors,
+        environmentId,
+      );
       setNow(timestamp);
-      setSnapshot(
-        selectAtriumSnapshot(
-          useStore.getState(),
-          timestamp,
-          dismissedTaskAtriumErrors,
-          environmentId,
-        ),
+      setSnapshot(nextSnapshot);
+      setCardPresentation(
+        new Map(nextSnapshot.cards.map((card) => [card.key, readCardPresentation(state, card)])),
       );
     };
     const stop = () => {
@@ -932,7 +1045,7 @@ export function TaskAtriumBoard() {
     filteredMetrics.holdingCount > 0
       ? `${filteredMetrics.holdingCount} waiting on you. Everything else is moving on its own.`
       : filteredMetrics.errorCount > 0 && filteredMetrics.runningCount === 0
-        ? `${pluralizedCount(filteredMetrics.errorCount, "thread")} stopped on an error. Open one to see what happened.`
+        ? `${pluralizedCount(filteredMetrics.errorCount, "chat")} stopped on an error. Open one to see why.`
         : "Nothing here asks for you. The garden keeps its own hours.";
 
   const clearErrors = useCallback(() => {
@@ -964,12 +1077,9 @@ export function TaskAtriumBoard() {
   );
 
   const total = snapshot.cards.length;
-  const glass = dark
-    ? "border-white/15 bg-black/35 text-white/85"
-    : "border-black/10 bg-white/60 text-[#3a3038]";
-  const heading = dark ? "text-white" : "text-[#241b23]";
-  const muted = dark ? "text-white/60" : "text-[#5d5460]";
-  const label = dark ? "text-white/45" : "text-[#8a8189]";
+  // Translucent theme surface for chrome that floats over the scene.
+  const glass = "border-border bg-card/60 text-foreground";
+  const providerIndicator = useSlidingIndicator(providerTrackRef);
 
   return (
     <div
@@ -994,26 +1104,40 @@ export function TaskAtriumBoard() {
         <div className="sticky top-0 z-30 flex min-w-0 justify-center bg-gradient-to-b from-background/65 via-background/25 to-transparent py-4 pr-14 pl-3 sm:pl-4">
           <div className="flex min-w-0 max-w-full items-center gap-2">
             <div
+              ref={providerTrackRef}
               role="group"
               aria-label="Filter by provider"
               className={cn(
-                "flex min-w-0 max-w-full items-center gap-1 overflow-x-auto overscroll-x-contain rounded-full border p-1 backdrop-blur-md [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
+                "relative flex min-w-0 max-w-full items-center gap-1 overflow-x-auto overscroll-x-contain rounded-full border p-1 backdrop-blur-md [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
                 glass,
               )}
             >
+              {/* One indicator slides under the pressed pill. It lives inside
+                  the horizontal scroller, so it scrolls with the pills. */}
+              {providerIndicator ? (
+                <span
+                  aria-hidden="true"
+                  className={cn(
+                    "pointer-events-none absolute top-1 bottom-1 left-0 rounded-full bg-foreground",
+                    providerIndicator.animate &&
+                      "transition-[translate,width] duration-(--duration-base) ease-out motion-reduce:transition-none",
+                  )}
+                  style={{
+                    translate: `${providerIndicator.left}px 0`,
+                    width: providerIndicator.width,
+                  }}
+                />
+              ) : null}
               <button
                 type="button"
                 onClick={() => setProviderFilter(null)}
                 aria-pressed={providerFilter === null}
+                data-cafe-atrium-segment=""
                 className={cn(
-                  "rounded-full px-3 py-1 text-xs whitespace-nowrap transition-colors",
-                  "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-current",
+                  "focus-ring relative rounded-full px-3 py-1 text-xs font-medium whitespace-nowrap transition-colors duration-(--duration-fast)",
                   providerFilter === null
-                    ? cn(
-                        "font-semibold",
-                        dark ? "bg-white text-[#1b1620]" : "bg-[#2b2029] text-white",
-                      )
-                    : "opacity-70 hover:opacity-100",
+                    ? "text-background"
+                    : "text-muted-foreground hover:text-foreground",
                 )}
               >
                 All work {total}
@@ -1026,24 +1150,21 @@ export function TaskAtriumBoard() {
                     type="button"
                     onClick={() => setProviderFilter(active ? null : provider)}
                     aria-pressed={active}
+                    data-cafe-atrium-segment=""
                     className={cn(
-                      "flex items-center gap-1.5 rounded-full px-3 py-1 text-xs whitespace-nowrap transition-colors",
-                      "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-current",
-                      active
-                        ? cn(
-                            "font-semibold",
-                            dark ? "bg-white text-[#1b1620]" : "bg-[#2b2029] text-white",
-                          )
-                        : "opacity-70 hover:opacity-100",
+                      "focus-ring relative flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium whitespace-nowrap transition-colors duration-(--duration-fast)",
+                      active ? "text-background" : "text-muted-foreground hover:text-foreground",
                     )}
                   >
-                    <span
-                      aria-hidden="true"
-                      className="size-1.5 rounded-full"
-                      style={{ background: PROVIDER_DOT[provider] ?? SETTLED_COLOR }}
-                    />
                     {providerLabel(provider)}
-                    <span className="tabular-nums opacity-60">{count}</span>
+                    <span
+                      className={cn(
+                        "tabular-nums",
+                        active ? "text-background" : "text-subtle-foreground",
+                      )}
+                    >
+                      {count}
+                    </span>
                   </button>
                 );
               })}
@@ -1058,9 +1179,8 @@ export function TaskAtriumBoard() {
                       onClick={clearErrors}
                       aria-label="Clear Task Atrium errors"
                       className={cn(
-                        "flex size-8 items-center justify-center rounded-full border backdrop-blur-md",
-                        "transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-current",
-                        "hover:bg-white/75 dark:hover:bg-black/55",
+                        "focus-ring flex size-8 items-center justify-center rounded-full border backdrop-blur-md",
+                        "transition-colors duration-(--duration-fast) hover:bg-card",
                         glass,
                       )}
                     />
@@ -1069,8 +1189,7 @@ export function TaskAtriumBoard() {
                   <CircleCheckIcon className="size-4" />
                 </TooltipTrigger>
                 <TooltipPopup side="bottom">
-                  Clear {snapshot.errorCount} historical{" "}
-                  {snapshot.errorCount === 1 ? "error" : "errors"}
+                  Clear {snapshot.errorCount} {snapshot.errorCount === 1 ? "error" : "errors"}
                 </TooltipPopup>
               </Tooltip>
             ) : null}
@@ -1081,18 +1200,18 @@ export function TaskAtriumBoard() {
           {filtered.length === 0 ? (
             <section
               className={cn(
-                "flex min-h-[clamp(15rem,32vh,22rem)] flex-col items-center justify-center gap-2 rounded-3xl border px-6 text-center backdrop-blur-sm",
+                "flex min-h-[clamp(15rem,32vh,22rem)] flex-col items-center justify-center gap-2 rounded-2xl border px-6 text-center backdrop-blur-sm",
                 glass,
               )}
               data-cafe-atrium-empty-state="true"
             >
-              <p className={cn("text-2xl font-light tracking-tight", heading)}>
+              <p className="text-2xl font-light tracking-tight text-foreground">
                 {providerFilter === null ? "The garden is quiet" : "Nothing from this provider"}
               </p>
-              <p className={cn("max-w-sm text-sm", muted)}>
+              <p className="max-w-sm text-sm text-muted-foreground">
                 {providerFilter === null
-                  ? "When threads and their subagents are working, they appear here."
-                  : `No ${providerLabel(providerFilter)} threads are running right now.`}
+                  ? "Working chats and their subagents appear here."
+                  : `No ${providerLabel(providerFilter)} chats are running.`}
               </p>
             </section>
           ) : (
@@ -1105,55 +1224,31 @@ export function TaskAtriumBoard() {
                 <div className="min-w-0">
                   <h2
                     id={overviewTitleId}
-                    className={cn(
-                      "max-w-[13ch] text-[clamp(2.5rem,10vw,5.25rem)] leading-[0.9] font-light tracking-[-0.055em]",
-                      heading,
-                    )}
+                    className="max-w-[13ch] text-[clamp(2.5rem,10vw,5.25rem)] leading-[0.9] font-light tracking-[-0.055em] text-foreground"
                     data-cafe-atrium-overview-headline="true"
                   >
-                    <span className="block">{pluralizedCount(filtered.length, "thread")},</span>
+                    <span className="block">{pluralizedCount(filtered.length, "chat")},</span>
                     <span className="block font-semibold" style={{ color: tint }}>
                       {pluralizedCount(filteredMetrics.subagentCount, "subagent")},
                     </span>
                     <span className="block">{overviewStatus}</span>
                   </h2>
-                  <p className={cn("mt-5 max-w-md text-sm leading-relaxed sm:text-base", muted)}>
+                  <p className="-mx-2 mt-5 w-fit max-w-md rounded-lg bg-background/50 px-2 py-1 text-sm leading-relaxed text-muted-foreground backdrop-blur-sm sm:text-base">
                     {overviewDescription}
                   </p>
                 </div>
+                {/* Chat and subagent counts are already the headline, so the
+                    metrics carry only what it does not say. The soft backdrop
+                    keeps them legible when blossoms drift behind. */}
                 <dl
-                  className="grid min-w-0 grid-cols-2 gap-x-5 gap-y-6 sm:grid-cols-3 sm:gap-x-8 lg:pb-1"
+                  className="grid min-w-0 grid-cols-2 gap-x-5 gap-y-5 rounded-xl bg-background/60 p-4 backdrop-blur-sm sm:grid-cols-4 sm:gap-x-6 lg:mb-1 lg:grid-cols-2 2xl:grid-cols-4"
                   data-cafe-atrium-overview-metrics="true"
                 >
-                  <Stat
-                    label="Threads"
-                    value={String(filtered.length)}
-                    tone={heading}
-                    muted={label}
-                  />
-                  <Stat
-                    label="Subagents"
-                    value={String(filteredMetrics.subagentCount)}
-                    tone={heading}
-                    muted={label}
-                  />
-                  <Stat
-                    label="Running"
-                    value={String(filteredMetrics.runningCount)}
-                    tone={heading}
-                    muted={label}
-                  />
-                  <Stat
-                    label="Cache hits"
-                    value={formatCachedShare(usage.cachedShare)}
-                    tone={heading}
-                    muted={label}
-                  />
+                  <Stat label="Running" value={String(filteredMetrics.runningCount)} />
+                  <Stat label="Cache hits" value={formatCachedShare(usage.cachedShare)} />
                   <Stat
                     label="Cache saved (USD)"
                     value={formatCacheSavings(usage.cacheSavings, usage.loaded)}
-                    tone={heading}
-                    muted={label}
                   />
                   <Stat
                     label="Output"
@@ -1164,8 +1259,6 @@ export function TaskAtriumBoard() {
                         : undefined
                     }
                     detailAriaHidden
-                    tone={heading}
-                    muted={label}
                   />
                 </dl>
               </section>
@@ -1184,7 +1277,13 @@ export function TaskAtriumBoard() {
                     key={card.key}
                     card={card}
                     now={now}
-                    tint={tint}
+                    status={
+                      cardPresentation.get(card.key)?.status ??
+                      (card.state === "holding"
+                        ? ATRIUM_HOLDING_FALLBACK_STATUS
+                        : ATRIUM_CARD_STATUS[card.state])
+                    }
+                    detailPending={cardPresentation.get(card.key)?.detailPending ?? true}
                     onOpen={openCard}
                     onOpenSubagent={openSubagent}
                     onCardElement={onCardElement}
@@ -1199,28 +1298,51 @@ export function TaskAtriumBoard() {
               breakdown stay visible without a second scrollbar or fade mask. */}
           {usage.loaded && usage.raw ? (
             <section
-              className={cn("rounded-2xl border backdrop-blur-md", glass)}
+              className={cn("animate-enter-fade rounded-2xl border backdrop-blur-md", glass)}
               data-cafe-atrium-usage-panel="true"
             >
               <div className="flex items-center gap-3 px-4 pt-3 sm:px-5">
-                <span className={cn("font-mono text-[10px] uppercase tracking-[0.14em]", label)}>
-                  Summary &middot; all threads
-                </span>
+                <span className="label-overline">Usage · all chats</span>
               </div>
               <MemoizedUsageCostContent usage={usage.raw} />
             </section>
           ) : (
+            // Mirrors UsageCostContent's toolbar, hero/chart grid and tiles so
+            // the real summary replaces it without the pane jumping.
             <section
-              className={cn("rounded-2xl border p-4 backdrop-blur-md sm:p-5", glass)}
+              className={cn("rounded-2xl border backdrop-blur-md", glass)}
               data-cafe-atrium-usage-loading="true"
               aria-label="Loading usage summary"
+              aria-busy="true"
             >
-              <div className={cn("font-mono text-[10px] uppercase tracking-[0.14em]", label)}>
-                Summary &middot; all threads
+              <div className="flex items-center gap-3 px-4 pt-3 sm:px-5">
+                <span className="label-overline">Usage · all chats</span>
               </div>
-              <div className="mt-4 grid gap-3 md:grid-cols-[minmax(13rem,0.34fr)_1fr]">
-                <div className="h-28 animate-pulse rounded-xl bg-white/5 motion-reduce:animate-none" />
-                <div className="h-28 animate-pulse rounded-xl bg-white/5 motion-reduce:animate-none" />
+              <div className="@container/usage-cost min-w-0" aria-hidden="true">
+                <div className="flex justify-end gap-3 px-4 pt-3 sm:px-5">
+                  <Skeleton className="h-7 w-36 rounded-lg" />
+                  <Skeleton className="h-7 w-24 rounded-md" />
+                </div>
+                <div className="grid gap-5 px-4 py-4 sm:px-5 @min-[52rem]/usage-cost:grid-cols-[minmax(0,22rem)_minmax(0,1fr)]">
+                  <div className="flex min-w-0 flex-col gap-2">
+                    <Skeleton className="h-3 w-32" />
+                    <Skeleton className="h-10 w-44" />
+                    <Skeleton className="h-3 w-full max-w-64" />
+                    <div className="mt-4 flex flex-col gap-4">
+                      <Skeleton className="h-8 w-full" />
+                      <Skeleton className="h-8 w-full" />
+                    </div>
+                  </div>
+                  <div className="flex min-w-0 flex-col gap-2">
+                    <Skeleton className="h-3 w-40" />
+                    <Skeleton className="h-[clamp(12rem,24cqw,20rem)] w-full rounded-xl" />
+                  </div>
+                </div>
+                <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,17rem),1fr))] gap-4 border-t border-border-subtle px-4 py-4 sm:px-5">
+                  <Skeleton className="h-14" />
+                  <Skeleton className="h-14" />
+                  <Skeleton className="h-14" />
+                </div>
               </div>
             </section>
           )}
@@ -1233,13 +1355,15 @@ export function TaskAtriumBoard() {
         }}
       >
         <DialogPrimitive.Portal>
-          <DialogPrimitive.Backdrop className="fixed inset-0 z-[70] bg-black/35 backdrop-blur-sm" />
+          <DialogPrimitive.Backdrop className="fixed inset-0 z-[70] bg-black/35 backdrop-blur-sm transition-opacity duration-(--duration-slow) ease-out data-ending-style:opacity-0 data-ending-style:duration-(--duration-fast) data-ending-style:ease-in data-starting-style:opacity-0" />
           <DialogPrimitive.Popup
             aria-label="Subagent activity"
             data-cafe-atrium-subagent-popup="true"
             data-cafe-window-no-drag="true"
             className={cn(
-              "fixed left-1/2 top-1/2 z-[80] h-[min(85dvh,60rem)] w-[min(94vw,70rem)] -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-xl border bg-background shadow-2xl outline-none [-webkit-app-region:no-drag]",
+              "fixed left-1/2 top-1/2 z-[80] h-[min(85dvh,60rem)] w-[min(94vw,70rem)] -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-2xl border bg-background shadow-2xl outline-none [-webkit-app-region:no-drag]",
+              // Fade + slight scale in, a faster fade out (docs/style-guide.md §8).
+              "transition-[opacity,scale] duration-(--duration-slow) ease-out data-ending-style:scale-[0.985] data-ending-style:opacity-0 data-ending-style:duration-(--duration-fast) data-ending-style:ease-in data-starting-style:scale-[0.985] data-starting-style:opacity-0",
               // Portals do not inherit the outer modal's native inset. Keep
               // this child centered and bounded within the usable area, not
               // beneath Electron's caption controls on a short window. Every

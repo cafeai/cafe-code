@@ -1,3 +1,4 @@
+import type { Menu as MenuPrimitive } from "@base-ui/react/menu";
 import type { ContextMenuItem } from "@cafecode/contracts";
 import {
   Archive,
@@ -57,10 +58,13 @@ function decoration(id: string): { icon: LucideIcon; group: string } {
   return { icon: ArrowRight, group: "other" };
 }
 
-const panelClass =
-  "z-[10000] w-72 max-w-[calc(100vw-1rem)] rounded-xl border-border/80 bg-popover/95 text-popover-foreground shadow-[0_12px_36px_-8px_rgb(0_0_0/35%)] backdrop-blur-xl [&>div]:p-1.5";
-const rowClass =
-  "min-h-9 gap-3 rounded-lg px-2.5 py-2 text-sm sm:min-h-9 sm:text-sm [&>svg]:size-4 [&>svg]:opacity-75";
+// The panel, rows, separators and motion are the shared Menu primitive's own
+// (surface, 28px rows, rounded-sm highlights, anchored fade + scale), so this
+// fallback reads like every other menu. Only the width is set here: wide
+// enough for typical actions without growing past a small viewport.
+const panelClass = "min-w-48 max-w-[min(18rem,calc(100vw-1rem))]";
+// Keep the main menu and its portalled submenus above every app surface.
+const positionerClass = "z-[10000]";
 
 function MenuEntries<T extends string>({
   items,
@@ -79,12 +83,10 @@ function MenuEntries<T extends string>({
     const children = item.children?.length ? item.children : undefined;
     return (
       <Fragment key={item.id}>
-        {index > 0 && group !== decoration(items[index - 1]!.id).group ? (
-          <MenuSeparator className="mx-2 my-1.5 bg-border/60" />
-        ) : null}
+        {index > 0 && group !== decoration(items[index - 1]!.id).group ? <MenuSeparator /> : null}
         {children ? (
           <MenuSub>
-            <MenuSubTrigger className={rowClass} disabled={item.disabled}>
+            <MenuSubTrigger disabled={item.disabled}>
               <Icon aria-hidden="true" />
               <span className="min-w-0 flex-1 truncate">{item.label}</span>
             </MenuSubTrigger>
@@ -94,7 +96,7 @@ function MenuEntries<T extends string>({
               // whole-menu retirement must not run another focus restoration.
               finalFocus={canRestoreSubmenuFocus}
               className={panelClass}
-              positionerClassName="z-[10000]"
+              positionerClassName={positionerClass}
             >
               <MenuEntries
                 items={children}
@@ -106,7 +108,7 @@ function MenuEntries<T extends string>({
           </MenuSub>
         ) : (
           <MenuItem
-            className={`${rowClass} ${item.destructive ? "text-destructive data-highlighted:text-destructive" : ""}`}
+            variant={item.destructive ? "destructive" : "default"}
             disabled={item.disabled}
             closeOnClick={false}
             onPointerDown={(event) => {
@@ -138,6 +140,15 @@ type ContextMenuSession = {
 
 let currentMenu: ContextMenuSession | undefined;
 
+// Retired menus still playing their exit transition, keyed by their teardown.
+// Opening another menu finishes them at once so two menus never overlap.
+const exitingMenuTeardowns = new Set<() => void>();
+
+// Backstop for unmounting a closing menu if Base UI never reports that its exit
+// transition completed (for example, transitions are suspended while the
+// document is hidden). Well above the fast exit duration.
+const EXIT_TEARDOWN_BACKSTOP_MS = 1000;
+
 /** The shell owns only one menu at a time. Base UI supplies keyboard traversal,
  * submenus, focus management and viewport collision handling. A resolved item
  * is still merely a user choice; callers retain exact chat/action admission. */
@@ -158,6 +169,8 @@ export function showContextMenu<T extends string>(
         ? activeElement
         : null;
   previousMenu?.dismiss();
+  // Each teardown deletes only its own entry, which Set iteration tolerates.
+  for (const finishExit of exitingMenuTeardowns) finishExit();
   if (items.length === 0) return Promise.resolve(null);
   const host = document.createElement("div");
   host.dataset.contextMenuHost = "true";
@@ -193,14 +206,38 @@ export function showContextMenu<T extends string>(
       ((element === inheritedFocus && element.isConnected) ||
         Array.from(popups).some((popup) => popup.contains(element)));
     let resolved = false;
-    const finish = (id: T | null, restoreFocus = false) => {
+    let tornDown = false;
+    let exitBackstop: number | undefined;
+    const actionsRef: { current: MenuPrimitive.Root.Actions | null } = { current: null };
+    const teardown = () => {
+      if (tornDown) return;
+      tornDown = true;
+      exitingMenuTeardowns.delete(teardown);
+      window.clearTimeout(exitBackstop);
+      root.unmount();
+      host.remove();
+    };
+    // `immediate` skips the exit transition: a replacement menu takes over at
+    // once instead of overlapping a fading one.
+    const finish = (id: T | null, restoreFocus = false, immediate = false) => {
       if (resolved) return;
       resolved = true;
-      // Defer unmount until the library has finished its current event/update.
+      // Defer cleanup until the library has finished its current event/update.
       queueMicrotask(() => {
         const focusWasInside = containsFocus(document.activeElement);
-        root.unmount();
-        host.remove();
+        const actions = actionsRef.current;
+        if (immediate || tornDown || !actions) {
+          teardown();
+        } else {
+          // Close through Base UI so the shared Menu exit transition plays;
+          // the root unmounts when it reports completion. A closing positioner
+          // is inert, so the fading panel takes no clicks or focus, and
+          // `resolved` already ignores any late item event. Focus restoration
+          // below still runs now, before the exit finishes.
+          exitingMenuTeardowns.add(teardown);
+          actions.close();
+          exitBackstop = window.setTimeout(teardown, EXIT_TEARDOWN_BACKSTOP_MS);
+        }
         // A retired menu must not reactivate its pane after an outside press,
         // focus transfer or replacement. Escape and selection return to the
         // opener only while this exact menu still owns both focus and cleanup.
@@ -213,16 +250,21 @@ export function showContextMenu<T extends string>(
         resolve(id);
       });
     };
-    const dismiss = () => finish(null);
+    const dismiss = () => finish(null, false, true);
     const menu = { previousFocus, containsFocus, dismiss };
     currentMenu = menu;
     root.render(
       <Menu
+        actionsRef={actionsRef}
         defaultOpen
         defaultTriggerId={triggerId}
         modal={false}
         onOpenChange={(open, details) => {
           if (!open) finish(null, details.reason === "escape-key");
+        }}
+        onOpenChangeComplete={(open) => {
+          // Unmount outside Base UI's own flush once the exit has finished.
+          if (!open) queueMicrotask(teardown);
         }}
       >
         {/* The registered trigger supplies Base UI's floating-tree identity even
@@ -232,7 +274,7 @@ export function showContextMenu<T extends string>(
           ref={registerPopup}
           aria-label="Actions"
           className={panelClass}
-          positionerClassName="z-[10000]"
+          positionerClassName={positionerClass}
           anchor={anchor}
           align="start"
           side="bottom"

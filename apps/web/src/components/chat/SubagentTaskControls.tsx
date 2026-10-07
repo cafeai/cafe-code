@@ -8,6 +8,9 @@ import {
 import { useState } from "react";
 import { readEnvironmentApi } from "../../environmentApi";
 import type { WorkLogEntry } from "../../session-logic";
+import { cn } from "~/lib/utils";
+import { Button } from "../ui/button";
+import { InfoTip } from "../ui/info-tip";
 
 /** These controls never optimistically mark a worker stopped. A native status
  * edge is the completion authority; receipts only describe request delivery. */
@@ -93,31 +96,41 @@ export function IndividualTaskControls({
     }
   };
   return (
-    <div className="space-y-2 border-t border-border/40 px-4 py-3 sm:px-6">
-      <div className="flex flex-wrap gap-2" aria-label="Individual task controls">
+    <div className="space-y-2 border-t border-border-subtle px-4 py-3 sm:px-6">
+      <div className="flex flex-wrap items-center gap-2" aria-label="Individual task controls">
         {control.canBackground && (
-          <button
-            type="button"
+          <Button
+            size="xs"
+            variant="outline"
             disabled={pending || requested.has("background")}
             onClick={() => void send("background")}
-            className="rounded-md border border-border px-3 py-1.5 text-xs text-foreground disabled:opacity-50"
           >
             Run in background
-          </button>
+          </Button>
         )}
         {control.canStop && (
-          <button
-            type="button"
-            disabled={pending || requested.has("stop")}
-            onClick={() => void send("stop")}
-            className="rounded-md border border-border px-3 py-1.5 text-xs text-destructive disabled:opacity-50"
-          >
-            Stop task
-          </button>
+          <span className="inline-flex items-center gap-1">
+            <Button
+              size="xs"
+              variant="destructive-outline"
+              disabled={pending || requested.has("stop")}
+              onClick={() => void send("stop")}
+            >
+              Stop task
+            </Button>
+            <InfoTip label="About stopping a task">
+              Stops only this task. Stop chat remains a separate control.
+            </InfoTip>
+          </span>
         )}
       </div>
-      <p className="text-xs text-muted-foreground" role="status" aria-live="polite">
-        {message ?? "Only this task is affected. Stop chat remains a separate control."}
+      {/* Mounted before any action so screen readers announce the result. */}
+      <p
+        className={cn("text-xs text-muted-foreground", message === null && "sr-only")}
+        role="status"
+        aria-live="polite"
+      >
+        {message}
       </p>
     </div>
   );

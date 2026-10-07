@@ -122,8 +122,15 @@ describe("inline scheduled follow-up notices", () => {
       await expect
         .element(page.getByText("Won’t run until you approve.", { exact: true }))
         .toBeVisible();
-      await expect.element(page.getByText("Every 5 minutes · Asia/Tokyo")).toBeVisible();
+      await expect.element(page.getByText("Every 5 minutes", { exact: true })).toBeVisible();
+      // Model, account and time zone are progressive detail behind a toggle.
+      expect(document.body.textContent).not.toContain("Account: Personal Codex");
+      const details = page.getByRole("button", { name: "Details" });
+      await expect.element(details).toHaveAttribute("aria-expanded", "false");
+      await details.click();
+      await expect.element(details).toHaveAttribute("aria-expanded", "true");
       await expect.element(page.getByText("Account: Personal Codex")).toBeVisible();
+      await expect.element(page.getByText("Time zone: Asia/Tokyo")).toBeVisible();
       await expect
         .element(page.getByText("Uses chat settings · gpt-6-astra · Effort: ultra"))
         .toBeVisible();
@@ -256,12 +263,13 @@ describe("inline scheduled follow-up notices", () => {
       <ScheduledFollowupNotices context={context} schedules={[record]} onReview={vi.fn()} />,
     );
     try {
-      await expect.element(page.getByText("gpt-6.1-sol · Effort: medium · Fast: on")).toBeVisible();
+      // The account-change disclosure stays visible without opening details.
       await expect
-        .element(
-          page.getByText(`Account: ${previousAccount} · Account changed; review before enabling`),
-        )
+        .element(page.getByText("Account changed; review before enabling", { exact: true }))
         .toBeVisible();
+      await page.getByRole("button", { name: "Details" }).click();
+      await expect.element(page.getByText("gpt-6.1-sol · Effort: medium · Fast: on")).toBeVisible();
+      await expect.element(page.getByText(`Account: ${previousAccount}`)).toBeVisible();
       expect(document.body.textContent).not.toContain("Personal Codex");
       expect(document.body.textContent).not.toContain("Uses chat settings");
     } finally {
@@ -284,7 +292,9 @@ describe("inline scheduled follow-up notices", () => {
     );
     try {
       await expect.element(page.getByText("Last known: Scheduled", { exact: true })).toBeVisible();
-      expect(document.body.textContent).toContain("Schedule status may be out of date.");
+      expect(document.body.textContent).toContain(
+        "Couldn’t refresh. Schedule status may be out of date.",
+      );
       expect(document.body.textContent).toContain("Last reported next run:");
       expect(document.body.textContent).not.toContain("sensitive transport fixture detail");
       await expect
@@ -300,7 +310,9 @@ describe("inline scheduled follow-up notices", () => {
           onRefresh={onRefresh}
         />,
       );
-      expect(document.body.textContent).toContain("This backend is disconnected.");
+      expect(document.body.textContent).toContain(
+        "Disconnected. Schedule status may be out of date.",
+      );
       await expect.element(page.getByRole("button", { name: "Refresh schedules" })).toBeDisabled();
       await expect.element(page.getByText("Last known: Scheduled", { exact: true })).toBeVisible();
       expect(onReview).not.toHaveBeenCalled();
@@ -328,8 +340,9 @@ describe("inline scheduled follow-up notices", () => {
     try {
       await expect.element(page.getByRole("heading", { name: title, exact: true })).toBeVisible();
       expect(host.querySelectorAll("img, script, a")).toHaveLength(0);
-      expect(host.textContent).toContain("One-time follow-up · Asia/Tokyo");
-      expect(host.textContent).toContain("Planned:");
+      expect(host.textContent).toContain("One-time follow-up · Planned:");
+      await page.getByRole("button", { name: "Details" }).click();
+      expect(host.textContent).toContain("Time zone: Asia/Tokyo");
       for (const dark of [false, true]) {
         document.documentElement.classList.toggle("dark", dark);
         const status = page.getByText("Needs your approval", { exact: true }).element();
@@ -345,13 +358,17 @@ describe("inline scheduled follow-up notices", () => {
     }
   });
 
-  it("keeps an empty successful conversation quiet but exposes first-load and read failures", async () => {
+  it("keeps an empty conversation quiet during its first load but exposes read failures", async () => {
     const onReview = vi.fn();
     const screen = await render(
       <ScheduledFollowupNotices context={context} schedules={[]} loading onReview={onReview} />,
     );
     try {
-      await expect.element(page.getByText("Loading schedules…")).toBeVisible();
+      // No "Loading…" line flashes on every chat open; the tail stays stable.
+      await expect
+        .element(page.getByRole("region", { name: "Scheduled follow-up notices" }))
+        .not.toBeInTheDocument();
+      expect(document.body.textContent).not.toContain("Loading");
       await screen.rerender(
         <ScheduledFollowupNotices
           context={context}
@@ -360,7 +377,7 @@ describe("inline scheduled follow-up notices", () => {
           onReview={onReview}
         />,
       );
-      expect(document.body.textContent).toContain("Schedules could not be refreshed.");
+      expect(document.body.textContent).toContain("Couldn’t refresh.");
       await screen.rerender(
         <ScheduledFollowupNotices context={context} schedules={[]} onReview={onReview} />,
       );

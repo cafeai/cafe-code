@@ -11,6 +11,7 @@ import {
 } from "../ui/dialog";
 import { ScheduledFollowupNotices } from "./ScheduledFollowupNotices";
 import { ScheduledFollowups, type ScheduledFollowupsContext } from "./ScheduledFollowups";
+import { readRetainedScheduledFollowupNotices } from "./scheduledFollowupsResource";
 import { useScheduledFollowups } from "./useScheduledFollowups";
 
 /** This is a live, bounded view of saved schedules, not assistant-message
@@ -40,6 +41,13 @@ function ConversationSchedules({ context }: { context: ScheduledFollowupsContext
   );
   const [reviewId, setReviewId] = useState<ScheduledFollowupId | null>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
+  // Returning to a chat: until its first authoritative read lands, show the
+  // last successful (instruction-free) rows instead of an empty tail that would
+  // grow under the reader. They stay non-reviewable while loading.
+  const displayedSchedules =
+    loading && schedules.length === 0 && !error
+      ? (readRetainedScheduledFollowupNotices(context.environmentId, context.threadId) ?? schedules)
+      : schedules;
   const review = useCallback(
     (record: ScheduledFollowupRecord) => {
       if (record.threadId !== context.threadId || context.unavailable || error) return;
@@ -57,7 +65,7 @@ function ConversationSchedules({ context }: { context: ScheduledFollowupsContext
     <>
       <ScheduledFollowupNotices
         context={context}
-        schedules={schedules}
+        schedules={displayedSchedules}
         loading={loading}
         error={error}
         onReview={review}
@@ -76,8 +84,8 @@ function ConversationSchedules({ context }: { context: ScheduledFollowupsContext
           <DialogHeader>
             <DialogTitle>Review scheduled follow-up</DialogTitle>
             <DialogDescription>
-              Check the instructions, timing and paying account. Opening this review makes no
-              changes; new proposals still need your approval.
+              Check the instructions, timing and paying account. Opening this review changes
+              nothing; proposals still need your approval.
             </DialogDescription>
           </DialogHeader>
           <DialogPanel>

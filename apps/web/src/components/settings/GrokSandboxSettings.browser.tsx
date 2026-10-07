@@ -57,6 +57,7 @@ afterEach(async () => {
 async function mountCard(
   instance: ProviderInstanceConfig = baseInstance,
   provider: ServerProvider = makeProvider(),
+  options: { readonly settingsOpen?: boolean } = {},
 ) {
   const onUpdate = vi.fn<(next: ProviderInstanceConfig) => void>();
   mounted = await render(
@@ -66,7 +67,7 @@ async function mountCard(
         instance={instance}
         driverOption={DRIVER_OPTION_BY_VALUE[instance.driver]}
         liveProvider={provider}
-        isSettingsOpen={false}
+        isSettingsOpen={options.settingsOpen ?? false}
         onSettingsOpenChange={vi.fn()}
         isDefaultProvider={false}
         onSetDefaultProvider={vi.fn()}
@@ -95,18 +96,24 @@ describe("Grok sandbox consent in provider settings", () => {
     await page.getByRole("button", { name: "Use without sandbox", exact: true }).click();
     const dialog = page.getByRole("dialog", { name: "Use Grok without sandbox?" });
     await expect.element(dialog).toBeVisible();
+    // The confirmation must disclose the missing OS boundary and that Ask
+    // permissions are not a substitute for it, plus the Full access, Plan and
+    // reload caveats.
     await expect
-      .element(dialog.getByText(/These checks use Ask permissions and do not submit a chat prompt/))
+      .element(dialog.getByText(/connection checks outside the OS sandbox/))
       .toBeVisible();
     await expect
-      .element(dialog.getByText(/Full access also bypasses ordinary approval prompts/))
+      .element(dialog.getByText(/Ask permissions, which don't replace a sandbox/))
       .toBeVisible();
+    await expect.element(dialog.getByText(/send no chat prompt/)).toBeVisible();
+    await expect.element(dialog.getByText(/Chat access modes don't change/)).toBeVisible();
     await expect
-      .element(
-        dialog.getByText(/Plan and protected modes keep their existing sandbox requirements/),
-      )
+      .element(dialog.getByText(/select Full access; it also bypasses approval prompts/))
       .toBeVisible();
-    await expect.element(dialog.getByText(/may interrupt active sessions/)).toBeVisible();
+    await expect.element(dialog.getByText(/Plan and protected modes may still fail/)).toBeVisible();
+    await expect
+      .element(dialog.getByText(/may interrupt active chats\. Change it between sessions\./))
+      .toBeVisible();
     expect(onUpdate).not.toHaveBeenCalled();
     await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
     await expect.element(dialog).not.toBeInTheDocument();
@@ -143,7 +150,9 @@ describe("Grok sandbox consent in provider settings", () => {
     );
     await expect.element(page.getByText("Unsandboxed connection checks enabled")).toBeVisible();
     await expect
-      .element(page.getByText("Sandbox availability has not been checked."))
+      .element(
+        page.getByText("Checks run outside the OS sandbox, so sandbox support isn't checked."),
+      )
       .toBeVisible();
     await page.getByRole("button", { name: "Use protected checks", exact: true }).click();
     const dialog = page.getByRole("dialog", { name: "Restore protected connection checks?" });
@@ -155,19 +164,33 @@ describe("Grok sandbox consent in provider settings", () => {
     });
   });
 
-  it("offers explicit opt-in before a sandbox failure and accepts only literal true as consent", async () => {
-    const onUpdate = await mountCard(
-      { ...baseInstance, config: { allowUnsandboxedProbe: "true" } },
-      makeProvider({ status: "ready", sandbox: { status: "available" } }),
-    );
+  it("keeps a healthy card quiet and offers explicit opt-in in Advanced settings", async () => {
+    const instance: ProviderInstanceConfig = {
+      ...baseInstance,
+      config: { allowUnsandboxedProbe: "true" },
+    };
+    const provider = makeProvider({ status: "ready", sandbox: { status: "available" } });
+    const onCardUpdate = await mountCard(instance, provider);
+    // Only literal true is consent, and an available sandbox needs no card row.
+    await expect
+      .element(page.getByText("Protected connection checks", { exact: true }))
+      .not.toBeInTheDocument();
+    await expect
+      .element(page.getByRole("button", { name: "Use without sandbox" }))
+      .not.toBeInTheDocument();
+    expect(onCardUpdate).not.toHaveBeenCalled();
+    await mounted?.unmount();
+
+    const onDialogUpdate = await mountCard(instance, provider, { settingsOpen: true });
+    await page.getByRole("button", { name: /^Advanced/ }).click();
     await expect
       .element(page.getByText("Protected connection checks", { exact: true }))
       .toBeVisible();
     await expect
-      .element(page.getByText("The last protected connection check verified sandbox startup."))
+      .element(page.getByText("The last check verified that the sandbox starts."))
       .toBeVisible();
     await expect.element(page.getByRole("button", { name: "Use without sandbox" })).toBeVisible();
-    expect(onUpdate).not.toHaveBeenCalled();
+    expect(onDialogUpdate).not.toHaveBeenCalled();
   });
 
   it("does not expose Grok consent actions or classify a different provider's sandbox field", async () => {

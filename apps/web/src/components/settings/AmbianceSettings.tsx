@@ -51,9 +51,9 @@ const REACT_MODE_LABELS: Record<AmbianceReactMode, string> = {
  * someone lands on a heavy one on a machine that will struggle.
  */
 const COST_DOT_CLASS: Record<AmbianceCost, string> = {
-  light: "bg-emerald-400/80",
-  medium: "bg-amber-400/80",
-  heavy: "bg-red-400/80",
+  light: "bg-status-done",
+  medium: "bg-status-attention",
+  heavy: "bg-status-error",
 };
 
 function AmbianceSurfaceToggle({
@@ -97,11 +97,11 @@ export function AmbianceSettingsPanel() {
   const opacityDirty = settings.ambianceOpacity !== DEFAULT_AMBIANCE_OPACITY;
 
   return (
-    <SettingsPageContainer>
-      <SettingsSection title="Ambiance">
+    <SettingsPageContainer title="Ambiance">
+      <SettingsSection>
         <SettingsRow
-          title="Ambiance"
-          description="Draw an animated weather layer over the app. Off keeps the default sidebar stars."
+          title="Weather layer"
+          description="Animated weather over the app. Off keeps the sidebar stars."
           control={
             <Switch
               checked={settings.ambianceEnabled}
@@ -113,7 +113,7 @@ export function AmbianceSettingsPanel() {
 
         <SettingsRow
           title="Effect"
-          description="Pick the weather drawn behind your work. Previews are live. GPU effects render with a shader; heavier ones cost more battery."
+          description="Heavier effects use more battery."
           resetAction={
             settings.ambianceEffect !== DEFAULT_AMBIANCE_EFFECT ? (
               <SettingResetButton
@@ -140,10 +140,10 @@ export function AmbianceSettingsPanel() {
                   aria-pressed={selected}
                   aria-label={`${tile.label} effect`}
                   className={cn(
-                    "group overflow-hidden rounded-lg border text-left transition-colors",
+                    "group focus-ring overflow-hidden rounded-lg border text-left transition-colors duration-(--duration-fast)",
                     selected
-                      ? "border-primary/70 ring-1 ring-primary/45 ring-inset"
-                      : "border-border hover:border-foreground/25",
+                      ? "border-primary bg-primary/5"
+                      : "border-border hover:border-border-strong",
                   )}
                   onClick={() => updateSettings({ ambianceEffect: tile.effect })}
                 >
@@ -154,13 +154,13 @@ export function AmbianceSettingsPanel() {
                   <span className="block px-2 py-1.5">
                     <span
                       className={cn(
-                        "block text-[11px]",
+                        "block text-2xs font-medium",
                         selected ? "text-foreground" : "text-muted-foreground",
                       )}
                     >
                       {tile.label}
                     </span>
-                    <span className="mt-0.5 flex items-center gap-1 text-[9px] uppercase tracking-wide text-muted-foreground/70">
+                    <span className="mt-0.5 flex items-center gap-1 text-2xs text-subtle-foreground">
                       <span
                         aria-hidden="true"
                         className={cn("size-1.5 shrink-0 rounded-full", COST_DOT_CLASS[tile.cost])}
@@ -177,7 +177,7 @@ export function AmbianceSettingsPanel() {
 
         <SettingsRow
           title="Intensity"
-          description="Baseline density before the thread has any say."
+          description="Base density; chat activity can add more."
           resetAction={
             intensityDirty ? (
               <SettingResetButton
@@ -212,7 +212,7 @@ export function AmbianceSettingsPanel() {
 
         <SettingsRow
           title="Opacity"
-          description="How strongly the weather reads. Turn it down for the brighter effects without making the sky any less busy."
+          description="How visible the weather is, without changing its density."
           resetAction={
             opacityDirty ? (
               <SettingResetButton
@@ -246,12 +246,12 @@ export function AmbianceSettingsPanel() {
         />
 
         <SettingsRow
-          title="React to thread"
-          description="How much of the run the weather is allowed to hear."
+          title="React to chat"
+          description="How much chat activity changes the weather."
           resetAction={
             settings.ambianceReactMode !== DEFAULT_AMBIANCE_REACT_MODE ? (
               <SettingResetButton
-                label="ambiance thread reaction"
+                label="ambiance chat reaction"
                 onClick={() => updateSettings({ ambianceReactMode: DEFAULT_AMBIANCE_REACT_MODE })}
               />
             ) : null
@@ -265,7 +265,7 @@ export function AmbianceSettingsPanel() {
                 }
               }}
             >
-              <SelectTrigger className="w-full sm:w-44" aria-label="React to thread">
+              <SelectTrigger className="w-full sm:w-44" aria-label="React to chat">
                 <SelectValue>{REACT_MODE_LABELS[settings.ambianceReactMode]}</SelectValue>
               </SelectTrigger>
               <SelectPopup align="end" alignItemWithTrigger={false}>
@@ -285,7 +285,7 @@ export function AmbianceSettingsPanel() {
 
         <SettingsRow
           title="Surfaces"
-          description="Where the weather draws. Turning off the thread area keeps message text on a flat background; the composer surface tints the prompt frame with the current conditions."
+          description="Composer tints the prompt frame instead of drawing weather."
           control={
             <div className="flex flex-col items-end gap-2">
               <AmbianceSurfaceToggle
@@ -294,7 +294,7 @@ export function AmbianceSettingsPanel() {
                 onCheckedChange={(checked) => updateSettings({ ambianceSurfaceSidebar: checked })}
               />
               <AmbianceSurfaceToggle
-                label="Thread"
+                label="Chat"
                 checked={settings.ambianceSurfaceThread}
                 onCheckedChange={(checked) => updateSettings({ ambianceSurfaceThread: checked })}
               />
@@ -333,7 +333,7 @@ export function AmbianceSettingsPanel() {
       <SettingsSection title="Task Atrium">
         <SettingsRow
           title="Task Atrium"
-          description="Adds a button to the chat header that opens a live view of what every thread and subagent is working on, over its own blossom scene. Display only — no approvals, no controls. It never opens on its own."
+          description="Adds an Atrium button above Settings: a read-only overview of chats and subagents."
           resetAction={
             settings.ambianceAtriumEnabled !== DEFAULT_AMBIANCE_ATRIUM_ENABLED ? (
               <SettingResetButton
@@ -357,7 +357,7 @@ export function AmbianceSettingsPanel() {
 
         <SettingsRow
           title="Atrium color"
-          description="Defaults to the ambiance weather color, which itself follows the Appearance accent."
+          description="Defaults to the weather color."
           resetAction={
             settings.ambianceAtriumColor !== DEFAULT_UNIFIED_SETTINGS.ambianceAtriumColor ? (
               <SettingResetButton

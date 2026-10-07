@@ -37,6 +37,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { render } from "vitest-browser-react";
 
 import { useCommandPaletteStore } from "../commandPaletteStore";
+import { showContextMenuFallback } from "../contextMenuFallback";
 import { createDeskState, deskTabKey } from "../deskModel";
 import { useDeskStore } from "../deskStore";
 import { useComposerDraftStore, DraftId } from "../composerDraftStore";
@@ -49,7 +50,7 @@ import { isMacPlatform } from "../lib/utils";
 import { resetSourceControlDiscoveryStateForTests } from "../lib/sourceControlDiscoveryState";
 import { __resetLocalApiForTests } from "../localApi";
 import { AppAtomRegistryProvider } from "../rpc/atomRegistry";
-import { getServerConfig } from "../rpc/serverState";
+import { applyClientSettingsUpdated, getServerConfig } from "../rpc/serverState";
 import { getRouter } from "../router";
 import { deriveLogicalProjectKeyFromSettings } from "../logicalProject";
 import { selectBootstrapCompleteForActiveEnvironment, selectThreadByRef, useStore } from "../store";
@@ -115,6 +116,18 @@ const NOW_ISO = "2026-03-04T12:00:00.000Z";
 const BASE_TIME_MS = Date.parse(NOW_ISO);
 const ATTACHMENT_SVG = "<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'></svg>";
 const ADD_PROJECT_SUBMENU_PLACEHOLDER = "Enter path (e.g. ~/projects/my-app)";
+
+/**
+ * Sidebar rows fade their hover/selected colours (docs/style-guide.md §7), so
+ * read the presentation only after this element's running transitions settle;
+ * a mid-transition read returns an interpolated colour.
+ */
+async function readSettledSidebarRowPresentation(element: Element) {
+  await Promise.all(
+    element.getAnimations().map((animation) => animation.finished.catch(() => undefined)),
+  );
+  return readSidebarRowPresentation(element);
+}
 
 function readSidebarRowPresentation(element: Element) {
   const style = getComputedStyle(element);
@@ -1810,8 +1823,8 @@ async function waitForNewThreadShortcutLabel(): Promise<void> {
   await revealProjectThreadAction();
   await newThreadButton.hover();
   const shortcutLabel = isMacPlatform(navigator.platform)
-    ? "New thread (⇧⌘O)"
-    : "New thread (Ctrl+Shift+O)";
+    ? "New chat (⇧⌘O)"
+    : "New chat (Ctrl+Shift+O)";
   await expect.element(page.getByText(shortcutLabel)).toBeInTheDocument();
 }
 
@@ -2159,8 +2172,12 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
     useTaskAtriumStore.getState().setOpen(false);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     customWsRpcResolver = null;
+    // Imperative context menus own separate React roots. Finish active menus
+    // and their exit transitions before clearing the DOM they still own.
+    await showContextMenuFallback([]);
+    expect(document.querySelector("[data-context-menu-host]")).toBeNull();
     document.body.innerHTML = "";
   });
 
@@ -3178,7 +3195,11 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       });
 
       try {
-        await expect.element(page.getByText("No threads yet")).toBeInTheDocument();
+        // The standalone Chats catalog can show the same short empty line, so
+        // scope this to the project's own empty row.
+        await expect
+          .element(page.getByTestId("sidebar-project-empty-chats").getByText("No chats yet"))
+          .toBeInTheDocument();
       } finally {
         await mounted.cleanup();
       }
@@ -3216,8 +3237,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       }
     });
 
-    it("shows a passive source update badge before the Open button when the tracked branch is behind", async () => {
-      setDraftThreadWithoutWorktree();
+    it("shows the source update badge beside Settings when the tracked branch is behind", async () => {
       const sourceUpdateState: DesktopSourceUpdateState = {
         status: "behind",
         branch: "dev",
@@ -3234,7 +3254,10 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
 
       const mounted = await mountChatView({
         viewport: DEFAULT_VIEWPORT,
-        snapshot: createDraftOnlySnapshot(),
+        snapshot: createSnapshotForTargetUser({
+          targetMessageId: MessageId.make("titlebar-preview"),
+          targetText: "Move the tabs into the top window bar.",
+        }),
         configureFixture: (nextFixture) => {
           nextFixture.serverConfig = {
             ...nextFixture.serverConfig,
@@ -3253,13 +3276,32 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           "Unable to find passive source update badge.",
         );
         expect(updateBadge.getAttribute("title")).toContain("Newer origin/dev commit available");
-        await waitForElement(
-          () =>
-            document.querySelector<HTMLButtonElement>(
-              '[data-chat-view-header="true"] button[aria-label="Copy options"]',
-            ),
-          "Unable to find desktop open project picker.",
+        expect(updateBadge.closest('[data-sidebar="menu-item"]')?.textContent).toContain(
+          "Settings",
         );
+        expect(updateBadge.closest('[data-chat-view-header="true"]')).toBeNull();
+        expect(
+          document.querySelector(
+            '[data-chat-view-header="true"] button[aria-label="Copy options"]',
+          ),
+        ).toBeNull();
+        expect(
+          document.querySelector('[data-chat-view-header="true"] .desk-group-bar'),
+        ).not.toBeNull();
+        await page.screenshot({
+          path: "../../../../.explorations/titlebar-visual/source-badge-footer.png",
+        });
+        await page.getByRole("tab").first().click({ button: "right" });
+        await expect
+          .element(page.getByRole("menuitem", { name: "Open", exact: true }))
+          .toBeVisible();
+        await page.getByRole("menuitem", { name: "Open", exact: true }).hover();
+        await expect
+          .element(page.getByRole("menuitem", { name: "VS Code", exact: true }))
+          .toBeVisible();
+        await page.screenshot({
+          path: "../../../../.explorations/titlebar-visual/open-context-menu.png",
+        });
       } finally {
         await mounted.cleanup();
       }
@@ -3302,6 +3344,9 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           "Unable to find passive rebuild badge.",
         );
         expect(updateBadge.getAttribute("title")).toContain("Rebuild and restart to apply dev");
+        expect(updateBadge.closest('[data-sidebar="menu-item"]')?.textContent).toContain(
+          "Settings",
+        );
       } finally {
         await mounted.cleanup();
       }
@@ -4578,7 +4623,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
 
       try {
         const initialModeButton = await waitForInteractionModeButton("Build");
-        expect(initialModeButton.title).toContain("enter plan mode");
+        expect(initialModeButton.title).toContain("Switch to Plan");
 
         window.dispatchEvent(
           new KeyboardEvent("keydown", {
@@ -4590,7 +4635,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         );
         await waitForLayout();
 
-        expect((await waitForInteractionModeButton("Build")).title).toContain("enter plan mode");
+        expect((await waitForInteractionModeButton("Build")).title).toContain("Switch to Plan");
 
         const composerEditor = await waitForComposerEditor();
         composerEditor.focus();
@@ -4605,9 +4650,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
 
         await vi.waitFor(
           async () => {
-            expect((await waitForInteractionModeButton("Plan")).title).toContain(
-              "return to normal build mode",
-            );
+            expect((await waitForInteractionModeButton("Plan")).title).toContain("Switch to Build");
           },
           { timeout: 8_000, interval: 16 },
         );
@@ -4623,9 +4666,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
 
         await vi.waitFor(
           async () => {
-            expect((await waitForInteractionModeButton("Build")).title).toContain(
-              "enter plan mode",
-            );
+            expect((await waitForInteractionModeButton("Build")).title).toContain("Switch to Plan");
           },
           { timeout: 8_000, interval: 16 },
         );
@@ -4685,19 +4726,16 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         );
         expect(
           Array.from(footer.querySelectorAll("button")).some((button) =>
-            ["Manual", "Accept edits", "Plan", "Auto", "Bypass permissions"].includes(
+            ["Ask permissions", "Accept edits", "Plan", "Auto", "Bypass permissions"].includes(
               button.textContent?.trim() ?? "",
             ),
           ),
         ).toBe(false);
 
         optionsButton.click();
-        expect((await waitForMenuRadioItemContainingText("Manual")).textContent).toContain(
-          "Ask before edits and commands",
-        );
-        expect((await waitForMenuRadioItemContainingText("Accept edits")).textContent).toContain(
-          "Apply edits automatically",
-        );
+        // Routine descriptions moved into tooltips; Bypass keeps its warning visible.
+        await waitForMenuRadioItemContainingText("Ask permissions");
+        await waitForMenuRadioItemContainingText("Accept edits");
         expect(
           (await waitForMenuRadioItemContainingText("Bypass permissions")).textContent,
         ).toContain("Run without permission checks");
@@ -5554,6 +5592,104 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         await mounted.cleanup();
       }
     });
+
+    it.each(["running", "ready"] as const)(
+      "immediately delivers an inline question answer in a %s chat without consuming the main draft",
+      async (sessionStatus) => {
+        const activeTurnId = "turn-inline-question-steer" as TurnId;
+        const base = createSnapshotForTargetUser({
+          targetMessageId: MessageId.make("inline-question-user"),
+          targetText: "Inline question fixture",
+          sessionStatus,
+        });
+        const activityId = EventId.make(`codex-async-questions:${"c".repeat(64)}`);
+        const snapshot: OrchestrationReadModel = {
+          ...base,
+          threads: base.threads.map((thread) => ({
+            ...thread,
+            latestTurn:
+              sessionStatus === "running"
+                ? {
+                    turnId: activeTurnId,
+                    state: "running",
+                    requestedAt: NOW_ISO,
+                    startedAt: NOW_ISO,
+                    completedAt: null,
+                    assistantMessageId: null,
+                  }
+                : null,
+            session: {
+              ...thread.session!,
+              activeTurnId: sessionStatus === "running" ? activeTurnId : null,
+              status: sessionStatus,
+            },
+            activities: [
+              ...thread.activities,
+              {
+                id: activityId,
+                createdAt: NOW_ISO,
+                tone: "info",
+                kind: "provider.async-questions",
+                summary: "Codex has questions",
+                turnId: activeTurnId,
+                payload: {
+                  itemId: "inline-question-item",
+                  questions: [{ title: "Which route?", options: ["Suggested route"] }],
+                },
+              },
+            ],
+          })),
+        };
+        const mounted = await mountChatView({
+          viewport: DEFAULT_VIEWPORT,
+          snapshot,
+          configureFixture: (testFixture) => {
+            testFixture.serverConfig = {
+              ...testFixture.serverConfig,
+              providers: testFixture.serverConfig.providers.map((provider) => ({
+                ...provider,
+                runtimeCapabilities: { liveSteer: "supported", threadGoals: "unsupported" },
+              })),
+            };
+          },
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+              ? { sequence: snapshot.snapshotSequence + 1 }
+              : undefined,
+        });
+        try {
+          useComposerDraftStore.getState().setPrompt(THREAD_REF, "Keep this independent draft");
+          await page.getByText("1 question from Codex").click();
+          await page.getByRole("button", { name: "Suggested route" }).click();
+          await page.getByRole("button", { name: "Send answer" }).click();
+          const commandType =
+            sessionStatus === "running" ? "thread.turn.steer" : "thread.turn.start";
+          await vi.waitFor(() =>
+            expect(wsRequests.filter((request) => request.type === commandType)).toHaveLength(1),
+          );
+          const answer = wsRequests.find((request) => request.type === commandType)!;
+          expect(answer.message).toMatchObject({ text: "> Which route?\n\nSuggested route" });
+          await vi.waitFor(() =>
+            expect(
+              wsRequests.find((request) => request.type === "thread.async-questions.resolve"),
+            ).toMatchObject({ threadId: THREAD_ID, activityId, questionIndexes: [0] }),
+          );
+          expect(useComposerDraftStore.getState().draftsByThreadKey[THREAD_KEY]?.prompt).toBe(
+            "Keep this independent draft",
+          );
+          expect(
+            wsRequests.some(
+              (request) =>
+                request.type ===
+                  (sessionStatus === "running" ? "thread.turn.start" : "thread.turn.steer") ||
+                request.type === "thread.turn.interrupt",
+            ),
+          ).toBe(false);
+        } finally {
+          await mounted.cleanup();
+        }
+      },
+    );
 
     it("sends a second queued steer while the first accepted steer is still processing", async () => {
       const activeTurnId = "turn-consecutive-queued-steers" as TurnId;
@@ -7428,7 +7564,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
               .toBeVisible();
             await page.getByRole("button", { name: "Implementation actions", exact: true }).click();
             await page
-              .getByRole("menuitem", { name: "Implement in a new thread", exact: true })
+              .getByRole("menuitem", { name: "Implement in a new chat", exact: true })
               .click();
           };
           try {
@@ -7736,7 +7872,10 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
       });
       try {
-        const newChat = page.getByRole("button", { name: "New chat", exact: true });
+        // Exercise the Projects Chats heading action before the global shortcut.
+        const newChat = page
+          .getByLabelText("Standalone chats", { exact: true })
+          .getByRole("button", { name: "New chat", exact: true });
         await newChat.click();
         await vi.waitFor(() =>
           expect(mounted.router.state.location.pathname).toMatch(UUID_ROUTE_RE),
@@ -7747,7 +7886,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual([]);
         expect(useDeskStore.getState().activeDraftId).toBe(draftId);
         expect(document.querySelector("[data-desk-tab-key]")).toBeNull();
-        expect(document.body.textContent).toContain("No standalone chats yet");
+        expect(document.body.textContent).toContain("No chats yet");
         useComposerDraftStore.getState().setSubagentLimits(draftId, { codex: 5 });
         useComposerDraftStore.getState().setPrompt(draftId, "First standalone conversation");
         await waitForStandaloneComposerText("First standalone conversation");
@@ -7759,9 +7898,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         ]);
         await waitForStandaloneComposerText("First standalone conversation");
         await page.getByRole("button", { name: "Desk", exact: true }).click();
-        await page
-          .getByRole("button", { name: "New chat in active tab group", exact: true })
-          .click();
+        newChatShortcut();
         await waitForLayout();
         expect(mounted.router.state.location.pathname).toBe(`/draft/${draftId}`);
         expect(useDeskStore.getState().desk.sidebarMode).toBe("desk");
@@ -7873,9 +8010,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         desk.dispatch({ type: "sidebarMode", mode: "desk" });
         const capturedGroup = useDeskStore.getState().desk.activeGroupId;
         await waitForLayout();
-        await page
-          .getByRole("button", { name: "New chat in active tab group", exact: true })
-          .click();
+        newChatShortcut();
         await vi.waitFor(() =>
           expect(mounted.router.state.location.pathname).toMatch(UUID_ROUTE_RE),
         );
@@ -7911,11 +8046,8 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         await vi.waitFor(() =>
           expect(mounted.router.state.location.pathname).toBe(serverThreadPath(firstSavedId)),
         );
-        // Use the sidebar action, outside the chat runtime's React context, to
-        // qualify its observation of the exact first-send gate.
-        await page
-          .getByRole("button", { name: "New chat in active tab group", exact: true })
-          .click();
+        // The global shortcut observes the same exact first-send gate.
+        newChatShortcut();
         await vi.waitFor(() =>
           expect(mounted.router.state.location.pathname).toMatch(UUID_ROUTE_RE),
         );
@@ -8094,12 +8226,151 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
     });
     const splitChats = async () => {
       const dispatch = useDeskStore.getState().dispatch;
+      dispatch({ type: "keepOpen", tabKey: firstKey });
       dispatch({ type: "open", target: secondTarget });
       dispatch({ type: "split", tabKey: secondKey, targetGroupId: "g1", edge: "right" });
       await vi.waitFor(() =>
         expect(document.querySelectorAll('[data-testid="composer-editor"]')).toHaveLength(2),
       );
     };
+    it.each(["project", "standalone"] as const)(
+      "previews %s chat rows, keeps them on double-click and retains input when dismissed",
+      async (kind) => {
+        const initial = createSnapshotForTargetUser({
+          targetMessageId: MessageId.make("preview-chat-navigation"),
+          targetText: "Preview navigation fixture",
+        });
+        const snapshot = withSecondThread(initial);
+        const mounted = await mountChatView({
+          viewport: DEFAULT_VIEWPORT,
+          snapshot:
+            kind === "project"
+              ? snapshot
+              : {
+                  ...snapshot,
+                  threads: snapshot.threads.map((thread) => ({ ...thread, projectId: null })),
+                },
+        });
+        try {
+          const firstRow = page.getByTestId(`thread-row-${THREAD_ID}`);
+          const secondRow = page.getByTestId(`thread-row-${secondId}`);
+          // Explicitly keep the first chat before browsing another one.
+          await firstRow.dblClick();
+          await secondRow.click();
+          await vi.waitFor(() =>
+            expect(useDeskStore.getState().desk.groups.g1?.previewTabKey).toBe(secondKey),
+          );
+          const tab = page.getByRole("tab", { name: "Second Desk chat", exact: true });
+          await expect.element(tab).toHaveAttribute("data-preview", "true");
+          useComposerDraftStore.getState().setPrompt(secondRef, "Keep this unsent preview input");
+          await expect
+            .element(page.getByTestId("composer-editor"))
+            .toHaveTextContent("Keep this unsent preview input");
+          await firstRow.click();
+          await expect.element(tab).not.toBeInTheDocument();
+          expect(useComposerDraftStore.getState().getComposerDraft(secondRef)?.prompt).toBe(
+            "Keep this unsent preview input",
+          );
+          expect(useDeskStore.getState().desk.closed).toEqual([]);
+          await secondRow.dblClick();
+          await expect.element(tab).toHaveAttribute("data-preview", "false");
+          await expect
+            .element(page.getByTestId("composer-editor"))
+            .toHaveTextContent("Keep this unsent preview input");
+          await firstRow.click();
+          await expect.element(tab).toBeVisible();
+          expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual([firstKey, secondKey]);
+          expect(
+            wsRequests.some(
+              (request) =>
+                request.type === "thread.turn.start" ||
+                request.type === "thread.turn.interrupt" ||
+                request.type === "thread.archived" ||
+                request.type === "thread.deleted",
+            ),
+          ).toBe(false);
+        } finally {
+          await mounted.cleanup();
+        }
+      },
+    );
+    it.each(["project", "standalone"] as const)(
+      "keeps single-clicked %s chats open when the default behavior is Open",
+      async (kind) => {
+        const snapshot = withSecondThread(
+          createSnapshotForTargetUser({
+            targetMessageId: MessageId.make("open-click-navigation"),
+            targetText: "Open navigation fixture",
+          }),
+        );
+        const mounted = await mountChatView({
+          viewport: DEFAULT_VIEWPORT,
+          snapshot:
+            kind === "project"
+              ? snapshot
+              : {
+                  ...snapshot,
+                  threads: snapshot.threads.map((thread) => ({ ...thread, projectId: null })),
+                },
+          configureFixture: (next) => {
+            next.serverConfig = {
+              ...next.serverConfig,
+              clientSettings: {
+                ...next.serverConfig.clientSettings,
+                chatClickBehavior: "open",
+              },
+            };
+          },
+        });
+        try {
+          await page.getByTestId(`thread-row-${secondId}`).click();
+          await expect
+            .element(page.getByRole("tab", { name: "Second Desk chat", exact: true }))
+            .toHaveAttribute("data-preview", "false");
+          await page.getByTestId(`thread-row-${THREAD_ID}`).click();
+          await expect
+            .element(page.getByRole("tab", { name: "Second Desk chat", exact: true }))
+            .toBeVisible();
+          expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual([firstKey, secondKey]);
+          expect(useDeskStore.getState().desk.groups.g1?.previewTabKey).toBeUndefined();
+        } finally {
+          await mounted.cleanup();
+        }
+      },
+    );
+
+    it.each(["project", "standalone"] as const)(
+      "applies Open to the already selected %s preview on the next click",
+      async (kind) => {
+        const initial = createSnapshotForTargetUser({
+          targetMessageId: MessageId.make("updated-click-navigation"),
+          targetText: "Updated click preference fixture",
+        });
+        const mounted = await mountChatView({
+          viewport: DEFAULT_VIEWPORT,
+          snapshot:
+            kind === "project"
+              ? initial
+              : {
+                  ...initial,
+                  threads: initial.threads.map((thread) => ({ ...thread, projectId: null })),
+                },
+        });
+        try {
+          await expect.element(page.getByRole("tab")).toHaveAttribute("data-preview", "true");
+          applyClientSettingsUpdated({
+            ...getServerConfig()!.clientSettings,
+            chatClickBehavior: "open",
+          });
+          await page.getByTestId(`thread-row-${THREAD_ID}`).click();
+          await expect.element(page.getByRole("tab")).toHaveAttribute("data-preview", "false");
+          expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual([firstKey]);
+        } finally {
+          await mounted.cleanup();
+        }
+      },
+    );
+
     const seedDeskQueue = async (runtimeMode: RuntimeMode = "full-access") => {
       const queue = createFollowUpQueuePersistence();
       expect(
@@ -8132,6 +8403,52 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       return queue;
     };
 
+    it.each(["stopped", "running", "missing account", "wrong account"] as const)(
+      "hides selected Claude fork actions for a %s source session",
+      async (state) => {
+        const initial = createSnapshotForTargetUser({
+          targetMessageId: MessageId.make("desk-unavailable-fork-source"),
+          targetText: "Unavailable fork source",
+          provider: "claudeAgent",
+        });
+        const snapshot: OrchestrationReadModel = {
+          ...initial,
+          threads: initial.threads.map((source) => ({
+            ...source,
+            session: {
+              ...source.session!,
+              status: state === "running" || state === "stopped" ? state : "ready",
+              ...(state === "missing account"
+                ? {}
+                : {
+                    providerInstanceId: ProviderInstanceId.make(
+                      state === "wrong account" ? "other-claude" : "claudeAgent",
+                    ),
+                  }),
+            },
+            latestTurn: {
+              turnId: "desk-unavailable-fork-completed" as TurnId,
+              state: "completed",
+              requestedAt: isoAt(1),
+              startedAt: isoAt(2),
+              completedAt: isoAt(130),
+              assistantMessageId: source.messages.at(-1)!.id,
+            },
+          })),
+        };
+        const mounted = await mountChatView({ viewport: DEFAULT_VIEWPORT, snapshot });
+        try {
+          await waitForComposerEditor();
+          await expect
+            .element(page.getByRole("button", { name: "Fork from this message", exact: true }))
+            .not.toBeInTheDocument();
+          expect(wsRequests.filter((request) => request.type === "thread.fork")).toHaveLength(0);
+        } finally {
+          await mounted.cleanup();
+        }
+      },
+    );
+
     it("does not let a late message-fork acknowledgement navigate an inactive mounted pane", async () => {
       const initial = createSnapshotForTargetUser({
         targetMessageId: MessageId.make("desk-fork-source"),
@@ -8142,6 +8459,10 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         ...initial,
         threads: initial.threads.map((thread) => ({
           ...thread,
+          session: {
+            ...thread.session!,
+            providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+          },
           latestTurn: {
             turnId: "desk-fork-completed" as TurnId,
             state: "completed" as const,
@@ -8193,6 +8514,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         const action = sourcePane
           .getByTimelineMessageId(selectedMessageId)
           .getByRole("button", { name: "Fork from this message", exact: true });
+        await sourcePane.getByTimelineMessageId(selectedMessageId).hover();
         await expect.element(action).toBeVisible();
         expect(action.element().closest("[data-message-id]")?.getAttribute("data-message-id")).toBe(
           selectedMessageId,
@@ -8221,7 +8543,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           expect(mounted.router.state.location.pathname).toBe(serverThreadPath(THREAD_ID)),
         );
         await expect
-          .element(page.getByRole("button", { name: "Creating fork…", exact: true }))
+          .element(page.getByRole("button", { name: "Create fork", exact: true }))
           .toBeDisabled();
         await expect
           .element(page.getByRole("button", { name: "Cancel", exact: true }))
@@ -8259,6 +8581,10 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         ...initial,
         threads: initial.threads.map((thread) => ({
           ...thread,
+          session: {
+            ...thread.session!,
+            providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+          },
           latestTurn: {
             turnId: "desk-reopened-fork-completed" as TurnId,
             state: "completed" as const,
@@ -8296,6 +8622,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       __setEnvironmentApiOverrideForTests(LOCAL_ENVIRONMENT_ID, api);
       const forks = () => wsRequests.filter((request) => request.type === "thread.fork");
       try {
+        useDeskStore.getState().dispatch({ type: "keepOpen", tabKey: firstKey });
         useDeskStore.getState().dispatch({ type: "open", target: secondTarget });
         useDeskStore.getState().dispatch({ type: "select", tabKey: firstKey });
         const originalEditor = await waitForComposerEditor();
@@ -8316,10 +8643,9 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         );
         const reopenedEditor = await waitForComposerEditor();
         expect(reopenedEditor).not.toBe(originalEditor);
-        await page
-          .getByRole("button", { name: "Fork from this message", exact: true })
-          .last()
-          .click();
+        await expect
+          .element(page.getByRole("button", { name: "Fork from this message", exact: true }))
+          .not.toBeInTheDocument();
         await waitForLayout();
         await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
         expect(forks()).toHaveLength(1);
@@ -8348,6 +8674,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         ),
       });
       try {
+        useDeskStore.getState().dispatch({ type: "keepOpen", tabKey: firstKey });
         const scroller = await waitForElement(
           () =>
             document
@@ -8678,11 +9005,13 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         await page.getByTestId("composer-editor").hover();
         // Compare the live production components, not a duplicate reference
         // fixture that could silently drift from the actual Projects design.
-        const projectPresentation = readSidebarRowPresentation(projectsRow.element());
+        const projectPresentation = await readSettledSidebarRowPresentation(projectsRow.element());
         const projectTimestamp =
           projectsRow.element().lastElementChild!.lastElementChild!.textContent;
         await projectsRow.hover();
-        const projectHoverPresentation = readSidebarRowPresentation(projectsRow.element());
+        const projectHoverPresentation = await readSettledSidebarRowPresentation(
+          projectsRow.element(),
+        );
         await page
           .getByRole("group", { name: "Sidebar view" })
           .getByRole("button", { name: "Desk", exact: true })
@@ -8696,7 +9025,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         const title = row.querySelector("[data-desk-row-title]")!;
         const timestamp = row.querySelector("[data-desk-row-meta]")!;
         const actions = row.closest("li")!.querySelector("[data-desk-row-actions]")!;
-        expect(readSidebarRowPresentation(row)).toEqual(projectPresentation);
+        expect(await readSettledSidebarRowPresentation(row)).toEqual(projectPresentation);
         expect(timestamp.textContent).toBe(projectTimestamp);
         expect(timestamp.textContent).not.toBe("");
         await vi.waitFor(() => {
@@ -8726,7 +9055,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           .hover();
         // The actions are siblings of the native activation button so controls
         // aren't nested. Their parent hover must still cover the whole row.
-        expect(readSidebarRowPresentation(row)).toEqual(projectHoverPresentation);
+        expect(await readSettledSidebarRowPresentation(row)).toEqual(projectHoverPresentation);
       } finally {
         await mounted.cleanup();
       }
@@ -8809,15 +9138,10 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         expect(footerShowsAccessMode()).toBe(false);
         optionsButton.click();
 
-        expect((await waitForMenuRadioItemContainingText("Supervised")).textContent).toContain(
-          "Ask before commands and file changes",
-        );
+        await waitForMenuRadioItemContainingText("Supervised");
 
         const autoAcceptItem = await waitForMenuRadioItemContainingText("Auto-accept edits");
-        expect(autoAcceptItem.textContent).toContain("Auto-approve edits");
-        expect((await waitForMenuRadioItemContainingText("Full access")).textContent).toContain(
-          "Allow commands and edits without prompts",
-        );
+        await waitForMenuRadioItemContainingText("Full access");
 
         autoAcceptItem.click();
         await vi.waitFor(() => {
@@ -9663,9 +9987,9 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
 
         await expect.element(palette).toBeInTheDocument();
         await expect
-          .element(palette.getByText("New thread in Project", { exact: true }))
+          .element(palette.getByText("New chat in Project", { exact: true }))
           .toBeInTheDocument();
-        await palette.getByText("New thread in Project", { exact: true }).click();
+        await palette.getByText("New chat in Project", { exact: true }).click();
 
         await waitForURL(
           mounted.router,
@@ -9714,12 +10038,12 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         await openCommandPaletteFromTrigger();
 
         await expect.element(palette).toBeInTheDocument();
-        await page.getByPlaceholder("Search commands, projects, and threads...").fill("settings");
+        await page.getByPlaceholder("Search commands, projects and chats…").fill("settings");
         await expect
           .element(palette.getByText("Open settings", { exact: true }))
           .toBeInTheDocument();
         await expect
-          .element(palette.getByText("New thread in Project", { exact: true }))
+          .element(palette.getByText("New chat in Project", { exact: true }))
           .not.toBeInTheDocument();
       } finally {
         await mounted.cleanup();
@@ -10644,7 +10968,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         await openCommandPaletteFromTrigger();
 
         await expect.element(palette).toBeInTheDocument();
-        await page.getByPlaceholder("Search commands, projects, and threads...").fill("docs");
+        await page.getByPlaceholder("Search commands, projects and chats…").fill("docs");
         await expect.element(palette.getByText("Docs Portal", { exact: true })).toBeInTheDocument();
         await expect
           .element(palette.getByText("Release checklist", { exact: true }))
@@ -10693,9 +11017,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         await openCommandPaletteFromTrigger();
 
         await expect.element(palette).toBeInTheDocument();
-        await page
-          .getByPlaceholder("Search commands, projects, and threads...")
-          .fill("clients/docs");
+        await page.getByPlaceholder("Search commands, projects and chats…").fill("clients/docs");
         await expect.element(palette.getByText("Docs Portal", { exact: true })).toBeInTheDocument();
         await expect
           .element(palette.getByText("/repo/clients/docs-portal", { exact: true }))
@@ -10757,9 +11079,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         await openCommandPaletteFromTrigger();
 
         await expect.element(palette).toBeInTheDocument();
-        await page
-          .getByPlaceholder("Search commands, projects, and threads...")
-          .fill("clients/docs");
+        await page.getByPlaceholder("Search commands, projects and chats…").fill("clients/docs");
         await expect.element(palette.getByText("Docs Portal", { exact: true })).toBeInTheDocument();
         await expect
           .element(palette.getByText("/repo/clients/docs-portal", { exact: true }))
@@ -10815,9 +11135,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         await openCommandPaletteFromTrigger();
 
         await expect.element(palette).toBeInTheDocument();
-        await page
-          .getByPlaceholder("Search commands, projects, and threads...")
-          .fill("docs-archive");
+        await page.getByPlaceholder("Search commands, projects and chats…").fill("docs-archive");
         await expect
           .element(palette.getByText("Archived Docs Notes", { exact: true }))
           .not.toBeInTheDocument();

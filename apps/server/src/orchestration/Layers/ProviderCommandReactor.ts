@@ -249,7 +249,12 @@ const serverCommandId = (tag: string): CommandId =>
 const HANDLED_TURN_START_KEY_MAX = 10_000;
 const HANDLED_TURN_START_KEY_TTL = Duration.minutes(30);
 const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
-const DEFAULT_THREAD_TITLE = "New thread";
+/**
+ * Placeholder titles that automatic title generation may replace. "New chat"
+ * is the current default seed; "New thread" is the legacy seed that existing
+ * chats may still carry, so it must stay replaceable.
+ */
+const DEFAULT_THREAD_TITLES: ReadonlySet<string> = new Set(["New chat", "New thread"]);
 const ORPHANED_TURN_START_RESTART_DETAIL =
   "Turn start was interrupted by application restart before a provider turn started. The prompt was not resent automatically to avoid duplicate provider work; resend the message to continue.";
 const ORPHANED_ACTIVE_TURN_RESTART_DETAIL =
@@ -274,7 +279,7 @@ export function providerErrorLabelFromInstanceHint(input: {
 
 function canReplaceThreadTitle(currentTitle: string, titleSeed?: string): boolean {
   const trimmedCurrentTitle = currentTitle.trim();
-  if (trimmedCurrentTitle === DEFAULT_THREAD_TITLE) {
+  if (DEFAULT_THREAD_TITLES.has(trimmedCurrentTitle)) {
     return true;
   }
 

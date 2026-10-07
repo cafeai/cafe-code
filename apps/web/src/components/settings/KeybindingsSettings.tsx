@@ -39,6 +39,7 @@ import { ensureWorkspaceApi } from "../../environments/workspaceApi";
 import { getLocalShellCapabilities } from "../../localCapabilities";
 import { useServerKeybindings, useServerKeybindingsConfigPath } from "../../rpc/serverState";
 import { Button } from "../ui/button";
+import { Empty, EmptyDescription } from "../ui/empty";
 import { Input } from "../ui/input";
 import { Kbd, KbdGroup } from "../ui/kbd";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
@@ -63,7 +64,7 @@ import {
   unknownWhenVariables,
   whenAstToExpression,
 } from "./KeybindingsSettings.logic";
-import { SettingsPageContainer, SettingsSection } from "./settingsLayout";
+import { BusyButtonLabel, SettingsPageContainer, SettingsSection } from "./settingsLayout";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
 function KeybindingPill({ value }: { value: string }) {
@@ -154,7 +155,7 @@ function ExpandableHeaderSearch({
         }}
         placeholder="Search keybindings"
         aria-label="Search keybindings"
-        className="h-6 w-44 rounded-md border border-input bg-background pl-7 pr-2 text-[11px] text-foreground outline-none placeholder:text-muted-foreground/72 focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/24"
+        className="h-6 w-44 rounded-md border border-input bg-background pl-7 pr-2 text-2xs text-foreground outline-none placeholder:text-subtle-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/24"
       />
     </div>
   );
@@ -250,8 +251,8 @@ function UnknownWhenVariableWarning({
         }
       />
       <TooltipPopup side="top" className="max-w-72 whitespace-normal leading-relaxed">
-        Cafe Code does not recognize this condition yet. It can still be saved, but it may not match
-        unless the runtime provides it.
+        Cafe Code doesn&apos;t know this condition. You can save it, but it only matches if
+        something provides it.
       </TooltipPopup>
     </Tooltip>
   );
@@ -317,11 +318,7 @@ function WhenVariableSelect({
         className="max-h-72 w-fit min-w-44"
       >
         {options.map((option) => (
-          <SelectItem
-            key={option}
-            value={option}
-            className="min-h-7 w-full py-1 font-mono text-[12px]"
-          >
+          <SelectItem key={option} value={option} className="min-h-7 w-full py-1 font-mono text-xs">
             <span className="truncate">{option}</span>
           </SelectItem>
         ))}
@@ -351,14 +348,14 @@ function WhenExpressionNodeEditor({
       : [condition.identifier];
 
     return (
-      <div className="flex items-center gap-2 rounded-md border border-border/70 bg-background/60 px-2 py-2">
+      <div className="flex items-center gap-2 rounded-md border border-border bg-background/60 px-2 py-2">
         <Toggle
           pressed={condition.negated}
           onPressedChange={(pressed) => onChange(setConditionNegated(node, pressed))}
           aria-label={`Negate ${condition.identifier}`}
           variant="outline"
           size="xs"
-          className="h-7 min-w-10 px-2 text-[11px] sm:h-7"
+          className="h-7 min-w-10 px-2 text-2xs sm:h-7"
         >
           Not
         </Toggle>
@@ -388,8 +385,8 @@ function WhenExpressionNodeEditor({
     return (
       <div
         className={cn(
-          "space-y-2 rounded-lg border border-border/70 bg-muted/20 p-2",
-          depth > 0 && "border-border/50 bg-background/50",
+          "space-y-2 rounded-lg border border-border bg-muted/20 p-2",
+          depth > 0 && "border-border-subtle bg-background/50",
         )}
       >
         <div className="flex items-center gap-2">
@@ -399,7 +396,7 @@ function WhenExpressionNodeEditor({
             aria-label="Negate group"
             variant="outline"
             size="xs"
-            className="h-7 min-w-10 px-2 text-[11px] sm:h-7"
+            className="h-7 min-w-10 px-2 text-2xs sm:h-7"
           >
             Not
           </Toggle>
@@ -417,8 +414,8 @@ function WhenExpressionNodeEditor({
           ) : null}
         </div>
         <div className="relative pl-4">
-          <span className="absolute top-0 bottom-0 left-1.5 w-px bg-border/70" aria-hidden />
-          <span className="absolute top-4 left-1.5 h-px w-2.5 bg-border/70" aria-hidden />
+          <span className="absolute top-0 bottom-0 left-1.5 w-px bg-border-subtle" aria-hidden />
+          <span className="absolute top-4 left-1.5 h-px w-2.5 bg-border-subtle" aria-hidden />
           <WhenExpressionNodeEditor
             node={node.node}
             variables={variables}
@@ -495,8 +492,8 @@ function WhenExpressionNodeEditor({
   return (
     <div
       className={cn(
-        "space-y-2 rounded-lg border border-border/60 bg-muted/10 p-2",
-        depth > 0 && "border-border/70 bg-background/55",
+        "space-y-2 rounded-lg border border-border-subtle bg-muted/10 p-2",
+        depth > 0 && "border-border bg-background/55",
       )}
     >
       <div className="flex flex-wrap items-center gap-2">
@@ -510,10 +507,10 @@ function WhenExpressionNodeEditor({
             popupClassName="w-fit"
             className="w-fit min-w-24"
           >
-            <SelectItem value="and" className="min-h-7 py-1 font-mono text-[12px]">
+            <SelectItem value="and" className="min-h-7 py-1 font-mono text-xs">
               and
             </SelectItem>
-            <SelectItem value="or" className="min-h-7 py-1 font-mono text-[12px]">
+            <SelectItem value="or" className="min-h-7 py-1 font-mono text-xs">
               or
             </SelectItem>
           </SelectContent>
@@ -551,14 +548,14 @@ function WhenExpressionNodeEditor({
             <span
               className={cn(
                 "absolute top-0 bottom-0 left-1.5 w-px",
-                depth === 0 ? "bg-border" : "bg-border/70",
+                depth === 0 ? "bg-border" : "bg-border-subtle",
               )}
               aria-hidden
             />
             <span
               className={cn(
                 "absolute top-4 left-1.5 h-px w-2.5",
-                depth === 0 ? "bg-border" : "bg-border/70",
+                depth === 0 ? "bg-border" : "bg-border-subtle",
               )}
               aria-hidden
             />
@@ -664,9 +661,9 @@ function WhenExpressionBuilder({
             aria-invalid={Boolean(parseError)}
             aria-label="When expression"
             className={cn(
-              "h-7 rounded-md font-mono text-[12px] leading-7 sm:h-7 sm:leading-7",
+              "h-7 rounded-md font-mono text-xs leading-7 sm:h-7 sm:leading-7",
               unknownIdentifiers.length > 0 && "pr-9",
-              parseError && "border-destructive/70 focus-visible:border-destructive",
+              parseError && "border-destructive",
             )}
           />
           {unknownIdentifiers.length > 0 ? (
@@ -676,7 +673,7 @@ function WhenExpressionBuilder({
           ) : null}
         </div>
         {parseError ? (
-          <div className="flex items-center gap-1.5 text-[11px] text-destructive">
+          <div className="flex items-center gap-1.5 text-2xs text-destructive-foreground">
             <CircleXIcon className="size-3.5" />
             {parseError}
           </div>
@@ -692,7 +689,7 @@ function WhenExpressionBuilder({
             onRemove={() => updateExpressionValue(undefined)}
           />
         ) : (
-          <div className="rounded-md border border-dashed border-border/80 bg-muted/15 p-3">
+          <div className="rounded-md border border-dashed border-border bg-muted/15 p-3">
             <div className="flex flex-wrap gap-2">
               <Button type="button" size="xs" className="h-7 sm:h-7" onClick={addRootCondition}>
                 <PlusIcon className="size-3.5" />
@@ -712,7 +709,7 @@ function WhenExpressionBuilder({
           </div>
         )}
         {parseError ? (
-          <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-lg border border-destructive/30 bg-background/75 p-4 text-center text-xs text-destructive backdrop-blur-[1px]">
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-lg border border-destructive bg-background/75 p-4 text-center text-xs text-destructive-foreground backdrop-blur-[1px]">
             Fix the expression above to continue editing visually.
           </div>
         ) : null}
@@ -809,9 +806,17 @@ function KeybindingTableRow({
     <div className="grid grid-cols-[minmax(190px,1.1fr)_minmax(220px,0.85fr)_minmax(210px,1fr)_60px] items-center px-4 py-1.5 text-sm even:bg-muted/15 hover:bg-accent/40">
       <div className="min-w-0 pr-4">
         <div className="flex min-w-0 items-center gap-1.5">
-          <div className="truncate text-[13px] font-medium text-foreground" title={row.command}>
-            {commandLabel(row.command)}
-          </div>
+          <Tooltip>
+            <TooltipTrigger
+              delay={500}
+              render={<div className="truncate text-ui font-medium text-foreground" />}
+            >
+              {commandLabel(row.command)}
+            </TooltipTrigger>
+            <TooltipPopup side="top" className="font-mono">
+              {row.command}
+            </TooltipPopup>
+          </Tooltip>
         </div>
       </div>
       <div className="flex min-w-0 items-center gap-2 pr-4">
@@ -820,10 +825,10 @@ function KeybindingTableRow({
             type="button"
             onClick={() => setDraft({ isRecording: true })}
             aria-label={`Edit shortcut for ${commandLabel(row.command)}`}
-            className="group inline-flex h-7 items-center gap-1.5 rounded-md border border-transparent px-1.5 outline-none transition-colors hover:border-border/70 hover:bg-background focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/24"
+            className="group inline-flex h-7 items-center gap-1.5 rounded-md border border-transparent px-1.5 outline-none transition-colors hover:border-border hover:bg-background focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/24"
           >
             <KeybindingPill value={row.key} />
-            <span className="text-[10px] uppercase tracking-[0.08em] text-muted-foreground/0 transition-opacity group-hover:text-muted-foreground/70 group-focus-visible:text-muted-foreground/70">
+            <span className="text-2xs text-transparent transition-colors duration-(--duration-fast) group-hover:text-subtle-foreground group-focus-visible:text-subtle-foreground">
               Edit
             </span>
           </button>
@@ -834,8 +839,8 @@ function KeybindingTableRow({
             value={isRecording ? "" : keyDraft}
             placeholder={isRecording ? "Press shortcut" : "Unassigned"}
             className={cn(
-              "h-7 w-44 rounded-md font-mono text-[12px] sm:h-7",
-              isRecording && "border-primary/70 bg-primary/5",
+              "h-7 w-44 rounded-md font-mono text-xs sm:h-7",
+              isRecording && "border-primary bg-primary/5",
             )}
             onFocus={() => setDraft({ isRecording: true })}
             onBlur={() => setDraft({ isRecording: false })}
@@ -848,9 +853,12 @@ function KeybindingTableRow({
             size="xs"
             className="h-7 sm:h-7"
             disabled={isSaving || keyDraft.trim().length === 0 || !isWhenDraftValid}
+            aria-busy={isSaving || undefined}
             onClick={save}
           >
-            {isSaving ? "Saving" : "Save"}
+            <BusyButtonLabel busy={isSaving} spinnerClassName="size-3.5">
+              Save
+            </BusyButtonLabel>
           </Button>
         ) : null}
       </div>
@@ -858,7 +866,7 @@ function KeybindingTableRow({
         <Popover>
           <PopoverTrigger
             className={cn(
-              "inline-flex h-7 w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-2.5 text-left font-mono text-[12px] text-foreground shadow-xs/5 outline-none transition-colors hover:bg-accent focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/24",
+              "inline-flex h-7 w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-2.5 text-left font-mono text-xs text-foreground shadow-xs/5 outline-none transition-colors hover:bg-accent focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/24",
               !whenDraftExpression && "text-muted-foreground",
             )}
             aria-label={`Edit when clause for ${commandLabel(row.command)}`}
@@ -985,7 +993,7 @@ function NewKeybindingTableRow({
             className="max-h-72 w-fit min-w-56"
           >
             {commandOptions.map((command) => (
-              <SelectItem key={command} value={command} className="min-h-7 w-full py-1 text-[12px]">
+              <SelectItem key={command} value={command} className="min-h-7 w-full py-1 text-xs">
                 <span className="truncate">{commandLabel(command)}</span>
               </SelectItem>
             ))}
@@ -998,8 +1006,8 @@ function NewKeybindingTableRow({
           value={isRecording ? "" : keyDraft}
           placeholder={isRecording ? "Press shortcut" : "Unassigned"}
           className={cn(
-            "h-7 w-44 rounded-md font-mono text-[12px] sm:h-7",
-            isRecording && "border-primary/70 bg-primary/5",
+            "h-7 w-44 rounded-md font-mono text-xs sm:h-7",
+            isRecording && "border-primary bg-primary/5",
           )}
           onFocus={() => setDraft({ isRecording: true })}
           onBlur={() => setDraft({ isRecording: false })}
@@ -1010,16 +1018,19 @@ function NewKeybindingTableRow({
           size="xs"
           className="h-7 sm:h-7"
           disabled={isSaving || !commandDraft || keyDraft.trim().length === 0 || !isWhenDraftValid}
+          aria-busy={isSaving || undefined}
           onClick={save}
         >
-          {isSaving ? "Saving" : "Save"}
+          <BusyButtonLabel busy={isSaving} spinnerClassName="size-3.5">
+            Save
+          </BusyButtonLabel>
         </Button>
       </div>
       <div className="pr-4">
         <Popover>
           <PopoverTrigger
             className={cn(
-              "inline-flex h-7 w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-2.5 text-left font-mono text-[12px] text-foreground shadow-xs/5 outline-none transition-colors hover:bg-accent focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/24",
+              "inline-flex h-7 w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-2.5 text-left font-mono text-xs text-foreground shadow-xs/5 outline-none transition-colors hover:bg-accent focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/24",
               !whenDraftExpression && "text-muted-foreground",
             )}
             aria-label={`Edit when clause for ${commandLabelText}`}
@@ -1196,16 +1207,15 @@ export function KeybindingsSettingsPanel() {
   );
 
   const bindingsCount = (
-    <span className="text-[11px] text-muted-foreground">
+    <span className="text-2xs text-muted-foreground">
       {rows.length + (isAddingBinding ? 1 : 0)}{" "}
       {rows.length + (isAddingBinding ? 1 : 0) === 1 ? "binding" : "bindings"}
     </span>
   );
 
   return (
-    <SettingsPageContainer className="max-w-5xl">
+    <SettingsPageContainer title="Keybindings" width="wide">
       <SettingsSection
-        title="Keybindings"
         headerAction={
           <div className="flex items-center gap-1.5">
             <ExpandableHeaderSearch
@@ -1263,12 +1273,9 @@ export function KeybindingsSettingsPanel() {
         }
       >
         {!isElectron ? (
-          <div className="flex items-start gap-2 border-b border-warning/20 bg-warning/5 px-3 py-2.5 text-[12px] leading-relaxed text-muted-foreground sm:px-4">
-            <InfoIcon className="mt-0.5 size-3.5 shrink-0 text-warning" />
-            <p>
-              Some shortcuts may be claimed by the browser before Cafe Code sees them. Use the
-              desktop app for better keybinding support.
-            </p>
+          <div className="flex items-start gap-2 border-b border-border-subtle bg-warning/5 px-4 py-2 text-xs text-muted-foreground">
+            <InfoIcon className="mt-0.5 size-3.5 shrink-0 text-warning-foreground" />
+            <p>The browser may take some shortcuts first; the desktop app handles more of them.</p>
           </div>
         ) : null}
 
@@ -1278,13 +1285,13 @@ export function KeybindingsSettingsPanel() {
           hideScrollbars
           className="w-full max-w-full rounded-none"
         >
-          <div className="grid min-w-[680px] grid-cols-[minmax(190px,1.1fr)_minmax(220px,0.85fr)_minmax(210px,1fr)_60px] border-b border-border/70 bg-muted/25 px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.07em] text-muted-foreground">
+          <div className="grid min-w-[680px] grid-cols-[minmax(190px,1.1fr)_minmax(220px,0.85fr)_minmax(210px,1fr)_60px] border-b border-border-subtle bg-muted/25 px-4 py-2 text-2xs font-medium text-muted-foreground">
             <div>Command</div>
             <div>Keybinding</div>
             <div>When</div>
             <div>Status</div>
           </div>
-          <div className="min-w-[680px] divide-y divide-border/60">
+          <div className="min-w-[680px] divide-y divide-border-subtle">
             {isAddingBinding ? (
               <NewKeybindingTableRow
                 commandOptions={commandOptions}
@@ -1308,9 +1315,13 @@ export function KeybindingsSettingsPanel() {
               />
             ))}
             {rows.length === 0 && !isAddingBinding ? (
-              <div className="px-4 py-12 text-center text-sm text-muted-foreground">
-                No keybindings match your search.
-              </div>
+              <Empty className="md:p-10">
+                <EmptyDescription>
+                  {query.trim().length > 0
+                    ? "No keybindings match your search."
+                    : "No keybindings."}
+                </EmptyDescription>
+              </Empty>
             ) : null}
           </div>
         </ScrollArea>

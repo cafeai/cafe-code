@@ -382,6 +382,7 @@ export function selectCafeKillallTargets(
   options: {
     readonly currentPid?: number;
     readonly currentParentPid?: number;
+    readonly graceful?: boolean;
   } = {},
 ): ReadonlyArray<CafeKillallProcessTarget> {
   const currentPid = options.currentPid ?? process.pid;
@@ -398,6 +399,19 @@ export function selectCafeKillallTargets(
       return role === null ? [] : [{ ...processSnapshot, role }];
     })
     .toSorted((left, right) => {
+      if (options.graceful) {
+        const priority: Record<CafeKillallProcessRole, number> = {
+          "desktop-client": 0,
+          server: 1,
+          "provider-runtime": 2,
+          "virtual-desktop": 3,
+          launcher: 4,
+        };
+        const roleDelta = priority[left.role] - priority[right.role];
+        if (roleDelta) return roleDelta;
+        const parentDelta = processDepth(left, byPid) - processDepth(right, byPid);
+        return parentDelta || left.pid - right.pid;
+      }
       const depthDelta = processDepth(right, byPid) - processDepth(left, byPid);
       return depthDelta !== 0 ? depthDelta : left.pid - right.pid;
     });
@@ -546,16 +560,29 @@ function formatKillallOutput(input: {
   ].join("\n");
 }
 
-export const runKillallCommand = (flags: { readonly dryRun: boolean }) =>
+export const runKillallCommand = (flags: {
+  readonly dryRun: boolean;
+  readonly graceful?: boolean;
+}) =>
   Effect.gen(function* () {
     const processes = yield* listCafeKillallProcesses();
-    const targets = selectCafeKillallTargets(processes);
+    const targets = selectCafeKillallTargets(processes, { graceful: flags.graceful ?? false });
     const results = flags.dryRun
       ? []
-      : yield* Effect.forEach(targets, (target) => terminateCafeKillallTarget(target), {
-          concurrency: 1,
-        });
+      : yield* Effect.forEach(
+          targets,
+          (target) =>
+            terminateCafeKillallTarget(target, flags.graceful ? { terminateGraceMs: 15_000 } : {}),
+          {
+            concurrency: 1,
+          },
+        );
     yield* Console.log(formatKillallOutput({ dryRun: flags.dryRun, targets, results }));
+    if (flags.graceful && results.some((result) => result.error !== null || result.stillAlive)) {
+      return yield* Effect.fail(
+        new Error("Cafe Code did not finish shutting down; restart was not launched."),
+      );
+    }
   });
 
 const dryRunFlag = Flag.boolean("dry-run").pipe(
@@ -565,6 +592,12 @@ const dryRunFlag = Flag.boolean("dry-run").pipe(
 
 export const killallCommand = Command.make("killall", {
   dryRun: dryRunFlag,
+  graceful: Flag.boolean("graceful").pipe(
+    Flag.withDefault(false),
+    Flag.withDescription(
+      "Allow owners to shut down their runtimes before terminating remaining processes.",
+    ),
+  ),
 }).pipe(
   Command.withDescription("Terminate running Cafe Code desktop, server, and provider processes."),
   Command.withHandler((flags) => runKillallCommand(flags)),

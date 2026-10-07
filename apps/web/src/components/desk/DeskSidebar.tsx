@@ -1,6 +1,7 @@
 import type { EnvironmentId, ScopedThreadRef } from "@cafecode/contracts";
+import { autoAnimate } from "@formkit/auto-animate";
 import { PencilIcon, XIcon } from "lucide-react";
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { DESK_LIMITS, deskGroupIds, type DeskGroup, type DeskState } from "../../deskModel";
 import { useDeskStore } from "../../deskStore";
@@ -9,11 +10,14 @@ import { readLocalApi } from "../../localApi";
 import type { ThreadRouteTarget } from "../../threadRoutes";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
 import { resolveThreadRowClassName } from "../Sidebar.logic";
-import { ThreadStatusLabel } from "../ThreadStatusIndicators";
+import { ThreadStatusLabel } from "../ThreadStatusLabel";
 import { SidebarMenuSub, SidebarMenuSubButton, SidebarMenuSubItem } from "../ui/sidebar";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { useDeskTabMetadata } from "./useDeskTabMetadata";
 import { useDeskChatActions } from "./useDeskChatActions";
-import { SidebarNewChatButton } from "../sidebar/SidebarNewChatButton";
+
+/** Matches the Projects lists so open, close and reorder move the same way. */
+const DESK_LIST_ANIMATION_OPTIONS = { duration: 180, easing: "ease-out" } as const;
 
 type SidebarMenuOwnership = {
   readonly claim: () => symbol;
@@ -21,10 +25,15 @@ type SidebarMenuOwnership = {
   readonly revoke: (owner: symbol | null) => void;
 };
 
+const DESK_ROW_ACTION_CLASS_NAME =
+  "inline-flex size-5 shrink-0 items-center justify-center rounded-sm text-subtle-foreground transition-colors duration-(--duration-fast) hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring max-md:size-8";
+
 const DeskSidebarRow = memo(function DeskSidebarRow({
   target,
   selected,
+  preview,
   onActivate,
+  onKeepOpen,
   onClose,
   chatActions,
   deskSnapshot,
@@ -32,7 +41,9 @@ const DeskSidebarRow = memo(function DeskSidebarRow({
 }: {
   target: ThreadRouteTarget;
   selected: boolean;
+  preview: boolean;
   onActivate: () => void;
+  onKeepOpen: () => void;
   onClose: () => void;
   chatActions: ReturnType<typeof useDeskChatActions>;
   deskSnapshot: DeskState;
@@ -190,12 +201,8 @@ const DeskSidebarRow = memo(function DeskSidebarRow({
               type="button"
               aria-label={metadata.title}
               aria-current={selected ? "page" : undefined}
-              title={
-                metadata.projectName
-                  ? `${metadata.title} · ${metadata.projectName}`
-                  : metadata.title
-              }
               onClick={onActivate}
+              onDoubleClick={onKeepOpen}
               onKeyDown={(event) => {
                 if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
                   event.preventDefault();
@@ -221,7 +228,7 @@ const DeskSidebarRow = memo(function DeskSidebarRow({
               aria-label="Chat title"
               aria-invalid={error !== null}
               aria-busy={saving}
-              className="min-w-0 flex-1 truncate rounded border border-ring bg-transparent px-0.5 text-base outline-none sm:text-xs"
+              className="min-w-0 flex-1 truncate rounded-sm border border-ring bg-transparent px-0.5 text-base outline-none sm:text-ui"
               value={title}
               readOnly={saving}
               onChange={(event) => {
@@ -243,15 +250,30 @@ const DeskSidebarRow = memo(function DeskSidebarRow({
               onBlur={() => void saveRename()}
             />
           ) : (
-            <span data-desk-row-title className="min-w-0 flex-1 truncate text-xs">
-              {metadata.title}
-            </span>
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <span
+                    data-desk-row-title
+                    className={`min-w-0 flex-1 truncate text-ui ${preview ? "italic" : ""}`}
+                  >
+                    {metadata.title}
+                  </span>
+                }
+              />
+              {/* The project is context, so it lives in the tooltip, not the row. */}
+              <TooltipPopup side="top" className="max-w-80 whitespace-normal leading-tight">
+                {metadata.projectName
+                  ? `${metadata.title} · ${metadata.projectName}`
+                  : metadata.title}
+              </TooltipPopup>
+            </Tooltip>
           )}
         </div>
         <div className="ml-auto flex min-w-12 shrink-0 justify-end max-md:min-w-20">
           <span
             data-desk-row-meta
-            className={`pointer-events-none text-[10px] transition-opacity duration-150 group-hover/desk-row:opacity-0 group-has-focus-visible/desk-row:opacity-0 [@media(hover:none)_and_(pointer:coarse)]:opacity-0 ${editing ? "opacity-0" : ""} ${selected ? "text-foreground/72 dark:text-foreground/82" : "text-muted-foreground/40"}`}
+            className={`pointer-events-none text-2xs tabular-nums transition-opacity duration-(--duration-fast) group-hover/desk-row:opacity-0 group-has-focus-visible/desk-row:opacity-0 [@media(hover:none)_and_(pointer:coarse)]:opacity-0 ${editing ? "opacity-0" : ""} ${selected ? "text-muted-foreground" : "text-subtle-foreground"}`}
           >
             {metadata.activityAt ? formatRelativeTimeLabel(metadata.activityAt) : null}
           </span>
@@ -263,25 +285,37 @@ const DeskSidebarRow = memo(function DeskSidebarRow({
           className="pointer-events-none absolute top-1/2 right-1 flex -translate-y-1/2 items-center gap-1 opacity-0 transition-opacity duration-150 group-hover/desk-row:pointer-events-auto group-hover/desk-row:opacity-100 group-has-focus-visible/desk-row:pointer-events-auto group-has-focus-visible/desk-row:opacity-100 [@media(hover:none)_and_(pointer:coarse)]:pointer-events-auto [@media(hover:none)_and_(pointer:coarse)]:opacity-100"
         >
           {metadata.threadRef && metadata.exists ? (
-            <button
-              type="button"
-              aria-label={`Rename ${metadata.title}`}
-              title="Rename chat (F2)"
-              className="inline-flex size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground/60 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring max-md:size-8"
-              onClick={beginRename}
-            >
-              <PencilIcon className="size-3" />
-            </button>
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <button
+                    type="button"
+                    aria-label={`Rename ${metadata.title}`}
+                    className={DESK_ROW_ACTION_CLASS_NAME}
+                    onClick={beginRename}
+                  >
+                    <PencilIcon className="size-3" />
+                  </button>
+                }
+              />
+              <TooltipPopup side="top">Rename (F2)</TooltipPopup>
+            </Tooltip>
           ) : null}
-          <button
-            type="button"
-            aria-label={`Close tab ${metadata.title}`}
-            title="Close tab; chat keeps running"
-            className="inline-flex size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground/60 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring max-md:size-8"
-            onClick={onClose}
-          >
-            <XIcon className="size-3" />
-          </button>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <button
+                  type="button"
+                  aria-label={`Close tab ${metadata.title}`}
+                  className={DESK_ROW_ACTION_CLASS_NAME}
+                  onClick={onClose}
+                >
+                  <XIcon className="size-3" />
+                </button>
+              }
+            />
+            <TooltipPopup side="top">Close tab (chat keeps running)</TooltipPopup>
+          </Tooltip>
         </div>
       ) : null}
       {error ? (
@@ -376,7 +410,7 @@ const DeskSidebarGroupHeading = memo(function DeskSidebarGroupHeading({
           <input
             ref={inputRef}
             aria-label="Group name"
-            className="min-w-0 flex-1 truncate rounded border border-ring bg-transparent px-0.5 text-base outline-none sm:text-[11px]"
+            className="min-w-0 flex-1 truncate rounded-sm border border-ring bg-transparent px-0.5 text-base outline-none sm:text-xs"
             maxLength={DESK_LIMITS.nameLength}
             value={value}
             onChange={(event) => {
@@ -401,8 +435,7 @@ const DeskSidebarGroupHeading = memo(function DeskSidebarGroupHeading({
             type="button"
             aria-label={`Activate group ${name}`}
             aria-pressed={selected}
-            title={name}
-            className="flex h-7 w-full items-center gap-2 px-2 text-left text-[11px] text-muted-foreground group-hover/desk-group:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
+            className="flex h-7 w-full items-center gap-2 rounded-lg px-2 text-left text-xs font-medium text-muted-foreground transition-colors duration-(--duration-fast) group-hover/desk-group:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring aria-pressed:text-foreground"
             onClick={onActivate}
             onKeyDown={(event) => {
               if (event.key === "F2") {
@@ -417,20 +450,26 @@ const DeskSidebarGroupHeading = memo(function DeskSidebarGroupHeading({
             </span>
             <span
               data-desk-group-count
-              className="pointer-events-none min-w-5 shrink-0 text-right text-[10px] opacity-60 transition-opacity duration-150 group-hover/desk-group:opacity-0 group-has-focus-visible/desk-group:opacity-0 [@media(hover:none)_and_(pointer:coarse)]:opacity-0"
+              className="pointer-events-none min-w-5 shrink-0 text-right text-2xs font-normal tabular-nums text-subtle-foreground transition-opacity duration-(--duration-fast) group-hover/desk-group:opacity-0 group-has-focus-visible/desk-group:opacity-0 [@media(hover:none)_and_(pointer:coarse)]:opacity-0"
             >
               {count}
             </span>
           </button>
-          <button
-            type="button"
-            aria-label={`Rename group ${name}`}
-            title="Rename group (F2)"
-            className="pointer-events-none absolute top-1/2 right-1.5 inline-flex size-5 -translate-y-1/2 items-center justify-center rounded-sm text-muted-foreground/60 opacity-0 transition-opacity duration-150 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring max-md:size-8 group-hover/desk-group:pointer-events-auto group-hover/desk-group:opacity-100 group-has-focus-visible/desk-group:pointer-events-auto group-has-focus-visible/desk-group:opacity-100 [@media(hover:none)_and_(pointer:coarse)]:pointer-events-auto [@media(hover:none)_and_(pointer:coarse)]:opacity-100"
-            onClick={beginRename}
-          >
-            <PencilIcon className="size-3" />
-          </button>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <button
+                  type="button"
+                  aria-label={`Rename group ${name}`}
+                  className="pointer-events-none absolute top-1/2 right-1.5 inline-flex size-5 -translate-y-1/2 items-center justify-center rounded-sm text-subtle-foreground opacity-0 transition-[opacity,color] duration-(--duration-fast) hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring max-md:size-8 group-hover/desk-group:pointer-events-auto group-hover/desk-group:opacity-100 group-has-focus-visible/desk-group:pointer-events-auto group-has-focus-visible/desk-group:opacity-100 [@media(hover:none)_and_(pointer:coarse)]:pointer-events-auto [@media(hover:none)_and_(pointer:coarse)]:opacity-100"
+                  onClick={beginRename}
+                >
+                  <PencilIcon className="size-3" />
+                </button>
+              }
+            />
+            <TooltipPopup side="top">Rename group (F2)</TooltipPopup>
+          </Tooltip>
         </>
       )}
     </div>
@@ -440,13 +479,7 @@ const DeskSidebarGroupHeading = memo(function DeskSidebarGroupHeading({
 /** The Desk lists open views, not a second chat catalog. All chat mutations
  * continue through existing APIs; closing a view only updates local layout.
  */
-export function DeskSidebar({
-  onNavigate,
-  onNewChat,
-}: {
-  onNavigate: (target: ThreadRouteTarget) => void;
-  onNewChat: () => void;
-}) {
+export function DeskSidebar({ onNavigate }: { onNavigate: (target: ThreadRouteTarget) => void }) {
   const desk = useDeskStore((state) => state.desk);
   const dispatch = useDeskStore((state) => state.dispatch);
   const chatActions = useDeskChatActions();
@@ -473,13 +506,17 @@ export function DeskSidebar({
     },
     [],
   );
+  // Rows animate in, out and between positions (docs/style-guide.md §8).
+  const animatedListsRef = useRef(new WeakSet<HTMLElement>());
+  const attachListAutoAnimate = useCallback((node: HTMLElement | null) => {
+    if (!node || animatedListsRef.current.has(node)) return;
+    autoAnimate(node, DESK_LIST_ANIMATION_OPTIONS);
+    animatedListsRef.current.add(node);
+  }, []);
   return (
     <section aria-label="Desk open chats" className="px-2 py-2">
       <div className="mb-1 flex items-center justify-between pl-2 pr-1.5">
-        <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground/60">
-          Open chats
-        </span>
-        <SidebarNewChatButton label="New chat in active tab group" onClick={onNewChat} />
+        <span className="label-overline">Open chats</span>
       </div>
       {deskGroupIds(desk.layout).map((groupId) => {
         const group = desk.groups[groupId];
@@ -509,7 +546,10 @@ export function DeskSidebar({
                 dispatch({ type: "renameGroup", groupId, name });
               }}
             />
-            <SidebarMenuSub className="mx-1 my-0 w-full translate-x-0 gap-0.5 overflow-hidden px-1.5 py-0">
+            <SidebarMenuSub
+              ref={attachListAutoAnimate}
+              className="mx-1 my-0 w-full translate-x-0 gap-0.5 overflow-hidden px-1.5 py-0"
+            >
               {group.tabs.map((tabKey) => {
                 const target = desk.targets[tabKey];
                 if (!target) return null;
@@ -521,19 +561,19 @@ export function DeskSidebar({
                     deskSnapshot={desk}
                     menuOwnership={menuOwnership}
                     selected={desk.activeGroupId === groupId && group.activeTabKey === tabKey}
+                    preview={group.previewTabKey === tabKey}
                     onActivate={() => {
                       dispatch({ type: "select", tabKey });
                       onNavigate(target);
                     }}
                     onClose={() => dispatch({ type: "close", tabKey })}
+                    onKeepOpen={() => dispatch({ type: "keepOpen", tabKey })}
                   />
                 );
               })}
             </SidebarMenuSub>
             {group.tabs.length === 0 ? (
-              <p className="px-2 py-2 text-xs text-muted-foreground/60">
-                Start a new chat or open one from Projects.
-              </p>
+              <p className="px-3 py-1 text-xs text-subtle-foreground">No open chats</p>
             ) : null}
           </section>
         );

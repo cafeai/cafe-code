@@ -203,6 +203,8 @@ export function buildKeybindingRows(
   return rowsWithConflicts.filter((row) => {
     return (
       row.command.toLowerCase().includes(normalizedQuery) ||
+      // Match the displayed label too, so searching "chat" finds `thread.*` commands.
+      commandLabel(row.command).toLowerCase().includes(normalizedQuery) ||
       row.key.toLowerCase().includes(normalizedQuery) ||
       row.when.toLowerCase().includes(normalizedQuery) ||
       row.source.toLowerCase().includes(normalizedQuery)
@@ -282,7 +284,13 @@ export function commandLabel(command: KeybindingCommand): string {
   if (raw.startsWith("script.") && raw.endsWith(".run")) {
     return `Run Script: ${titleCaseCommandSegment(raw.slice("script.".length, -".run".length))}`;
   }
-  return raw.split(".").map(titleCaseCommandSegment).join(": ");
+  return raw
+    .split(".")
+    .map((segment, index) =>
+      // Command ids keep their protocol names (`thread.next`), but the UI says "chat".
+      index === 0 && segment === "thread" ? "Chat" : titleCaseCommandSegment(segment),
+    )
+    .join(": ");
 }
 
 function titleCaseCommandSegment(segment: string): string {

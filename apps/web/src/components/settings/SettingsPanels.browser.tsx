@@ -771,13 +771,7 @@ describe("settings panels", () => {
       </AppAtomRegistryProvider>,
     );
 
-    await expect
-      .element(
-        page.getByText(
-          "Choose the model and settings used for automatic chat titles and worktree branch names.",
-        ),
-      )
-      .toBeVisible();
+    await expect.element(page.getByText("Writes chat titles and branch names.")).toBeVisible();
     await expect.element(page.getByRole("button", { name: /GPT-5.6 Luna/ })).toBeVisible();
     await expect
       .element(page.getByRole("button", { name: "High · Fast", exact: true }))
@@ -854,16 +848,12 @@ describe("settings panels", () => {
       </AppAtomRegistryProvider>,
     );
 
-    await expect.element(page.getByText("Manage local backend")).toBeInTheDocument();
+    await expect.element(page.getByText("Local server")).toBeInTheDocument();
     await expect.element(page.getByLabelText("Enable network access")).toBeDisabled();
     await expect
-      .element(
-        page.getByText(
-          "This backend is only reachable on this machine. Restart it with a non-loopback host to enable remote pairing.",
-        ),
-      )
+      .element(page.getByText("Restart the server so other devices on your network can reach it."))
       .toBeInTheDocument();
-    await expect.element(page.getByText("Authorized clients")).not.toBeInTheDocument();
+    await expect.element(page.getByText("Paired devices")).not.toBeInTheDocument();
     await expect.element(page.getByText("Chrome on Mac")).not.toBeInTheDocument();
   });
 
@@ -906,7 +896,11 @@ describe("settings panels", () => {
       </AppAtomRegistryProvider>,
     );
 
-    await expect.element(page.getByText("Limited to this machine.")).toBeInTheDocument();
+    // Loaded local-only state: the switch is interactive and off, so no
+    // reachable address or endpoint rows are listed.
+    await expect.element(page.getByLabelText("Enable network access")).not.toBeDisabled();
+    await expect.element(page.getByLabelText("Enable network access")).not.toBeChecked();
+    await expect.element(page.getByText(/^Reachable at/)).not.toBeInTheDocument();
     await expect
       .element(page.getByRole("heading", { name: "This machine", exact: true }))
       .not.toBeInTheDocument();
@@ -1044,14 +1038,20 @@ describe("settings panels", () => {
     );
 
     await expect.element(page.getByText("(dev branch)", { exact: false })).toBeInTheDocument();
-    await expect.element(page.getByText("Current: 111111111111 (dirty)")).toBeInTheDocument();
-    await expect.element(page.getByText("Running build: 111111111111")).toBeInTheDocument();
-    await expect.element(page.getByText("Latest origin/dev: 222222222222")).toBeInTheDocument();
+    await expect.element(page.getByText("Newer dev commit available")).toBeInTheDocument();
+    // Commit hashes live in the Version row's info tooltip rather than the row itself.
+    await page.getByRole("button", { name: "Version details" }).hover();
     await expect
-      .element(page.getByText("Newer dev commit available: 222222222222"))
+      .element(page.getByText("Current: 111111111111 (dirty)", { exact: false }))
+      .toBeInTheDocument();
+    await expect
+      .element(page.getByText("Running build: 111111111111", { exact: false }))
+      .toBeInTheDocument();
+    await expect
+      .element(page.getByText("Latest origin/dev: 222222222222", { exact: false }))
       .toBeInTheDocument();
 
-    await page.getByRole("button", { name: "Check for Updates" }).click();
+    await page.getByRole("button", { name: "Check for updates", exact: true }).click();
     await vi.waitFor(() => {
       expect(checkSourceUpdate).toHaveBeenCalledTimes(1);
     });
@@ -1080,9 +1080,14 @@ describe("settings panels", () => {
       </AppAtomRegistryProvider>,
     );
 
-    await expect.element(page.getByText("Current: 222222222222 (clean)")).toBeInTheDocument();
-    await expect.element(page.getByText("Running build: 111111111111")).toBeInTheDocument();
     await expect.element(page.getByText("Rebuild to apply (dev)")).toBeInTheDocument();
+    await page.getByRole("button", { name: "Version details" }).hover();
+    await expect
+      .element(page.getByText("Current: 222222222222 (clean)", { exact: false }))
+      .toBeInTheDocument();
+    await expect
+      .element(page.getByText("Running build: 111111111111", { exact: false }))
+      .toBeInTheDocument();
   });
 
   it("persists the keep-awake preference from System settings", async () => {
@@ -1157,6 +1162,33 @@ describe("settings panels", () => {
     });
   });
 
+  it("persists single-click behavior from Chat settings and resets it to preview", async () => {
+    const desktopBridge = createDesktopBridgeStub();
+    window.desktopBridge = desktopBridge;
+    const { updateClientSettings } = installClientSettingsNativeApi(desktopBridge);
+    updateClientSettings.mockImplementation(async (patch) => ({
+      ...DEFAULT_CLIENT_SETTINGS,
+      ...patch,
+    }));
+    setServerConfigSnapshot(createBaseServerConfig());
+    mounted = await renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <ChatSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+    await page.getByLabelText("Chat click behavior").click();
+    await page.getByRole("option", { name: "Open", exact: true }).click();
+    await vi.waitFor(() => {
+      expect(updateClientSettings).toHaveBeenCalledWith({ chatClickBehavior: "open" });
+      expect(getServerConfig()?.clientSettings.chatClickBehavior).toBe("open");
+    });
+    await page.getByRole("button", { name: "Reset single-click behavior to default" }).click();
+    await vi.waitFor(() => {
+      expect(updateClientSettings).toHaveBeenLastCalledWith({ chatClickBehavior: "preview" });
+      expect(getServerConfig()?.clientSettings.chatClickBehavior).toBe("preview");
+    });
+  });
+
   it("persists appearance preferences from Appearance settings", async () => {
     const desktopBridge = createDesktopBridgeStub();
     window.desktopBridge = desktopBridge;
@@ -1225,7 +1257,9 @@ describe("settings panels", () => {
     });
     vi.stubGlobal("fetch", uploadFetch);
 
-    await expect.element(page.getByRole("heading", { name: "Sidebar image" })).toBeInTheDocument();
+    await expect
+      .element(page.getByRole("heading", { name: "Sidebar image", exact: true }))
+      .toBeInTheDocument();
     const imageInput = document.querySelector(
       'input[aria-label="Sidebar image file"]',
     ) as HTMLInputElement | null;
@@ -1300,8 +1334,10 @@ describe("settings panels", () => {
       expect(updateClientSettings).toHaveBeenCalledWith({ showSidebarSearch: false });
     });
 
-    await expect.element(page.getByText("Sidebar mascot")).toBeInTheDocument();
-    await page.getByLabelText("Show sidebar mascot").click();
+    await expect
+      .element(page.getByRole("heading", { name: "Show sidebar image", exact: true }))
+      .toBeInTheDocument();
+    await page.getByLabelText("Show sidebar image").click();
 
     await vi.waitFor(() => {
       expect(updateClientSettings).toHaveBeenCalledWith({ showSidebarMascot: false });
@@ -1478,7 +1514,7 @@ describe("settings panels", () => {
       </AppAtomRegistryProvider>,
     );
 
-    await expect.element(page.getByText("Authorized clients")).toBeInTheDocument();
+    await expect.element(page.getByText("Paired devices")).toBeInTheDocument();
     await expect.element(page.getByText("Revoke others")).toBeInTheDocument();
     await expect.element(page.getByText("This Mac")).toBeInTheDocument();
     await page.getByRole("button", { name: "Create link", exact: true }).click();
@@ -1546,8 +1582,10 @@ describe("settings panels", () => {
     );
 
     await expect.element(page.getByText("Admin password")).toBeInTheDocument();
-    await expect.element(page.getByText("Password sign-in is off.")).toBeInTheDocument();
-    await page.getByLabelText("Enable password authentication").click();
+    const passwordSwitch = page.getByLabelText("Enable password authentication");
+    await expect.element(passwordSwitch).not.toBeDisabled();
+    await expect.element(passwordSwitch).not.toBeChecked();
+    await passwordSwitch.click();
     await expect.element(page.getByText("Enable admin password")).toBeInTheDocument();
     await page
       .getByRole("textbox", { name: "Admin password", exact: true })
@@ -1557,16 +1595,19 @@ describe("settings panels", () => {
       .fill("correct horse battery staple");
     await page.getByRole("button", { name: "Enable", exact: true }).click();
 
-    await expect.element(page.getByText("Password sign-in is on.")).toBeInTheDocument();
+    await expect.element(passwordSwitch).toBeChecked();
     await expect
       .element(page.getByRole("button", { name: "Change", exact: true }))
       .toBeInTheDocument();
 
-    await page.getByLabelText("Enable password authentication").click();
+    await passwordSwitch.click();
     await expect.element(page.getByText("Disable password authentication?")).toBeInTheDocument();
     await page.getByRole("button", { name: "Disable", exact: true }).click();
 
-    await expect.element(page.getByText("Password sign-in is off.")).toBeInTheDocument();
+    await expect.element(passwordSwitch).not.toBeChecked();
+    await expect
+      .element(page.getByRole("button", { name: "Change", exact: true }))
+      .not.toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith("http://127.0.0.1:3773/api/auth/admin-password", {
       body: JSON.stringify({ password: "correct horse battery staple" }),
       credentials: "include",
@@ -1708,17 +1749,24 @@ describe("settings panels", () => {
       </AppAtomRegistryProvider>,
     );
 
-    await expect.element(page.getByText("WebUI uses HTTPS.")).toBeInTheDocument();
-    await page.getByLabelText("Enable HTTPS").click();
+    const httpsSwitch = page.getByLabelText("Enable HTTPS");
+    await expect.element(httpsSwitch).toBeChecked();
+    await expect
+      .element(page.getByRole("link", { name: "Download certificate" }))
+      .toBeInTheDocument();
+    await httpsSwitch.click();
     await expect.element(page.getByText("Disable HTTPS?")).toBeInTheDocument();
     await expect
-      .element(page.getByText("Cafe Code will restart to update the backend listener."))
+      .element(page.getByText("Cafe Code will restart to apply this."))
       .toBeInTheDocument();
     await page.getByRole("button", { name: "Restart and disable", exact: true }).click();
     await vi.waitFor(() => {
       expect(setServerHttpsEnabled).toHaveBeenCalledWith(false);
     });
-    await expect.element(page.getByText("WebUI uses HTTP.")).toBeInTheDocument();
+    await expect.element(httpsSwitch).not.toBeChecked();
+    await expect
+      .element(page.getByRole("link", { name: "Download certificate" }))
+      .not.toBeInTheDocument();
   });
 
   it("opens the logs folder in the preferred editor", async () => {
@@ -1781,18 +1829,29 @@ describe("settings panels", () => {
 
     const openLogsButton = page.getByLabelText("Open logs folder");
     await expect
-      .element(page.getByRole("heading", { name: "Runtime Overview", exact: true }))
+      .element(page.getByRole("heading", { name: "Diagnostics", exact: true }))
       .toBeInTheDocument();
     await expect
-      .element(page.getByRole("heading", { name: "Orchestrator Subprocesses", exact: true }))
+      .element(page.getByRole("heading", { name: "Runtime overview", exact: true }))
       .toBeInTheDocument();
     await expect
-      .element(page.getByRole("heading", { name: "Provider Daemon", exact: true }))
+      .element(page.getByRole("heading", { name: "Orchestrator subprocesses", exact: true }))
       .toBeInTheDocument();
     await expect
-      .element(page.getByRole("heading", { name: "Provider Supervisor", exact: true }))
+      .element(page.getByRole("heading", { name: "Provider daemon", exact: true }))
       .toBeInTheDocument();
-    await expect.element(page.getByText("not-configured", { exact: true })).toBeInTheDocument();
+    await expect
+      .element(page.getByRole("heading", { name: "Provider supervisor", exact: true }))
+      .toBeInTheDocument();
+    // The unconfigured supervisor is a neutral layer status, and its section
+    // collapses to one quiet line instead of a grid of empty values.
+    await expect
+      .element(page.getByRole("cell", { name: "Not configured", exact: true }))
+      .toBeInTheDocument();
+    await expect
+      .element(page.getByRole("button", { name: "About the provider supervisor" }))
+      .toBeInTheDocument();
+    await expect.element(page.getByText("Configured", { exact: true })).not.toBeInTheDocument();
     await expect
       .element(
         page.getByText(
@@ -2097,7 +2156,10 @@ describe("settings panels", () => {
     await expect
       .element(page.getByText("Credit balance:", { exact: false }))
       .not.toBeInTheDocument();
-    await expect.element(page.getByText("Individual spend remaining: 0% left")).toBeVisible();
+    // Amount, remaining share and reset share one row for the one limit.
+    await expect
+      .element(page.getByText("Individual spend limit: 10 used of 10 (0% left)"))
+      .toBeVisible();
     await expect
       .element(page.getByText("Limit reached: Workspace member usage limit reached"))
       .toBeVisible();
@@ -2212,8 +2274,10 @@ describe("SourceControlSettingsPanel discovery states", () => {
       </AppAtomRegistryProvider>,
     );
 
-    await expect.element(page.getByText("Version Control")).toBeInTheDocument();
-    await expect.element(page.getByText("Source Control Providers")).toBeInTheDocument();
+    await expect.element(page.getByText("Version control", { exact: true })).toBeInTheDocument();
+    await expect
+      .element(page.getByText("Source control providers", { exact: true }))
+      .toBeInTheDocument();
     await expect
       .element(page.getByRole("button", { name: "Rescan server environment" }))
       .toBeDisabled();
@@ -2237,11 +2301,7 @@ describe("SourceControlSettingsPanel discovery states", () => {
 
     await expect.element(page.getByText("Nothing detected yet")).toBeInTheDocument();
     await expect
-      .element(
-        page.getByText(
-          "Install Git on the server, add optional hosting integrations or credentials your workspace needs, then rescan.",
-        ),
-      )
+      .element(page.getByText("Install Git on the server, then rescan."))
       .toBeInTheDocument();
     await expect.element(page.getByRole("button", { name: "Scan" })).toBeInTheDocument();
   });

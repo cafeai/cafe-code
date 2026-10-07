@@ -47,7 +47,7 @@ export function FirstRunHint({ open, onDismiss, anchor, message, testId }: First
         tooltipStyle
       >
         <div className="flex items-center gap-1.5">
-          <PopoverDescription className="font-medium text-[0.8125rem] text-popover-foreground leading-5">
+          <PopoverDescription className="font-medium text-(length:--text-ui) text-popover-foreground leading-5">
             {message}
           </PopoverDescription>
           <PopoverClose

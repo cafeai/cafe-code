@@ -2,6 +2,8 @@ import { CodexReviewTarget, type RuntimeMode } from "@cafecode/contracts";
 import * as Schema from "effect/Schema";
 import { useLayoutEffect, useRef, useState } from "react";
 import { Button } from "../ui/button";
+import { InfoTip } from "../ui/info-tip";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import {
   Dialog,
   DialogDescription,
@@ -12,6 +14,27 @@ import {
 } from "../ui/dialog";
 
 const isReviewTarget = Schema.is(CodexReviewTarget);
+
+const REVIEW_TARGET_OPTIONS: ReadonlyArray<{
+  readonly value: CodexReviewTarget["type"];
+  readonly label: string;
+}> = [
+  { value: "uncommittedChanges", label: "Uncommitted changes" },
+  { value: "baseBranch", label: "Changes against a base branch" },
+  { value: "commit", label: "A specific commit" },
+  { value: "custom", label: "Custom instructions" },
+];
+
+/** Same access names as the composer's Access menu (CompactComposerControlsMenu). */
+const RUNTIME_MODE_LABELS: Record<RuntimeMode, string> = {
+  "approval-required": "Supervised",
+  "auto-accept-edits": "Auto-accept edits",
+  "full-access": "Full access",
+};
+
+function isReviewTargetType(value: unknown): value is CodexReviewTarget["type"] {
+  return REVIEW_TARGET_OPTIONS.some((option) => option.value === value);
+}
 
 export interface NativeCodexReviewProps {
   /** Parent keys this component by exact environment/chat/account identity. */
@@ -73,9 +96,7 @@ export function NativeCodexReview({
         <DialogHeader>
           <DialogTitle>Start a Codex review</DialogTitle>
           <DialogDescription>
-            Ask Codex to check code for bugs and risks. Findings appear in this chat. Review in this
-            chat with {accountLabel}. Uses the current native session and its review-model settings,
-            not unsent composer changes.
+            Codex reviews code for bugs and risks; findings appear in this chat.
           </DialogDescription>
         </DialogHeader>
         <DialogPanel>
@@ -106,25 +127,32 @@ export function NativeCodexReview({
               }
             }}
           >
-            <label className="block space-y-1 text-sm">
-              <span>Review target</span>
-              <select
-                aria-label="Review target"
-                className="w-full rounded-md border border-input bg-background px-3 py-2"
+            <div className="space-y-1.5 text-sm">
+              <span aria-hidden="true">Review target</span>
+              <Select
                 value={kind}
                 disabled={pending}
-                onChange={(event) => {
-                  setKind(event.target.value as CodexReviewTarget["type"]);
+                onValueChange={(next) => {
+                  if (!isReviewTargetType(next)) return;
+                  setKind(next);
                   setValue("");
                   setError(null);
                 }}
               >
-                <option value="uncommittedChanges">Uncommitted changes</option>
-                <option value="baseBranch">Changes against a base branch</option>
-                <option value="commit">A specific commit</option>
-                <option value="custom">Custom review instructions</option>
-              </select>
-            </label>
+                <SelectTrigger aria-label="Review target">
+                  <SelectValue>
+                    {REVIEW_TARGET_OPTIONS.find((option) => option.value === kind)?.label}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectPopup alignItemWithTrigger={false}>
+                  {REVIEW_TARGET_OPTIONS.map((option) => (
+                    <SelectItem hideIndicator key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectPopup>
+              </Select>
+            </div>
             {kind !== "uncommittedChanges" && (
               <label className="block space-y-1 text-sm">
                 <span>
@@ -136,7 +164,7 @@ export function NativeCodexReview({
                 </span>
                 {kind === "custom" ? (
                   <textarea
-                    className="min-h-28 w-full rounded-md border border-input bg-background px-3 py-2"
+                    className="focus-ring min-h-28 w-full rounded-lg border border-input bg-background px-3 py-2"
                     value={value}
                     maxLength={16_000}
                     disabled={pending}
@@ -144,7 +172,7 @@ export function NativeCodexReview({
                   />
                 ) : (
                   <input
-                    className="w-full rounded-md border border-input bg-background px-3 py-2"
+                    className="focus-ring w-full rounded-lg border border-input bg-background px-3 py-2"
                     value={value}
                     maxLength={kind === "commit" ? 64 : 512}
                     disabled={pending}
@@ -154,22 +182,31 @@ export function NativeCodexReview({
                 )}
               </label>
             )}
-            <p className="text-xs text-muted-foreground">
-              Codex’s native reviewer runs non-interactively, without approval prompts, under this
-              session’s sandbox.{" "}
-              {runtimeMode === "full-access"
-                ? "This chat currently has full access."
-                : "Its sandbox is not expanded."}{" "}
-              Stop chat cancels the review. For a separate review, open a separate Cafe chat first.
+            {/* Required disclosure (AGENTS.md): the saved session's account and
+                permission mode, before submission. Unsent composer overrides never
+                apply to a native review. */}
+            <p
+              className="flex items-center gap-1.5 text-xs text-muted-foreground"
+              data-native-review-disclosure="true"
+            >
+              <span className="min-w-0">
+                {accountLabel} · {RUNTIME_MODE_LABELS[runtimeMode]} · runs without approval prompts
+              </span>
+              <InfoTip label="About Codex reviews">
+                Uses this chat’s current Codex session and its review-model settings, not unsent
+                composer changes. The reviewer runs under the session’s sandbox
+                {runtimeMode === "full-access" ? ", which has full access" : ", unexpanded"}. Stop
+                chat cancels the review. For a separate review, open a separate chat first.
+              </InfoTip>
             </p>
             {error && (
-              <p role="alert" className="text-sm text-destructive">
+              <p role="alert" className="text-sm text-destructive-foreground">
                 {error}
               </p>
             )}
             {disabled && (
               <p role="status" className="text-sm text-muted-foreground">
-                Wait for the current work to finish and reconnect before starting a review.
+                Wait for current work to finish and reconnect first.
               </p>
             )}
             <div className="flex flex-wrap justify-end gap-2">

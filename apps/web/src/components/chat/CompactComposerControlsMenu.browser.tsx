@@ -325,16 +325,22 @@ describe("CompactComposerControlsMenu", () => {
 
     await vi.waitFor(() => {
       const text = document.body.textContent ?? "";
-      expect(text).toContain("Manual");
-      expect(text).toContain("Ask before edits and commands");
+      expect(text).toContain("Ask permissions");
       expect(text).toContain("Accept edits");
       expect(text).toContain("Plan");
       expect(text).toContain("Auto");
       expect(text).toContain("Bypass permissions");
+      // Only the dangerous mode keeps its warning visible in the menu.
       expect(text).toContain("Run without permission checks");
+      expect(text).not.toContain("Ask before edits and commands");
       expect(text).not.toContain("Access");
       expect(text).not.toContain("Supervised");
     });
+    // Routine mode explanations stay available on hover/focus.
+    await page.getByRole("menuitemradio", { name: "Ask permissions" }).hover();
+    await expect
+      .element(page.getByRole("tooltip"))
+      .toHaveTextContent("Ask before edits and commands.");
   });
 
   it("keeps access selectable without traits or an interaction-mode section", async () => {
@@ -363,14 +369,17 @@ describe("CompactComposerControlsMenu", () => {
     await vi.waitFor(() => {
       const text = document.body.textContent ?? "";
       expect(text).not.toContain("Mode");
-      expect(text).not.toContain("Chat");
+      expect(text).not.toContain("Build");
       expect(text).not.toContain("Plan");
       expect(text).toContain("Access");
       expect(text).toContain("Supervised");
-      expect(text).toContain("Ask before commands and file changes");
-      expect(text).toContain("Auto-approve edits");
+      expect(text).toContain("Auto-accept edits");
       expect(text).toContain("Full access");
     });
+    await page.getByRole("menuitemradio", { name: "Supervised" }).hover();
+    await expect
+      .element(page.getByRole("tooltip"))
+      .toHaveTextContent("Ask before commands and file changes.");
 
     const autoAcceptItem = Array.from(
       document.querySelectorAll<HTMLElement>('[data-slot="menu-radio-item"]'),

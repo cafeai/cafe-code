@@ -104,6 +104,7 @@ vi.mock("../../hooks/useSettings", () => ({
 vi.mock("../../hooks/useTheme", () => ({ useTheme: () => ({ resolvedTheme: "dark" }) }));
 vi.mock("../../store", () => ({
   selectAnyThreadRunning: () => true,
+  selectProjectByRef: () => undefined,
   useStore: Object.assign(
     (selector: (state: typeof harness.state) => unknown) => selector(harness.state),
     {
@@ -114,6 +115,10 @@ vi.mock("../../store", () => ({
 vi.mock("../../environments/runtime/service", () => ({
   retainThreadDetailSubscription: () => () => {},
 }));
+// Card status reuses the sidebar's ThreadStatusLabel; its module also hosts
+// git-status row helpers whose transport is irrelevant to this fixture.
+vi.mock("../../lib/gitStatusState", () => ({ useGitStatus: () => ({ data: null }) }));
+
 vi.mock("../stats/useUsageCostSummary", () => ({
   useUsageCostSummary: () => ({ loaded: false, raw: null }),
 }));

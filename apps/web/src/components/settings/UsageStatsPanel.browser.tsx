@@ -5,7 +5,7 @@ vi.mock("../../environments/workspace", () => ({
 }));
 import "../../index.css";
 
-import { page } from "vitest/browser";
+import { page, userEvent } from "vitest/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 import {
@@ -578,13 +578,14 @@ const testCurrency = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 2,
 });
 
+/** Values keep the dollar sign; the surface names the USD currency once. */
 function expectedUsd(value: number): string {
-  return `${testCurrency.format(value)} USD`;
+  return testCurrency.format(value);
 }
 
 function parseUsd(value: string | null): number {
   expect(value).not.toBeNull();
-  const normalized = value!.replaceAll(",", "").replace("USD", "").trim();
+  const normalized = value!.replaceAll(",", "").trim();
   const sign = normalized.startsWith("-") ? -1 : 1;
   const numeric = Number(normalized.replaceAll("-", "").replace("$", ""));
   expect(Number.isFinite(numeric)).toBe(true);
@@ -604,6 +605,24 @@ function activeActivityCellCount(): number {
   ).length;
 }
 
+function infoTipTrigger(name: string): HTMLElement {
+  return page.getByRole("button", { name }).element() as HTMLElement;
+}
+
+/** Hover an info/tooltip trigger and return the text of the popup it opens. */
+async function tooltipTextFor(trigger: HTMLElement): Promise<string> {
+  await page.elementLocator(trigger).hover();
+  await vi.waitFor(() => expect(requiredElement('[data-slot="tooltip-popup"]')).toBeVisible());
+  return requiredElement('[data-slot="tooltip-popup"]').textContent ?? "";
+}
+
+function unattributedTokens(): string | null {
+  return (
+    document.querySelector("[data-usage-unattributed-row] [data-usage-token-full='unattributed']")
+      ?.textContent ?? null
+  );
+}
+
 async function hoverActivityCell(day: string): Promise<HTMLElement> {
   // The Activity calendar can be below the fold or still resizing after fresh
   // detail replaces its bounds. A synthetic event bypasses layout stability
@@ -621,102 +640,102 @@ async function hoverActivityCell(day: string): Promise<HTMLElement> {
 
 const rangeExpectations = {
   "7 days": {
-    cost: "$3.94 USD*",
+    cost: "$3.94",
     processed: 2_750_000,
     cached: 500_000,
     uncached: 1_900_000,
     output: 250_000,
     reasoning: "35,000 reasoning tokens",
     cachePercent: "20.0% of input",
-    cacheSavings: "$0.56 USD",
+    cacheSavings: "$0.56",
     priced: "80.0%",
     unpriced: "20.0%",
     chats: "4",
     time: "3m 30s",
-    attributed: "200,000 attributed",
     activityDays: 8,
-    providers: [{ provider: "Codex", cost: "$3.94 USD", tokens: "2,200,000 tokens" }],
-    models: [{ model: "gpt-5.6-codex", cost: "$3.94 USD", tokens: "2,200,000" }],
+    unattributed: "550,000",
+    providers: [{ provider: "Codex", cost: "$3.94", tokens: "2,200,000 tokens" }],
+    models: [{ model: "gpt-5.6-codex", cost: "$3.94", tokens: "2,200,000" }],
   },
   "30 days": {
-    cost: "$19.81 USD*",
+    cost: "$19.81",
     processed: 6_050_000,
     cached: 2_000_000,
     uncached: 3_300_000,
     output: 550_000,
     reasoning: "105,000 reasoning tokens",
     cachePercent: "36.4% of input",
-    cacheSavings: "$7.19 USD",
+    cacheSavings: "$7.19",
     priced: "90.9%",
     unpriced: "9.1%",
     chats: "11",
     time: "10m 30s",
-    attributed: "500,000 attributed",
     activityDays: 8,
+    unattributed: "550,000",
     providers: [
-      { provider: "Claude", cost: "$15.88 USD", tokens: "3,300,000 tokens" },
-      { provider: "Codex", cost: "$3.94 USD", tokens: "2,200,000 tokens" },
+      { provider: "Claude", cost: "$15.88", tokens: "3,300,000 tokens" },
+      { provider: "Codex", cost: "$3.94", tokens: "2,200,000 tokens" },
     ],
     models: [
-      { model: "claude-opus-5", cost: "$15.88 USD", tokens: "3,300,000" },
-      { model: "gpt-5.6-codex", cost: "$3.94 USD", tokens: "2,200,000" },
+      { model: "claude-opus-5", cost: "$15.88", tokens: "3,300,000" },
+      { model: "gpt-5.6-codex", cost: "$3.94", tokens: "2,200,000" },
     ],
   },
   "90 days": {
-    cost: "$22.61 USD*",
+    cost: "$22.61",
     processed: 8_250_000,
     cached: 2_250_000,
     uncached: 5_050_000,
     output: 750_000,
     reasoning: "215,000 reasoning tokens",
     cachePercent: "30.0% of input",
-    cacheSavings: "$7.19 USD",
+    cacheSavings: "$7.19",
     priced: "80.0%",
     unpriced: "20.0%",
     chats: "22",
     time: "21m 30s",
-    attributed: "700,000 attributed",
     activityDays: 8,
+    unattributed: "550,000",
     providers: [
-      { provider: "Claude", cost: "$15.88 USD", tokens: "3,300,000 tokens" },
-      { provider: "Codex", cost: "$6.74 USD", tokens: "3,300,000 tokens" },
-      { provider: "OpenCode", cost: "unpriced", tokens: "1,100,000 tokens" },
+      { provider: "Claude", cost: "$15.88", tokens: "3,300,000 tokens" },
+      { provider: "Codex", cost: "$6.74", tokens: "3,300,000 tokens" },
+      { provider: "OpenCode", cost: "Unpriced", tokens: "1,100,000 tokens" },
     ],
     models: [
-      { model: "claude-opus-5", cost: "$15.88 USD", tokens: "3,300,000" },
-      { model: "gpt-4.1", cost: "$2.80 USD", tokens: "1,100,000" },
-      { model: "gpt-5.6-codex", cost: "$3.94 USD", tokens: "2,200,000" },
-      { model: "unknown-local-model", cost: "unpriced", tokens: "1,100,000" },
+      { model: "claude-opus-5", cost: "$15.88", tokens: "3,300,000" },
+      { model: "gpt-4.1", cost: "$2.80", tokens: "1,100,000" },
+      { model: "gpt-5.6-codex", cost: "$3.94", tokens: "2,200,000" },
+      { model: "unknown-local-model", cost: "Unpriced", tokens: "1,100,000" },
     ],
   },
   All: {
-    cost: "$28.36 USD*",
+    cost: "$28.36",
     processed: 10_175_000,
     cached: 2_250_000,
     uncached: 6_800_000,
     output: 925_000,
     reasoning: "292,500 reasoning tokens",
     cachePercent: "24.3% of input",
-    cacheSavings: "$7.19 USD",
+    cacheSavings: "$7.19",
     priced: "81.1%",
     unpriced: "18.9%",
     chats: "37",
     time: "36m 00s",
-    attributed: "850,000 attributed",
     activityDays: 8,
+    unattributed: "825,000",
     providers: [
-      { provider: "Claude", cost: "$15.88 USD", tokens: "3,300,000 tokens" },
-      { provider: "Codex", cost: "$10.24 USD", tokens: "4,400,000 tokens" },
-      { provider: "Grok", cost: "$2.25 USD", tokens: "550,000 tokens" },
-      { provider: "OpenCode", cost: "unpriced", tokens: "1,100,000 tokens" },
+      { provider: "Claude", cost: "$15.88", tokens: "3,300,000 tokens" },
+      { provider: "Codex", cost: "$10.24", tokens: "4,400,000 tokens" },
+      { provider: "Grok", cost: "$2.25", tokens: "550,000 tokens" },
+      { provider: "OpenCode", cost: "Unpriced", tokens: "1,100,000 tokens" },
     ],
     models: [
-      { model: "claude-opus-5", cost: "$15.88 USD", tokens: "3,300,000" },
-      { model: "gpt-4.1", cost: "$2.80 USD", tokens: "1,100,000" },
-      { model: "gpt-4o", cost: "$3.50 USD", tokens: "1,100,000" },
-      { model: "gpt-5.6-codex", cost: "$3.94 USD", tokens: "2,200,000" },
-      { model: "grok-legacy-model", cost: "$2.25 USD", tokens: "550,000" },
-      { model: "unknown-local-model", cost: "unpriced", tokens: "1,100,000" },
+      { model: "claude-opus-5", cost: "$15.88", tokens: "3,300,000" },
+      { model: "gpt-4.1", cost: "$2.80", tokens: "1,100,000" },
+      { model: "gpt-4o", cost: "$3.50", tokens: "1,100,000" },
+      { model: "gpt-5.6-codex", cost: "$3.94", tokens: "2,200,000" },
+      { model: "grok-legacy-model", cost: "$2.25", tokens: "550,000" },
+      { model: "unknown-local-model", cost: "Unpriced", tokens: "1,100,000" },
     ],
   },
 } as const;
@@ -739,9 +758,9 @@ function expectCostRange(label: keyof typeof rangeExpectations): void {
   expect(requiredElement("[data-usage-composition-value='cache-savings']").textContent).toBe(
     expected.cacheSavings,
   );
-  expect(requiredElement("[data-usage-cost-quality-cache-savings]").textContent).toBe(
-    expected.cacheSavings,
-  );
+  // Net cache savings is shown once, in its composition tile.
+  expect(document.querySelector("[data-usage-cost-quality-cache-savings]")).toBeNull();
+  expect(unattributedTokens()).toBe(expected.unattributed);
   expect(costQualityValue("Priced")).toBe(expected.priced);
   expect(costQualityValue("Unpriced")).toBe(expected.unpriced);
   expect(providerCostRows()).toEqual(expected.providers);
@@ -754,18 +773,23 @@ function expectPanelRange(label: keyof typeof rangeExpectations): void {
   expect(overviewValue("Tokens generated")).toBe(expected.output.toLocaleString("en-US"));
   expect(overviewValue("Chats sent")).toBe(expected.chats);
   expect(overviewValue("Time spent generating")).toBe(expected.time);
-  expect(page.getByText(expected.attributed, { exact: true }).element()).toBeVisible();
   expect(activeActivityCellCount()).toBe(expected.activityDays);
 }
 
-function expectFullBeforeCompact(context: string): void {
-  const full = requiredElement(`[data-usage-token-full="${context}"]`);
+/**
+ * Token totals show only their compact readout. The exact count is the focusable
+ * trigger's screen-reader text and its hover/focus tooltip, never a second
+ * visible line.
+ */
+function expectCompactWithExactOnDemand(context: string): void {
   const compact = requiredElement(`[data-usage-token-compact="${context}"]`);
-  expect(full.compareDocumentPosition(compact) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
-  expect(Number.parseFloat(getComputedStyle(full).fontSize)).toBeGreaterThan(
-    Number.parseFloat(getComputedStyle(compact).fontSize),
-  );
+  const exact = requiredElement(`[data-usage-token-full="${context}"]`);
+  expect(compact).toBeVisible();
   expect(compact.getAttribute("aria-hidden")).toBe("true");
+  expect(exact.classList.contains("sr-only")).toBe(true);
+  const trigger = compact.parentElement!;
+  expect(trigger.contains(exact)).toBe(true);
+  expect(trigger.tabIndex).toBe(0);
 }
 
 function expectNoHorizontalOverflow(element: HTMLElement): void {
@@ -774,19 +798,19 @@ function expectNoHorizontalOverflow(element: HTMLElement): void {
 
 function expectCompositionNumbersOnOneLine(): void {
   for (const id of ["processed", "cached", "uncached", "output"]) {
-    const figure = requiredElement(`[data-usage-token-full="composition-${id}"]`);
+    const figure = requiredElement(`[data-usage-token-compact="composition-${id}"]`);
     const numericText = Array.from(figure.childNodes).find(
-      (node) => node.nodeType === Node.TEXT_NODE && /^[\d,]+/.test(node.textContent ?? ""),
+      (node) => node.nodeType === Node.TEXT_NODE && /^[\d.,]+[KMB]?/.test(node.textContent ?? ""),
     );
     expect(numericText).toBeDefined();
-    const digitLength = numericText!.textContent!.match(/^[\d,]+/)![0].length;
-    // Measure the digits themselves: the supporting word "tokens" may wrap,
-    // but a billion-scale counter must remain readable as one complete number.
+    const digitLength = numericText!.textContent!.match(/^[\d.,]+[KMB]?/)![0].length;
+    // Measure the figure itself: the supporting word "tokens" may wrap, but a
+    // billion-scale readout must remain one complete number.
     const range = document.createRange();
     range.setStart(numericText!, 0);
     range.setEnd(numericText!, digitLength);
     expect(Array.from(range.getClientRects()).filter((rect) => rect.width > 0)).toHaveLength(1);
-    expectNoHorizontalOverflow(figure);
+    expectNoHorizontalOverflow(requiredElement(`[data-usage-composition-tile="${id}"]`));
   }
 }
 
@@ -815,12 +839,15 @@ function settleLayoutCountersImmediately(): void {
 describe("UsageStatsPanel", () => {
   it("discloses partial prospective child usage without claiming root context growth", async () => {
     mounted = await render(<UsageCostContent usage={createUsageDetail()} />);
+    // One visible line at the figures; the specifics are one focus/hover away.
     await expect
-      .element(page.getByText(/Codex subagent usage includes only observed increments/))
+      .element(page.getByText("Estimates from recorded usage; may be incomplete.", { exact: true }))
       .toBeVisible();
-    await expect
-      .element(page.getByText(/child tokens do not increase the main chat’s context-window meter/))
-      .toBeVisible();
+    const details = await tooltipTextFor(infoTipTrigger("About cost estimates"));
+    expect(details).toContain("Priced share covers recorded tokens only");
+    expect(details).toContain("not a complete billing record");
+    expect(details).toContain("Codex subagent usage includes only observed increments");
+    expect(details).toContain("child tokens do not increase the main chat’s context-window meter");
   });
   let mounted:
     | (Awaited<ReturnType<typeof render>> & {
@@ -909,7 +936,7 @@ describe("UsageStatsPanel", () => {
     expect(timeOnlyRow.querySelector("[data-usage-token-full='model']")?.textContent).toBe("0");
     expect(displayedRawCount("processed")).toBe(rangeExpectations["30 days"].processed);
     expect(requiredElement("[data-usage-model-time-coverage]").textContent).toContain(
-      "Recorded since ",
+      "Time recorded since ",
     );
     expect(requiredElement("[data-usage-model-time-coverage] time").getAttribute("datetime")).toBe(
       usage.modelGeneratingTime!.startedAt,
@@ -930,9 +957,7 @@ describe("UsageStatsPanel", () => {
     expect(displayedRawCount("processed")).toBe(rangeExpectations.All.processed);
     expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(1);
 
-    await page.getByRole("button", { name: "About time spent generating" }).hover();
-    await expect.element(page.getByRole("tooltip")).toBeVisible();
-    const explanation = page.getByRole("tooltip").element().textContent;
+    const explanation = await tooltipTextFor(infoTipTrigger("About time spent generating"));
     expect(explanation).toContain("full active-turn time, including tools and waits");
     expect(explanation).toContain("Concurrent chats count separately");
     expect(explanation).toContain(`${usage.modelGeneratingTime!.startedAt} (UTC)`);
@@ -1027,7 +1052,7 @@ describe("UsageStatsPanel", () => {
       totals: { ...usage.totals, generatingMs: 999_999_999 },
       today: { ...usage.today, generatingMs: 999_999_999 },
     });
-    await expect.element(page.getByText("3 sessions generating", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("3 chats generating", { exact: true })).toBeVisible();
     expect(requiredModelTime("gpt-5.6-codex").textContent).toBe("2h 30m 01s");
     expect(requiredModelTime("waiting-only").textContent).toBe("16h 02m 03s");
     const time = usage.modelGeneratingTime!;
@@ -1297,11 +1322,11 @@ describe("UsageStatsPanel", () => {
       await page.getByRole("button", { name: label, exact: true }).click();
       expectCostRange(label);
     }
-    await page.getByRole("button", { name: "tokens", exact: true }).click();
+    await page.getByRole("button", { name: "Tokens", exact: true }).click();
     expect(requiredElement("[data-usage-cost-chart-label]").textContent).toBe("Daily tokens");
     await page.getByRole("button", { name: "7 days", exact: true }).click();
     expectCostRange("7 days");
-    expect(page.getByRole("button", { name: "tokens", exact: true }).element().ariaPressed).toBe(
+    expect(page.getByRole("button", { name: "Tokens", exact: true }).element().ariaPressed).toBe(
       "true",
     );
     await expect.element(page.getByText("Cache writes", { exact: true })).toBeVisible();
@@ -1330,14 +1355,14 @@ describe("UsageStatsPanel", () => {
     expect(overviewValue("Tokens generated")).toBe("550,000");
     expect(overviewValue("Chats sent")).toBe("11");
     expect(overviewValue("Time spent generating")).toBe("10m 30s");
-    expect(requiredElement("[data-usage-cost-hero-value]").textContent).toBe("$0.00 USD*");
+    expect(requiredElement("[data-usage-cost-hero-value]").textContent).toBe("$0.00");
     expect(providerCostRows()).toEqual([]);
     expect(modelCostRows()).toEqual([]);
     expect(costQualityValue("Priced")).toBe("0.0%");
     expect(costQualityValue("Unpriced")).toBe("100.0%");
-    expect(
-      requiredElement('[aria-label="Output token usage by provider and model"]').textContent,
-    ).toContain("550,000");
+    // Without daily attribution the whole period is counted as unattributed,
+    // never assigned to a model from lifetime shares.
+    expect(unattributedTokens()).toBe("6,050,000");
     expect(document.body.textContent).not.toContain("grok-legacy-model");
     expect(activeActivityCellCount()).toBe(8);
 
@@ -1362,7 +1387,6 @@ describe("UsageStatsPanel", () => {
     expect(overviewValue("Tokens generated")).toBe("550,000");
     expect(overviewValue("Chats sent")).toBe("11");
     expectCostRange("30 days");
-    expect(page.getByText("500,000 attributed", { exact: true }).element()).toBeVisible();
 
     const freshToday = {
       ...usage.today,
@@ -1411,17 +1435,18 @@ describe("UsageStatsPanel", () => {
         expect(modelCostRows().find((entry) => entry.model === "gpt-5.6-codex")?.tokens).toBe(
           "2,201,100",
         );
-        expect(page.getByText("500,100 attributed", { exact: true }).element()).toBeVisible();
+        expect(unattributedTokens()).toBe("550,000");
       },
       { timeout: 3_000 },
     );
   });
 
   it("resets the selected total's floor while retaining today's Activity floor across ranges", async () => {
-    // Only Date is controlled: the component's real 250ms projection timer,
-    // detail resource, React updates, and browser layout still execute normally.
+    // Mock Date without installing fake timers: waitFor auto-advances an
+    // installed fake clock, even when only Date is faked. Tooltip/layout waits
+    // must not add time to these exact accounting assertions. The component's
+    // real 250ms projection timer and browser layout still run normally.
     const baseMs = Date.parse("2026-07-21T12:00:00Z");
-    vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(baseMs);
     const usage = { ...createRangeUsageDetail(), asOfMs: baseMs };
     usageHarness.reset(usage, usage);
@@ -1436,7 +1461,7 @@ describe("UsageStatsPanel", () => {
       asOfMs: baseMs + 10_000,
     });
     await vi.waitFor(() => expect(overviewValue("Time spent generating")).toBe("10m 40s"));
-    await expect.element(page.getByText("2 sessions generating", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("2 chats generating", { exact: true })).toBeVisible();
 
     // Two current sessions add two seconds after this newer observation; they
     // must not be charged for all ten seconds since the earlier detail read.
@@ -1456,7 +1481,7 @@ describe("UsageStatsPanel", () => {
       asOfMs: baseMs + 12_000,
     });
     await expect
-      .element(page.getByText("2 sessions generating", { exact: true }))
+      .element(page.getByText("2 chats generating", { exact: true }))
       .not.toBeInTheDocument();
     expect(overviewValue("Time spent generating")).toBe("10m 42s");
     expect((await hoverActivityCell("2026-07-21")).textContent).toContain("1m 12s generating");
@@ -1470,7 +1495,7 @@ describe("UsageStatsPanel", () => {
     expect(overviewValue("Time spent generating")).toBe("3m 31s");
     expect(overviewValue("Tokens generated")).toBe("250,000");
     expectCostRange("7 days");
-    expect(document.body.textContent).not.toContain("sessions generating");
+    expect(document.body.textContent).not.toContain("chats generating");
     expect((await hoverActivityCell("2026-07-21")).textContent).toContain("1m 12s generating");
     for (const label of ["90 days", "All", "30 days", "7 days"] as const) {
       await page.getByRole("button", { name: label, exact: true }).click();
@@ -1484,7 +1509,6 @@ describe("UsageStatsPanel", () => {
 
   it("freezes the old server day at midnight until a newer detailed response replaces its calendar", async () => {
     const baseMs = Date.parse("2026-07-21T23:59:58Z");
-    vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(baseMs);
     const usage = { ...createRangeUsageDetail(), activeSessionCount: 1, asOfMs: baseMs };
     usageHarness.reset(usage, usage);
@@ -1502,7 +1526,7 @@ describe("UsageStatsPanel", () => {
       activeSessionCount: 2,
       asOfMs: baseMs + 2_000,
     });
-    await expect.element(page.getByText("2 sessions generating", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("2 chats generating", { exact: true })).toBeVisible();
     vi.setSystemTime(baseMs + 12_000);
     // Let the real projection interval read the post-midnight clock before
     // checking the unchanged value; an immediate assertion would only inspect
@@ -1564,7 +1588,7 @@ describe("UsageStatsPanel", () => {
       expect(displayedRawCount("processed")).toBe(1_650_110);
       expect(displayedRawCount("output")).toBe(150_010);
     });
-    expect(document.body.textContent).not.toContain("sessions generating");
+    expect(document.body.textContent).not.toContain("chats generating");
     expect(
       requiredElement('[role="img"][aria-label^="Daily generating time"]').getAttribute(
         "aria-label",
@@ -1596,32 +1620,34 @@ describe("UsageStatsPanel", () => {
     }
   });
 
-  it("renders stored provider and model token attribution with unattributed usage separated", async () => {
+  it("renders stored provider and model attribution with unattributed usage separated", async () => {
     mounted = await render(<UsageStatsPanel />);
 
-    await expect.element(page.getByText("Output tokens by provider and model")).toBeVisible();
-    await expect.element(page.getByText("200,000 attributed")).toBeVisible();
-    // Provider and model names now appear in the Cost section as well, so these
-    // match more than once. Both are legitimate renders and the assertion is
-    // only that the name appears; the section-specific strings above and below
-    // are what actually pin this test to the attribution list.
-    await expect.element(page.getByText("Codex", { exact: true }).first()).toBeVisible();
-    await expect.element(page.getByText("Claude", { exact: true }).first()).toBeVisible();
-    await expect.element(page.getByText("gpt-5.6-codex", { exact: true }).first()).toBeVisible();
-    await expect
-      .element(page.getByText("gpt-5.6-codex-mini", { exact: true }).first())
-      .toBeVisible();
-    await expect.element(page.getByText("claude-opus-5", { exact: true }).first()).toBeVisible();
-    await expect.element(page.getByText("Unattributed usage")).toBeVisible();
-    await expect
-      .element(page.getByText("Recorded usage without provider and model attribution"))
-      .toBeVisible();
+    // One table lists every attributed model; the separate output-only
+    // breakdown was removed because it repeated these rows.
+    await vi.waitFor(() =>
+      expect(modelCostRows().map((row) => row.model)).toEqual([
+        "claude-opus-5",
+        "gpt-5.6-codex",
+        "gpt-5.6-codex-mini",
+      ]),
+    );
+    expect(document.body.textContent).not.toContain("Output tokens by provider and model");
+    expect(providerCostRows().map((row) => row.provider)).toEqual(["Claude", "Codex"]);
+    // 3,000,000 recorded processed tokens, of which 2,950,000 carry attribution.
+    const unattributed = requiredElement("[data-usage-unattributed-row]");
+    expect(unattributed.textContent).toContain("Unattributed usage");
+    expect(unattributed.textContent).toContain("Unpriced");
+    expect(unattributedTokens()).toBe("50,000");
+    expect(await tooltipTextFor(infoTipTrigger("About unattributed usage"))).toContain(
+      "counted but not priced",
+    );
     expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(1);
     expect(usageHarness.subscribeConnectionOpened).toHaveBeenCalledTimes(1);
     expect(usageHarness.subscribeUsageStats).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps input-only Fable visible without assigning its processed tokens to generated output", async () => {
+  it("keeps input-only Fable visible in the cost table without counting it as generated output", async () => {
     const codex = ProviderDriverKind.make("codex");
     const claude = ProviderDriverKind.make("claudeAgent");
     const rows: UsageStatsTokenBreakdownEntry[] = [
@@ -1664,23 +1690,16 @@ describe("UsageStatsPanel", () => {
       expect(overviewValue("Tokens generated")).toBe("10,012,680");
       expect(displayedRawCount("processed")).toBe(2_640_840_195);
     });
-    await expect.element(page.getByText("Output tokens by provider and model")).toBeVisible();
-    await expect
-      .element(
-        page.getByText("Generated output only; processed-token totals above also include input."),
-      )
-      .toBeVisible();
     for (const range of ["7 days", "90 days", "All", "30 days"] as const) {
       await page.getByRole("button", { name: range, exact: true }).click();
-      const provider = requiredElement('[data-usage-output-provider="claudeAgent"]');
-      expect(provider.textContent).toContain("Claude");
-      expect(provider.textContent).toContain("claude-fable-5-1");
-      expect(provider.textContent).toContain("No output recorded");
-      expect(provider.textContent).toContain("2,853,296 processed tokens");
+      expect(providerCostRows().find((row) => row.provider === "Claude")?.tokens).toBe(
+        "2,853,296 tokens",
+      );
       expect(modelCostRows().find((row) => row.model === "claude-fable-5-1")?.tokens).toBe(
         "2,853,296",
       );
-      expect(page.getByText("10,012,680 attributed", { exact: true }).element()).toBeVisible();
+      expect(displayedRawCount("output")).toBe(10_012_680);
+      expect(unattributedTokens()).toBeNull();
       expect(overviewValue("Tokens generated")).toBe("10,012,680");
     }
     expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(1);
@@ -1702,10 +1721,7 @@ describe("UsageStatsPanel", () => {
     });
     await vi.waitFor(
       () => {
-        const provider = requiredElement('[data-usage-output-provider="claudeAgent"]');
-        expect(provider.textContent).not.toContain("No output recorded");
-        expect(provider.textContent).not.toContain("processed tokens");
-        expect(provider.textContent).toContain("200");
+        expect(displayedRawCount("output")).toBe(10_012_880);
         expect(overviewValue("Tokens generated")).toBe("10,012,880");
         expect(modelCostRows().find((row) => row.model === "claude-fable-5-1")?.tokens).toBe(
           "2,853,496",
@@ -1757,20 +1773,16 @@ describe("UsageStatsPanel", () => {
       { timeout: 5_000 },
     );
 
-    const costLabel = requiredElement("[data-usage-cost-breakdown] tbody span[title]");
-    const tokenLabel = requiredElement(
-      '[aria-label="Output token usage by provider and model"] span[title]',
-    );
     const explanation =
-      "The provider reported token usage without identifying the effective model. Tokens remain counted; cost is unpriced unless you set a custom rate.";
-    expect(costLabel.textContent).toBe("Model not reported");
-    expect(tokenLabel.textContent).toBe("Model not reported");
-    expect(costLabel.title).toBe(explanation);
-    expect(tokenLabel.title).toBe(explanation);
-    // A missing model must not turn a known provider into unattributed output
+      "The provider didn't report which model served these tokens. They're counted but not priced.";
+    expect(requiredModelRow("unknown", "codex").firstElementChild!.textContent).toBe(
+      "Model not reported",
+    );
+    // The explanation is reachable by hover and keyboard focus, not a title.
+    expect(await tooltipTextFor(infoTipTrigger("About Model not reported"))).toBe(explanation);
+    // A missing model must not turn a known provider into unattributed usage
     // or silently price the observation as the user's requested model.
-    expect(page.getByText("16 attributed", { exact: true }).element()).toBeVisible();
-    expect(tokenLabel.parentElement!.lastElementChild!.lastElementChild!.textContent).toBe("16");
+    expect(unattributedTokens()).toBeNull();
     expect(document.body.textContent).not.toContain("Unattributed usage");
 
     for (const label of ["7 days", "90 days", "All", "30 days"] as const) {
@@ -1778,27 +1790,21 @@ describe("UsageStatsPanel", () => {
       expect(overviewValue("Tokens generated")).toBe("16");
       expect(displayedRawCount("processed")).toBe(20_527);
       expect(displayedRawCount("output")).toBe(16);
-      expect(requiredElement("[data-usage-cost-hero-value]").textContent).toBe("$0.00 USD*");
+      expect(requiredElement("[data-usage-cost-hero-value]").textContent).toBe("$0.00");
       expect(costQualityValue("Priced")).toBe("0.0%");
       expect(costQualityValue("Unpriced")).toBe("100.0%");
       expect(providerCostRows()).toEqual([
-        { provider: "Codex", cost: "unpriced", tokens: "20,527 tokens" },
+        { provider: "Codex", cost: "Unpriced", tokens: "20,527 tokens" },
       ]);
       expect(modelCostRows()).toEqual([
-        { model: "Model not reported", cost: "unpriced", tokens: "20,527" },
+        { model: "Model not reported", cost: "Unpriced", tokens: "20,527" },
       ]);
-      expect(requiredElement("[data-usage-cost-breakdown] tbody span[title]").title).toBe(
-        explanation,
-      );
-      expect(
-        requiredElement('[aria-label="Output token usage by provider and model"] span[title]')
-          .title,
-      ).toBe(explanation);
+      expect(infoTipTrigger("About Model not reported")).toBeVisible();
     }
     expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(1);
   });
 
-  it("renders a quiet empty state before attributed tokens exist", async () => {
+  it("renders quiet empty states once a period with no attributed usage has loaded", async () => {
     usageHarness.reset(
       {
         ...snapshot,
@@ -1813,44 +1819,85 @@ describe("UsageStatsPanel", () => {
     mounted = await render(<UsageStatsPanel />);
 
     await expect
+      .element(page.getByText("No usage by model in this period.", { exact: true }))
+      .toBeVisible();
+    await expect
+      .element(page.getByText("Nothing recorded in this period.", { exact: true }))
+      .toBeVisible();
+    expect(document.querySelector("[data-usage-cost-skeleton]")).toBeNull();
+  });
+
+  it("shows a delayed layout skeleton, never zero figures, while the first response loads", async () => {
+    // A pending request keeps the page in its first-load state.
+    usageHarness.reset(new Promise(() => {}), snapshot);
+    mounted = await render(<UsageStatsPanel />);
+
+    // Fast loads show nothing: the skeleton reserves space but stays hidden.
+    const skeleton = requiredElement("[data-usage-cost-skeleton]");
+    expect(getComputedStyle(skeleton).visibility).toBe("hidden");
+    await vi.waitFor(() => expect(getComputedStyle(skeleton).visibility).toBe("visible"));
+    expect(document.querySelector("[data-usage-cost-hero-value]")).toBeNull();
+    expect(document.body.textContent).not.toContain("$0.00");
+    expect(document.body.textContent).not.toContain("in this period");
+    expect(document.body.textContent).not.toContain("unavailable");
+  });
+
+  it("states a failed first load once instead of showing empty cost and activity", async () => {
+    usageHarness.getUsageStats.mockImplementationOnce(async () => {
+      throw new Error("Usage request failed");
+    });
+    mounted = await render(<UsageStatsPanel />);
+
+    await expect
       .element(
-        page.getByText("Provider and model attribution will appear after token usage is recorded."),
+        page.getByText("Usage is unavailable right now. Reconnect to the server and try again."),
       )
+      .toBeVisible();
+    expect(document.querySelector("[data-usage-cost-layout]")).toBeNull();
+    expect(document.querySelector("[data-usage-cost-skeleton]")).toBeNull();
+    expect(document.body.textContent).not.toContain("Activity");
+    await expect
+      .element(page.getByRole("switch", { name: "Collect usage statistics" }))
       .toBeVisible();
   });
 
-  it("labels monetary estimates as USD and makes full token counts primary", async () => {
+  it("names the USD currency once and shows compact token totals with exact values on demand", async () => {
     mounted = await render(<UsageCostContent usage={createUsageDetail()} />);
 
+    // Standalone content (Atrium) names the currency on its headline estimate;
+    // every value keeps the dollar sign without repeating the currency code.
     const hero = requiredElement('[data-usage-cost-hero-value="true"]');
-    expect(hero.textContent).toMatch(/^\$[\d,.]+ USD\*/);
-    expect(requiredElement('[data-usage-cost-chart-label="true"]').textContent).toContain("USD");
+    expect(hero.textContent).toMatch(/^\$[\d,.]+$/);
+    await expect.element(page.getByText("Estimated cost (USD)", { exact: true })).toBeVisible();
+    expect(document.body.textContent?.match(/\bUSD\b/g)).toHaveLength(1);
+    expect(requiredElement('[data-usage-cost-chart-label="true"]').textContent).toBe("Daily cost");
+    const estimateNote = await tooltipTextFor(infoTipTrigger("About estimated cost"));
+    expect(estimateNote).toContain("Excludes long-context and speed-tier adjustments");
+    expect(estimateNote).not.toContain("Add your own in Settings");
 
     const providerCosts = Array.from(
       document.querySelectorAll<HTMLElement>('[data-usage-provider-cost-value="true"]'),
     );
     expect(providerCosts).toHaveLength(2);
-    expect(providerCosts.every((entry) => /\$[\d,.]+ USD/.test(entry.textContent ?? ""))).toBe(
-      true,
-    );
-
+    expect(providerCosts.every((entry) => /^\$[\d,.]+$/.test(entry.textContent ?? ""))).toBe(true);
     expect(requiredElement('[data-usage-composition-value="cache-savings"]').textContent).toMatch(
-      /\$[\d,.]+ USD/,
+      /^\$[\d,.]+$/,
     );
-    expect(requiredElement('[data-usage-cost-quality-cache-savings="true"]').textContent).toMatch(
-      /\$[\d,.]+ USD/,
-    );
+    // Net cache savings appears once, in its composition tile.
+    expect(page.getByText("Net cache savings", { exact: true }).elements()).toHaveLength(1);
     const modelCosts = Array.from(
       document.querySelectorAll<HTMLElement>('[data-usage-model-cost-value="true"]'),
     );
     expect(modelCosts).toHaveLength(3);
-    expect(modelCosts.every((entry) => /\$[\d,.]+ USD/.test(entry.textContent ?? ""))).toBe(true);
+    expect(modelCosts.every((entry) => /^\$[\d,.]+$/.test(entry.textContent ?? ""))).toBe(true);
 
-    expect(requiredElement('[data-usage-token-full="range"]').textContent).toContain(
+    expect(requiredElement('[data-usage-token-full="range"]').textContent).toBe(
       "3,000,000 tokens in range",
     );
-    expect(requiredElement('[data-usage-token-compact="range"]').textContent).toBe("3.00M");
-    expectFullBeforeCompact("range");
+    expect(requiredElement('[data-usage-token-compact="range"]').textContent).toBe(
+      "3.00M tokens in range",
+    );
+    expectCompactWithExactOnDemand("range");
 
     const providerFullCounts = Array.from(
       document.querySelectorAll<HTMLElement>('[data-usage-token-full="provider"]'),
@@ -1863,35 +1910,30 @@ describe("UsageStatsPanel", () => {
     expect(
       providerFullCounts.every((entry) => /\d{1,3}(,\d{3})+ tokens/.test(entry.textContent ?? "")),
     ).toBe(true);
-    expect(providerCompacts.every((entry) => /[KM]/.test(entry.textContent ?? ""))).toBe(true);
-    for (const figure of document.querySelectorAll<HTMLElement>(
-      '[data-usage-token-figure="provider"]',
-    )) {
-      const children = figure.querySelectorAll<HTMLElement>(
-        "[data-usage-token-full], [data-usage-token-compact]",
-      );
-      expect(children[0]?.dataset.usageTokenFull).toBe("provider");
-      expect(children[1]?.dataset.usageTokenCompact).toBe("provider");
-    }
+    expect(providerCompacts.every((entry) => /[KM] tokens$/.test(entry.textContent ?? ""))).toBe(
+      true,
+    );
 
     const aggregateExpectations = {
-      processed: ["3,000,000 tokens", "3.00M"],
-      cached: ["1,250,000 tokens", "1.25M"],
-      uncached: ["1,250,000 tokens", "1.25M"],
-      output: ["250,000 tokens", "250K"],
+      processed: ["3,000,000 tokens", "3.00M tokens"],
+      cached: ["1,250,000 tokens", "1.25M tokens"],
+      uncached: ["1,250,000 tokens", "1.25M tokens"],
+      output: ["250,000 tokens", "250K tokens"],
     } as const;
     for (const [id, [full, compact]] of Object.entries(aggregateExpectations)) {
       const context = `composition-${id}`;
       expect(requiredElement(`[data-usage-token-full="${context}"]`).textContent).toBe(full);
       expect(requiredElement(`[data-usage-token-compact="${context}"]`).textContent).toBe(compact);
-      expectFullBeforeCompact(context);
+      expectCompactWithExactOnDemand(context);
     }
 
-    expect(requiredElement('[data-usage-token-full="reasoning"]').textContent).toContain(
+    expect(requiredElement('[data-usage-token-full="reasoning"]').textContent).toBe(
       "50,000 reasoning tokens",
     );
-    expect(requiredElement('[data-usage-token-compact="reasoning"]').textContent).toBe("50K");
-    expectFullBeforeCompact("reasoning");
+    expect(requiredElement('[data-usage-token-compact="reasoning"]').textContent).toBe(
+      "50K reasoning tokens",
+    );
+    expectCompactWithExactOnDemand("reasoning");
 
     const modelFullCounts = Array.from(
       document.querySelectorAll<HTMLElement>('[data-usage-token-full="model"]'),
@@ -1901,9 +1943,26 @@ describe("UsageStatsPanel", () => {
     );
     expect(modelFullCounts).toHaveLength(3);
     expect(modelCompacts).toHaveLength(3);
-    expect(modelCompacts.every((entry) => /[KM]/.test(entry.textContent ?? ""))).toBe(true);
+    expect(modelCompacts.every((entry) => /^[\d.]+[KM]$/.test(entry.textContent ?? ""))).toBe(true);
     expect(modelFullCounts.every((entry) => /\d{1,3}(,\d{3})+/.test(entry.textContent ?? ""))).toBe(
       true,
+    );
+
+    // The exact count is one keyboard focus away, without a second visible line:
+    // Tab from the tile's info button lands on the processed-token figure.
+    const processedTrigger = requiredElement(
+      '[data-usage-token-compact="composition-processed"]',
+    ).parentElement!;
+    infoTipTrigger("About Processed tokens").focus();
+    await userEvent.keyboard("{Tab}");
+    expect(document.activeElement).toBe(processedTrigger);
+    await vi.waitFor(() =>
+      expect(
+        Array.from(
+          document.querySelectorAll('[data-slot="tooltip-popup"]'),
+          (popup) => popup.textContent,
+        ),
+      ).toContain("3,000,000 tokens"),
     );
     expect(document.body.textContent).not.toMatch(/\btokens? exact\b/i);
   });
@@ -1930,18 +1989,15 @@ describe("UsageStatsPanel", () => {
     );
     await page.getByRole("button", { name: "All", exact: true }).click();
     expect(requiredElement('[data-usage-composition-value="cache-savings"]').textContent).toBe(
-      "-$1.00 USD",
-    );
-    expect(requiredElement('[data-usage-cost-quality-cache-savings="true"]').textContent).toBe(
-      "-$1.00 USD",
+      "-$1.00",
     );
     await expect
       .element(page.getByText("Cache writes cost more than reads have saved"))
       .toBeVisible();
-    await expect.element(page.getByText("Net cache savings (USD)").first()).toBeVisible();
+    await expect.element(page.getByText("Net cache savings", { exact: true })).toBeVisible();
   });
 
-  it("renders the billion-scale shorthand beneath the full counter", async () => {
+  it("renders the billion-scale shorthand with the exact counter on demand", async () => {
     const baseline = createUsageDetail();
     const usage = {
       ...baseline,
@@ -1958,9 +2014,9 @@ describe("UsageStatsPanel", () => {
       "3,539,966,200 tokens",
     );
     expect(requiredElement('[data-usage-token-compact="composition-processed"]').textContent).toBe(
-      "3.54B",
+      "3.54B tokens",
     );
-    expectFullBeforeCompact("composition-processed");
+    expectCompactWithExactOnDemand("composition-processed");
   });
 
   it("animates the full aggregate count through a small increment", async () => {
@@ -2099,9 +2155,6 @@ describe("UsageStatsPanel", () => {
         expect(requiredElement('[data-usage-composition-value="cache-savings"]').textContent).toBe(
           expectedUsd(targetRollup.cacheSavings),
         );
-        expect(requiredElement("[data-usage-cost-quality-cache-savings]").textContent).toBe(
-          expectedUsd(targetRollup.cacheSavings),
-        );
         expect(requiredElement("[data-usage-composition-tile='cached']").textContent).toContain(
           `${((updatedUsage.totals.cachedInputTokens / updatedUsage.totals.inputTokens) * 100).toFixed(1)}% of input`,
         );
@@ -2224,13 +2277,13 @@ describe("UsageStatsPanel", () => {
     try {
       mounted = await render(<UsageCostContent usage={createUsageDetail()} />);
       expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth + 1);
-      expect(requiredElement('[data-usage-token-full="composition-processed"]')).toBeVisible();
+      expect(requiredElement('[data-usage-token-compact="composition-processed"]')).toBeVisible();
     } finally {
       await page.viewport(originalViewport.width, originalViewport.height);
     }
   });
 
-  it("uses the wide space remaining beside the sidebar for the chart and complete metrics", async () => {
+  it("uses the wide settings page width for the chart and complete metrics", async () => {
     await page.viewport(1_800, 1_000);
     applyInterfaceScalePercent(100);
     settleLayoutCountersImmediately();
@@ -2249,12 +2302,15 @@ describe("UsageStatsPanel", () => {
     const sidebar = requiredElement("[data-usage-test-sidebar]").getBoundingClientRect();
     const layout = requiredElement("[data-usage-cost-layout]");
     const bounds = layout.getBoundingClientRect();
-    // Allow the page's ordinary gutters while rejecting the old 768px cap.
-    expect(bounds.width).toBeGreaterThan(window.innerWidth - sidebar.width - 128);
+    // Usage is a dashboard: it takes the shared wide page width (64rem), wider
+    // than the standard 48rem settings column but no longer unbounded.
+    const rootFontSize = Number.parseFloat(getComputedStyle(document.documentElement).fontSize);
+    expect(bounds.width).toBeGreaterThan(60 * rootFontSize);
+    expect(bounds.width).toBeLessThanOrEqual(64 * rootFontSize);
     expect(bounds.left).toBeGreaterThan(sidebar.right);
     const chart = requiredElement('[data-usage-cost-overview] svg[role="img"]');
-    expect(chart.getBoundingClientRect().width).toBeGreaterThan(800);
-    expect(chart.getBoundingClientRect().height).toBeGreaterThan(260);
+    expect(chart.getBoundingClientRect().width).toBeGreaterThan(560);
+    expect(chart.getBoundingClientRect().height).toBeGreaterThanOrEqual(12 * rootFontSize - 1);
     const tiles = Array.from(document.querySelectorAll("[data-usage-composition-tile]"));
     expect(tiles).toHaveLength(5);
     for (const tile of tiles) {

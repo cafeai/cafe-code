@@ -9,6 +9,13 @@ import {
   validateInteractionResponse,
 } from "@cafecode/shared/providerInteraction";
 import { Button } from "../ui/button";
+import { InfoTip } from "../ui/info-tip";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
+
+const PERMISSION_SCOPE_LABELS = {
+  turn: "This turn only",
+  session: "This provider session",
+} as const;
 
 export interface ComposerInteractionCallbacks {
   onRespondToInteraction?: (
@@ -105,10 +112,11 @@ export function ComposerInteractionCard({
       setBusy(false);
     }
   };
-  const inputClass = "w-full rounded border border-border bg-background px-2 py-1 text-sm";
+  const inputClass =
+    "focus-ring w-full rounded-lg border border-input bg-background px-2.5 py-1.5 text-sm text-foreground";
   return (
     <section
-      className="space-y-3 p-4"
+      className="space-y-3 px-4 py-3 sm:px-5"
       aria-label="Provider interaction"
       onKeyDown={(event) => {
         event.stopPropagation();
@@ -116,7 +124,7 @@ export function ComposerInteractionCard({
           event.preventDefault();
       }}
     >
-      <h3 className="text-sm font-semibold">
+      <h3 className="text-sm font-medium text-foreground">
         {interaction.kind === "permissions"
           ? "Additional permissions requested"
           : `MCP server: ${interaction.serverName}`}
@@ -124,12 +132,14 @@ export function ComposerInteractionCard({
       <p className="whitespace-pre-wrap break-words text-sm">{interaction.message}</p>
       {interaction.kind === "permissions" ? (
         <>
-          <p className="break-all text-xs">
-            Working directory: {interaction.cwd}
+          <p className="break-all text-xs text-muted-foreground">
+            Working directory: <span className="font-mono">{interaction.cwd}</span>
             {interaction.environment ? ` · Environment: ${interaction.environment}` : ""}
           </p>
           <fieldset disabled={busy} className="space-y-2">
-            <legend className="text-xs">Select only the permissions you want to grant</legend>
+            <legend className="mb-1 text-xs text-muted-foreground">
+              Choose the permissions to grant
+            </legend>
             {interaction.grants.map((grant) => (
               <label key={grant.id} className="flex items-start gap-2 break-all text-sm">
                 <input
@@ -146,20 +156,26 @@ export function ComposerInteractionCard({
                 {grant.label}
               </label>
             ))}
-            <label className="block text-sm">
-              Permission duration
-              <select
-                aria-label="Permission duration"
+            <div className="space-y-1 text-sm">
+              <span aria-hidden="true">Permission duration</span>
+              <Select
                 value={scope}
-                className={inputClass}
-                onChange={(event) =>
-                  setScope(event.target.value === "session" ? "session" : "turn")
-                }
+                disabled={busy}
+                onValueChange={(next) => setScope(next === "session" ? "session" : "turn")}
               >
-                <option value="turn">This turn only</option>
-                <option value="session">This provider session</option>
-              </select>
-            </label>
+                <SelectTrigger aria-label="Permission duration">
+                  <SelectValue>{PERMISSION_SCOPE_LABELS[scope]}</SelectValue>
+                </SelectTrigger>
+                <SelectPopup alignItemWithTrigger={false}>
+                  <SelectItem hideIndicator value="turn">
+                    {PERMISSION_SCOPE_LABELS.turn}
+                  </SelectItem>
+                  <SelectItem hideIndicator value="session">
+                    {PERMISSION_SCOPE_LABELS.session}
+                  </SelectItem>
+                </SelectPopup>
+              </Select>
+            </div>
           </fieldset>
         </>
       ) : interaction.mode === "url" ? (
@@ -170,7 +186,7 @@ export function ComposerInteractionCard({
           </p>
           {url ? (
             <a
-              className="text-sm underline"
+              className="focus-ring rounded-sm text-sm text-primary underline underline-offset-4"
               href={url}
               target="_blank"
               rel="noopener noreferrer"
@@ -188,9 +204,11 @@ export function ComposerInteractionCard({
               Get authorization link
             </Button>
           )}
-          <p className="text-xs text-muted-foreground">
-            After completing the external step, confirm below. Cafe does not fetch or verify the
-            page.
+          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            After completing the external step, confirm below.
+            <InfoTip label="About the external step">
+              Cafe doesn’t load or verify this page.
+            </InfoTip>
           </p>
         </div>
       ) : (
@@ -231,46 +249,63 @@ export function ComposerInteractionCard({
                     ))}
                   </div>
                 ) : field.options || field.type === "boolean" ? (
-                  <select
-                    id={id}
-                    className={inputClass}
-                    value={
-                      field.options
-                        ? Object.hasOwn(values, field.id)
-                          ? String(field.options.findIndex((option) => option.value === value))
-                          : ""
-                        : typeof value === "string"
-                          ? value
-                          : ""
-                    }
-                    onChange={(event) => {
-                      const selection = field.options
-                        ? field.options[Number(event.target.value)]?.value
-                        : event.target.value;
-                      if (event.target.value === "" || selection === undefined)
-                        setValues((prior) => {
-                          const next = { ...prior };
-                          delete next[field.id];
-                          return next;
-                        });
-                      else set(selection);
-                    }}
-                  >
-                    <option value="">Choose a value</option>
-                    {(
+                  (() => {
+                    // Option indexes, not provider values, are the Select keys so
+                    // arbitrary provider strings never become DOM identifiers.
+                    const choices = (
                       field.options ?? [
                         { value: "true", label: "Yes" },
                         { value: "false", label: "No" },
                       ]
-                    ).map((option, index) => (
-                      <option
-                        key={option.value}
-                        value={field.options ? String(index) : option.value}
+                    ).map((option, index) => ({
+                      key: field.options ? String(index) : option.value,
+                      label: option.label,
+                    }));
+                    const selectedKey = field.options
+                      ? Object.hasOwn(values, field.id)
+                        ? String(field.options.findIndex((option) => option.value === value))
+                        : ""
+                      : typeof value === "string"
+                        ? value
+                        : "";
+                    return (
+                      <Select
+                        value={selectedKey}
+                        onValueChange={(nextKey) => {
+                          const selection = field.options
+                            ? field.options[Number(nextKey)]?.value
+                            : typeof nextKey === "string"
+                              ? nextKey
+                              : undefined;
+                          if (nextKey === "" || nextKey === null || selection === undefined)
+                            setValues((prior) => {
+                              const next = { ...prior };
+                              delete next[field.id];
+                              return next;
+                            });
+                          else set(selection);
+                        }}
                       >
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
+                        <SelectTrigger id={id}>
+                          <SelectValue>
+                            {choices.find((choice) => choice.key === selectedKey)?.label ?? (
+                              <span className="text-muted-foreground">Choose a value</span>
+                            )}
+                          </SelectValue>
+                        </SelectTrigger>
+                        <SelectPopup alignItemWithTrigger={false}>
+                          <SelectItem hideIndicator value="">
+                            <span className="text-muted-foreground">Choose a value</span>
+                          </SelectItem>
+                          {choices.map((choice) => (
+                            <SelectItem hideIndicator key={choice.key} value={choice.key}>
+                              {choice.label}
+                            </SelectItem>
+                          ))}
+                        </SelectPopup>
+                      </Select>
+                    );
+                  })()
                 ) : (
                   <input
                     id={id}
@@ -287,17 +322,17 @@ export function ComposerInteractionCard({
                   />
                 )}
                 {field.minimum !== undefined || field.maximum !== undefined ? (
-                  <p className="text-xs">
+                  <p className="text-xs text-muted-foreground">
                     Allowed range: {field.minimum ?? "unbounded"} to {field.maximum ?? "unbounded"}
                   </p>
                 ) : null}
                 {field.minLength !== undefined || field.maxLength !== undefined ? (
-                  <p className="text-xs">
+                  <p className="text-xs text-muted-foreground">
                     Length: {field.minLength ?? 0}–{field.maxLength ?? 8192} characters
                   </p>
                 ) : null}
                 {field.minItems !== undefined || field.maxItems !== undefined ? (
-                  <p className="text-xs">
+                  <p className="text-xs text-muted-foreground">
                     Choose {field.minItems ?? 0}–{field.maxItems ?? 64} values
                   </p>
                 ) : null}
@@ -313,7 +348,7 @@ export function ComposerInteractionCard({
         </p>
       ) : null}
       {error ? (
-        <p role="alert" className="text-sm text-destructive">
+        <p role="alert" className="text-sm text-destructive-foreground">
           {error}
         </p>
       ) : null}

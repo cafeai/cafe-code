@@ -91,6 +91,9 @@ export interface AsyncQuestion {
   readonly id: string;
   readonly title: string;
   readonly options: readonly string[];
+  readonly activityId?: string;
+  readonly questionIndex?: number;
+  readonly handled?: boolean;
 }
 
 export interface AsyncQuestionDraft {
@@ -145,7 +148,10 @@ export async function deriveAsyncQuestions(
   threadId: string,
   activities: readonly OrchestrationThreadActivity[],
 ): Promise<AsyncQuestion[]> {
-  const items = new Map<string, ReturnType<typeof normalizeCodexAsyncQuestions>>();
+  const items = new Map<
+    string,
+    { questions: ReturnType<typeof normalizeCodexAsyncQuestions>; handled: readonly number[] }
+  >();
   // Detail snapshots already carry ordered activities. Work only on the newest
   // bounded question window so a multi-day transcript cannot flood the editor.
   for (let index = activities.length - 1; index >= 0 && items.size < MAX_QUESTION_ITEMS; index--) {
@@ -163,15 +169,26 @@ export async function deriveAsyncQuestions(
     if (typeof itemId !== "string" || itemId.length === 0 || itemId.length > 512) continue;
     if (items.has(activity.id)) continue;
     const questions = normalizeCodexAsyncQuestions(payload.questions);
-    if (questions.length) items.set(activity.id, questions);
+    const handled = Array.isArray(payload.handledQuestionIndexes)
+      ? payload.handledQuestionIndexes
+          .slice(0, 16)
+          .filter(
+            (index): index is number =>
+              Number.isSafeInteger(index) && index >= 0 && index < questions.length,
+          )
+      : [];
+    if (questions.length) items.set(activity.id, { questions, handled });
   }
   const groups = await Promise.all(
-    [...items].toReversed().map(async ([activityId, questions]) => {
+    [...items].toReversed().map(async ([activityId, { questions, handled }]) => {
       const hash = questionScopeHash(JSON.stringify([environmentId, threadId, activityId]));
       return questions.map((question, index) => ({
         id: `async-question:${hash}:${index}`,
         title: question.title,
         options: question.options,
+        activityId,
+        questionIndex: index,
+        handled: handled.includes(index),
       }));
     }),
   );

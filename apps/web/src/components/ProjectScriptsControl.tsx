@@ -351,8 +351,8 @@ export default function ProjectScriptsControl({
                               type="button"
                               className={`relative flex flex-col items-center gap-2 rounded-md border px-2 py-2 text-xs ${
                                 isSelected
-                                  ? "border-primary/70 bg-primary/10"
-                                  : "border-border/70 hover:bg-accent/60"
+                                  ? "border-primary bg-primary/10"
+                                  : "border-border hover:bg-accent"
                               }`}
                               onClick={() => {
                                 setIcon(entry.id);
@@ -398,7 +398,7 @@ export default function ProjectScriptsControl({
                   onChange={(event) => setCommand(event.target.value)}
                 />
               </div>
-              <label className="flex items-center justify-between gap-3 rounded-md border border-border/70 px-3 py-2 text-sm">
+              <label className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2 text-sm">
                 <span>Run automatically on worktree creation</span>
                 <Switch
                   checked={runOnWorktreeCreate}

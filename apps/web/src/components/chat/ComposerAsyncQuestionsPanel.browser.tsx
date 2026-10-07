@@ -9,6 +9,7 @@ import {
   deriveAsyncQuestions,
   rememberHandledAsyncQuestion,
   withAsyncQuestionLock,
+  type AsyncQuestion,
 } from "./asyncQuestions";
 
 const activities: OrchestrationThreadActivity[] = [
@@ -41,6 +42,118 @@ const multipleActivities: OrchestrationThreadActivity[] = [
 describe("inline async questions", () => {
   beforeEach(() => localStorage.removeItem(ASYNC_QUESTION_HANDLED_STORAGE_KEY));
 
+  it("waits for server acknowledgement before hiding skips and reads them in a fresh client", async () => {
+    const onResolve = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    const onAnswer = vi.fn(async () => true);
+    const screen = await render(
+      <ComposerAsyncQuestionsPanel
+        environmentId="local"
+        threadId="thread"
+        activities={activities}
+        deliveryDisabled={false}
+        onAnswer={onAnswer}
+        onResolve={onResolve}
+      />,
+    );
+    try {
+      await page.getByText("1 question from Codex").click();
+      await page.getByRole("button", { name: "Skip", exact: true }).click();
+      await expect
+        .element(page.getByRole("alert"))
+        .toHaveTextContent("Could not save the skipped questions. Try again.");
+      expect(localStorage.getItem(ASYNC_QUESTION_HANDLED_STORAGE_KEY)).toBeNull();
+      await page.getByRole("button", { name: "Skip", exact: true }).click();
+      await expect.element(page.getByText("1 question from Codex")).not.toBeInTheDocument();
+      expect(onResolve.mock.calls[0]![0][0]).toMatchObject({
+        activityId: activities[0]!.id,
+        questionIndex: 0,
+      });
+      expect(onAnswer).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+    localStorage.removeItem(ASYNC_QUESTION_HANDLED_STORAGE_KEY);
+    const fresh = await render(
+      <ComposerAsyncQuestionsPanel
+        environmentId="remote-client"
+        threadId="thread"
+        activities={[
+          {
+            ...activities[0]!,
+            payload: { ...(activities[0]!.payload as object), handledQuestionIndexes: [0] },
+          },
+        ]}
+        deliveryDisabled={false}
+        onAnswer={onAnswer}
+        onResolve={onResolve}
+      />,
+    );
+    try {
+      await expect.element(fresh.container).toBeEmptyDOMElement();
+      expect(onAnswer).not.toHaveBeenCalled();
+    } finally {
+      await fresh.unmount();
+    }
+  });
+
+  it("publishes legacy browser receipts without sending an answer", async () => {
+    const [question] = await deriveAsyncQuestions("local", "thread", activities);
+    rememberHandledAsyncQuestion(localStorage, question!.id);
+    const onAnswer = vi.fn(async () => true);
+    const onResolve = vi.fn(async (_questions: readonly AsyncQuestion[]) => true);
+    const screen = await render(
+      <ComposerAsyncQuestionsPanel
+        environmentId="local"
+        threadId="thread"
+        activities={activities}
+        deliveryDisabled={false}
+        onAnswer={onAnswer}
+        onResolve={onResolve}
+      />,
+    );
+    try {
+      await vi.waitFor(() => expect(onResolve).toHaveBeenCalledOnce());
+      expect(onResolve.mock.calls[0]![0][0]).toMatchObject({
+        activityId: activities[0]!.id,
+        questionIndex: 0,
+      });
+      expect(onAnswer).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("retries a failed state save without resending an accepted answer", async () => {
+    const onAnswer = vi.fn(async () => true);
+    const onResolve = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    const screen = await render(
+      <ComposerAsyncQuestionsPanel
+        environmentId="local"
+        threadId="thread"
+        activities={activities}
+        deliveryDisabled={false}
+        onAnswer={onAnswer}
+        onResolve={onResolve}
+      />,
+    );
+    try {
+      await page.getByText("1 question from Codex").click();
+      await page.getByRole("button", { name: "Suggested route" }).click();
+      await page.getByRole("button", { name: "Send answer" }).click();
+      await expect
+        .element(page.getByRole("alert"))
+        .toHaveTextContent(
+          "Your answer was accepted, but its question state could not be saved. Try again.",
+        );
+      await page.getByRole("button", { name: "Send answer" }).click();
+      await expect.element(page.getByText("1 question from Codex")).not.toBeInTheDocument();
+      expect(onAnswer).toHaveBeenCalledOnce();
+      expect(onResolve).toHaveBeenCalledTimes(2);
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("retains rejected answers, requires explicit send, and preserves the independent main draft", async () => {
     const onAnswer = vi
       .fn<(_: string, id: string) => Promise<boolean>>()
@@ -49,6 +162,7 @@ describe("inline async questions", () => {
     const screen = await render(
       <>
         <ComposerAsyncQuestionsPanel
+          onResolve={async () => true}
           environmentId="local"
           threadId="thread"
           activities={activities}
@@ -64,7 +178,7 @@ describe("inline async questions", () => {
       await page.getByRole("button", { name: "Suggested route" }).click();
       expect(onAnswer).not.toHaveBeenCalled();
       await page.getByLabelText("Your answer").fill("/do-not-run-as-a-command");
-      await page.getByRole("button", { name: "Queue answer" }).click();
+      await page.getByRole("button", { name: "Send answer" }).click();
       await expect
         .element(page.getByRole("alert"))
         .toMatchTextContent("The answer was not queued.");
@@ -72,7 +186,7 @@ describe("inline async questions", () => {
         .element(page.getByLabelText("Your answer"))
         .toHaveValue("/do-not-run-as-a-command");
       expect(localStorage.getItem(ASYNC_QUESTION_HANDLED_STORAGE_KEY)).toBeNull();
-      await page.getByRole("button", { name: "Queue answer" }).click();
+      await page.getByRole("button", { name: "Send answer" }).click();
       await expect.element(page.getByText("1 question from Codex")).not.toBeInTheDocument();
       expect(onAnswer).toHaveBeenCalledTimes(2);
       expect(onAnswer.mock.calls[0]).toEqual(onAnswer.mock.calls[1]);
@@ -98,6 +212,7 @@ describe("inline async questions", () => {
       );
       const screen = await render(
         <ComposerAsyncQuestionsPanel
+          onResolve={async () => true}
           environmentId="local"
           threadId="thread"
           activities={count === 1 ? activities : multipleActivities}
@@ -110,7 +225,7 @@ describe("inline async questions", () => {
           .getByText(`${count} ${count === 1 ? "question" : "questions"} from Codex`)
           .click();
         await page.getByLabelText("Your answer").fill("Explicit answer");
-        const submit = page.getByRole("button", { name: "Queue answer" }).element();
+        const submit = page.getByRole("button", { name: "Send answer" }).element();
         submit.dispatchEvent(new MouseEvent("click", { bubbles: true }));
         submit.dispatchEvent(new MouseEvent("click", { bubbles: true }));
         await expect.poll(() => onAnswer.mock.calls.length).toBe(1);
@@ -142,6 +257,7 @@ describe("inline async questions", () => {
     const component = (rows = multipleActivities, environmentId = "local", key = "initial") => (
       <>
         <ComposerAsyncQuestionsPanel
+          onResolve={async () => true}
           key={key}
           environmentId={environmentId}
           threadId="thread"
@@ -189,6 +305,7 @@ describe("inline async questions", () => {
     const onAnswer = vi.fn(async () => true);
     const component = (rows: OrchestrationThreadActivity[]) => (
       <ComposerAsyncQuestionsPanel
+        onResolve={async () => true}
         environmentId="local"
         threadId="thread"
         activities={rows}
@@ -241,6 +358,7 @@ describe("inline async questions", () => {
     const onAnswer = vi.fn(async () => true);
     const component = (environmentId: string, key = "initial") => (
       <ComposerAsyncQuestionsPanel
+        onResolve={async () => true}
         key={key}
         environmentId={environmentId}
         threadId="thread"
@@ -269,6 +387,7 @@ describe("inline async questions", () => {
   it("keeps answer editing available while delivery is disabled", async () => {
     const screen = await render(
       <ComposerAsyncQuestionsPanel
+        onResolve={async () => true}
         environmentId="local"
         threadId="thread"
         activities={activities}
@@ -279,7 +398,7 @@ describe("inline async questions", () => {
     try {
       await page.getByText("1 question from Codex").click();
       await page.getByLabelText("Your answer").fill("Draft while reconnecting");
-      await expect.element(page.getByRole("button", { name: "Queue answer" })).toBeDisabled();
+      await expect.element(page.getByRole("button", { name: "Send answer" })).toBeDisabled();
       await expect.element(page.getByRole("button", { name: "Skip" })).toBeDisabled();
       await expect
         .element(page.getByLabelText("Your answer"))
@@ -295,6 +414,7 @@ describe("inline async questions", () => {
       const onAnswer = vi.fn(async () => true);
       const screen = await render(
         <ComposerAsyncQuestionsPanel
+          onResolve={async () => true}
           environmentId="local"
           threadId="thread"
           activities={activities}
@@ -312,7 +432,7 @@ describe("inline async questions", () => {
             new StorageEvent("storage", { key: ASYNC_QUESTION_HANDLED_STORAGE_KEY }),
           );
         } else {
-          await page.getByRole("button", { name: "Queue answer" }).click();
+          await page.getByRole("button", { name: "Send answer" }).click();
         }
         await expect
           .element(page.getByRole("status"))
@@ -320,7 +440,7 @@ describe("inline async questions", () => {
         await expect
           .element(page.getByLabelText("Your answer"))
           .toHaveValue("Keep this alternative answer");
-        await expect.element(page.getByRole("button", { name: "Queue answer" })).toBeDisabled();
+        await expect.element(page.getByRole("button", { name: "Send answer" })).toBeDisabled();
         expect(onAnswer).not.toHaveBeenCalled();
         await page.getByRole("button", { name: "Skip" }).click();
         await expect.element(page.getByText("1 question from Codex")).not.toBeInTheDocument();

@@ -1219,6 +1219,18 @@ const ThreadUserInputSnoozeCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+const ThreadAsyncQuestionsResolveCommand = Schema.Struct({
+  type: Schema.Literal("thread.async-questions.resolve"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  activityId: EventId,
+  questionIndexes: Schema.Array(NonNegativeInt).check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(16),
+  ),
+  createdAt: IsoDateTime,
+});
+
 const ThreadCheckpointRevertCommand = Schema.Struct({
   type: Schema.Literal("thread.checkpoint.revert"),
   commandId: CommandId,
@@ -1289,6 +1301,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadApprovalRespondCommand,
   ThreadUserInputRespondCommand,
   ThreadUserInputSnoozeCommand,
+  ThreadAsyncQuestionsResolveCommand,
   ThreadCheckpointRevertCommand,
   ThreadSessionStopCommand,
   ThreadGoalSetCommand,
@@ -1318,6 +1331,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadApprovalRespondCommand,
   ThreadUserInputRespondCommand,
   ThreadUserInputSnoozeCommand,
+  ThreadAsyncQuestionsResolveCommand,
   ThreadCheckpointRevertCommand,
   ThreadSessionStopCommand,
   ThreadGoalSetCommand,

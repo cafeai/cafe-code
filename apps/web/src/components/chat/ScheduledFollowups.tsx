@@ -14,6 +14,7 @@ import { memo, useEffect, useRef, useState } from "react";
 
 import { ensureScheduledFollowupsApi } from "../../lib/scheduledFollowupsApi";
 import { Button } from "../ui/button";
+import { InfoTip } from "../ui/info-tip";
 import { ScheduledFollowupEditor } from "./ScheduledFollowupEditor";
 import {
   formatScheduleTime,
@@ -106,7 +107,7 @@ function ScheduleHistory(props: {
 
   return (
     <div
-      className="mt-2 space-y-2 border-t border-border/50 pt-2"
+      className="mt-2 animate-enter-rise space-y-2 border-t border-border-subtle pt-2"
       aria-label={`Run history for ${record.name}`}
     >
       {error ? (
@@ -125,7 +126,10 @@ function ScheduleHistory(props: {
             <li key={run.id} className="min-w-0 text-xs">
               <div className="flex flex-wrap items-baseline justify-between gap-1">
                 <span className="font-medium">{runLabel(run)}</span>
-                <time dateTime={run.createdAt} className="text-[11px] text-muted-foreground">
+                <time
+                  dateTime={run.createdAt}
+                  className="text-2xs tabular-nums text-subtle-foreground"
+                >
                   {formatScheduleTime(run.createdAt, record.recurrence.timeZone)}
                 </time>
               </div>
@@ -135,7 +139,7 @@ function ScheduleHistory(props: {
                 </p>
               ) : null}
               {run.modelSelection ? (
-                <p className="mt-1 break-words text-[11px] text-muted-foreground [overflow-wrap:anywhere]">
+                <p className="mt-1 break-words text-2xs text-muted-foreground [overflow-wrap:anywhere]">
                   {scheduleModelLabel(run.modelSelection)}
                 </p>
               ) : null}
@@ -155,7 +159,7 @@ function ScheduleHistory(props: {
           >
             Newer runs
           </Button>
-          <span className="text-[11px] text-muted-foreground">Page {cursors.length}</span>
+          <span className="text-2xs tabular-nums text-muted-foreground">Page {cursors.length}</span>
           <Button
             size="xs"
             variant="ghost"
@@ -194,29 +198,29 @@ function ScheduleCard(props: {
 
   return (
     <article
-      className="min-w-0 rounded-xl border border-border/60 bg-muted/20 p-3"
+      className="min-w-0 rounded-xl border border-border-subtle bg-muted/20 p-3"
       aria-label={`Scheduled follow-up: ${record.name}`}
     >
       <div className="flex min-w-0 flex-wrap items-start justify-between gap-x-2 gap-y-1">
         <h4 className="min-w-0 flex-1 break-words text-sm font-medium [overflow-wrap:anywhere]">
           {record.name}
         </h4>
-        <span className="text-[10px] font-medium text-muted-foreground">{label}</span>
+        <span className="text-2xs font-medium text-muted-foreground">{label}</span>
       </div>
       {record.nextRunAt && record.state === "active" ? (
         <p className="mt-1 break-words text-xs text-primary">
           Next: {formatScheduleTime(record.nextRunAt, record.recurrence.timeZone)}
         </p>
       ) : null}
-      <p className="mt-1 break-words text-[11px] text-muted-foreground [overflow-wrap:anywhere]">
+      <p className="mt-1 break-words text-2xs text-muted-foreground [overflow-wrap:anywhere]">
         {scheduleRecurrenceLabel(record)} · {record.recurrence.timeZone}
       </p>
-      <p className="mt-2 break-words text-[11px] text-muted-foreground [overflow-wrap:anywhere]">
+      <p className="mt-2 break-words text-2xs text-muted-foreground [overflow-wrap:anywhere]">
         {record.modelSelection
           ? scheduleModelLabel(selection)
           : `Uses chat settings · ${scheduleModelLabel(selection)}`}
       </p>
-      <p className="break-words text-[11px] text-muted-foreground [overflow-wrap:anywhere]">
+      <p className="break-words text-2xs text-muted-foreground [overflow-wrap:anywhere]">
         Account:{" "}
         {scheduleAccountLabel(
           { ...selection, instanceId: record.authorizedInstanceId },
@@ -225,12 +229,11 @@ function ScheduleCard(props: {
         {!accountMatches ? " · Account changed; review before enabling" : ""}
       </p>
       {lastRun ? (
-        <p className="mt-2 text-[11px] text-muted-foreground">Last run: {runLabel(lastRun)}</p>
+        <p className="mt-2 text-2xs text-muted-foreground">Last run: {runLabel(lastRun)}</p>
       ) : null}
       {record.state === "pending_confirmation" ? (
         <p className="mt-2 text-xs text-muted-foreground">
-          Proposed by an agent. Review the instructions and the account that will run and pay for
-          these follow-ups before enabling them.
+          Proposed by an agent — review before enabling.
         </p>
       ) : null}
       {record.state === "needs_attention" ? (
@@ -295,7 +298,7 @@ function ScheduleCard(props: {
         ) : null}
       </div>
       {confirmDelete ? (
-        <div className="mt-2 rounded-lg border border-border/60 p-2 text-xs">
+        <div className="mt-2 animate-enter-rise rounded-lg border border-border p-2 text-xs">
           <p>
             Delete this schedule? Future runs will stop. An already running turn is not interrupted.
           </p>
@@ -418,18 +421,24 @@ export const ScheduledFollowups = memo(function ScheduledFollowups({
   return (
     <section
       aria-label="Scheduled follow-ups"
-      className="mt-4 min-w-0 border-t border-border/60 pt-3"
+      className="mt-4 min-w-0 border-t border-border-subtle pt-3"
       data-scheduled-followups="true"
     >
       <div className="mb-3 flex min-w-0 flex-wrap items-center justify-between gap-2">
-        <h3
-          ref={headingRef}
-          tabIndex={-1}
-          className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground outline-none"
-        >
-          <Clock3Icon className="size-3.5" />
-          Scheduled <span className="text-muted-foreground/65">{current.length}</span>
-        </h3>
+        <div className="flex items-center gap-1">
+          <h3
+            ref={headingRef}
+            tabIndex={-1}
+            className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground outline-none"
+          >
+            <Clock3Icon className="size-3.5" />
+            Scheduled <span className="tabular-nums text-subtle-foreground">{current.length}</span>
+          </h3>
+          <InfoTip label="About scheduled follow-ups">
+            Saved across restarts. Runs while this chat’s Cafe server is online and awake. Existing
+            account permissions apply.
+          </InfoTip>
+        </div>
         {!editor ? (
           <Button
             ref={createRef}
@@ -474,11 +483,11 @@ export const ScheduledFollowups = memo(function ScheduledFollowups({
           ) : null}
           {context.unavailable ? (
             <p className="mb-2 text-xs text-muted-foreground">
-              This backend is disconnected. Schedule controls will return when it reconnects.
+              This server is disconnected. Schedule controls return when it reconnects.
             </p>
           ) : null}
           {mutationError ? (
-            <p role="alert" className="mb-2 text-xs text-destructive">
+            <p role="alert" className="mb-2 text-xs text-destructive-foreground">
               {mutationError}
             </p>
           ) : null}
@@ -551,7 +560,7 @@ export const ScheduledFollowups = memo(function ScheduledFollowups({
               >
                 Previous schedules
               </Button>
-              <span className="text-[11px] text-muted-foreground">
+              <span className="text-2xs tabular-nums text-muted-foreground">
                 {safePage + 1} / {pageCount}
               </span>
               <Button
@@ -578,10 +587,6 @@ export const ScheduledFollowups = memo(function ScheduledFollowups({
               {showHistory ? "Show current schedules" : `Finished schedules (${historical.length})`}
             </Button>
           ) : null}
-          <p className="mt-3 text-[10px] leading-4 text-muted-foreground/70">
-            Saved across restarts. Runs while this chat’s Cafe backend is online and awake. Existing
-            account permissions apply.
-          </p>
         </>
       )}
     </section>

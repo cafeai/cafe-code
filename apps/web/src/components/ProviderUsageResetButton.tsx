@@ -1,11 +1,12 @@
 import { useRef, useState } from "react";
-import { LoaderCircleIcon, RotateCcwIcon } from "lucide-react";
+import { RotateCcwIcon } from "lucide-react";
 import type {
   ProviderUsageResetInput,
   ProviderUsageResetResult,
   ServerProvider,
 } from "@cafecode/contracts";
 import { hasLowCodexUsage } from "@cafecode/shared/providerUsageReset";
+import { useDelayedFlag } from "../hooks/useDelayedFlag";
 import {
   formatCodexRateLimitPresentation,
   selectCodexAvailableResetCount,
@@ -21,6 +22,7 @@ import {
   DialogPopup,
   DialogTitle,
 } from "./ui/dialog";
+import { Spinner } from "./ui/spinner";
 
 export type RequestProviderUsageReset = (
   input: ProviderUsageResetInput,
@@ -65,6 +67,8 @@ export function ProviderUsageResetButton(props: {
   const inFlight = useRef(false);
   const generation = useRef(0);
   const provider = props.provider;
+  // Fast reads show no indicator at all (docs/style-guide.md §9).
+  const showBusy = useDelayedFlag(busy);
   const visible =
     provider?.enabled &&
     provider.driver === "codex" &&
@@ -175,54 +179,53 @@ export function ProviderUsageResetButton(props: {
             </DialogDescription>
           </DialogHeader>
           <DialogPanel className="space-y-4 text-sm">
-            {busy ? (
+            {showBusy ? (
               <p role="status" className="flex items-center gap-2 text-muted-foreground">
-                <LoaderCircleIcon className="size-4 animate-spin" />
-                {result?.confirmationId
-                  ? "Confirming reset…"
-                  : "Checking current usage and resets…"}
+                <Spinner aria-hidden="true" className="size-4" />
+                {result?.confirmationId ? "Confirming reset…" : "Checking usage…"}
               </p>
             ) : null}
             {result?.outcome ? <p role="status">{OUTCOME_TEXT[result.outcome]}</p> : null}
-            {result && !busy ? (
+            {/* Keep the last read visible while a confirmation is in flight so
+                the dialog does not empty out and jump. */}
+            {result ? (
               <>
-                <div className="space-y-1 rounded-lg border bg-muted/30 p-3">
+                <div className="space-y-1 rounded-xl border border-border-subtle bg-muted/30 p-3">
                   {quota ? (
                     <ProviderAccountQuotaDetails
                       presentation={{ ...quota, resetAvailability: null }}
                     />
                   ) : null}
-                  <p className="font-medium">
+                  <p className="font-medium tabular-nums">
                     {count === undefined
-                      ? "Reset availability unavailable"
+                      ? "Reset count not reported"
                       : `${count} usage limit ${count === 1 ? "reset" : "resets"} available`}
                   </p>
                 </div>
                 {!finished && !result.retrying && canRedeem ? (
                   <p>
-                    This spends one of your earned resets to reset eligible Codex usage limits. It
-                    cannot be undone.
+                    This spends one of your earned resets on eligible Codex limits and can&apos;t be
+                    undone.
                   </p>
                 ) : null}
-                {!finished && !result.retrying && !canRedeem ? (
+                {!busy && !finished && !result.retrying && !canRedeem ? (
                   <p>
                     {count === 0
-                      ? "You have no earned resets available. You can wait for the scheduled usage reset."
+                      ? "You have no earned resets available. Your limits reset on schedule."
                       : count === undefined
-                        ? "Codex did not report reset availability. Try refreshing or updating Codex."
-                        : "Your usage is no longer below 5% remaining. No reset is needed here."}
+                        ? "Codex didn't report reset availability. Try refreshing or updating Codex."
+                        : "Usage is above 5% remaining, so no reset is needed."}
                   </p>
                 ) : null}
-                {result.retrying && !error ? (
+                {!busy && result.retrying && !error ? (
                   <p>
-                    An earlier reset has an unconfirmed result. Retry that same attempt to check it
+                    An earlier reset&apos;s result is unconfirmed. Retry the same reset to check it
                     safely.
                   </p>
                 ) : null}
                 {finished && !result.rateLimits ? (
                   <p>
-                    The result is confirmed, but fresh usage is unavailable. Refresh usage to check
-                    the updated limits.
+                    Confirmed, but updated usage isn&apos;t available yet. Refresh usage to check.
                   </p>
                 ) : null}
               </>

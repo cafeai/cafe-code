@@ -13,7 +13,6 @@
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  border: 1px solid var(--border);
 }
 .desk-pane > * {
   min-height: 0;
@@ -43,12 +42,44 @@
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  height: 1.9rem;
+  height: 2.75rem;
   min-width: 0;
   border-bottom: 1px solid var(--border);
-  background: color-mix(in srgb, var(--card) 82%, transparent);
+  /* Chrome sits one surface step below the chat; the selected tab takes the
+     chat's own background so it reads as attached to the content below. */
+  background: color-mix(in srgb, var(--sunken) 88%, transparent);
   backdrop-filter: blur(12px);
-  font-size: 0.72rem;
+  font-size: var(--text-sm);
+  line-height: var(--text-sm--line-height);
+}
+.desk-header-controls {
+  display: contents;
+}
+.desk-group-bar[data-desktop-titlebar="true"] {
+  height: max(var(--app-titlebar-height), 2.75rem);
+}
+/* Native geometry describes the usable window titlebar. Subtract this pane's
+   actual window-edge gaps so only controls overlapping it consume tab space. */
+.wco .desk-group-bar[data-desktop-titlebar="true"] {
+  height: max(var(--app-titlebar-height), 2.75rem, env(titlebar-area-height, 40px));
+  padding-left: max(
+    0px,
+    calc(var(--app-titlebar-area-x, env(titlebar-area-x, 0px)) - var(--desk-window-left-gap, 0px))
+  );
+  padding-right: max(
+    0px,
+    calc(
+      100vw - var(--app-titlebar-area-width, env(titlebar-area-width, calc(100vw - 138px))) -
+        var(--app-titlebar-area-x, env(titlebar-area-x, 0px)) - var(--desk-window-right-gap, 0px)
+    )
+  );
+}
+.desk-group-bar[data-window-left="false"] [data-sidebar="trigger"],
+.desk-group-bar[data-window-top="false"] [data-sidebar="trigger"] {
+  display: none;
+}
+.desk-group-bar.drag-region .desk-tab-cell {
+  -webkit-app-region: no-drag;
 }
 .desk-icon,
 .desk-group-name,
@@ -59,26 +90,44 @@
   height: 100%;
   color: var(--muted-foreground);
   flex: 0 0 auto;
+  transition:
+    color var(--duration-fast) var(--ease-out),
+    background-color var(--duration-fast) var(--ease-out);
 }
 .desk-icon {
-  width: 1.6rem;
+  width: 2rem;
 }
-.desk-icon:hover,
+.desk-icon:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.desk-icon:not(:disabled):hover,
 .desk-group-name:hover,
 .desk-tab-action:hover {
   color: var(--foreground);
   background: var(--accent);
+}
+.desk-group-identity {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  height: 1.75rem;
+  margin: 0 0.5rem;
+  padding-inline-start: 0.25rem;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--secondary);
 }
 .desk-group-name {
   max-width: 6rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  padding: 0 0.35rem;
-  border-right: 1px solid var(--border);
+  padding: 0 0.75rem;
 }
 .desk-group-grip {
-  width: 1rem;
+  width: 0.75rem;
   cursor: grab;
   touch-action: none;
 }
@@ -111,19 +160,29 @@
   bottom: 0.15rem;
   left: 0;
   width: 2px;
+  border-radius: 9999px;
   background: var(--primary);
   box-shadow: 0 0 0.3rem color-mix(in srgb, var(--primary) 45%, transparent);
+  /* Opacity only: the marker is zero-width so it never shifts tab geometry. */
+  animation: cafe-enter-fade var(--duration-fast) var(--ease-out) both;
 }
 .desk-tab-cell {
   display: flex;
   flex: 0 0 auto;
   min-width: 6rem;
   max-width: 15rem;
-  border-right: 1px solid var(--border);
+  border-right: 1px solid var(--border-subtle);
   border-bottom: 1px solid transparent;
+  transition:
+    background-color var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out),
+    opacity var(--duration-fast) var(--ease-out);
+}
+.desk-tab-cell:not([data-selected="true"]):hover {
+  background: var(--accent);
 }
 .desk-tab-cell[data-selected="true"] {
-  background: color-mix(in srgb, var(--accent) 50%, transparent);
+  background: var(--background);
   border-bottom-color: var(--primary);
 }
 .desk-tab-cell[data-dragging="true"] {
@@ -132,12 +191,17 @@
 .desk-tab {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  /* The status dot shell supplies its own trailing margin when visible. */
+  gap: 0.25rem;
   min-width: 0;
-  padding: 0 0.5rem;
+  padding: 0 0.625rem;
   color: var(--muted-foreground);
   text-align: left;
   touch-action: none;
+  transition: color var(--duration-fast) var(--ease-out);
+}
+.desk-tab:hover {
+  color: var(--foreground);
 }
 .desk-tab[aria-selected="true"] {
   color: var(--foreground);
@@ -147,30 +211,19 @@
   white-space: nowrap;
   text-overflow: ellipsis;
 }
+
+.desk-tab[data-preview="true"] .desk-tab-title {
+  font-style: italic;
+}
 .desk-tab-action {
-  width: 1.2rem;
-}
-.desk-status {
-  width: 0.3rem;
-  height: 0.3rem;
-  flex-shrink: 0;
-  border-radius: 50%;
-  background: var(--muted-foreground);
-  opacity: 0.5;
-}
-.desk-status[data-working="true"] {
-  background: #57bfd3;
-  opacity: 1;
-}
-.desk-status[data-attention="true"] {
-  background: #e6b85c;
-  opacity: 1;
+  width: 1.75rem;
 }
 .desk-divider {
   position: absolute;
   z-index: 5;
   touch-action: none;
   outline: none;
+  transition: background-color var(--duration-fast) var(--ease-out);
 }
 .desk-divider[data-axis="x"] {
   width: 5px;
@@ -186,6 +239,10 @@
 .desk-divider:focus-visible {
   background: color-mix(in srgb, var(--primary) 60%, transparent);
 }
+/* The preview always covers the whole pane and shrinks toward the target edge
+   with scale, so moving between center and edges glides on the compositor
+   instead of relaying out. Halved axes get a 2px border that scales back to
+   the same visual 1px. It fades in when a drag first enters the pane. */
 .desk-drop-hint {
   position: absolute;
   inset: 0;
@@ -193,18 +250,36 @@
   z-index: 15;
   border: 1px solid var(--primary);
   background: color-mix(in srgb, var(--primary) 12%, transparent);
+  /* A fixed top-left origin lets left<->right and top<->bottom glide via
+     translate instead of jumping when the origin flips. */
+  transform-origin: 0 0;
+  scale: 1;
+  translate: 0 0;
+  transition:
+    scale var(--duration-base) var(--ease-out),
+    translate var(--duration-base) var(--ease-out);
+  animation: cafe-enter-fade var(--duration-fast) var(--ease-out) both;
 }
-.desk-drop-hint[data-edge="left"] {
-  right: 50%;
+.desk-drop-hint[data-edge="left"],
+.desk-drop-hint[data-edge="right"] {
+  scale: 0.5 1;
+  border-inline-width: 2px;
 }
 .desk-drop-hint[data-edge="right"] {
-  left: 50%;
+  translate: 50% 0;
 }
-.desk-drop-hint[data-edge="top"] {
-  bottom: 50%;
+.desk-drop-hint[data-edge="top"],
+.desk-drop-hint[data-edge="bottom"] {
+  scale: 1 0.5;
+  border-block-width: 2px;
 }
 .desk-drop-hint[data-edge="bottom"] {
-  top: 50%;
+  translate: 0 50%;
+}
+@media (prefers-reduced-motion: reduce) {
+  .desk-drop-hint {
+    transition: none;
+  }
 }
 .desk-group-switcher {
   display: flex;
@@ -212,24 +287,27 @@
   min-width: 0;
   overflow-x: auto;
   border-bottom: 1px solid var(--border);
-  font-size: 0.75rem;
+  font-size: var(--text-xs);
+  line-height: var(--text-xs--line-height);
 }
 .desk-group-switcher button {
   padding: 0.25rem 0.65rem;
   white-space: nowrap;
-  border-right: 1px solid var(--border);
+  color: var(--muted-foreground);
+  border-right: 1px solid var(--border-subtle);
+  transition:
+    color var(--duration-fast) var(--ease-out),
+    background-color var(--duration-fast) var(--ease-out);
+}
+.desk-group-switcher button:not(:disabled):hover {
+  color: var(--foreground);
+}
+.desk-group-switcher button:disabled {
+  opacity: 0.5;
 }
 .desk-group-switcher button[aria-pressed="true"] {
+  color: var(--foreground);
   background: var(--accent);
-}
-.desk-empty-actions {
-  position: absolute;
-  bottom: 15%;
-  left: 0;
-  right: 0;
-  display: flex;
-  justify-content: center;
-  gap: 0.5rem;
 }
 .desk-overflow-row {
   display: flex;
@@ -237,16 +315,35 @@
   justify-content: space-between;
   gap: 1rem;
   width: 100%;
-  padding: 0.45rem;
+  min-height: 2rem;
+  padding: 0.375rem 0.5rem;
+  border-radius: var(--radius-sm);
   text-align: left;
-  font-size: 0.8rem;
+  font-size: var(--text-ui);
+  line-height: var(--text-ui--line-height);
+  transition: background-color var(--duration-fast) var(--ease-out);
 }
 .desk-overflow-row:hover,
 .desk-overflow-row:focus-visible {
   background: var(--accent);
 }
 .desk-overflow-row small {
-  color: var(--muted-foreground);
+  font-size: var(--text-2xs);
+  color: var(--subtle-foreground);
+}
+/* One title per view (docs/style-guide.md §5): inside a Desk pane the tab
+   strip already names the chat, so the header keeps the title only for
+   assistive technology and shows its project context and actions. */
+.desk-pane [data-chat-header-title] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border-width: 0;
 }
 .desk-group-bar button:focus-visible {
   outline: 1px solid var(--ring);

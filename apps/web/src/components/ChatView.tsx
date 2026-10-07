@@ -7,6 +7,7 @@ import {
   type DesktopRendererDebugSnapshot,
   MessageId,
   CommandId,
+  EventId,
   type ModelSelection,
   type ProjectId,
   type ProviderApprovalDecision,
@@ -135,7 +136,7 @@ import { resolveShortcutCommand } from "../keybindings";
 import PlanSidebar from "./PlanSidebar";
 import { SessionRail } from "./chat/SessionRail";
 import { ComposerAsyncQuestionsPanel } from "./chat/ComposerAsyncQuestionsPanel";
-import { persistExactAsyncQuestionAnswer } from "./chat/asyncQuestions";
+import { persistExactAsyncQuestionAnswer, type AsyncQuestion } from "./chat/asyncQuestions";
 import { ChevronDownIcon, TriangleAlertIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
 import { stackedThreadToast, toastManager } from "./ui/toast";
@@ -480,7 +481,9 @@ function formatOutgoingPrompt(params: {
   const promptEffort = resolvePromptInjectedEffort(caps, params.effort);
   return applyClaudePromptEffortPrefix(params.text, promptEffort);
 }
-type ChatViewProps = { readonly navigationSlot?: ReactNode } & (
+type ChatViewProps = {
+  readonly navigationSlot?: ((controls: ReactNode) => ReactNode) | undefined;
+} & (
   | {
       environmentId: EnvironmentId;
       threadId: ThreadId;
@@ -1286,9 +1289,9 @@ export default function ChatView(props: ChatViewProps) {
     },
     [],
   );
-  const dispatchFollowUpTurnStartRef = useRef<((item: FollowUpQueueItem) => Promise<void>) | null>(
-    null,
-  );
+  const dispatchFollowUpTurnStartRef = useRef<
+    ((item: FollowUpQueueItem, options?: { independentAnswer?: boolean }) => Promise<void>) | null
+  >(null);
   const dispatchQueuedSteerRetryRef = useRef<((item: FollowUpQueueItem) => Promise<void>) | null>(
     null,
   );
@@ -4478,9 +4481,15 @@ export default function ChatView(props: ChatViewProps) {
 
   const enqueueFollowUpSnapshot = async (
     snapshot: ComposerSendSnapshot,
-    options: { readonly preserveComposer?: boolean; readonly id?: string } = {},
+    options: {
+      readonly preserveComposer?: boolean;
+      readonly id?: string;
+      readonly activate?: boolean;
+    } = {},
   ): Promise<boolean> => {
     if (!activeThread || sendInFlightRef.current || queueDispatchInFlightRef.current) return false;
+    const stopGenerationAtAdmission =
+      manualStopGenerationByThreadIdRef.current[activeThread.id] ?? 0;
     const composerContentAtAdmission = useComposerDraftStore
       .getState()
       .getComposerDraft(composerDraftTarget);
@@ -4508,7 +4517,22 @@ export default function ChatView(props: ChatViewProps) {
       // An uncertain answer receipt permits only an exact text retry. A second
       // view must never overwrite another answer or reuse its accepted command
       // identity with changed text, even when that item is already claimed.
-      if (existing) return existing.promptText === snapshot.promptText;
+      if (existing) {
+        if (existing.promptText !== snapshot.promptText) return false;
+        if (options.activate && existing.dispatchState === "pending" && phase === "running") {
+          const item: FollowUpQueueItem = {
+            ...snapshot,
+            id: existing.id,
+            environmentId: activeThread.environmentId,
+            threadId: activeThread.id,
+            queuedAt: existing.queuedAt,
+            expanded: false,
+            blockedReason: existing.blockedReason,
+          };
+          await dispatchSteerSnapshot(item, { queuedItem: item, independentAnswer: true });
+        }
+        return true;
+      }
     }
     const queuedAt = new Date().toISOString();
     const item: FollowUpQueueItem = {
@@ -4538,18 +4562,39 @@ export default function ChatView(props: ChatViewProps) {
       return false;
     }
     if (options.id && saved.value === "claimed") return true;
+    const stoppedDuringPersistence =
+      options.activate &&
+      (manualStopGenerationByThreadIdRef.current[item.threadId] ?? 0) !== stopGenerationAtAdmission;
+    let acceptedItem: FollowUpQueueItem = { ...item, dispatchState: "pending" };
+    if (stoppedDuringPersistence) {
+      acceptedItem = {
+        ...acceptedItem,
+        blockedReason: "Stopped before sending. Select this queued message to send it.",
+      };
+      const parked = await queuePersistence.replacePending(item, acceptedItem);
+      if (!parked.ok) {
+        setThreadError(item.threadId, parked.error);
+        return false;
+      }
+    }
     // The saved queue remains authoritative if routing changed during storage
     // I/O. Its normal hydration owns the next view's environment-specific state.
     if (currentRouteThreadKeyRef.current !== routeThreadKey) return true;
     setFollowUpQueueByThreadId((current) => ({
       ...current,
-      [activeThread.id]: [
-        ...(current[activeThread.id] ?? []),
-        { ...item, dispatchState: "pending" },
-      ],
+      [activeThread.id]: [...(current[activeThread.id] ?? []), acceptedItem],
     }));
     setThreadError(activeThread.id, null);
     if (!options.preserveComposer) clearActiveComposerContent(composerContentAtAdmission);
+    if (options.activate && !stoppedDuringPersistence) {
+      updateManualStopBarrier(item.threadId, null);
+      if (phase === "running")
+        await dispatchSteerSnapshot(acceptedItem, {
+          queuedItem: acceptedItem,
+          independentAnswer: true,
+        });
+      else await dispatchFollowUpTurnStartRef.current?.(acceptedItem, { independentAnswer: true });
+    }
     return true;
   };
 
@@ -4586,8 +4631,34 @@ export default function ChatView(props: ChatViewProps) {
         runtimeMode,
         interactionMode,
       },
-      { preserveComposer: true, id: messageId },
+      { preserveComposer: true, id: messageId, activate: true },
     );
+  };
+
+  const resolveAsyncQuestions = async (questions: readonly AsyncQuestion[]): Promise<boolean> => {
+    const api = readEnvironmentApi(environmentId);
+    if (!api || !activeThread || !isServerThread) return false;
+    const groups = new Map<string, number[]>();
+    for (const question of questions) {
+      if (!question.activityId || question.questionIndex === undefined) return false;
+      const indexes = groups.get(question.activityId) ?? [];
+      indexes.push(question.questionIndex);
+      groups.set(question.activityId, indexes);
+    }
+    try {
+      for (const [activityId, questionIndexes] of groups)
+        await api.orchestration.dispatchCommand({
+          type: "thread.async-questions.resolve",
+          commandId: newCommandId(),
+          threadId: activeThread.id,
+          activityId: EventId.make(activityId),
+          questionIndexes,
+          createdAt: new Date().toISOString(),
+        });
+      return true;
+    } catch {
+      return false;
+    }
   };
 
   const removeFollowUpQueueItem = (targetThreadId: ThreadId, itemId: string, revoke: boolean) => {
@@ -4632,7 +4703,10 @@ export default function ChatView(props: ChatViewProps) {
     });
   };
 
-  const dispatchFollowUpTurnStart = async (item: FollowUpQueueItem) => {
+  const dispatchFollowUpTurnStart = async (
+    item: FollowUpQueueItem,
+    options?: { independentAnswer?: boolean },
+  ) => {
     if (!ownsQueuedThread(item.environmentId, item.threadId)) return;
     if (manualStopBarrierByThreadIdRef.current[item.threadId] !== undefined) return;
     // A Stop followed by a newer explicit input may clear the visible barrier
@@ -4651,6 +4725,7 @@ export default function ChatView(props: ChatViewProps) {
     )
       return;
     if (
+      !options?.independentAnswer &&
       useComposerDraftStore
         .getState()
         .getComposerDraft(scopeThreadRef(item.environmentId, item.threadId))?.queueEditingItemId
@@ -4940,7 +5015,7 @@ export default function ChatView(props: ChatViewProps) {
 
   const dispatchSteerSnapshot = async (
     snapshot: ComposerSendSnapshot,
-    options?: { queuedItem?: FollowUpQueueItem },
+    options?: { queuedItem?: FollowUpQueueItem; independentAnswer?: boolean },
   ) => {
     const api = readEnvironmentApi(environmentId);
     if (!api || !activeThread) return;
@@ -4949,7 +5024,10 @@ export default function ChatView(props: ChatViewProps) {
       (options?.queuedItem?.automaticSteerRetry && options.queuedItem.blockedReason !== null)
     )
       return;
-    if (useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)?.queueEditingItemId)
+    if (
+      !options?.independentAnswer &&
+      useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)?.queueEditingItemId
+    )
       return;
     if (sendInFlightRef.current || queueDispatchInFlightRef.current) return;
     const composerContentAtAdmission = useComposerDraftStore
@@ -5595,7 +5673,7 @@ export default function ChatView(props: ChatViewProps) {
         } else if (snapshot.files[0]) {
           titleSeed = `File: ${snapshot.files[0].name}`;
         } else {
-          titleSeed = "New thread";
+          titleSeed = "New chat";
         }
       }
       const title = truncate(titleSeed);
@@ -7073,8 +7151,8 @@ export default function ChatView(props: ChatViewProps) {
   const currentForkOwner = useRef({
     thread: activeThread,
     foreground: pane.active && pane.visible,
+    available: false,
   });
-  currentForkOwner.current = { thread: activeThread, foreground: pane.active && pane.visible };
   const forkOwnerMounted = useRef(true);
   useEffect(() => {
     forkOwnerMounted.current = true;
@@ -7088,10 +7166,28 @@ export default function ChatView(props: ChatViewProps) {
       ? pending.has(messageForkAdmissionKey(activeThread.environmentId, activeThread.id))
       : false,
   );
+  const messageForkAvailable =
+    isServerThread &&
+    activeThread?.session?.provider === "claudeAgent" &&
+    activeThread.session.status === "ready" &&
+    activeThread.session.providerInstanceId === activeThread.modelSelection.instanceId &&
+    !activeEnvironmentUnavailable &&
+    !isWorking &&
+    latestTurnSettled &&
+    !isForkingMessage &&
+    activeSubagentEntries.length === 0 &&
+    pendingApprovals.length === 0 &&
+    pendingUserInputs.length === 0;
+  currentForkOwner.current = {
+    thread: activeThread,
+    foreground: pane.active && pane.visible,
+    available: messageForkAvailable,
+  };
   const onSelectForkMessage = useCallback((messageId: MessageId) => {
-    const { thread, foreground } = currentForkOwner.current;
+    const { thread, foreground, available } = currentForkOwner.current;
     if (
       !foreground ||
+      !available ||
       !thread ||
       thread.session?.provider !== "claudeAgent" ||
       useMessageForkAdmission
@@ -7120,6 +7216,7 @@ export default function ChatView(props: ChatViewProps) {
       if (
         !forkOwnerMounted.current ||
         !owner.foreground ||
+        !owner.available ||
         owner.thread?.id !== selection.threadId ||
         owner.thread.environmentId !== selection.environmentId ||
         !api ||
@@ -7317,6 +7414,20 @@ export default function ChatView(props: ChatViewProps) {
   const shouldRenderRightColumn =
     (shouldRenderPlanSidebar && !shouldUsePlanSidebarSheet) || sessionRailVisible;
 
+  const headerControls = (
+    <ChatHeader
+      compact={Boolean(props.navigationSlot)}
+      activeThreadEnvironmentId={activeThread.environmentId}
+      activeThreadTitle={activeThread.title}
+      activeProjectName={activeProject?.name}
+      isGitRepo={isGitRepo}
+      openInCwd={gitCwd}
+      keybindings={keybindings}
+      availableEditors={availableEditors}
+      terminal={terminal}
+    />
+  );
+
   return (
     <div
       ref={paneElementRef}
@@ -7327,24 +7438,16 @@ export default function ChatView(props: ChatViewProps) {
       <header
         data-chat-view-header="true"
         className={cn(
-          "border-b border-border group-has-[[data-chat-composer-keyboard-open=true]]/chat-view:hidden",
-          isElectron
-            ? "drag-region flex h-[52px] items-center px-3 sm:px-5 wco:h-[env(titlebar-area-height)] wco:pr-[calc(100vw-env(titlebar-area-width)-env(titlebar-area-x)+1em)]"
-            : "pb-2 pl-[calc(env(safe-area-inset-left)+0.75rem)] pr-[calc(env(safe-area-inset-right)+0.75rem)] pt-2 sm:pb-3 sm:pl-[calc(env(safe-area-inset-left)+1.25rem)] sm:pr-[calc(env(safe-area-inset-right)+1.25rem)] sm:pt-3",
+          "group-has-[[data-chat-composer-keyboard-open=true]]/chat-view:hidden",
+          props.navigationSlot
+            ? "shrink-0"
+            : isElectron
+              ? "border-b border-border drag-region flex h-[52px] items-center px-3 sm:px-5 wco:h-[env(titlebar-area-height)] wco:pr-[calc(100vw-env(titlebar-area-width)-env(titlebar-area-x)+1em)]"
+              : "border-b border-border pb-2 pl-[calc(env(safe-area-inset-left)+0.75rem)] pr-[calc(env(safe-area-inset-right)+0.75rem)] pt-2 sm:pb-3 sm:pl-[calc(env(safe-area-inset-left)+1.25rem)] sm:pr-[calc(env(safe-area-inset-right)+1.25rem)] sm:pt-3",
         )}
       >
-        <ChatHeader
-          activeThreadEnvironmentId={activeThread.environmentId}
-          activeThreadTitle={activeThread.title}
-          activeProjectName={activeProject?.name}
-          isGitRepo={isGitRepo}
-          openInCwd={gitCwd}
-          keybindings={keybindings}
-          availableEditors={availableEditors}
-          terminal={terminal}
-        />
+        {props.navigationSlot ? props.navigationSlot(headerControls) : headerControls}
       </header>
-      {props.navigationSlot}
       {pane.active &&
       pane.visible &&
       messageForkSelection &&
@@ -7356,9 +7459,7 @@ export default function ChatView(props: ChatViewProps) {
           messageId={messageForkSelection.messageId}
           accountLabel={activeProviderStatus?.displayName ?? "this Claude account"}
           busy={isForkingMessage}
-          disabled={
-            activeEnvironmentUnavailable || isWorking || !latestTurnSettled || isRevertingCheckpoint
-          }
+          disabled={!messageForkAvailable}
           onClose={() =>
             setMessageForkSelection((current) =>
               current === messageForkSelection ? null : current,
@@ -7416,7 +7517,7 @@ export default function ChatView(props: ChatViewProps) {
                   ? onSelectForkMessage
                   : undefined
               }
-              messageForkDisabled={activeEnvironmentUnavailable || !latestTurnSettled}
+              messageForkDisabled={!messageForkAvailable}
               isRevertingCheckpoint={isRevertingCheckpoint}
               onImageExpand={onExpandTimelineImage}
               activeProvider={activeThread.session?.provider ?? null}
@@ -7447,7 +7548,9 @@ export default function ChatView(props: ChatViewProps) {
                 <button
                   type="button"
                   onClick={() => scrollToEnd(true)}
-                  className="pointer-events-auto flex items-center gap-1.5 rounded-full border border-border/60 bg-card px-3 py-1 text-muted-foreground text-xs shadow-sm transition-colors hover:border-border hover:text-foreground hover:cursor-pointer"
+                  // The rise lives on the button, not the wrapper: the wrapper's
+                  // -translate-x-1/2 centring uses the same `translate` property.
+                  className="pointer-events-auto flex items-center gap-1.5 rounded-full border border-border bg-raised px-3 py-1 text-muted-foreground text-xs shadow-sm transition-colors duration-(--duration-fast) hover:border-border-strong hover:text-foreground hover:cursor-pointer animate-enter-rise"
                 >
                   <ChevronDownIcon className="size-3.5" />
                   Scroll to bottom
@@ -7478,6 +7581,7 @@ export default function ChatView(props: ChatViewProps) {
                   isSendBusy || isComposerConnecting || activeEnvironmentUnavailable
                 }
                 onAnswer={enqueueAsyncQuestionAnswer}
+                onResolve={resolveAsyncQuestions}
               />
             )}
             <div className="relative isolate">
@@ -7627,7 +7731,7 @@ export default function ChatView(props: ChatViewProps) {
 
         {shouldRenderRightColumn ? (
           <div
-            className="flex min-h-0 w-[340px] shrink-0 flex-col border-l border-border/70 bg-card/50"
+            className="flex min-h-0 w-[340px] shrink-0 flex-col border-l border-border-subtle bg-card animate-enter-from-end"
             style={
               sharedChatRuntime
                 ? { width: Math.min(340, Math.max(220, (paneWidth ?? 660) / 3)) }

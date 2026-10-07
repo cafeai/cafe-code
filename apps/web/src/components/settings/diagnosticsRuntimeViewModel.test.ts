@@ -3,6 +3,7 @@ import type { ServerRuntimeLayerDiagnosticsResult } from "@cafecode/contracts";
 
 import {
   formatRuntimeLayerRole,
+  formatRuntimeLayerStatus,
   runtimeLayerStatusTone,
   sortRuntimeLayers,
   summarizeRuntimeCpu,
@@ -12,7 +13,10 @@ import {
 
 describe("diagnosticsRuntimeViewModel", () => {
   it("formats runtime layer labels and status tones", () => {
-    expect(formatRuntimeLayerRole("provider-daemon")).toBe("Provider Daemon");
+    expect(formatRuntimeLayerRole("provider-daemon")).toBe("Provider daemon");
+    expect(formatRuntimeLayerRole("backend")).toBe("Backend");
+    expect(formatRuntimeLayerStatus("not-configured")).toBe("Not configured");
+    expect(formatRuntimeLayerStatus("online")).toBe("Online");
     expect(runtimeLayerStatusTone("online")).toBe("default");
     expect(runtimeLayerStatusTone("degraded")).toBe("warning");
     expect(runtimeLayerStatusTone("unknown")).toBe("warning");
@@ -126,7 +130,7 @@ describe("diagnosticsRuntimeViewModel", () => {
       {
         source: "provider-runtime-ingestion",
         message:
-          "Provider daemon is 1250 runtime events ahead of backend ingestion. Provider output may still be running while chat projection catches up.",
+          "Backend ingestion is 1250 provider daemon events behind; chats may lag provider output.",
       },
     ]);
   });

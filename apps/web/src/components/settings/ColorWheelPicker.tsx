@@ -41,7 +41,7 @@ export function ColorWheelPicker(props: {
         <span className="pointer-events-none relative flex size-6 items-center justify-center rounded-full bg-[conic-gradient(from_40deg,#ef4444,#f97316,#facc15,#22c55e,#06b6d4,#3b82f6,#8b5cf6,#ef4444)] shadow-inner shadow-black/15">
           <span className="absolute inset-1 rounded-full bg-background/92" />
           <PaletteIcon
-            className="relative size-3.5 text-foreground/78"
+            className="relative size-3.5 text-muted-foreground"
             strokeWidth={2.2}
             aria-hidden="true"
           />

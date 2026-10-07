@@ -52,6 +52,10 @@ export function TaskAtriumOverlay() {
           // the fallback matches DesktopWindow's 40px caption configuration.
           className={cn(
             "fixed inset-0 z-[60] flex flex-col bg-background outline-none [-webkit-app-region:no-drag]",
+            // Fade + slight scale in, a faster fade out (docs/style-guide.md
+            // §8). Reduced motion drops the scale globally and keeps the fade.
+            // The popup stays full-window and modal throughout.
+            "transition-[opacity,scale] duration-[180ms] ease-out data-ending-style:scale-[0.99] data-ending-style:opacity-0 data-ending-style:duration-(--duration-fast) data-ending-style:ease-in data-starting-style:scale-[0.985] data-starting-style:opacity-0",
             reserveNativeTitlebar &&
               "wco:[--cafe-atrium-titlebar-inset:calc(env(titlebar-area-y,0px)+env(titlebar-area-height,40px))] pt-[var(--cafe-atrium-titlebar-inset,0px)]",
           )}
@@ -68,7 +72,7 @@ export function TaskAtriumOverlay() {
         >
           <DialogPrimitive.Close
             aria-label="Close Task Atrium"
-            className="absolute right-4 top-[calc(var(--cafe-atrium-titlebar-inset,0px)+1rem)] z-30 flex size-8 items-center justify-center rounded-full border border-white/15 bg-black/35 text-white/80 backdrop-blur-md transition-colors hover:bg-black/50 hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white/60 dark:border-white/15"
+            className="focus-ring absolute right-4 top-[calc(var(--cafe-atrium-titlebar-inset,0px)+1rem)] z-30 flex size-8 items-center justify-center rounded-full border border-border bg-card/60 text-muted-foreground backdrop-blur-md transition-colors duration-(--duration-fast) hover:bg-card hover:text-foreground"
           >
             <X className="size-4" />
           </DialogPrimitive.Close>
