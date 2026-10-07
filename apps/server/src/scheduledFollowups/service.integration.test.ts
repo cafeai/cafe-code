@@ -61,7 +61,9 @@ function provider(driver: string): ServerProvider {
     status: "ready",
     auth: { status: "authenticated" },
     checkedAt: INITIAL,
-    availability: "available",
+    // Built-in Codex, Claude and Grok snapshots omit this optional field.
+    // Match those production producers here so successful scheduling cannot
+    // depend on a synthetic explicit "available" value that they never send.
     models: ["test-model", "test-override"].map((slug) => ({
       slug,
       name: slug,
@@ -529,6 +531,140 @@ async function waitForBarrier(promise: Promise<void>) {
 }
 
 describe("scheduled follow-up real-SQL service", () => {
+  it.each(
+    (["codex", "claudeAgent", "grok"] as const).flatMap((driver) =>
+      (["omitted", "available", "unavailable"] as const).map((availability) => ({
+        driver,
+        availability,
+      })),
+    ),
+  )("honors $driver cached availability when $availability", async ({ driver, availability }) => {
+    const h = await harness();
+    const threadId = await h.createThread(`availability-${driver}-${availability}`, driver);
+    const before = await h.shell(threadId);
+    const schedule = await h.run(h.service.save({ ...draft, threadId }));
+    const snapshot = provider(driver);
+    expect(Object.hasOwn(snapshot, "availability")).toBe(false);
+    h.setProviders([
+      availability === "omitted"
+        ? snapshot
+        : availability === "available"
+          ? { ...snapshot, availability }
+          : {
+              // A missing-driver shadow cannot claim an installed or enabled
+              // runtime. Preserve that contract while qualifying rejection.
+              ...snapshot,
+              availability,
+              installed: false,
+              enabled: false,
+            },
+    ]);
+    h.setTime(FIVE_MINUTES);
+    await h.run(h.service.tick);
+    const [occurrence] = (await h.history(schedule)).runs;
+    expect(occurrence).toBeDefined();
+    const [ledger] = await h.run(
+      h.sql<{
+        attempt_at: string | null;
+        turn_id: string | null;
+      }>`SELECT attempt_at,turn_id FROM scheduled_followup_runs WHERE id = ${occurrence!.id}`,
+    );
+    // This real-SQL harness ends at durable command admission. Neither the
+    // accepting nor rejecting branch may invoke a provider or count a spend.
+    expect(ledger).toMatchObject({ attempt_at: null, turn_id: null });
+    const [receipt] = await h.run(
+      h.sql<{
+        status: string;
+      }>`SELECT status FROM orchestration_command_receipts WHERE command_id = ${occurrence!.commandId}`,
+    );
+    if (availability === "unavailable") {
+      expect(occurrence).toMatchObject({
+        state: "failed",
+        errorCode: "provider-unavailable",
+        intentSequence: null,
+      });
+      expect(receipt).toBeUndefined();
+      expect((await h.read(threadId)).schedules[0]).toMatchObject({
+        state: "needs_attention",
+        nextRunAt: null,
+        runCount: 0,
+      });
+    } else {
+      expect(occurrence).toMatchObject({ state: "dispatching", errorCode: null });
+      expect(occurrence?.intentSequence).toBeGreaterThan(0);
+      expect(receipt?.status).toBe("accepted");
+      expect((await h.read(threadId)).schedules[0]).toMatchObject({ state: "active", runCount: 0 });
+    }
+    expect((await h.shell(threadId)).modelSelection).toEqual(before.modelSelection);
+    expect((await h.shell(threadId)).runtimeMode).toBe(before.runtimeMode);
+  });
+
+  it.each(
+    (["codex", "claudeAgent", "grok"] as const).flatMap((driver) =>
+      (
+        [
+          "not-installed",
+          "disabled",
+          "missing",
+          "model-mismatch",
+          "inconsistent-unavailable",
+        ] as const
+      ).map((failure) => ({ driver, failure })),
+    ),
+  )("retains $driver pre-dispatch rejection for $failure", async ({ driver, failure }) => {
+    const h = await harness();
+    const threadId = await h.createThread(`provider-gate-${driver}-${failure}`, driver);
+    const before = await h.shell(threadId);
+    const schedule = await h.run(h.service.save({ ...draft, threadId }));
+    const snapshot = provider(driver);
+    h.setProviders(
+      failure === "missing"
+        ? []
+        : [
+            {
+              ...snapshot,
+              ...(failure === "not-installed" ? { installed: false } : {}),
+              ...(failure === "disabled" ? { enabled: false } : {}),
+              ...(failure === "model-mismatch" ? { models: [] } : {}),
+              // Even a contradictory cache claiming an installed, enabled
+              // runtime cannot override an explicit missing-driver fence.
+              ...(failure === "inconsistent-unavailable"
+                ? { availability: "unavailable" as const }
+                : {}),
+            },
+          ],
+    );
+    h.setTime(FIVE_MINUTES);
+    await h.run(h.service.tick);
+    const [occurrence] = (await h.history(schedule)).runs;
+    expect(occurrence).toMatchObject({
+      state: "failed",
+      errorCode: "provider-unavailable",
+      intentSequence: null,
+    });
+    const [ledger] = await h.run(
+      h.sql<{
+        attempt_at: string | null;
+        turn_id: string | null;
+        command_json: string | null;
+      }>`SELECT attempt_at,turn_id,command_json FROM scheduled_followup_runs WHERE id = ${occurrence!.id}`,
+    );
+    expect(ledger).toMatchObject({ attempt_at: null, turn_id: null, command_json: null });
+    const [receipt] = await h.run(
+      h.sql<{
+        status: string;
+      }>`SELECT status FROM orchestration_command_receipts WHERE command_id = ${occurrence!.commandId}`,
+    );
+    expect(receipt).toBeUndefined();
+    expect((await h.read(threadId)).schedules[0]).toMatchObject({
+      state: "needs_attention",
+      nextRunAt: null,
+      runCount: 0,
+    });
+    expect((await h.shell(threadId)).modelSelection).toEqual(before.modelSelection);
+    expect((await h.shell(threadId)).runtimeMode).toBe(before.runtimeMode);
+  });
+
   it.each(["codex", "claudeAgent", "grok"])(
     "admits a scheduled %s turn through real receipts without altering chat defaults",
     async (driver) => {

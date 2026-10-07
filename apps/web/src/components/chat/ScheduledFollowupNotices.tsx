@@ -9,6 +9,7 @@ import {
   scheduleAccountLabel,
   scheduleModelLabel,
   scheduleRecurrenceLabel,
+  scheduleRunIssuePresentation,
 } from "./schedulePresentation";
 
 export interface ScheduledFollowupNoticesProps {
@@ -131,6 +132,7 @@ export const ScheduledFollowupNotices = memo(function ScheduledFollowupNotices({
       <div className="space-y-2">
         {records.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE).map((record) => {
           const pending = record.state === "pending_confirmation";
+          const issue = scheduleRunIssuePresentation(record.lastRun);
           const selection = record.modelSelection ?? context.modelSelection;
           const accountMatches = record.authorizedInstanceId === context.modelSelection.instanceId;
           return (
@@ -151,9 +153,13 @@ export const ScheduledFollowupNotices = memo(function ScheduledFollowupNotices({
               {pending ? (
                 <p className="mt-1 text-xs text-muted-foreground">Won’t run until you approve.</p>
               ) : record.state === "needs_attention" ? (
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Review this schedule and its run history before enabling it again.
-                </p>
+                <div className="mt-1 space-y-1 text-xs text-muted-foreground">
+                  {issue ? <p>{issue.reason}</p> : null}
+                  <p>
+                    {issue?.action ??
+                      "Review this schedule and its run history before enabling it again."}
+                  </p>
+                </div>
               ) : null}
               <p className="mt-2 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
                 {scheduleRecurrenceLabel(record)} · Schedule timezone: {record.recurrence.timeZone}

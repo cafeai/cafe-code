@@ -1,13 +1,17 @@
 import "../../index.css";
 
 import {
+  CommandId,
   EnvironmentId,
+  MessageId,
   ProviderDriverKind,
   ProviderInstanceId,
   ScheduledFollowupId,
+  ScheduledFollowupRunId,
   ThreadId,
   type EnvironmentApi,
   type ScheduledFollowupRecord,
+  type ScheduledFollowupRun,
   type ServerProvider,
 } from "@cafecode/contracts";
 import { page, userEvent } from "vitest/browser";
@@ -69,6 +73,27 @@ function proposal(overrides: Partial<ScheduledFollowupRecord> = {}): ScheduledFo
     runCount: 0,
     lastRun: null,
     ...overrides,
+  };
+}
+
+function failedRun(errorCode: string): ScheduledFollowupRun {
+  return {
+    id: ScheduledFollowupRunId.make("22222222-2222-4222-8222-222222222222"),
+    scheduleId: proposal().id,
+    revision: 7,
+    dueAt: now,
+    state: "failed",
+    commandId: CommandId.make("inline-review-failed-command"),
+    messageId: MessageId.make("inline-review-failed-message"),
+    intentSequence: null,
+    turnId: null,
+    modelSelection: null,
+    createdAt: now,
+    startedAt: null,
+    completedAt: now,
+    result: null,
+    summary: null,
+    errorCode,
   };
 }
 
@@ -147,6 +172,63 @@ describe("inline scheduled follow-up owner review", () => {
     vi.restoreAllMocks();
     document.body.innerHTML = "";
   });
+
+  it.each(["provider-unavailable", "private_fixture_token"])(
+    "opens owner review after a sanitized %s explanation without enabling",
+    async (errorCode) => {
+      const saved = proposal({ state: "needs_attention", lastRun: failedRun(errorCode) });
+      const { api } = installApi([saved]);
+      const screen = await render(<ScheduledFollowupConversation context={context} />);
+      try {
+        const notice = page.getByRole("article", {
+          name: `Scheduled follow-up notice: ${saved.name}`,
+        });
+        const reason =
+          errorCode === "provider-unavailable"
+            ? "The saved provider account or selected model was unavailable. This run was not submitted."
+            : "This run failed.";
+        await expect.element(notice.getByText(reason, { exact: true })).toBeVisible();
+        await expect
+          .element(notice.getByText("Account: Personal Codex", { exact: true }))
+          .toBeVisible();
+        expectNoMutation(api);
+        await notice.getByRole("button", { name: `Review schedule: ${saved.name}` }).click();
+        const dialog = page.getByRole("dialog", {
+          name: "Review scheduled follow-up",
+          exact: true,
+        });
+        await expect.element(dialog).toBeVisible();
+        await expect.element(page.getByLabelText("Name", { exact: true })).toHaveValue(saved.name);
+        await expect
+          .element(page.getByLabelText("Instructions", { exact: true }))
+          .toHaveValue(saved.prompt);
+        await dialog.getByText("Model and run settings", { exact: true }).click();
+        await expect
+          .element(
+            dialog.getByText(
+              "Account: Personal Codex. This account will execute and pay for these follow-ups.",
+              { exact: false },
+            ),
+          )
+          .toBeVisible();
+        expect(document.body.textContent).not.toContain(errorCode);
+        expectNoMutation(api);
+        await userEvent.keyboard("{Escape}");
+        // Escape belongs to the open editor and cancels that draft. Closing
+        // the containing review remains a separate, explicit dialog action.
+        await expect
+          .element(page.getByRole("form", { name: "Scheduled follow-up editor" }))
+          .not.toBeInTheDocument();
+        await expect.element(dialog.getByText(reason, { exact: true })).toBeVisible();
+        expectNoMutation(api);
+        await dialog.getByRole("button", { name: "Close", exact: true }).click();
+        await expect.element(dialog).not.toBeInTheDocument();
+        expectNoMutation(api);
+      } finally {
+        await screen.unmount();
+      }
+    },
+  );
 
   it("loads proposals while Tasks is closed and enables only the exact saved definition after explicit approval", async () => {
     const saved = proposal();

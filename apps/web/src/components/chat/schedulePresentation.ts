@@ -3,6 +3,7 @@ import {
   ScheduledFollowupTimestamp,
   type ModelSelection,
   type ScheduledFollowupRecord,
+  type ScheduledFollowupRun,
   type ServerProvider,
 } from "@cafecode/contracts";
 import * as DateTime from "effect/DateTime";
@@ -10,6 +11,92 @@ import * as Schema from "effect/Schema";
 
 const isScheduleTimeZone = Schema.is(ScheduledFollowupTimeZone);
 const isScheduleTimestamp = Schema.is(ScheduledFollowupTimestamp);
+
+export interface ScheduleRunIssuePresentation {
+  readonly reason: string;
+  readonly action: string;
+}
+
+/** Describe the saved occurrence, not the provider's current health. Codes are
+ * public classifications but remain untrusted/forward-compatible strings at
+ * this boundary: only exact known values select Cafe-authored copy. Never echo
+ * an unknown code, provider message, exception, account secret or native path.
+ * A switch also prevents inherited object properties from becoming messages.
+ */
+export function scheduleRunIssuePresentation(
+  run: Pick<ScheduledFollowupRun, "state" | "errorCode"> | null,
+): ScheduleRunIssuePresentation | null {
+  if (run === null || !["failed", "interrupted", "unknown", "skipped"].includes(run.state)) {
+    // Waiting remains an idle-admission barrier, never a failed provider run.
+    // Completed/live runs must not inherit obsolete error classifications.
+    return null;
+  }
+  const action = "Check this chat and run history, then review and enable the schedule when ready.";
+  const fallback = {
+    reason:
+      run.state === "interrupted"
+        ? "This run was interrupted."
+        : run.state === "skipped"
+          ? "This run was skipped."
+          : "This run failed.",
+    action,
+  };
+  if (run.state === "unknown") {
+    return {
+      reason: "Cafe could not confirm whether the provider accepted this run.",
+      action:
+        "Wait for Cafe to reconcile this run. Check this chat for existing work; do not repeat an unconfirmed run.",
+    };
+  }
+  switch (run.errorCode) {
+    case "provider-unavailable":
+      // A mismatched legacy/future state must not gain an unsent guarantee
+      // merely by carrying the spelling of a pre-admission failure code.
+      if (run.state !== "failed") return fallback;
+      return {
+        // This exact code is minted before admission or the immutable attempt
+        // fence. Unlike a failed/unknown native turn, it proves no submission.
+        reason:
+          "The saved provider account or selected model was unavailable. This run was not submitted.",
+        action:
+          "Check the saved account and model in Settings, then review the schedule before enabling it again.",
+      };
+    case "chat-unavailable":
+      return { reason: "This chat was unavailable when the run was due.", action };
+    case "settings-changed":
+      return {
+        reason: "The chat's account or permission settings changed and need renewed review.",
+        action,
+      };
+    case "admission-rejected":
+      return { reason: "This run could not be admitted to the chat.", action };
+    case "preparation-failed":
+      return { reason: "This run could not prepare its saved input or provider.", action };
+    case "turn-failed":
+      return { reason: "The provider reported that this run failed.", action };
+    case "turn-interrupted":
+      return { reason: "The provider reported that this run was interrupted.", action };
+    case "limit-reached":
+      return {
+        reason: "This run was skipped because the schedule reached its end or run limit.",
+        action,
+      };
+    case "schedule-changed":
+      return {
+        reason: "This run was skipped because the schedule changed before it started.",
+        action,
+      };
+    case "user-control":
+    case "admission-revoked":
+      return { reason: "This run was cancelled before starting.", action };
+    case "runtime-busy":
+      return { reason: "This run was skipped because the chat was already working.", action };
+    default:
+      // A future backend or corrupt legacy row cannot disclose arbitrary text
+      // or make a more specific delivery claim through the generic fallback.
+      return fallback;
+  }
+}
 
 /** The transcript and Tasks must describe the same saved recurrence. Labels
  * are presentation only; the backend's named-zone recurrence owns execution. */

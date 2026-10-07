@@ -20,6 +20,7 @@ import {
   scheduleAccountLabel,
   scheduleModelLabel,
   scheduleRecurrenceLabel,
+  scheduleRunIssuePresentation,
 } from "./schedulePresentation";
 import { useScheduledFollowups } from "./useScheduledFollowups";
 
@@ -73,7 +74,13 @@ function ScheduleHistory(props: {
   const [failureKey, setFailureKey] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
   const before = cursors[cursors.length - 1];
-  const lastRunVersion = `${record.lastRun?.id ?? ""}:${record.lastRun?.state ?? ""}:${record.lastRun?.completedAt ?? ""}:${record.lastRun?.summary ?? ""}`;
+  const lastRunVersion = JSON.stringify([
+    record.lastRun?.id ?? null,
+    record.lastRun?.state ?? null,
+    record.lastRun?.completedAt ?? null,
+    record.lastRun?.summary ?? null,
+    record.lastRun?.errorCode ?? null,
+  ]);
   const requestKey = JSON.stringify([record.id, before, retry, lastRunVersion]);
   const page = snapshot?.key === requestKey ? snapshot.page : null;
   const error = failureKey === requestKey;
@@ -121,26 +128,34 @@ function ScheduleHistory(props: {
         <p className="text-xs text-muted-foreground">Loading runs…</p>
       ) : page?.runs.length ? (
         <ol className="space-y-2">
-          {page.runs.map((run) => (
-            <li key={run.id} className="min-w-0 text-xs">
-              <div className="flex flex-wrap items-baseline justify-between gap-1">
-                <span className="font-medium">{runLabel(run)}</span>
-                <time dateTime={run.createdAt} className="text-[11px] text-muted-foreground">
-                  {formatScheduleTime(run.createdAt)}
-                </time>
-              </div>
-              {run.summary ? (
-                <p className="mt-1 whitespace-pre-wrap break-words text-muted-foreground [overflow-wrap:anywhere]">
-                  {run.summary}
-                </p>
-              ) : null}
-              {run.modelSelection ? (
-                <p className="mt-1 break-words text-[11px] text-muted-foreground [overflow-wrap:anywhere]">
-                  {scheduleModelLabel(run.modelSelection)}
-                </p>
-              ) : null}
-            </li>
-          ))}
+          {page.runs.map((run) => {
+            const issue = scheduleRunIssuePresentation(run);
+            return (
+              <li key={run.id} className="min-w-0 text-xs">
+                <div className="flex flex-wrap items-baseline justify-between gap-1">
+                  <span className="font-medium">{runLabel(run)}</span>
+                  <time dateTime={run.createdAt} className="text-[11px] text-muted-foreground">
+                    {formatScheduleTime(run.createdAt)}
+                  </time>
+                </div>
+                {issue ? (
+                  <p className="mt-1 break-words text-muted-foreground [overflow-wrap:anywhere]">
+                    {issue.reason}
+                  </p>
+                ) : null}
+                {run.summary ? (
+                  <p className="mt-1 whitespace-pre-wrap break-words text-muted-foreground [overflow-wrap:anywhere]">
+                    {run.summary}
+                  </p>
+                ) : null}
+                {run.modelSelection ? (
+                  <p className="mt-1 break-words text-[11px] text-muted-foreground [overflow-wrap:anywhere]">
+                    {scheduleModelLabel(run.modelSelection)}
+                  </p>
+                ) : null}
+              </li>
+            );
+          })}
         </ol>
       ) : !error ? (
         <p className="text-xs text-muted-foreground">No runs yet.</p>
@@ -185,6 +200,7 @@ function ScheduleCard(props: {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const lastRun = record.lastRun;
+  const issue = scheduleRunIssuePresentation(lastRun);
   const liveRun = lastRun && ["waiting", "dispatching", "running"].includes(lastRun.state);
   const label =
     record.state === "active" && liveRun ? runLabel(lastRun) : STATE_LABELS[record.state];
@@ -234,9 +250,13 @@ function ScheduleCard(props: {
         </p>
       ) : null}
       {record.state === "needs_attention" ? (
-        <p className="mt-2 text-xs text-muted-foreground">
-          Check this chat and run history, then review and enable the schedule when ready.
-        </p>
+        <div className="mt-2 space-y-1 text-xs text-muted-foreground">
+          {issue ? <p>{issue.reason}</p> : null}
+          <p>
+            {issue?.action ??
+              "Check this chat and run history, then review and enable the schedule when ready."}
+          </p>
+        </div>
       ) : null}
       <div className="mt-2 flex flex-wrap gap-1">
         {record.state === "active" ? (

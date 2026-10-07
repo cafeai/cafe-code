@@ -13,6 +13,7 @@ import {
   parseScheduleZonedInput,
   scheduleModelLabel,
   scheduleRecurrenceLabel,
+  scheduleRunIssuePresentation,
   scheduleTimeZoneOptions,
   scheduleZonedInput,
 } from "./schedulePresentation";
@@ -62,6 +63,91 @@ afterEach(() => {
 });
 
 describe("schedule presentation", () => {
+  it("explains provider unavailability using the saved pre-admission classification", () => {
+    expect(
+      scheduleRunIssuePresentation({ state: "failed", errorCode: "provider-unavailable" }),
+    ).toEqual({
+      reason:
+        "The saved provider account or selected model was unavailable. This run was not submitted.",
+      action:
+        "Check the saved account and model in Settings, then review the schedule before enabling it again.",
+    });
+  });
+
+  it.each([
+    null,
+    "constructor",
+    "__proto__",
+    "private_fixture_token",
+    "provider-unavailable.private",
+    '<img src="x" onerror="alert(1)">',
+  ])("never echoes an unrecognized failure classification %s", (errorCode) => {
+    const presentation = scheduleRunIssuePresentation({ state: "failed", errorCode });
+    expect(presentation).toEqual({
+      reason: "This run failed.",
+      action: "Check this chat and run history, then review and enable the schedule when ready.",
+    });
+    expect(JSON.stringify(presentation)).not.toContain("not submitted");
+    if (errorCode !== null) expect(JSON.stringify(presentation)).not.toContain(errorCode);
+  });
+
+  it("does not call uncertain acceptance an unsent or safely repeatable run", () => {
+    for (const errorCode of [
+      "acceptance-unknown",
+      "provider-unavailable",
+      "private_fixture_token",
+      null,
+    ]) {
+      expect(scheduleRunIssuePresentation({ state: "unknown", errorCode })).toEqual({
+        reason: "Cafe could not confirm whether the provider accepted this run.",
+        action:
+          "Wait for Cafe to reconcile this run. Check this chat for existing work; do not repeat an unconfirmed run.",
+      });
+    }
+  });
+
+  it.each(["waiting", "dispatching", "running", "completed"] as const)(
+    "does not present a failure for a %s run even with an obsolete error code",
+    (state) => {
+      expect(scheduleRunIssuePresentation({ state, errorCode: "provider-unavailable" })).toBeNull();
+    },
+  );
+
+  it.each(["interrupted", "skipped"] as const)(
+    "does not grant an unsent guarantee to a mismatched %s provider-unavailable classification",
+    (state) => {
+      const presentation = scheduleRunIssuePresentation({
+        state,
+        errorCode: "provider-unavailable",
+      });
+      expect(presentation?.reason).toBe(
+        state === "interrupted" ? "This run was interrupted." : "This run was skipped.",
+      );
+      expect(JSON.stringify(presentation)).not.toContain("not submitted");
+    },
+  );
+
+  it("keeps cancelled, exhausted, busy and changed occurrences distinct from provider failure", () => {
+    expect(scheduleRunIssuePresentation(null)).toBeNull();
+    for (const errorCode of ["user-control", "admission-revoked"]) {
+      expect(scheduleRunIssuePresentation({ state: "skipped", errorCode })?.reason).toBe(
+        "This run was cancelled before starting.",
+      );
+    }
+    expect(
+      scheduleRunIssuePresentation({ state: "skipped", errorCode: "limit-reached" })?.reason,
+    ).toBe("This run was skipped because the schedule reached its end or run limit.");
+    expect(
+      scheduleRunIssuePresentation({ state: "skipped", errorCode: "runtime-busy" })?.reason,
+    ).toBe("This run was skipped because the chat was already working.");
+    expect(
+      scheduleRunIssuePresentation({ state: "skipped", errorCode: "schedule-changed" })?.reason,
+    ).toBe("This run was skipped because the schedule changed before it started.");
+    expect(
+      scheduleRunIssuePresentation({ state: "failed", errorCode: "settings-changed" })?.reason,
+    ).toBe("The chat's account or permission settings changed and need renewed review.");
+  });
+
   it.each([
     ["UTC", "2026-10-04T09:30", "2026-10-04T09:30:00.000Z"],
     ["Asia/Tokyo", "2026-10-04T09:30", "2026-10-04T00:30:00.000Z"],

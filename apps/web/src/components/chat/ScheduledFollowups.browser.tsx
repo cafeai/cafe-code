@@ -198,6 +198,144 @@ describe("scheduled follow-ups Tasks UI", () => {
     document.documentElement.style.removeProperty("--primary");
   });
 
+  it.each(["provider-unavailable", "private_fixture_token", "constructor"])(
+    "shows a fixed failed-run reason in the card and history for %s without granting execution",
+    async (errorCode) => {
+      const run = makeRun(1, {
+        state: "failed",
+        intentSequence: null,
+        startedAt: null,
+        result: null,
+        summary: null,
+        errorCode,
+      });
+      const saved = makeSchedule(1, { state: "needs_attention", nextRunAt: null, lastRun: run });
+      const api = installApi([saved]);
+      api.history.mockResolvedValue({ runs: [run], nextCursor: null });
+      const screen = await render(<ScheduledFollowups context={context} />);
+      try {
+        const card = page.getByRole("article", { name: `Scheduled follow-up: ${saved.name}` });
+        const reason =
+          errorCode === "provider-unavailable"
+            ? "The saved provider account or selected model was unavailable. This run was not submitted."
+            : "This run failed.";
+        await expect.element(card.getByText(reason, { exact: true })).toBeVisible();
+        await expect.element(card.getByText("Needs attention", { exact: true })).toBeVisible();
+        if (errorCode === "provider-unavailable") {
+          await expect
+            .element(
+              card.getByText(
+                "Check the saved account and model in Settings, then review the schedule before enabling it again.",
+                { exact: true },
+              ),
+            )
+            .toBeVisible();
+        } else {
+          expect(card.element().textContent).not.toContain(errorCode);
+          expect(card.element().textContent).not.toContain("not submitted");
+        }
+        await expect
+          .element(card.getByRole("button", { name: "Run now", exact: true }))
+          .not.toBeInTheDocument();
+        await card.getByRole("button", { name: "Run history", exact: true }).click();
+        const history = page.getByLabelText(`Run history for ${saved.name}`);
+        await expect.element(history.getByText(reason, { exact: true })).toBeVisible();
+        await expect.element(history.getByText("Failed", { exact: true })).toBeVisible();
+        expect(history.element().textContent).not.toContain(errorCode);
+        expect(api.runNow).not.toHaveBeenCalled();
+        expect(api.save).not.toHaveBeenCalled();
+        expect(api.setStatus).not.toHaveBeenCalled();
+      } finally {
+        await screen.unmount();
+      }
+    },
+  );
+
+  it("keeps a waiting occurrence distinct from a failed provider run", async () => {
+    const run = makeRun(1, {
+      state: "waiting",
+      intentSequence: null,
+      startedAt: null,
+      completedAt: null,
+      result: null,
+      summary: null,
+    });
+    const saved = makeSchedule(1, { lastRun: run });
+    const api = installApi([saved]);
+    api.history.mockResolvedValue({ runs: [run], nextCursor: null });
+    const screen = await render(<ScheduledFollowups context={context} />);
+    try {
+      const card = page.getByRole("article", { name: `Scheduled follow-up: ${saved.name}` });
+      await expect.element(card.getByText("Waiting for this chat", { exact: true })).toBeVisible();
+      await expect
+        .element(card.getByRole("button", { name: "Run now", exact: true }))
+        .toBeDisabled();
+      await card.getByRole("button", { name: "Run history", exact: true }).click();
+      const history = page.getByLabelText(`Run history for ${saved.name}`);
+      await expect
+        .element(history.getByText("Waiting for this chat", { exact: true }))
+        .toBeVisible();
+      expect(card.element().textContent).not.toContain("Failed");
+      expect(card.element().textContent).not.toContain("unavailable");
+      expect(api.runNow).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it.each(["acceptance-unknown", "provider-unavailable", "private_fixture_token"])(
+    "keeps an unconfirmed run fenced in the presentation even with the %s classification",
+    async (errorCode) => {
+      const run = makeRun(1, {
+        state: "unknown",
+        result: null,
+        summary: null,
+        errorCode,
+      });
+      const saved = makeSchedule(1, { state: "needs_attention", nextRunAt: null, lastRun: run });
+      const api = installApi([saved]);
+      api.history.mockResolvedValue({ runs: [run], nextCursor: null });
+      const screen = await render(<ScheduledFollowups context={context} />);
+      try {
+        const card = page.getByRole("article", { name: `Scheduled follow-up: ${saved.name}` });
+        await expect
+          .element(
+            card.getByText("Cafe could not confirm whether the provider accepted this run.", {
+              exact: true,
+            }),
+          )
+          .toBeVisible();
+        await expect
+          .element(
+            card.getByText(
+              "Wait for Cafe to reconcile this run. Check this chat for existing work; do not repeat an unconfirmed run.",
+              { exact: true },
+            ),
+          )
+          .toBeVisible();
+        expect(card.element().textContent).not.toContain("not submitted");
+        expect(card.element().textContent).not.toContain(errorCode);
+        await card.getByRole("button", { name: "Run history", exact: true }).click();
+        const history = page.getByLabelText(`Run history for ${saved.name}`);
+        await expect
+          .element(history.getByText("Status unconfirmed", { exact: true }))
+          .toBeVisible();
+        await expect
+          .element(
+            history.getByText("Cafe could not confirm whether the provider accepted this run.", {
+              exact: true,
+            }),
+          )
+          .toBeVisible();
+        expect(api.runNow).not.toHaveBeenCalled();
+        expect(api.save).not.toHaveBeenCalled();
+        expect(api.setStatus).not.toHaveBeenCalled();
+      } finally {
+        await screen.unmount();
+      }
+    },
+  );
+
   it("requires review before running a schedule after the chat account changes", async () => {
     const api = installApi([
       makeSchedule(1, { authorizedInstanceId: ProviderInstanceId.make("previous-account") }),
