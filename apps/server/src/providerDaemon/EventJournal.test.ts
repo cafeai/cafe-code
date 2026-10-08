@@ -1,8 +1,10 @@
 import {
   EventId,
+  ProviderDaemonEventRecord,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderRuntimeEvent as ProviderRuntimeEventSchema,
+  RuntimeItemId,
   ThreadId,
   TurnId,
   type ProviderRuntimeEvent,
@@ -23,6 +25,81 @@ import {
 const encodeProviderRuntimeEventJsonForTest = Schema.encodeSync(
   Schema.fromJsonString(ProviderRuntimeEventSchema),
 );
+const encodeDaemonEventRecordJsonForTest = Schema.encodeSync(
+  Schema.fromJsonString(ProviderDaemonEventRecord),
+);
+const decodeDaemonEventRecordJsonForTest = Schema.decodeUnknownSync(
+  Schema.fromJsonString(ProviderDaemonEventRecord),
+);
+
+const assistantSourceFixtures = [
+  { name: "trailing LF", chunks: ["The", " synthetic answer is complete.", "\n"] },
+  {
+    name: "leading spaces and split CRLF",
+    chunks: [" \tThe", " synthetic answer", "\r", "\nretains its source. \r\n "],
+  },
+  {
+    name: "split surrogate pair and trailing whitespace",
+    chunks: [" \tBoth \ud83d", "\ude80 synthetic branches are complete.", "\r", "\n \t"],
+  },
+  {
+    name: "unpaired high and low surrogate code units",
+    // Text between the two units keeps them unpaired in the full completion,
+    // not just in individual delta chunks. JSON must escape and round-trip
+    // each original unit rather than substitute a Unicode replacement value.
+    chunks: [
+      " \tThe lone high \ud83d",
+      " and lone low \ude80",
+      " remain distinct source units.\r",
+      "\n ",
+    ],
+  },
+];
+
+function makeAssistantSourceEvents(chunks: ReadonlyArray<string>): ProviderRuntimeEvent[] {
+  const itemId = RuntimeItemId.make("synthetic-assistant-item");
+  const base = {
+    provider: ProviderDriverKind.make("codex"),
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    threadId: ThreadId.make("synthetic-parent-thread"),
+    turnId: TurnId.make("synthetic-parent-turn"),
+    itemId,
+    createdAt: "1970-01-01T00:00:00.000Z",
+  };
+  const events = chunks.map<ProviderRuntimeEvent>((delta, index) => ({
+    ...base,
+    eventId: EventId.make(`synthetic-assistant-delta-${index}`),
+    type: "content.delta",
+    payload: { streamKind: "assistant_text", delta },
+    raw: {
+      source: "codex.app-server.notification",
+      method: "item/agentMessage/delta",
+      payload: {
+        threadId: "synthetic-native-child-thread",
+        turnId: "synthetic-native-child-turn",
+        itemId,
+        delta,
+      },
+    },
+  }));
+  const text = chunks.join("");
+  events.push({
+    ...base,
+    eventId: EventId.make("synthetic-assistant-completed"),
+    type: "item.completed",
+    payload: { itemType: "assistant_message", status: "completed", detail: text },
+    raw: {
+      source: "codex.app-server.notification",
+      method: "item/completed",
+      payload: {
+        threadId: "synthetic-native-child-thread",
+        turnId: "synthetic-native-child-turn",
+        item: { id: itemId, type: "agentMessage", text },
+      },
+    },
+  });
+  return events;
+}
 
 function encodedRuntimeEventBytes(event: ProviderRuntimeEvent | undefined): number {
   return event === undefined ? 0 : utf8ByteLength(encodeProviderRuntimeEventJsonForTest(event));
@@ -91,6 +168,83 @@ function makeCommandEvent(id: string, output: string): ProviderRuntimeEvent {
 }
 
 describe("ProviderDaemonEventJournal", () => {
+  it.each(assistantSourceFixtures)(
+    "preserves exact assistant source through persistent publish, live delivery and replay: $name",
+    async ({ chunks }) => {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const events = makeAssistantSourceEvents(chunks);
+          const journal = yield* makePersistentProviderDaemonEventJournal({
+            capacity: 10,
+            ownerKey: "synthetic-assistant-source",
+          });
+          const delivered: ProviderDaemonEventRecord[] = [];
+          const subscription = yield* journal.subscribeWithReplayBoundary((record) => {
+            delivered.push(record);
+          });
+          yield* Effect.addFinalizer(() => Effect.sync(subscription.unsubscribe));
+          const published = yield* Effect.forEach(events, (event) => journal.publish(event), {
+            concurrency: 1,
+          });
+
+          // This is the real SQLite publication boundary, not the in-memory
+          // adapter object. Publication decodes its newly stored row before
+          // live fanout, so a schema transform can corrupt both live and replay
+          // even when native raw text and adapter completion were exact.
+          expect(subscription.replayBoundaryCursor).toBe(0);
+          expect(published.map((record) => record.event)).toEqual(events);
+          expect(delivered).toEqual(published);
+          expect(delivered.map((record) => record.event)).toEqual(events);
+
+          const replayJournal = yield* makePersistentProviderDaemonEventJournal({
+            capacity: 10,
+            ownerKey: "synthetic-assistant-source",
+          });
+          const replayed = yield* replayJournal.replayAfter(0);
+          expect(replayed).toEqual(published);
+          expect(replayed.map((record) => record.event)).toEqual(events);
+          expect(replayed.map((record) => record.cursor)).toEqual(
+            events.map((_, index) => index + 1),
+          );
+
+          // Inspect only this fixture's in-memory rows to distinguish source
+          // loss during encode from a later decode-only normalization. Raw
+          // child identity is intentionally distinct from canonical ownership;
+          // neither identity authorizes normalization of assistant source.
+          const sql = yield* SqlClient.SqlClient;
+          const rows = yield* sql<{ readonly eventJson: string }>`
+            SELECT event_json AS "eventJson"
+            FROM provider_daemon_events
+            WHERE owner_key = ${"synthetic-assistant-source"}
+            ORDER BY cursor
+          `;
+          expect(rows.map((row) => JSON.parse(row.eventJson))).toEqual(events);
+        }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+      );
+    },
+  );
+
+  it.each(assistantSourceFixtures)(
+    "preserves exact assistant source through daemon-record JSON encode and decode: $name",
+    ({ chunks }) => {
+      const events = makeAssistantSourceEvents(chunks);
+      for (const [index, event] of events.entries()) {
+        const record: ProviderDaemonEventRecord = {
+          cursor: index + 1,
+          emittedAt: "1970-01-01T00:00:00.000Z",
+          event,
+        };
+        // These are the same record contracts used by daemon SSE encoding and
+        // the remote backend decoder. Check each direction independently so
+        // two matching lossy transforms cannot conceal the original source.
+        const encoded = encodeDaemonEventRecordJsonForTest(record);
+        expect(JSON.parse(encoded)).toEqual(record);
+        expect(decodeDaemonEventRecordJsonForTest(JSON.stringify(record))).toEqual(record);
+        expect(decodeDaemonEventRecordJsonForTest(encoded)).toEqual(record);
+      }
+    },
+  );
+
   it("keeps a committed event and later listeners when one listener throws", async () => {
     await Effect.runPromise(
       Effect.gen(function* () {

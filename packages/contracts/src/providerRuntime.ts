@@ -549,7 +549,13 @@ export const ItemLifecyclePayload = Schema.Struct({
   itemType: CanonicalItemType,
   status: Schema.optional(RuntimeItemStatus),
   title: Schema.optional(TrimmedNonEmptyStringSchema),
-  detail: Schema.optional(TrimmedNonEmptyStringSchema),
+  // Detail carries provider source text, not a normalized display label. This
+  // shared codec runs on journal publication/replay and remote event transport;
+  // trimming in either direction changes the UTF-16 stream commitment and can
+  // strand a valid completed message at its first projected chunk. Validate
+  // nonblank content without transforming a single source code unit. The same
+  // refinement also rejects blank values on encode, before durable publication.
+  detail: Schema.optional(Schema.String.check(Schema.isPattern(/\S/))),
   data: Schema.optional(Schema.Unknown),
 });
 export type ItemLifecyclePayload = typeof ItemLifecyclePayload.Type;

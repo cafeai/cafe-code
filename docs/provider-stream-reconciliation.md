@@ -1,6 +1,6 @@
 # Provider stream reconciliation
 
-Last updated: 2026-10-04 17:49:25 JST (UTC+0900)
+Last updated: 2026-10-08 17:21:53 JST (UTC+0900)
 
 ## Ownership and exact text
 
@@ -9,6 +9,8 @@ Provider adapters normalize upstream events into canonical item identities and a
 Ingestion commits every observed UTF-16 code unit with a fixed-memory SHA-256 commitment. An authoritative completed item may replace lagging projected text only when it contains that exact committed prefix, or no stream was observed. It flushes its own buffered tail, never derives a suffix from an asynchronously lagging SQL row. Different text and shorter completions fail closed. Completion remains a content boundary, not permission to reopen a stopped turn or change a newer turn's state.
 
 Codex `item/agentMessage/delta` and `item/completed` must preserve identical source text. `CodexAdapter.itemDetail` may check whether an `agentMessage` is blank, but must not trim a nonblank message. One removed trailing newline is enough to invalidate an otherwise complete stream commitment. In the observed failure, the native completion matched all streamed text; trimming caused the final replacement to be rejected, leaving an older terminal message with only its first projected chunk. The fix preserves source whitespace rather than weakening the commitment or hiding short output.
+
+That invariant also applies after the adapter. The shared `ItemLifecyclePayload.detail` schema validates nonblank source without transforming it in **either encode or decode**. The persistent daemon journal, live publication, replay and remote event-record JSON codecs all reuse this contract. A trim transformation there previously removed valid final newlines even though the adapter and raw native payload preserved them. It could also hide a leading-space divergence from the integrity guard. Normalized titles and identifiers retain their existing trimming rules; source text does not. Empty or whitespace-only detail is still invalid, now including encode-side publication.
 
 Source: [official Codex app-server item lifecycle](https://learn.chatgpt.com/docs/app-server#items). The exact-prefix guard is Cafe's persistence integrity boundary, not an upstream claim.
 
@@ -112,14 +114,18 @@ A rejected nonempty completed item emits `provider.assistantCompletion/textMisma
 
 The fix affects newly handled provider events. It does not rewrite historical rows on startup, replay all provider history, or restart live providers. Previously stranded text remains unchanged unless the user explicitly chooses **Attempt repair from provider history** in the thread's sidebar context menu while debug mode is enabled. That bounded, authenticated service independently validates terminal message ownership and prefix-safe repair from retained journal or configured provider history; recovery depends on the source data still being available.
 
+The shared-codec correction requires normal rebuilt backend **and daemon** adoption; an already-running generation is not live-updated by a build or push. It cannot reconstruct whitespace already removed from old canonical journal detail. The retained raw payload may still contain the original, but this change grants no new raw-payload repair authority and performs no historical write. Existing explicit repair remains subject to its own retained-source and prefix checks.
+
 ## Verification
 
 Use the repository-pinned Node runtime and Yarn through Corepack, with the checked-in lockfile and setup. The stream correction itself requires no dependency change; the accompanying Claude compatibility update deliberately changes the SDK pin. These regressions do not require credentials, network access or live provider binaries.
 
-- `yarn workspace @cafeai/cafe-code test src/provider/Layers/CodexAdapter.test.ts`: exact leading/trailing whitespace, CRLF, whitespace-only suppression and strict streamed-prefix compatibility.
-- `yarn workspace @cafeai/cafe-code test src/provider/Layers/ClaudeAdapter.test.ts`: multiple block snapshots sharing an API message id, reused block indexes, duplicate wrappers, partial/no-delta repair, split surrogates and cross-message/prefix rejection.
-- `yarn workspace @cafeai/cafe-code test src/orchestration/Layers/ProviderRuntimeIngestion.test.ts`: late old-turn exact completion restores full text without disturbing a newer active turn or timestamps; replay is idempotent, mismatches retain streamed text and diagnostics remain content-free.
-- `yarn workspace @cafeai/cafe-code test src/orchestration/sessionLifecycle.test.ts src/orchestration/decider.test.ts src/orchestration/Layers/ProviderRuntimeIngestion.test.ts`: absent/null runtime-ID normalization across SQL hydration and in-memory admission, stale observations racing accepted new turns, historical resume start/completion, readiness while active, genuine completion across heartbeat-only changes, and exact rejection behavior on replay.
+- `corepack yarn workspace @cafecode/contracts test src/providerRuntime.test.ts`: independent lifecycle/event JSON encode and decode, exact leading/trailing whitespace, CRLF and surrogate code units across every provider kind, blank rejection and unchanged title/identifier normalization.
+- `corepack yarn workspace @cafeai/cafe-code test --config vitest.config.ts src/providerDaemon/EventJournal.test.ts`: persistent journal publication, live subscription, fresh journal replay and independent event-record JSON codecs preserve the same exact source.
+- `corepack yarn workspace @cafeai/cafe-code test --config vitest.config.ts src/provider/Layers/CodexAdapter.test.ts`: exact leading/trailing whitespace, CRLF, whitespace-only suppression and strict streamed-prefix compatibility.
+- `corepack yarn workspace @cafeai/cafe-code test --config vitest.config.ts src/provider/Layers/ClaudeAdapter.test.ts`: multiple block snapshots sharing an API message id, reused block indexes, duplicate wrappers, partial/no-delta repair, split surrogates and cross-message/prefix rejection.
+- `corepack yarn workspace @cafeai/cafe-code test --config vitest.config.ts src/orchestration/Layers/ProviderRuntimeIngestion.test.ts`: late old-turn exact completion crosses the real shared JSON codec and restores full text without disturbing a newer active turn or timestamps; replay is idempotent, leading-space and other mismatches retain streamed text and diagnostics remain content-free.
+- `corepack yarn workspace @cafeai/cafe-code test --config vitest.config.ts src/orchestration/sessionLifecycle.test.ts src/orchestration/decider.test.ts src/orchestration/Layers/ProviderRuntimeIngestion.test.ts`: absent/null runtime-ID normalization across SQL hydration and in-memory admission, stale observations racing accepted new turns, historical resume start/completion, readiness while active, genuine completion across heartbeat-only changes, and exact rejection behavior on replay.
 - Run `yarn fmt`, `yarn lint`, `yarn typecheck`, and `yarn test`, followed by `yarn build:desktop --force` after tests. A successful build does not replace the already-running desktop/daemon processes; applying it requires the normal app restart lifecycle.
 
 The stream-content corrections stay within the existing adapter/ingestion/projection contracts and add no persistence migration or new repair authority. The separate subagent retention correction adds schema-only migration 82 and bounded per-thread legacy hydration, as documented in the [retention decision](decisions/subagent-lifecycle-retention.md). Neither change adds public protocol or provider inference.

@@ -37,6 +37,7 @@ import * as Logger from "effect/Logger";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
+import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -111,6 +112,9 @@ const asEventId = (value: string): EventId => EventId.make(value);
 const asMessageId = (value: string): MessageId => MessageId.make(value);
 const asThreadId = (value: string): ThreadId => ThreadId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
+const providerRuntimeEventJson = Schema.fromJsonString(ProviderRuntimeEvent);
+const encodeProviderRuntimeEventJson = Schema.encodeSync(providerRuntimeEventJson);
+const decodeProviderRuntimeEventJson = Schema.decodeUnknownSync(providerRuntimeEventJson);
 
 function codexAsyncQuestionCompletion(
   itemId: string,
@@ -4220,137 +4224,170 @@ describe("ProviderRuntimeIngestion", () => {
     expect(message?.streaming).toBe(false);
   });
 
-  it("repairs exact late assistant completion without reopening an older terminal turn", async () => {
-    const logMessages: unknown[] = [];
-    const harness = await createHarness({
-      serverSettings: { enableAssistantStreaming: true },
-      logMessages,
-    });
-    const threadId = asThreadId("thread-1");
-    const oldTurnId = asTurnId("turn-late-assistant-old");
-    const newTurnId = asTurnId("turn-late-assistant-new");
-    const itemId = RuntimeItemId.make("item-late-assistant");
-    const messageId = "assistant:item-late-assistant";
-    const startedAt = "2026-01-01T00:00:01.000Z";
-    const completedAt = "2026-01-01T00:00:02.000Z";
-    const newStartedAt = "2026-01-01T00:00:03.000Z";
-    const lateAt = "2026-01-01T00:00:04.000Z";
-    const finalText = "The complete paragraph retains its final newline.\n";
+  it.each([
+    {
+      whitespace: "trailing newline",
+      firstChunk: "The",
+      finalText: "The complete paragraph retains its final newline.\n",
+    },
+    {
+      whitespace: "leading spaces",
+      firstChunk: "  I",
+      finalText: "  I retain the leading spaces in the complete answer.\n",
+    },
+    {
+      whitespace: "CRLF and Unicode",
+      firstChunk: "Both",
+      finalText: "Both café and 日本語 retain Unicode 😀 and CRLF.\r\n",
+    },
+  ])(
+    "repairs exact late assistant completion with $whitespace across the wire without reopening an older terminal turn",
+    async ({ firstChunk, finalText }) => {
+      const logMessages: unknown[] = [];
+      const harness = await createHarness({
+        serverSettings: { enableAssistantStreaming: true },
+        logMessages,
+      });
+      const threadId = asThreadId("thread-1");
+      const oldTurnId = asTurnId("turn-late-assistant-old");
+      const newTurnId = asTurnId("turn-late-assistant-new");
+      const itemId = RuntimeItemId.make("item-late-assistant");
+      const messageId = "assistant:item-late-assistant";
+      const startedAt = "2026-01-01T00:00:01.000Z";
+      const completedAt = "2026-01-01T00:00:02.000Z";
+      const newStartedAt = "2026-01-01T00:00:03.000Z";
+      const lateAt = "2026-01-01T00:00:04.000Z";
 
-    harness.emit({
-      type: "turn.started",
-      eventId: asEventId("evt-late-assistant-old-start"),
-      provider: ProviderDriverKind.make("codex"),
-      threadId,
-      turnId: oldTurnId,
-      createdAt: startedAt,
-    });
-    await waitForThread(harness.readModel, (thread) => thread.session?.activeTurnId === oldTurnId);
-    harness.emit({
-      type: "turn.completed",
-      eventId: asEventId("evt-late-assistant-old-complete"),
-      provider: ProviderDriverKind.make("codex"),
-      threadId,
-      turnId: oldTurnId,
-      createdAt: completedAt,
-      payload: { state: "completed" },
-    });
-    await waitForThread(harness.readModel, (thread) => thread.latestTurn?.state === "completed");
-    harness.emit({
-      type: "turn.started",
-      eventId: asEventId("evt-late-assistant-new-start"),
-      provider: ProviderDriverKind.make("codex"),
-      threadId,
-      turnId: newTurnId,
-      createdAt: newStartedAt,
-    });
-    const before = await waitForThread(
-      harness.readModel,
-      (thread) => thread.session?.activeTurnId === newTurnId,
-    );
-    const readOldTurn = () =>
-      runtime!.runPromise(
-        Effect.gen(function* () {
-          const sql = yield* SqlClient.SqlClient;
-          return yield* sql<{ readonly state: string; readonly completedAt: string | null }>`
+      harness.emit({
+        type: "turn.started",
+        eventId: asEventId("evt-late-assistant-old-start"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        turnId: oldTurnId,
+        createdAt: startedAt,
+      });
+      await waitForThread(
+        harness.readModel,
+        (thread) => thread.session?.activeTurnId === oldTurnId,
+      );
+      harness.emit({
+        type: "turn.completed",
+        eventId: asEventId("evt-late-assistant-old-complete"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        turnId: oldTurnId,
+        createdAt: completedAt,
+        payload: { state: "completed" },
+      });
+      await waitForThread(harness.readModel, (thread) => thread.latestTurn?.state === "completed");
+      harness.emit({
+        type: "turn.started",
+        eventId: asEventId("evt-late-assistant-new-start"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        turnId: newTurnId,
+        createdAt: newStartedAt,
+      });
+      const before = await waitForThread(
+        harness.readModel,
+        (thread) => thread.session?.activeTurnId === newTurnId,
+      );
+      const readOldTurn = () =>
+        runtime!.runPromise(
+          Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient;
+            return yield* sql<{ readonly state: string; readonly completedAt: string | null }>`
             SELECT state, completed_at AS "completedAt"
             FROM projection_turns
             WHERE thread_id = ${threadId} AND turn_id = ${oldTurnId}
           `;
+          }),
+        );
+      const oldTurnBefore = await readOldTurn();
+      expect(oldTurnBefore).toEqual([{ state: "completed", completedAt }]);
+
+      // Late child/root output may still name the terminal turn while a newer
+      // turn runs. The first tiny chunk becomes a non-streaming snapshot row;
+      // later appends intentionally cannot reopen it. Exact item completion is
+      // the content-only repair boundary, including every final whitespace unit.
+      for (const [index, delta] of [firstChunk, finalText.slice(firstChunk.length)].entries()) {
+        harness.emit({
+          type: "content.delta",
+          eventId: asEventId(`evt-late-assistant-delta-${index}`),
+          provider: ProviderDriverKind.make("codex"),
+          threadId,
+          turnId: oldTurnId,
+          itemId,
+          createdAt: lateAt,
+          payload: { streamKind: "assistant_text", delta },
+        });
+      }
+      await harness.drain();
+      const fragmented = await waitForThread(harness.readModel, (thread) =>
+        thread.messages.some((message) => message.id === messageId),
+      );
+      expect(fragmented.messages.find((message) => message.id === messageId)).toMatchObject({
+        text: firstChunk,
+        streaming: false,
+        createdAt: completedAt,
+        updatedAt: completedAt,
+      });
+
+      // Production daemon persistence/transport crosses this exact schema JSON
+      // boundary. Feeding a typed object directly hid the old detail transform,
+      // which trimmed final whitespace and broke the strict stream commitment.
+      const completion = decodeProviderRuntimeEventJson(
+        encodeProviderRuntimeEventJson({
+          type: "item.completed",
+          eventId: asEventId("evt-late-assistant-item-complete"),
+          provider: ProviderDriverKind.make("codex"),
+          threadId,
+          turnId: oldTurnId,
+          itemId,
+          createdAt: lateAt,
+          payload: { itemType: "assistant_message", status: "completed", detail: finalText },
         }),
       );
-    const oldTurnBefore = await readOldTurn();
-    expect(oldTurnBefore).toEqual([{ state: "completed", completedAt }]);
-
-    // Late child/root output may still name the terminal turn while a newer
-    // turn runs. The first tiny chunk becomes a non-streaming snapshot row;
-    // later appends intentionally cannot reopen it. Exact item completion is
-    // the content-only repair boundary, including every final whitespace unit.
-    for (const [index, delta] of ["The", finalText.slice(3)].entries()) {
-      harness.emit({
-        type: "content.delta",
-        eventId: asEventId(`evt-late-assistant-delta-${index}`),
-        provider: ProviderDriverKind.make("codex"),
-        threadId,
+      harness.emit(completion);
+      const repaired = await waitForThread(harness.readModel, (thread) =>
+        thread.messages.some((message) => message.id === messageId && message.text === finalText),
+      );
+      expect(repaired.messages.find((message) => message.id === messageId)).toMatchObject({
         turnId: oldTurnId,
-        itemId,
-        createdAt: lateAt,
-        payload: { streamKind: "assistant_text", delta },
+        text: finalText,
+        streaming: false,
+        createdAt: completedAt,
+        updatedAt: completedAt,
       });
-    }
-    await harness.drain();
-    const fragmented = await waitForThread(harness.readModel, (thread) =>
-      thread.messages.some((message) => message.id === messageId),
-    );
-    expect(fragmented.messages.find((message) => message.id === messageId)).toMatchObject({
-      text: "The",
-      streaming: false,
-      createdAt: completedAt,
-      updatedAt: completedAt,
-    });
+      expect(repaired.session).toEqual(before.session);
+      expect(repaired.latestTurn).toEqual(before.latestTurn);
+      expect(await readOldTurn()).toEqual(oldTurnBefore);
 
-    const completion: ProviderRuntimeEvent = {
-      type: "item.completed",
-      eventId: asEventId("evt-late-assistant-item-complete"),
-      provider: ProviderDriverKind.make("codex"),
-      threadId,
-      turnId: oldTurnId,
-      itemId,
-      createdAt: lateAt,
-      payload: { itemType: "assistant_message", status: "completed", detail: finalText },
-    };
-    harness.emit(completion);
-    const repaired = await waitForThread(harness.readModel, (thread) =>
-      thread.messages.some((message) => message.id === messageId && message.text === finalText),
-    );
-    expect(repaired.messages.find((message) => message.id === messageId)).toMatchObject({
-      turnId: oldTurnId,
-      text: finalText,
-      streaming: false,
-      createdAt: completedAt,
-      updatedAt: completedAt,
-    });
-    expect(repaired.session).toEqual(before.session);
-    expect(repaired.latestTurn).toEqual(before.latestTurn);
-    expect(await readOldTurn()).toEqual(oldTurnBefore);
-
-    // Replaying the same completion cannot append the answer twice or produce
-    // a mismatch warning merely because the old turn remains terminal.
-    harness.emit(completion);
-    await harness.drain();
-    const replayed = await harness.readModel();
-    expect(
-      replayed.threads
-        .find((thread) => thread.id === threadId)
-        ?.messages.find((message) => message.id === messageId)?.text,
-    ).toBe(finalText);
-    expect(
-      logMessages.filter(
-        (message) =>
-          Array.isArray(message) && message[0] === "provider.assistantCompletion/textMismatch",
-      ),
-    ).toEqual([]);
-  });
+      // Replaying the same completion cannot append the answer twice or produce
+      // a mismatch warning merely because the old turn remains terminal. Its
+      // content-only authority must also preserve both turn lifecycles again.
+      harness.emit(completion);
+      await harness.drain();
+      const replayed = await harness.readModel();
+      const replayedThread = replayed.threads.find((thread) => thread.id === threadId);
+      expect(replayedThread?.messages.find((message) => message.id === messageId)).toMatchObject({
+        turnId: oldTurnId,
+        text: finalText,
+        streaming: false,
+        createdAt: completedAt,
+        updatedAt: completedAt,
+      });
+      expect(replayedThread?.session).toEqual(before.session);
+      expect(replayedThread?.latestTurn).toEqual(before.latestTurn);
+      expect(await readOldTurn()).toEqual(oldTurnBefore);
+      expect(
+        logMessages.filter(
+          (message) =>
+            Array.isArray(message) && message[0] === "provider.assistantCompletion/textMismatch",
+        ),
+      ).toEqual([]);
+    },
+  );
 
   it("consolidates a completed assistant stream without appending it twice", async () => {
     const harness = await createHarness({ serverSettings: { enableAssistantStreaming: true } });
@@ -4514,6 +4551,7 @@ describe("ProviderRuntimeIngestion", () => {
   it.each([
     { finalText: "Different completed provider text.", reason: "completion-prefix-mismatch" },
     { finalText: "Streamed", reason: "completion-shorter-than-stream" },
+    { finalText: " Streamed provider text.", reason: "completion-prefix-mismatch" },
   ])(
     "preserves streamed output and reports only counts for $reason",
     async ({ finalText, reason }) => {
@@ -4547,20 +4585,24 @@ describe("ProviderRuntimeIngestion", () => {
         ),
       );
 
-      const completion: ProviderRuntimeEvent = {
-        type: "item.completed",
-        eventId: asEventId("evt-divergent-completion-completed"),
-        provider: ProviderDriverKind.make("codex"),
-        createdAt: now,
-        threadId: asThreadId("thread-1"),
-        turnId,
-        itemId,
-        payload: {
-          itemType: "assistant_message",
-          status: "completed",
-          detail: finalText,
-        },
-      };
+      // Transport must preserve a real leading-space mismatch as faithfully as
+      // accepted whitespace; normalization cannot grant replacement authority.
+      const completion = decodeProviderRuntimeEventJson(
+        encodeProviderRuntimeEventJson({
+          type: "item.completed",
+          eventId: asEventId("evt-divergent-completion-completed"),
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: now,
+          threadId: asThreadId("thread-1"),
+          turnId,
+          itemId,
+          payload: {
+            itemType: "assistant_message",
+            status: "completed",
+            detail: finalText,
+          },
+        }),
+      );
       harness.emit(completion);
 
       const thread = await waitForThread(harness.readModel, (entry) =>
