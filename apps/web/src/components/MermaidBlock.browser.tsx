@@ -5,7 +5,11 @@ import { cdp, page, userEvent } from "vitest/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
-import type { MermaidResult } from "../lib/mermaid/renderService";
+import {
+  createMermaidRenderService,
+  renderInMermaidSandbox,
+  type MermaidResult,
+} from "../lib/mermaid/renderService";
 import { applyInterfaceScalePercent } from "../interfaceScale";
 import { MermaidBlock } from "./MermaidBlock";
 
@@ -14,8 +18,32 @@ const mocks = vi.hoisted(() => ({
   copy: vi.fn<(source: string) => Promise<void>>(),
 }));
 
-vi.mock("../lib/mermaid/renderService", () => ({ renderMermaid: mocks.render }));
+vi.mock("../lib/mermaid/renderService", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/mermaid/renderService")>()),
+  renderMermaid: mocks.render,
+}));
 vi.mock("../lib/copyToClipboard", () => ({ copyTextToClipboard: mocks.copy }));
+
+const REAL_CHARTS = [
+  {
+    name: "XY bars",
+    label: "Baseline A",
+    source: `xychart-beta
+    title "Measured totals and forecast"
+    x-axis ["Baseline A", "Baseline B", "Forecast", "Target"]
+    y-axis "Decimal units" 0 --> 2400
+    bar [2262.804, 2174.792, 360, 400]\n`,
+  },
+  {
+    name: "pie showData",
+    label: "Header bytes [150]",
+    source: `pie showData
+    title Resource allocation: exact unit composition
+    "Primary pool" : 610698
+    "Secondary pool" : 1563944
+    "Header bytes" : 150\n`,
+  },
+] as const;
 
 function diagram(title = "Fixture diagram", width = 1200, height = 600): MermaidResult {
   return {
@@ -316,4 +344,152 @@ describe("Mermaid block", () => {
       await screen.unmount();
     }
   });
+
+  it.each(
+    REAL_CHARTS.flatMap((chart) =>
+      (["light", "dark"] as const).flatMap((theme) =>
+        [80, 130].map((scale) => ({ ...chart, theme, scale })),
+      ),
+    ),
+  )(
+    "retains real $name source, copy and expanded controls at $theme/$scale%",
+    async ({ source, label, theme, scale }) => {
+      await page.viewport(390, 700);
+      applyInterfaceScalePercent(scale);
+      document.documentElement.classList.toggle("dark", theme === "dark");
+      const host = document.createElement("div");
+      host.className = "chat-markdown";
+      host.style.width = "min(100%, 19rem)";
+      document.body.append(host);
+      // Retain the existing lifecycle test double, but give chart cases a
+      // fresh real service and its ordinary opaque-origin sandbox. This also
+      // exercises parent admission and sanitized image publication; Mermaid
+      // itself is never evaluated in this test document's application realm.
+      mocks.render.mockImplementation(createMermaidRenderService(renderInMermaidSandbox));
+      const screen = await render(<MermaidBlock code={source} complete theme={theme} />, {
+        container: host,
+      });
+      try {
+        // Keep the established 30-second browser test deadline. As in the real
+        // preview harness, bound cold bundle/sandbox readiness separately from
+        // the remaining source, geometry and native-input checks.
+        await vi.waitFor(() => expect(host.querySelector(".mermaid-preview img")).not.toBeNull(), {
+          timeout: 20_000,
+        });
+        const image = host.querySelector<HTMLImageElement>(".mermaid-preview img")!;
+        await image.decode();
+        expect(image.naturalWidth).toBeGreaterThan(0);
+        expect(image.naturalHeight).toBeGreaterThan(0);
+        const imageUrl = image.src;
+        const svg = await (await fetch(imageUrl)).text();
+        const parsed = new DOMParser().parseFromString(svg, "image/svg+xml");
+        expect(parsed.querySelector("foreignObject,script,image,a,use")).toBeNull();
+        for (const style of parsed.querySelectorAll("style")) style.remove();
+        expect(parsed.documentElement.textContent).toContain(label);
+        expect(mocks.render).toHaveBeenCalledExactlyOnceWith(source, theme);
+        expect(document.querySelector('iframe[title="Isolated diagram renderer"]')).toBeNull();
+
+        const block = host.querySelector<HTMLElement>(".mermaid-block")!;
+        const preview = host.querySelector<HTMLElement>(".mermaid-preview")!;
+        expect(block.getBoundingClientRect().width).toBeLessThanOrEqual(
+          host.getBoundingClientRect().width + 1,
+        );
+        expect(host.scrollWidth).toBeLessThanOrEqual(host.clientWidth + 1);
+        expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth + 1);
+        expect(image.getBoundingClientRect().width).toBeCloseTo(image.naturalWidth, 0);
+        expect(preview.scrollWidth).toBeGreaterThan(preview.clientWidth);
+        await expect
+          .element(page.getByRole("button", { name: "Diagram", exact: true }))
+          .toHaveAttribute("aria-pressed", "true");
+        await page.getByRole("button", { name: "Source", exact: true }).click();
+        expect(host.querySelector(".mermaid-source code")?.textContent).toBe(source);
+        expect(host.scrollWidth).toBeLessThanOrEqual(host.clientWidth + 1);
+        await page.getByRole("button", { name: "Copy Mermaid source" }).click();
+        expect(mocks.copy).toHaveBeenCalledExactlyOnceWith(source);
+        await expect.element(page.getByText("Copied", { exact: true })).toBeVisible();
+        await page.getByRole("button", { name: "Diagram", exact: true }).click();
+        expect(host.querySelector<HTMLImageElement>(".mermaid-preview img")!.src).toBe(imageUrl);
+
+        await page.getByRole("button", { name: "Expand diagram" }).click();
+        await expect
+          .element(page.getByRole("dialog", { name: "Expanded Mermaid diagram" }))
+          .toBeVisible();
+        const popup = document.querySelector<HTMLElement>(".mermaid-expanded-dialog")!;
+        const viewport = document.querySelector<HTMLElement>(".mermaid-expanded-viewport")!;
+        await vi.waitFor(() => {
+          expect(Number(getComputedStyle(popup).opacity)).toBe(1);
+          expect(viewport.scrollWidth).toBeLessThanOrEqual(viewport.clientWidth + 1);
+          expect(viewport.scrollHeight).toBeLessThanOrEqual(viewport.clientHeight + 1);
+        });
+        expect(popup.getBoundingClientRect().right).toBeLessThanOrEqual(window.innerWidth + 1);
+        expect(popup.getBoundingClientRect().bottom).toBeLessThanOrEqual(window.innerHeight + 1);
+        await page.getByRole("button", { name: "Reset", exact: true }).click();
+        expect(document.querySelector(".mermaid-zoom-value")?.textContent).toBe("100%");
+        expect(viewport.scrollWidth).toBeGreaterThan(viewport.clientWidth);
+        await page.getByRole("button", { name: "Zoom in", exact: true }).click();
+        expect(document.querySelector(".mermaid-zoom-value")?.textContent).toBe("125%");
+        await page.getByRole("button", { name: "Zoom out", exact: true }).click();
+        expect(document.querySelector(".mermaid-zoom-value")?.textContent).toBe("100%");
+        // Both real chart families are smaller than the large rectangle used
+        // by the existing control fixture. Two zoom steps ensure scroll room
+        // on both axes before exercising keyboard input and pointer capture.
+        await page.getByRole("button", { name: "Zoom in", exact: true }).click();
+        await page.getByRole("button", { name: "Zoom in", exact: true }).click();
+        viewport.focus();
+        await userEvent.keyboard("{ArrowRight}");
+        await vi.waitFor(() => expect(viewport.scrollLeft).toBeGreaterThan(0));
+        viewport.scrollTo(50, 50);
+        const rect = viewport.getBoundingClientRect();
+        const start = browserPoint({
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height / 2,
+        });
+        const end = browserPoint({
+          x: rect.left + rect.width / 2 - 50,
+          y: rect.top + rect.height / 2 - 30,
+        });
+        const input: CDPSession = cdp();
+        await input.send("Input.dispatchMouseEvent", { type: "mouseMoved", ...start });
+        await input.send("Input.dispatchMouseEvent", {
+          type: "mousePressed",
+          ...start,
+          button: "left",
+          buttons: 1,
+          clickCount: 1,
+        });
+        try {
+          await input.send("Input.dispatchMouseEvent", {
+            type: "mouseMoved",
+            ...end,
+            button: "left",
+            buttons: 1,
+          });
+          await vi.waitFor(() => {
+            expect(viewport.scrollLeft).toBeGreaterThan(80);
+            expect(viewport.scrollTop).toBeGreaterThan(65);
+          });
+        } finally {
+          await input.send("Input.dispatchMouseEvent", {
+            type: "mouseReleased",
+            ...end,
+            button: "left",
+            buttons: 0,
+            clickCount: 1,
+          });
+        }
+        await page.getByRole("button", { name: "Fit", exact: true }).click();
+        await vi.waitFor(() => {
+          expect(viewport.scrollWidth).toBeLessThanOrEqual(viewport.clientWidth + 1);
+          expect(viewport.scrollHeight).toBeLessThanOrEqual(viewport.clientHeight + 1);
+        });
+        expect(viewport.scrollLeft).toBe(0);
+        expect(viewport.scrollTop).toBe(0);
+        await userEvent.keyboard("{Escape}");
+        await expect.element(page.getByRole("button", { name: "Expand diagram" })).toHaveFocus();
+      } finally {
+        await screen.unmount();
+        host.remove();
+      }
+    },
+  );
 });

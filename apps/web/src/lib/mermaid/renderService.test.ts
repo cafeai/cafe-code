@@ -5,24 +5,42 @@ import { admitMermaidSource } from "./policy";
 const result = { svg: "<svg/>", width: 10, height: 10, title: "Diagram" };
 
 describe("Mermaid admission and bounded scheduler", () => {
-  it("allows five families but rejects configuration, unsupported syntax and byte overflow", () => {
+  it("allows seven families but rejects configuration, unsupported syntax and byte overflow", () => {
     for (const source of [
       "graph TD\nA-->B",
       "sequenceDiagram",
       "classDiagram",
       "stateDiagram-v2",
       "erDiagram",
+      "xychart-beta\nbar [1,2]",
+      "xychart\nbar [1,2]",
+      'pie showData\n"One": 1',
     ]) {
       expect(() => admitMermaidSource(source)).not.toThrow();
     }
     for (const source of [
       "---\nconfig: {}\n---\ngraph TD",
       "%%{init: {}}%%\ngraph TD",
-      "pie",
+      "gantt\ntitle Work",
       `graph TD\n${"字".repeat(11_000)}`,
     ]) {
       expect(() => admitMermaidSource(source)).toThrow("Diagram unavailable");
     }
+  });
+
+  it("allows flowchart LINK nodes without admitting interactive directives in other families", () => {
+    for (const source of [
+      'flowchart TD\nA --> LINK["Checks<br/>and review"]\nLINK --> PLAN',
+      "%% Comment\ngraph TD; links --> B; LINK --> A",
+    ])
+      expect(() => admitMermaidSource(source)).not.toThrow();
+    for (const source of [
+      'flowchart TD\nA-->B\nclick A href "https://example.invalid"',
+      "sequenceDiagram\nparticipant A\nLINK A: Guide @ https://example.invalid",
+      'sequenceDiagram\nparticipant A\nlinks A: {"Guide": "https://example.invalid"}',
+      'classDiagram\nclass A\nlink A "https://example.invalid"',
+    ])
+      expect(() => admitMermaidSource(source)).toThrow("Diagram unavailable");
   });
 
   it("deduplicates complete-source/theme identities and serializes jobs", async () => {

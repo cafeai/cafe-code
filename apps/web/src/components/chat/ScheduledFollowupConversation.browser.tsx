@@ -257,9 +257,16 @@ describe("inline scheduled follow-up owner review", () => {
         .element(page.getByLabelText("Instructions", { exact: true }))
         .toHaveValue(saved.prompt);
       await expect.element(page.getByLabelText("Every (minutes)", { exact: true })).toHaveValue(17);
+      // The full selected label identifies the computer-local option. Derive
+      // this independently from native Intl so a Tokyo-hosted browser retains
+      // the same exact-label assertion as a UTC-hosted CI browser.
+      const selectedZone = saved.recurrence.timeZone;
+      const localZone = new Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const zoneLabel =
+        selectedZone === localZone ? `${selectedZone} (computer local time)` : selectedZone;
       await expect
         .element(page.getByLabelText("Timezone", { exact: true }))
-        .toHaveTextContent("Asia/Tokyo");
+        .toHaveTextContent(zoneLabel);
       expectNoMutation(api);
 
       await page.getByRole("button", { name: "Approve & enable", exact: true }).click();

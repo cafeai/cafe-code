@@ -136,6 +136,17 @@ describe("per-chat subagent concurrency editor", () => {
     await expect.element(page.getByText("Subagent limit: 20", { exact: true })).toBeVisible();
     expect(document.body.textContent).not.toContain("Provider-managed");
     // Provider-specific scope notes live in the one labelled info tooltip.
+    // A visible mobile dialog can still be entering. A one-shot hover during
+    // that movement leaves the small trigger and cancels the native tooltip
+    // rest timer. Admit the actual settled target, not an arbitrary delay;
+    // retain the real hover, exact help text and reset-authority assertions.
+    const dialog = page.getByRole("dialog").element();
+    await vi.waitFor(() => {
+      expect(dialog.hasAttribute("data-starting-style")).toBe(false);
+      expect(dialog.getAnimations().every((animation) => animation.playState === "finished")).toBe(
+        true,
+      );
+    });
     await page.getByRole("button", { name: "About subagent limits" }).hover();
     await expect.element(page.getByText(/Claude limits Agent-tool admission/)).toBeVisible();
     await page.getByRole("button", { name: "Reset", exact: true }).click();

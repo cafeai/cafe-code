@@ -15,9 +15,14 @@ flowchart TD
 ````
 
 Supported families are flowcharts (`flowchart`/`graph`), sequence diagrams,
-class diagrams, state diagrams, and entity-relationship diagrams. Ordinary code
+class diagrams, state diagrams, entity-relationship diagrams, XY charts
+(`xychart`/`xychart-beta`, bar and line plots), and pie charts (`pie`, including
+`showData`). Ordinary code
 blocks are unchanged. Untagged diagrams, unsupported families, incomplete fences,
 invalid syntax, and diagrams exceeding resource limits remain copyable source.
+XY charts support category or numeric X axes, named plots, optional point labels
+and horizontal orientation. Pie charts retain small entries in the legend even
+when the pinned renderer omits their slices below 1% from the drawing.
 
 ## Controls and streaming
 
@@ -46,7 +51,13 @@ sanitized separately and displayed as an image; it cannot become active chat DOM
 User-supplied animation, filters and layout CSS do not survive output admission.
 
 Sources are limited to 32 KiB UTF-8, with at most 250 parsed nodes and 250 parsed
-connections/messages per graph (state/class auxiliary items count too). Results
+connections/messages per graph (state/class auxiliary items count too). XY charts
+count categories/numeric ticks plus series against the node limit, and aggregate
+plotted points and aggregate retained point labels each against the connection
+limit. Pie charts count every parsed section, including zero or tiny entries.
+Numeric data must be finite, within the final axis domains, and produce finite
+nonempty tick/angle calculations. Empty/all-zero pies, charts without plots and
+unsafe numeric ranges fall back to source. Results
 are limited to 2 MiB SVG. One job runs at a time per app window, with at most 64
 pending identities, and an in-memory 128-entry / 16 MiB cache. Cache entries bind
 the complete source, theme, library version and policy. Nothing is persisted in
@@ -56,7 +67,11 @@ An asynchronous 15-second deadline releases stalled jobs. It is not a hard CPU
 deadline: a sandboxed iframe is not guaranteed a separate browser thread, and a
 timer cannot preempt synchronous layout. Source and parsed-graph bounds therefore
 apply before layout. See the [architecture decision](decisions/mermaid-rendering.md)
-for trust-boundary details and the verification limitations.
+for trust-boundary details and the verification limitations. The
+[chart admission decision](decisions/mermaid-chart-admission.md) records the
+pinned parsed contracts and numeric/resource defenses. Flowchart IDs such as
+`LINK` are ordinary nodes, not sequence/class link directives; multiline quoted
+labels using `<br/>` remain supported with HTML labels disabled.
 
 ## Verification and dependency updates
 
@@ -75,7 +90,7 @@ forced desktop build still gate publication.
 
 When updating Mermaid Tiny, review its bundled dependencies as well as its API:
 it is a self-contained script, not a dependency tree resolved at runtime. Verify
-all five database admission adapters, CSP/offline behavior, actual SVG label
+all seven database admission adapters, numeric chart limits, CSP/offline behavior, actual SVG label
 rendering, hostile inputs, and the source/theme/cache lifecycle. Update the
 renderer identity in `apps/web/src/lib/mermaid/policy.ts` with policy changes.
 The independent output sanitizer is separately pinned. Renovate updates remain

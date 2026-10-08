@@ -10,7 +10,7 @@ function svgDocument(contents: string, attributes = ""): string {
   return `<svg xmlns="${SVG_NAMESPACE}" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 100 60" ${attributes}>${contents}</svg>`;
 }
 
-async function admitsParsedGraph(source: string): Promise<boolean> {
+async function admitsParsedGraph(source: string, parsedMutation = ""): Promise<boolean> {
   const nonce = crypto.randomUUID();
   const id = crypto.randomUUID();
   const frame = document.createElement("iframe");
@@ -21,9 +21,25 @@ async function admitsParsedGraph(source: string): Promise<boolean> {
   // only the final layout call gives a direct admission signal without asking
   // every boundary fixture to perform an expensive 250-node graph layout.
   const admittedSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1" />';
+  // These mutation bodies are fixed, test-authored code used only to model a
+  // future renderer changing its parsed database contract. They execute in the
+  // same opaque sandbox as the parser; provider source never becomes script.
+  // Tiny freezes mermaidAPI, so replace its reference with a test-only copy
+  // rather than silently attempting to overwrite a frozen method.
+  const parsedOverride = parsedMutation
+    ? `const getDiagram = mermaid.mermaidAPI.getDiagramFromText.bind(mermaid.mermaidAPI);
+       mermaid.mermaidAPI = {
+         ...mermaid.mermaidAPI,
+         getDiagramFromText: async (source) => {
+           const diagram = await getDiagram(source);
+           ${parsedMutation}
+           return diagram;
+         }
+       };`
+    : "";
   const instrumentedDocument = createMermaidSandboxDocument(nonce).replace(
     "</script></body>",
-    `</script><script nonce="${nonce}">mermaid.render = async () => ({ svg: ${JSON.stringify(admittedSvg)} });</script></body>`,
+    `</script><script nonce="${nonce}">mermaid.render = async () => ({ svg: ${JSON.stringify(admittedSvg)} });${parsedOverride}</script></body>`,
   );
   return new Promise((resolve, reject) => {
     const finish = (admitted: boolean | undefined) => {
@@ -172,6 +188,9 @@ describe("Mermaid source and parsed-graph admission", () => {
     "graph TD; A-->B; click A callback",
     "sequenceDiagram\nparticipant A\nlink A: Website @ https://example.invalid/",
     'sequenceDiagram\nparticipant A\nlinks A: {"Website":"https://example.invalid/"}',
+    "sequenceDiagram\nparticipant A\nLINK A: Website @ https://example.invalid/",
+    'sequenceDiagram\nparticipant A\nLINKS A: {"Website":"https://example.invalid/"}',
+    'classDiagram\nclass Node\nlink Node "https://example.invalid/"',
     'graph TD\nA@{ img: "https://example.invalid/image" }',
     'graph TD\nA@{ "img": "https://example.invalid/image" }',
     "graph TD\nA@{ 'img': 'https://example.invalid/image' }",
@@ -187,6 +206,13 @@ describe("Mermaid source and parsed-graph admission", () => {
     const source = 'graph TD\nA["click, links, and img are text"]-->B';
     expect(() => admitMermaidSource(source)).not.toThrow();
     expect(await admitsParsedGraph(source)).toBe(true);
+  });
+
+  it("admits flowchart node identifiers that resemble another family's link directives", async () => {
+    for (const source of ["flowchart TD\nLINK --> PLAN", "graph TD\nLINKS --> PLAN"]) {
+      expect(() => admitMermaidSource(source)).not.toThrow();
+      expect(await admitsParsedGraph(source)).toBe(true);
+    }
   });
 
   it("rejects canonical image nodes even when YAML encodes the img property name", async () => {
@@ -280,6 +306,198 @@ describe("Mermaid source and parsed-graph admission", () => {
       `flowchart LR\n${Array.from({ length: leftCount }, (_, i) => `A${i}`).join(" & ")} --> ${Array.from({ length: rightCount }, (_, i) => `B${i}`).join(" & ")}`;
     expect(await admitsParsedGraph(source(15, 16))).toBe(true);
     expect(await admitsParsedGraph(source(16, 16))).toBe(false);
+  });
+
+  it.each([
+    [
+      "XY categories plus series and numeric axis ticks",
+      (count: number) =>
+        `xychart-beta\nx-axis [${Array.from({ length: count }, (_, i) => `Category${i}`).join(",")}]\nbar [${Array.from({ length: count }, () => "1").join(",")}]`,
+      248,
+      249,
+    ],
+    [
+      "XY aggregate numeric plot points",
+      (count: number) => `xychart\nline [${Array.from({ length: count }, () => "1").join(",")}]`,
+      250,
+      251,
+    ],
+    [
+      "XY aggregate original point labels across truncated series",
+      (count: number) => {
+        const firstCount = Math.floor(count / 2);
+        const first = Array.from({ length: firstCount }, (_, i) => `1 "First${i}"`).join(",");
+        const second = Array.from({ length: count - firstCount }, (_, i) => `1 "Second${i}"`).join(
+          ",",
+        );
+        return `xychart-beta\nx-axis [Only]\nline [${first}]\nline [${second}]`;
+      },
+      250,
+      251,
+    ],
+    [
+      "XY series plus both constant numeric axis ticks",
+      (count: number) =>
+        `xychart-beta\n${Array.from({ length: count }, (_, i) => `bar "Series${i}" [1]`).join("\n")}`,
+      248,
+      249,
+    ],
+    [
+      "XY category expansion across multiple series",
+      (count: number) => {
+        const categories = Array.from({ length: count }, (_, i) => `Category${i}`).join(",");
+        const values = Array.from({ length: count }, () => "1").join(",");
+        return `xychart-beta\nx-axis [${categories}]\nbar [${values}]\nline [${values}]`;
+      },
+      125,
+      126,
+    ],
+    [
+      "XY original point labels retained after numeric data truncation",
+      (count: number) =>
+        `xychart-beta\nx-axis [Only]\nline [${Array.from({ length: count }, (_, i) => `1 "Label${i}"`).join(",")}]`,
+      250,
+      251,
+    ],
+    [
+      "pie sections including those omitted from visible arcs",
+      (count: number) =>
+        // One dominant slice keeps a valid pie while every tiny slice still
+        // creates a legend entry and must consume the parsed section budget.
+        `pie showData\n"Dominant" : 1000000\n${Array.from({ length: count - 1 }, (_, i) => `"Section${i}" : 1`).join("\n")}`,
+      250,
+      251,
+    ],
+  ] as const)(
+    "counts %s in the 250-item chart limits",
+    async (_name, source, admitted, rejected) => {
+      expect(await admitsParsedGraph(source(admitted))).toBe(true);
+      expect(await admitsParsedGraph(source(rejected))).toBe(false);
+    },
+  );
+
+  it("retains bounded chart cases with constant axes, negative values, and zero slices", async () => {
+    const admitted = [
+      "xychart-beta\nbar [0]",
+      "xychart horizontal\nx-axis 1 --> 3\ny-axis -3 --> 3\nline [-3,0,3]",
+      'pie showData\n"Empty" : 0\n"Used" : 1',
+    ];
+    for (const source of admitted) expect(await admitsParsedGraph(source)).toBe(true);
+  });
+
+  it.each([
+    ["XY without a plot", "xychart-beta"],
+    ["XY missing category values", "xychart-beta\nx-axis [First,Second]\nbar [1]"],
+    [
+      "XY category replacement after plot parsing",
+      "xychart-beta\nx-axis [First,Second]\nbar [1,2]\nx-axis [Other,Last]",
+    ],
+    [
+      "XY numeric range replacement after plot parsing",
+      "xychart-beta\nx-axis 1 --> 2\nline [1,2]\nx-axis 1 --> 1",
+    ],
+    [
+      "XY narrow range with a finite huge outlier",
+      `xychart-beta\ny-axis 0 --> 1\nbar [${"1" + "0".repeat(308)}]`,
+    ],
+    ["XY nonfinite parsed value", `xychart-beta\nbar [${"9".repeat(400)}]`],
+    [
+      "XY finite endpoints with an overflowing axis span",
+      `xychart-beta\ny-axis -${"1" + "0".repeat(308)} --> ${"1" + "0".repeat(308)}\nbar [0]`,
+    ],
+    [
+      "XY reciprocal tick increment overflow",
+      `xychart-beta\ny-axis 0 --> 0.${"0".repeat(310)}1\nbar [0]`,
+    ],
+    [
+      "XY subnormal tick-step underflow",
+      `xychart-beta\ny-axis 0 --> 0.${"0".repeat(322)}1\nbar [0]`,
+    ],
+    ["pie without sections", "pie showData"],
+    ["pie without a positive total", 'pie\n"First" : 0\n"Second" : 0'],
+    ["pie negative value", 'pie\n"Negative" : -1'],
+    ["pie nonfinite parsed value", `pie\n"Overflow" : ${"9".repeat(400)}`],
+    [
+      "pie finite values with an overflowing total",
+      `pie\n"First" : ${"1" + "0".repeat(308)}\n"Second" : ${"1" + "0".repeat(308)}`,
+    ],
+    ["pie tiny total with an infinite angular multiplier", `pie\n"Tiny" : 0.${"0".repeat(310)}1`],
+  ])("rejects %s before invoking chart layout", async (_name, source) => {
+    expect(() => admitMermaidSource(source)).not.toThrow();
+    expect(await admitsParsedGraph(source)).toBe(false);
+  });
+
+  it.each([
+    [
+      "pie sections as a plain object",
+      'pie\n"Slice" : 1',
+      "diagram.db.getSections = () => ({ Slice: 1 });",
+    ],
+    [
+      "pie labels with a foreign type",
+      'pie\n"Slice" : 1',
+      "diagram.db.getSections = () => new Map([[1, 1]]);",
+    ],
+    [
+      "pie values with a foreign type",
+      'pie\n"Slice" : 1',
+      'diagram.db.getSections = () => new Map([["Slice", "1"]]);',
+    ],
+    ["XY chart data as an array", "xychart-beta\nbar [1]", "diagram.db.getXYChartData = () => [];"],
+    [
+      "XY unknown axis kind",
+      "xychart-beta\nbar [1]",
+      'diagram.db.getXYChartData().xAxis = { type: "log", title: "", min: 1, max: 1 };',
+    ],
+    [
+      "XY categorical Y axis",
+      "xychart-beta\nbar [1]",
+      'diagram.db.getXYChartData().yAxis = { type: "band", title: "", categories: ["Only"] };',
+    ],
+    [
+      "XY plots as a map",
+      "xychart-beta\nbar [1]",
+      "diagram.db.getXYChartData().plots = new Map();",
+    ],
+    [
+      "XY unknown plot kind",
+      "xychart-beta\nbar [1]",
+      'diagram.db.getXYChartData().plots[0].type = "scatter";',
+    ],
+    [
+      "XY point data as an object",
+      "xychart-beta\nbar [1]",
+      'diagram.db.getXYChartData().plots[0].data = { "1": 1 };',
+    ],
+    [
+      "XY tuple with extra fields",
+      "xychart-beta\nbar [1]",
+      'diagram.db.getXYChartData().plots[0].data = [["1", 1, 2]];',
+    ],
+    [
+      "XY numeric tuple key",
+      "xychart-beta\nbar [1]",
+      "diagram.db.getXYChartData().plots[0].data = [[1, 1]];",
+    ],
+    [
+      "XY foreign point labels",
+      "xychart-beta\nline [1]",
+      "diagram.db.getXYChartData().plots[0].pointLabels = [1];",
+    ],
+    [
+      "XY sparse point labels",
+      "xychart-beta\nline [1]",
+      "diagram.db.getXYChartData().plots[0].pointLabels = new Array(1);",
+    ],
+    [
+      "XY sparse categories",
+      "xychart-beta\nbar [1]",
+      'diagram.db.getXYChartData().xAxis = { type: "band", title: "", categories: ["1", ,] };',
+    ],
+  ])("rejects unfamiliar parsed contracts: %s", async (_name, source, mutation) => {
+    // Exercise production admission against the real parsed diagram with only
+    // one contract changed, so an API upgrade cannot silently become size zero.
+    expect(await admitsParsedGraph(source, mutation)).toBe(false);
   });
 });
 
