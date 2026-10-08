@@ -133,7 +133,9 @@ const deriveServerPathsSync = (baseDir: string, devUrl: URL | undefined) =>
 
 async function waitFor(
   predicate: () => boolean | Promise<boolean>,
-  timeoutMs = 2000,
+  // Windows fixture observations can exceed the two-second wait on some hosts.
+  // Preserve explicit caller deadlines and the existing macOS/Linux default.
+  timeoutMs = process.platform === "win32" ? 5_000 : 2_000,
 ): Promise<void> {
   const deadline = performance.now() + timeoutMs;
   while (true) {
