@@ -1,60 +1,417 @@
 {
   "sourceCommit": "b0968e1b12834e485dda68789541a3cc57664a9f",
   "contractVersion": "0.8.0",
+  "schemaSource": "pinned-macos-native-registry",
   "tools": [
     {
-      "name": "click",
-      "description": "Click coordinates or a snapshot-bound element with an explicit target and delivery mode.",
+      "name": "bring_to_front",
+      "description": "Activate an exact app/window when the task needs visible foreground interaction. Prefer background input otherwise.",
       "inputSchema": {
         "additionalProperties": false,
-        "oneOf": [
-          {
-            "not": {
-              "required": ["element_token"]
-            },
-            "required": ["x", "y"]
-          },
-          {
-            "not": {
-              "anyOf": [
-                {
-                  "required": ["x"]
-                },
-                {
-                  "required": ["y"]
-                },
-                {
-                  "required": ["capture_id"]
-                }
-              ]
-            },
-            "required": ["element_token"]
-          }
-        ],
         "properties": {
+          "pid": {
+            "description": "Process ID of the app to activate.",
+            "type": "integer"
+          },
+          "window_id": {
+            "description": "CGWindowID to verify as the focused, frontmost window. Omit to activate the app only.",
+            "type": "integer"
+          }
+        },
+        "required": ["pid"],
+        "type": "object"
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      }
+    },
+    {
+      "name": "browser_click",
+      "description": "Click an exact tab's current DOM ref or CSS-pixel coordinates. Background by default; inspect fresh browser state to verify the effect.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "delivery_mode": {
+            "default": "background",
+            "description": "background (default) refuses trusted input where it would activate the browser window (Linux Chromium). foreground accepts that activation, for a browser whose window nobody else is using (for example inside a sandbox).",
+            "enum": ["background", "foreground"],
+            "type": "string"
+          },
+          "input_route": {
+            "description": "\"trusted\" (default): Input.dispatchMouseEvent. It refuses rather than foregrounding a standalone browser. \"dom_event\": synthetic full-background DOM click, only when explicitly requested. Dispatch does not prove the control activated; refresh page state and verify the expected postcondition.",
+            "enum": ["trusted", "dom_event"],
+            "type": "string"
+          },
+          "ref": {
+            "description": "Page element ref in the p<snapshot>:<index> namespace from get_browser_state. Refs are invalidated by navigation and by newer snapshots of the same tab.",
+            "type": "string"
+          },
+          "tab_id": {
+            "description": "Opaque tab id from get_browser_state (session-scoped).",
+            "type": "string"
+          },
+          "target_id": {
+            "description": "Opaque browser target id minted by get_browser_state (session-scoped; never a CDP id).",
+            "type": "string"
+          },
+          "x": {
+            "description": "Viewport x (CSS px) — alternative to ref.",
+            "type": "number"
+          },
+          "y": {
+            "description": "Viewport y (CSS px) — alternative to ref.",
+            "type": "number"
+          }
+        },
+        "required": ["target_id", "tab_id"],
+        "type": "object"
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      }
+    },
+    {
+      "name": "browser_dialog",
+      "description": "Inspect, accept or dismiss an exact tab's current JavaScript dialog using its dialog_id.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "description": "inspect returns the current dialog and its dialog_id; accept or dismiss resolves that exact dialog.",
+            "enum": ["inspect", "accept", "dismiss"],
+            "type": "string"
+          },
+          "delivery_mode": {
+            "default": "background",
+            "description": "Requested foreground posture for accept/dismiss. Linux Chromium requires foreground; inspect is read-only.",
+            "enum": ["background", "foreground"],
+            "type": "string"
+          },
+          "dialog_id": {
+            "description": "Opaque current dialog generation returned by action=inspect.",
+            "type": "string"
+          },
+          "prompt_text": {
+            "description": "Sensitive response text, valid only when accepting a prompt dialog.",
+            "type": "string"
+          },
+          "tab_id": {
+            "description": "Opaque tab id from get_browser_state (session-scoped).",
+            "type": "string"
+          },
+          "target_id": {
+            "description": "Opaque browser target id minted by get_browser_state (session-scoped; never a CDP id).",
+            "type": "string"
+          }
+        },
+        "required": ["target_id", "tab_id", "action"],
+        "type": "object"
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      }
+    },
+    {
+      "name": "browser_navigate",
+      "description": "Navigate an exactly bound browser tab to an HTTP, HTTPS or about URL without typing into the address bar.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "tab_id": {
+            "description": "Opaque tab id from get_browser_state (session-scoped).",
+            "type": "string"
+          },
+          "target_id": {
+            "description": "Opaque browser target id minted by get_browser_state (session-scoped; never a CDP id).",
+            "type": "string"
+          },
+          "url": {
+            "description": "Destination URL (http:, https:, or about:).",
+            "type": "string"
+          }
+        },
+        "required": ["target_id", "tab_id", "url"],
+        "type": "object"
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      }
+    },
+    {
+      "name": "browser_pointer",
+      "description": "Hover, right/double click, scroll or drag in an exact browser tab, using current DOM refs or CSS pixels. Background by default.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "description": "Pointer gesture. scroll needs delta_x or delta_y; drag needs destination_ref or to_x/to_y.",
+            "enum": ["hover", "right_click", "double_click", "scroll", "drag"],
+            "type": "string"
+          },
+          "delivery_mode": {
+            "default": "background",
+            "description": "background (default) refuses trusted input where it would activate the browser window (Linux Chromium). foreground accepts that activation, for a browser whose window nobody else is using (for example inside a sandbox).",
+            "enum": ["background", "foreground"],
+            "type": "string"
+          },
+          "delta_x": {
+            "description": "Horizontal scroll delta in CSS pixels.",
+            "type": "number"
+          },
+          "delta_y": {
+            "description": "Vertical scroll delta in CSS pixels.",
+            "type": "number"
+          },
+          "destination_ref": {
+            "description": "Drag destination page ref in the exact same frame.",
+            "type": "string"
+          },
+          "input_route": {
+            "default": "trusted",
+            "description": "trusted sends CDP Input events; dom_event synthesizes DOM events in the page and requires ref.",
+            "enum": ["trusted", "dom_event"],
+            "type": "string"
+          },
+          "ref": {
+            "description": "Origin page ref. Alternative to x/y.",
+            "type": "string"
+          },
+          "tab_id": {
+            "description": "Opaque tab id minted by get_browser_state.",
+            "type": "string"
+          },
+          "target_id": {
+            "description": "Opaque target id minted by get_browser_state.",
+            "type": "string"
+          },
+          "to_x": {
+            "description": "Drag destination viewport x in CSS pixels.",
+            "type": "number"
+          },
+          "to_y": {
+            "description": "Drag destination viewport y in CSS pixels.",
+            "type": "number"
+          },
+          "x": {
+            "description": "Origin viewport x in CSS pixels.",
+            "type": "number"
+          },
+          "y": {
+            "description": "Origin viewport y in CSS pixels.",
+            "type": "number"
+          }
+        },
+        "required": ["target_id", "tab_id", "action"],
+        "type": "object"
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      }
+    },
+    {
+      "name": "browser_prepare",
+      "description": "Prepare a browser DOM connection. Prefer allow_launch:true with profile.mode:isolated_new for a driver-owned Chromium profile. Existing-profile attachment requires separate native authorization; never change the user's browser settings automatically.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "allow_launch": {
+            "description": "Allow a separate driver-owned isolated Chromium process to be launched (default false).",
+            "type": "boolean"
+          },
+          "pid": {
+            "description": "Browser process id to prepare. Required except for a driver-owned isolated_new/isolated_named launch with allow_launch=true.",
+            "type": "integer"
+          },
+          "profile": {
+            "additionalProperties": false,
+            "description": "Driver-owned isolated Chromium profile to launch with allow_launch=true. mode=isolated_new creates a fresh throwaway profile; mode=isolated_named reuses the named driver-owned profile. Never an existing user profile.",
+            "properties": {
+              "mode": {
+                "enum": ["isolated_new", "isolated_named"],
+                "type": "string"
+              },
+              "name": {
+                "description": "Required only for isolated_named; 1-64 path-safe ASCII characters.",
+                "type": "string"
+              }
+            },
+            "required": ["mode"],
+            "type": "object"
+          },
+          "strategy": {
+            "additionalProperties": false,
+            "description": "Attach to an already-running browser instead of launching one. kind=existing_profile attaches to the user's running profile at pid/window_id and requires explicit profile authorization.",
+            "properties": {
+              "kind": {
+                "enum": ["existing_profile"],
+                "type": "string"
+              }
+            },
+            "required": ["kind"],
+            "type": "object"
+          },
+          "window_id": {
+            "description": "Exact native window approval anchor; required for strategy.kind=existing_profile.",
+            "type": "integer"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      }
+    },
+    {
+      "name": "browser_set_input_files",
+      "description": "Assign explicit local files to an exact tab's current file-input ref. Use only files the user requested uploading.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "files": {
+            "description": "Absolute paths of 1 to 32 local regular files to assign to the input.",
+            "items": {
+              "description": "Absolute path to one local regular file.",
+              "type": "string"
+            },
+            "maxItems": 32,
+            "minItems": 1,
+            "type": "array"
+          },
+          "ref": {
+            "description": "Page element ref in the p<snapshot>:<index> namespace from get_browser_state. Refs are invalidated by navigation and by newer snapshots of the same tab.",
+            "type": "string"
+          },
+          "tab_id": {
+            "description": "Opaque tab id from get_browser_state (session-scoped).",
+            "type": "string"
+          },
+          "target_id": {
+            "description": "Opaque browser target id minted by get_browser_state (session-scoped; never a CDP id).",
+            "type": "string"
+          }
+        },
+        "required": ["target_id", "tab_id", "ref", "files"],
+        "type": "object"
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      }
+    },
+    {
+      "name": "browser_type",
+      "description": "Fill an exact tab's current DOM ref. replace:true replaces its value; otherwise text is inserted at the caret.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "description": "insert_text (default): bulk Input.insertText. keystrokes: per-character Input.dispatchKeyEvent.",
+            "enum": ["insert_text", "keystrokes"],
+            "type": "string"
+          },
+          "ref": {
+            "description": "Page element ref in the p<snapshot>:<index> namespace from get_browser_state. Refs are invalidated by navigation and by newer snapshots of the same tab.",
+            "type": "string"
+          },
+          "replace": {
+            "description": "false (default): insert at the caret, appending to whatever the field already holds. true: select the element's whole content first so the text replaces it — with an empty text this clears the field. Replacement goes through the selection, so beforeinput/input still fire and framework state stays consistent.",
+            "type": "boolean"
+          },
+          "tab_id": {
+            "description": "Opaque tab id from get_browser_state (session-scoped).",
+            "type": "string"
+          },
+          "target_id": {
+            "description": "Opaque browser target id minted by get_browser_state (session-scoped; never a CDP id).",
+            "type": "string"
+          },
+          "text": {
+            "description": "Text to type.",
+            "type": "string"
+          }
+        },
+        "required": ["target_id", "tab_id", "ref", "text"],
+        "type": "object"
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      }
+    },
+    {
+      "name": "click",
+      "description": "Prefer pid + element_token from a fresh window read for background AX clicking. Otherwise use pid/window_id with window-screenshot pixels and capture_id. delivery_mode defaults to background; foreground is an explicit fallback. Desktop pixels require scope:desktop.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "description": "AX action: press, show_menu, pick, confirm, cancel, open.",
+            "type": "string"
+          },
           "button": {
-            "default": null,
+            "description": "Mouse button. Default: \"left\" — omit for legacy left-click behaviour. Pixel path uses the matching CGEvent primitive; AX path maps \"right\" to AXShowMenu and falls back to a pixel middle-click at the element's center for \"middle\".",
             "enum": ["left", "right", "middle"],
             "type": "string"
           },
           "capture_id": {
-            "default": null,
-            "minLength": 1,
+            "description": "Optional immutable source capture ID returned by get_window_state or get_desktop_state. With x,y, Driver atomically admits and consumes that exact capture before dispatch; stale, mismatched, or out-of-bounds captures are refused without fallback.",
             "type": "string"
           },
           "count": {
-            "default": null,
-            "maximum": 3,
-            "minimum": 1,
+            "description": "Click count (pixel path only). Default 1.",
             "type": "integer"
           },
           "delivery_mode": {
+            "description": "Best-effort-background ladder rung (default \"background\").",
             "enum": ["background", "foreground"],
             "type": "string"
           },
           "element_token": {
-            "default": null,
+            "description": "Opaque per-snapshot element handle from `structuredContent.elements[].element_token`. Returns an explicit stale error naming the current snapshots once a newer read supersedes it.",
             "pattern": "^s[0-9a-f]{8}:[0-9]+$",
+            "type": "string"
+          },
+          "from_zoom": {
+            "description": "When true, x and y are in the last zoom image for this pid; driver translates back to full-window coordinates.",
+            "type": "boolean"
+          },
+          "modifier": {
+            "description": "Modifier keys: cmd, shift, option/alt, ctrl.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "pid": {
+            "description": "Target process ID.",
+            "type": "integer"
+          },
+          "scope": {
+            "description": "Coordinate frame for a windowless screen-absolute click (default \"window\"). Pass \"desktop\" when sending x,y with NO pid/window_id — the coordinates are then true screen pixels (read from get_desktop_state with scope=\"desktop\"). Per-call; not a setting.",
+            "enum": ["window", "desktop"],
             "type": "string"
           },
           "target": {
@@ -95,57 +452,176 @@
               }
             ]
           },
+          "window_id": {
+            "description": "Target window ID. Omit when element_token is supplied (the token carries it).",
+            "type": "integer"
+          },
           "x": {
-            "default": null,
+            "description": "X in screenshot pixels. A window target uses the get_window_state PNG; a desktop target uses the native get_desktop_state PNG. The driver reverses Retina backing scale and any window-image downscale.",
             "type": "number"
           },
           "y": {
-            "default": null,
+            "description": "Y in screenshot pixels from the image selected by target.",
             "type": "number"
           }
         },
-        "required": ["target", "delivery_mode"],
+        "required": [],
         "type": "object"
       },
       "annotations": {
-        "readOnlyHint": false,
         "destructiveHint": true,
         "idempotentHint": false,
-        "openWorldHint": true
+        "openWorldHint": true,
+        "readOnlyHint": false
+      }
+    },
+    {
+      "name": "clipboard_read",
+      "description": "Inspect clipboard types; include_text:true reads its sensitive text only when needed for the user's task.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "include_text": {
+            "default": false,
+            "description": "Return plain-text clipboard content in addition to the available types.\nClipboard content is privacy-sensitive and is never retained in telemetry.",
+            "type": "boolean"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      }
+    },
+    {
+      "name": "clipboard_write",
+      "description": "Write exactly one clipboard value: text, an image path or a file path. Prefer targeted type_text/set_value for ordinary text entry.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "file_path": {
+            "description": "Absolute path to a local file to place on the clipboard as a file URL.",
+            "type": "string"
+          },
+          "image_path": {
+            "description": "Absolute path to a local image to place on the clipboard.",
+            "type": "string"
+          },
+          "text": {
+            "description": "Plain text to place on the clipboard.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      }
+    },
+    {
+      "name": "double_click",
+      "description": "Double-click a fresh element_token or window-local screenshot pixels in an exact pid/window_id. Background by default.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "delivery_mode": {
+            "description": "Best-effort-background ladder rung (default \"background\").",
+            "enum": ["background", "foreground"],
+            "type": "string"
+          },
+          "element_token": {
+            "description": "Opaque per-snapshot element handle from `structuredContent.elements[].element_token`. Returns an explicit stale error naming the current snapshots once a newer read supersedes it.",
+            "pattern": "^s[0-9a-f]{8}:[0-9]+$",
+            "type": "string"
+          },
+          "pid": {
+            "description": "Target process ID.",
+            "type": "integer"
+          },
+          "window_id": {
+            "description": "CGWindowID. Omit when element_token is supplied (the token carries it).",
+            "type": "integer"
+          },
+          "x": {
+            "description": "Screen X coordinate (pixel path).",
+            "type": "number"
+          },
+          "y": {
+            "description": "Screen Y coordinate (pixel path).",
+            "type": "number"
+          }
+        },
+        "required": ["pid"],
+        "type": "object"
+      },
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
       }
     },
     {
       "name": "drag",
-      "description": "Drag between two absolute points in get_desktop_state coordinates.",
+      "description": "Drag between window-local screenshot pixels in an exact window. Use an explicit desktop scope for foreground desktop gestures.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
           "button": {
+            "description": "Mouse button used for the drag. Default: left.",
             "enum": ["left", "right", "middle"],
             "type": "string"
           },
+          "delivery_mode": {
+            "description": "Window-scoped drag on macOS supports only \"foreground\": briefly front the exact window (window_id required), drive the physical pointer through the gesture, then restore the prior frontmost app.",
+            "enum": ["background", "foreground"],
+            "type": "string"
+          },
           "duration_ms": {
+            "description": "Wall-clock duration of the drag path between mouseDown and mouseUp. Default: 500.",
             "maximum": 10000,
             "minimum": 0,
             "type": "integer"
           },
           "from_x": {
+            "description": "Drag-start X in window-local screenshot pixels. Top-left origin.",
             "type": "number"
           },
           "from_y": {
+            "description": "Drag-start Y in window-local screenshot pixels. Top-left origin.",
             "type": "number"
           },
+          "from_zoom": {
+            "description": "When true, coordinates are in the last zoom image for this pid; driver maps back to window coordinates.",
+            "type": "boolean"
+          },
           "modifier": {
+            "description": "Modifier keys held across the entire gesture: cmd/shift/option/ctrl.",
             "items": {
               "type": "string"
             },
             "type": "array"
           },
+          "pid": {
+            "description": "Target process ID.",
+            "type": "integer"
+          },
           "scope": {
-            "const": "desktop",
-            "description": "Deprecated flat desktop target retained for wire compatibility."
+            "default": "window",
+            "description": "Use desktop with no pid/window_id for native get_desktop_state screenshot coordinates.",
+            "enum": ["window", "desktop"],
+            "type": "string"
           },
           "steps": {
+            "description": "Number of intermediate mouseDragged events linearly interpolated along the path. Default: 20.",
             "maximum": 200,
             "minimum": 1,
             "type": "integer"
@@ -197,47 +673,46 @@
             "description": "Preferred per-call target: an exact window (`kind=\"window\"`, `pid`, `window_id`) or the\nprimary desktop (`kind=\"desktop\"`, `display_id=\"primary\"`)."
           },
           "to_x": {
+            "description": "Drag-end X in window-local screenshot pixels.",
             "type": "number"
           },
           "to_y": {
+            "description": "Drag-end Y in window-local screenshot pixels.",
             "type": "number"
+          },
+          "window_id": {
+            "description": "CGWindowID for the window the pixel coordinates were measured against. Optional only when pid owns exactly one eligible top-level window; otherwise the action refuses with ambiguous_window_target.",
+            "type": "integer"
           }
         },
         "required": ["from_x", "from_y", "to_x", "to_y"],
         "type": "object"
       },
       "annotations": {
-        "readOnlyHint": false,
         "destructiveHint": true,
         "idempotentHint": false,
-        "openWorldHint": true
+        "openWorldHint": true,
+        "readOnlyHint": false
       }
     },
     {
-      "name": "get_desktop_state",
-      "description": "Capture the complete primary display at native resolution for a desktop-scope GUI loop.",
+      "name": "get_accessibility_tree",
+      "description": "Read a lightweight desktop inventory of apps and visible windows before selecting an exact window.",
       "inputSchema": {
         "additionalProperties": false,
-        "properties": {
-          "max_image_dimension": {
-            "description": "Optional long-edge cap for the returned PNG, in pixels. Omitted or 0\nreturns the full-size capture. When the cap downsizes the image,\ndesktop-scope x/y taken from it are mapped back automatically.",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [],
+        "properties": {},
         "type": "object"
       },
       "annotations": {
-        "readOnlyHint": true,
         "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
       }
     },
     {
-      "name": "get_screen_size",
-      "description": "Return the primary display dimensions and scale factor in the platform's desktop coordinate space.",
+      "name": "get_agent_cursor_state",
+      "description": "Inspect this chat's native agent cursor visibility, position, theme and motion.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {},
@@ -245,57 +720,168 @@
         "type": "object"
       },
       "annotations": {
-        "readOnlyHint": true,
         "destructiveHint": false,
         "idempotentHint": true,
-        "openWorldHint": false
+        "openWorldHint": false,
+        "readOnlyHint": true
+      }
+    },
+    {
+      "name": "get_browser_state",
+      "description": "Read exact browser tabs and actionable DOM refs. Defaults to compact semantic_v2 without screenshots. Use query, scope_ref and continuation to narrow/page the result. Refresh refs after navigation or a newer snapshot.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "continuation": {
+            "description": "Opaque continuation minted by an earlier semantic_v2 response.",
+            "type": "string"
+          },
+          "include_screenshot": {
+            "default": false,
+            "description": "Capture the exact tab viewport as PNG through CDP without selecting the tab or foregrounding its native window. The request refuses if capture cannot be completed.",
+            "type": "boolean"
+          },
+          "pid": {
+            "description": "Native browser process id (bind mode).",
+            "type": "integer"
+          },
+          "query": {
+            "description": "Read-only semantic match over role, accessible name, and visible text.",
+            "type": "string"
+          },
+          "scope_ref": {
+            "description": "Current semantic/content ref whose subtree should be observed.",
+            "type": "string"
+          },
+          "snapshot_format": {
+            "description": "Versioned snapshot contract. dom_refs_v1 remains the compatibility default.",
+            "enum": ["dom_refs_v1", "semantic_v2"],
+            "type": "string"
+          },
+          "tab_id": {
+            "description": "Opaque tab id from get_browser_state (session-scoped).",
+            "type": "string"
+          },
+          "target_id": {
+            "description": "Opaque browser target id minted by get_browser_state (session-scoped; never a CDP id).",
+            "type": "string"
+          },
+          "window_id": {
+            "description": "Native window id owned by pid (bind mode).",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      }
+    },
+    {
+      "name": "get_cursor_position",
+      "description": "Read the real mouse pointer position in screen points; this is distinct from the agent cursor overlay.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      }
+    },
+    {
+      "name": "get_desktop_state",
+      "description": "Capture the desktop for system UI or when window targeting is unavailable. Defaults to a 1280-pixel long edge; request 0 for native resolution.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_image_dimension": {
+            "description": "Optional long-edge cap for the returned PNG, in pixels (aspect ratio preserved).",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      }
+    },
+    {
+      "name": "get_screen_size",
+      "description": "Read logical display dimensions and backing scale for screen-point geometry.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
       }
     },
     {
       "name": "get_window_state",
-      "description": "Observe an exact native window with snapshot-bound elements and optional screenshots.",
+      "description": "Read an exact pid/window_id and its actionable element_token handles. Defaults to tree-only, 250 elements and depth 18. Narrow with query; raise limits when truncated. Request include_screenshot:true for pixel grounding, capped at 1280 pixels by default. Each read replaces that window's prior element tokens.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
           "include_accessibility_tree": {
+            "description": "Default true — walk the AX tree and return `elements` + `tree_markdown` alongside the screenshot.",
             "type": "boolean"
           },
           "include_screenshot": {
+            "description": "Default true — returns a grounding screenshot alongside the tree. Set false to skip the grab and return the tree only (the cheap path when you're just re-indexing before an element ax action; saves the image tokens + screen-grab latency). screenshot_out_file still forces a capture to disk.",
             "type": "boolean"
           },
           "max_depth": {
+            "description": "Cap on the AX-tree walk depth. Nodes whose rendered indent would exceed this are omitted. Omit for the default (25). Lower this for deep menu/Electron trees.",
             "minimum": 1,
             "type": "integer"
           },
           "max_dimension": {
+            "description": "Optional cap on the returned screenshot's long edge, in pixels (aspect ratio preserved) — the cheap path for a small preview / thumbnail. Applied on top of the session/global max_image_dimension ceiling; the tighter of the two wins. Omit for the configured default.",
             "minimum": 1,
             "type": "integer"
           },
           "max_elements": {
+            "description": "Cap on the total number of AX nodes walked. Truncates depth-first; markdown and structured elements truncate together. Omit for the default (2 000). Lower this for Electron / Obsidian / large web apps that produce 10k+ element trees and blow context windows.",
             "minimum": 1,
             "type": "integer"
           },
           "max_image_dimension": {
-            "description": "Optional per-call long-edge ceiling. Zero requests native resolution;\nomit it to preserve the configured session or global behavior.",
+            "description": "Per-call override for the returned screenshot's long edge in pixels. An explicit value wins over the session/global setting; 0 returns native resolution. Omit to preserve configured behavior.",
             "minimum": 0,
             "type": "integer"
           },
           "pid": {
-            "maximum": 4294967295,
-            "minimum": 1,
+            "description": "Target process ID.",
             "type": "integer"
           },
           "query": {
+            "description": "Case-insensitive filter for tree_markdown and structured elements. Returns matching actionable rows plus their actionable ancestors without renumbering element_index values.",
             "type": "string"
           },
           "timeout_ms": {
-            "description": "Wall-clock budget for the accessibility walk in milliseconds\n(default 1000 on every platform). A walk that runs out returns a\npartial tree flagged `truncated` rather than failing.",
+            "default": 1000,
+            "description": "Wall-clock budget in milliseconds for the accessibility-tree walk (default 1000, min 100, max 120000).",
             "maximum": 120000,
             "minimum": 100,
             "type": "integer"
           },
           "window_id": {
-            "minimum": 1,
+            "description": "Target window ID from list_windows.",
             "type": "integer"
           }
         },
@@ -303,28 +889,45 @@
         "type": "object"
       },
       "annotations": {
-        "readOnlyHint": true,
         "destructiveHint": false,
         "idempotentHint": false,
-        "openWorldHint": false
+        "openWorldHint": false,
+        "readOnlyHint": true
       }
     },
     {
       "name": "hotkey",
-      "description": "Press a key chord in the foreground desktop application.",
+      "description": "Send a key combination to an exact window, preferring background delivery. Explicit scope:desktop sends it to the foreground app.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
+          "delivery_mode": {
+            "description": "Best-effort-background ladder rung (default \"background\").",
+            "enum": ["background", "foreground"],
+            "type": "string"
+          },
+          "element_token": {
+            "description": "Opaque per-snapshot element handle from `structuredContent.elements[].element_token`. Returns an explicit stale error naming the current snapshots once a newer read supersedes it.",
+            "pattern": "^s[0-9a-f]{8}:[0-9]+$",
+            "type": "string"
+          },
           "keys": {
+            "description": "Modifier(s) and one non-modifier key, e.g. [\"cmd\", \"c\"].",
             "items": {
               "type": "string"
             },
             "minItems": 2,
             "type": "array"
           },
+          "pid": {
+            "description": "Target process ID.",
+            "type": "integer"
+          },
           "scope": {
-            "const": "desktop",
-            "description": "Deprecated flat desktop target retained for wire compatibility."
+            "default": "window",
+            "description": "Use desktop with no pid/window_id to send the chord to the frontmost application.",
+            "enum": ["window", "desktop"],
+            "type": "string"
           },
           "target": {
             "anyOf": [
@@ -371,68 +974,186 @@
               }
             ],
             "description": "Preferred per-call target: an exact window (`kind=\"window\"`, `pid`, `window_id`) or the\nprimary desktop (`kind=\"desktop\"`, `display_id=\"primary\"`)."
+          },
+          "window_id": {
+            "description": "Target window. Required for delivery_mode:\"foreground\" (the NSMenu activation needs a window). Does NOT itself raise the window — raising is gated on delivery_mode.",
+            "type": "integer"
+          },
+          "x": {
+            "description": "Screenshot-pixel X — the element px action form: pixel-click there to focus, then send the combo (so e.g. Cmd+V pastes into that field). Pass with y. Use for Chromium/Electron surfaces the background combo can't reach.",
+            "type": "number"
+          },
+          "y": {
+            "description": "Screenshot-pixel Y (see x).",
+            "type": "number"
           }
         },
         "required": ["keys"],
         "type": "object"
       },
       "annotations": {
-        "readOnlyHint": false,
         "destructiveHint": true,
         "idempotentHint": false,
-        "openWorldHint": true
+        "openWorldHint": true,
+        "readOnlyHint": false
       }
     },
     {
-      "name": "list_apps",
-      "description": "Discover installed and running native applications.",
+      "name": "invoke_menu",
+      "description": "Invoke an exact app menu path through accessibility, avoiding repeated menu screenshots and pixel clicks.",
       "inputSchema": {
         "additionalProperties": false,
-        "properties": {},
-        "required": [],
-        "type": "object"
-      },
-      "annotations": {
-        "readOnlyHint": true,
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false
-      }
-    },
-    {
-      "name": "list_windows",
-      "description": "Discover exact native windows and observable bounds and stacking order.",
-      "inputSchema": {
-        "additionalProperties": false,
+        "description": "Exact, immediate-child application menu path to resolve and invoke through\nthe operating system's accessibility API.",
         "properties": {
-          "on_screen_only": {
-            "type": "boolean"
+          "path": {
+            "description": "Menu labels from the top-level menu to the item, e.g. `[\"File\", \"Save As...\"]`\n(1 to 16 labels).",
+            "items": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 16,
+            "minItems": 1,
+            "type": "array"
           },
           "pid": {
-            "maximum": 4294967295,
+            "description": "Process ID of the application that owns the menu.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "window_id": {
+            "description": "Window ID from list_windows whose menu is invoked.",
             "minimum": 1,
             "type": "integer"
           }
         },
-        "required": [],
+        "required": ["pid", "window_id", "path"],
         "type": "object"
       },
       "annotations": {
-        "readOnlyHint": true,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      }
+    },
+    {
+      "name": "kill_app",
+      "description": "Force-terminate an exact app pid. Destructive: use only when the user requests termination and account for unsaved work.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "pid": {
+            "description": "PID of the process to terminate.",
+            "type": "integer"
+          }
+        },
+        "required": ["pid"],
+        "type": "object"
+      },
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      }
+    },
+    {
+      "name": "launch_app",
+      "description": "Launch an installed app in the background by bundle_id (preferred) or name, optionally opening URLs. Returns pid and windows so you can immediately target a window. Use bring_to_front only when the task needs it visible.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "additional_arguments": {
+            "description": "Extra arguments appended after --args when launching.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "bundle_id": {
+            "description": "App bundle identifier, e.g. com.apple.calculator. Preferred over name.",
+            "type": "string"
+          },
+          "creates_new_application_instance": {
+            "description": "When true, force a new app instance even if already running (open -n). Use for concurrent multi-agent/multi-session work so each session gets an isolated instance + window instead of sharing one — on single-instance apps (e.g. Calculator) every caller otherwise gets the same window and the sessions clobber each other.",
+            "type": "boolean"
+          },
+          "name": {
+            "description": "App display name. Used only when bundle_id is absent.",
+            "type": "string"
+          },
+          "urls": {
+            "description": "Optional file paths or URLs to open with the app (e.g. a folder path for Finder).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "webkit_inspector_port": {
+            "description": "Open a WebKit inspector server on this port (sets WEBKIT_INSPECTOR_SERVER env var).",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "annotations": {
         "destructiveHint": false,
         "idempotentHint": true,
-        "openWorldHint": false
+        "openWorldHint": true,
+        "readOnlyHint": false
+      }
+    },
+    {
+      "name": "list_apps",
+      "description": "List running and installed apps with bundle IDs, pids and state flags for native app launching.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      }
+    },
+    {
+      "name": "list_windows",
+      "description": "List native windows and their bounds/owner pids. Filter by pid and on_screen_only when possible.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "on_screen_only": {
+            "description": "When true, drop windows not on the current Space. Default false.",
+            "type": "boolean"
+          },
+          "pid": {
+            "description": "Optional pid filter. When set, only this pid's windows are returned.",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
       }
     },
     {
       "name": "move_cursor",
-      "description": "Move the real OS pointer in get_desktop_state coordinates.",
+      "description": "Move this chat's labelled agent cursor in screen points. Default window scope leaves the real pointer alone; explicit desktop scope moves the real pointer in desktop-screenshot pixels.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
           "scope": {
-            "const": "desktop",
-            "description": "Deprecated flat desktop target retained for wire compatibility."
+            "default": "window",
+            "description": "\"window\" (default) moves only the agent cursor overlay; \"desktop\" moves the real OS pointer.",
+            "enum": ["window", "desktop"],
+            "type": "string"
           },
           "target": {
             "anyOf": [
@@ -481,11 +1202,11 @@
             "description": "Preferred per-call target: an exact window (`kind=\"window\"`, `pid`, `window_id`) or the\nprimary desktop (`kind=\"desktop\"`, `display_id=\"primary\"`)."
           },
           "x": {
-            "description": "Destination X: window-local screenshot pixels for a window target, native\nget_desktop_state screenshot pixels for the desktop.",
+            "description": "Destination X. Window scope: screen points for the agent cursor overlay. Desktop scope: native get_desktop_state screenshot pixels.",
             "type": "number"
           },
           "y": {
-            "description": "Destination Y, in the same space as `x`.",
+            "description": "Destination Y, in the same space as x.",
             "type": "number"
           }
         },
@@ -493,30 +1214,127 @@
         "type": "object"
       },
       "annotations": {
-        "readOnlyHint": false,
         "destructiveHint": false,
         "idempotentHint": true,
-        "openWorldHint": false
+        "openWorldHint": false,
+        "readOnlyHint": false
       }
     },
     {
-      "name": "press_key",
-      "description": "Press one key, with optional modifiers, in the foreground desktop application.",
+      "name": "page",
+      "description": "Browser compatibility actions for text, DOM queries and JavaScript on supported Safari/WebKit/CDP targets. Prefer exact-tab browser_* tools. Enabling browser JavaScript automation requires the user's separate confirmation.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
-          "key": {
+          "action": {
+            "description": "Action to perform.",
+            "enum": [
+              "execute_javascript",
+              "get_text",
+              "query_dom",
+              "click_element",
+              "insert_text",
+              "type_keystrokes",
+              "enable_javascript_apple_events"
+            ],
             "type": "string"
           },
-          "modifiers": {
+          "attributes": {
+            "description": "Element attributes to include in query_dom results.",
             "items": {
               "type": "string"
             },
             "type": "array"
           },
+          "bundle_id": {
+            "description": "Bundle ID of the browser. Required for enable_javascript_apple_events (macOS only).",
+            "type": "string"
+          },
+          "cdp_port": {
+            "description": "Optional, for execute_javascript/insert_text/type_keystrokes: use this exact CDP port instead of auto-discovering one from pid. Needed when the port was opened via the browser's own remote-debugging toggle rather than a launch-time flag, since that path may not answer the auto-discovery probe.",
+            "maximum": 65535,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "css_selector": {
+            "description": "CSS selector for query_dom (e.g. 'a', 'button', 'input', 'h1'-'h6', 'p', 'img', 'select', '*').",
+            "type": "string"
+          },
+          "javascript": {
+            "description": "JavaScript to execute. Required for execute_javascript.",
+            "type": "string"
+          },
+          "pid": {
+            "description": "Target process ID.",
+            "type": "integer"
+          },
+          "selector": {
+            "description": "CSS selector for click_element (e.g. 'button.submit', '#login a').",
+            "type": "string"
+          },
+          "target_url_contains": {
+            "description": "Optional, for execute_javascript/insert_text/type_keystrokes: require exactly one browser tab whose URL contains this substring. Use this on a multi-tab browser — there's no built-in link between window_id and which tab a CDP call reaches.",
+            "type": "string"
+          },
+          "text": {
+            "description": "Text to insert or type. Required for insert_text and type_keystrokes. The target field must already have DOM focus (click/focus it first).",
+            "type": "string"
+          },
+          "user_has_confirmed_enabling": {
+            "description": "Must be true to proceed with enable_javascript_apple_events. This will quit and relaunch the browser.",
+            "type": "boolean"
+          },
+          "window_id": {
+            "description": "Target window ID from list_windows.",
+            "type": "integer"
+          }
+        },
+        "required": ["action"],
+        "type": "object"
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      }
+    },
+    {
+      "name": "press_key",
+      "description": "Press one key in an exact window, preferring background delivery. Explicit scope:desktop acts in the foreground app.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "delivery_mode": {
+            "description": "Best-effort-background ladder rung (default \"background\").",
+            "enum": ["background", "foreground"],
+            "type": "string"
+          },
+          "element_token": {
+            "description": "Opaque per-snapshot element handle from `structuredContent.elements[].element_token`. Returns an explicit stale error naming the current snapshots once a newer read supersedes it.",
+            "pattern": "^s[0-9a-f]{8}:[0-9]+$",
+            "type": "string"
+          },
+          "key": {
+            "description": "Key name: return, tab, escape, up, down, etc.",
+            "type": "string"
+          },
+          "modifiers": {
+            "description": "Modifier keys: cmd, shift, option/alt, ctrl, fn.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "pid": {
+            "description": "Target process ID.",
+            "type": "integer"
+          },
           "scope": {
-            "const": "desktop",
-            "description": "Deprecated flat desktop target retained for wire compatibility."
+            "default": "window",
+            "description": "Use desktop with no pid/window_id to send the key to the frontmost application.",
+            "enum": ["window", "desktop"],
+            "type": "string"
           },
           "target": {
             "anyOf": [
@@ -563,40 +1381,121 @@
               }
             ],
             "description": "Preferred per-call target: an exact window (`kind=\"window\"`, `pid`, `window_id`) or the\nprimary desktop (`kind=\"desktop\"`, `display_id=\"primary\"`)."
+          },
+          "window_id": {
+            "description": "Target window. Required for delivery_mode:\"foreground\". Does NOT itself raise the window — raising is gated on delivery_mode.",
+            "type": "integer"
+          },
+          "x": {
+            "description": "Screenshot-pixel X — the element px action form: pixel-click there to focus, then send the key. Use when the key must go to a Chromium/Electron surface the AX path can't focus. Pass with y, no element_token.",
+            "type": "number"
+          },
+          "y": {
+            "description": "Screenshot-pixel Y (see x).",
+            "type": "number"
           }
         },
         "required": ["key"],
         "type": "object"
       },
       "annotations": {
-        "readOnlyHint": false,
         "destructiveHint": true,
         "idempotentHint": false,
-        "openWorldHint": true
+        "openWorldHint": true,
+        "readOnlyHint": false
+      }
+    },
+    {
+      "name": "right_click",
+      "description": "Open an exact element's context menu through AX or window-local pixels. Use fresh element tokens; background by default.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "delivery_mode": {
+            "description": "Best-effort-background ladder rung (default \"background\").",
+            "enum": ["background", "foreground"],
+            "type": "string"
+          },
+          "element_token": {
+            "description": "Opaque per-snapshot element handle from `structuredContent.elements[].element_token`. Returns an explicit stale error naming the current snapshots once a newer read supersedes it.",
+            "pattern": "^s[0-9a-f]{8}:[0-9]+$",
+            "type": "string"
+          },
+          "modifier": {
+            "description": "Modifier keys held during the right-click: cmd/shift/option/ctrl. Pixel path only.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "pid": {
+            "description": "Target process ID.",
+            "type": "integer"
+          },
+          "window_id": {
+            "description": "CGWindowID. Omit when element_token is supplied (the token carries it).",
+            "type": "integer"
+          },
+          "x": {
+            "description": "X in window-local screenshot pixels. Must be provided together with y.",
+            "type": "number"
+          },
+          "y": {
+            "description": "Y in window-local screenshot pixels. Must be provided together with x.",
+            "type": "number"
+          }
+        },
+        "required": ["pid"],
+        "type": "object"
+      },
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
       }
     },
     {
       "name": "scroll",
-      "description": "Scroll at an absolute point in get_desktop_state coordinates.",
+      "description": "Scroll an exact window in the background using its current element token or screenshot coordinates.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
           "amount": {
+            "description": "Pixel-wheel path: number of wheel notches. Keystroke path: number of keystroke repetitions. Larger requests are clamped to the maximum. Default: 3.",
             "maximum": 50,
             "minimum": 1,
             "type": "integer"
           },
           "by": {
+            "description": "Scroll granularity. Default: line.",
             "enum": ["line", "page"],
             "type": "string"
           },
+          "delivery_mode": {
+            "description": "Best-effort-background ladder rung (default \"background\").",
+            "enum": ["background", "foreground"],
+            "type": "string"
+          },
           "direction": {
+            "description": "Scroll direction.",
             "enum": ["up", "down", "left", "right"],
             "type": "string"
           },
+          "element_token": {
+            "description": "Opaque per-snapshot element handle from `structuredContent.elements[].element_token`. Returns an explicit stale error naming the current snapshots once a newer read supersedes it.",
+            "pattern": "^s[0-9a-f]{8}:[0-9]+$",
+            "type": "string"
+          },
+          "pid": {
+            "description": "Target process ID. Required unless scope is \"desktop\".",
+            "type": "integer"
+          },
           "scope": {
-            "const": "desktop",
-            "description": "Deprecated flat desktop target retained for wire compatibility."
+            "default": "window",
+            "description": "Use desktop with x,y and no pid/window_id for native get_desktop_state screenshot coordinates.",
+            "enum": ["window", "desktop"],
+            "type": "string"
           },
           "target": {
             "anyOf": [
@@ -644,32 +1543,286 @@
             ],
             "description": "Preferred per-call target: an exact window (`kind=\"window\"`, `pid`, `window_id`) or the\nprimary desktop (`kind=\"desktop\"`, `display_id=\"primary\"`)."
           },
+          "window_id": {
+            "description": "CGWindowID of the target window. Required with x/y; optional with element_token (the token carries it).",
+            "type": "integer"
+          },
           "x": {
+            "description": "Window-local screenshot X (top-left origin of the PNG from get_window_state). With `y`, routes through the pixel-wheel path at this point — use for a scrollable surface that isn't in the AX tree. Requires window_id to anchor the window→screen conversion.",
             "type": "number"
           },
           "y": {
+            "description": "Window-local screenshot Y. See `x`.",
             "type": "number"
           }
         },
-        "required": ["x", "y", "direction"],
+        "required": ["direction"],
         "type": "object"
       },
       "annotations": {
-        "readOnlyHint": false,
         "destructiveHint": false,
         "idempotentHint": false,
-        "openWorldHint": true
+        "openWorldHint": true,
+        "readOnlyHint": false
+      }
+    },
+    {
+      "name": "set_agent_cursor_enabled",
+      "description": "Show or hide only this chat's native agent cursor; this does not grant or revoke computer control.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "description": "`true` shows the session's agent cursor overlay; `false` hides it.",
+            "type": "boolean"
+          }
+        },
+        "required": ["enabled"],
+        "type": "object"
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      }
+    },
+    {
+      "name": "set_agent_cursor_motion",
+      "description": "Tune this chat's agent cursor motion, effects and idle visibility. The native cursor respects reduced motion.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "arc_flow": {
+            "description": "Added to the arc asymmetry of `signature_arc`, `spring_settle` and `comet_swoop`:\npositive moves the apex toward the destination. Clamped to -1..1 (default 0).",
+            "type": ["number", "null"]
+          },
+          "arc_size": {
+            "description": "Scales the arc of `signature_arc`, `spring_settle` and `comet_swoop`: 0.25 (default)\nkeeps the style's arc, 0 is a straight line, 0.5 doubles it. Clamped to 0..1.",
+            "type": ["number", "null"]
+          },
+          "dwell_after_click_ms": {
+            "description": "Pause after a click animation, in milliseconds. Clamped to 0..5000 (default 80).",
+            "type": ["number", "null"]
+          },
+          "effects": {
+            "additionalProperties": false,
+            "description": "Turn single effects on or off. An omitted effect keeps its current setting; null\nrestores the style's default.",
+            "properties": {
+              "glow": {
+                "description": "Soft glow around the cursor that grows with speed.",
+                "type": ["boolean", "null"]
+              },
+              "magnet": {
+                "description": "Target glow when the `magnetic` style locks on.",
+                "type": ["boolean", "null"]
+              },
+              "ripple": {
+                "description": "Ring that expands from the hotspot on click.",
+                "type": ["boolean", "null"]
+              },
+              "squish": {
+                "description": "Brief scale-down of the cursor on click.",
+                "type": ["boolean", "null"]
+              },
+              "trail": {
+                "description": "Short fading trail behind the cursor.",
+                "type": ["boolean", "null"]
+              }
+            },
+            "type": ["object", "null"]
+          },
+          "end_handle": {
+            "description": "Arc control-point offset from the end, as a fraction of the distance, for\n`signature_arc`, `spring_settle` and `comet_swoop`. Clamped to 0..1 (default 0.3).",
+            "type": ["number", "null"]
+          },
+          "glide_duration_ms": {
+            "description": "Move duration in milliseconds for `fixed` timing (1430 ms when 0, the default). A\nnonzero value with `native` timing also fixes the duration. Clamped to 0..5000.",
+            "type": ["number", "null"]
+          },
+          "idle_hide_ms": {
+            "description": "Hide the cursor after this many idle milliseconds; 0 never hides it. Clamped to\n0..60000 (default 15000).",
+            "type": ["number", "null"]
+          },
+          "spring": {
+            "description": "Arrival spring damping for `classic`: 1 is critically damped, 0.3 is bouncy. Clamped\nto 0.3..1 (default 0.72).",
+            "type": ["number", "null"]
+          },
+          "start_handle": {
+            "description": "Arc control-point offset from the start, as a fraction of the distance, for\n`signature_arc`, `spring_settle` and `comet_swoop`. Clamped to 0..1 (default 0.3).",
+            "type": ["number", "null"]
+          },
+          "style": {
+            "description": "Trajectory style.",
+            "enum": [
+              "signature_arc",
+              "spring_settle",
+              "magnetic",
+              "comet_swoop",
+              "adaptive",
+              "classic"
+            ],
+            "type": "string"
+          },
+          "timing": {
+            "description": "`native` uses the style's own timing; `fitts` scales the move time with distance and\ntarget size; `fixed` uses glide_duration_ms (1430 ms when 0).",
+            "enum": ["native", "fitts", "fixed"],
+            "type": "string"
+          },
+          "turn_radius": {
+            "description": "Minimum turning radius of the `classic` glide path, in points; smaller turns tighter.\nClamped to 1..1000 (default 80).",
+            "type": ["number", "null"]
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      }
+    },
+    {
+      "name": "set_agent_cursor_theme",
+      "description": "Choose an already installed native cursor theme and reduced-motion setting. Does not install themes.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "reduced_motion": {
+            "default": "auto",
+            "description": "Theme animation policy: `on` uses the theme's reduced-motion frames, `off` always\nanimates, `auto` (default) leaves the choice to the host.",
+            "enum": ["auto", "on", "off"],
+            "type": "string"
+          },
+          "theme_id": {
+            "description": "Id of an installed cursor theme (see `cua-driver cursor-theme list`).",
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": ["theme_id"],
+        "type": "object"
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      }
+    },
+    {
+      "name": "set_value",
+      "description": "Set an exact fresh AX element's value directly, avoiding focus changes and repeated keystrokes. Verify with a fresh read.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "element_token": {
+            "description": "Opaque per-snapshot element handle from `structuredContent.elements[].element_token`. Returns an explicit stale error naming the current snapshots once a newer read supersedes it.",
+            "pattern": "^s[0-9a-f]{8}:[0-9]+$",
+            "type": "string"
+          },
+          "pid": {
+            "description": "Target process ID.",
+            "type": "integer"
+          },
+          "value": {
+            "description": "New value. AX will coerce to the element's native type.",
+            "type": "string"
+          },
+          "window_id": {
+            "description": "CGWindowID. Omit when element_token is supplied (the token carries it).",
+            "type": "integer"
+          }
+        },
+        "required": ["pid", "value"],
+        "type": "object"
+      },
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      }
+    },
+    {
+      "name": "set_window_frame",
+      "description": "Resize or reposition one exact native window, with independent geometry verification.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "height": {
+            "description": "New height, in the same units as list_windows bounds.",
+            "minimum": 1,
+            "type": "number"
+          },
+          "pid": {
+            "description": "Process ID that owns the window.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "width": {
+            "description": "New width, in the same units as list_windows bounds.",
+            "minimum": 1,
+            "type": "number"
+          },
+          "window_id": {
+            "description": "Window ID from list_windows.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "x": {
+            "description": "New left edge in the desktop coordinate space reported by list_windows.",
+            "type": "number"
+          },
+          "y": {
+            "description": "New top edge in the desktop coordinate space reported by list_windows.",
+            "type": "number"
+          }
+        },
+        "required": ["pid", "window_id", "x", "y", "width", "height"],
+        "type": "object"
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
       }
     },
     {
       "name": "type_text",
-      "description": "Type text into the current foreground desktop application.",
+      "description": "Insert text into a fresh AX element or an exact window's field. Prefer background delivery and element_token; window screenshot x/y can establish renderer focus. Foreground is an explicit fallback. Scope:desktop types into the foreground app.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
+          "delay_ms": {
+            "description": "Milliseconds between characters in the CGEvent fallback path. Default 30. Ignored when the AX path succeeds.",
+            "maximum": 200,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "delivery_mode": {
+            "description": "Best-effort-background ladder rung (default \"background\").",
+            "enum": ["background", "foreground"],
+            "type": "string"
+          },
+          "element_token": {
+            "description": "Opaque per-snapshot element handle from `structuredContent.elements[].element_token`. Returns an explicit stale error naming the current snapshots once a newer read supersedes it.",
+            "pattern": "^s[0-9a-f]{8}:[0-9]+$",
+            "type": "string"
+          },
+          "pid": {
+            "description": "Target process ID.",
+            "type": "integer"
+          },
           "scope": {
-            "const": "desktop",
-            "description": "Deprecated flat desktop target retained for wire compatibility."
+            "default": "window",
+            "description": "Use desktop with no pid/window_id to type into the frontmost application.",
+            "enum": ["window", "desktop"],
+            "type": "string"
           },
           "target": {
             "anyOf": [
@@ -718,17 +1871,196 @@
             "description": "Preferred per-call target: an exact window (`kind=\"window\"`, `pid`, `window_id`) or the\nprimary desktop (`kind=\"desktop\"`, `display_id=\"primary\"`)."
           },
           "text": {
+            "description": "Text to insert at the target's cursor.",
             "type": "string"
+          },
+          "window_id": {
+            "description": "CGWindowID. Omit when element_token is supplied (the token carries it).",
+            "type": "integer"
+          },
+          "x": {
+            "description": "Screenshot-pixel X of the field to type into — the element px action form. Pass x,y (no element_token) and the tool pixel-clicks there to establish real renderer focus, then types. Use for Chromium/Electron inputs the AX path can't reach. Read straight off the get_window_state PNG, same convention as click.",
+            "type": "number"
+          },
+          "y": {
+            "description": "Screenshot-pixel Y of the field (see x).",
+            "type": "number"
           }
         },
         "required": ["text"],
         "type": "object"
       },
       "annotations": {
-        "readOnlyHint": false,
         "destructiveHint": true,
         "idempotentHint": false,
-        "openWorldHint": true
+        "openWorldHint": true,
+        "readOnlyHint": false
+      }
+    },
+    {
+      "name": "verify_state",
+      "description": "Wait for up to eight bounded exact-window/element predicates without repeated screenshot polling. Images are optional; default off.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "expect": {
+            "description": "One to eight predicates, combined with logical AND.",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "element": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "enabled": {
+                      "type": ["boolean", "null"]
+                    },
+                    "exists": {
+                      "description": "Assert that at least one trusted element matches the selector.\n\nElement walks are not yet exhaustive on every platform, so absence\ncannot be proven. `false` is rejected instead of returning an\nindefinitely-unknown predicate.",
+                      "type": "boolean"
+                    },
+                    "selected": {
+                      "type": ["boolean", "null"]
+                    },
+                    "selector": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "label_contains": {
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "role": {
+                          "minLength": 1,
+                          "type": "string"
+                        }
+                      },
+                      "required": [],
+                      "type": "object"
+                    },
+                    "value_equals": {
+                      "type": ["string", "null"]
+                    }
+                  },
+                  "required": ["selector"],
+                  "type": ["object", "null"]
+                },
+                "window": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "bounds": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "height": {
+                          "type": "number"
+                        },
+                        "tolerance_px": {
+                          "maximum": 100,
+                          "minimum": 0,
+                          "type": "number"
+                        },
+                        "width": {
+                          "type": "number"
+                        },
+                        "x": {
+                          "type": "number"
+                        },
+                        "y": {
+                          "type": "number"
+                        }
+                      },
+                      "required": ["x", "y", "width", "height"],
+                      "type": ["object", "null"]
+                    },
+                    "exists": {
+                      "type": ["boolean", "null"]
+                    }
+                  },
+                  "type": ["object", "null"]
+                }
+              },
+              "required": [],
+              "type": "object"
+            },
+            "maxItems": 8,
+            "minItems": 1,
+            "type": "array"
+          },
+          "include_screenshot": {
+            "description": "Return the final window screenshot as image content for a multimodal\ncaller. The driver does not interpret that image.",
+            "type": ["boolean", "null"]
+          },
+          "pid": {
+            "description": "Exact process whose window may be observed.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "stable_samples": {
+            "default": 2,
+            "description": "Consecutive satisfied samples required before returning success.",
+            "maximum": 5,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "timeout_ms": {
+            "default": 5000,
+            "description": "Bounded wait. Zero performs one sample.",
+            "maximum": 10000,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "window_id": {
+            "description": "Exact native window identifier.",
+            "type": "integer"
+          }
+        },
+        "required": ["pid", "window_id", "expect"],
+        "type": "object"
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      }
+    },
+    {
+      "name": "zoom",
+      "description": "Capture a cropped window region for small pixel targets. Coordinates use the last window screenshot; from_zoom:true maps later input back to that window.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "pid": {
+            "description": "Optional target pid. When omitted, the driver resolves the unique current snapshot for this session and window.",
+            "type": "integer"
+          },
+          "window_id": {
+            "description": "CGWindowID from list_windows.",
+            "type": "integer"
+          },
+          "x1": {
+            "description": "Left edge of region in screenshot pixels.",
+            "type": "number"
+          },
+          "x2": {
+            "description": "Right edge of region in screenshot pixels.",
+            "type": "number"
+          },
+          "y1": {
+            "description": "Top edge of region in screenshot pixels.",
+            "type": "number"
+          },
+          "y2": {
+            "description": "Bottom edge of region in screenshot pixels.",
+            "type": "number"
+          }
+        },
+        "required": ["window_id", "x1", "y1", "x2", "y2"],
+        "type": "object"
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
       }
     }
   ]

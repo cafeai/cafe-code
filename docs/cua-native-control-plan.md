@@ -105,7 +105,14 @@ establish native Linux or Windows qualification.
 
 The first user test after merging is `corepack yarn build:desktop --force`, then
 the user's normal desktop launch. Local control starts enabled on Mac; each
-local Codex/Claude chat has a Computer use composer toggle. In Settings → MCP,
+local Codex/Claude chat starts with computer use off and has a cursor icon
+immediately to the right of the thinking controls. Click it to opt that chat in.
+The native cursor displays its provider/binding label and is removed when
+control is released. The Mac catalog includes exact-window background input,
+native app launching, menu/value actions, clipboard, browser DOM tools, zoom and
+state verification. Compact AX/browser reads and deduplicated structured output
+reduce image/tree tokens; native app support determines whether background
+delivery succeeds. In Settings → MCP,
 grant Accessibility and Screen Recording to Cafe when requested, check
 permissions and test a screenshot. Start or normally stop/resume a Codex/Claude
 session and use a disposable window for initial input. No separate app is

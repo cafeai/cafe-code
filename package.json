@@ -58,6 +58,7 @@
     "sync:mac-icons": "node scripts/build-macos-icons.ts",
     "cua:fetch": "node scripts/cua-driver-release.ts fetch",
     "cua:prepare": "node scripts/prepare-cua-driver.ts",
+    "cua:sync-catalog": "node scripts/sync-cua-catalog.ts",
     "cua:review": "node scripts/cua-driver-release.ts review"
   },
   "devDependencies": {

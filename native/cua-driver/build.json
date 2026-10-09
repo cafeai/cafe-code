@@ -6,7 +6,7 @@
   "linuxBlocker": "RustSec XML advisories remain in runtime-reachable Linux AT-SPI dependencies",
   "sourceOnly": true,
   "telemetry": "compile-time-disabled",
-  "overlay": "disabled",
+  "overlay": "native-session-cursor",
   "dependencyFixes": {
     "anyhow": "1.0.103",
     "event-listener": "5.4.2",

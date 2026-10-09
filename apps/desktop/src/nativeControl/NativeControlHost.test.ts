@@ -36,6 +36,9 @@ async function fixture(fault?: "action" | "cleanup") {
   });
   const connection = await host.listen(false);
   await host.setEnabled(true);
+  // Existing action fixtures explicitly opt in; the separate admission case
+  // below proves that a newly bound chat never inherits that choice.
+  await host.setChatEnabled("fixture-thread" as ThreadId, true);
   async function bind(threadId = "fixture-thread") {
     const value = await requestNativeControlHost(connection, "bind", {
       threadId,
@@ -69,10 +72,54 @@ async function fixture(fault?: "action" | "cleanup") {
 }
 
 describe("Electron-owned native control authority", () => {
+  it("keeps each new chat off until trusted opt-in, including health and resumed bindings", async () => {
+    const f = await fixture();
+    const threadId = "new-chat" as ThreadId;
+    try {
+      expect((await f.host.chatState(threadId)).enabled).toBe(false);
+      const binding = await f.bind(threadId);
+      await binding.update("activate");
+      await binding.update("begin-turn");
+      expect((await binding.call("health")).result.isError).toBe(true);
+      expect(
+        (await binding.call("launch_app", { bundle_id: "com.apple.calculator" })).result.isError,
+      ).toBe(true);
+      expect(f.controller.health).not.toHaveBeenCalled();
+      expect(f.controller.session).not.toHaveBeenCalled();
+      await f.host.setChatEnabled(threadId, true);
+      expect(
+        (await binding.call("get_window_state", { pid: 1, window_id: 2 })).result.isError,
+      ).not.toBe(true);
+      expect(f.controller.session).toHaveBeenCalledWith(
+        expect.stringMatching(/^Codex · [0-9a-f]{8}$/u),
+      );
+      expect(f.request).toHaveBeenCalledWith({
+        method: "trusted_session_call",
+        name: "get_window_state",
+        args: {
+          pid: 1,
+          window_id: 2,
+          include_screenshot: false,
+          max_elements: 250,
+          max_depth: 18,
+          max_image_dimension: 1280,
+        },
+      });
+      expect((await f.host.chatState("other-new-chat" as ThreadId)).enabled).toBe(false);
+      await f.host.setChatEnabled(threadId, false);
+      const resumed = await f.bind(threadId);
+      await resumed.update("activate");
+      await resumed.update("begin-turn");
+      expect((await resumed.call("get_screen_size")).result.isError).toBe(true);
+    } finally {
+      await f.host.close();
+    }
+  });
   it("disables one chat, releases its session, and can re-enable its still-active turn", async () => {
     const f = await fixture();
     const threadId = "computer-use-fixture" as ThreadId;
     try {
+      await f.host.setChatEnabled(threadId, true);
       const first = await f.bind(threadId);
       await first.update("activate");
       await first.update("begin-turn");
@@ -86,6 +133,7 @@ describe("Electron-owned native control authority", () => {
       expect(f.controller.health).not.toHaveBeenCalled();
 
       const second = await f.bind("another-chat");
+      await f.host.setChatEnabled("another-chat" as ThreadId, true);
       await second.update("activate");
       await second.update("begin-turn");
       expect((await second.call("get_screen_size")).result.isError).not.toBe(true);
@@ -258,9 +306,11 @@ describe("Electron-owned native control authority", () => {
       const b = await f.bind();
       const catalog = (await b.rpc("tools/list")).result.tools!;
       expect(catalog.some((tool) => tool.name === "click")).toBe(true);
-      expect(
-        catalog.some((tool) => /extension|update|model|browser|session/u.test(tool.name)),
-      ).toBe(false);
+      expect(catalog.some((tool) => /install|update|model|remote|session/u.test(tool.name))).toBe(
+        false,
+      );
+      expect(catalog.some((tool) => tool.name === "launch_app")).toBe(true);
+      expect(catalog.some((tool) => tool.name === "browser_click")).toBe(true);
       expect((await b.call("click", {})).result.isError).toBe(true);
       await b.update("activate");
       expect((await b.call("click", {})).result.isError).toBe(true);
@@ -299,6 +349,8 @@ describe("Electron-owned native control authority", () => {
     try {
       const first = await f.bind("first");
       const second = await f.bind("second");
+      await f.host.setChatEnabled("first" as ThreadId, true);
+      await f.host.setChatEnabled("second" as ThreadId, true);
       await first.update("activate");
       await second.update("activate");
       await first.update("begin-turn");

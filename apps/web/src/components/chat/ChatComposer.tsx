@@ -3937,12 +3937,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   onInstanceModelChange={onProviderModelSelect}
                 />
 
-                <ComputerUseButton
-                  threadId={activeThreadId}
-                  provider={selectedProvider}
-                  local={environmentId === primaryEnvironmentId}
-                  compact={isComposerFooterCompact}
-                />
                 <CompactComposerControlsMenu
                   showPlanSidebar={showPlanSidebarToggle}
                   provider={selectedProvider}
@@ -3967,6 +3961,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   onTogglePlanSidebar={togglePlanSidebar}
                   onRuntimeModeChange={handleRuntimeModeChange}
                   onOpenGoal={onOpenGoalDialog}
+                />
+                <ComputerUseButton
+                  threadId={activeThreadId}
+                  provider={selectedProvider}
+                  local={environmentId === primaryEnvironmentId}
                 />
               </div>
 

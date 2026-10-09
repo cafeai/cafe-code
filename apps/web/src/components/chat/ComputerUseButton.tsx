@@ -1,6 +1,6 @@
 import type { NativeControlChatState, ProviderDriverKind, ThreadId } from "@cafecode/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { MonitorIcon } from "lucide-react";
+import { MousePointer2Icon } from "lucide-react";
 import { useEffect } from "react";
 import { cn } from "~/lib/utils";
 import { Button } from "../ui/button";
@@ -12,12 +12,10 @@ export function ComputerUseButton({
   threadId,
   provider,
   local,
-  compact,
 }: {
   threadId: ThreadId | null;
   provider: ProviderDriverKind;
   local: boolean;
-  compact: boolean;
 }) {
   const bridge = window.desktopBridge;
   const supported = Boolean(
@@ -77,13 +75,13 @@ export function ComputerUseButton({
         render={
           <Button
             type="button"
-            size="sm"
+            size="icon-sm"
             variant="ghost"
             aria-label="Computer use"
             aria-pressed={data.enabled}
             aria-disabled={pending || unavailable}
             className={cn(
-              "shrink-0 gap-1.5 px-2",
+              "shrink-0",
               data.enabled
                 ? "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary"
                 : "text-muted-foreground hover:text-foreground",
@@ -96,8 +94,10 @@ export function ComputerUseButton({
           />
         }
       >
-        <MonitorIcon aria-hidden="true" className="size-4" />
-        <span className={compact ? "sr-only" : undefined}>Computer use</span>
+        <MousePointer2Icon
+          aria-hidden="true"
+          className={cn("size-4", data.enabled && "fill-primary/20")}
+        />
       </TooltipTrigger>
       <TooltipPopup className="max-w-64">{detail}</TooltipPopup>
     </Tooltip>

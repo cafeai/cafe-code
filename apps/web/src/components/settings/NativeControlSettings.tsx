@@ -131,7 +131,7 @@ export function NativeControlSettings({
     <SettingsSection title="Local desktop control" icon={<MonitorIcon className="size-3.5" />}>
       <SettingsRow
         title="Codex and Claude"
-        description="Allow desktop tools to observe and control this computer through local Cua. Available by default on Mac; use the composer button to turn computer use on or off for each chat. No Cua account or subscription is needed."
+        description="Allow desktop tools through local Cua. Each chat starts with computer use off; click the cursor beside the thinking settings to enable it. No Cua account or subscription is needed."
         control={
           <Switch
             aria-label="Enable local desktop control"

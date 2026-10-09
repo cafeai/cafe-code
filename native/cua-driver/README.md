@@ -33,8 +33,9 @@ compile-time disabled. It upgrades `anyhow` to 1.0.103, `event-listener` to 5.4.
 `lru` to 0.18.2 and `memmap2` to 0.9.11. The reviewed Mac normal dependency graph
 excludes the affected XML and atomic-polyfill paths. The informational
 `ttf-parser` 0.21.1 maintenance finding is retained through fontdue's cursor
-overlay; Cafe unconditionally disables the overlay and exposes no font/overlay
-configuration. Its maintenance status remains an upgrade-review item.
+overlay. Native session cursors are enabled at the user's request; Cafe does not
+install custom themes or fonts. This informational maintenance finding remains
+an upgrade-review item, rather than a reason to disable the cursor feature.
 
 The runtime lives in ignored `runtime/darwin-<arch>` with source/patch/binary
 hash provenance. Artifact packaging stages only matching verified bytes and
@@ -53,15 +54,18 @@ the hash/seal/notarization ordering; Developer ID and real notarization remain
 release-CI checks.
 
 Electron launches the helper directly, with a private socket, stdin parent
-liveness, fixed standard permission mode and no overlay. Telemetry/update opt-outs
+liveness, fixed standard permission mode and the native session cursor overlay.
+The cursor follows OS reduced motion and shows the provider/binding label.
+Telemetry/update opt-outs
 reach this actual child. Its HOME and Cua state directories are private temporary
 directories, so ambient Cua history, extensions or preferences are not adopted.
 Provider transports use copied standalone Node/Electron stdio bridges and
 session-only private capability files; no provider-global configuration is
 changed. Mac startup enables the helper by default. The Settings switch controls
-app-wide availability; the composer **Computer use** button enables or disables
+app-wide availability; the composer cursor icon immediately right of the thinking
+settings enables or disables
 access for its local Codex/Claude chat. Chat choices last for the app session and
-default on. Only trusted renderer IPC can change them, and the host enforces
+default off. Only trusted renderer IPC can change them, and the host enforces
 disabled chat access before dispatch even with an already-connected provider.
 
 After merging and building, open **Settings → MCP → Local desktop control** in
@@ -73,6 +77,28 @@ Settings when required. Start a new Codex/Claude session or normally stop/resume
 an existing session to attach the tools. Begin with `health`, observe before
 acting, and use a disposable window for initial input testing. Never repeat an
 input whose completion is uncertain.
+
+The catalog now uses the actual pinned Mac registry, including exact-window
+background input, app launch/activation, AX menu/value actions, clipboard,
+cropped captures, deterministic state verification and exact-tab browser
+DOM/navigation/input tools. Use `corepack yarn cua:sync-catalog` after preparing
+an upgraded pin; `tool-policy.json` controls the local feature set and concise
+agent descriptions. It never invokes an input tool or installs a provider.
+Window reads default to tree-only, 250 elements, depth 18 and a 1280-pixel image
+limit when screenshots are requested. Browser reads default to semantic_v2 with
+no image. Callers can explicitly override those limits. Results carry one JSON
+text representation and any images, preserving tokens/refs and refusal details
+without duplicating the AX Markdown tree.
+
+Background support depends on the target app; explicit foreground fallback is
+available and never automatically retries uncertain input. Browser DOM tools
+require a supported prepared browser; ordinary Orion/Safari windows still use
+AX/pixel control and the compatibility page tools where supported. Existing
+profile attachment keeps Cua's separate authorization requirement. The optional
+visual-region parser needs a local perception extension, which Cafe does not
+download or expose in this catalog. Browser downloads requiring Cua's separate host approval adapter,
+recording/replay, remote services and runtime installers remain outside the
+agent catalog.
 
 Cafe's public `health` tool and **Check permissions** button call the native
 `health_report` tool. Its versioned report includes Accessibility and Screen

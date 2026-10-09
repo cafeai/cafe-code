@@ -10,6 +10,9 @@ import {
   nativeControlError,
   nativeControlTokenDigest,
   validateNativeToolCall,
+  nativeToolArguments,
+  compactNativeToolResult,
+  NATIVE_CONTROL_INSTRUCTIONS,
   type NativeToolResult,
   type NativeControlHostConnection,
 } from "@cafecode/shared/nativeControl";
@@ -27,6 +30,7 @@ interface Session {
   readonly id: string;
   readonly threadId: string;
   readonly providerInstanceId: string;
+  readonly provider: "codex" | "claudeAgent" | "human";
   readonly expires: number;
   active: boolean;
   turnActive: boolean;
@@ -67,8 +71,9 @@ export class NativeControlHost {
   private readonly threadGenerations = new Map<string, string>();
   // User choices belong to the trusted local renderer, never the provider's
   // capability transport. Keep them across provider replacement in this app
-  // session. Absence means on; only explicit disabled chats need storage.
-  private readonly disabledThreads = new Set<string>();
+  // session. Absence means off: a provider binding, draft promotion or newly
+  // opened chat can never grant desktop access without the user's gesture.
+  private readonly enabledThreads = new Set<string>();
   private policyRevision = 0;
   private readonly controller: NativeController;
   private readonly server = createServer((request, response) => {
@@ -232,7 +237,7 @@ export class NativeControlHost {
     // a revision so an older IPC/query acknowledgement cannot undo a new one.
     return {
       threadId,
-      enabled: !this.disabledThreads.has(threadId),
+      enabled: this.enabledThreads.has(threadId),
       revision: this.policyRevision,
       control: { ...control, enabled: this.enabled, phase: this.phase, detail: this.detail },
     };
@@ -244,16 +249,15 @@ export class NativeControlHost {
     if ((this.options.platform ?? process.platform) !== "darwin") return this.chatState(threadId);
     this.policyRevision++;
     if (enabled) {
-      this.disabledThreads.delete(threadId);
-    } else {
-      // Do not evict another chat's explicit denial to admit more preferences.
-      if (!this.disabledThreads.has(threadId) && this.disabledThreads.size >= 4096)
+      if (!this.enabledThreads.has(threadId) && this.enabledThreads.size >= 4096)
         throw new Error("Too many local computer-use choices. Restart Cafe before changing more.");
+      this.enabledThreads.add(threadId);
+    } else {
       // Revoke admission before any asynchronous cleanup. An in-flight action
       // may already have executed; wait for it, never cancel/replay its input.
       // Preserve the real provider turn's activity so re-enabling can work in
       // that same turn, while an independent end-turn still wins immediately.
-      this.disabledThreads.add(threadId);
+      this.enabledThreads.delete(threadId);
       await Promise.all(
         [...this.sessions.values()]
           .filter((session) => session.threadId === threadId)
@@ -287,6 +291,7 @@ export class NativeControlHost {
       id: randomUUID(),
       threadId: "human-preview",
       providerInstanceId: "human",
+      provider: "human",
       expires: Date.now() + 30_000,
       active: true,
       turnActive: true,
@@ -348,7 +353,7 @@ export class NativeControlHost {
           "This desktop tool is outside an active Cafe turn. Resume the conversation to reconnect.",
         ),
       );
-    if (this.disabledThreads.has(session.threadId))
+    if (session.provider !== "human" && !this.enabledThreads.has(session.threadId))
       return Promise.resolve(
         nativeControlError("Computer use is off for this chat. Enable it in the composer."),
       );
@@ -366,19 +371,25 @@ export class NativeControlHost {
     this.owner = session;
     const operation = async (): Promise<NativeToolResult> => {
       try {
-        session.connection ??= await this.controller.session(`cafe-${session.id}`);
+        // A short readable label identifies the provider and this specific
+        // binding on Cua's native cursor. The SDK injects it into native calls;
+        // no model-supplied label can substitute another session's identity.
+        session.connection ??= await this.controller.session(
+          `${session.provider === "claudeAgent" ? "Claude" : session.provider === "codex" ? "Codex" : "Cafe"} · ${session.id.slice(0, 8)}`,
+        );
         if (
           !this.enabled ||
           !session.turnActive ||
           session.revoked ||
-          this.disabledThreads.has(session.threadId)
+          (session.provider !== "human" && !this.enabledThreads.has(session.threadId))
         )
           return nativeControlError("Desktop access was revoked before the action started.");
-        return (await session.connection.request({
+        const result = (await session.connection.request({
           method: "trusted_session_call",
           name,
-          args,
+          args: nativeToolArguments(name, args),
         })) as unknown as NativeToolResult;
+        return compactNativeToolResult(result);
       } catch {
         this.enabled = false;
         this.phase = "error";
@@ -438,8 +449,7 @@ export class NativeControlHost {
             protocolVersion: "2025-06-18",
             capabilities: { tools: {} },
             serverInfo: { name: "Cafe local desktop control", version: NATIVE_CONTROL_VERSION },
-            instructions:
-              "Use health first. Desktop tools control this computer. Observe before input, finish by releasing control. Never repeat an input whose completion is uncertain.",
+            instructions: NATIVE_CONTROL_INSTRUCTIONS,
           };
         else if (message.method === "ping") result = {};
         else if (message.method === "tools/list") result = { tools: NATIVE_CONTROL_TOOLS };
@@ -494,6 +504,7 @@ export class NativeControlHost {
           id: randomUUID(),
           threadId: body.threadId,
           providerInstanceId: body.providerInstanceId,
+          provider: body.provider,
           expires: Date.now() + 24 * 3600_000,
           active: false,
           turnActive: false,
@@ -571,7 +582,7 @@ export class NativeControlHost {
     if (this.owner) await this.release(this.owner);
     await this.controller.stop();
     this.sessions.clear();
-    this.disabledThreads.clear();
+    this.enabledThreads.clear();
     this.server.closeAllConnections();
     await new Promise<void>((resolve) => this.server.close(() => resolve()));
     const path = join(this.options.stateDirectory, NATIVE_CONTROL_HOST_FILE);

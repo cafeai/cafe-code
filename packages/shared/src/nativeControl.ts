@@ -18,6 +18,48 @@ export const NATIVE_CONTROL_ENVIRONMENT = Object.freeze({
   CUA_DRIVER_DISABLE_UNRESTRICTED: "1",
 });
 
+export const NATIVE_CONTROL_INSTRUCTIONS =
+  "Computer use is off for every new chat until the user enables its cursor button. Use health first, observe before acting, and finish with release_control. Prefer launch_app over Spotlight, exact pid/window_id targets and fresh element_token handles over desktop input. Use background delivery first; foreground and scope:desktop are explicit fallbacks. Read compact AX trees without screenshots, using query and bounded limits; request a window screenshot or zoom only for visual grounding. For supported browsers prefer semantic_v2 DOM refs and exact-tab browser_* tools, with isolated driver-owned profiles for automation. Existing profiles require separate native authorization. Verify postconditions with verify_state or a fresh compact read. Refresh stale tokens/refs; never replay input whose completion is uncertain. Cursor/session ownership belongs to Cafe.";
+
+/** Defaults reduce image and tree tokens while callers retain explicit control
+ * over capture/limits. Native targeting and verification remain in Cua, so
+ * background refusals never turn into an automatic foreground input retry. */
+export function nativeToolArguments(
+  name: string,
+  args: Record<string, unknown>,
+): Record<string, unknown> {
+  if (name === "get_window_state")
+    return {
+      include_screenshot: args.include_accessibility_tree === false,
+      max_elements: 250,
+      max_depth: 18,
+      max_image_dimension: 1280,
+      ...args,
+    };
+  if (name === "get_desktop_state") return { max_image_dimension: 1280, ...args };
+  if (name === "get_browser_state")
+    return { snapshot_format: "semantic_v2", include_screenshot: false, ...args };
+  if (name === "verify_state") return { include_screenshot: false, ...args };
+  return args;
+}
+
+/** MCP consumers must receive structured element tokens, browser refs and
+ * window records in text content as well. Cua's count-only list text and AX
+ * Markdown otherwise hide these fields from content-only clients. Emit one
+ * JSON representation instead of duplicate Markdown/structured payloads,
+ * preserving capture images and every machine-readable refusal/route field. */
+export function compactNativeToolResult(result: NativeToolResult): NativeToolResult {
+  if (result.isError || !result.structuredContent) return result;
+  const { tree_markdown: _duplicateTree, ...structured } = result.structuredContent;
+  return {
+    ...(result.isError !== undefined ? { isError: result.isError } : {}),
+    content: [
+      { type: "text", text: JSON.stringify(structured) },
+      ...result.content.filter((part) => part.type !== "text"),
+    ],
+  };
+}
+
 export interface NativeToolResult {
   readonly content: readonly Record<string, unknown>[];
   readonly isError?: boolean;
@@ -59,6 +101,8 @@ const names = new Set<string>(NATIVE_CONTROL_TOOLS.map((tool) => tool.name));
 const reserved = new Set([
   "session",
   "session_id",
+  "cursor_id",
+  "debug_image_out",
   "screenshot_out_file",
   "output_file",
   "_meta",
@@ -84,7 +128,7 @@ export function validateNativeToolCall(name: unknown, input: unknown): Record<st
     }
     if (value && typeof value === "object")
       for (const [key, item] of Object.entries(value)) {
-        if (reserved.has(key))
+        if (reserved.has(key) || key.startsWith("_"))
           throw new Error("Native desktop transport and file-output arguments are reserved.");
         visit(item, depth + 1);
       }
