@@ -1,7 +1,10 @@
+import "../../index.css";
+
 import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@cafecode/contracts";
 import { EnvironmentId } from "@cafecode/contracts";
 import { createModelCapabilities } from "@cafecode/shared/model";
-import { page, userEvent } from "vitest/browser";
+import type { CDPSession } from "@vitest/browser-playwright";
+import { cdp, page, userEvent } from "vitest/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
@@ -18,6 +21,7 @@ import {
   type UnifiedSettings,
 } from "@cafecode/contracts/settings";
 import { __resetLocalApiForTests } from "../../localApi";
+import { applyInterfaceScalePercent } from "../../interfaceScale";
 
 // Mock the environments/runtime module to provide a mock primary environment connection
 vi.mock("../../environments/runtime", () => {
@@ -316,6 +320,120 @@ function getSidebarProviderOrder() {
   );
 }
 
+/**
+ * Keep the account-scroll fixture entirely in memory. Every account has its
+ * own model names and routing ids so a scroll-induced account/model change
+ * cannot pass by accidentally finding an identically named provider model.
+ */
+function buildManyAccountProviders(): ReadonlyArray<ServerProvider> {
+  return Array.from({ length: 24 }, (_, index) => {
+    const ordinal = String(index + 1).padStart(2, "0");
+    const isCodex = index % 2 === 0;
+    const displayName = `${isCodex ? "Codex" : "Claude"} account ${ordinal}`;
+    return {
+      driver: ProviderDriverKind.make(isCodex ? "codex" : "claudeAgent"),
+      instanceId: ProviderInstanceId.make(`scroll_${isCodex ? "codex" : "claude"}_${ordinal}`),
+      displayName,
+      enabled: true,
+      installed: true,
+      version: "fixture-only",
+      status: "ready",
+      auth: { status: "authenticated" },
+      checkedAt: "2026-10-10T00:00:00.000Z",
+      slashCommands: [],
+      skills: [],
+      // The first account also overflows the model pane. Other accounts use
+      // short catalogues to verify that their bottom rail icons stay usable
+      // independently of the selected catalogue's natural height.
+      models: Array.from({ length: index === 0 ? 24 : 3 }, (_, modelIndex) => ({
+        slug: `fixture-account-${ordinal}-model-${modelIndex + 1}`,
+        name: `${displayName} model ${modelIndex + 1}`,
+        isCustom: false,
+        capabilities: createModelCapabilities({ optionDescriptors: [] }),
+      })),
+    };
+  });
+}
+
+/** CDP input uses the runner viewport, including the test iframe's scale. */
+function modelPickerBrowserPoint(point: { x: number; y: number }) {
+  let { x, y } = point;
+  let frame = window.frameElement;
+  while (frame) {
+    const element = frame as HTMLElement;
+    const rect = element.getBoundingClientRect();
+    x = rect.left + (x + element.clientLeft) * (rect.width / element.offsetWidth);
+    y = rect.top + (y + element.clientTop) * (rect.height / element.offsetHeight);
+    frame = frame.ownerDocument.defaultView?.frameElement ?? null;
+  }
+  return { x, y };
+}
+
+/** Real Chromium wheel input exercises native scrolling; a DOM event cannot. */
+async function wheelModelPickerViewport(input: CDPSession, viewport: HTMLElement, deltaY: number) {
+  const rect = viewport.getBoundingClientRect();
+  const point = modelPickerBrowserPoint({
+    x: rect.left + rect.width / 2,
+    y: rect.top + Math.min(rect.height / 2, 100),
+  });
+  await input.send("Input.dispatchMouseEvent", { type: "mouseMoved", ...point });
+  await input.send("Input.dispatchMouseEvent", {
+    type: "mouseWheel",
+    ...point,
+    deltaX: 0,
+    deltaY,
+  });
+}
+
+function getModelPickerScrollRegions() {
+  const sidebar = document.querySelector<HTMLElement>("[data-model-picker-sidebar]");
+  const railViewport = sidebar?.querySelector<HTMLElement>('[data-slot="scroll-area-viewport"]');
+  const modelViewport = getModelPickerListElement().closest<HTMLElement>(
+    '[data-slot="scroll-area-viewport"]',
+  );
+  const surface = sidebar?.parentElement;
+  const popupViewport = sidebar?.closest<HTMLElement>('[data-slot="popover-viewport"]');
+  expect(railViewport).toBeInstanceOf(HTMLElement);
+  expect(modelViewport).toBeInstanceOf(HTMLElement);
+  expect(surface).toBeInstanceOf(HTMLElement);
+  expect(popupViewport).toBeInstanceOf(HTMLElement);
+  return {
+    railViewport: railViewport!,
+    modelViewport: modelViewport!,
+    surface: surface!,
+    popupViewport: popupViewport!,
+  };
+}
+
+function assertModelPickerRailBounds(railViewport: HTMLElement, surface: HTMLElement) {
+  const railBounds = railViewport.getBoundingClientRect();
+  const surfaceBounds = surface.getBoundingClientRect();
+  // Include concrete browser geometry in failure output so the regression
+  // distinguishes a clipped, naturally sized viewport from a wheel issue.
+  const geometry = JSON.stringify({
+    rail: {
+      clientHeight: railViewport.clientHeight,
+      scrollHeight: railViewport.scrollHeight,
+      top: railBounds.top,
+      bottom: railBounds.bottom,
+    },
+    surface: { top: surfaceBounds.top, bottom: surfaceBounds.bottom, height: surfaceBounds.height },
+  });
+  expect(railViewport.clientHeight, geometry).toBeGreaterThan(0);
+  expect(railBounds.bottom, geometry).toBeLessThanOrEqual(surfaceBounds.bottom + 1);
+  expect(railViewport.scrollHeight, geometry).toBeGreaterThan(railViewport.clientHeight);
+}
+
+function assertAccountFitsRail(button: HTMLElement, railViewport: HTMLElement) {
+  const buttonBounds = button.getBoundingClientRect();
+  const railBounds = railViewport.getBoundingClientRect();
+  expect(buttonBounds.top).toBeGreaterThanOrEqual(railBounds.top - 1);
+  expect(buttonBounds.bottom).toBeLessThanOrEqual(railBounds.bottom + 1);
+  // Account icons must retain their square hit area instead of shrinking to
+  // make a long list appear to fit without providing an actual scroll owner.
+  expect(buttonBounds.height).toBeCloseTo(buttonBounds.width, 0);
+}
+
 describe("ProviderModelPicker", () => {
   beforeEach(async () => {
     // Reset test environment before each test
@@ -449,6 +567,178 @@ describe("ProviderModelPicker", () => {
           "claudeAgent",
         ]);
       });
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it.each(
+    (["light", "dark"] as const).flatMap((theme) => [80, 130].map((scale) => ({ theme, scale }))),
+  )(
+    "independently scrolls many account icons and models at narrow $theme/$scale%",
+    async ({ theme, scale }) => {
+      const root = document.documentElement;
+      const originalFontSize = root.style.fontSize;
+      const originallyDark = root.classList.contains("dark");
+      const originalViewport = { width: window.innerWidth, height: window.innerHeight };
+      const originalReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      const input: CDPSession = cdp();
+      const providers = buildManyAccountProviders();
+      const firstAccount = providers[0]!;
+      const lastAccount = providers.at(-1)!;
+      const firstModel = firstAccount.models[0]!;
+      const lastAccountModel = lastAccount.models[0]!;
+      let mounted: Awaited<ReturnType<typeof mountPicker>> | undefined;
+
+      try {
+        await page.viewport(390, 700);
+        applyInterfaceScalePercent(scale);
+        root.classList.toggle("dark", theme === "dark");
+        // Exercise the same layout with native reduced-motion preferences at
+        // the large interface bound; no animation deadline is relaxed.
+        await input.send("Emulation.setEmulatedMedia", {
+          features: [
+            { name: "prefers-reduced-motion", value: scale === 130 ? "reduce" : "no-preference" },
+          ],
+        });
+        mounted = await mountPicker({
+          activeInstanceId: firstAccount.instanceId,
+          model: firstModel.slug,
+          lockedProvider: null,
+          providers,
+        });
+        await page.getByRole("button", { name: firstModel.name, exact: true }).click();
+        await expect.element(page.getByPlaceholder("Search models...")).toHaveFocus();
+        const { railViewport, modelViewport, surface, popupViewport } =
+          getModelPickerScrollRegions();
+        await vi.waitFor(() => assertModelPickerRailBounds(railViewport, surface));
+        expect(getSidebarProviderOrder()[0]).toBe("favorites");
+        expect(modelViewport.scrollHeight).toBeGreaterThan(modelViewport.clientHeight);
+        const lastButton = page
+          .getByRole("button", { name: lastAccount.displayName!, exact: true })
+          .element() as HTMLElement;
+        expect(lastButton.getBoundingClientRect().top).toBeGreaterThan(
+          railViewport.getBoundingClientRect().bottom,
+        );
+        const initialModelScrollTop = modelViewport.scrollTop;
+        const initialPopupScrollTop = popupViewport.scrollTop;
+        const initialListText = getModelPickerListText();
+
+        await wheelModelPickerViewport(input, railViewport, 10_000);
+        await vi.waitFor(() => {
+          expect(railViewport.scrollTop).toBeGreaterThan(0);
+          assertAccountFitsRail(lastButton, railViewport);
+        });
+        expect(modelViewport.scrollTop).toBe(initialModelScrollTop);
+        expect(popupViewport.scrollTop).toBe(initialPopupScrollTop);
+        expect(getModelPickerListText()).toBe(initialListText);
+        expect(mounted.onInstanceModelChange).not.toHaveBeenCalled();
+        const railScrollTop = railViewport.scrollTop;
+
+        await wheelModelPickerViewport(input, modelViewport, 240);
+        await vi.waitFor(() =>
+          expect(modelViewport.scrollTop).toBeGreaterThan(initialModelScrollTop),
+        );
+        expect(railViewport.scrollTop).toBe(railScrollTop);
+        expect(popupViewport.scrollTop).toBe(initialPopupScrollTop);
+        expect(getModelPickerListText()).toBe(initialListText);
+        expect(mounted.onInstanceModelChange).not.toHaveBeenCalled();
+
+        // Restore only the rail with native wheel input, then focus the last
+        // account. Native focus must reveal it inside its own scroll viewport
+        // without moving the model pane or committing the composer choice.
+        const modelScrollTop = modelViewport.scrollTop;
+        await wheelModelPickerViewport(input, railViewport, -10_000);
+        await vi.waitFor(() => expect(railViewport.scrollTop).toBe(0));
+        expect(modelViewport.scrollTop).toBe(modelScrollTop);
+        expect(popupViewport.scrollTop).toBe(initialPopupScrollTop);
+        lastButton.focus();
+        await vi.waitFor(() => {
+          expect(document.activeElement).toBe(lastButton);
+          assertAccountFitsRail(lastButton, railViewport);
+        });
+        expect(modelViewport.scrollTop).toBe(modelScrollTop);
+        expect(popupViewport.scrollTop).toBe(initialPopupScrollTop);
+        expect(mounted.onInstanceModelChange).not.toHaveBeenCalled();
+        await userEvent.keyboard("{Enter}");
+        await expect.element(page.getByPlaceholder("Search models...")).toHaveFocus();
+        await vi.waitFor(() => {
+          expect(getModelPickerListText()).toContain(lastAccountModel.name);
+          expect(getModelPickerListText()).not.toContain(firstModel.name);
+        });
+        expect(mounted.onInstanceModelChange).not.toHaveBeenCalled();
+        // Browsing another account is local picker state. Only the explicit
+        // model row choice may publish the exact account-and-model tuple.
+        await page.getByText(lastAccountModel.name, { exact: true }).click();
+        expect(mounted.onInstanceModelChange).toHaveBeenCalledExactlyOnceWith(
+          lastAccount.instanceId,
+          lastAccountModel.slug,
+        );
+        expect(mounted.onRequestModelsRefresh).toHaveBeenCalledExactlyOnceWith(
+          firstAccount.instanceId,
+        );
+      } finally {
+        await mounted?.cleanup();
+        root.style.fontSize = originalFontSize;
+        root.classList.toggle("dark", originallyDark);
+        await input.send("Emulation.setEmulatedMedia", {
+          features: [
+            {
+              name: "prefers-reduced-motion",
+              value: originalReducedMotion ? "reduce" : "no-preference",
+            },
+          ],
+        });
+        await page.viewport(originalViewport.width, originalViewport.height);
+      }
+    },
+  );
+
+  it.each([
+    { mode: "compact", lockedProvider: null },
+    { mode: "locked", lockedProvider: ProviderDriverKind.make("codex") },
+  ])("keeps bottom accounts reachable in the $mode picker", async ({ lockedProvider }) => {
+    const providers = buildManyAccountProviders();
+    const firstAccount = providers[0]!;
+    const eligibleProviders = lockedProvider
+      ? providers.filter((provider) => provider.driver === lockedProvider)
+      : providers;
+    const lastAccount = eligibleProviders.at(-1)!;
+    const lastModel = lastAccount.models[0]!;
+    const mounted = await mountPicker({
+      activeInstanceId: firstAccount.instanceId,
+      model: firstAccount.models[0]!.slug,
+      lockedProvider,
+      compact: true,
+      providers,
+    });
+    try {
+      await page.getByRole("button").click();
+      await expect.element(page.getByPlaceholder("Search models...")).toHaveFocus();
+      const { railViewport, surface, popupViewport } = getModelPickerScrollRegions();
+      await vi.waitFor(() => assertModelPickerRailBounds(railViewport, surface));
+      expect(getSidebarProviderOrder()).toEqual([
+        ...(lockedProvider ? [] : ["favorites"]),
+        ...sortProviderInstanceEntries(deriveProviderInstanceEntries(eligibleProviders)).map(
+          (entry) => entry.instanceId,
+        ),
+      ]);
+      const initialPopupScrollTop = popupViewport.scrollTop;
+      await wheelModelPickerViewport(cdp(), railViewport, 10_000);
+      const lastButton = page.getByRole("button", { name: lastAccount.displayName!, exact: true });
+      await vi.waitFor(() =>
+        assertAccountFitsRail(lastButton.element() as HTMLElement, railViewport),
+      );
+      expect(popupViewport.scrollTop).toBe(initialPopupScrollTop);
+      await lastButton.click();
+      await expect.element(page.getByPlaceholder("Search models...")).toHaveFocus();
+      expect(getModelPickerListText()).toContain(lastModel.name);
+      expect(mounted.onInstanceModelChange).not.toHaveBeenCalled();
+      await page.getByText(lastModel.name, { exact: true }).click();
+      expect(mounted.onInstanceModelChange).toHaveBeenCalledExactlyOnceWith(
+        lastAccount.instanceId,
+        lastModel.slug,
+      );
     } finally {
       await mounted.cleanup();
     }
