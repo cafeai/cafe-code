@@ -38,6 +38,7 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { parseCliArgs } from "@cafecode/shared/cliArgs";
 import { publicClaudeCommands, UNAVAILABLE_COMMAND_CATALOG } from "../claudeCommands.ts";
+import { mapClaudeSessionQuotaReport, stripClaudeUsageReport } from "../claudeSessionQuota.ts";
 import { resolveConfiguredSubagentLimit } from "../Drivers/SubagentConcurrency.ts";
 import {
   getSafeInteractionUrl,
@@ -54,6 +55,7 @@ import {
   type ModelCapabilities,
   type ProviderApprovalDecision,
   type ProviderCommandCatalog,
+  type ProviderSessionQuotaReport,
   ProviderDriverKind,
   type ProviderInteractionMode,
   ProviderInstanceId,
@@ -541,6 +543,8 @@ interface ClaudeSessionContext {
   /** A push supersedes initialization even while that cached SDK read awaits init. */
   commandCatalogPushRevision: number;
   commandCatalogPublishPending: boolean;
+  /** At most one content-free invalidation; balances never enter events. */
+  quotaReportPublishPending: boolean;
   pendingCommandCatalog:
     | { readonly sessionId: string; readonly catalog: ProviderCommandCatalog }
     | undefined;
@@ -4596,6 +4600,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       context.commandCatalogPushRevision += 1;
       context.pendingCommandCatalog = undefined;
       setCommandCatalog(context, UNAVAILABLE_COMMAND_CATALOG);
+      setQuotaReport(context, undefined);
     }
     if (context.resumeSessionId !== message.session_id) {
       context.rewindMessageIds = undefined;
@@ -6050,6 +6055,37 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     );
   };
 
+  const setQuotaReport = (
+    context: ClaudeSessionContext,
+    report: ProviderSessionQuotaReport | undefined,
+  ) => {
+    if (context.stopped || sessions.get(context.session.threadId) !== context) return;
+    if (report === undefined && context.session.quotaReport === undefined) return;
+    // A native session replacement/reset invalidates the entire level. Never
+    // merge anonymous meters, retain old balances after failure, or treat this
+    // query/config scope as authenticated account identity.
+    const { quotaReport: _previous, ...session } = context.session;
+    context.session = report === undefined ? session : { ...session, quotaReport: report };
+    if (context.quotaReportPublishPending) return;
+    context.quotaReportPublishPending = true;
+    context.runFork(
+      Effect.gen(function* () {
+        yield* Effect.sleep(50);
+        context.quotaReportPublishPending = false;
+        if (context.stopped || sessions.get(context.session.threadId) !== context) return;
+        const stamp = yield* makeEventStamp();
+        yield* offerRuntimeEvent(context, {
+          ...stamp,
+          type: "session.configured",
+          provider: PROVIDER,
+          threadId: context.session.threadId,
+          payload: { config: {}, quotaReportChanged: true },
+          providerRefs: {},
+        });
+      }),
+    );
+  };
+
   const handleSystemMessage = Effect.fn("handleSystemMessage")(function* (
     context: ClaudeSessionContext,
     sdkMessage: SDKMessage,
@@ -7458,9 +7494,42 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   const handleSdkMessage = Effect.fn("handleSdkMessage")(function* (
     context: ClaudeSessionContext,
-    message: SDKMessage,
+    incomingMessage: SDKMessage,
   ) {
-    yield* logNativeSdkMessage(context, message);
+    // Redaction is deliberately before every logger, accounting mapper, raw
+    // event and transcript projection. Even rejected/foreign/subagent reports
+    // must not bypass privacy simply because they cannot update the metadata.
+    const stripped = stripClaudeUsageReport(incomingMessage);
+    const message = stripped.message;
+    if (stripped.hasReport) {
+      const primary =
+        message.type === "assistant" &&
+        (message.parent_tool_use_id === null || message.parent_tool_use_id === undefined);
+      const sameNativeSession =
+        typeof message.session_id === "string" &&
+        message.session_id.length > 0 &&
+        message.session_id.length <= 1024 &&
+        context.resumeSessionId !== undefined &&
+        context.lastThreadStartedId === context.resumeSessionId &&
+        message.session_id === context.resumeSessionId;
+      if (
+        primary &&
+        sameNativeSession &&
+        !context.stopped &&
+        !context.authFailureSeen &&
+        sessions.get(context.session.threadId) === context
+      ) {
+        const observedAt = yield* nowIso;
+        setQuotaReport(context, mapClaudeSessionQuotaReport(stripped.report, observedAt));
+      }
+      yield* logNativeSdkMessage(context, message);
+      // A quota-bearing frame is not session-identity or synthetic-turn
+      // authority. Only the ordinary text of an already-active user turn may
+      // continue through projection; an idle report changes metadata only.
+      if (!primary || !sameNativeSession || !context.turnState || context.stopped) return;
+    } else {
+      yield* logNativeSdkMessage(context, message);
+    }
     if (message.type === "system" && sdkMessageSubtype(message) === "session_title_changed") {
       // Claude Code 2.1.285 added this internal session-name notification,
       // which is still absent from the published SDK union. It may precede
@@ -7472,7 +7541,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // Command telemetry cannot establish or replace native conversation
     // identity. In particular a pre-init push must await the authoritative
     // init frame and a foreign-session push must not rebind this query.
-    if (!(message.type === "system" && message.subtype === "commands_changed")) {
+    if (
+      !stripped.hasReport &&
+      !(message.type === "system" && message.subtype === "commands_changed")
+    ) {
       yield* ensureThreadId(context, message);
     }
     yield* recordTurnSdkMessage(context, message);
@@ -7483,6 +7555,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // until completeTurn would lose the last good totals if a later segment
     // crashes. Only bounded numeric/model metadata enters this new event.
     if (rawMessageType === "conversation_reset") {
+      setQuotaReport(context, undefined);
       const reset = message as unknown as Record<string, unknown>;
       const conversationId = reset.new_conversation_id;
       if (
@@ -7678,6 +7751,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   ) {
     if (context.stopped && !options?.retirementReserved && !context.queryClosureUncertain) return;
 
+    // Inconclusive teardown deliberately retains an ownership-fenced context
+    // in sessions. Remove presentation metadata synchronously so that retained
+    // context cannot keep serving a stopped query's old quota level.
+    const hadQuotaReport = context.session.quotaReport !== undefined;
+    const { quotaReport: _stoppedQuota, ...stoppedSession } = context.session;
+    context.session = stoppedSession;
     context.stopped = true;
     // Any cleanup failure before query.close is also inconclusive teardown.
     // Keep the ownership fence until that exact query is proven closed.
@@ -7688,6 +7767,19 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     yield* Effect.promise(() => context.schedulingBinding?.dispose() ?? Promise.resolve()).pipe(
       Effect.catchCause(() => Effect.logWarning("Claude scheduling cleanup remains pending.")),
     );
+    if (hadQuotaReport) {
+      // The coalesced publisher is stopped-fenced; explicitly invalidate this
+      // revoked level without waiting for provider close/exit acknowledgement.
+      const stamp = yield* makeEventStamp();
+      yield* offerRuntimeEvent(context, {
+        ...stamp,
+        type: "session.configured",
+        provider: PROVIDER,
+        threadId: context.session.threadId,
+        payload: { config: {}, quotaReportChanged: true },
+        providerRefs: {},
+      });
+    }
 
     for (const [requestId, pending] of context.pendingApprovals) {
       yield* Deferred.succeed(pending.decision, "cancel");
@@ -8712,6 +8804,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         query: queryRuntime,
         commandCatalogPushRevision: 0,
         commandCatalogPublishPending: false,
+        quotaReportPublishPending: false,
         pendingCommandCatalog: undefined,
         schedulingBinding,
         runFork,

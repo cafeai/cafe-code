@@ -1,8 +1,37 @@
 # Usage statistics
 
-Last updated: 2026-10-04 12:21:42 JST (UTC+0900)
+Last updated: 2026-10-09 08:52:36 JST (UTC+0900)
 
 Settings → Usage has one date-range selector for its reporting statistics. The default is 30 days. Selecting 7 days, 30 days, 90 days or All updates generated tokens, chats sent, generating time, estimated USD cost, provider/model breakdowns, token composition, cache savings, cost quality and usage charts together. Activity always shows all recorded daily history, independently of this selector. Cost/Tokens changes the graph's measurement without changing the selected period. The shared detailed cost view in Atrium uses the same range semantics; Atrium's ambient lifetime counters remain lifetime counters.
+
+## Claude plan quotas
+
+Settings → Providers and the current chat's session rail/context popover can show
+the full bounded structured quota report received from a user-requested native
+Claude `/usage`. All reported five-hour, weekly, model-specific, surface-specific
+and unknown meter rows remain in source order; no model names or missing limits
+are invented. These are session-reported observations, not independently verified
+current account allowances. Sparse reset-only events cannot fill in missing
+report percentages. The source-bound Claude view does not fall back to anonymous
+cached events when its report is unavailable, loading or disconnected.
+
+The presenter shows percentage remaining, reset time and receipt time in the
+viewer computer's locale/timezone, including the zone label. An old observation
+or passed reset is marked stale, not refilled to 100%. Extra usage stays separate:
+disabled/absent values are explicit, known currency uses reported minor units,
+and missing currency is not guessed to be USD. Quotas do not change context-window
+tokens or the recorded API-equivalent cost estimates below.
+
+There is no automatic `/usage` or independent Refresh. If unavailable, request
+`/usage` through the existing native command path when the configured runtime
+supports it. Configured instance/selection, chat, runtime and environment changes and disconnection clear the
+old scope. Settings selects only that configured instance's eligible current
+sessions; the chat surfaces remain exact-chat bound. This does not detect otherwise
+unreported changes to the provider's authenticated principal. Reports are volatile
+and lost when their execution owner/runtime restarts, not restored by scanning
+saved transcripts. A presentation-backend reconnect can reread a surviving owner
+inventory after revalidating its saved source authority.
+See the [quota report decision](decisions/claude-account-quota-report.md).
 
 ## Calendar and data boundaries
 

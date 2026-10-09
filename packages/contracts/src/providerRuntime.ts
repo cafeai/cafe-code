@@ -302,6 +302,9 @@ const SessionConfiguredPayload = Schema.Struct({
   config: UnknownRecordSchema,
   // Content-free invalidation only: catalogs remain volatile session metadata.
   commandCatalogChanged: Schema.optional(Schema.Boolean),
+  // Only an invalidation crosses canonical/durable event paths. Quota values
+  // stay in the owner's volatile ProviderSession and the metadata subscription.
+  quotaReportChanged: Schema.optional(Schema.Boolean),
 });
 export type SessionConfiguredPayload = typeof SessionConfiguredPayload.Type;
 

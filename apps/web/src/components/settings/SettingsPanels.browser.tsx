@@ -205,6 +205,9 @@ vi.mock("../../environments/runtime", () => {
     resetEnvironmentServiceForTests: () => undefined,
     startEnvironmentConnectionService: () => undefined,
     subscribeEnvironmentConnections: () => () => {},
+    useSavedEnvironmentRuntimeStore: (
+      selector: (state: { readonly byId: Record<string, never> }) => unknown,
+    ) => selector({ byId: {} }),
   };
 });
 

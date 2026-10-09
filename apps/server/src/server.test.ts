@@ -19,6 +19,7 @@ import {
   type OrchestrationThreadShell,
   type OrchestrationCommand,
   type OrchestrationEvent,
+  type ProviderRuntimeEvent,
   ORCHESTRATION_WS_METHODS,
   ProjectId,
   ProviderDriverKind,
@@ -42,11 +43,13 @@ import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -3177,6 +3180,275 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         );
         assert.equal(inventoryReads, 2);
       }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
+  );
+
+  it.effect("streams passive quota only for owner-authorized current Claude session metadata", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("claudeAgent");
+      const runtimeId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+      const now = "2026-10-09T00:00:00.000Z";
+      const path = yield* Path.Path;
+      const cwd = path.join(process.cwd(), "quota-worktree");
+      const report = {
+        source: "claude-session" as const,
+        observedAt: now,
+        meters: [
+          {
+            kind: "session",
+            group: "subscription",
+            usedPercent: 25,
+            resetsAt: null,
+            severity: "normal",
+            isActive: true,
+          },
+        ],
+      };
+      let present = true;
+      let archived = false;
+      let sequence = 0;
+      let replaceDuringInventory = false;
+      let unrelatedDuringInventory = false;
+      let moveDuringAssembly = false;
+      let currentRuntimeId = runtimeId;
+      let inventoryReads = 0;
+      let configuredEnabled = true;
+      let environmentChanged = false;
+      const quotaChanges = yield* PubSub.unbounded<ProviderRuntimeEvent>();
+      const project = makeDefaultOrchestrationReadModel().projects[0]!;
+      yield* buildAppUnderTest({
+        layers: {
+          providerService: {
+            streamEvents: Stream.fromPubSub(quotaChanges),
+            listSessions: () =>
+              Effect.sync(() => {
+                inventoryReads++;
+                if (replaceDuringInventory) {
+                  sequence++;
+                  currentRuntimeId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+                }
+                if (unrelatedDuringInventory) sequence++;
+                return [
+                  {
+                    threadId: defaultThreadId,
+                    provider: ProviderDriverKind.make("claudeAgent"),
+                    providerInstanceId: instanceId,
+                    subagentRuntimeId: runtimeId,
+                    cwd,
+                    status: "ready" as const,
+                    runtimeMode: "full-access" as const,
+                    createdAt: now,
+                    updatedAt: now,
+                    ...(present ? { quotaReport: report } : {}),
+                    commandCatalogConfigurationKey: claudeCommandsConfigurationKey({
+                      config: DEFAULT_SERVER_SETTINGS.providers.claudeAgent,
+                      enabled: true,
+                    }),
+                  },
+                ];
+              }),
+            sendTurn: () => Effect.die("passive quota must not send a turn"),
+          },
+          providerRegistry: {
+            refresh: () => Effect.die("passive quota must not probe providers"),
+            refreshInstance: () => Effect.die("passive quota must not probe providers"),
+          },
+          serverSettings: {
+            getSettings: Effect.sync(() => ({
+              ...DEFAULT_SERVER_SETTINGS,
+              providerInstances: {
+                [instanceId]: {
+                  driver: ProviderDriverKind.make("claudeAgent"),
+                  // No envelope enabled: exercise the inherited driver flag.
+                  config: {
+                    ...DEFAULT_SERVER_SETTINGS.providers.claudeAgent,
+                    enabled: configuredEnabled,
+                  },
+                  ...(environmentChanged
+                    ? {
+                        environment: [
+                          {
+                            name: "ANTHROPIC_BASE_URL",
+                            value: "https://synthetic.invalid",
+                            sensitive: false,
+                          },
+                        ],
+                      }
+                    : {}),
+                },
+              },
+            })),
+          },
+          projectionSnapshotQuery: {
+            getShellSnapshot: () =>
+              Effect.sync(() => ({
+                snapshotSequence: sequence,
+                projects: [
+                  {
+                    ...project,
+                    workspaceRoot: cwd,
+                    additionalWorkspaceRoots: [],
+                    repositoryIdentity: null,
+                  },
+                ],
+                threads: [
+                  makeDefaultOrchestrationThreadShell({
+                    modelSelection: { instanceId, model: "claude-sonnet-5" },
+                    archivedAt: archived ? now : null,
+                    session: {
+                      threadId: defaultThreadId,
+                      providerName: "claudeAgent",
+                      providerInstanceId: instanceId,
+                      subagentRuntimeId: currentRuntimeId,
+                      status: "ready",
+                      runtimeMode: "full-access",
+                      activeTurnId: null,
+                      lastError: null,
+                      updatedAt: now,
+                    },
+                  }),
+                ],
+                updatedAt: now,
+              })),
+            getSnapshotSequence: () =>
+              Effect.sync(() => {
+                if (moveDuringAssembly) {
+                  moveDuringAssembly = false;
+                  sequence++;
+                }
+                return { snapshotSequence: sequence };
+              }),
+          },
+        },
+      });
+      const ownerCookie = yield* getAuthenticatedSessionCookieHeader();
+      const wsUrl = appendSessionCookieToWsUrl(
+        yield* getWsServerUrl("/ws", { authenticated: false }),
+        ownerCookie,
+      );
+      const input = { instanceId, session: { threadId: defaultThreadId, runtimeId } };
+      const first = (url: string, selection: typeof input | { instanceId: typeof instanceId }) =>
+        Effect.scoped(
+          withWsRpcClient(url, (client) =>
+            client[WS_METHODS.serverSubscribeProviderQuota](selection).pipe(
+              Stream.take(1),
+              Stream.runCollect,
+              Effect.map(Array.from),
+            ),
+          ),
+        );
+      assert.deepEqual(yield* first(wsUrl, input), [{ report }]);
+      // Reconnection obtains a new current inventory, not a retained RPC reply.
+      assert.deepEqual(yield* first(wsUrl, { instanceId }), [{ report }]);
+      present = false;
+      assert.deepEqual(yield* first(wsUrl, input), [{ report: null }]);
+      present = true;
+      replaceDuringInventory = true;
+      assert.deepEqual(yield* first(wsUrl, input), [{ report: null }]);
+      replaceDuringInventory = false;
+      currentRuntimeId = runtimeId;
+      assert.equal(inventoryReads, 4);
+      unrelatedDuringInventory = true;
+      assert.deepEqual(yield* first(wsUrl, input), [{ report }]);
+      unrelatedDuringInventory = false;
+      moveDuringAssembly = true;
+      assert.deepEqual(yield* first(wsUrl, input), [{ report }]);
+      assert.equal(inventoryReads, 6);
+      for (const wrong of [
+        { ...input, instanceId: ProviderInstanceId.make("different-account") },
+        {
+          ...input,
+          session: { ...input.session, runtimeId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" },
+        },
+      ])
+        assert.deepEqual(yield* first(wsUrl, wrong), [{ report: null }]);
+      archived = true;
+      assert.deepEqual(yield* first(wsUrl, input), [{ report: null }]);
+      assert.equal(inventoryReads, 6);
+      archived = false;
+      configuredEnabled = false;
+      assert.deepEqual(yield* first(wsUrl, input), [{ report: null }]);
+      assert.equal(inventoryReads, 6);
+      configuredEnabled = true;
+      environmentChanged = true;
+      assert.deepEqual(yield* first(wsUrl, input), [{ report: null }]);
+      assert.equal(inventoryReads, 7);
+      environmentChanged = false;
+      const pairing = yield* HttpClient.post("/api/auth/pairing-token", {
+        headers: { cookie: ownerCookie },
+      });
+      const { credential } = (yield* pairing.json) as { credential: string };
+      const guestUrl = appendSessionCookieToWsUrl(
+        yield* getWsServerUrl("/ws", { authenticated: false }),
+        yield* getAuthenticatedSessionCookieHeader(credential),
+      );
+      assert.deepEqual(yield* first(guestUrl, input), [{ report: null }]);
+      assert.equal(inventoryReads, 7);
+      yield* Effect.scoped(
+        withWsRpcClient(guestUrl, (client) =>
+          Effect.gen(function* () {
+            const initial = yield* Deferred.make<void>();
+            const finished = yield* Deferred.make<void>();
+            const denied: unknown[] = [];
+            const receiver = yield* client[WS_METHODS.serverSubscribeProviderQuota](input).pipe(
+              Stream.ensuring(Deferred.succeed(finished, undefined)),
+              Stream.runForEach((value) =>
+                Effect.gen(function* () {
+                  denied.push(value);
+                  yield* Deferred.succeed(initial, undefined);
+                }),
+              ),
+              Effect.forkScoped,
+            );
+            yield* Deferred.await(initial);
+            // Let the synthetic websocket deliver any terminal frame. A denied
+            // stream stays open, so a live client has no completion to retry.
+            yield* Effect.promise(() => new Promise<void>((resolve) => setTimeout(resolve, 50)));
+            assert.equal(yield* Deferred.isDone(finished), false);
+            assert.deepEqual(denied, [{ report: null }]);
+            assert.equal(inventoryReads, 7);
+            yield* Fiber.interrupt(receiver);
+            assert.equal(yield* Deferred.isDone(finished), true);
+          }),
+        ),
+      );
+      // The native adapter emits only a content-free invalidation. A live
+      // subscriber re-reads current inventory; the event itself has no report.
+      yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.gen(function* () {
+            const initial = yield* Deferred.make<void>();
+            const cleared = yield* Deferred.make<void>();
+            const values: unknown[] = [];
+            const receiver = yield* client[WS_METHODS.serverSubscribeProviderQuota](input).pipe(
+              Stream.take(2),
+              Stream.runForEach((value) =>
+                Effect.gen(function* () {
+                  values.push(value);
+                  yield* Deferred.succeed(value.report === null ? cleared : initial, undefined);
+                }),
+              ),
+              Effect.forkScoped,
+            );
+            yield* Deferred.await(initial);
+            present = false;
+            yield* PubSub.publish(quotaChanges, {
+              eventId: EventId.make("quota-invalidated"),
+              type: "session.configured",
+              provider: ProviderDriverKind.make("claudeAgent"),
+              providerInstanceId: instanceId,
+              threadId: defaultThreadId,
+              subagentRuntimeId: runtimeId,
+              createdAt: now,
+              payload: { config: {}, quotaReportChanged: true },
+            });
+            yield* Deferred.await(cleared);
+            yield* Fiber.join(receiver);
+            assert.deepEqual(values, [{ report }, { report: null }]);
+          }),
+        ),
+      );
+      assert.equal(inventoryReads, 9);
+    }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
   );
 
   it.effect("routes owner usage-reset confirmations only to the mocked provider action", () =>

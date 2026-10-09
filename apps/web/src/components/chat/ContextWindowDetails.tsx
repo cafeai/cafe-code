@@ -5,6 +5,7 @@ import { cn } from "~/lib/utils";
 import { type ContextWindowSnapshot, formatContextWindowTokens } from "~/lib/contextWindow";
 import { formatCodexRateLimitPresentation } from "~/lib/codexRateLimits";
 import { ProviderAccountQuotaDetails, UsageMeterBar } from "../ProviderAccountQuotaDetails";
+import type { ProviderQuotaState } from "./useProviderQuota";
 import { SubagentConcurrencyDetails } from "./SubagentConcurrencyControl";
 import {
   formatSubagentConcurrencyLimit,
@@ -24,6 +25,7 @@ function formatPercentage(value: number | null): string | null {
 export function ContextWindowDetails(props: {
   readonly usage: ContextWindowSnapshot | null | undefined;
   readonly rateLimits?: ServerProviderAccountRateLimits | null | undefined;
+  readonly sessionQuota?: ProviderQuotaState | undefined;
   readonly layout?: "popover" | "panel";
   readonly headerAction?: ReactNode;
   readonly usageResetAction?: ReactNode;
@@ -36,9 +38,10 @@ export function ContextWindowDetails(props: {
   const normalizedPercentage = Math.max(0, Math.min(100, usage?.usedPercentage ?? 0));
   const hasUsage = usage !== null;
   const hasRateLimits = quota !== null;
+  const hasSessionQuota = props.sessionQuota !== undefined;
   const hasSubagentLimit = formatSubagentConcurrencyLimit(props.subagentConcurrency) !== null;
 
-  if (!hasUsage && !hasRateLimits && !hasSubagentLimit) {
+  if (!hasUsage && !hasRateLimits && !hasSubagentLimit && !hasSessionQuota) {
     return <p className="text-ui text-subtle-foreground">Waiting for usage from this chat.</p>;
   }
 
@@ -49,14 +52,14 @@ export function ContextWindowDetails(props: {
         layout === "panel" ? "flex min-h-0 flex-col gap-2.5" : "space-y-1.5",
       )}
     >
-      {layout === "popover" ? (
+      {layout === "popover" && (hasUsage || !hasSessionQuota) ? (
         <div className="flex items-center justify-between gap-2">
           <div className="label-overline">Context window</div>
           {props.headerAction}
         </div>
-      ) : (
+      ) : hasUsage || !hasSessionQuota ? (
         <div className="label-overline">Context window</div>
-      )}
+      ) : null}
 
       {hasUsage && layout === "panel" ? (
         <UsageMeterBar percent={normalizedPercentage} testId="context" />
@@ -105,7 +108,7 @@ export function ContextWindowDetails(props: {
         </div>
       ) : null}
 
-      {quota ? (
+      {quota || hasSessionQuota ? (
         <div
           className={cn(
             "text-xs",
@@ -116,6 +119,7 @@ export function ContextWindowDetails(props: {
         >
           <ProviderAccountQuotaDetails
             presentation={quota}
+            sessionQuota={props.sessionQuota}
             layout={layout}
             action={props.usageResetAction}
           />

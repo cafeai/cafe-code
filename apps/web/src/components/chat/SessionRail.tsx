@@ -9,6 +9,7 @@ import { isLiveSubagentStatus, type SubagentRosterEntry } from "../subagents/Sub
 import { Button } from "../ui/button";
 import { ScrollArea } from "../ui/scroll-area";
 import { ContextWindowDetails } from "./ContextWindowDetails";
+import { useProviderQuota, type ProviderQuotaContext } from "./useProviderQuota";
 import type { SubagentConcurrencyPresentation } from "../../subagentConcurrency";
 import { TaskProgressDetails } from "./TaskProgressDetails";
 import { ScheduledFollowups, type ScheduledFollowupsContext } from "./ScheduledFollowups";
@@ -58,6 +59,7 @@ interface SessionRailProps {
     | undefined;
   readonly usage: ContextWindowSnapshot | null;
   readonly rateLimits?: ServerProviderAccountRateLimits | null | undefined;
+  readonly quotaContext?: ProviderQuotaContext | undefined;
   readonly usageResetAction?: ReactNode;
   readonly subagentConcurrency?: SubagentConcurrencyPresentation | null;
   readonly onShowInComposer: () => void;
@@ -68,6 +70,7 @@ interface SessionRailProps {
 
 export const SessionRail = memo(
   forwardRef<HTMLDivElement, SessionRailProps>(function SessionRail(props, ref) {
+    const sessionQuota = useProviderQuota(props.quotaContext, true);
     const plan = props.plan;
     const hasPlan = Boolean(plan && plan.steps.length > 0);
     const subagents = (props.subagents ?? []).filter(
@@ -141,6 +144,7 @@ export const SessionRail = memo(
           <ContextWindowDetails
             usage={props.usage}
             rateLimits={props.rateLimits}
+            sessionQuota={sessionQuota}
             usageResetAction={props.usageResetAction}
             layout="panel"
             subagentConcurrency={props.subagentConcurrency}

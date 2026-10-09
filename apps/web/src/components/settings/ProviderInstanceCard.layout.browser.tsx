@@ -1,6 +1,9 @@
 vi.mock("../../environments/workspaceApi", () => ({
   ensureWorkspaceApi: () => api.ensureLocalApi(),
 }));
+vi.mock("../../environments/runtime", () => ({
+  requireEnvironmentConnection: () => api.ensureLocalApi(),
+}));
 import "../../index.css";
 
 import {

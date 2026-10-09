@@ -29,6 +29,7 @@ import {
 import { cn } from "../../lib/utils";
 import { ProviderUsageResetButton } from "../ProviderUsageResetButton";
 import { ProviderAccountQuotaDetails } from "../ProviderAccountQuotaDetails";
+import { useProviderQuota, type ProviderQuotaContext } from "../chat/useProviderQuota";
 import { ensureWorkspaceApi } from "../../environments/workspaceApi";
 import {
   formatCodexRateLimitPresentation,
@@ -800,6 +801,7 @@ function ProviderAdvancedSection(props: {
 }
 
 interface ProviderInstanceCardProps {
+  readonly quotaContext?: ProviderQuotaContext | undefined;
   readonly instanceId: ProviderInstanceId;
   readonly instance: ProviderInstanceConfig;
   readonly driverOption: DriverOption | undefined;
@@ -868,6 +870,7 @@ interface ProviderInstanceCardProps {
  *     flows through the envelope.
  */
 export function ProviderInstanceCard({
+  quotaContext,
   instanceId,
   instance,
   driverOption,
@@ -892,6 +895,7 @@ export function ProviderInstanceCard({
   onRestartRuntime,
   isRestartingRuntime = false,
 }: ProviderInstanceCardProps) {
+  const sessionQuota = useProviderQuota(quotaContext, true, instance.driver === "claudeAgent");
   const enabled = instance.enabled ?? true;
   // The server-reported status wins when present; otherwise fall back to
   // "disabled"/"checking" based on the local `enabled` flag so the dot
@@ -1368,9 +1372,13 @@ export function ProviderInstanceCard({
             not change the available width and unexpectedly rewrap rows. */}
         <div className="mt-2 min-w-0 space-y-2" data-provider-card-details>
           {authRowNode}
-          {accountQuota ? (
+          {accountQuota || sessionQuota ? (
             <div className="w-full [&_[data-account-quota-scroll]]:[scrollbar-gutter:stable]">
-              <ProviderAccountQuotaDetails presentation={accountQuota} layout="settings" />
+              <ProviderAccountQuotaDetails
+                presentation={accountQuota}
+                sessionQuota={sessionQuota}
+                layout="settings"
+              />
             </div>
           ) : null}
         </div>

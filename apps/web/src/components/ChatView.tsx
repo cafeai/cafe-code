@@ -64,6 +64,10 @@ import {
 import { useDesktopDebugEnabled } from "~/lib/desktopDebugState";
 import { useWorkspaceProjects, useWorkspaceThreads } from "../environments/workspaceData";
 import { readPrimaryEnvironmentDescriptor, usePrimaryEnvironmentId } from "../environments/primary";
+import { useWsConnectionStatus } from "../rpc/wsConnectionState";
+import { providerSkillsScopeRevision } from "./chat/useProviderSkills";
+import type { ProviderQuotaContext } from "./chat/useProviderQuota";
+import { selectedQuotaDriver } from "../lib/claudeSessionQuota";
 import { readEnvironmentApi } from "../environmentApi";
 import { MessageForkDialog } from "./chat/MessageForkDialog";
 import { isElectron } from "../env";
@@ -1882,6 +1886,7 @@ export default function ChatView(props: ChatViewProps) {
   }, [environmentId, routeKind, threadId]);
 
   const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const quotaConnectionStatus = useWsConnectionStatus();
   const primaryEnvironmentLabel = readPrimaryEnvironmentDescriptor()?.label ?? null;
   const savedRuntime = useSavedEnvironmentRuntimeStore((s) => s.byId[environmentId]);
   const activeEnvironmentUnavailable =
@@ -7412,6 +7417,39 @@ export default function ChatView(props: ChatViewProps) {
   const sessionRailRateLimits = shouldSurfaceProviderAccountRateLimits(activeProviderStatus)
     ? (activeProviderStatus?.accountRateLimits ?? null)
     : null;
+  const sessionRailQuotaContext: ProviderQuotaContext | undefined =
+    selectedQuotaDriver({
+      instanceId: activeThread.modelSelection.instanceId,
+      configuredDriver: settings.providerInstances[activeThread.modelSelection.instanceId]?.driver,
+      snapshot: activeProviderStatus,
+      session: activeThread.session,
+    }) === "claudeAgent"
+      ? {
+          environmentId,
+          input:
+            activeThread.session?.provider === "claudeAgent" &&
+            activeThread.session.providerInstanceId === activeThread.modelSelection.instanceId &&
+            activeThread.session.subagentRuntimeId
+              ? {
+                  instanceId: activeThread.modelSelection.instanceId,
+                  session: {
+                    threadId: activeThread.id,
+                    runtimeId: activeThread.session.subagentRuntimeId,
+                  },
+                }
+              : null,
+          scopeRevision: providerSkillsScopeRevision({
+            cwd: gitCwd,
+            instanceId: activeThread.modelSelection.instanceId,
+            settings,
+            snapshot: activeProviderStatus ?? null,
+          }),
+          connected:
+            environmentId === primaryEnvironmentId
+              ? quotaConnectionStatus.phase === "connected"
+              : savedRuntime?.connectionState === "connected",
+        }
+      : undefined;
   const shouldRenderRightColumn =
     (shouldRenderPlanSidebar && !shouldUsePlanSidebarSheet) || sessionRailVisible;
 
@@ -7766,6 +7804,7 @@ export default function ChatView(props: ChatViewProps) {
                 onOpenSubagentDetail={openSubagentDetail}
                 usage={sessionRailUsage}
                 rateLimits={sessionRailRateLimits}
+                quotaContext={sessionRailQuotaContext}
                 subagentConcurrency={
                   activeThread
                     ? deriveSubagentConcurrencyPresentation({

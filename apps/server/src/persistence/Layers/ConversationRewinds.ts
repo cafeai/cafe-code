@@ -1,9 +1,23 @@
 import { ProviderSession } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import * as Struct from "effect/Struct";
 import type * as SqlClient from "effect/unstable/sql/SqlClient";
 import { toPersistenceSqlError, toPersistenceDecodeError } from "../Errors.ts";
 import type { ConversationRewindStore } from "../Services/ConversationRewinds.ts";
+
+// Rewind recovery needs the exact runtime/cursor/authority snapshot, not live
+// metadata from a query that will have been retired before recovery. Keep one
+// durable schema at BOTH boundaries: encoding must never save structured quota
+// reports or command catalogs/private configuration commitments, and decoding
+// must not rehydrate those fields from older snapshots. Schema's default excess
+// property handling strips them without traversing or validating their values.
+// All other ProviderSession fields retain their original schema and semantics;
+// this changes neither the rewind admission checks nor its native lifecycle.
+const DurableProviderSession = ProviderSession.mapFields(
+  Struct.omit(["quotaReport", "commandCatalog", "commandCatalogConfigurationKey"]),
+);
+const DurableProviderSessionJson = Schema.fromJsonString(DurableProviderSession);
 
 const StoredRewind = Schema.Struct({
   operationId: Schema.String,
@@ -21,10 +35,10 @@ const StoredRewind = Schema.Struct({
   retainedTurnCount: Schema.Number,
   numTurns: Schema.Number,
   firstRemovedTurnId: Schema.String,
-  original: Schema.fromJsonString(ProviderSession),
-  candidate: Schema.NullOr(Schema.fromJsonString(ProviderSession)),
+  original: DurableProviderSessionJson,
+  candidate: Schema.NullOr(DurableProviderSessionJson),
 });
-const encodeSession = Schema.encodeSync(Schema.fromJsonString(ProviderSession));
+const encodeSession = Schema.encodeSync(DurableProviderSessionJson);
 const decodeRewind = Schema.decodeUnknownEffect(StoredRewind);
 const isProviderSession = Schema.is(ProviderSession);
 

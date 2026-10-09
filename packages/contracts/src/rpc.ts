@@ -6,6 +6,7 @@ import {
 import * as Schema from "effect/Schema";
 import { ProviderSkillsInput, ProviderSkillsResult } from "./providerSkills.ts";
 import { ProviderCommandCatalog, ProviderCommandsInput } from "./providerCommands.ts";
+import { ProviderSessionQuotaInput, ProviderSessionQuotaResult } from "./providerQuota.ts";
 import {
   ScheduledFollowupListInput,
   ScheduledFollowupListResult,
@@ -177,6 +178,7 @@ export const WS_METHODS = {
   serverRefreshProviders: "server.refreshProviders",
   serverListProviderSkills: "server.listProviderSkills",
   serverSubscribeProviderCommands: "server.subscribeProviderCommands",
+  serverSubscribeProviderQuota: "server.subscribeProviderQuota",
   serverUsageReset: "server.usageReset",
   serverLoginProvider: "server.loginProvider",
   serverUpdateProvider: "server.updateProvider",
@@ -292,6 +294,12 @@ export const WsServerSubscribeProviderCommandsRpc = Rpc.make(
     stream: true,
   },
 );
+
+export const WsServerSubscribeProviderQuotaRpc = Rpc.make(WS_METHODS.serverSubscribeProviderQuota, {
+  payload: ProviderSessionQuotaInput,
+  success: ProviderSessionQuotaResult,
+  stream: true,
+});
 
 export const WsServerUsageResetRpc = Rpc.make(WS_METHODS.serverUsageReset, {
   payload: ProviderUsageResetInput,
@@ -713,6 +721,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerRefreshProvidersRpc,
   WsServerListProviderSkillsRpc,
   WsServerSubscribeProviderCommandsRpc,
+  WsServerSubscribeProviderQuotaRpc,
   WsServerUsageResetRpc,
   WsServerLoginProviderRpc,
   WsServerUpdateProviderRpc,

@@ -1,6 +1,7 @@
 import { DesktopPicker } from "../virtualDesktop/VirtualDesktops";
 import { providerSkillsScopeRevision, useProviderSkills } from "./useProviderSkills";
 import { useProviderCommands } from "./useProviderCommands";
+import type { ProviderQuotaContext } from "./useProviderQuota";
 import { useWsConnectionStatus } from "../../rpc/wsConnectionState";
 import { usePrimaryEnvironmentId } from "../../environments/primary";
 import { useSavedEnvironmentRuntimeStore } from "../../environments/runtime";
@@ -307,6 +308,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   compact: boolean;
   activeContextWindow: ReturnType<typeof deriveLatestContextWindowSnapshot>;
   codexRateLimits: ServerProvider["accountRateLimits"] | null;
+  quotaContext?: ProviderQuotaContext | undefined;
   usageResetAction: ReactNode;
   subagentConcurrency?: SubagentConcurrencyPresentation | null;
   sessionRailVisible: boolean;
@@ -342,6 +344,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         <ContextWindowMeter
           usage={props.activeContextWindow}
           codexRateLimits={props.codexRateLimits}
+          quotaContext={props.quotaContext}
           subagentConcurrency={props.subagentConcurrency}
           {...(props.onShowSessionRail ? { onShowOnSide: props.onShowSessionRail } : {})}
         />
@@ -1850,6 +1853,20 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     commandsScopeRevision,
     commandsConnected,
   );
+  const quotaContext: ProviderQuotaContext | undefined =
+    selectedProvider === "claudeAgent"
+      ? {
+          environmentId,
+          input: commandsInput
+            ? {
+                instanceId: commandsInput.instanceId,
+                session: { threadId: commandsInput.threadId, runtimeId: commandsInput.runtimeId },
+              }
+            : null,
+          scopeRevision: commandsScopeRevision,
+          connected: commandsConnected,
+        }
+      : undefined;
   const selectedProviderCommands =
     selectedProvider === "claudeAgent"
       ? discoveredCommands.commands
@@ -4116,6 +4133,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   compact={isComposerPrimaryActionsCompact}
                   activeContextWindow={activeContextWindow}
                   codexRateLimits={selectedCodexRateLimits}
+                  quotaContext={quotaContext}
                   usageResetAction={
                     <ProviderUsageResetButton
                       key={`${environmentId}:${selectedProviderStatus?.instanceId ?? ""}`}

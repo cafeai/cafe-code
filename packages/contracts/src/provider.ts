@@ -33,6 +33,7 @@ import {
   ProviderPrioritySessionBinding,
 } from "./providerTaskControls.ts";
 import { ProviderCommandCatalog } from "./providerCommands.ts";
+import { ProviderSessionQuotaReport } from "./providerQuota.ts";
 
 const ProviderSessionStatus = Schema.Literals([
   "connecting",
@@ -46,6 +47,9 @@ export const ProviderSession = Schema.Struct({
   provider: ProviderDriverKind,
   // Volatile metadata from this exact query, never an account-global catalog.
   commandCatalog: Schema.optional(ProviderCommandCatalog),
+  // Passive metadata from this exact native query. Never persist or hydrate it
+  // as account authority; an absent field is legacy/no report, not zero usage.
+  quotaReport: Schema.optional(ProviderSessionQuotaReport),
   commandCatalogConfigurationKey: Schema.optional(
     Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
   ),

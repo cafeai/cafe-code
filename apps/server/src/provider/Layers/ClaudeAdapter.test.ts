@@ -585,6 +585,341 @@ describe("Claude project directory encoding", () => {
 
 describe("ClaudeAdapterLive", () => {
   it.effect(
+    "admits only established primary session quota and strips every report before logs/events",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "claude-quota-" });
+        const nativeEvents: unknown[] = [];
+        const harness = makeHarness({
+          environment: {},
+          cwd: directory,
+          baseDir: directory,
+          claudeConfig: { homePath: directory },
+          nativeEventLogger: {
+            filePath: "memory://passive-quota",
+            write: (event) => {
+              nativeEvents.push(event);
+              return Effect.void;
+            },
+            close: () => Effect.void,
+          },
+        });
+        yield* Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          const events: ProviderRuntimeEvent[] = [];
+          const initialized = yield* Deferred.make<void>();
+          yield* Stream.runForEach(adapter.streamEvents, (event) =>
+            Effect.gen(function* () {
+              events.push(event);
+              if (event.type === "session.configured" && event.raw?.method === "claude/system/init")
+                yield* Deferred.succeed(initialized, undefined);
+            }),
+          ).pipe(Effect.forkScoped);
+          const secret = "private-quota-session-total-must-not-persist";
+          const raw = (percent: number) => ({
+            session: { total_cost_usd: secret },
+            privateIdentity: secret,
+            rate_limits: {
+              limits: [
+                {
+                  kind: "weekly_all",
+                  group: "weekly",
+                  percent,
+                  resets_at: null,
+                  severity: "normal",
+                  is_active: true,
+                  private: secret,
+                },
+              ],
+            },
+          });
+          const report = (
+            session_id: string,
+            percent: number,
+            parent_tool_use_id: string | null = null,
+          ) =>
+            ({
+              type: "assistant",
+              session_id,
+              parent_tool_use_id,
+              uuid: `quota-${percent}`,
+              message: {
+                role: "assistant",
+                content: [{ type: "text", text: "ordinary /usage text" }],
+              },
+              usage_report: raw(percent),
+            }) as unknown as SDKMessage;
+          yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "full-access" });
+          harness.query.emit(report("pre-init", 99));
+          yield* TestClock.adjust(100);
+          assert.equal((yield* adapter.listSessions())[0]?.quotaReport, undefined);
+          assert.equal(
+            events.some(
+              (event) => event.type === "thread.started" || event.type === "turn.started",
+            ),
+            false,
+          );
+          harness.query.emit({
+            type: "system",
+            subtype: "init",
+            session_id: "native-quota",
+            uuid: "init-quota",
+            capabilities: [],
+          } as unknown as SDKMessage);
+          yield* Deferred.await(initialized);
+          harness.query.emit(report("native-quota", 1));
+          harness.query.emit(report("native-quota", 2));
+          harness.query.emit(report("native-quota", 3));
+          yield* TestClock.adjust(100);
+          assert.equal(
+            (yield* adapter.listSessions())[0]?.quotaReport?.meters?.[0]?.usedPercent,
+            3,
+          );
+          const invalidations = events.filter(
+            (event) => event.type === "session.configured" && event.payload.quotaReportChanged,
+          );
+          assert.lengthOf(invalidations, 1);
+          assert.deepEqual(invalidations[0]?.payload, { config: {}, quotaReportChanged: true });
+          harness.query.emit(report("foreign-native", 88));
+          harness.query.emit(report("native-quota", 77, "subagent-tool"));
+          yield* TestClock.adjust(100);
+          assert.equal(
+            (yield* adapter.listSessions())[0]?.quotaReport?.meters?.[0]?.usedPercent,
+            3,
+          );
+          assert.deepEqual(
+            events
+              .filter((event) => event.type === "thread.started")
+              .map((event) =>
+                event.type === "thread.started" ? event.payload.providerThreadId : undefined,
+              ),
+            ["native-quota"],
+          );
+          assert.equal(
+            events.some((event) => event.type === "turn.started"),
+            false,
+          );
+          assert.equal(JSON.stringify(nativeEvents).includes(secret), false);
+          assert.equal(JSON.stringify(events).includes(secret), false);
+          assert.equal(JSON.stringify(nativeEvents).includes("usage_report"), false);
+          assert.equal(JSON.stringify(events).includes("claude-session"), false);
+          assert.equal(harness.createInputs.length, 1);
+          assert.lengthOf(harness.query.interruptCalls, 0);
+          assert.equal(harness.query.closeCalls, 0);
+        }).pipe(Effect.scoped, Effect.provide(harness.layer));
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect(
+    "replaces malformed quota levels and clears them on reset, rebind and query replacement",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const directory = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "claude-quota-reset-",
+        });
+        const harness = makeHarness({
+          newQueryPerSession: true,
+          environment: {},
+          cwd: directory,
+          baseDir: directory,
+          claudeConfig: { homePath: directory },
+        });
+        yield* Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          yield* Stream.runDrain(adapter.streamEvents).pipe(Effect.forkScoped);
+          yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "full-access" });
+          const init = (session_id: string) =>
+            harness.query.emit({
+              type: "system",
+              subtype: "init",
+              session_id,
+              uuid: "quota-init",
+              capabilities: [],
+            } as unknown as SDKMessage);
+          const report = (rate_limits: unknown, session_id = "native-quota") =>
+            harness.query.emit({
+              type: "assistant",
+              session_id,
+              uuid: "quota-message",
+              parent_tool_use_id: null,
+              message: { role: "assistant", content: [] },
+              usage_report: { rate_limits },
+            } as unknown as SDKMessage);
+          init("native-quota");
+          yield* TestClock.adjust(100);
+          report({ limits: [] });
+          yield* TestClock.adjust(100);
+          assert.deepEqual((yield* adapter.listSessions())[0]?.quotaReport?.meters, []);
+          report({
+            limits: [
+              {
+                kind: "weekly_all",
+                group: "weekly",
+                percent: NaN,
+                resets_at: null,
+                severity: "normal",
+                is_active: true,
+              },
+            ],
+          });
+          yield* TestClock.adjust(100);
+          assert.equal((yield* adapter.listSessions())[0]?.quotaReport?.meters, null);
+          report({ limits: [] });
+          yield* TestClock.adjust(100);
+          harness.query.emit({
+            type: "conversation_reset",
+            session_id: "native-quota",
+            new_conversation_id: "00000000-0000-4000-8000-000000000123",
+          } as unknown as SDKMessage);
+          yield* TestClock.adjust(100);
+          assert.equal((yield* adapter.listSessions())[0]?.quotaReport, undefined);
+          report({ limits: [] });
+          yield* TestClock.adjust(100);
+          init("replacement-native");
+          yield* TestClock.adjust(100);
+          assert.equal((yield* adapter.listSessions())[0]?.quotaReport, undefined);
+          report({ limits: [] }, "replacement-native");
+          yield* TestClock.adjust(100);
+          assert.deepEqual((yield* adapter.listSessions())[0]?.quotaReport?.meters, []);
+          yield* adapter.stopSession(THREAD_ID);
+          yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "full-access" });
+          yield* TestClock.adjust(100);
+          assert.equal((yield* adapter.listSessions())[0]?.quotaReport, undefined);
+          assert.equal(harness.createInputs.length, 2);
+        }).pipe(Effect.scoped, Effect.provide(harness.layer));
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect(
+    "retains ordinary user-requested usage text without duplicating report accounting",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const directory = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "claude-usage-text-",
+        });
+        const harness = makeHarness({
+          environment: {},
+          cwd: directory,
+          baseDir: directory,
+          claudeConfig: { homePath: directory },
+        });
+        yield* Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          const events: ProviderRuntimeEvent[] = [];
+          yield* Stream.runForEach(adapter.streamEvents, (event) =>
+            Effect.sync(() => {
+              events.push(event);
+            }),
+          ).pipe(Effect.forkScoped);
+          yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "full-access" });
+          harness.query.emit({
+            type: "system",
+            subtype: "init",
+            session_id: "native-usage-text",
+            uuid: "init",
+            capabilities: [],
+          } as unknown as SDKMessage);
+          yield* TestClock.adjust(100);
+          yield* adapter.sendTurn({ threadId: THREAD_ID, input: "/usage" });
+          harness.query.emit({
+            type: "assistant",
+            session_id: "native-usage-text",
+            uuid: "usage-text",
+            parent_tool_use_id: null,
+            message: {
+              id: "usage-native-message",
+              role: "assistant",
+              content: [{ type: "text", text: "ordinary /usage text" }],
+            },
+            usage_report: { session: { total_cost_usd: 12345 }, rate_limits: { limits: [] } },
+          } as unknown as SDKMessage);
+          yield* TestClock.adjust(100);
+          assert.ok(
+            events.some(
+              (event) =>
+                event.type === "content.delta" && event.payload.delta === "ordinary /usage text",
+            ),
+          );
+          assert.lengthOf(
+            events.filter((event) => event.type === "turn.started"),
+            1,
+          );
+          assert.lengthOf(
+            events.filter((event) => event.type === "thread.usage-accounting.updated"),
+            0,
+          );
+          assert.equal(JSON.stringify(events).includes("usage_report"), false);
+          assert.equal(JSON.stringify(events).includes("12345"), false);
+          assert.deepEqual((yield* adapter.listSessions())[0]?.quotaReport?.meters, []);
+        }).pipe(Effect.scoped, Effect.provide(harness.layer));
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("revokes quota metadata even when the exact query close is inconclusive", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const directory = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "claude-quota-close-",
+      });
+      const harness = makeHarness({
+        environment: {},
+        cwd: directory,
+        baseDir: directory,
+        claudeConfig: { homePath: directory },
+      });
+      yield* Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const events: ProviderRuntimeEvent[] = [];
+        yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.sync(() => {
+            events.push(event);
+          }),
+        ).pipe(Effect.forkScoped);
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "full-access" });
+        harness.query.emit({
+          type: "system",
+          subtype: "init",
+          session_id: "quota-close-native",
+          uuid: "init",
+          capabilities: [],
+        } as unknown as SDKMessage);
+        yield* TestClock.adjust(100);
+        harness.query.emit({
+          type: "assistant",
+          session_id: "quota-close-native",
+          uuid: "quota",
+          parent_tool_use_id: null,
+          message: { role: "assistant", content: [] },
+          usage_report: { rate_limits: { limits: [] } },
+        } as unknown as SDKMessage);
+        yield* TestClock.adjust(100);
+        assert.deepEqual((yield* adapter.listSessions())[0]?.quotaReport?.meters, []);
+        harness.query.closeFailure = new Error("synthetic close refused");
+        yield* adapter.stopSession(THREAD_ID);
+        yield* TestClock.adjust(100);
+        const retained = (yield* adapter.listSessions())[0];
+        assert.equal(retained?.status, "error");
+        assert.equal(retained?.quotaReport, undefined);
+        assert.lengthOf(
+          events.filter(
+            (event) => event.type === "session.configured" && event.payload.quotaReportChanged,
+          ),
+          2,
+        );
+        // A failed close still keeps native ownership fenced. Recovery uses the
+        // existing exact-query cleanup, never a replacement inspection child.
+        assert.equal(harness.createInputs.length, 1);
+        harness.query.closeFailure = undefined;
+        yield* adapter.stopSession(THREAD_ID);
+        assert.deepEqual(yield* adapter.listSessions(), []);
+      }).pipe(Effect.scoped, Effect.provide(harness.layer));
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect(
     "replaces live commands after add/remove/rename and rejects foreign-session pushes without rebinding",
     () => {
       const harness = makeHarness();
