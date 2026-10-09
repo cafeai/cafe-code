@@ -44,7 +44,7 @@ function normalizedTokenCount(value: number): number {
   return Number.isFinite(value) ? Math.max(0, value) : 0;
 }
 
-/** Exact comma-separated token count, available on hover/focus of a compact readout. */
+/** Primary comma-separated token count; paired with the smaller compact readout. */
 export function formatFullTokenCount(value: number): string {
   return tokenIntegerFormat.format(Math.round(normalizedTokenCount(value)));
 }

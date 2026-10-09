@@ -15,7 +15,6 @@ import { Button } from "../ui/button";
 import { InfoTip } from "../ui/info-tip";
 import { SegmentedControl } from "../ui/segmented-control";
 import { Skeleton } from "../ui/skeleton";
-import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { SettingsSection } from "./settingsLayout";
 import {
   formatCompactTokenCount,
@@ -116,11 +115,11 @@ type TokenFigureContext =
   | `composition-${"processed" | "cached" | "uncached" | "output"}`;
 
 /**
- * Every token total on the usage surfaces shows its compact K/M/B readout. The
- * exact comma-separated count is the figure's hover/focus tooltip and its
- * accessible text, so small changes stay inspectable and screen readers hear
- * the precise value. Keeping this in one component stops the Settings and
- * Atrium copies from drifting into different conventions.
+ * The complete counter is the primary, animated value; its abbreviated K/M/B
+ * readout sits below in smaller text. Both derive from the same displayed
+ * number, so even increments too small to change the abbreviation stay visible.
+ * Hide only the redundant abbreviation from screen readers. Keeping this in
+ * one component gives Settings and Atrium the same readable hierarchy.
  */
 function TokenCountFigure({
   value,
@@ -143,32 +142,65 @@ function TokenCountFigure({
       className={cn("min-w-0", align === "right" && "text-right", className)}
       data-usage-token-figure={context}
     >
-      <Tooltip>
-        <TooltipTrigger
-          delay={150}
-          render={
-            <span
-              // Focusable so keyboard users can reveal the exact count too.
-              tabIndex={0}
-              className={cn(
-                // `relative` keeps the absolutely positioned screen-reader
-                // copy inside any horizontal scroller (the model table).
-                "focus-ring relative inline-block max-w-full cursor-default rounded-sm text-sm font-medium tabular-nums text-foreground",
-                valueClassName,
-              )}
-            />
-          }
+      <div
+        className={cn(
+          "break-words text-sm font-medium tabular-nums text-foreground [overflow-wrap:anywhere]",
+          valueClassName,
+        )}
+        data-usage-token-full={context}
+      >
+        {exact}
+      </div>
+      <div
+        className="mt-0.5 text-2xs tabular-nums text-subtle-foreground"
+        aria-hidden="true"
+        data-usage-token-compact={context}
+      >
+        {formatCompactTokenCount(value)}
+      </div>
+    </div>
+  );
+}
+
+/** Provider identity keeps its ticker state stable when cost ordering changes. */
+function UsageProviderSummary({
+  entry,
+  maxCost,
+}: {
+  entry: Pick<ModelCostRow, "provider" | "cost" | "priced" | "tokens">;
+  maxCost: number;
+}) {
+  const Icon = PROVIDER_ICON_BY_PROVIDER[entry.provider as never];
+  const displayedCost = useCountUp(entry.cost, { decimals: 2 });
+  const displayedTokens = useCountUp(entry.tokens);
+  const width = maxCost > 0 ? Math.max(2, (entry.cost / maxCost) * 100) : 0;
+
+  return (
+    <div className="min-w-0" data-usage-provider-summary={entry.provider}>
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+        <span className="flex min-w-0 items-center gap-1.5 text-sm text-foreground">
+          {Icon ? <Icon className="size-3.5 shrink-0" /> : null}
+          <span className="truncate">{formatUsageProviderLabel(entry.provider)}</span>
+        </span>
+        <span
+          className={cn(
+            "ml-auto max-w-full break-words text-right text-sm tabular-nums [overflow-wrap:anywhere]",
+            entry.priced ? "text-foreground" : "text-muted-foreground",
+          )}
+          data-usage-provider-cost-value="true"
         >
-          <span aria-hidden="true" data-usage-token-compact={context}>
-            {formatCompactTokenCount(value)}
-            {suffix}
-          </span>
-          <span className="sr-only" data-usage-token-full={context}>
-            {exact}
-          </span>
-        </TooltipTrigger>
-        <TooltipPopup className="tabular-nums">{exact}</TooltipPopup>
-      </Tooltip>
+          {entry.priced ? formatUsd(displayedCost) : "Unpriced"}
+        </span>
+      </div>
+      <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-muted">
+        <div className="h-full rounded-full bg-foreground/80" style={{ width: `${width}%` }} />
+      </div>
+      <TokenCountFigure
+        value={displayedTokens}
+        context="provider"
+        className="mt-1"
+        valueClassName="text-xs font-normal text-muted-foreground"
+      />
     </div>
   );
 }
@@ -563,10 +595,6 @@ function UsageCostMetrics({
   const chart = useMemo(() => {
     const days = usage.days;
     const labels = days.map((day) => day.day.slice(5));
-    // All may contain lifetime volume predating the daily ledger. Keep the
-    // range counter consistent with the dashboard rather than silently drop
-    // that history simply because it cannot be placed on the daily graph.
-    const rangeTokens = view.processed;
     if (mode === "tokens") {
       const series: UsageChartSeries[] = [
         {
@@ -602,7 +630,6 @@ function UsageCostMetrics({
       return {
         labels,
         series,
-        rangeTokens,
         hasUnpriced: false,
         format: (value: number) =>
           `${formatFullTokenCount(value)} tokens (${formatCompactTokenCount(value)})`,
@@ -622,11 +649,10 @@ function UsageCostMetrics({
     return {
       labels,
       series,
-      rangeTokens,
       hasUnpriced: days.some((day) => (dailyCosts.get(day.day)?.unpricedTokens ?? 0) > 0),
       format: (value: number) => formatUsd(value),
     };
-  }, [usage, mode, overrides, view.processed]);
+  }, [usage, mode, overrides]);
 
   // Missing model attribution is real recorded usage, but has no trustworthy
   // rate. Include that gap in cost quality instead of implying 100% coverage.
@@ -676,42 +702,13 @@ function UsageCostMetrics({
             {view.providers.length === 0 ? (
               <p className="text-xs text-muted-foreground">No usage by model in this period.</p>
             ) : (
-              view.providers.map((entry) => {
-                const Icon = PROVIDER_ICON_BY_PROVIDER[entry.provider as never];
-                const width =
-                  maxProviderCost > 0 ? Math.max(2, (entry.cost / maxProviderCost) * 100) : 0;
-                return (
-                  <div key={entry.provider} className="min-w-0">
-                    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-                      <span className="flex min-w-0 items-center gap-1.5 text-sm text-foreground">
-                        {Icon ? <Icon className="size-3.5 shrink-0" /> : null}
-                        <span className="truncate">{formatUsageProviderLabel(entry.provider)}</span>
-                      </span>
-                      <span
-                        className={cn(
-                          "ml-auto max-w-full break-words text-right text-sm tabular-nums [overflow-wrap:anywhere]",
-                          entry.priced ? "text-foreground" : "text-muted-foreground",
-                        )}
-                        data-usage-provider-cost-value="true"
-                      >
-                        {entry.priced ? formatUsd(entry.cost) : "Unpriced"}
-                      </span>
-                    </div>
-                    <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-muted">
-                      <div
-                        className="h-full rounded-full bg-foreground/80"
-                        style={{ width: `${width}%` }}
-                      />
-                    </div>
-                    <TokenCountFigure
-                      value={entry.tokens}
-                      context="provider"
-                      className="mt-1"
-                      valueClassName="text-xs font-normal text-muted-foreground"
-                    />
-                  </div>
-                );
-              })
+              view.providers.map((entry) => (
+                <UsageProviderSummary
+                  key={entry.provider}
+                  entry={entry}
+                  maxCost={maxProviderCost}
+                />
+              ))
             )}
           </div>
         </div>
@@ -726,7 +723,10 @@ function UsageCostMetrics({
               {mode === "cost" ? "Daily cost" : "Daily tokens"}
             </span>
             <TokenCountFigure
-              value={chart.rangeTokens}
+              // All can include lifetime volume predating the daily ledger.
+              // Reuse the aggregate ticker instead of dropping that history or
+              // allowing two displays of the same total to animate differently.
+              value={processedDisplay}
               context="range"
               suffix=" tokens in range"
               valueClassName="text-xs font-normal text-muted-foreground"
@@ -797,7 +797,7 @@ function UsageCostMetrics({
                 value={reasoningDisplay}
                 context="reasoning"
                 suffix=" reasoning tokens"
-                valueClassName="text-2xs font-normal text-subtle-foreground"
+                valueClassName="text-xs font-normal text-subtle-foreground"
               />
             ) : undefined
           }

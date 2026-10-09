@@ -5,7 +5,7 @@ vi.mock("../../environments/workspace", () => ({
 }));
 import "../../index.css";
 
-import { page, userEvent } from "vitest/browser";
+import { page } from "vitest/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 import {
@@ -777,19 +777,28 @@ function expectPanelRange(label: keyof typeof rangeExpectations): void {
 }
 
 /**
- * Token totals show only their compact readout. The exact count is the focusable
- * trigger's screen-reader text and its hover/focus tooltip, never a second
- * visible line.
+ * Full totals remain visible above a smaller abbreviation. Check rendered
+ * geometry and accessibility so neither line can silently become a tooltip or
+ * duplicate the value in screen-reader narration again.
  */
-function expectCompactWithExactOnDemand(context: string): void {
-  const compact = requiredElement(`[data-usage-token-compact="${context}"]`);
-  const exact = requiredElement(`[data-usage-token-full="${context}"]`);
-  expect(compact).toBeVisible();
-  expect(compact.getAttribute("aria-hidden")).toBe("true");
-  expect(exact.classList.contains("sr-only")).toBe(true);
-  const trigger = compact.parentElement!;
-  expect(trigger.contains(exact)).toBe(true);
-  expect(trigger.tabIndex).toBe(0);
+function expectFullAboveCompact(context: string): void {
+  const figures = document.querySelectorAll<HTMLElement>(`[data-usage-token-figure="${context}"]`);
+  expect(figures.length).toBeGreaterThan(0);
+  for (const figure of figures) {
+    const compact = figure.querySelector<HTMLElement>(`[data-usage-token-compact="${context}"]`)!;
+    const exact = figure.querySelector<HTMLElement>(`[data-usage-token-full="${context}"]`)!;
+    expect(exact).toBeVisible();
+    expect(compact).toBeVisible();
+    expect(exact.getAttribute("aria-hidden")).toBeNull();
+    expect(exact.classList.contains("sr-only")).toBe(false);
+    expect(compact.getAttribute("aria-hidden")).toBe("true");
+    expect(compact.getBoundingClientRect().top).toBeGreaterThanOrEqual(
+      exact.getBoundingClientRect().bottom,
+    );
+    expect(Number.parseFloat(getComputedStyle(exact).fontSize)).toBeGreaterThan(
+      Number.parseFloat(getComputedStyle(compact).fontSize),
+    );
+  }
 }
 
 function expectNoHorizontalOverflow(element: HTMLElement): void {
@@ -798,14 +807,14 @@ function expectNoHorizontalOverflow(element: HTMLElement): void {
 
 function expectCompositionNumbersOnOneLine(): void {
   for (const id of ["processed", "cached", "uncached", "output"]) {
-    const figure = requiredElement(`[data-usage-token-compact="composition-${id}"]`);
+    const figure = requiredElement(`[data-usage-token-full="composition-${id}"]`);
     const numericText = Array.from(figure.childNodes).find(
       (node) => node.nodeType === Node.TEXT_NODE && /^[\d.,]+[KMB]?/.test(node.textContent ?? ""),
     );
     expect(numericText).toBeDefined();
     const digitLength = numericText!.textContent!.match(/^[\d.,]+[KMB]?/)![0].length;
     // Measure the figure itself: the supporting word "tokens" may wrap, but a
-    // billion-scale readout must remain one complete number.
+    // billion-scale full count must remain one complete number.
     const range = document.createRange();
     range.setStart(numericText!, 0);
     range.setEnd(numericText!, digitLength);
@@ -1861,7 +1870,7 @@ describe("UsageStatsPanel", () => {
       .toBeVisible();
   });
 
-  it("names the USD currency once and shows compact token totals with exact values on demand", async () => {
+  it("names the USD currency once and shows full token totals above smaller abbreviations", async () => {
     mounted = await render(<UsageCostContent usage={createUsageDetail()} />);
 
     // Standalone content (Atrium) names the currency on its headline estimate;
@@ -1894,10 +1903,8 @@ describe("UsageStatsPanel", () => {
     expect(requiredElement('[data-usage-token-full="range"]').textContent).toBe(
       "3,000,000 tokens in range",
     );
-    expect(requiredElement('[data-usage-token-compact="range"]').textContent).toBe(
-      "3.00M tokens in range",
-    );
-    expectCompactWithExactOnDemand("range");
+    expect(requiredElement('[data-usage-token-compact="range"]').textContent).toBe("3.00M");
+    expectFullAboveCompact("range");
 
     const providerFullCounts = Array.from(
       document.querySelectorAll<HTMLElement>('[data-usage-token-full="provider"]'),
@@ -1910,30 +1917,27 @@ describe("UsageStatsPanel", () => {
     expect(
       providerFullCounts.every((entry) => /\d{1,3}(,\d{3})+ tokens/.test(entry.textContent ?? "")),
     ).toBe(true);
-    expect(providerCompacts.every((entry) => /[KM] tokens$/.test(entry.textContent ?? ""))).toBe(
-      true,
-    );
+    expect(providerCompacts.every((entry) => /[KM]$/.test(entry.textContent ?? ""))).toBe(true);
+    expectFullAboveCompact("provider");
 
     const aggregateExpectations = {
-      processed: ["3,000,000 tokens", "3.00M tokens"],
-      cached: ["1,250,000 tokens", "1.25M tokens"],
-      uncached: ["1,250,000 tokens", "1.25M tokens"],
-      output: ["250,000 tokens", "250K tokens"],
+      processed: ["3,000,000 tokens", "3.00M"],
+      cached: ["1,250,000 tokens", "1.25M"],
+      uncached: ["1,250,000 tokens", "1.25M"],
+      output: ["250,000 tokens", "250K"],
     } as const;
     for (const [id, [full, compact]] of Object.entries(aggregateExpectations)) {
       const context = `composition-${id}`;
       expect(requiredElement(`[data-usage-token-full="${context}"]`).textContent).toBe(full);
       expect(requiredElement(`[data-usage-token-compact="${context}"]`).textContent).toBe(compact);
-      expectCompactWithExactOnDemand(context);
+      expectFullAboveCompact(context);
     }
 
     expect(requiredElement('[data-usage-token-full="reasoning"]').textContent).toBe(
       "50,000 reasoning tokens",
     );
-    expect(requiredElement('[data-usage-token-compact="reasoning"]').textContent).toBe(
-      "50K reasoning tokens",
-    );
-    expectCompactWithExactOnDemand("reasoning");
+    expect(requiredElement('[data-usage-token-compact="reasoning"]').textContent).toBe("50K");
+    expectFullAboveCompact("reasoning");
 
     const modelFullCounts = Array.from(
       document.querySelectorAll<HTMLElement>('[data-usage-token-full="model"]'),
@@ -1948,22 +1952,7 @@ describe("UsageStatsPanel", () => {
       true,
     );
 
-    // The exact count is one keyboard focus away, without a second visible line:
-    // Tab from the tile's info button lands on the processed-token figure.
-    const processedTrigger = requiredElement(
-      '[data-usage-token-compact="composition-processed"]',
-    ).parentElement!;
-    infoTipTrigger("About Processed tokens").focus();
-    await userEvent.keyboard("{Tab}");
-    expect(document.activeElement).toBe(processedTrigger);
-    await vi.waitFor(() =>
-      expect(
-        Array.from(
-          document.querySelectorAll('[data-slot="tooltip-popup"]'),
-          (popup) => popup.textContent,
-        ),
-      ).toContain("3,000,000 tokens"),
-    );
+    expectFullAboveCompact("model");
     expect(document.body.textContent).not.toMatch(/\btokens? exact\b/i);
   });
 
@@ -1997,7 +1986,7 @@ describe("UsageStatsPanel", () => {
     await expect.element(page.getByText("Net cache savings", { exact: true })).toBeVisible();
   });
 
-  it("renders the billion-scale shorthand with the exact counter on demand", async () => {
+  it("renders the full billion-scale counter above its shorthand", async () => {
     const baseline = createUsageDetail();
     const usage = {
       ...baseline,
@@ -2014,9 +2003,9 @@ describe("UsageStatsPanel", () => {
       "3,539,966,200 tokens",
     );
     expect(requiredElement('[data-usage-token-compact="composition-processed"]').textContent).toBe(
-      "3.54B tokens",
+      "3.54B",
     );
-    expectCompactWithExactOnDemand("composition-processed");
+    expectFullAboveCompact("composition-processed");
   });
 
   it("animates the full aggregate count through a small increment", async () => {
@@ -2038,6 +2027,13 @@ describe("UsageStatsPanel", () => {
       () => {
         expect(displayedRawCount("processed")).toBeGreaterThan(3_000_000);
         expect(displayedRawCount("processed")).toBeLessThan(3_000_010);
+        expect(requiredElement('[data-usage-token-full="composition-processed"]')).toBeVisible();
+        expect(
+          requiredElement('[data-usage-token-compact="composition-processed"]').textContent,
+        ).toBe(formatCompactTokenCount(displayedRawCount("processed")));
+        expect(parseFullTokenFigure(requiredElement('[data-usage-token-full="range"]'))).toBe(
+          displayedRawCount("processed"),
+        );
       },
       { interval: 10, timeout: 1_000 },
     );
@@ -2064,6 +2060,13 @@ describe("UsageStatsPanel", () => {
     const initialReasoning = parseFullTokenFigure(
       requiredElement('[data-usage-token-full="reasoning"]'),
     );
+    const provider = requiredElement('[data-usage-provider-summary="codex"]');
+    const initialProviderTokens = parseFullTokenFigure(
+      provider.querySelector('[data-usage-token-full="provider"]')!,
+    );
+    const initialProviderCost = parseUsd(
+      provider.querySelector("[data-usage-provider-cost-value]")!.textContent,
+    );
     const initialSavings = parseUsd(
       requiredElement('[data-usage-composition-value="cache-savings"]').textContent,
     );
@@ -2078,6 +2081,14 @@ describe("UsageStatsPanel", () => {
       (entry) => entry.provider === "codex" && entry.model === "gpt-5.6-codex",
     )!.generatingMs;
     const targetRollup = rollUpCost(updatedUsage.tokenBreakdown);
+    const providerEntries = updatedUsage.tokenBreakdown.filter(
+      (entry) => entry.provider === "codex",
+    );
+    const targetProviderTokens = providerEntries.reduce(
+      (sum, entry) => sum + entry.inputTokens + entry.outputTokens,
+      0,
+    );
+    const targetProviderCost = rollUpCost(providerEntries).cost;
     const targetProcessed = updatedUsage.totals.inputTokens + updatedUsage.totals.outputTokens;
     const targetFresh = Math.max(
       0,
@@ -2112,10 +2123,26 @@ describe("UsageStatsPanel", () => {
           requiredElement('[data-usage-composition-value="cache-savings"]').textContent,
         );
         const priced = Number.parseFloat(costQualityValue("Priced")!);
+        const providerTokens = parseFullTokenFigure(
+          provider.querySelector('[data-usage-token-full="provider"]')!,
+        );
+        const providerCost = parseUsd(
+          provider.querySelector("[data-usage-provider-cost-value]")!.textContent,
+        );
 
         expect(tokens).toBeGreaterThan(initialModelTokens);
         expect(tokens).toBeLessThan(targetModelTokens);
         expect(compact).toBe(formatCompactTokenCount(tokens));
+        expect(providerTokens).toBeGreaterThan(initialProviderTokens);
+        expect(providerTokens).toBeLessThan(targetProviderTokens);
+        expect(provider.querySelector('[data-usage-token-compact="provider"]')!.textContent).toBe(
+          formatCompactTokenCount(providerTokens),
+        );
+        expect(providerCost).toBeGreaterThan(initialProviderCost);
+        expect(providerCost).toBeLessThan(targetProviderCost);
+        expect(parseFullTokenFigure(requiredElement('[data-usage-token-full="range"]'))).toBe(
+          displayedRawCount("processed"),
+        );
         expect(cost).toBeGreaterThan(initialModelCost);
         expect(cost).toBeLessThan(targetModelCost);
         expect(time).not.toBe(initialModelTime);
@@ -2146,6 +2173,15 @@ describe("UsageStatsPanel", () => {
           formatGeneratingTime(targetModelTime),
         );
         expect(displayedRawCount("processed")).toBe(targetProcessed);
+        expect(
+          parseFullTokenFigure(provider.querySelector('[data-usage-token-full="provider"]')!),
+        ).toBe(targetProviderTokens);
+        expect(provider.querySelector("[data-usage-provider-cost-value]")!.textContent).toBe(
+          expectedUsd(targetProviderCost),
+        );
+        expect(parseFullTokenFigure(requiredElement('[data-usage-token-full="range"]'))).toBe(
+          targetProcessed,
+        );
         expect(displayedRawCount("cached")).toBe(updatedUsage.totals.cachedInputTokens);
         expect(displayedRawCount("uncached")).toBe(targetFresh);
         expect(displayedRawCount("output")).toBe(updatedUsage.totals.outputTokens);
@@ -2194,6 +2230,21 @@ describe("UsageStatsPanel", () => {
       expect(requiredModelTime("gpt-5.6-codex", "codex").textContent).toBe("3m 00s");
       expect(displayedRawCount("processed")).toBe(
         updatedUsage.totals.inputTokens + updatedUsage.totals.outputTokens,
+      );
+      const provider = requiredElement('[data-usage-provider-summary="codex"]');
+      const providerEntries = updatedUsage.tokenBreakdown.filter(
+        (entry) => entry.provider === "codex",
+      );
+      expect(
+        parseFullTokenFigure(provider.querySelector('[data-usage-token-full="provider"]')!),
+      ).toBe(
+        providerEntries.reduce((sum, entry) => sum + entry.inputTokens + entry.outputTokens, 0),
+      );
+      expect(provider.querySelector("[data-usage-provider-cost-value]")!.textContent).toBe(
+        expectedUsd(rollUpCost(providerEntries).cost),
+      );
+      expect(parseFullTokenFigure(requiredElement('[data-usage-token-full="range"]'))).toBe(
+        displayedRawCount("processed"),
       );
       expect(requiredElement('[data-usage-token-full="reasoning"]').textContent).toBe(
         `${formatFullTokenCount(updatedUsage.totals.reasoningOutputTokens)} reasoning tokens`,
