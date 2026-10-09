@@ -8275,6 +8275,19 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         ]);
         await waitForStandaloneComposerText("First standalone conversation");
         await page.getByRole("button", { name: "Desk", exact: true }).click();
+        await page
+          .getByLabelText("Desk open chats", { exact: true })
+          .getByRole("button", { name: "New chat in active tab group", exact: true })
+          .click();
+        await waitForLayout();
+        expect(mounted.router.state.location.pathname).toBe(`/draft/${draftId}`);
+        expect(Object.keys(useComposerDraftStore.getState().draftThreadsByThreadKey)).toEqual([
+          draftId,
+        ]);
+        await waitForStandaloneComposerText("First standalone conversation");
+        expect(useComposerDraftStore.getState().getComposerDraft(draftId)?.subagentLimits).toEqual({
+          codex: 5,
+        });
         newChatShortcut();
         await waitForLayout();
         expect(mounted.router.state.location.pathname).toBe(`/draft/${draftId}`);
@@ -8387,7 +8400,12 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         desk.dispatch({ type: "sidebarMode", mode: "desk" });
         const capturedGroup = useDeskStore.getState().desk.activeGroupId;
         await waitForLayout();
-        newChatShortcut();
+        // The heading action must capture the same exact active-group owner as
+        // the shortcut, not the saved chat currently visible in another pane.
+        await page
+          .getByLabelText("Desk open chats", { exact: true })
+          .getByRole("button", { name: "New chat in active tab group", exact: true })
+          .click();
         await vi.waitFor(() =>
           expect(mounted.router.state.location.pathname).toMatch(UUID_ROUTE_RE),
         );
