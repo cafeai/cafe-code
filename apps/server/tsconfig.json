@@ -12,6 +12,7 @@
     "integration",
     "../../scripts/lib",
     "../desktop/src/nativeControl/NativeControlHost.ts",
+    "../desktop/src/nativeControl/NativeControlActions.ts",
     "../desktop/src/nativeControl/NativeDaemon.ts",
     "../../packages/shared/src/nativeRuntime.ts"
   ]

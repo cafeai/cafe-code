@@ -26,7 +26,8 @@ not touch user applications, profiles, credentials or paid inference.
    notices. Development setup is an explicit Corepack Yarn/Node command.
 2. **Electron-owned helper.** Electron main starts `cua-driver serve --embedded`
    directly with a fresh private socket/named pipe, parent-liveness stdin and
-   standard permission mode. Set telemetry and update opt-outs on this actual
+   standard permission mode with the supported `existing-profile` grant. Chat
+   computer-use opt-in authorizes desktop and supported browser access. Set telemetry and update opt-outs on this actual
    process; do not use the embedded SDK's incomplete environment allowlist.
    Verify readiness against the spawned PID, version and host identity. Never
    adopt an ambient Cua daemon. Stop the exact child on disable/quit/death.
@@ -118,3 +119,52 @@ permissions and test a screenshot. Start or normally stop/resume a Codex/Claude
 session and use a disposable window for initial input. No separate app is
 launched by this work. Real screenshot/input grants and a live provider task
 remain the user's acceptance test, distinct from isolated automated tests.
+
+## Mac reliability and browser DOM integration
+
+The October 9 follow-up adds a Cafe action adapter without changing the Cua
+source pin. The host retains one exclusive operation while the adapter selects
+usable main windows, combines action and observation, and retries only definite
+pre-dispatch background targeting refusals with foreground delivery. Every
+native subcall checks current chat and turn authority. Partial delivery,
+uncertain effects and lost acknowledgements never trigger an input replay.
+`auto_foreground:false` preserves an explicit background-only request.
+
+AX text queries walk up to 4000 nodes with a 3000 ms budget; ordinary reads walk
+2000 nodes with a 1000 ms budget. Both default to depth 25 and independently
+return at most 200 elements. Separate search/output truncation fields preserve
+the distinction between a missed control and omitted response output. Ranked
+window lists exclude tiny previews and completion surfaces by default, expose
+omission counts, and offer explicit larger/auxiliary enumeration.
+
+`open_url` reuses a running browser and selects a usable main window. It prefers
+an exactly bound DOM tab; supported Chrome/Edge profiles can be prepared with
+the helper's existing-profile grant. Other browsers use native accessibility
+and keyboard input. The native path keeps the browser active throughout address
+editing, uses a fresh address-field token where available, grounds submission
+on a window screenshot, and observes both address and loaded page content.
+Cold launches wait for Cua's background launch watchdog. It reports redirected
+or unverified navigation instead of repeating it. No browser process, profile,
+window ID, screen coordinate or user URL is hard-coded to the qualification Mac.
+
+Browser reads default to compact semantic_v2 snapshots. Window binding also
+returns the uniquely active tab's page. DOM click, type, pointer and navigation
+calls return fresh exact-tab snapshots by default; `observe_query` narrows them
+and `observe_after:false` omits them. Existing-profile preparation can enable
+the supported browser's native debugging setting and reports that side effect.
+The composer tooltip makes desktop and browser page access explicit; new chats
+still require the user to enable their cursor button.
+
+Manual native qualification used the pinned helper and a disposable local HTML
+page in Orion: URL navigation verified loaded content, background AX clicking
+changed the page, and a combined observation returned the changed text. A
+same-process keyboard refusal was recovered through foreground delivery for the
+same exact window. The helper and local fixture were retired after use. This
+standalone-Node check establishes native input behavior, not Electron permission
+attribution or a new end-to-end provider qualification.
+
+Chrome and Edge were not installed on this Mac, so live DOM attachment/input
+remains unqualified here. Mock-only regressions cover exact-tab routing, fresh
+refs, native navigation and recovery/revocation. The test suite was not run for
+this follow-up at the user's request; formatting, lint, typecheck and the forced
+desktop build remain required. Native Mac evidence does not qualify other hosts.

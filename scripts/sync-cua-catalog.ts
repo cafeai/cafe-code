@@ -24,8 +24,8 @@ const reserved = new Set([
 function shortenDescriptions(value: unknown): void {
   if (!value || typeof value !== "object") return;
   for (const [key, item] of Object.entries(value)) {
-    if (key === "description" && typeof item === "string" && item.length > 320)
-      (value as Record<string, unknown>)[key] = item.split(/(?<=\.)\s/u)[0];
+    if (key === "description" && typeof item === "string" && item.length > 180)
+      (value as Record<string, unknown>)[key] = item.split(/(?<=[.!?])\s+(?=[A-Z])/u)[0];
     else shortenDescriptions(item);
   }
 }

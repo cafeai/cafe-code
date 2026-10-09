@@ -25,6 +25,7 @@ describe("local native catalog", () => {
     expect(click.inputSchema.properties).toHaveProperty("delivery_mode");
     expect(NATIVE_CONTROL_TOOLS.some((tool) => tool.name === "launch_app")).toBe(true);
     expect(NATIVE_CONTROL_TOOLS.some((tool) => tool.name === "get_browser_state")).toBe(true);
+    expect(NATIVE_CONTROL_TOOLS.some((tool) => tool.name === "open_url")).toBe(true);
     expect(() => validateNativeToolCall("click", { _session_id: "foreign" })).toThrow();
     expect(() => validateNativeToolCall("move_cursor", { cursor_id: "foreign" })).toThrow();
   });
@@ -42,6 +43,28 @@ describe("local native catalog", () => {
       snapshot_format: "semantic_v2",
       include_screenshot: false,
     });
+    expect(nativeToolArguments("get_window_state", { query: "Account" })).toMatchObject({
+      max_elements: 4000,
+      max_depth: 25,
+      timeout_ms: 3000,
+      include_screenshot: false,
+    });
+  });
+  it("advertises Cafe defaults and convenience options rather than upstream defaults", () => {
+    const window = NATIVE_CONTROL_TOOLS.find((tool) => tool.name === "get_window_state")!;
+    expect(window.inputSchema.properties).toHaveProperty("max_results");
+    expect(window.inputSchema).toMatchObject({
+      required: ["pid"],
+      properties: { include_screenshot: { default: false } },
+    });
+    const browser = NATIVE_CONTROL_TOOLS.find((tool) => tool.name === "get_browser_state")!;
+    expect(browser.inputSchema.properties).toMatchObject({
+      snapshot_format: { default: "semantic_v2" },
+    });
+    expect(browser.inputSchema.properties).toHaveProperty("include_page_state");
+    const key = NATIVE_CONTROL_TOOLS.find((tool) => tool.name === "press_key")!;
+    expect(key.inputSchema.properties).toHaveProperty("auto_foreground");
+    expect(key.inputSchema.properties).toHaveProperty("observe_after");
   });
   it("exposes tokens once, preserves images and passes through native errors unchanged", () => {
     const image = { type: "image", data: "fixture", mimeType: "image/png" };

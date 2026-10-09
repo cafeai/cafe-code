@@ -8,7 +8,6 @@ import {
   NATIVE_CONTROL_HOST_FILE,
   readNativeControlHost,
   requestNativeControlHost,
-  type NativeControlHostConnection,
   type NativeToolResult,
 } from "@cafecode/shared/nativeControl";
 
@@ -72,6 +71,38 @@ async function fixture(fault?: "action" | "cleanup") {
 }
 
 describe("Electron-owned native control authority", () => {
+  it("rechecks chat opt-in between a refused action and its automatic foreground fallback", async () => {
+    const f = await fixture();
+    let disabling: Promise<unknown> | undefined;
+    try {
+      const binding = await f.bind();
+      await binding.update("activate");
+      await binding.update("begin-turn");
+      f.request.mockImplementation(async (body) => {
+        if (body.method === "trusted_session_end") return { closed: true };
+        disabling = f.host.setChatEnabled("fixture-thread" as ThreadId, false);
+        return {
+          isError: true,
+          content: [],
+          structuredContent: {
+            code: "same_pid_keyboard_ambiguity",
+            effect: "refused",
+            pid: 1,
+            window_id: 2,
+          },
+        };
+      });
+      const response = await binding.call("press_key", { pid: 1, window_id: 2, key: "return" });
+      expect(response.result.isError).toBe(true);
+      await disabling;
+      expect(
+        f.request.mock.calls.filter(([body]) => body.method === "trusted_session_call"),
+      ).toHaveLength(1);
+      expect((await f.host.chatState("fixture-thread" as ThreadId)).enabled).toBe(false);
+    } finally {
+      await f.host.close();
+    }
+  });
   it("keeps each new chat off until trusted opt-in, including health and resumed bindings", async () => {
     const f = await fixture();
     const threadId = "new-chat" as ThreadId;
@@ -100,8 +131,9 @@ describe("Electron-owned native control authority", () => {
           pid: 1,
           window_id: 2,
           include_screenshot: false,
-          max_elements: 250,
-          max_depth: 18,
+          max_elements: 2000,
+          max_depth: 25,
+          timeout_ms: 1000,
           max_image_dimension: 1280,
         },
       });

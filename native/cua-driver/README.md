@@ -54,7 +54,9 @@ the hash/seal/notarization ordering; Developer ID and real notarization remain
 release-CI checks.
 
 Electron launches the helper directly, with a private socket, stdin parent
-liveness, fixed standard permission mode and the native session cursor overlay.
+liveness, standard permission mode, the supported `existing-profile` launch grant
+and the native session cursor overlay. Enabled chat computer use authorizes
+desktop input and supported browser page access; the composer tooltip states both.
 The cursor follows OS reduced motion and shows the provider/binding label.
 Telemetry/update opt-outs
 reach this actual child. Its HOME and Cua state directories are private temporary
@@ -84,17 +86,57 @@ cropped captures, deterministic state verification and exact-tab browser
 DOM/navigation/input tools. Use `corepack yarn cua:sync-catalog` after preparing
 an upgraded pin; `tool-policy.json` controls the local feature set and concise
 agent descriptions. It never invokes an input tool or installs a provider.
-Window reads default to tree-only, 250 elements, depth 18 and a 1280-pixel image
-limit when screenshots are requested. Browser reads default to semantic_v2 with
-no image. Callers can explicitly override those limits. Results carry one JSON
-text representation and any images, preserving tokens/refs and refusal details
-without duplicating the AX Markdown tree.
+Window reads default to tree-only, depth 25 and a 1280-pixel image limit when
+screenshots are requested. AX traversal defaults to 4000 nodes/3000 ms for a
+text query and 2000 nodes/1000 ms otherwise. `max_results` independently limits
+the returned elements to 200; `search_truncated` and `output_truncated` describe
+these distinct limits. Explicit caller budgets remain authoritative. Window lists
+and app launches rank usable main windows, exclude tiny preview/completion windows
+by default, and return `recommended_window`, up to eight records and omission
+counts. `max_windows`, `query` and `include_auxiliary_windows` expose the full
+native enumeration when needed. Recommendations do not prove focus or navigation.
+Results carry one JSON text representation and any images, preserving tokens/refs
+and refusal details without duplicating the AX Markdown tree.
 
-Background support depends on the target app; explicit foreground fallback is
-available and never automatically retries uncertain input. Browser DOM tools
-require a supported prepared browser; ordinary Orion/Safari windows still use
-AX/pixel control and the compatibility page tools where supported. Existing
-profile attachment keeps Cua's separate authorization requirement. The optional
+Cafe automatically retries a definite before-dispatch background targeting
+refusal in foreground mode for the same window. This is enabled by default and
+can briefly change focus. Set `auto_foreground:false` for background-only actions.
+The eligible native refusal codes are `same_pid_keyboard_ambiguity`,
+`minimized_or_hidden_window` and `off_space_or_ax_unresolved`, with
+`effect:refused`. Partial/unverifiable input, other errors and lost replies are
+never replayed. Fallback returns its reason and a fresh window observation;
+`observe_after:false` omits that read. Other native inputs accept
+`observe_after:true` and an optional `observe_query` to return fresh tokens in
+the same agent call. Chat/turn permission is rechecked before every subcall.
+
+`open_url` selects a usable window in the user's existing browser, opens a new
+tab by default, and returns a compact observed page plus a truthful navigation
+status. An already connected exact DOM target uses `browser_navigate`; otherwise
+the host activates the main window for the whole navigation sequence, sets its
+native address field, grounds submission on a window capture, and polls address/page
+instead of assuming a LaunchServices handoff or AX value write navigated.
+`pid`/`window_id` or `bundle_id` selects a known browser. With neither, a running
+browser is selected (the active one first), falling back to Safari. An explicit
+`target_id`/`tab_id` navigates that exact prepared tab. Running browsers are reused
+without calling the background launcher; cold launches wait for Cua's background
+focus watchdog before foreground input. Supported Chrome/Edge navigation can
+prepare the existing profile's native debugging connection under the launch grant.
+It never launches an isolated login profile automatically. Redirected or
+unobserved destinations are reported, not replayed.
+
+Browser reads default to semantic_v2 without images. Binding a native window also
+returns a DOM snapshot of its uniquely active tab; `include_page_state:false`
+omits it. DOM navigation, clicks, typing and pointer actions return a fresh exact-tab
+semantic observation by default, with optional `observe_query`; set
+`observe_after:false` to omit it. Every new snapshot invalidates old refs/tokens.
+Browser DOM tools require a supported prepared browser; ordinary Orion/Safari
+windows retain native AX/pixel control and compatibility page tools where
+supported. Cua's existing-profile authorization boundary is satisfied by Cafe's
+trusted launch grant; chat opt-in and host ownership still gate every tool.
+`browser_prepare` can enable the supported browser's native debugging setting and
+reports those side effects. Orion is qualified through native control; Chrome/Edge
+DOM input needs separate live browser qualification on an installed supported
+browser. The optional
 visual-region parser needs a local perception extension, which Cafe does not
 download or expose in this catalog. Browser downloads requiring Cua's separate host approval adapter,
 recording/replay, remote services and runtime installers remain outside the

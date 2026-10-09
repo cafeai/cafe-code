@@ -10,7 +10,6 @@ import {
   nativeControlError,
   nativeControlTokenDigest,
   validateNativeToolCall,
-  nativeToolArguments,
   compactNativeToolResult,
   NATIVE_CONTROL_INSTRUCTIONS,
   type NativeToolResult,
@@ -18,6 +17,7 @@ import {
 } from "@cafecode/shared/nativeControl";
 import type { NativeControlChatState, NativeControlState, ThreadId } from "@cafecode/contracts";
 import { NativeDaemon, verifyNativeRuntime, type NativeDaemonConnection } from "./NativeDaemon.ts";
+import { executeNativeControlTool } from "./NativeControlActions.ts";
 
 export interface NativeController {
   start: () => Promise<void>;
@@ -384,11 +384,28 @@ export class NativeControlHost {
           (session.provider !== "human" && !this.enabledThreads.has(session.threadId))
         )
           return nativeControlError("Desktop access was revoked before the action started.");
-        const result = (await session.connection.request({
-          method: "trusted_session_call",
+        const connection = session.connection;
+        const result = await executeNativeControlTool(
           name,
-          args: nativeToolArguments(name, args),
-        })) as unknown as NativeToolResult;
+          args,
+          async (nativeName, nativeArgs) => {
+            // Composite navigation and automatic fallback retain the same owner
+            // and must observe disable/end-turn between native subcalls.
+            if (
+              !this.enabled ||
+              !session.turnActive ||
+              session.revoked ||
+              session.connection !== connection ||
+              (session.provider !== "human" && !this.enabledThreads.has(session.threadId))
+            )
+              return nativeControlError("Desktop access was revoked before the action started.");
+            return (await connection.request({
+              method: "trusted_session_call",
+              name: nativeName,
+              args: nativeArgs,
+            })) as unknown as NativeToolResult;
+          },
+        );
         return compactNativeToolResult(result);
       } catch {
         this.enabled = false;

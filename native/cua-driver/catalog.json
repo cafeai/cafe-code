@@ -30,7 +30,7 @@
     },
     {
       "name": "browser_click",
-      "description": "Click an exact tab's current DOM ref or CSS-pixel coordinates. Background by default; inspect fresh browser state to verify the effect.",
+      "description": "Click an exact tab's current DOM ref or CSS-pixel coordinates. Background by default. Returns a fresh semantic page observation with new refs; observe_query narrows it and observe_after:false omits it.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -41,7 +41,7 @@
             "type": "string"
           },
           "input_route": {
-            "description": "\"trusted\" (default): Input.dispatchMouseEvent. It refuses rather than foregrounding a standalone browser. \"dom_event\": synthetic full-background DOM click, only when explicitly requested. Dispatch does not prove the control activated; refresh page state and verify the expected postcondition.",
+            "description": "\"trusted\" (default): Input.dispatchMouseEvent.",
             "enum": ["trusted", "dom_event"],
             "type": "string"
           },
@@ -122,7 +122,7 @@
     },
     {
       "name": "browser_navigate",
-      "description": "Navigate an exactly bound browser tab to an HTTP, HTTPS or about URL without typing into the address bar.",
+      "description": "Navigate an exactly bound browser tab to an HTTP, HTTPS or about URL without address-bar input. Returns a fresh semantic page observation by default.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -151,7 +151,7 @@
     },
     {
       "name": "browser_pointer",
-      "description": "Hover, right/double click, scroll or drag in an exact browser tab, using current DOM refs or CSS pixels. Background by default.",
+      "description": "Hover, right/double click, scroll or drag in an exact browser tab, using current DOM refs or CSS pixels. Returns a fresh semantic observation by default; observe_after:false omits it.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -225,7 +225,7 @@
     },
     {
       "name": "browser_prepare",
-      "description": "Prepare a browser DOM connection. Prefer allow_launch:true with profile.mode:isolated_new for a driver-owned Chromium profile. Existing-profile attachment requires separate native authorization; never change the user's browser settings automatically.",
+      "description": "Connect a supported Chromium browser for DOM tools. For signed-in tasks use pid/window_id with strategy.kind:existing_profile; enabled Cafe computer use pre-authorizes this attachment and native debugging setup. For separate automation use allow_launch:true with profile.mode:isolated_new. Never use a new logged-out profile for the user's account tasks.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -239,7 +239,7 @@
           },
           "profile": {
             "additionalProperties": false,
-            "description": "Driver-owned isolated Chromium profile to launch with allow_launch=true. mode=isolated_new creates a fresh throwaway profile; mode=isolated_named reuses the named driver-owned profile. Never an existing user profile.",
+            "description": "Driver-owned isolated Chromium profile to launch with allow_launch=true. mode=isolated_new creates a fresh throwaway profile; mode=isolated_named reuses the named driver-owned profile.",
             "properties": {
               "mode": {
                 "enum": ["isolated_new", "isolated_named"],
@@ -321,7 +321,7 @@
     },
     {
       "name": "browser_type",
-      "description": "Fill an exact tab's current DOM ref. replace:true replaces its value; otherwise text is inserted at the caret.",
+      "description": "Fill an exact tab's current DOM ref. replace:true replaces its value. Returns a fresh semantic observation with new refs; observe_query narrows it and observe_after:false omits it.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -335,7 +335,7 @@
             "type": "string"
           },
           "replace": {
-            "description": "false (default): insert at the caret, appending to whatever the field already holds. true: select the element's whole content first so the text replaces it — with an empty text this clears the field. Replacement goes through the selection, so beforeinput/input still fire and framework state stays consistent.",
+            "description": "false (default): insert at the caret, appending to whatever the field already holds. true: select the element's whole content first so the text replaces it — with an empty text this clears the field.",
             "type": "boolean"
           },
           "tab_id": {
@@ -363,7 +363,7 @@
     },
     {
       "name": "click",
-      "description": "Prefer pid + element_token from a fresh window read for background AX clicking. Otherwise use pid/window_id with window-screenshot pixels and capture_id. delivery_mode defaults to background; foreground is an explicit fallback. Desktop pixels require scope:desktop.",
+      "description": "Prefer pid + element_token from a fresh window read for background AX clicking. Otherwise use pid/window_id with window-screenshot pixels and capture_id. Cafe automatically uses foreground after definite targeting refusals. Desktop pixels require scope:desktop.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -372,12 +372,12 @@
             "type": "string"
           },
           "button": {
-            "description": "Mouse button. Default: \"left\" — omit for legacy left-click behaviour. Pixel path uses the matching CGEvent primitive; AX path maps \"right\" to AXShowMenu and falls back to a pixel middle-click at the element's center for \"middle\".",
+            "description": "Mouse button.",
             "enum": ["left", "right", "middle"],
             "type": "string"
           },
           "capture_id": {
-            "description": "Optional immutable source capture ID returned by get_window_state or get_desktop_state. With x,y, Driver atomically admits and consumes that exact capture before dispatch; stale, mismatched, or out-of-bounds captures are refused without fallback.",
+            "description": "Optional immutable source capture ID returned by get_window_state or get_desktop_state.",
             "type": "string"
           },
           "count": {
@@ -385,7 +385,7 @@
             "type": "integer"
           },
           "delivery_mode": {
-            "description": "Best-effort-background ladder rung (default \"background\").",
+            "description": "Best-effort-background ladder rung (default \"background\"). \"background\": perform the AX action or post the CGEvent without fronting. \"foreground\": briefly front the window, act, let transient UI settle, then restore the prior frontmost app.",
             "enum": ["background", "foreground"],
             "type": "string"
           },
@@ -410,12 +410,12 @@
             "type": "integer"
           },
           "scope": {
-            "description": "Coordinate frame for a windowless screen-absolute click (default \"window\"). Pass \"desktop\" when sending x,y with NO pid/window_id — the coordinates are then true screen pixels (read from get_desktop_state with scope=\"desktop\"). Per-call; not a setting.",
+            "description": "Coordinate frame for a windowless screen-absolute click (default \"window\").",
             "enum": ["window", "desktop"],
             "type": "string"
           },
           "target": {
-            "description": "Exact capture/input target selected independently for each action.\n\n`display_id=\"primary\"` is the portable desktop target in this release.\nPlatforms that cannot address another display reject it explicitly rather\nthan silently changing coordinate spaces.",
+            "description": "Exact capture/input target selected independently for each action.\n\n`display_id=\"primary\"` is the portable desktop target in this release.",
             "oneOf": [
               {
                 "additionalProperties": true,
@@ -457,7 +457,7 @@
             "type": "integer"
           },
           "x": {
-            "description": "X in screenshot pixels. A window target uses the get_window_state PNG; a desktop target uses the native get_desktop_state PNG. The driver reverses Retina backing scale and any window-image downscale.",
+            "description": "X in screenshot pixels.",
             "type": "number"
           },
           "y": {
@@ -533,7 +533,7 @@
         "additionalProperties": false,
         "properties": {
           "delivery_mode": {
-            "description": "Best-effort-background ladder rung (default \"background\").",
+            "description": "Best-effort-background ladder rung (default \"background\"). \"background\": inject without fronting or raising the target — no focus steal. \"foreground\": briefly front the target, act, then restore the prior frontmost — the explicit last resort when a background attempt didn't land.",
             "enum": ["background", "foreground"],
             "type": "string"
           },
@@ -629,7 +629,7 @@
           "target": {
             "anyOf": [
               {
-                "description": "Exact capture/input target selected independently for each action.\n\n`display_id=\"primary\"` is the portable desktop target in this release.\nPlatforms that cannot address another display reject it explicitly rather\nthan silently changing coordinate spaces.",
+                "description": "Exact capture/input target selected independently for each action.\n\n`display_id=\"primary\"` is the portable desktop target in this release.",
                 "oneOf": [
                   {
                     "additionalProperties": true,
@@ -681,7 +681,7 @@
             "type": "number"
           },
           "window_id": {
-            "description": "CGWindowID for the window the pixel coordinates were measured against. Optional only when pid owns exactly one eligible top-level window; otherwise the action refuses with ambiguous_window_target.",
+            "description": "CGWindowID for the window the pixel coordinates were measured against.",
             "type": "integer"
           }
         },
@@ -728,7 +728,7 @@
     },
     {
       "name": "get_browser_state",
-      "description": "Read exact browser tabs and actionable DOM refs. Defaults to compact semantic_v2 without screenshots. Use query, scope_ref and continuation to narrow/page the result. Refresh refs after navigation or a newer snapshot.",
+      "description": "Read exact browser tabs and actionable DOM refs. Defaults to semantic_v2 without screenshots. Native binding also snapshots the uniquely active tab. Use query, scope_ref and continuation to narrow/page output. If the browser needs a connection, use browser_prepare. Unsupported browsers retain native AX/pixel control.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -833,7 +833,7 @@
     },
     {
       "name": "get_window_state",
-      "description": "Read an exact pid/window_id and its actionable element_token handles. Defaults to tree-only, 250 elements and depth 18. Narrow with query; raise limits when truncated. Request include_screenshot:true for pixel grounding, capped at 1280 pixels by default. Each read replaces that window's prior element tokens.",
+      "description": "Read a native window and its fresh element_token handles. Omit window_id to select a usable main window for pid. Tree-only by default: query searches up to 4000 nodes, otherwise 2000; max_results independently limits output to 200. Distinguish search_truncated from output_truncated. Request include_screenshot:true only for pixel grounding. Each read replaces the window's old tokens.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -842,7 +842,7 @@
             "type": "boolean"
           },
           "include_screenshot": {
-            "description": "Default true — returns a grounding screenshot alongside the tree. Set false to skip the grab and return the tree only (the cheap path when you're just re-indexing before an element ax action; saves the image tokens + screen-grab latency). screenshot_out_file still forces a capture to disk.",
+            "description": "Default true — returns a grounding screenshot alongside the tree.",
             "type": "boolean"
           },
           "max_depth": {
@@ -851,17 +851,17 @@
             "type": "integer"
           },
           "max_dimension": {
-            "description": "Optional cap on the returned screenshot's long edge, in pixels (aspect ratio preserved) — the cheap path for a small preview / thumbnail. Applied on top of the session/global max_image_dimension ceiling; the tighter of the two wins. Omit for the configured default.",
+            "description": "Optional cap on the returned screenshot's long edge, in pixels (aspect ratio preserved) — the cheap path for a small preview / thumbnail.",
             "minimum": 1,
             "type": "integer"
           },
           "max_elements": {
-            "description": "Cap on the total number of AX nodes walked. Truncates depth-first; markdown and structured elements truncate together. Omit for the default (2 000). Lower this for Electron / Obsidian / large web apps that produce 10k+ element trees and blow context windows.",
+            "description": "Cap on the total number of AX nodes walked.",
             "minimum": 1,
             "type": "integer"
           },
           "max_image_dimension": {
-            "description": "Per-call override for the returned screenshot's long edge in pixels. An explicit value wins over the session/global setting; 0 returns native resolution. Omit to preserve configured behavior.",
+            "description": "Per-call override for the returned screenshot's long edge in pixels.",
             "minimum": 0,
             "type": "integer"
           },
@@ -902,7 +902,7 @@
         "additionalProperties": false,
         "properties": {
           "delivery_mode": {
-            "description": "Best-effort-background ladder rung (default \"background\").",
+            "description": "Best-effort-background ladder rung (default \"background\"). \"background\": inject without fronting or raising the target — no focus steal. \"foreground\": briefly front the target, act, then restore the prior frontmost — the explicit last resort when a background attempt didn't land.",
             "enum": ["background", "foreground"],
             "type": "string"
           },
@@ -932,7 +932,7 @@
           "target": {
             "anyOf": [
               {
-                "description": "Exact capture/input target selected independently for each action.\n\n`display_id=\"primary\"` is the portable desktop target in this release.\nPlatforms that cannot address another display reject it explicitly rather\nthan silently changing coordinate spaces.",
+                "description": "Exact capture/input target selected independently for each action.\n\n`display_id=\"primary\"` is the portable desktop target in this release.",
                 "oneOf": [
                   {
                     "additionalProperties": true,
@@ -980,7 +980,7 @@
             "type": "integer"
           },
           "x": {
-            "description": "Screenshot-pixel X — the element px action form: pixel-click there to focus, then send the combo (so e.g. Cmd+V pastes into that field). Pass with y. Use for Chromium/Electron surfaces the background combo can't reach.",
+            "description": "Screenshot-pixel X — the element px action form: pixel-click there to focus, then send the combo (so e.g.",
             "type": "number"
           },
           "y": {
@@ -1060,7 +1060,7 @@
     },
     {
       "name": "launch_app",
-      "description": "Launch an installed app in the background by bundle_id (preferred) or name, optionally opening URLs. Returns pid and windows so you can immediately target a window. Use bring_to_front only when the task needs it visible.",
+      "description": "Launch an installed app in the background by bundle_id (preferred) or name. Returns pid, a ranked main-window recommendation and up to eight usable windows. URL handoff is not verified navigation; prefer open_url for websites in the user's browser.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1076,7 +1076,7 @@
             "type": "string"
           },
           "creates_new_application_instance": {
-            "description": "When true, force a new app instance even if already running (open -n). Use for concurrent multi-agent/multi-session work so each session gets an isolated instance + window instead of sharing one — on single-instance apps (e.g. Calculator) every caller otherwise gets the same window and the sessions clobber each other.",
+            "description": "When true, force a new app instance even if already running (open -n).",
             "type": "boolean"
           },
           "name": {
@@ -1121,7 +1121,7 @@
     },
     {
       "name": "list_windows",
-      "description": "List native windows and their bounds/owner pids. Filter by pid and on_screen_only when possible.",
+      "description": "List ranked native windows and recommended_window. Tiny previews and completion windows are excluded by default; up to eight windows are returned. Filter by pid or query. Increase max_windows or include_auxiliary_windows to inspect omitted windows.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1158,7 +1158,7 @@
           "target": {
             "anyOf": [
               {
-                "description": "Exact capture/input target selected independently for each action.\n\n`display_id=\"primary\"` is the portable desktop target in this release.\nPlatforms that cannot address another display reject it explicitly rather\nthan silently changing coordinate spaces.",
+                "description": "Exact capture/input target selected independently for each action.\n\n`display_id=\"primary\"` is the portable desktop target in this release.",
                 "oneOf": [
                   {
                     "additionalProperties": true,
@@ -1251,7 +1251,7 @@
             "type": "string"
           },
           "cdp_port": {
-            "description": "Optional, for execute_javascript/insert_text/type_keystrokes: use this exact CDP port instead of auto-discovering one from pid. Needed when the port was opened via the browser's own remote-debugging toggle rather than a launch-time flag, since that path may not answer the auto-discovery probe.",
+            "description": "Optional, for execute_javascript/insert_text/type_keystrokes: use this exact CDP port instead of auto-discovering one from pid.",
             "maximum": 65535,
             "minimum": 1,
             "type": "integer"
@@ -1273,7 +1273,7 @@
             "type": "string"
           },
           "target_url_contains": {
-            "description": "Optional, for execute_javascript/insert_text/type_keystrokes: require exactly one browser tab whose URL contains this substring. Use this on a multi-tab browser — there's no built-in link between window_id and which tab a CDP call reaches.",
+            "description": "Optional, for execute_javascript/insert_text/type_keystrokes: require exactly one browser tab whose URL contains this substring.",
             "type": "string"
           },
           "text": {
@@ -1306,7 +1306,7 @@
         "additionalProperties": false,
         "properties": {
           "delivery_mode": {
-            "description": "Best-effort-background ladder rung (default \"background\").",
+            "description": "Best-effort-background ladder rung (default \"background\"). \"background\": inject without fronting or raising the target — no focus steal. \"foreground\": briefly front the target, act, then restore the prior frontmost — the explicit last resort when a background attempt didn't land.",
             "enum": ["background", "foreground"],
             "type": "string"
           },
@@ -1339,7 +1339,7 @@
           "target": {
             "anyOf": [
               {
-                "description": "Exact capture/input target selected independently for each action.\n\n`display_id=\"primary\"` is the portable desktop target in this release.\nPlatforms that cannot address another display reject it explicitly rather\nthan silently changing coordinate spaces.",
+                "description": "Exact capture/input target selected independently for each action.\n\n`display_id=\"primary\"` is the portable desktop target in this release.",
                 "oneOf": [
                   {
                     "additionalProperties": true,
@@ -1387,7 +1387,7 @@
             "type": "integer"
           },
           "x": {
-            "description": "Screenshot-pixel X — the element px action form: pixel-click there to focus, then send the key. Use when the key must go to a Chromium/Electron surface the AX path can't focus. Pass with y, no element_token.",
+            "description": "Screenshot-pixel X — the element px action form: pixel-click there to focus, then send the key.",
             "type": "number"
           },
           "y": {
@@ -1412,7 +1412,7 @@
         "additionalProperties": false,
         "properties": {
           "delivery_mode": {
-            "description": "Best-effort-background ladder rung (default \"background\").",
+            "description": "Best-effort-background ladder rung (default \"background\"). \"background\": inject without fronting or raising the target — no focus steal. \"foreground\": briefly front the target, act, then restore the prior frontmost — the explicit last resort when a background attempt didn't land.",
             "enum": ["background", "foreground"],
             "type": "string"
           },
@@ -1473,7 +1473,7 @@
             "type": "string"
           },
           "delivery_mode": {
-            "description": "Best-effort-background ladder rung (default \"background\").",
+            "description": "Best-effort-background ladder rung (default \"background\"). \"background\": inject without fronting or raising the target — no focus steal. \"foreground\": briefly front the target, act, then restore the prior frontmost — the explicit last resort when a background attempt didn't land.",
             "enum": ["background", "foreground"],
             "type": "string"
           },
@@ -1500,7 +1500,7 @@
           "target": {
             "anyOf": [
               {
-                "description": "Exact capture/input target selected independently for each action.\n\n`display_id=\"primary\"` is the portable desktop target in this release.\nPlatforms that cannot address another display reject it explicitly rather\nthan silently changing coordinate spaces.",
+                "description": "Exact capture/input target selected independently for each action.\n\n`display_id=\"primary\"` is the portable desktop target in this release.",
                 "oneOf": [
                   {
                     "additionalProperties": true,
@@ -1548,7 +1548,7 @@
             "type": "integer"
           },
           "x": {
-            "description": "Window-local screenshot X (top-left origin of the PNG from get_window_state). With `y`, routes through the pixel-wheel path at this point — use for a scrollable surface that isn't in the AX tree. Requires window_id to anchor the window→screen conversion.",
+            "description": "Window-local screenshot X (top-left origin of the PNG from get_window_state).",
             "type": "number"
           },
           "y": {
@@ -1653,7 +1653,7 @@
             "type": ["number", "null"]
           },
           "style": {
-            "description": "Trajectory style.",
+            "description": "Trajectory style. `signature_arc` (default) is one arc with a small follow-through;\n`spring_settle` lands with one soft bounce; `magnetic` is pulled into the target;\n`comet_swoop` is a wide arc with a short trail; `adaptive` picks a careful approach for\nsmall targets and a swoop for long moves; `classic` is the previous Dubins glide.",
             "enum": [
               "signature_arc",
               "spring_settle",
@@ -1794,7 +1794,7 @@
     },
     {
       "name": "type_text",
-      "description": "Insert text into a fresh AX element or an exact window's field. Prefer background delivery and element_token; window screenshot x/y can establish renderer focus. Foreground is an explicit fallback. Scope:desktop types into the foreground app.",
+      "description": "Insert text into a fresh AX element or an exact window's field. Prefer background delivery and element_token; window screenshot x/y can establish renderer focus. Cafe automatically uses foreground after definite targeting refusals. Scope:desktop types into the foreground app.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1805,7 +1805,7 @@
             "type": "integer"
           },
           "delivery_mode": {
-            "description": "Best-effort-background ladder rung (default \"background\").",
+            "description": "Best-effort-background ladder rung (default \"background\"). \"background\": AX insert, then CGEvent keystrokes if needed — no focus steal; native controls can be confirmed via AXValue read-back, while web-content writes remain effect:\"unverifiable\". \"foreground\": briefly front the window, type, restore the prior frontmost — the explicit last resort for focus-sensitive surfaces (e.g.",
             "enum": ["background", "foreground"],
             "type": "string"
           },
@@ -1827,7 +1827,7 @@
           "target": {
             "anyOf": [
               {
-                "description": "Exact capture/input target selected independently for each action.\n\n`display_id=\"primary\"` is the portable desktop target in this release.\nPlatforms that cannot address another display reject it explicitly rather\nthan silently changing coordinate spaces.",
+                "description": "Exact capture/input target selected independently for each action.\n\n`display_id=\"primary\"` is the portable desktop target in this release.",
                 "oneOf": [
                   {
                     "additionalProperties": true,
@@ -1879,7 +1879,7 @@
             "type": "integer"
           },
           "x": {
-            "description": "Screenshot-pixel X of the field to type into — the element px action form. Pass x,y (no element_token) and the tool pixel-clicks there to establish real renderer focus, then types. Use for Chromium/Electron inputs the AX path can't reach. Read straight off the get_window_state PNG, same convention as click.",
+            "description": "Screenshot-pixel X of the field to type into — the element px action form.",
             "type": "number"
           },
           "y": {
@@ -1915,7 +1915,7 @@
                       "type": ["boolean", "null"]
                     },
                     "exists": {
-                      "description": "Assert that at least one trusted element matches the selector.\n\nElement walks are not yet exhaustive on every platform, so absence\ncannot be proven. `false` is rejected instead of returning an\nindefinitely-unknown predicate.",
+                      "description": "Assert that at least one trusted element matches the selector.",
                       "type": "boolean"
                     },
                     "selected": {

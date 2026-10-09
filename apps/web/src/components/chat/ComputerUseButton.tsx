@@ -68,7 +68,7 @@ export function ComputerUseButton({
       ? "Could not change computer use. Try again."
       : unavailable
         ? "Check local desktop control in Settings → MCP."
-        : `Computer use is ${data.enabled ? "on" : "off"} for this chat. Click to ${data.enabled ? "disable" : "enable"}.`;
+        : `Computer use is ${data.enabled ? "on" : "off"} for this chat. Click to ${data.enabled ? "disable" : "enable"} desktop control and browser page access.`;
   return (
     <Tooltip>
       <TooltipTrigger

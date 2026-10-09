@@ -19,11 +19,11 @@ export const NATIVE_CONTROL_ENVIRONMENT = Object.freeze({
 });
 
 export const NATIVE_CONTROL_INSTRUCTIONS =
-  "Computer use is off for every new chat until the user enables its cursor button. Use health first, observe before acting, and finish with release_control. Prefer launch_app over Spotlight, exact pid/window_id targets and fresh element_token handles over desktop input. Use background delivery first; foreground and scope:desktop are explicit fallbacks. Read compact AX trees without screenshots, using query and bounded limits; request a window screenshot or zoom only for visual grounding. For supported browsers prefer semantic_v2 DOM refs and exact-tab browser_* tools, with isolated driver-owned profiles for automation. Existing profiles require separate native authorization. Verify postconditions with verify_state or a fresh compact read. Refresh stale tokens/refs; never replay input whose completion is uncertain. Cursor/session ownership belongs to Cafe.";
+  "Enable this chat's cursor button, check health, and finish with release_control. Use open_url for the user's signed-in browser. Use recommended_window and fresh element_token handles. Cafe automatically switches definite background refusals to foreground; this can change focus. Request observe_after:true (optionally observe_query) to act and read in one call; returned snapshots replace old tokens. Query searches broadly and max_results bounds output. Request screenshots only for pixel grounding. Never repeat an input with uncertain completion. Prefer semantic DOM refs and exact-tab browser_* tools when connected; enabled computer use authorizes browser_prepare for supported existing profiles. Use the advertised schemas without repeated discovery.";
 
 /** Defaults reduce image and tree tokens while callers retain explicit control
- * over capture/limits. Native targeting and verification remain in Cua, so
- * background refusals never turn into an automatic foreground input retry. */
+ * over capture/limits. Search traversal and response size are separate: a
+ * narrow query must not miss a late control merely to save response tokens. */
 export function nativeToolArguments(
   name: string,
   args: Record<string, unknown>,
@@ -31,8 +31,9 @@ export function nativeToolArguments(
   if (name === "get_window_state")
     return {
       include_screenshot: args.include_accessibility_tree === false,
-      max_elements: 250,
-      max_depth: 18,
+      max_elements: typeof args.query === "string" ? 4000 : 2000,
+      max_depth: 25,
+      timeout_ms: typeof args.query === "string" ? 3000 : 1000,
       max_image_dimension: 1280,
       ...args,
     };
@@ -50,7 +51,11 @@ export function nativeToolArguments(
  * preserving capture images and every machine-readable refusal/route field. */
 export function compactNativeToolResult(result: NativeToolResult): NativeToolResult {
   if (result.isError || !result.structuredContent) return result;
-  const { tree_markdown: _duplicateTree, ...structured } = result.structuredContent;
+  const {
+    tree_markdown: _duplicateTree,
+    _note: _duplicateNote,
+    ...structured
+  } = result.structuredContent;
   return {
     ...(result.isError !== undefined ? { isError: result.isError } : {}),
     content: [
@@ -70,6 +75,128 @@ export const nativeControlError = (message: string): NativeToolResult => ({
   content: [{ type: "text", text: message }],
 });
 
+// Cafe owns these conveniences. Generate upstream schemas without modifying
+// them, then apply the same overrides at publication after every Cua upgrade.
+function cafeNativeTool(tool: (typeof catalog.tools)[number]) {
+  const inputSchema = structuredClone(tool.inputSchema);
+  const properties = inputSchema.properties as Record<string, unknown>;
+  if ("delivery_mode" in properties && !tool.name.startsWith("browser_")) {
+    properties.delivery_mode = {
+      type: "string",
+      enum: ["background", "foreground"],
+      description:
+        "Default background. Cafe retries definite targeting refusals in foreground, which can change focus. Set auto_foreground:false to keep background-only delivery.",
+    };
+    properties.auto_foreground = {
+      type: "boolean",
+      default: true,
+      description:
+        "Automatically use foreground delivery after a definite background targeting refusal. Never repeats an input with uncertain completion.",
+    };
+    properties.observe_after = {
+      type: "boolean",
+      description:
+        "Return a fresh compact window observation after this action, saving a separate read. Default true after automatic foreground fallback, false otherwise. New snapshots replace prior element tokens.",
+    };
+    properties.observe_query = {
+      type: "string",
+      description:
+        "Optional text filter for observe_after. Searches broadly and returns matching elements with fresh tokens.",
+    };
+  }
+  if (
+    ["browser_click", "browser_type", "browser_pointer", "browser_navigate"].includes(tool.name)
+  ) {
+    properties.observe_after = {
+      type: "boolean",
+      default: true,
+      description:
+        "Default true. Return a fresh semantic DOM observation of this exact tab after the action, including new refs. Set false to omit it.",
+    };
+    properties.observe_query = {
+      type: "string",
+      description: "Optional semantic text filter for the returned DOM observation.",
+    };
+  }
+  if (tool.name === "get_browser_state") {
+    properties.snapshot_format = {
+      type: "string",
+      enum: ["dom_refs_v1", "semantic_v2"],
+      default: "semantic_v2",
+      description:
+        "Default semantic_v2: compact actionable refs and visible content. dom_refs_v1 is available for compatibility.",
+    };
+    properties.include_page_state = {
+      type: "boolean",
+      default: true,
+      description:
+        "In pid/window bind mode, include a semantic snapshot of the uniquely active tab. Default true. Set false to return only the binding and tab list.",
+    };
+  }
+  if (tool.name === "get_window_state") {
+    properties.include_screenshot = {
+      type: "boolean",
+      default: false,
+      description:
+        "Default false. Request true for a window screenshot to ground pixel actions. Defaults true when include_accessibility_tree:false.",
+    };
+    properties.max_elements = {
+      type: "integer",
+      minimum: 1,
+      description:
+        "AX traversal budget, independent of max_results. Default 4000 with query, 2000 otherwise. Query filters after traversal; raise this if search_truncated is true.",
+    };
+    properties.max_depth = {
+      type: "integer",
+      minimum: 1,
+      default: 25,
+      description: "AX traversal depth limit. Default 25.",
+    };
+    properties.max_results = {
+      type: "integer",
+      minimum: 1,
+      maximum: 2000,
+      default: 200,
+      description:
+        "Maximum elements returned; does not limit the AX search. Default 200. Increase when output_truncated is true.",
+    };
+    properties.timeout_ms = {
+      type: "integer",
+      minimum: 100,
+      maximum: 120000,
+      description: "AX walk budget in milliseconds. Default 3000 with query, 1000 otherwise.",
+    };
+    properties.window_id = {
+      type: "integer",
+      description:
+        "Exact window ID. Omit to select a usable main window for pid; the result reports the selected window.",
+    };
+    inputSchema.required = ["pid"];
+  }
+  if (tool.name === "list_windows" || tool.name === "launch_app") {
+    properties.max_windows = {
+      type: "integer",
+      minimum: 1,
+      maximum: 100,
+      default: 8,
+      description:
+        "Maximum window records returned. Default 8; total_window_count and windows_truncated describe omissions.",
+    };
+    properties.include_auxiliary_windows = {
+      type: "boolean",
+      default: false,
+      description:
+        "Include tiny preview, menu and completion windows. Default false; recommended_window favors a usable main window.",
+    };
+  }
+  if (tool.name === "list_windows")
+    properties.query = {
+      type: "string",
+      description: "Filter window titles and app names before limiting the returned records.",
+    };
+  return { ...tool, inputSchema };
+}
+
 export const NATIVE_CONTROL_TOOLS = [
   {
     name: "health",
@@ -83,7 +210,74 @@ export const NATIVE_CONTROL_TOOLS = [
       openWorldHint: false,
     },
   },
-  ...catalog.tools,
+  ...catalog.tools.map(cafeNativeTool),
+  {
+    name: "open_url",
+    description:
+      "Open a web URL in the user's existing browser and return its exact window plus a fresh compact page observation. Handles window selection, native address-bar navigation and verification in one call. Prefer over launch_app urls or manual shortcuts for signed-in sites. Uses foreground input and can change focus. Specify pid/window_id or bundle_id when the browser is known; otherwise selects a running browser, falling back to Safari.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["url"],
+      properties: {
+        url: { type: "string", description: "Absolute http or https URL." },
+        pid: {
+          type: "integer",
+          minimum: 1,
+          description: "Existing browser process. Takes precedence over bundle_id.",
+        },
+        window_id: {
+          type: "integer",
+          minimum: 1,
+          description:
+            "Exact browser window; requires pid. Otherwise selects a usable main window.",
+        },
+        bundle_id: {
+          type: "string",
+          description:
+            "Browser bundle ID, e.g. com.kagi.kagimacOS or com.apple.Safari. Launches it if needed.",
+        },
+        target_id: {
+          type: "string",
+          description:
+            "Prepared DOM browser target from get_browser_state. Requires tab_id; navigates that exact tab without native keyboard input.",
+        },
+        tab_id: {
+          type: "string",
+          description:
+            "Exact tab on target_id. When supplied, open_url navigates this tab; omit new_tab or set false.",
+        },
+        new_tab: {
+          type: "boolean",
+          default: true,
+          description: "Default true: open a new tab. False navigates the selected tab.",
+        },
+        query: {
+          type: "string",
+          description:
+            "Optional text filter for the returned page observation, e.g. Account menu or subscribers.",
+        },
+        include_screenshot: {
+          type: "boolean",
+          default: false,
+          description: "Include a window screenshot with the returned observation.",
+        },
+        max_results: {
+          type: "integer",
+          minimum: 1,
+          maximum: 2000,
+          default: 200,
+          description: "Maximum native AX elements in the returned page observation.",
+        },
+      },
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+  },
   {
     name: "release_control",
     description:

@@ -186,6 +186,8 @@ export class NativeDaemon {
         this.hostBundleId,
         "--permission-mode",
         "standard",
+        "--grant",
+        "existing-profile",
       ],
       {
         env: nativeDaemonEnvironment(process.env, this.root),
