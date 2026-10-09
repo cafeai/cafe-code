@@ -1720,16 +1720,68 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       yield* buildAppUnderTest({ config: { staticDir } });
 
-      const url = yield* getHttpServerUrl("/deep/link");
-      const response = yield* Effect.promise(() =>
-        fetch(url, { headers: { "accept-encoding": "br" } }),
-      );
+      // Only the assets namespace rejects missing files. Deep application
+      // routes, including routes whose final segment contains a dot, still
+      // resolve to the same uncached and compression-aware app entrypoint.
+      for (const requestPath of ["/", "/deep/link", "/deep/link/with.dots"]) {
+        const url = yield* getHttpServerUrl(requestPath);
+        const response = yield* Effect.promise(() =>
+          fetch(url, { headers: { "accept-encoding": "br" } }),
+        );
 
-      assert.equal(response.status, 200);
-      assert.equal(response.headers.get("content-encoding"), "br");
-      assert.equal(response.headers.get("cache-control"), "no-store");
-      assert.equal(response.headers.get("vary"), "Accept-Encoding");
-      assert.include(response.headers.get("content-type") ?? "", "text/html");
+        assert.equal(response.status, 200, requestPath);
+        assert.equal(response.headers.get("content-encoding"), "br", requestPath);
+        assert.equal(response.headers.get("cache-control"), "no-store", requestPath);
+        assert.equal(response.headers.get("vary"), "Accept-Encoding", requestPath);
+        assert.include(response.headers.get("content-type") ?? "", "text/html", requestPath);
+        assert.equal(yield* Effect.promise(() => response.text()), "<html>fallback</html>");
+      }
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("returns uncached 404s for missing assets instead of the app HTML", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const staticDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-router-static-missing-assets-",
+      });
+      const indexPath = path.join(staticDir, "index.html");
+      yield* fileSystem.writeFileString(indexPath, "<html>must-not-serve-for-assets</html>");
+      yield* fileSystem.writeFile(
+        `${indexPath}.br`,
+        brotliCompressSync(Buffer.from("<html>must-not-serve-for-assets</html>")),
+      );
+      const assetsDir = path.join(staticDir, "assets");
+      yield* fileSystem.makeDirectory(assetsDir);
+      // A directory with a module-looking name is not an admissible asset.
+      // Build all fixture locations through the host's injected Path service.
+      yield* fileSystem.makeDirectory(path.join(assetsDir, "not-a-module.js"));
+      yield* fileSystem.makeDirectory(path.join(assetsDir, "existing-directory"));
+
+      yield* buildAppUnderTest({ config: { staticDir } });
+
+      for (const requestPath of [
+        "/assets/SubagentDetailView-retired.js",
+        "/assets/retired.css",
+        "/assets/missing",
+        "/assets/not-a-module.js",
+        "/assets/existing-directory",
+        "/assets/existing-directory/",
+        "/assets",
+        "/assets/",
+      ]) {
+        const url = yield* getHttpServerUrl(requestPath);
+        const response = yield* Effect.promise(() =>
+          fetch(url, { headers: { "accept-encoding": "br, gzip" } }),
+        );
+
+        assert.equal(response.status, 404, requestPath);
+        assert.equal(response.headers.get("cache-control"), "no-store", requestPath);
+        assert.equal(response.headers.get("content-encoding"), null, requestPath);
+        assert.include(response.headers.get("content-type") ?? "", "text/plain", requestPath);
+        assert.equal(yield* Effect.promise(() => response.text()), "Not Found", requestPath);
+      }
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
