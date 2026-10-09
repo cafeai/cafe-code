@@ -536,6 +536,32 @@ body::after {
   /* Electron's frameless title bar band (traffic lights / window controls).
      Pixel-based on purpose: it matches native chrome, not the interface size. */
   --app-titlebar-height: 44px;
+  /* macOS native buttons retain their fixed position when Cafe's root rem
+     changes. All desktop titlebar controls share this native-sized band and
+     leading clearance; neither dimension scales with interface typography. */
+  --app-mac-titlebar-height: 50px;
+  --app-mac-titlebar-leading-space: 90px;
+}
+
+/* These attributes are admitted only by macOS Electron desktop headers.
+   Keep the container, not a reused child control, responsible for the window
+   geometry: Desk is flush while ordinary chat/settings headers have padding.
+   Lower panes are unmarked; right panes never reserve left-window controls.
+   The expanded sidebar retains its own padding and trailing-edge toggle. */
+[data-mac-titlebar="true"] {
+  height: var(--app-mac-titlebar-height);
+  flex-shrink: 0;
+}
+[data-mac-titlebar="true"]:not([data-slot="sidebar-header"]) {
+  /* Content bars have a 1px bottom divider, unlike the borderless sidebar.
+     Balance that line at the top of the content box so their control centers
+     match rather than landing half a pixel above the sidebar's center. */
+  padding-top: 1px;
+}
+[data-mac-titlebar="true"]:has([data-sidebar="trigger"]):not([data-slot="sidebar-header"]):not(
+    [data-window-left="false"]
+  ):not([data-window-top="false"]) {
+  padding-left: var(--app-mac-titlebar-leading-space);
 }
 
 .thread-status-dot {

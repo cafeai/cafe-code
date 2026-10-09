@@ -73,6 +73,7 @@ import { readEnvironmentApi } from "../environmentApi";
 import { getWorkspaceServerConfig } from "../environments/workspaceApi";
 import { MessageForkDialog } from "./chat/MessageForkDialog";
 import { isElectron } from "../env";
+import { useMacDesktopTitlebar } from "../hooks/useMacDesktopTitlebar";
 import { readLocalApi } from "../localApi";
 import {
   collapseExpandedComposerCursor,
@@ -1067,6 +1068,7 @@ export default function ChatView(props: ChatViewProps) {
   const shouldUsePlanSidebarSheet =
     sharedChatRuntime && paneWidth !== null ? paneWidth <= 980 : viewportNeedsPlanSidebarSheet;
   const isMobile = useIsMobile();
+  const isMacDesktopTitlebar = useMacDesktopTitlebar();
   const hasOnScreenKeyboard = useHasOnScreenKeyboard();
   const draftPlanSidebarOpen =
     routeKind === "draft" ? draftPlanSidebarOpenByThreadKey[routeThreadKey] : undefined;
@@ -7603,6 +7605,7 @@ export default function ChatView(props: ChatViewProps) {
           open (data attribute set by ChatComposer) to maximize vertical room. */}
       <header
         data-chat-view-header="true"
+        data-mac-titlebar={!props.navigationSlot && isMacDesktopTitlebar}
         className={cn(
           "group-has-[[data-chat-composer-keyboard-open=true]]/chat-view:hidden",
           props.navigationSlot

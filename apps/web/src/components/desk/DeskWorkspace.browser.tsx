@@ -20,6 +20,7 @@ import { applyInterfaceScalePercent } from "../../interfaceScale";
 import type { ThreadRouteTarget } from "../../threadRoutes";
 import { resolveThreadStatusPill, type ThreadStatusPill } from "../Sidebar.logic";
 import { ThreadStatusLabel } from "../ThreadStatusLabel";
+import { SidebarProvider } from "../ui/sidebar";
 import DeskWorkspace from "./DeskWorkspace";
 
 const mocks = vi.hoisted(() => ({
@@ -33,6 +34,7 @@ const mocks = vi.hoisted(() => ({
   confirm: vi.fn(async () => true),
   palette: vi.fn(),
   macPlatform: false,
+  showSidebarTrigger: false,
   openInEditor: vi.fn(async () => undefined),
   openTerminal: vi.fn(async () => undefined),
   // Status rendered by every tab's metadata; null keeps the fixture idle.
@@ -85,6 +87,11 @@ vi.mock("../../environments/primary", () => ({
   getPrimaryKnownEnvironment: () => null,
 }));
 vi.mock("../../env", () => ({ isElectron: true }));
+vi.mock("../../environments/workspaceData", () => ({
+  // This layout fixture has no transcript inventory. Keep its real sidebar
+  // control isolated from backend bootstrap and unrelated chat subscriptions.
+  useWorkspaceSidebarThreads: () => [],
+}));
 vi.mock("../../store", () => ({
   useStore: (selector: (state: object) => unknown) => selector({}),
   selectEnvironmentState: () => mocks.environment,
@@ -187,6 +194,7 @@ vi.mock("../NoActiveThreadState", () => ({
 }));
 vi.mock("../ChatView", async () => {
   const { useChatPane } = await import("../../chatPaneContext");
+  const { ContentSidebarTriggerWithUnreadDot } = await import("../sidebar/unseenCompletions");
   return {
     default: function FixtureChatView({
       threadId,
@@ -206,7 +214,9 @@ vi.mock("../ChatView", async () => {
           data-pane-active={pane.active}
           data-pane-visible={pane.visible}
         >
-          {navigationSlot?.(null)}
+          {navigationSlot?.(
+            mocks.showSidebarTrigger ? <ContentSidebarTriggerWithUnreadDot /> : null,
+          )}
           <div className="p-3">
             <p>Existing chat {threadId}</p>
             <button
@@ -245,6 +255,7 @@ beforeEach(async () => {
   mocks.params = {};
   mocks.primaryEnvironmentId = environmentId;
   mocks.macPlatform = false;
+  mocks.showSidebarTrigger = false;
   mocks.openInEditor.mockClear();
   mocks.openTerminal.mockClear();
   mocks.composer.draftThreadsByThreadKey = {};
@@ -281,7 +292,12 @@ async function setup(ids = ["one", "two", "three"]) {
   const host = document.createElement("div");
   host.style.width = "100%";
   document.body.append(host);
-  const screen = await render(<DeskWorkspace />, { container: host });
+  const screen = await render(
+    <SidebarProvider defaultOpen={false}>
+      <DeskWorkspace />
+    </SidebarProvider>,
+    { container: host },
+  );
   return {
     screen,
     host,
@@ -499,6 +515,7 @@ describe("Desk workspace navigation chrome", () => {
   ])(
     "keeps taller titlebar tabs clear of $platform controls at $scale%",
     async ({ platform, scale, x, controls, dark }) => {
+      mocks.macPlatform = platform === "mac";
       applyInterfaceScalePercent(scale);
       document.documentElement.classList.toggle("dark", dark);
       document.documentElement.classList.toggle("wco", platform !== "mac");
@@ -512,7 +529,9 @@ describe("Desk workspace navigation chrome", () => {
         const bar = host.querySelector<HTMLElement>(".desk-group-bar")!;
         const box = bar.getBoundingClientRect();
         const style = getComputedStyle(bar);
-        expect(box.height).toBeGreaterThanOrEqual(Math.max(44, (44 * scale) / 100) - 0.1);
+        expect(box.height).toBeGreaterThanOrEqual(
+          (platform === "mac" ? 50 : Math.max(44, (44 * scale) / 100)) - 0.1,
+        );
         expect(bar.dataset.desktopTitlebar).toBe("true");
         expect(box.top).toBeLessThanOrEqual(1);
         expect(parseFloat(style.paddingLeft)).toBeCloseTo(Math.max(0, x - box.left), 0);
@@ -534,6 +553,56 @@ describe("Desk workspace navigation chrome", () => {
         document.documentElement.classList.remove("wco");
         document.documentElement.style.removeProperty("--app-titlebar-area-x");
         document.documentElement.style.removeProperty("--app-titlebar-area-width");
+        applyInterfaceScalePercent(100);
+      }
+    },
+  );
+  it.each([80, 100, 130])(
+    "aligns the real collapsed Mac sidebar control without reserving traffic-light space in other panes at %s%%",
+    async (scale) => {
+      mocks.macPlatform = true;
+      mocks.showSidebarTrigger = true;
+      applyInterfaceScalePercent(scale);
+      const { host, cleanup } = await setup(["one", "two", "three"]);
+      try {
+        useDeskStore.getState().dispatch({
+          type: "split",
+          tabKey: key("two"),
+          targetGroupId: "g1",
+          edge: "right",
+        });
+        useDeskStore.getState().dispatch({
+          type: "split",
+          tabKey: key("three"),
+          targetGroupId: "g1",
+          edge: "bottom",
+        });
+        await vi.waitFor(() => {
+          const bars = [...host.querySelectorAll<HTMLElement>(".desk-group-bar")];
+          expect(bars).toHaveLength(3);
+          const left = bars.find(
+            (bar) => bar.dataset.windowLeft === "true" && bar.dataset.windowTop === "true",
+          )!;
+          const right = bars.find((bar) => bar.dataset.windowLeft === "false")!;
+          const lower = bars.find((bar) => bar.dataset.windowTop === "false")!;
+          const bounds = left.querySelector('[data-sidebar="trigger"]')!.getBoundingClientRect();
+          expect(bounds.left).toBe(90);
+          expect((bounds.top + bounds.bottom) / 2).toBe(25);
+          expect(bounds.top).toBeGreaterThan(2);
+          expect(bounds.bottom).toBeLessThan(48);
+          expect(left.getBoundingClientRect().height).toBe(50);
+          expect(right.getBoundingClientRect().height).toBe(50);
+          expect(parseFloat(getComputedStyle(right).paddingLeft)).toBe(0);
+          expect(parseFloat(getComputedStyle(lower).paddingLeft)).toBe(0);
+          expect(lower.getBoundingClientRect().height).toBeCloseTo((44 * scale) / 100, 1);
+          for (const bar of [right, lower]) {
+            expect(getComputedStyle(bar.querySelector('[data-sidebar="trigger"]')!).display).toBe(
+              "none",
+            );
+          }
+        });
+      } finally {
+        await cleanup();
         applyInterfaceScalePercent(100);
       }
     },

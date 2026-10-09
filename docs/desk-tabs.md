@@ -10,6 +10,17 @@ chat header above them. Native window controls retain their own space. Project
 context remains in each tab's hover title and the sidebar. Source-build badges
 such as **Newer dev** sit beside **Settings** at the bottom of the sidebar.
 
+On macOS desktop, the sidebar reopen button stays clear of the traffic lights
+when the sidebar is hidden. Desk, chat, Settings, empty-state and sidebar
+headers share a fixed native-sized vertical band, so changing interface size
+does not move that control toward the window buttons. Only the top-left split
+pane reserves their leading space; lower panes keep normal tab spacing. This
+does not reposition the native window buttons or alter browser/mobile layouts.
+Renderer geometry and hide/reopen behavior are covered by
+`SidebarChromeHeader.browser.tsx`, `MacTitlebar.browser.tsx`,
+`MacBrowserTitlebar.browser.tsx` and `DeskWorkspace.browser.tsx` in the web browser suite; native AppKit placement
+remains a separate desktop smoke check.
+
 - In **Settings → Chats → Single-click behavior**, choose **Preview** (the default)
   or **Open**. Open keeps each clicked chat as a regular tab.
 - With Preview selected, click a chat in Projects, Chats or search to preview it in the current group.
