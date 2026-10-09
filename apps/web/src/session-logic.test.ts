@@ -1063,6 +1063,34 @@ describe("deriveWorkLogEntries", () => {
     expect(entries.map((entry) => entry.id)).toEqual(["task-progress", "task-complete"]);
   });
 
+  it("keeps workflow lifecycle in its dedicated Tasks section without malformed display fallthrough", () => {
+    const activities = [
+      makeActivity({
+        id: "workflow-start",
+        kind: "task.started",
+        payload: { taskId: "workflow", workflow: { futureSchema: "not admitted" } },
+      }),
+      makeActivity({
+        id: "workflow-progress",
+        kind: "task.progress",
+        payload: { taskId: "workflow", workflow: { futureSchema: "not admitted" } },
+      }),
+      makeActivity({
+        id: "workflow-completed",
+        kind: "task.completed",
+        payload: { taskId: "workflow", workflow: { futureSchema: "not admitted" } },
+      }),
+      makeActivity({
+        id: "ordinary-progress",
+        kind: "task.progress",
+        payload: { taskId: "ordinary", detail: "Updating files" },
+      }),
+    ];
+    expect(deriveWorkLogEntries(activities, undefined).map((entry) => entry.id)).toEqual([
+      "ordinary-progress",
+    ]);
+  });
+
   it("keeps ambient provider tasks out of the ordinary work log", () => {
     const ambientProgress = makeActivity({
       id: "ambient-watcher-progress",

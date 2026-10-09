@@ -5,6 +5,7 @@ import {
   ClientSettingsPatch,
   ClientSettingsSchema,
   CLAUDE_MAX_CONCURRENT_SUBAGENTS,
+  CLAUDE_MAX_OUTPUT_TOKENS,
   CODEX_MAX_CONCURRENT_SUBAGENTS,
   CodexSettings,
   ClaudeSettings,
@@ -43,6 +44,7 @@ import {
   MIN_INTERFACE_SCALE_PERCENT,
   MIN_SIDEBAR_STAR_SPEED,
   ServerSettingsPatch,
+  ServerSettings,
 } from "./settings.ts";
 
 const decodeClientSettings = Schema.decodeSync(ClientSettingsSchema);
@@ -492,6 +494,50 @@ describe("provider settings", () => {
 
   it("leaves the Claude Agent-tool limit unset for inherited provider resolution", () => {
     expect(decodeClaudeSettings({}).maxConcurrentSubagents).toBeUndefined();
+  });
+
+  it("leaves the Claude response cap unset for inherited model resolution", () => {
+    expect(Object.hasOwn(decodeClaudeSettings({}), "maxOutputTokens")).toBe(false);
+    expect(decodeServerSettingsPatch({ providers: { claudeAgent: {} } })).toEqual({
+      providers: { claudeAgent: {} },
+    });
+  });
+
+  it.each([1, 32_000, 64_000, CLAUDE_MAX_OUTPUT_TOKENS])(
+    "decodes explicit Claude response budget %i at full and legacy-patch boundaries",
+    (maxOutputTokens) => {
+      expect(decodeClaudeSettings({ maxOutputTokens }).maxOutputTokens).toBe(maxOutputTokens);
+      expect(
+        Schema.decodeUnknownSync(ServerSettings)({
+          providers: { claudeAgent: { maxOutputTokens } },
+        }).providers.claudeAgent.maxOutputTokens,
+      ).toBe(maxOutputTokens);
+      expect(
+        decodeServerSettingsPatch({ providers: { claudeAgent: { maxOutputTokens } } }),
+      ).toEqual({ providers: { claudeAgent: { maxOutputTokens } } });
+    },
+  );
+
+  it.each([
+    0,
+    -1,
+    1.5,
+    CLAUDE_MAX_OUTPUT_TOKENS + 1,
+    Number.MAX_SAFE_INTEGER + 1,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    "64000",
+    "64_000",
+    "1; ignored",
+    null,
+  ])("rejects malformed explicit Claude response budget %s", (maxOutputTokens) => {
+    expect(() => decodeClaudeSettings({ maxOutputTokens })).toThrow();
+    expect(() =>
+      Schema.decodeUnknownSync(ServerSettings)({ providers: { claudeAgent: { maxOutputTokens } } }),
+    ).toThrow();
+    expect(() =>
+      decodeServerSettingsPatch({ providers: { claudeAgent: { maxOutputTokens } } }),
+    ).toThrow();
   });
 
   it.each([1, 20, CLAUDE_MAX_CONCURRENT_SUBAGENTS])(

@@ -716,6 +716,18 @@ export const ClaudeMaxConcurrentSubagents = Schema.Int.check(
 );
 export type ClaudeMaxConcurrentSubagents = typeof ClaudeMaxConcurrentSubagents.Type;
 
+// Claude Code owns the model-specific output ceiling and clamps a configured
+// CLAUDE_CODE_MAX_OUTPUT_TOKENS above it. Cafe bounds its explicit preference
+// separately at its supported 128,000-token range, not a universal upstream
+// maximum (gateway capabilities can differ). Malformed/unbounded persisted
+// numbers cannot reach a child environment. Omission retains native policy.
+// https://code.claude.com/docs/en/env-vars#claude_code_max_output_tokens
+export const CLAUDE_MAX_OUTPUT_TOKENS = 128_000;
+export const ClaudeMaxOutputTokens = Schema.Int.check(
+  Schema.isBetween({ minimum: 1, maximum: CLAUDE_MAX_OUTPUT_TOKENS }),
+);
+export type ClaudeMaxOutputTokens = typeof ClaudeMaxOutputTokens.Type;
+
 export const ClaudeSettings = makeProviderSettingsSchema(
   {
     enabled: Schema.Boolean.pipe(
@@ -769,6 +781,23 @@ export const ClaudeSettings = makeProviderSettingsSchema(
         },
       }),
     ),
+    maxOutputTokens: Schema.optionalKey(ClaudeMaxOutputTokens).pipe(
+      Schema.annotateKey({
+        title: "Maximum response tokens",
+        description: "Cafe supports 1–128,000 response tokens. Blank: inherited or model default.",
+        documentation:
+          "Sets CLAUDE_CODE_MAX_OUTPUT_TOKENS for new chat queries, subject to the model's ceiling. Larger budgets can increase output cost and reduce context room before compaction. Saving reloads this account: change between sessions. Metadata helpers and login/health checks keep their existing output policy.",
+        providerSettingsForm: {
+          control: "number",
+          step: 1,
+          minimum: 1,
+          maximum: CLAUDE_MAX_OUTPUT_TOKENS,
+          integerOnly: true,
+          placeholder: "Inherited / model default",
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
     launchArgs: Schema.String.pipe(
       Schema.withDecodingDefault(Effect.succeed("")),
       Schema.annotateKey({
@@ -782,7 +811,14 @@ export const ClaudeSettings = makeProviderSettingsSchema(
     ),
   },
   {
-    order: ["runtimeSource", "binaryPath", "homePath", "maxConcurrentSubagents", "launchArgs"],
+    order: [
+      "runtimeSource",
+      "binaryPath",
+      "homePath",
+      "maxConcurrentSubagents",
+      "maxOutputTokens",
+      "launchArgs",
+    ],
   },
 );
 export type ClaudeSettings = typeof ClaudeSettings.Type;
@@ -995,6 +1031,7 @@ const ClaudeSettingsPatch = Schema.Struct({
   homePath: Schema.optionalKey(TrimmedString),
   customModels: Schema.optionalKey(Schema.Array(Schema.String)),
   maxConcurrentSubagents: Schema.optionalKey(ClaudeMaxConcurrentSubagents),
+  maxOutputTokens: Schema.optionalKey(ClaudeMaxOutputTokens),
   launchArgs: Schema.optionalKey(TrimmedString),
 });
 

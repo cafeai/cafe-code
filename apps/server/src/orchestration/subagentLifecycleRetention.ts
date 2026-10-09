@@ -96,7 +96,19 @@ function lifecycleChildIds(row: LegacyActivityRow): ReadonlyArray<string> {
     payload?.visibility === "ambient" && isExactChildIdentity(payload.taskId)
       ? payload.taskId
       : undefined;
-  return [presentationId, ambientTaskId].filter(
+  const workflow = asRecord(payload?.workflow);
+  // Host-generated runtime UUIDs and configured account slugs are ASCII.
+  // Match the narrow SQL sidecar gate without changing ordinary child IDs.
+  const isWorkflowOwner = (value: unknown): value is string =>
+    typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);
+  const workflowTaskId =
+    isWorkflowOwner(workflow?.runtimeId) &&
+    isWorkflowOwner(workflow?.providerInstanceId) &&
+    typeof payload?.workflowRetentionId === "string" &&
+    /^sha256:workflow:[a-f0-9]{64}$/.test(payload.workflowRetentionId)
+      ? payload.workflowRetentionId
+      : undefined;
+  return [presentationId, ambientTaskId, workflowTaskId].filter(
     (identity, index, all): identity is string =>
       identity !== undefined && all.indexOf(identity) === index,
   );

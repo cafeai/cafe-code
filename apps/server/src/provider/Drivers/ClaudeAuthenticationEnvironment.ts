@@ -11,7 +11,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { collectUint8StreamText } from "../../stream/collectUint8StreamText.ts";
 import { DEFAULT_TIMEOUT_MS, terminateProbeChild } from "../providerSnapshot.ts";
-import { makeClaudeEnvironment, resolveClaudeHomePath } from "./ClaudeHome.ts";
+import { makeClaudeNonChatEnvironment, resolveClaudeHomePath } from "./ClaudeHome.ts";
 
 const AUTH_STATUS_MAX_BYTES = 16_384;
 const UNRESOLVED_SELECTION_TTL = Duration.seconds(5);
@@ -90,7 +90,12 @@ export const makeClaudeAuthenticationEnvironment = Effect.fn("makeClaudeAuthenti
     Path.Path | ChildProcessSpawner.ChildProcessSpawner
   > {
     const path = yield* Path.Path;
-    const environment = yield* makeClaudeEnvironment(config, baseEnv, platform);
+    // The account response cap belongs only to user chat queries. Login and
+    // status probes, and the helpers sharing this selected login, must retain
+    // their existing provider policy rather than acquire a larger chat budget.
+    // Select only the existing login/concurrency fields even when the driver
+    // passes a complete ClaudeSettings object at runtime.
+    const environment = yield* makeClaudeNonChatEnvironment(config, baseEnv, platform);
     const defaultConfigDirectory = path.join(yield* resolveClaudeHomePath(config), ".claude");
     const shouldSelectDefaultLogin =
       config.enabled &&

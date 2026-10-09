@@ -110,6 +110,20 @@ function knownServiceTierName(tier: string): string | null {
 }
 
 /**
+ * Ultracode is a separately submitted workflow setting, not an effort alias.
+ * Older snapshots never imply Off or a successful native activation: only an
+ * explicitly captured request is shown, while the existing source caveat keeps
+ * provider execution and billing confirmation distinct.
+ */
+function requestedUltracodeLabel(configuration: ProviderTurnConfiguration): string | undefined {
+  return configuration.provider === "claudeAgent" && configuration.ultracode !== undefined
+    ? configuration.ultracode
+      ? "Ultracode requested on"
+      : "Ultracode requested off"
+    : undefined;
+}
+
+/**
  * One-line work-log summary of the frozen snapshot, e.g.
  * "GPT-6.1 Sol · Ultra · Fast on · Codex Personal · Build · Full access".
  * It keeps the exact configured account label, model, effort, Fast and mode
@@ -160,6 +174,7 @@ export function presentTurnConfigurationSummary(configuration: ProviderTurnConfi
     summary: [
       model,
       effort,
+      requestedUltracodeLabel(configuration),
       fast,
       // The configured instance label, never an auth email or account id.
       configuration.providerDisplayName,
@@ -207,7 +222,9 @@ export function presentTurnConfiguration(configuration: ProviderTurnConfiguratio
       ? "Mode: provider default"
       : { default: "Build", plan: "Plan", auto: "Auto" }[configuration.interactionMode];
   return {
-    settings: [model, effort, fast].filter((value) => value !== undefined).join(" · "),
+    settings: [model, effort, requestedUltracodeLabel(configuration), fast]
+      .filter((value) => value !== undefined)
+      .join(" · "),
     // This is the configured instance label, deliberately not an auth email,
     // account identifier, token, or a fresh read of the provider's credentials.
     account: `Account: ${configuration.providerDisplayName}`,

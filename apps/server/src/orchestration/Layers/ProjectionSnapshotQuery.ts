@@ -2505,6 +2505,20 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             CASE WHEN json_valid(activities.payload_json) THEN
               CASE WHEN json_type(activities.payload_json, '$.subagent.threadId') = 'text'
                 THEN json_extract(activities.payload_json, '$.subagent.threadId')
+                WHEN json_type(activities.payload_json, '$.workflow.runtimeId') = 'text'
+                  AND length(json_extract(activities.payload_json, '$.workflow.runtimeId')) BETWEEN 1 AND 128
+                  AND instr(CAST(json_extract(activities.payload_json, '$.workflow.runtimeId') AS BLOB), X'00') = 0
+                  AND json_extract(activities.payload_json, '$.workflow.runtimeId') NOT GLOB '*[^A-Za-z0-9_-]*'
+                  AND json_type(activities.payload_json, '$.workflow.providerInstanceId') = 'text'
+                  AND length(json_extract(activities.payload_json, '$.workflow.providerInstanceId')) BETWEEN 1 AND 128
+                  AND instr(CAST(json_extract(activities.payload_json, '$.workflow.providerInstanceId') AS BLOB), X'00') = 0
+                  AND json_extract(activities.payload_json, '$.workflow.providerInstanceId') NOT GLOB '*[^A-Za-z0-9_-]*'
+                  AND json_type(activities.payload_json, '$.workflowRetentionId') = 'text'
+                  AND length(json_extract(activities.payload_json, '$.workflowRetentionId')) = 80
+                  AND instr(CAST(json_extract(activities.payload_json, '$.workflowRetentionId') AS BLOB), X'00') = 0
+                  AND substr(json_extract(activities.payload_json, '$.workflowRetentionId'), 1, 16) = 'sha256:workflow:'
+                  AND substr(json_extract(activities.payload_json, '$.workflowRetentionId'), 17) NOT GLOB '*[^a-f0-9]*'
+                THEN json_extract(activities.payload_json, '$.workflowRetentionId')
                 ELSE NULL
               END
             ELSE NULL END AS presentation_child_id,

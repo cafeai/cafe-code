@@ -1,6 +1,6 @@
 # Claude operation visibility
 
-Last updated: 2026-10-09 10:44:22 JST (UTC+0900)
+Last updated: 2026-10-09 13:03:52 JST (UTC+0900)
 
 ## What the chat can show
 
@@ -73,6 +73,12 @@ paging limits. The operation view makes no provider call, reads no credential
 store and never replays a command or prompt.
 
 ## Qualification and adoption
+
+Native workflow roots and received phase/agent telemetry have a separate bounded
+Tasks/rail presentation. Their inert counters never become primary context or
+billing usage, and their numeric rows never authorize history or controls. See
+[native workflow details](claude-runtime-options.md) for compatibility, privacy
+and unavailable-data rules.
 
 Synthetic adapter/ingestion fixtures must exercise exact query/turn/block
 ownership, live updates and snapshot fallback, duplicate/divergent/foreign

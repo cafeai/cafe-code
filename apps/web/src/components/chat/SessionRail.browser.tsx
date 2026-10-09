@@ -3,7 +3,14 @@ import "../../index.css";
 import { page } from "vitest/browser";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
-import { EventId, TurnId } from "@cafecode/contracts";
+import {
+  EnvironmentId,
+  EventId,
+  ProviderInstanceId,
+  SubagentRuntimeId,
+  ThreadId,
+  TurnId,
+} from "@cafecode/contracts";
 
 import { deriveLatestContextWindowSnapshot } from "../../lib/contextWindow";
 import type { WorkLogEntry } from "../../session-logic";
@@ -32,6 +39,56 @@ function makeUsage() {
 describe("SessionRail", () => {
   afterEach(() => {
     document.body.innerHTML = "";
+  });
+
+  it("keeps a workflow-only Tasks rail available without inventing an active subagent or ordinary controls", async () => {
+    const providerInstanceId = ProviderInstanceId.make("claude-workflow");
+    const runtimeId = SubagentRuntimeId.make("10000000-0000-4000-8000-000000000001");
+    const screen = await render(
+      <SessionRail
+        plan={null}
+        subagents={[]}
+        usage={null}
+        onShowInComposer={vi.fn()}
+        providerTasks={{
+          environmentId: EnvironmentId.make("local"),
+          threadId: ThreadId.make("workflow-parent"),
+          providerInstanceId,
+          runtimeSession: { orchestrationStatus: "running", subagentRuntimeId: runtimeId },
+          activities: [
+            {
+              id: EventId.make("workflow-rail-start"),
+              kind: "task.started",
+              tone: "info",
+              summary: "Workflow started",
+              turnId: TurnId.make("workflow-turn"),
+              createdAt: "2026-10-09T00:00:00.000Z",
+              payload: {
+                taskId: "workflow-root",
+                workflow: { runtimeId, providerInstanceId, name: "Review workflow" },
+              },
+            },
+          ],
+        }}
+      />,
+    );
+    try {
+      await expect
+        .element(page.getByRole("region", { name: "Workflows", exact: true }))
+        .toBeVisible();
+      await expect
+        .element(page.getByText("No tasks yet.", { exact: true }))
+        .not.toBeInTheDocument();
+      await expect
+        .element(page.getByText("Phase details unavailable.", { exact: true }))
+        .toBeVisible();
+      expect(document.querySelector('[data-composer-subagent-list="true"]')).toBeNull();
+      await expect
+        .element(page.getByRole("button", { name: "Stop task", exact: true }))
+        .not.toBeInTheDocument();
+    } finally {
+      await screen.unmount();
+    }
   });
 
   it("counts only current workers and clears terminal rows without deleting historical input", async () => {

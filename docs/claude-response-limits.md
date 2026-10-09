@@ -1,6 +1,6 @@
 # Claude response limits
 
-Last updated: 2026-10-09 09:59:49 JST (UTC+0900)
+Last updated: 2026-10-09 13:03:52 JST (UTC+0900)
 
 ## Why a long run can end without an answer
 
@@ -61,6 +61,13 @@ The preparation button itself performs no provider or billing operation.
 caps are model-specific, and values above a model's cap are clamped. Increasing
 it can reduce context room before compaction and permit more output cost; Cafe
 does not silently set a larger cap. See the [official environment reference](https://code.claude.com/docs/en/env-vars#claude_code_max_output_tokens).
+
+An explicit **Maximum response tokens** setting is now available per Claude
+account in Settings → Providers, supporting 1–128,000. Blank inherits native or
+environment policy. Saving reloads the account and can end sessions; change it
+between sessions. This is an intentional user setting, not automatic recovery,
+and neither enlarges every native child budget nor guarantees a final answer.
+See [response budgets and native workflows](claude-runtime-options.md).
 
 ## Qualification and adoption
 

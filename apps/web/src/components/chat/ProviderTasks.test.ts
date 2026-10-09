@@ -8,7 +8,11 @@ import {
   type OrchestrationThreadActivity,
 } from "@cafecode/contracts";
 import { describe, expect, it } from "vitest";
-import { deriveActiveProviderTasks, type ProviderTasksContext } from "./ProviderTasks";
+import {
+  deriveActiveProviderTasks,
+  hasProviderTaskContent,
+  type ProviderTasksContext,
+} from "./ProviderTasks";
 
 const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000001");
 const reference = {
@@ -41,6 +45,51 @@ function activity(kind: string, payload: Record<string, unknown>): Orchestration
   };
 }
 describe("ordinary provider task controls", () => {
+  it("keeps workflow roots in their own presentation section even without mutation capability", () => {
+    const started = activity("task.started", {
+      taskId: "workflow-root",
+      taskType: "local_workflow",
+      workflow: {
+        runtimeId,
+        providerInstanceId: context.providerInstanceId,
+        name: "Review workflow",
+      },
+      individualTaskControl: { ...reference, taskId: "workflow-root" },
+    });
+    expect(deriveActiveProviderTasks({ ...context, activities: [started] })).toEqual([]);
+    expect(hasProviderTaskContent({ ...context, activities: [started] })).toBe(true);
+    const inert = {
+      ...started,
+      payload: {
+        ...(started.payload as Record<string, unknown>),
+        individualTaskControl: undefined,
+      },
+    };
+    expect(hasProviderTaskContent({ ...context, activities: [inert] })).toBe(true);
+    expect(
+      hasProviderTaskContent({
+        ...context,
+        providerInstanceId: ProviderInstanceId.make("other"),
+        activities: [inert],
+      }),
+    ).toBe(false);
+  });
+  it("preserves an older unstamped local workflow's exact ordinary controls without admitting malformed workflow details", () => {
+    const legacy = activity("task.started", {
+      taskId: "legacy-workflow",
+      taskType: "local_workflow",
+      individualTaskControl: { ...reference, taskId: "legacy-workflow" },
+    });
+    expect(deriveActiveProviderTasks({ ...context, activities: [legacy] })).toHaveLength(1);
+    const malformed = activity("task.started", {
+      taskId: "legacy-workflow",
+      taskType: "local_workflow",
+      workflow: { future: "unadmitted" },
+      individualTaskControl: { ...reference, taskId: "legacy-workflow" },
+    });
+    expect(deriveActiveProviderTasks({ ...context, activities: [malformed] })).toEqual([]);
+    expect(hasProviderTaskContent({ ...context, activities: [malformed] })).toBe(false);
+  });
   it("keeps opaque turn/task separator spellings distinct", () => {
     const first = {
       ...activity("task.started", { taskId: "b:c", individualTaskControl: reference }),

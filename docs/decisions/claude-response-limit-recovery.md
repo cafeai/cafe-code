@@ -2,10 +2,11 @@
 
 Decision status: Accepted — implementation and release verification remain separate.
 Created: 2026-10-09 09:59:49 JST (UTC+0900)
-Last updated: 2026-10-09 10:44:22 JST (UTC+0900)
+Last updated: 2026-10-09 13:03:52 JST (UTC+0900)
 Decision authority: agent implementation discretion within the user's explicit request to investigate, fix confirmed response-limit handling and push the changes to dev.
 Implementation status: implemented with synthetic focused qualification; whole-repository, final-build and release CI verification remain separate.
 Supersedes: none. Existing response-segment, approval, stream-integrity and user-control boundaries remain in force.
+Supplemented by: [explicit account budgets and native workflows](claude-runtime-options.md). That separately requested opt-in setting does not replace this decision's rejection of blanket automatic budget increases or unattended replay.
 
 ## Context
 

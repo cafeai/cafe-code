@@ -3,15 +3,78 @@ import { createModelCapabilities } from "@cafecode/shared/model";
 import { getClaudeModelCapabilities } from "./Layers/ClaudeProvider.ts";
 import {
   findClaudeNativeModel,
+  gateClaudeUltracodeCapabilities,
   normalizeClaudeNativeModels,
   reconcileClaudeModelCapabilities,
   reconcileClaudeModels,
+  supportsClaudeUltracode,
 } from "./claudeModelMetadata.ts";
 import { resolveClaudeModelSessionOptions } from "./Layers/ClaudeAdapter.ts";
 import { createModelSelection } from "@cafecode/shared/model";
 import { ProviderInstanceId } from "@cafecode/contracts";
 
 describe("Claude native model metadata", () => {
+  it("qualifies independent Ultracode against the actual CLI version", () => {
+    for (const version of [
+      undefined,
+      null,
+      "unknown",
+      "2.1.283",
+      "2.1.284-beta.1",
+      "2.1.288-rc.1",
+      "2.2.0-beta.1",
+      "2.1.288" + " ".repeat(64),
+    ]) {
+      expect(supportsClaudeUltracode(version)).toBe(false);
+      expect(
+        gateClaudeUltracodeCapabilities(
+          getClaudeModelCapabilities("claude-opus-5"),
+          version,
+        ).optionDescriptors?.some((descriptor) => descriptor.id === "ultracode"),
+      ).toBe(false);
+    }
+    for (const version of ["2.1.284", "2.1.288", "2.2.0"]) {
+      expect(supportsClaudeUltracode(version)).toBe(true);
+      expect(
+        gateClaudeUltracodeCapabilities(
+          getClaudeModelCapabilities("claude-opus-5"),
+          version,
+        ).optionDescriptors?.some((descriptor) => descriptor.id === "ultracode"),
+      ).toBe(true);
+    }
+  });
+
+  it("adds a distinct workflow Boolean only for affirmative native xhigh support", () => {
+    const fallback = createModelCapabilities({ optionDescriptors: [] });
+    const discovered = reconcileClaudeModelCapabilities(fallback, {
+      value: "custom-native",
+      displayName: "Custom",
+      supportsEffort: true,
+      supportedEffortLevels: ["low", "high", "xhigh", "max"],
+    });
+    expect(
+      discovered.optionDescriptors?.find((descriptor) => descriptor.id === "ultracode"),
+    ).toMatchObject({ id: "ultracode", type: "boolean" });
+    const effort = discovered.optionDescriptors?.find((descriptor) => descriptor.id === "effort");
+    expect(effort?.type === "select" ? effort.options.map((entry) => entry.id) : []).toEqual([
+      "low",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+    expect(
+      reconcileClaudeModelCapabilities(fallback, {
+        value: "custom-native",
+        displayName: "Custom",
+        supportsEffort: true,
+      }).optionDescriptors?.some((descriptor) => descriptor.id === "ultracode"),
+    ).toBe(false);
+    expect(
+      getClaudeModelCapabilities("claude-haiku-4-5").optionDescriptors?.some(
+        (descriptor) => descriptor.id === "ultracode",
+      ),
+    ).toBe(false);
+  });
   it("bounds metadata and ignores malformed rows/options", () => {
     expect(normalizeClaudeNativeModels(Array.from({ length: 129 }, () => ({})))).toBeUndefined();
     expect(
@@ -39,6 +102,7 @@ describe("Claude native model metadata", () => {
       findClaudeNativeModel(models, "claude-opus-5[1m]"),
     );
     expect(caps.optionDescriptors?.some((option) => option.id === "fastMode")).toBe(false);
+    expect(caps.optionDescriptors?.some((option) => option.id === "ultracode")).toBe(false);
     const effort = caps.optionDescriptors?.find((option) => option.id === "effort");
     expect(effort?.type === "select" ? effort.options.map((option) => option.id) : []).toEqual([
       "low",
@@ -62,6 +126,7 @@ describe("Claude native model metadata", () => {
       supportsEffort: false,
     });
     expect(caps.optionDescriptors?.some((option) => option.id === "effort")).toBe(false);
+    expect(caps.optionDescriptors?.some((option) => option.id === "ultracode")).toBe(false);
     expect(caps.optionDescriptors?.some((option) => option.id === "outputStyle")).toBe(true);
   });
   it("preserves historical/custom entries and adds a newly discovered model once", () => {

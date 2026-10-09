@@ -13,11 +13,7 @@ import { useProviderQuota, type ProviderQuotaContext } from "./useProviderQuota"
 import type { SubagentConcurrencyPresentation } from "../../subagentConcurrency";
 import { TaskProgressDetails } from "./TaskProgressDetails";
 import { ScheduledFollowups, type ScheduledFollowupsContext } from "./ScheduledFollowups";
-import {
-  ProviderTasks,
-  deriveActiveProviderTasks,
-  type ProviderTasksContext,
-} from "./ProviderTasks";
+import { ProviderTasks, hasProviderTaskContent, type ProviderTasksContext } from "./ProviderTasks";
 import {
   deriveTaskProgressPresentation,
   type ComposerTaskProgressPlan,
@@ -78,8 +74,7 @@ export const SessionRail = memo(
         entry.subagent !== undefined && isLiveSubagentStatus(entry.subagent.status),
     );
     const hasSubagents = subagents.length > 0;
-    const hasProviderTasks =
-      props.providerTasks && deriveActiveProviderTasks(props.providerTasks).length > 0;
+    const hasProviderTasks = props.providerTasks && hasProviderTaskContent(props.providerTasks);
     const { completedCount } = plan ? deriveTaskProgressPresentation(plan) : { completedCount: 0 };
     const total = plan?.steps.length ?? 0;
 

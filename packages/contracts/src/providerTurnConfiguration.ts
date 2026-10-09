@@ -37,6 +37,8 @@ export const ProviderTurnConfiguration = Schema.Struct({
   modelDisplayName: Schema.optional(SingleLineLabel),
   effort: Schema.optional(EffortLabel),
   fastMode: Schema.optional(Schema.Boolean),
+  // Requested orchestration mode, not proof of entitlement or a running workflow.
+  ultracode: Schema.optional(Schema.Boolean),
   serviceTier: Schema.optional(EffortLabel),
   resolvedServiceTier: Schema.optional(
     Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9_-]{0,63}$/)),

@@ -4,6 +4,10 @@ import type {
   ServerProviderModel,
 } from "@cafecode/contracts";
 import { createModelCapabilities } from "@cafecode/shared/model";
+import { compareSemverVersions, parseSemver } from "@cafecode/shared/semver";
+import * as Schema from "effect/Schema";
+import { ProviderOptionDescriptor as ProviderOptionDescriptorSchema } from "@cafecode/contracts";
+import claudeModelCatalog from "./Layers/ClaudeModelCatalog.json" with { type: "json" };
 
 export interface ClaudeNativeModel {
   readonly value: string;
@@ -15,6 +19,38 @@ export interface ClaudeNativeModel {
   readonly supportsAutoMode?: boolean;
 }
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+export const CLAUDE_ULTRACODE_MINIMUM_VERSION = "2.1.284";
+const ULTRACODE_DESCRIPTOR = Schema.decodeUnknownSync(ProviderOptionDescriptorSchema)(
+  claudeModelCatalog.sharedOptionDescriptors.find((descriptor) => descriptor.id === "ultracode"),
+);
+
+/**
+ * The public Boolean settings key became independent of effort in 2.1.284.
+ * Qualify the configured executable, never the imported SDK or an unknown
+ * version. Native workflow/account/managed-policy eligibility still wins.
+ */
+export function supportsClaudeUltracode(version: string | null | undefined): boolean {
+  const parsed = typeof version === "string" && version.length <= 64 ? parseSemver(version) : null;
+  return (
+    typeof version === "string" &&
+    parsed !== null &&
+    parsed.prerelease.length === 0 &&
+    compareSemverVersions(version, CLAUDE_ULTRACODE_MINIMUM_VERSION) >= 0
+  );
+}
+
+export function gateClaudeUltracodeCapabilities(
+  caps: ModelCapabilities,
+  version: string | null | undefined,
+): ModelCapabilities {
+  if (supportsClaudeUltracode(version)) return caps;
+  return createModelCapabilities({
+    ...caps,
+    optionDescriptors: (caps.optionDescriptors ?? []).filter(
+      (descriptor) => descriptor.id !== "ultracode",
+    ),
+  });
+}
 function clean(value: unknown, max: number): value is string {
   if (typeof value !== "string" || value.length > max || !value.trim()) return false;
   for (let index = 0; index < value.length; index++) {
@@ -121,6 +157,20 @@ export function reconcileClaudeModelCapabilities(
     descriptors = descriptors.filter((item) => item.id !== "fastMode");
   else if (native.supportsFastMode === true && !descriptors.some((item) => item.id === "fastMode"))
     descriptors.push({ id: "fastMode", label: "Fast Mode", type: "boolean" });
+  // Ultracode is orchestration, never a sixth effort enum or a prompt prefix.
+  // Only affirmative native xhigh support can add it to a discovered/custom
+  // model; a conclusive native effort exclusion removes stale saved choices.
+  if (
+    native.supportsEffort === false ||
+    (native.supportedEffortLevels !== undefined && !native.supportedEffortLevels.includes("xhigh"))
+  ) {
+    descriptors = descriptors.filter((descriptor) => descriptor.id !== "ultracode");
+  } else if (
+    native.supportedEffortLevels?.includes("xhigh") &&
+    !descriptors.some((descriptor) => descriptor.id === "ultracode")
+  ) {
+    descriptors.push({ ...ULTRACODE_DESCRIPTOR });
+  }
   return createModelCapabilities({
     ...caps,
     optionDescriptors: descriptors,

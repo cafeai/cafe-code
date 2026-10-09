@@ -93,6 +93,13 @@ export function snapshotProviderTurnConfiguration(input: {
     session.provider === "codex" || session.provider === "claudeAgent"
       ? getModelSelectionBooleanOptionValue(selection, "fastMode")
       : undefined;
+  // Ultracode is a requested native workflow flag, not another effort level.
+  // Capture explicit false as well as true; absence continues to delegate to
+  // the native runtime and must not claim account/workflow eligibility.
+  const ultracode =
+    session.provider === "claudeAgent"
+      ? getModelSelectionBooleanOptionValue(selection, "ultracode")
+      : undefined;
   const serviceTier =
     session.provider === "codex"
       ? safeLabel(getModelSelectionStringOptionValue(selection, "serviceTier"), 64)
@@ -112,6 +119,7 @@ export function snapshotProviderTurnConfiguration(input: {
     ...(modelDisplayName !== undefined ? { modelDisplayName } : {}),
     ...(effort !== undefined ? { effort } : {}),
     ...(fastMode !== undefined ? { fastMode } : {}),
+    ...(ultracode !== undefined ? { ultracode } : {}),
     ...(serviceTier !== undefined ? { serviceTier } : {}),
     runtimeMode: session.runtimeMode,
     ...(interactionMode !== undefined ? { interactionMode } : {}),

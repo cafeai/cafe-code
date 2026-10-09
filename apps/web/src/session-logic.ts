@@ -622,6 +622,13 @@ export function deriveWorkLogEntries(
     // Removing both here avoids rendering `Subagent task - Started /root/x`
     // next to the richer, identity-stable subagent row.
     .filter((activity) => !isSubagentWorkActivity(activity))
+    // Provenance-stamped workflow roots have their own richer Tasks card.
+    // Malformed/future workflow objects must not fall through to a generic
+    // task row, which could expose fields outside the admitted display schema.
+    .filter(
+      (activity) =>
+        !activity.kind.startsWith("task.") || asRecord(activity.payload)?.workflow === undefined,
+    )
     .filter((activity) => {
       const identity = taskActivityIdentityKey(activity);
       if (identity && latestTaskVisibility.get(identity) === "ambient") return false;

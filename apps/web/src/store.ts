@@ -44,6 +44,7 @@ import { resolveEnvironmentHttpUrl } from "./environments/runtime";
 import { sanitizeThreadErrorMessage } from "./rpc/transportError";
 import { getThreadFromEnvironmentState } from "./threadDerivation";
 import { readTurnConfiguration } from "./turnConfiguration";
+import { readWorkflowTaskPresentation } from "./workflowTaskActivity";
 import { subagentLimitsEqual } from "./subagentConcurrency";
 import { threadForkPrefix } from "./lib/threadForkPrefix";
 const isProviderDriverKindValue = Schema.is(ProviderDriverKind);
@@ -1181,7 +1182,7 @@ function boundedSubagentIdentity(value: unknown): string | undefined {
     : undefined;
 }
 
-function structuredSubagentLifecycleKeys(
+function structuredTaskLifecycleKeys(
   activity: OrchestrationThreadActivity,
 ): ReadonlyArray<{ identity: string; lifecycle: string }> {
   if (
@@ -1216,20 +1217,41 @@ function structuredSubagentLifecycleKeys(
     (identity, index, all): identity is string =>
       identity !== undefined && all.indexOf(identity) === index,
   );
-  return identities.map((identity) => ({
+  const keys = identities.map((identity) => ({
     identity: JSON.stringify([activity.turnId, identity]),
     lifecycle: JSON.stringify([activity.turnId, identity, activity.kind]),
   }));
+  const workflow = readWorkflowTaskPresentation(activity);
+  const workflowTaskId = workflow ? boundedSubagentIdentity(payload?.taskId) : undefined;
+  if (workflow && workflowTaskId) {
+    // Snapshot agent indices are never provider child ids. Retain only the
+    // admitted root, with its exact Cafe query/account stamp, under the same
+    // finite identity ceiling used for structured native tasks. Another query
+    // reusing a native root id must not replace this query's terminal authority.
+    const identity = [
+      "workflow",
+      activity.turnId,
+      workflow.providerInstanceId,
+      workflow.runtimeId,
+      workflowTaskId,
+    ];
+    keys.push({
+      identity: JSON.stringify(identity),
+      lifecycle: JSON.stringify([...identity, activity.kind]),
+    });
+  }
+  return keys;
 }
 
 /**
  * Retain the ordinary bounded tail plus the minimum durable state needed by
  * compact renderer projections across every turn that can still own live work.
  *
- * A subagent may stay silent while hundreds of unrelated tool rows arrive. If
+ * A subagent or workflow root may stay silent while hundreds of unrelated tool
+ * rows arrive. If
  * its lifecycle edges were treated like ordinary history, it would disappear
  * from chat/Atrium before it finished. Keeping the latest start, progress, and
- * terminal edge per `(turn, child)` identity reconstructs restarts and rejects
+ * terminal edge per structured identity reconstructs restarts and rejects
  * a delayed post-terminal progress replay without making the full activity
  * history unbounded. Retaining only the latest three events overall would be
  * incorrect: three later progress snapshots could evict the authoritative
@@ -1267,7 +1289,7 @@ function retainThreadActivityWindow(
   // reached, older identities fall back to the ordinary 500-row activity tail.
   for (let index = ordered.length - 1; index >= 0; index -= 1) {
     const activity = ordered[index]!;
-    for (const keys of structuredSubagentLifecycleKeys(activity)) {
+    for (const keys of structuredTaskLifecycleKeys(activity)) {
       if (!retainedSubagentIdentities.has(keys.identity)) {
         if (retainedSubagentIdentities.size >= MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN) continue;
         retainedSubagentIdentities.add(keys.identity);

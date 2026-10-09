@@ -3496,6 +3496,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           (model) => model.slug === "claude-opus-5-5",
         );
         const opus55Descriptors = opus55?.capabilities?.optionDescriptors ?? [];
+        assert.equal(
+          opus55Descriptors.some((descriptor) => descriptor.id === "ultracode"),
+          false,
+        );
         const opus55Effort = opus55Descriptors.find((descriptor) => descriptor.id === "effort");
         assert.deepStrictEqual(
           opus55Effort?.type === "select"
@@ -3528,6 +3532,41 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           (model) => model.slug === "claude-sonnet-5-5",
         );
         const sonnet55Descriptors = sonnet55?.capabilities?.optionDescriptors ?? [];
+        assert.equal(
+          sonnet55Descriptors.some(
+            (descriptor) => descriptor.id === "ultracode" && descriptor.type === "boolean",
+          ),
+          true,
+        );
+        const qualifiedUltraModels = getBuiltInClaudeModelsForVersion("2.1.288").filter((model) =>
+          model.capabilities?.optionDescriptors?.some(
+            (descriptor) => descriptor.id === "ultracode",
+          ),
+        );
+        assert.isAbove(qualifiedUltraModels.length, 0);
+        for (const model of qualifiedUltraModels) {
+          const effort = model.capabilities?.optionDescriptors?.find(
+            (descriptor) => descriptor.id === "effort",
+          );
+          assert.equal(
+            effort?.type === "select" && effort.options.some((option) => option.id === "xhigh"),
+            true,
+          );
+          assert.equal(
+            effort?.type === "select" && effort.options.some((option) => option.id === "ultracode"),
+            false,
+          );
+        }
+        for (const version of [undefined, "unknown", "2.1.283"]) {
+          assert.equal(
+            getBuiltInClaudeModelsForVersion(version).some((model) =>
+              model.capabilities?.optionDescriptors?.some(
+                (descriptor) => descriptor.id === "ultracode",
+              ),
+            ),
+            false,
+          );
+        }
         const sonnet55Effort = sonnet55Descriptors.find((descriptor) => descriptor.id === "effort");
         assert.deepStrictEqual(
           sonnet55Effort?.type === "select"
@@ -3653,6 +3692,35 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           );
         }).pipe(Effect.provide(recorded.layer));
       });
+
+      it.effect(
+        "keeps Claude status probes on inherited output policy rather than the chat cap",
+        () => {
+          const recorded = recordingMockSpawnerLayer((args) => {
+            assert.deepEqual(args, ["--version"]);
+            return { stdout: "2.1.288\n", stderr: "", code: 0 };
+          });
+          const parent = Object.freeze({ CLAUDE_CODE_MAX_OUTPUT_TOKENS: "32000" });
+          return Effect.gen(function* () {
+            const path = yield* Path.Path;
+            const status = yield* checkClaudeProviderStatus(
+              {
+                ...defaultClaudeSettings,
+                homePath: path.resolve("synthetic-claude-status-home"),
+                maxOutputTokens: 128_000,
+              },
+              claudeCapabilities(),
+              parent,
+            );
+            assert.equal(status.status, "ready");
+            assert.deepEqual(
+              recorded.commands.map((command) => command.env?.CLAUDE_CODE_MAX_OUTPUT_TOKENS),
+              ["32000"],
+            );
+            assert.equal(parent.CLAUDE_CODE_MAX_OUTPUT_TOKENS, "32000");
+          }).pipe(Effect.provide(recorded.layer));
+        },
+      );
 
       it.effect("includes probed claude slash commands in the provider snapshot", () =>
         Effect.gen(function* () {

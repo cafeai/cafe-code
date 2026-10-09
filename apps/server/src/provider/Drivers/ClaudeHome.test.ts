@@ -1,7 +1,11 @@
 import * as NodeOS from "node:os";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { CLAUDE_MAX_CONCURRENT_SUBAGENTS, type ClaudeSettings } from "@cafecode/contracts";
+import {
+  CLAUDE_MAX_CONCURRENT_SUBAGENTS,
+  CLAUDE_MAX_OUTPUT_TOKENS,
+  type ClaudeSettings,
+} from "@cafecode/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
@@ -12,6 +16,7 @@ import {
   makeClaudeCapabilitiesCacheKey,
   makeClaudeContinuationGroupKey,
   makeClaudeEnvironment,
+  makeClaudeNonChatEnvironment,
   resolveClaudeHomePath,
 } from "./ClaudeHome.ts";
 
@@ -26,6 +31,108 @@ const baseEnvWithoutClaudeConfigDir = (): NodeJS.ProcessEnv => {
 };
 
 it.layer(NodeServices.layer)("ClaudeHome", (it) => {
+  describe("Claude response-cap environment", () => {
+    it.effect("keeps non-chat operations on their inherited output policy", () =>
+      Effect.gen(function* () {
+        const config = {
+          homePath: "",
+          maxOutputTokens: CLAUDE_MAX_OUTPUT_TOKENS,
+          maxConcurrentSubagents: 3,
+        };
+        const unset = yield* makeClaudeNonChatEnvironment(config, {});
+        expect(Object.hasOwn(unset, "CLAUDE_CODE_MAX_OUTPUT_TOKENS")).toBe(false);
+        expect(unset.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS).toBe("3");
+        const inherited = Object.freeze({ CLAUDE_CODE_MAX_OUTPUT_TOKENS: "32000" });
+        const env = yield* makeClaudeNonChatEnvironment(config, inherited);
+        expect(env.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe("32000");
+        expect(inherited.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe("32000");
+      }),
+    );
+
+    it.effect("keeps omission and inherited provider parsing authoritative", () =>
+      Effect.gen(function* () {
+        const unset = yield* makeClaudeEnvironment({ homePath: "" }, {});
+        expect(Object.hasOwn(unset, "CLAUDE_CODE_MAX_OUTPUT_TOKENS")).toBe(false);
+        // An account reset removes only Cafe's override. An ambient value,
+        // even outside Cafe's supported explicit range, still belongs to the
+        // configured CLI and is not rewritten into an invented model default.
+        for (const inherited of ["32000", "256000", "provider-owned-value"]) {
+          const parent = Object.freeze({ CLAUDE_CODE_MAX_OUTPUT_TOKENS: inherited });
+          const env = yield* makeClaudeEnvironment({ homePath: "" }, parent);
+          expect(env.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe(inherited);
+          expect(parent.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe(inherited);
+        }
+      }),
+    );
+
+    it.effect("binds explicit caps to copied account environments and preserves reset", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const parent = Object.freeze({
+          CLAUDE_CODE_MAX_OUTPUT_TOKENS: "32000",
+          CAFE_TEST_UNRELATED: "preserved",
+        });
+        const firstHome = path.resolve("synthetic-claude-output-first");
+        const secondHome = path.resolve("synthetic-claude-output-second");
+        for (const maxOutputTokens of [1, 64_000, CLAUDE_MAX_OUTPUT_TOKENS]) {
+          const first = yield* makeClaudeEnvironment(
+            { homePath: firstHome, maxOutputTokens },
+            parent,
+          );
+          const second = yield* makeClaudeEnvironment(
+            { homePath: secondHome, maxOutputTokens: 42 },
+            parent,
+          );
+          const reset = yield* makeClaudeEnvironment({ homePath: firstHome }, parent);
+          expect(first.HOME).toBe(firstHome);
+          expect(first.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe(String(maxOutputTokens));
+          expect(second.HOME).toBe(secondHome);
+          expect(second.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe("42");
+          expect(reset.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe("32000");
+          expect(first.CAFE_TEST_UNRELATED).toBe("preserved");
+          expect(parent.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe("32000");
+          expect(first).not.toBe(second);
+          expect(first).not.toBe(reset);
+          // Later sibling/reset construction cannot mutate a query's already
+          // captured process environment or the global parent object.
+          expect(first.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe(String(maxOutputTokens));
+        }
+      }),
+    );
+
+    for (const maxOutputTokens of [
+      0,
+      -1,
+      1.5,
+      CLAUDE_MAX_OUTPUT_TOKENS + 1,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      "64000",
+      "1; ignored",
+      null,
+    ]) {
+      it.effect(
+        `rejects malformed explicit response cap ${String(maxOutputTokens)} at launch`,
+        () =>
+          Effect.gen(function* () {
+            const result = yield* makeClaudeEnvironment(
+              { homePath: "", maxOutputTokens } as unknown as Pick<
+                ClaudeSettings,
+                "homePath" | "maxOutputTokens"
+              >,
+              {},
+            ).pipe(Effect.exit);
+            expect(Exit.isFailure(result)).toBe(true);
+            if (Exit.isFailure(result)) {
+              expect(Cause.pretty(result.cause)).toContain(
+                `Claude maxOutputTokens must be an integer between 1 and ${CLAUDE_MAX_OUTPUT_TOKENS}.`,
+              );
+            }
+          }),
+      );
+    }
+  });
+
   describe("Claude Agent-tool concurrency environment", () => {
     it.effect("omits the key unless configured and preserves inherited provider policy", () =>
       Effect.gen(function* () {

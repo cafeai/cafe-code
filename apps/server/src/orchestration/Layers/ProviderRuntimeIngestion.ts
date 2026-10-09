@@ -570,6 +570,35 @@ function runtimeToolPresentationData(
 function runtimeEventToActivities(
   event: ProviderRuntimeEvent,
 ): ReadonlyArray<OrchestrationThreadActivity> {
+  // Workflow rows cannot borrow another account/query's presentation. The
+  // compact retention id is content-free and host-minted from the full exact
+  // tuple; it is never a task control target or a provider transcript id.
+  const workflow =
+    (event.type === "task.started" ||
+      event.type === "task.progress" ||
+      event.type === "task.completed") &&
+    event.provider === "claudeAgent" &&
+    event.payload.workflow?.runtimeId === event.subagentRuntimeId &&
+    event.payload.workflow?.providerInstanceId === event.providerInstanceId
+      ? event.payload.workflow
+      : undefined;
+  const workflowRetentionId = workflow
+    ? `sha256:workflow:${Crypto.createHash("sha256")
+        .update(
+          JSON.stringify([
+            event.turnId ?? null,
+            event.type === "task.started" ||
+            event.type === "task.progress" ||
+            event.type === "task.completed"
+              ? event.payload.taskId
+              : null,
+            workflow.providerInstanceId,
+            workflow.runtimeId,
+          ]),
+          "utf8",
+        )
+        .digest("hex")}`
+    : undefined;
   const maybeSequence = (() => {
     const eventWithSequence = event as ProviderRuntimeEvent & { sessionSequence?: number };
     return eventWithSequence.sessionSequence !== undefined
@@ -816,6 +845,7 @@ function runtimeEventToActivities(
             ...(event.payload.taskType ? { taskType: event.payload.taskType } : {}),
             ...(event.payload.visibility ? { visibility: event.payload.visibility } : {}),
             ...(event.payload.subagent ? { subagent: event.payload.subagent } : {}),
+            ...(workflow ? { workflow, workflowRetentionId } : {}),
             ...(event.payload.description
               ? { detail: truncateDetail(event.payload.description) }
               : {}),
@@ -842,6 +872,7 @@ function runtimeEventToActivities(
             detail: truncateDetail(event.payload.summary ?? event.payload.description),
             ...(event.payload.visibility ? { visibility: event.payload.visibility } : {}),
             ...(event.payload.subagent ? { subagent: event.payload.subagent } : {}),
+            ...(workflow ? { workflow, workflowRetentionId } : {}),
             ...(event.payload.summary ? { summary: truncateDetail(event.payload.summary) } : {}),
             ...(event.payload.lastToolName ? { lastToolName: event.payload.lastToolName } : {}),
             ...(event.payload.usage !== undefined ? { usage: event.payload.usage } : {}),
@@ -876,6 +907,7 @@ function runtimeEventToActivities(
             status: event.payload.status,
             ...(event.payload.visibility ? { visibility: event.payload.visibility } : {}),
             ...(event.payload.subagent ? { subagent: event.payload.subagent } : {}),
+            ...(workflow ? { workflow, workflowRetentionId } : {}),
             ...(event.payload.summary ? { detail: truncateDetail(event.payload.summary) } : {}),
             ...(event.payload.usage !== undefined ? { usage: event.payload.usage } : {}),
             ...(event.payload.resourceLinks ? { resourceLinks: event.payload.resourceLinks } : {}),

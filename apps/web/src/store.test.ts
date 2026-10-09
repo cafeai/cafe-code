@@ -9,6 +9,7 @@ import {
   ProjectId,
   ProviderInstanceId,
   ProviderDriverKind,
+  SubagentRuntimeId,
   ThreadId,
   TurnId,
   type OrchestrationEvent,
@@ -35,6 +36,7 @@ import {
   type EnvironmentState,
 } from "./store";
 import { deriveActiveSubagentWorkEntries, deriveSubagentWorkEntries } from "./session-logic";
+import { deriveWorkflowTasks } from "./workflowTaskActivity";
 import { DEFAULT_INTERACTION_MODE, DEFAULT_RUNTIME_MODE, type Thread } from "./types";
 import { threadForkPrefix } from "./lib/threadForkPrefix";
 
@@ -2240,6 +2242,153 @@ describe("incremental orchestration updates", () => {
     },
   );
 
+  it("retains only admitted workflow root lifecycle beyond the tail and binds runtime/account incarnations", () => {
+    const turnId = TurnId.make("turn-long-workflow");
+    const providerInstanceId = ProviderInstanceId.make("claude-workflow-a");
+    const runtimeId = SubagentRuntimeId.make("10000000-0000-4000-8000-000000000001");
+    const workflow = {
+      providerInstanceId,
+      runtimeId,
+      name: "Review workflow",
+      phases: [{ index: 1, title: "Explore" }],
+      agents: [
+        { index: 1, phaseIndex: 1, status: "completed", totalTokens: 1000, durationMs: 2000 },
+      ],
+    };
+    const rootActivity = (
+      sequence: number,
+      kind: string,
+      payload: Record<string, unknown> = {},
+    ): Thread["activities"][number] => ({
+      id: EventId.make(`workflow-retention-${sequence}`),
+      sequence,
+      kind,
+      tone: "info",
+      summary: "Workflow lifecycle",
+      turnId,
+      createdAt: "2026-10-09T00:00:01.000Z",
+      payload: { taskId: "same-root", workflow, ...payload },
+    });
+    const lifecycle = [
+      rootActivity(1, "task.started", { detail: "Review implementation" }),
+      rootActivity(2, "task.progress", { detail: "Obsolete progress" }),
+      rootActivity(3, "task.completed", {
+        status: "completed",
+        usage: { total_tokens: 1000, duration_ms: 2000 },
+      }),
+      rootActivity(4, "task.progress", {
+        detail: "Delayed progress",
+        usage: { total_tokens: 9999 },
+      }),
+      rootActivity(5, "task.progress", {
+        workflow: { ...workflow, providerInstanceId: ProviderInstanceId.make("claude-workflow-b") },
+        detail: "Foreign account",
+      }),
+      rootActivity(6, "task.progress", {
+        workflow: {
+          ...workflow,
+          runtimeId: SubagentRuntimeId.make("20000000-0000-4000-8000-000000000001"),
+        },
+        detail: "Foreign query",
+      }),
+      rootActivity(7, "task.progress", {
+        taskId: "invalid-workflow",
+        workflow: { ...workflow, phases: [], agents: undefined },
+        detail: "Malformed paired arrays",
+      }),
+    ];
+    const ordinaryTail: Thread["activities"] = Array.from({ length: 500 }, (_, index) => ({
+      id: EventId.make(`workflow-retention-tail-${index}`),
+      sequence: index + 8,
+      kind: "tool.completed",
+      tone: "tool",
+      summary: "Ordinary activity",
+      turnId,
+      createdAt: "2026-10-09T00:01:00.000Z",
+      payload: {},
+    }));
+    const thread = makeThread({
+      latestTurn: {
+        turnId,
+        state: "running",
+        requestedAt: "2026-10-09T00:00:00.000Z",
+        startedAt: "2026-10-09T00:00:00.000Z",
+        completedAt: null,
+        assistantMessageId: null,
+      },
+      activities: [...lifecycle, ...ordinaryTail],
+    });
+    const newest = {
+      ...ordinaryTail[0]!,
+      id: EventId.make("workflow-retention-newest"),
+      sequence: 508,
+    };
+    const next = applyOrchestrationEvent(
+      makeState(thread),
+      makeEvent(
+        "thread.activity-appended",
+        { threadId: thread.id, activity: newest },
+        { sequence: 2100 },
+      ),
+      localEnvironmentId,
+    );
+    const retained = threadsOf(next)[0]?.activities ?? [];
+    expect(retained.filter((row) => row.kind.startsWith("task.")).map((row) => row.id)).toEqual([
+      "workflow-retention-1",
+      "workflow-retention-3",
+      "workflow-retention-4",
+      "workflow-retention-5",
+      "workflow-retention-6",
+    ]);
+    expect(retained).toHaveLength(505);
+    expect(
+      deriveWorkflowTasks({
+        providerInstanceId,
+        runtimeSession: { subagentRuntimeId: runtimeId, orchestrationStatus: "running" },
+        activities: retained,
+      })[0],
+    ).toMatchObject({ status: "completed", totalTokens: 1000, durationMs: 2000 });
+    // Detail hydration uses the same compact projection and must not invent
+    // child identities for the single numeric snapshot agent.
+    const hydrated = syncServerThreadDetail(
+      makeState(makeThread({ id: thread.id })),
+      {
+        id: thread.id,
+        projectId: thread.projectId,
+        title: thread.title,
+        modelSelection: thread.modelSelection,
+        runtimeMode: thread.runtimeMode,
+        interactionMode: thread.interactionMode,
+        branch: thread.branch,
+        worktreePath: thread.worktreePath,
+        latestTurn: thread.latestTurn,
+        createdAt: thread.createdAt,
+        updatedAt: "2026-10-09T00:02:00.000Z",
+        archivedAt: null,
+        deletedAt: null,
+        messages: [],
+        proposedPlans: [],
+        activities: retained,
+        checkpoints: [],
+        session: null,
+        goal: null,
+      },
+      localEnvironmentId,
+      2200,
+    );
+    expect(
+      threadsOf(hydrated)[0]
+        ?.activities.filter((row) => row.kind.startsWith("task."))
+        .map((row) => row.id),
+    ).toEqual([
+      "workflow-retention-1",
+      "workflow-retention-3",
+      "workflow-retention-4",
+      "workflow-retention-5",
+      "workflow-retention-6",
+    ]);
+  });
+
   it("retains compact subagent lifecycle state beyond the live activity tail", () => {
     const turnId = TurnId.make("turn-long-subagents");
     const child = {
@@ -2694,73 +2843,87 @@ describe("incremental orchestration updates", () => {
     expect(deriveSubagentWorkEntries(retained, olderTurnId)).toEqual([]);
   });
 
-  it("caps compact lifecycle retention across adversarial identities from multiple turns", () => {
-    const turnId = TurnId.make("turn-subagent-cardinality-limit");
-    const olderTurnId = TurnId.make("turn-subagent-cardinality-older");
-    const lifecycle: Thread["activities"] = Array.from(
-      { length: MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN + 1 },
-      (_, index) => ({
-        id: EventId.make(`subagent-cardinality-${String(index).padStart(5, "0")}`),
-        tone: "info" as const,
-        kind: "task.started",
-        summary: "Subagent started",
-        payload: {
-          taskId: `child-${index}`,
-          subagent: { threadId: `child-${index}`, status: "active" },
-        },
-        turnId: index % 2 === 0 ? olderTurnId : turnId,
-        sequence: index + 1,
-        createdAt: "2026-02-27T00:00:01.000Z",
-      }),
-    );
-    const ordinaryTail: Thread["activities"] = Array.from({ length: 500 }, (_, index) => ({
-      id: EventId.make(`ordinary-cardinality-${String(index).padStart(4, "0")}`),
-      tone: "tool" as const,
-      kind: "tool.completed",
-      summary: "Ordinary activity",
-      payload: {},
-      turnId,
-      sequence: lifecycle.length + index + 1,
-      createdAt: "2026-02-27T00:01:00.000Z",
-    }));
-    const thread = makeThread({
-      latestTurn: {
-        turnId,
-        state: "running",
-        requestedAt: "2026-02-27T00:00:00.000Z",
-        startedAt: "2026-02-27T00:00:00.000Z",
-        completedAt: null,
-        assistantMessageId: null,
-      },
-      activities: [...lifecycle, ...ordinaryTail],
-    });
-
-    const next = applyOrchestrationEvent(
-      makeState(thread),
-      makeEvent(
-        "thread.activity-appended",
-        {
-          threadId: thread.id,
-          activity: {
-            id: EventId.make("ordinary-cardinality-newest"),
-            tone: "tool",
-            kind: "tool.completed",
-            summary: "Newest ordinary activity",
-            payload: {},
-            turnId,
-            sequence: lifecycle.length + ordinaryTail.length + 1,
-            createdAt: "2026-02-27T00:02:00.000Z",
+  it.each(["subagent", "workflow"] as const)(
+    "caps compact lifecycle retention across adversarial %s identities from multiple turns",
+    (kind) => {
+      const turnId = TurnId.make("turn-subagent-cardinality-limit");
+      const olderTurnId = TurnId.make("turn-subagent-cardinality-older");
+      const lifecycle: Thread["activities"] = Array.from(
+        { length: MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN + 1 },
+        (_, index) => ({
+          id: EventId.make(`subagent-cardinality-${String(index).padStart(5, "0")}`),
+          tone: "info" as const,
+          kind: "task.started",
+          summary: "Subagent started",
+          payload: {
+            taskId: `child-${index}`,
+            ...(kind === "subagent"
+              ? { subagent: { threadId: `child-${index}`, status: "active" } }
+              : {
+                  workflow: {
+                    runtimeId: SubagentRuntimeId.make("10000000-0000-4000-8000-000000000001"),
+                    providerInstanceId: ProviderInstanceId.make("claude-cardinality"),
+                    phases: [],
+                    agents: [],
+                  },
+                }),
           },
+          turnId: index % 2 === 0 ? olderTurnId : turnId,
+          sequence: index + 1,
+          createdAt: "2026-02-27T00:00:01.000Z",
+        }),
+      );
+      const ordinaryTail: Thread["activities"] = Array.from({ length: 500 }, (_, index) => ({
+        id: EventId.make(`ordinary-cardinality-${String(index).padStart(4, "0")}`),
+        tone: "tool" as const,
+        kind: "tool.completed",
+        summary: "Ordinary activity",
+        payload: {},
+        turnId,
+        sequence: lifecycle.length + index + 1,
+        createdAt: "2026-02-27T00:01:00.000Z",
+      }));
+      const thread = makeThread({
+        latestTurn: {
+          turnId,
+          state: "running",
+          requestedAt: "2026-02-27T00:00:00.000Z",
+          startedAt: "2026-02-27T00:00:00.000Z",
+          completedAt: null,
+          assistantMessageId: null,
         },
-        { sequence: 2_100 },
-      ),
-      localEnvironmentId,
-    );
+        activities: [...lifecycle, ...ordinaryTail],
+      });
 
-    const retained = threadsOf(next)[0]?.activities ?? [];
-    const retainedSubagentStarts = retained.filter((activity) => activity.kind === "task.started");
-    expect(retainedSubagentStarts).toHaveLength(MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN);
-    expect(retained).toHaveLength(MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN + 500);
-    expect(retained.some((activity) => activity.id === "subagent-cardinality-00000")).toBe(false);
-  });
+      const next = applyOrchestrationEvent(
+        makeState(thread),
+        makeEvent(
+          "thread.activity-appended",
+          {
+            threadId: thread.id,
+            activity: {
+              id: EventId.make("ordinary-cardinality-newest"),
+              tone: "tool",
+              kind: "tool.completed",
+              summary: "Newest ordinary activity",
+              payload: {},
+              turnId,
+              sequence: lifecycle.length + ordinaryTail.length + 1,
+              createdAt: "2026-02-27T00:02:00.000Z",
+            },
+          },
+          { sequence: 2_100 },
+        ),
+        localEnvironmentId,
+      );
+
+      const retained = threadsOf(next)[0]?.activities ?? [];
+      const retainedSubagentStarts = retained.filter(
+        (activity) => activity.kind === "task.started",
+      );
+      expect(retainedSubagentStarts).toHaveLength(MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN);
+      expect(retained).toHaveLength(MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN + 500);
+      expect(retained.some((activity) => activity.id === "subagent-cardinality-00000")).toBe(false);
+    },
+  );
 });

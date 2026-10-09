@@ -24,6 +24,7 @@ import {
   type FastModeState,
   type SDKControlInterruptResponse,
   type Options as ClaudeQueryOptions,
+  type Query as ClaudeSdkQuery,
   type PermissionMode,
   type PermissionResult,
   type PermissionUpdate,
@@ -54,6 +55,10 @@ import {
 import { publicClaudeCommands, UNAVAILABLE_COMMAND_CATALOG } from "../claudeCommands.ts";
 import { mapClaudeSessionQuotaReport, stripClaudeUsageReport } from "../claudeSessionQuota.ts";
 import { resolveConfiguredSubagentLimit } from "../Drivers/SubagentConcurrency.ts";
+import {
+  gateClaudeUltracodeCapabilities,
+  supportsClaudeUltracode,
+} from "../claudeModelMetadata.ts";
 import {
   getSafeInteractionUrl,
   normalizeElicitationRequest,
@@ -93,10 +98,17 @@ import {
   RuntimeTaskId,
   type RuntimeSubagentPresentation,
   type RuntimeTaskVisibility,
+  type RuntimeWorkflowPresentation,
   ThreadId,
   TurnId,
   type UserInputQuestion,
 } from "@cafecode/contracts";
+import {
+  claudeWorkflowLabel,
+  decodeClaudeWorkflowProgress,
+  supportsClaudeWorkflowProgress,
+  CLAUDE_WORKFLOW_RETAINED_LIMIT,
+} from "../claudeWorkflowProgress.ts";
 import {
   applyClaudePromptEffortPrefix,
   getModelSelectionBooleanOptionValue,
@@ -125,7 +137,7 @@ import {
   readSchedulingSessionBroker,
   type SchedulingSessionBinding,
 } from "../../scheduledFollowups/sessionRuntime.ts";
-import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
+import { makeClaudeEnvironment, makeClaudeNonChatEnvironment } from "../Drivers/ClaudeHome.ts";
 import { makeProviderSessionTitle } from "../providerSessionTitle.ts";
 import { awaitClaudeDecision } from "../claudeDecision.ts";
 import { recoverClaudeResume } from "../claudeResumeRecovery.ts";
@@ -560,6 +572,8 @@ interface ClaudeTaskVisibilityState {
 }
 
 interface ClaudeTaskBinding {
+  readonly taskType?: string;
+  readonly workflowName?: string;
   readonly retiredToolUseKeys?: ReadonlyArray<string> | undefined;
   readonly incarnationRequiresToolUseId?: boolean | undefined;
   readonly taskId: RuntimeTaskId;
@@ -598,6 +612,11 @@ interface ClaudeTaskBinding {
 type RuntimeFork = <A, E>(effect: Effect.Effect<A, E, never>) => Fiber.Fiber<A, E>;
 
 interface ClaudeSessionContext {
+  /** Small independent budget; ordinary task bindings cannot multiply snapshots. */
+  readonly workflowSnapshots: Map<
+    string,
+    Pick<RuntimeWorkflowPresentation, "phases" | "agents" | "truncated">
+  >;
   session: ProviderSession;
   /** Cached actual executable version; SDK package identity is not runtime authority. */
   taskControlVersion: string | null | undefined;
@@ -637,6 +656,9 @@ interface ClaudeSessionContext {
   readonly basePermissionMode: PermissionMode | undefined;
   currentPermissionMode: PermissionMode;
   currentApiModelId: string | undefined;
+  /** Requested flag state only; native eligibility and managed policy remain authoritative. */
+  currentEffort: ClaudeSdkEffort | null;
+  currentUltracode: boolean | undefined;
   selectedContextWindowTokens: number | undefined;
   resumeSessionId: string | undefined;
   resumeCursorDurable: boolean;
@@ -746,6 +768,8 @@ interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
   // interface has not exposed the method yet. Keep it optional for older SDKs.
   readonly cancelAsyncMessage?: (messageUuid: string) => Promise<boolean>;
   readonly setModel: (model?: string) => Promise<void>;
+  /** Public streaming SDK interface; never a private control RPC or settings-file write. */
+  readonly applyFlagSettings: ClaudeSdkQuery["applyFlagSettings"];
   readonly setPermissionMode: (mode: PermissionMode) => Promise<void>;
   readonly setMaxThinkingTokens: (
     maxThinkingTokens: number | null,
@@ -970,6 +994,7 @@ function upsertClaudeTaskBinding(
     readonly objective?: string | undefined;
     readonly startedAt?: string | undefined;
     readonly taskType?: string | undefined;
+    readonly workflowName?: string | undefined;
     readonly spawnDepth?: number | undefined;
     readonly isSubagent?: boolean | undefined;
     readonly turnId?: TurnId | null | undefined;
@@ -1035,7 +1060,8 @@ function upsertClaudeTaskBinding(
   const toolUseKey = input.toolUseKey ?? previous?.toolUseKey;
   const historyId =
     exactClaudeProviderIdentity(input.historyId, { pathSegment: true }) ?? previous?.historyId;
-  const taskType = claudeSubagentDisplayLine(input.taskType, 120);
+  const taskType = claudeSubagentDisplayLine(input.taskType, 120) ?? previous?.taskType;
+  const workflowName = claudeWorkflowLabel(input.workflowName) ?? previous?.workflowName;
   // Background snapshots and terminal notifications may arrive after the root
   // turn settles. Preserve the first owning turn so a later ambient retraction
   // targets the exact renderer row instead of creating a second cross-turn key.
@@ -1091,6 +1117,8 @@ function upsertClaudeTaskBinding(
       ? { retiredToolUseKeys: input.retiredToolUseKeys ?? previous?.retiredToolUseKeys }
       : {}),
     taskId: input.taskId,
+    ...(taskType ? { taskType } : {}),
+    ...(workflowName ? { workflowName } : {}),
     ...((input.nativeTaskId ?? previous?.nativeTaskId)
       ? { nativeTaskId: input.nativeTaskId ?? previous?.nativeTaskId }
       : {}),
@@ -1139,6 +1167,7 @@ function upsertClaudeTaskBinding(
       context.taskLivenessUncertain = true;
     }
     context.taskBindingsByTaskId.delete(oldest);
+    context.workflowSnapshots.delete(oldest);
   }
   if (context.backgroundTaskIds.has(taskMapKey)) {
     context.backgroundTaskBindings.delete(taskMapKey);
@@ -1165,6 +1194,8 @@ function restoreClaudeRetainedTaskBinding(
   const toolUseKey = retained.toolUseKey ?? canonicalClaudeToolUseBindingKey(retained.toolUseId);
   return upsertClaudeTaskBinding(context, {
     taskId: retained.taskId,
+    ...(retained.taskType ? { taskType: retained.taskType } : {}),
+    ...(retained.workflowName ? { workflowName: retained.workflowName } : {}),
     ...(retained.nativeTaskId ? { nativeTaskId: retained.nativeTaskId } : {}),
     ...(retained.taskGeneration ? { taskGeneration: retained.taskGeneration } : {}),
     ...(retained.backgrounded !== undefined ? { backgrounded: retained.backgrounded } : {}),
@@ -1207,6 +1238,7 @@ function bindClaudeTaskToToolUse(
     readonly objective?: string | undefined;
     readonly startedAt?: string | undefined;
     readonly taskType?: string | undefined;
+    readonly workflowName?: string | undefined;
     readonly spawnDepth?: number | undefined;
     readonly turnId?: TurnId | undefined;
     readonly visibility?: RuntimeTaskVisibility | undefined;
@@ -1237,6 +1269,7 @@ function bindClaudeTaskToToolUse(
     ...(input.objective !== undefined ? { objective: input.objective } : {}),
     ...(input.startedAt !== undefined ? { startedAt: input.startedAt } : {}),
     ...(input.taskType !== undefined ? { taskType: input.taskType } : {}),
+    ...(input.workflowName !== undefined ? { workflowName: input.workflowName } : {}),
     ...(input.spawnDepth !== undefined ? { spawnDepth: input.spawnDepth } : {}),
     ...(input.turnId !== undefined ? { turnId: input.turnId } : {}),
     ...(input.visibility !== undefined ? { visibility: input.visibility } : {}),
@@ -1873,7 +1906,7 @@ function boundedClaudeNativeMessagePayload(message: SDKMessage): unknown {
         CLAUDE_SUBAGENT_ROLE_LIMIT,
       );
       const taskType = boundedClaudeProviderText(source.task_type, 120);
-      const workflowName = boundedClaudeProviderText(source.workflow_name, 120);
+      const workflowName = claudeWorkflowLabel(source.workflow_name, 120);
       const spawnDepth = boundedClaudeNativeNumber(source.spawn_depth, true);
       return {
         ...boundedClaudeNativeSystemEnvelope(source, "task_started"),
@@ -2604,6 +2637,7 @@ function getEffectiveClaudeAgentEffort(effort: string | null | undefined): Claud
 export function resolveClaudeModelSessionOptions(
   modelSelection: ModelSelection | undefined,
   nativeCapabilities?: ModelCapabilities,
+  nativeVersion?: string | null,
 ): {
   readonly apiModelId: string | undefined;
   readonly selectedContextWindowTokens: number | undefined;
@@ -2613,9 +2647,13 @@ export function resolveClaudeModelSessionOptions(
     readonly alwaysThinkingEnabled?: boolean;
     readonly fastMode?: boolean;
     readonly outputStyle?: "Concise";
+    readonly ultracode?: boolean;
   };
 } {
-  const caps = nativeCapabilities ?? getClaudeModelCapabilities(modelSelection?.model);
+  const caps = gateClaudeUltracodeCapabilities(
+    nativeCapabilities ?? getClaudeModelCapabilities(modelSelection?.model),
+    nativeVersion,
+  );
   const descriptors = getProviderOptionDescriptors({
     caps,
     selections: modelSelection?.options,
@@ -2644,6 +2682,11 @@ export function resolveClaudeModelSessionOptions(
   const thinking = thinkingSupported
     ? getModelSelectionBooleanOptionValue(modelSelection, "thinking")
     : undefined;
+  const ultracode = descriptors.some(
+    (descriptor) => descriptor.type === "boolean" && descriptor.id === "ultracode",
+  )
+    ? getModelSelectionBooleanOptionValue(modelSelection, "ultracode")
+    : undefined;
 
   return {
     apiModelId: modelSelection ? resolveClaudeApiModelId(modelSelection) : undefined,
@@ -2657,6 +2700,10 @@ export function resolveClaudeModelSessionOptions(
       // premium mode after the user selected normal mode in Cafe. Absence still
       // delegates to upstream, and unsupported models keep ignoring stale values.
       ...(typeof fastMode === "boolean" ? { fastMode } : {}),
+      // This is a supported session-scoped settings key, independent of the
+      // concrete native effort. Do not force workflow enablement or replace
+      // ordinary tool approval callbacks; the runtime decides eligibility.
+      ...(typeof ultracode === "boolean" ? { ultracode } : {}),
       // Output-style names enter Claude's system prompt. Forward only the
       // built-in value Cafe advertises; never treat a persisted arbitrary
       // string as an inline Claude settings fragment.
@@ -4197,9 +4244,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const serverConfig = yield* ServerConfig;
-  const claudeEnvironment = yield* makeClaudeEnvironment(claudeSettings, options?.environment).pipe(
-    Effect.provideService(Path.Path, path),
-  );
+  const claudeEnvironment = yield* makeClaudeNonChatEnvironment(
+    claudeSettings,
+    options?.environment,
+  ).pipe(Effect.provideService(Path.Path, path));
   const nativeEventLogger =
     options?.nativeEventLogger ??
     (options?.nativeEventLogPath !== undefined
@@ -4243,6 +4291,21 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       event.type === "task.progress" ||
       event.type === "task.completed"
         ? context.taskBindingsByTaskId.get(String(event.payload.taskId))
+        : undefined;
+    const workflow: RuntimeWorkflowPresentation | undefined =
+      binding?.taskType === "local_workflow"
+        ? {
+            runtimeId: context.subagentRuntimeId,
+            providerInstanceId: boundInstanceId,
+            // Ambient transitions need provenance to retract an earlier card,
+            // but must not publish either new or previously visible details.
+            ...(binding.visibilityState.visibility === "visible"
+              ? {
+                  ...(binding.workflowName ? { name: binding.workflowName } : {}),
+                  ...context.workflowSnapshots.get(String(binding.taskId)),
+                }
+              : {}),
+          }
         : undefined;
     const taskControl =
       binding?.taskGeneration &&
@@ -4297,11 +4360,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       (event.type === "task.started" ||
         event.type === "task.progress" ||
         event.type === "task.completed") &&
-        (event.payload.subagent || taskControl)
+        (event.payload.subagent || taskControl || workflow)
         ? ({
             ...stamped,
             payload: {
               ...event.payload,
+              ...(workflow ? { workflow } : {}),
               ...(taskControl
                 ? {
                     individualTaskControl: {
@@ -5076,6 +5140,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   ) {
     const turnState = context.turnState;
     const stamp = yield* makeEventStamp();
+    // A rejected task identity must not turn received-only workflow siblings
+    // into arbitrary canonical warning detail. Use the same finite native
+    // projection as logging; prompts, agent errors and unknown fields stay out.
+    const detailRecord = recordValue(detail);
+    const warningDetail =
+      detailRecord?.type === "system" &&
+      ["task_started", "task_progress", "task_updated", "task_notification"].includes(
+        typeof detailRecord.subtype === "string" ? detailRecord.subtype : "",
+      )
+        ? boundedClaudeNativeMessagePayload(detail as SDKMessage)
+        : detail;
     yield* offerRuntimeEvent(context, {
       type: "runtime.warning",
       eventId: stamp.eventId,
@@ -5085,7 +5160,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       ...(turnState ? { turnId: asCanonicalTurnId(turnState.turnId) } : {}),
       payload: {
         message,
-        ...(detail !== undefined ? { detail } : {}),
+        ...(warningDetail !== undefined ? { detail: warningDetail } : {}),
       },
       providerRefs: nativeProviderRefs(context),
       ...(raw ? { raw } : {}),
@@ -7359,6 +7434,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           String(authoritativeIdentity.taskId),
         );
         if (reusedNativeTaskId) {
+          context.workflowSnapshots.delete(String(authoritativeIdentity.taskId));
           if (priorBinding?.toolUseKey) retiredToolUseKeys.push(priorBinding.toolUseKey);
           if (retiredToolUseKeys.length > 128) {
             context.taskLivenessUncertain = true;
@@ -7385,6 +7461,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           provisionalDescription: nativeDescription === undefined,
           ...(message.subagent_type ? { subagentType: message.subagent_type } : {}),
           ...(taskType ? { taskType } : {}),
+          ...(claudeWorkflowLabel(message.workflow_name)
+            ? { workflowName: claudeWorkflowLabel(message.workflow_name) }
+            : {}),
           ...(trimmedStringValue(taskStartedRecord.prompt)
             ? { objective: trimmedStringValue(taskStartedRecord.prompt) }
             : {}),
@@ -7514,6 +7593,26 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         );
         const progressSubagent = claudeSubagentPresentation(progressBinding, "active");
         const visibility = claudeTaskVisibilityForBinding(context, progressBinding);
+        if (
+          progressBinding.taskType === "local_workflow" &&
+          visibility === "visible" &&
+          !context.terminalTaskIds.has(String(progressBinding.taskId)) &&
+          supportsClaudeWorkflowProgress(context.taskControlVersion)
+        ) {
+          const snapshot = decodeClaudeWorkflowProgress(
+            (message as unknown as Record<string, unknown>).workflow_progress,
+          );
+          if (snapshot) {
+            const key = String(progressBinding.taskId);
+            context.workflowSnapshots.delete(key);
+            context.workflowSnapshots.set(key, snapshot);
+            while (context.workflowSnapshots.size > CLAUDE_WORKFLOW_RETAINED_LIMIT) {
+              const oldest = context.workflowSnapshots.keys().next().value;
+              if (oldest === undefined) break;
+              context.workflowSnapshots.delete(oldest);
+            }
+          }
+        }
         yield* offerRuntimeEvent(context, {
           ...base,
           turnId: progressBinding.turnId ?? undefined,
@@ -8118,6 +8217,28 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     } else {
       yield* logNativeSdkMessage(context, message);
     }
+    if (message.type === "system") {
+      const frame = message as unknown as Record<string, unknown>;
+      const binding = canonicalClaudeTaskId(frame.task_id);
+      const isWorkflow =
+        frame.task_type === "local_workflow" ||
+        frame.workflow_progress !== undefined ||
+        (binding &&
+          context.taskBindingsByTaskId.get(String(binding))?.taskType === "local_workflow");
+      // Workflow display authority cannot establish a new native session or
+      // borrow a replacement query. Foreign/pre-init/child frames are inert.
+      if (
+        isWorkflow &&
+        (context.stopped ||
+          context.authFailureSeen ||
+          sessions.get(context.session.threadId) !== context ||
+          !context.resumeSessionId ||
+          context.lastThreadStartedId !== context.resumeSessionId ||
+          frame.session_id !== context.resumeSessionId ||
+          (frame.parent_tool_use_id !== null && frame.parent_tool_use_id !== undefined))
+      )
+        return;
+    }
     let boundInspectionResult = false;
     let hasInspector = false;
     if (message.type === "user")
@@ -8201,6 +8322,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // until completeTurn would lose the last good totals if a later segment
     // crashes. Only bounded numeric/model metadata enters this new event.
     if (rawMessageType === "conversation_reset") {
+      context.workflowSnapshots.clear();
       if (context.turnState) context.turnState.responseLimitError = undefined;
       yield* flushPublicSummaries(context, "failed");
       retirePublicSummaryBlocks(context.turnState);
@@ -8619,6 +8741,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         {
           homePath: claudeSettings.homePath,
           ...(maxConcurrentSubagents !== null ? { maxConcurrentSubagents } : {}),
+          ...(claudeSettings.maxOutputTokens !== undefined
+            ? { maxOutputTokens: claudeSettings.maxOutputTokens }
+            : {}),
         },
         options?.resolveEnvironment ? yield* options.resolveEnvironment : options?.environment,
       ).pipe(Effect.provideService(Path.Path, path));
@@ -9149,6 +9274,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         modelSelection?.model && options?.getModelCapabilities
           ? yield* options.getModelCapabilities(modelSelection.model)
           : undefined,
+        options?.getNativeVersion?.(),
       );
       const fastMode = settings.fastMode === true;
       const permissionMode = runtimeModeToClaudePermissionMode(input.runtimeMode);
@@ -9273,13 +9399,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               },
             }
           : {}),
-        // The SDK type can lag the CLI here: current Claude Code exposes
-        // `xhigh`, but older published Agent SDK unions may not include it yet.
-        ...(effectiveEffort
-          ? {
-              effort: effectiveEffort as unknown as NonNullable<ClaudeQueryOptions["effort"]>,
-            }
-          : {}),
+        // The pinned public SDK includes every native effort, including Max.
+        // Ultracode is deliberately carried in settings instead of this enum.
+        ...(effectiveEffort ? { effort: effectiveEffort } : {}),
         // Claude's Agent SDK supports setting the session permission mode at
         // query creation, and reserves setPermissionMode() for changing an
         // already-active streaming session. Starting a plan-mode first turn
@@ -9375,6 +9497,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         "claude.query.cwd": input.cwd ?? "",
         "claude.query.model": apiModelId ?? "",
         "claude.query.effort": effectiveEffort ?? "",
+        "claude.query.ultracode_requested":
+          getModelSelectionBooleanOptionValue(modelSelection, "ultracode") ?? "inherited",
+        "claude.query.ultracode_forwarded": settings.ultracode ?? "inherited",
+        "claude.query.ultracode_runtime_qualified": supportsClaudeUltracode(
+          options?.getNativeVersion?.(),
+        ),
         "claude.query.permission_mode": initialPermissionMode ?? "",
         "claude.query.base_permission_mode": permissionMode ?? "",
         "claude.query.allow_dangerously_skip_permissions": permissionMode === "bypassPermissions",
@@ -9442,6 +9570,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ? { additionalDirectories: input.additionalDirectories }
           : {}),
         ...(modelSelection?.model ? { model: modelSelection.model } : {}),
+        ...(modelSelection ? { modelSelection } : {}),
         ...(threadId ? { threadId } : {}),
         ...(initialResumeCursor !== undefined ? { resumeCursor: initialResumeCursor } : {}),
         createdAt: startedAt,
@@ -9449,6 +9578,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       };
 
       const context: ClaudeSessionContext = {
+        workflowSnapshots: new Map(),
         taskControlVersion: options?.getNativeVersion?.(),
         session,
         subagentRuntimeId,
@@ -9473,6 +9603,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         basePermissionMode: permissionMode,
         currentPermissionMode: initialPermissionMode ?? "default",
         currentApiModelId: apiModelId,
+        currentEffort: effectiveEffort,
+        currentUltracode: settings.ultracode,
         selectedContextWindowTokens,
         resumeSessionId: existingResumeSessionId,
         resumeCursorDurable: existingResumeSessionId !== undefined,
@@ -9535,6 +9667,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             ...(apiModelId ? { model: apiModelId } : {}),
             ...(input.cwd ? { cwd: input.cwd } : {}),
             ...(effectiveEffort ? { effort: effectiveEffort } : {}),
+            ...(settings.ultracode !== undefined ? { ultracodeRequested: settings.ultracode } : {}),
             ...(initialPermissionMode ? { permissionMode: initialPermissionMode } : {}),
             ...(permissionMode ? { basePermissionMode: permissionMode } : {}),
             ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
@@ -9969,14 +10102,45 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     if (modelSelection?.model) {
-      const apiModelId = resolveClaudeApiModelId(modelSelection);
-      const selectedContextWindowTokens = resolveClaudeSelectedContextWindowTokens(modelSelection);
+      const { apiModelId, selectedContextWindowTokens, effectiveEffort, settings } =
+        resolveClaudeModelSessionOptions(
+          modelSelection,
+          options?.getModelCapabilities
+            ? yield* options.getModelCapabilities(modelSelection.model)
+            : undefined,
+          context.taskControlVersion,
+        );
       if (context.currentApiModelId !== apiModelId) {
         yield* Effect.tryPromise({
           try: () => context.query.setModel(apiModelId),
           catch: (cause) => toRequestError(input.threadId, "turn/setModel", cause),
         });
         context.currentApiModelId = apiModelId;
+      }
+      // Apply only changed public session flags. Changing effort alone disables
+      // Ultracode upstream, so explicitly include a selected Boolean whenever
+      // effort changes. Clearing a prior Cafe override uses native null/off
+      // semantics, not a settings-file write or a fabricated availability bit.
+      const effortChanged = effectiveEffort !== context.currentEffort;
+      const ultracodeChanged = settings.ultracode !== context.currentUltracode;
+      if (
+        supportsClaudeUltracode(context.taskControlVersion) &&
+        (effortChanged || ultracodeChanged)
+      ) {
+        const flags: Parameters<ClaudeSdkQuery["applyFlagSettings"]>[0] = {
+          ...(effortChanged ? { effortLevel: effectiveEffort } : {}),
+          ...(settings.ultracode !== undefined
+            ? { ultracode: settings.ultracode }
+            : ultracodeChanged
+              ? { ultracode: null }
+              : {}),
+        };
+        yield* Effect.tryPromise({
+          try: () => context.query.applyFlagSettings(flags),
+          catch: (cause) => toRequestError(input.threadId, "turn/applyFlagSettings", cause),
+        });
+        context.currentEffort = effectiveEffort;
+        context.currentUltracode = settings.ultracode;
       }
       context.selectedContextWindowTokens = selectedContextWindowTokens;
       if (selectedContextWindowTokens !== undefined) {
@@ -9985,6 +10149,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       context.session = {
         ...context.session,
         model: modelSelection.model,
+        modelSelection,
       };
     }
 

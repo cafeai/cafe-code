@@ -105,12 +105,14 @@ describe("providerLoginLauncher", () => {
         runtimeSource: "bundled",
         binaryPath: "claude",
         homePath,
+        maxOutputTokens: 128_000,
       },
     });
 
     const plan = await runResolve(settings, CLAUDE_INSTANCE_ID, {
       [CAFE_CODE_MANAGED_RUNTIME_ROOT_ENV]: "D:\\CafeManaged",
       PATH: "C:\\Windows\\System32",
+      CLAUDE_CODE_MAX_OUTPUT_TOKENS: "32000",
     });
 
     expect(plan.commandDisplay).toBe("claude login");
@@ -119,6 +121,7 @@ describe("providerLoginLauncher", () => {
     );
     expect(plan.env.HOME).toBe(homePath);
     expect(plan.env.CLAUDE_CONFIG_DIR).toBe(NodePath.join(homePath, ".claude"));
+    expect(plan.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe("32000");
   });
 
   it("quotes the exact managed shim path in the PowerShell command", () => {

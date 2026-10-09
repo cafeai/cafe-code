@@ -18,9 +18,11 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import type {
   Options as ClaudeQueryOptions,
   PermissionMode,
+  Query as ClaudeSdkQuery,
   PermissionResult,
   SDKControlInterruptResponse,
   SDKMessage,
+  SDKSystemMessage,
   SDKAssistantMessage,
   SDKResultSuccess,
   SDKUserMessage,
@@ -35,6 +37,7 @@ import {
   ProviderDriverKind,
   ProviderItemId,
   ProviderRuntimeEvent,
+  type RuntimeWorkflowPresentation,
   type RuntimeMode,
   RuntimeTaskId,
   ThreadId,
@@ -103,6 +106,10 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
   };
   public readonly cancelAsyncMessageCalls: Array<string> = [];
   public readonly setModelCalls: Array<string | undefined> = [];
+  public readonly applyFlagSettingsCalls: Array<
+    Parameters<ClaudeSdkQuery["applyFlagSettings"]>[0]
+  > = [];
+  public flagSettingsFailure: unknown = undefined;
   public readonly setPermissionModeCalls: Array<string> = [];
   public readonly setMaxThinkingTokensCalls: Array<number | null> = [];
   public interruptResponse: SDKControlInterruptResponse | undefined;
@@ -165,6 +172,11 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
 
   readonly setModel = async (model?: string): Promise<void> => {
     this.setModelCalls.push(model);
+  };
+
+  readonly applyFlagSettings: ClaudeSdkQuery["applyFlagSettings"] = async (settings) => {
+    this.applyFlagSettingsCalls.push(settings);
+    if (this.flagSettingsFailure !== undefined) throw this.flagSettingsFailure;
   };
 
   readonly setPermissionMode = async (mode: PermissionMode): Promise<void> => {
@@ -388,6 +400,91 @@ function makeHarness(config?: {
     createInputs,
     getLastCreateQueryInput: () => createInput,
   };
+}
+
+const WORKFLOW_FIXTURE_SESSION_ID = "qualified-workflow-fixture-session";
+type WorkflowTaskFixtureEvent = Extract<
+  ProviderRuntimeEvent,
+  {
+    readonly type: "task.started" | "task.progress" | "task.completed";
+  }
+>;
+function isWorkflowTaskFixtureEvent(
+  event: ProviderRuntimeEvent,
+): event is WorkflowTaskFixtureEvent {
+  return (
+    event.type === "task.started" ||
+    event.type === "task.progress" ||
+    event.type === "task.completed"
+  );
+}
+
+/** The .288 stream sibling is deliberately absent from SDKMessage's public
+ * union. This narrow synthetic transport fixture exercises the exact received
+ * extension, not a request API, native process, provider profile or journal. */
+function emitWorkflowFixtureSystemMessage(
+  query: FakeClaudeQuery,
+  subtype: string,
+  fields: Record<string, unknown> = {},
+): void {
+  query.emit({
+    type: "system",
+    subtype,
+    session_id: WORKFLOW_FIXTURE_SESSION_ID,
+    parent_tool_use_id: null,
+    uuid: `workflow-fixture-${subtype}`,
+    ...fields,
+  } as unknown as SDKMessage);
+}
+function emitWorkflowFixtureInit(query: FakeClaudeQuery, version = "2.1.288"): void {
+  // Use a complete typed public init envelope; only workflow_progress itself
+  // needs the received-extension cast above. The cwd is inert fixture metadata.
+  query.emit({
+    type: "system",
+    subtype: "init",
+    session_id: WORKFLOW_FIXTURE_SESSION_ID,
+    uuid: "71000000-0000-4000-8000-000000000133",
+    claude_code_version: version,
+    apiKeySource: "none",
+    cwd: path.resolve(os.tmpdir(), "cafecode-workflow-fixture"),
+    tools: [],
+    mcp_servers: [],
+    model: "claude-opus-5-5",
+    permissionMode: "default",
+    slash_commands: [],
+    output_style: "default",
+    skills: [],
+    plugins: [],
+    capabilities: [],
+  } satisfies SDKSystemMessage);
+}
+function emitWorkflowFixtureStart(
+  query: FakeClaudeQuery,
+  fields: Record<string, unknown> = {},
+): void {
+  emitWorkflowFixtureSystemMessage(query, "task_started", {
+    task_id: "workflow-fixture-task",
+    tool_use_id: "workflow-fixture-tool",
+    task_type: "local_workflow",
+    workflow_name: "Provider qualification",
+    description: "Qualify received workflow presentation",
+    ...fields,
+  });
+}
+function workflowFixtureSnapshot(title = "Inspect provider boundaries", tokens = 123): unknown[] {
+  return [
+    { type: "workflow_phase", index: 1, title, kind: "parallel" },
+    {
+      type: "workflow_agent",
+      index: 1,
+      phaseIndex: 1,
+      label: "Review provider",
+      model: "claude-sonnet-5-5",
+      state: "progress",
+      tokens,
+      durationMs: 500,
+    },
+  ];
 }
 
 function makeDeterministicRandomService(seed = 0x1234_5678): {
@@ -2624,6 +2721,7 @@ describe("ClaudeAdapterLive", () => {
       const harness = makeHarness({
         newQueryPerSession: true,
         environment: { CAFE_TEST_LOGIN_SELECTION: "unresolved-base" },
+        claudeConfig: { maxOutputTokens: 128_000 },
         resolveEnvironment: Effect.sync(() => {
           resolutions++;
           return selectedEnvironment;
@@ -2647,6 +2745,7 @@ describe("ClaudeAdapterLive", () => {
         for (const input of harness.createInputs) {
           assert.equal(input.options.env?.CLAUDE_CONFIG_DIR, selectedConfigDirectory);
           assert.equal(input.options.env?.CAFE_TEST_LOGIN_SELECTION, "existing-cafe-login");
+          assert.equal(input.options.env?.CLAUDE_CODE_MAX_OUTPUT_TOKENS, "128000");
         }
         assert.equal(first?.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS, "1");
         assert.equal(
@@ -2662,6 +2761,56 @@ describe("ClaudeAdapterLive", () => {
         Effect.provideService(Random.Random, makeDeterministicRandomService()),
         Effect.provide(harness.layer),
       );
+    },
+  );
+
+  it.effect(
+    "isolates Claude output budgets by account and preserves inherited policy on omission",
+    () => {
+      const baseEnvironment = Object.freeze({ CLAUDE_CODE_MAX_OUTPUT_TOKENS: "32000" });
+      const first = makeHarness({
+        instanceId: ProviderInstanceId.make("claude_output_first"),
+        environment: baseEnvironment,
+        claudeConfig: { maxOutputTokens: 128_000 },
+        cwd: os.tmpdir(),
+        baseDir: os.tmpdir(),
+      });
+      const second = makeHarness({
+        instanceId: ProviderInstanceId.make("claude_output_second"),
+        environment: baseEnvironment,
+        claudeConfig: { maxOutputTokens: 64_000 },
+        cwd: os.tmpdir(),
+        baseDir: os.tmpdir(),
+      });
+      const omitted = makeHarness({
+        instanceId: ProviderInstanceId.make("claude_output_inherited"),
+        environment: baseEnvironment,
+        cwd: os.tmpdir(),
+        baseDir: os.tmpdir(),
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "full-access" });
+        const firstEnv = first.createInputs[0]?.options.env;
+        for (const [harness, expected] of [
+          [second, "64000"],
+          [omitted, "32000"],
+        ] as const) {
+          yield* Effect.gen(function* () {
+            const siblingAdapter = yield* ClaudeAdapter;
+            yield* siblingAdapter.startSession({ threadId: THREAD_ID, runtimeMode: "full-access" });
+            assert.equal(
+              harness.createInputs[0]?.options.env?.CLAUDE_CODE_MAX_OUTPUT_TOKENS,
+              expected,
+            );
+            assert.notEqual(harness.createInputs[0]?.options.env, firstEnv);
+          }).pipe(Effect.provide(harness.layer));
+          assert.equal(first.query.closeCalls, 0);
+          assert.equal(firstEnv?.CLAUDE_CODE_MAX_OUTPUT_TOKENS, "128000");
+        }
+        assert.equal(baseEnvironment.CLAUDE_CODE_MAX_OUTPUT_TOKENS, "32000");
+        assert.notProperty(first.createInputs[0]?.options ?? {}, "maxOutputTokens");
+      }).pipe(Effect.provide(first.layer));
     },
   );
 
@@ -3428,6 +3577,174 @@ describe("ClaudeAdapterLive", () => {
       ]),
     );
     assert.deepEqual(unsupportedOutputStyle.settings as unknown, {});
+  });
+
+  it("keeps native Max and qualified Ultracode independent and rejects stale eligibility", () => {
+    const instanceId = ProviderInstanceId.make("claudeAgent");
+    for (const ultracode of [true, false]) {
+      const selection = createModelSelection(instanceId, "claude-opus-5-5", [
+        { id: "effort", value: "max" },
+        { id: "ultracode", value: ultracode },
+      ]);
+      const qualified = resolveClaudeModelSessionOptions(selection, undefined, "2.1.288");
+      assert.equal(qualified.effectiveEffort, "max");
+      assert.deepEqual(qualified.settings, { ultracode });
+      for (const version of [undefined, null, "unknown", "2.1.283"]) {
+        const stale = resolveClaudeModelSessionOptions(selection, undefined, version);
+        assert.equal(stale.effectiveEffort, "max");
+        assert.deepEqual(stale.settings, {});
+      }
+    }
+    const unsupported = resolveClaudeModelSessionOptions(
+      createModelSelection(instanceId, "claude-haiku-4-5", [{ id: "ultracode", value: true }]),
+      undefined,
+      "2.1.288",
+    );
+    assert.deepEqual(unsupported.settings, {});
+    const forgedEffort = resolveClaudeModelSessionOptions(
+      createModelSelection(instanceId, "claude-opus-5-5", [{ id: "effort", value: "ultracode" }]),
+      undefined,
+      "2.1.288",
+    );
+    assert.equal(forgedEffort.effectiveEffort, "medium");
+    assert.deepEqual(forgedEffort.settings, {});
+  });
+
+  it.effect(
+    "starts native Max plus Ultracode through public options without changing approvals",
+    () => {
+      const harness = makeHarness({ nativeVersion: "2.1.288", environment: {} });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const selection = createModelSelection(
+          ProviderInstanceId.make("claudeAgent"),
+          "claude-opus-5-5",
+          [
+            { id: "effort", value: "max" },
+            { id: "ultracode", value: true },
+          ],
+        );
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "approval-required",
+          modelSelection: selection,
+        });
+        const options = harness.getLastCreateQueryInput()?.options;
+        assert.equal(options?.effort, "max");
+        assert.deepEqual(options?.settings, { ultracode: true });
+        assert.equal(options?.permissionMode, "default");
+        assert.equal(options?.allowDangerouslySkipPermissions, undefined);
+        assert.equal(typeof options?.canUseTool, "function");
+        assert.deepEqual(session.modelSelection, selection);
+        yield* adapter.sendTurn({
+          threadId: session.threadId,
+          input: "hello",
+          modelSelection: selection,
+        });
+        assert.deepEqual(harness.query.applyFlagSettingsCalls, []);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect("updates concrete effort and preserves or explicitly disables native Ultracode", () => {
+    const harness = makeHarness({ nativeVersion: "2.1.288", environment: {} });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const instanceId = ProviderInstanceId.make("claudeAgent");
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "approval-required",
+        modelSelection: createModelSelection(instanceId, "claude-opus-5-5", [
+          { id: "effort", value: "high" },
+          { id: "ultracode", value: true },
+        ]),
+      });
+      const first = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "hello",
+        modelSelection: createModelSelection(instanceId, "claude-opus-5-5", [
+          { id: "effort", value: "max" },
+          { id: "ultracode", value: true },
+        ]),
+      });
+      assert.deepEqual(harness.query.applyFlagSettingsCalls, [
+        { effortLevel: "max", ultracode: true },
+      ]);
+      harness.query.emit({
+        ...makeSuccessfulClaudeResult("ultracode-session"),
+        user_message_uuid: first.turnId,
+      });
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      const second = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "again",
+        modelSelection: createModelSelection(instanceId, "claude-opus-5-5", [
+          { id: "effort", value: "max" },
+          { id: "ultracode", value: false },
+        ]),
+      });
+      assert.deepEqual(harness.query.applyFlagSettingsCalls, [
+        { effortLevel: "max", ultracode: true },
+        { ultracode: false },
+      ]);
+      harness.query.emit({
+        ...makeSuccessfulClaudeResult("ultracode-session"),
+        user_message_uuid: second.turnId,
+      });
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "default",
+        modelSelection: createModelSelection(instanceId, "claude-opus-5-5", [
+          { id: "effort", value: "max" },
+        ]),
+      });
+      assert.deepEqual(harness.query.applyFlagSettingsCalls, [
+        { effortLevel: "max", ultracode: true },
+        { ultracode: false },
+        { ultracode: null },
+      ]);
+      assert.deepEqual(harness.query.setPermissionModeCalls, []);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("does not enqueue a turn if public native flag admission fails", () => {
+    const harness = makeHarness({ nativeVersion: "2.1.288", environment: {} });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const instanceId = ProviderInstanceId.make("claudeAgent");
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "approval-required",
+        modelSelection: createModelSelection(instanceId, "claude-opus-5-5"),
+      });
+      harness.query.flagSettingsFailure = new Error("Synthetic flag admission rejected");
+      const rejected = yield* adapter
+        .sendTurn({
+          threadId: session.threadId,
+          input: "never admitted",
+          modelSelection: createModelSelection(instanceId, "claude-opus-5-5", [
+            { id: "ultracode", value: true },
+          ]),
+        })
+        .pipe(Effect.exit);
+      assert.equal(rejected._tag, "Failure");
+      assert.equal((yield* adapter.readThread(session.threadId)).turns.length, 0);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
   });
 
   it.effect("configures Claude SDK streaming without unused prompt suggestions", () => {
@@ -5986,6 +6303,637 @@ describe("ClaudeAdapterLive", () => {
         );
         assert.equal(progressEvent.payload.description, "Running background teammate");
       }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect(
+    "workflow snapshots retain omitted or rejected data and replace valid received counters",
+    () => {
+      const harness = makeHarness({ nativeVersion: "2.1.288", environment: {} });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const collected = yield* adapter.streamEvents.pipe(
+          Stream.filter(isWorkflowTaskFixtureEvent),
+          Stream.take(6),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "approval-required",
+        });
+        emitWorkflowFixtureInit(harness.query);
+        emitWorkflowFixtureStart(harness.query);
+        const firstSnapshot = [
+          ...workflowFixtureSnapshot(),
+          {
+            type: "workflow_agent",
+            index: 2,
+            phaseIndex: 1,
+            label: "Validate model selection",
+            model: "claude-opus-5-5",
+            fallbackModel: "claude-sonnet-5-5",
+            state: "done",
+            tokens: 456,
+            durationMs: 900,
+          },
+          {
+            type: "workflow_agent",
+            index: 3,
+            phaseIndex: 1,
+            label: "Failed attempt",
+            model: "claude-sonnet-5-5",
+            state: "error",
+            tokens: 0,
+            durationMs: 0,
+          },
+          {
+            type: "workflow_agent",
+            index: 4,
+            phaseIndex: 1,
+            label: "Queued attempt",
+            model: "claude-sonnet-5-5",
+          },
+          {
+            type: "workflow_agent",
+            index: 5,
+            phaseIndex: 1,
+            label: "Starting attempt",
+            model: "claude-sonnet-5-5",
+            state: "start",
+            tokens: 9,
+            durationMs: 20,
+          },
+        ];
+        const progress = (fields: Record<string, unknown>) =>
+          emitWorkflowFixtureSystemMessage(harness.query, "task_progress", {
+            task_id: "workflow-fixture-task",
+            tool_use_id: "workflow-fixture-tool",
+            description: "Qualify received workflow presentation",
+            usage: { total_tokens: 579, tool_uses: 3, duration_ms: 900 },
+            ...fields,
+          });
+        progress({ workflow_progress: firstSnapshot });
+        progress({ summary: "Native pure-progress frame omits the snapshot" });
+        progress({ workflow_progress: { unexpected: "not an array" } });
+        progress({
+          workflow_progress: Array.from({ length: 513 }, (_, index) => ({
+            type: "workflow_phase",
+            index: index + 1,
+            title: "Excessive input",
+          })),
+        });
+        progress({
+          workflow_progress: workflowFixtureSnapshot("Next observed phase", 7),
+          usage: { total_tokens: 7, tool_uses: 1, duration_ms: 500 },
+        });
+        const events = Array.from(yield* Fiber.join(collected));
+        const provenance = {
+          runtimeId: session.subagentRuntimeId!,
+          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+          name: "Provider qualification",
+        };
+        const started = events[0];
+        assert.equal(started?.type, "task.started");
+        if (started?.type === "task.started")
+          assert.equal(started.payload.taskType, "local_workflow");
+        assert.deepEqual(events[0]?.payload.workflow, provenance);
+        const admitted: RuntimeWorkflowPresentation = {
+          ...provenance,
+          phases: [{ index: 1, title: "Inspect provider boundaries", kind: "parallel" }],
+          agents: [
+            {
+              index: 1,
+              phaseIndex: 1,
+              label: "Review provider",
+              model: "claude-sonnet-5-5",
+              status: "running",
+              totalTokens: 123,
+              durationMs: 500,
+            },
+            {
+              index: 2,
+              phaseIndex: 1,
+              label: "Validate model selection",
+              model: "claude-opus-5-5",
+              fallbackModel: "claude-sonnet-5-5",
+              status: "completed",
+              totalTokens: 456,
+              durationMs: 900,
+            },
+            {
+              index: 3,
+              phaseIndex: 1,
+              label: "Failed attempt",
+              model: "claude-sonnet-5-5",
+              status: "failed",
+              totalTokens: 0,
+              durationMs: 0,
+            },
+            { index: 4, phaseIndex: 1, label: "Queued attempt", model: "claude-sonnet-5-5" },
+            {
+              index: 5,
+              phaseIndex: 1,
+              label: "Starting attempt",
+              model: "claude-sonnet-5-5",
+              status: "running",
+              totalTokens: 9,
+              durationMs: 20,
+            },
+          ],
+          truncated: false,
+        };
+        for (const event of events.slice(1, 5)) assert.deepEqual(event.payload.workflow, admitted);
+        assert.deepEqual(events[5]?.payload.workflow?.phases, [
+          { index: 1, title: "Next observed phase", kind: "parallel" },
+        ]);
+        assert.equal(
+          events[5]?.payload.workflow?.agents?.[0]?.totalTokens,
+          7,
+          "Snapshot counters replace rather than accumulate earlier received totals",
+        );
+        const finalProgress = events[5];
+        assert.equal(finalProgress?.type, "task.progress");
+        if (finalProgress?.type === "task.progress")
+          assert.deepEqual(finalProgress.payload.usage, {
+            total_tokens: 7,
+            tool_uses: 1,
+            duration_ms: 500,
+          });
+        assert.deepEqual(harness.query.stopTaskCalls, []);
+        assert.deepEqual(harness.query.backgroundTaskCalls, []);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect(
+    "workflow pre-init foreign and child frames cannot publish snapshots or rebind the native session",
+    () => {
+      const harness = makeHarness({ nativeVersion: "2.1.288", environment: {} });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        // The final same-owner progress edge is an ordered stream barrier. Every
+        // preceding rejected frame has completed projection before collection ends.
+        const collected = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil(
+            (event) =>
+              event.type === "task.progress" &&
+              event.payload.summary === "Workflow ownership barrier",
+          ),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+        emitWorkflowFixtureStart(harness.query, {
+          session_id: "pre-init-foreign",
+          workflow_name: "Pre-init must stay inert",
+        });
+        emitWorkflowFixtureSystemMessage(harness.query, "task_progress", {
+          task_id: "pre-init-task",
+          session_id: "pre-init-foreign",
+          workflow_progress: workflowFixtureSnapshot("Pre-init snapshot"),
+        });
+        emitWorkflowFixtureInit(harness.query);
+        emitWorkflowFixtureStart(harness.query);
+        for (const fields of [
+          { session_id: "foreign-workflow-session" },
+          { parent_tool_use_id: "nested-child-tool" },
+          { session_id: "" },
+        ]) {
+          emitWorkflowFixtureStart(harness.query, {
+            ...fields,
+            task_id: "unadmitted-workflow-task",
+            workflow_name: "Foreign workflow",
+          });
+          emitWorkflowFixtureSystemMessage(harness.query, "task_progress", {
+            task_id: "workflow-fixture-task",
+            description: "Unadmitted overwrite",
+            workflow_progress: workflowFixtureSnapshot("Unadmitted overwrite"),
+            ...fields,
+          });
+          emitWorkflowFixtureSystemMessage(harness.query, "task_notification", {
+            task_id: "workflow-fixture-task",
+            status: "completed",
+            ...fields,
+          });
+        }
+        emitWorkflowFixtureSystemMessage(harness.query, "task_progress", {
+          task_id: "workflow-fixture-task",
+          description: "Qualify received workflow presentation",
+          summary: "Workflow ownership barrier",
+          workflow_progress: workflowFixtureSnapshot(),
+        });
+        const events = Array.from(yield* Fiber.join(collected));
+        const tasks = events.filter(isWorkflowTaskFixtureEvent);
+        assert.deepEqual(
+          tasks.map((event) => event.type),
+          ["task.started", "task.progress"],
+        );
+        assert.deepEqual(tasks[1]?.payload.workflow?.phases, [
+          { index: 1, title: "Inspect provider boundaries", kind: "parallel" },
+        ]);
+        const activeSession = (yield* adapter.listSessions())[0];
+        // A fresh query with no submitted durable turn must not manufacture a
+        // resumable history cursor merely because presentation frames arrived.
+        assert.equal(activeSession?.resumeCursor, undefined);
+        assert.deepEqual(
+          events
+            .filter((event) => event.type === "thread.started")
+            .map((event) => event.payload.providerThreadId),
+          [WORKFLOW_FIXTURE_SESSION_ID],
+        );
+        assert.equal(
+          events.filter((event) => event.type === "thread.token-usage.updated").length,
+          0,
+        );
+        assert.equal(harness.createInputs.length, 1);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect(
+    "workflow snapshots use observed init version rather than the SDK or optimistic configured version",
+    () => {
+      const harness = makeHarness({ nativeVersion: "2.1.288", environment: {} });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const collected = yield* adapter.streamEvents.pipe(
+          Stream.filter(isWorkflowTaskFixtureEvent),
+          Stream.take(2),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+        emitWorkflowFixtureInit(harness.query, "2.1.287");
+        emitWorkflowFixtureStart(harness.query);
+        emitWorkflowFixtureSystemMessage(harness.query, "task_progress", {
+          task_id: "workflow-fixture-task",
+          description: "Version gate",
+          workflow_progress: workflowFixtureSnapshot(),
+        });
+        const events = Array.from(yield* Fiber.join(collected));
+        assert.equal(events[1]?.payload.workflow?.name, "Provider qualification");
+        assert.notProperty(events[1]?.payload.workflow ?? {}, "phases");
+        assert.notProperty(events[1]?.payload.workflow ?? {}, "agents");
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect(
+    "workflow ambient snapshots cannot replace or publish the last visible phase evidence",
+    () => {
+      const harness = makeHarness({ nativeVersion: "2.1.288", environment: {} });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const collected = yield* adapter.streamEvents.pipe(
+          Stream.filter(isWorkflowTaskFixtureEvent),
+          Stream.take(6),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "approval-required",
+        });
+        emitWorkflowFixtureInit(harness.query);
+        emitWorkflowFixtureStart(harness.query);
+        emitWorkflowFixtureSystemMessage(harness.query, "task_progress", {
+          task_id: "workflow-fixture-task",
+          description: "Public workflow",
+          workflow_progress: workflowFixtureSnapshot(),
+        });
+        emitWorkflowFixtureSystemMessage(harness.query, "task_updated", {
+          task_id: "workflow-fixture-task",
+          patch: { status: "running", ambient: true },
+        });
+        emitWorkflowFixtureSystemMessage(harness.query, "task_progress", {
+          task_id: "workflow-fixture-task",
+          description: "Ambient workflow",
+          workflow_progress: workflowFixtureSnapshot("Ambient must not overwrite", 999),
+        });
+        emitWorkflowFixtureSystemMessage(harness.query, "task_updated", {
+          task_id: "workflow-fixture-task",
+          patch: { status: "running", ambient: false },
+        });
+        emitWorkflowFixtureSystemMessage(harness.query, "task_progress", {
+          task_id: "workflow-fixture-task",
+          description: "Visible again",
+        });
+        const events = Array.from(yield* Fiber.join(collected));
+        assert.deepEqual(
+          events.map((event) => event.payload.visibility),
+          ["visible", "visible", "ambient", "ambient", "visible", "visible"],
+        );
+        for (const event of events.slice(2, 4))
+          assert.deepEqual(event.payload.workflow, {
+            runtimeId: session.subagentRuntimeId!,
+            providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+          });
+        assert.deepEqual(events[4]?.payload.workflow, events[1]?.payload.workflow);
+        assert.deepEqual(events[5]?.payload.workflow, events[1]?.payload.workflow);
+        assert.notInclude(
+          JSON.stringify(events.map((event) => event.payload.workflow)),
+          "Ambient must not overwrite",
+        );
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect(
+    "workflow terminal progress freezes and reused task ids do not borrow prior phase or control identities",
+    () => {
+      const harness = makeHarness({ nativeVersion: "2.1.288", environment: {} });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const collected = yield* adapter.streamEvents.pipe(
+          Stream.filter(isWorkflowTaskFixtureEvent),
+          Stream.take(6),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+        emitWorkflowFixtureInit(harness.query);
+        emitWorkflowFixtureStart(harness.query);
+        const progress = (fields: Record<string, unknown>) =>
+          emitWorkflowFixtureSystemMessage(harness.query, "task_progress", {
+            task_id: "workflow-fixture-task",
+            tool_use_id: "workflow-fixture-tool",
+            description: "Workflow lifecycle",
+            ...fields,
+          });
+        progress({ workflow_progress: workflowFixtureSnapshot() });
+        emitWorkflowFixtureSystemMessage(harness.query, "task_notification", {
+          task_id: "workflow-fixture-task",
+          tool_use_id: "workflow-fixture-tool",
+          status: "completed",
+        });
+        progress({ workflow_progress: workflowFixtureSnapshot("Late terminal overwrite", 999) });
+        emitWorkflowFixtureStart(harness.query, {
+          tool_use_id: "workflow-replacement-tool",
+          workflow_name: "Replacement workflow",
+        });
+        progress({ workflow_progress: workflowFixtureSnapshot("Old incarnation overwrite", 888) });
+        progress({ tool_use_id: "workflow-replacement-tool" });
+        const events = Array.from(yield* Fiber.join(collected));
+        assert.deepEqual(
+          events.map((event) => event.type),
+          [
+            "task.started",
+            "task.progress",
+            "task.completed",
+            "task.progress",
+            "task.started",
+            "task.progress",
+          ],
+        );
+        assert.deepEqual(events[2]?.payload.workflow, events[1]?.payload.workflow);
+        assert.deepEqual(events[3]?.payload.workflow, events[1]?.payload.workflow);
+        assert.notProperty(events[3]?.payload, "individualTaskControl");
+        for (const event of events.slice(4)) {
+          assert.equal(event.payload.workflow?.name, "Replacement workflow");
+          assert.notProperty(event.payload.workflow ?? {}, "phases");
+          assert.notProperty(event.payload.workflow ?? {}, "agents");
+        }
+        assert.notEqual(
+          events[4]?.payload.individualTaskControl?.capability.taskGeneration,
+          events[0]?.payload.individualTaskControl?.capability.taskGeneration,
+        );
+        assert.notInclude(JSON.stringify(events), "Late terminal overwrite");
+        assert.notInclude(JSON.stringify(events), "Old incarnation overwrite");
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect("workflow copied raw and native logs omit every sensitive snapshot sibling", () => {
+    const nativeEvents: Array<{ event?: { method?: string; payload?: unknown } }> = [];
+    const harness = makeHarness({
+      nativeVersion: "2.1.288",
+      environment: {},
+      nativeEventLogger: {
+        filePath: "memory://workflow-redaction-fixture",
+        write: (event) => {
+          nativeEvents.push(event as (typeof nativeEvents)[number]);
+          return Effect.void;
+        },
+        close: () => Effect.void,
+      },
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const collected = yield* adapter.streamEvents.pipe(
+        Stream.takeUntil(
+          (event) =>
+            event.type === "task.progress" &&
+            event.payload.description === "Safe workflow description",
+        ),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+      const secret = "workflow-private-content-sentinel";
+      // Diagnostic redaction runs before ownership rejection, including frames
+      // that arrive before init or belong to another native conversation.
+      emitWorkflowFixtureStart(harness.query, {
+        session_id: "unadmitted-pre-init-session",
+        prompt: secret,
+        private_extension: secret,
+      });
+      emitWorkflowFixtureSystemMessage(harness.query, "task_progress", {
+        task_id: "unadmitted-pre-init-task",
+        workflow_progress: [{ type: "workflow_agent", index: 1, promptPreview: secret }],
+        private_extension: secret,
+      });
+      emitWorkflowFixtureInit(harness.query);
+      emitWorkflowFixtureSystemMessage(harness.query, "task_progress", {
+        task_id: "unadmitted-foreign-task",
+        session_id: "foreign-workflow-session",
+        workflow_progress: [{ type: "workflow_agent", index: 1, promptPreview: secret }],
+        private_extension: secret,
+      });
+      emitWorkflowFixtureSystemMessage(harness.query, "task_progress", {
+        task_id: "",
+        description: "Malformed workflow identity",
+        workflow_progress: [{ type: "workflow_agent", index: 1, promptPreview: secret }],
+        private_extension: secret,
+      });
+      emitWorkflowFixtureStart(harness.query, { task_id: "", prompt: secret, script: secret });
+      emitWorkflowFixtureSystemMessage(harness.query, "task_notification", {
+        task_id: "",
+        task_type: "local_workflow",
+        status: "completed",
+        workflow_progress: [{ type: "workflow_agent", index: 1, resultPreview: secret }],
+        private_extension: secret,
+      });
+      emitWorkflowFixtureSystemMessage(harness.query, "task_updated", {
+        task_id: "",
+        patch: { status: "running", promptPreview: secret, private_extension: secret },
+        workflow_progress: [{ type: "workflow_agent", index: 1, resultPreview: secret }],
+        private_extension: secret,
+      });
+      emitWorkflowFixtureStart(harness.query, {
+        prompt: secret,
+        script: secret,
+        private_extension: { credential: secret },
+      });
+      emitWorkflowFixtureSystemMessage(harness.query, "task_progress", {
+        task_id: "workflow-fixture-task",
+        tool_use_id: "unbound-workflow-tool",
+        description: "Rejected tool binding",
+        workflow_progress: [{ type: "workflow_agent", index: 1, promptPreview: secret }],
+        private_extension: secret,
+      });
+      emitWorkflowFixtureSystemMessage(harness.query, "task_progress", {
+        task_id: "workflow-fixture-task",
+        description: "Safe workflow description",
+        workflow_progress: [
+          {
+            type: "workflow_phase",
+            index: 1,
+            title: "Review launch boundary",
+            kind: "parallel",
+            prompt: secret,
+          },
+          {
+            type: "workflow_agent",
+            index: 1,
+            phaseIndex: 1,
+            label: "Review provider",
+            model: "claude-sonnet-5-5",
+            state: "progress",
+            tokens: 12,
+            durationMs: 34,
+            agentId: secret,
+            promptPreview: secret,
+            resultPreview: secret,
+            lastToolSummary: secret,
+            lastToolName: secret,
+            error: secret,
+            output_file: `/private/${secret}/journal`,
+            script: secret,
+            toolCalls: 4,
+            private_extension: { credential: secret },
+          },
+          {
+            type: "workflow_agent",
+            index: 2,
+            phaseIndex: 1,
+            label: `token=${secret}`,
+            model: `/private/${secret}/model`,
+            state: "error",
+          },
+        ],
+        private_extension: { credential: secret },
+      });
+      const events = Array.from(yield* Fiber.join(collected));
+      const tasks = events.filter(isWorkflowTaskFixtureEvent);
+      assert.lengthOf(tasks, 2);
+      assert.isAtLeast(
+        events.filter((event) => event.type === "runtime.warning").length,
+        4,
+        "All four rejected task subtypes exercise canonical warning-detail privacy",
+      );
+      assert.deepEqual(tasks[1]?.payload.workflow?.agents, [
+        {
+          index: 1,
+          phaseIndex: 1,
+          label: "Review provider",
+          model: "claude-sonnet-5-5",
+          status: "running",
+          totalTokens: 12,
+          durationMs: 34,
+        },
+        { index: 2, phaseIndex: 1, status: "failed" },
+      ]);
+      for (const event of events) {
+        assert.notInclude(JSON.stringify(event), secret);
+        assert.notProperty((event.raw?.payload as object) ?? {}, "workflow_progress");
+      }
+      const progressPayload = nativeEvents.find(
+        (entry) => entry.event?.method === "claude/system/task_progress",
+      )?.event?.payload as Record<string, unknown>;
+      assert.ok(progressPayload);
+      assert.notProperty(progressPayload, "workflow_progress");
+      assert.notInclude(JSON.stringify(nativeEvents), secret);
+      for (const field of [
+        "agentId",
+        "promptPreview",
+        "resultPreview",
+        "lastToolSummary",
+        "output_file",
+        "script",
+        "private_extension",
+      ]) {
+        assert.notInclude(JSON.stringify(events), `"${field}"`);
+        assert.notInclude(JSON.stringify(nativeEvents), `"${field}"`);
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("workflow retained snapshots have a separate finite 32-task budget", () => {
+    const harness = makeHarness({ nativeVersion: "2.1.288", environment: {} });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      // Each of 33 distinct active tasks owns one start and one snapshot;
+      // two final omission frames observe the oldest eviction and newest row.
+      const collected = yield* adapter.streamEvents.pipe(
+        Stream.filter(isWorkflowTaskFixtureEvent),
+        Stream.take(68),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+      emitWorkflowFixtureInit(harness.query);
+      for (let index = 0; index <= 32; index++) {
+        emitWorkflowFixtureStart(harness.query, {
+          task_id: `workflow-budget-${index}`,
+          tool_use_id: `workflow-budget-tool-${index}`,
+        });
+        emitWorkflowFixtureSystemMessage(harness.query, "task_progress", {
+          task_id: `workflow-budget-${index}`,
+          tool_use_id: `workflow-budget-tool-${index}`,
+          description: `Workflow snapshot ${index}`,
+          workflow_progress: workflowFixtureSnapshot(`Observed phase ${index}`, index),
+        });
+      }
+      for (const index of [0, 32])
+        emitWorkflowFixtureSystemMessage(harness.query, "task_progress", {
+          task_id: `workflow-budget-${index}`,
+          tool_use_id: `workflow-budget-tool-${index}`,
+          description: `Workflow retained budget ${index}`,
+        });
+      const events = Array.from(yield* Fiber.join(collected));
+      assert.deepEqual(events[1]?.payload.workflow?.phases, [
+        { index: 1, title: "Observed phase 0", kind: "parallel" },
+      ]);
+      assert.equal(events[66]?.payload.workflow?.name, "Provider qualification");
+      assert.notProperty(events[66]?.payload.workflow ?? {}, "phases");
+      assert.notProperty(events[66]?.payload.workflow ?? {}, "agents");
+      assert.deepEqual(events[67]?.payload.workflow?.phases, [
+        { index: 1, title: "Observed phase 32", kind: "parallel" },
+      ]);
+      assert.equal(events[67]?.payload.workflow?.agents?.[0]?.totalTokens, 32);
+      assert.equal(harness.createInputs.length, 1);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

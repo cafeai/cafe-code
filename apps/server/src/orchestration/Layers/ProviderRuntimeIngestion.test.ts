@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -9012,6 +9013,176 @@ describe("ProviderRuntimeIngestion", () => {
         subagent: { ...subagent, status: "completed" },
       },
     });
+  });
+
+  it("persists exact stamped Claude workflow lifecycle digests without adding snapshot counters to billing", async () => {
+    const recordAccounting = vi.fn(() => Effect.void);
+    const harness = await createHarness({ recordAccounting });
+    const provider = ProviderDriverKind.make("claudeAgent");
+    const providerInstanceId = ProviderInstanceId.make("claudeAgent");
+    const subagentRuntimeId = SubagentRuntimeId.make("10000000-0000-4000-8000-000000000001");
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("turn-workflow-persistence");
+    const taskId = RuntimeTaskId.make("native-root");
+    const createdAt = "2026-10-09T00:00:00.000Z";
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("workflow-runtime-binding"),
+        threadId,
+        createdAt,
+        session: {
+          threadId,
+          providerName: provider,
+          providerInstanceId,
+          subagentRuntimeId,
+          status: "ready",
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: createdAt,
+        },
+      }),
+    );
+    const workflow = {
+      runtimeId: subagentRuntimeId,
+      providerInstanceId,
+      name: "Independent review",
+      phases: [{ index: 1, title: "Review" }],
+      agents: [
+        {
+          index: 1,
+          phaseIndex: 1,
+          label: "Reviewer",
+          model: "claude-fable-5-1",
+          status: "running" as const,
+          totalTokens: 120_000,
+          durationMs: 45_000,
+        },
+      ],
+    };
+    const base = { provider, providerInstanceId, subagentRuntimeId, threadId, turnId, createdAt };
+    const started = {
+      ...base,
+      type: "task.started" as const,
+      eventId: asEventId("workflow-persist-start"),
+      payload: { taskId, taskType: "local_workflow", description: "Workflow started", workflow },
+    };
+    harness.emit(started);
+    harness.emit(started); // At-least-once journal replay remains idempotent.
+    harness.emit({
+      ...base,
+      type: "task.progress",
+      eventId: asEventId("workflow-persist-progress"),
+      payload: { taskId, description: "Workflow updated", workflow },
+    });
+    harness.emit({
+      ...base,
+      type: "task.completed",
+      eventId: asEventId("workflow-persist-completed"),
+      payload: {
+        taskId,
+        status: "completed",
+        workflow: {
+          ...workflow,
+          agents: [{ ...workflow.agents[0]!, status: "completed" }],
+        },
+      },
+    });
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.id === "workflow-persist-completed"),
+    );
+    const digest = `sha256:workflow:${createHash("sha256")
+      .update(JSON.stringify([turnId, taskId, providerInstanceId, subagentRuntimeId]), "utf8")
+      .digest("hex")}`;
+    const rows = thread.activities.filter((activity) =>
+      activity.id.startsWith("workflow-persist-"),
+    );
+    const payloads = rows.map(
+      (activity) => activity.payload as Readonly<Record<string, unknown>> | undefined,
+    );
+    expect(rows.map((activity) => activity.kind)).toEqual([
+      "task.started",
+      "task.progress",
+      "task.completed",
+    ]);
+    expect(payloads.map((value) => value?.workflowRetentionId)).toEqual([digest, digest, digest]);
+    expect(payloads[0]?.workflow).toEqual(workflow);
+    expect(payloads[1]?.workflow).toEqual(workflow);
+    expect(payloads[2]?.workflow).toEqual({
+      ...workflow,
+      agents: [{ ...workflow.agents[0]!, status: "completed" }],
+    });
+    expect(
+      await Effect.runPromise(harness.sql<{ readonly kind: string; readonly childId: string }>`
+      SELECT kind, child_id AS "childId" FROM projection_subagent_lifecycle_sources
+      WHERE thread_id = ${threadId} ORDER BY kind
+    `),
+    ).toEqual([
+      { kind: "task.completed", childId: digest },
+      { kind: "task.progress", childId: digest },
+      { kind: "task.started", childId: digest },
+    ]);
+    expect(recordAccounting).not.toHaveBeenCalled();
+  });
+
+  it("does not retain workflow metadata borrowed from another query, account, or driver", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("turn-workflow-borrowed");
+    const providerInstanceId = ProviderInstanceId.make("claudeAgent");
+    const subagentRuntimeId = SubagentRuntimeId.make("10000000-0000-4000-8000-000000000001");
+    const workflow = {
+      runtimeId: subagentRuntimeId,
+      providerInstanceId,
+      name: "Independent review",
+    };
+    for (const [index, overrides] of [
+      {
+        workflow: {
+          ...workflow,
+          runtimeId: SubagentRuntimeId.make("20000000-0000-4000-8000-000000000001"),
+        },
+      },
+      { workflow: { ...workflow, providerInstanceId: ProviderInstanceId.make("claude-other") } },
+      { workflow, subagentRuntimeId: undefined },
+      { workflow, provider: ProviderDriverKind.make("codex") },
+    ].entries()) {
+      harness.emit({
+        type: "task.progress",
+        eventId: asEventId(`workflow-borrowed-${index}`),
+        provider: overrides.provider ?? ProviderDriverKind.make("claudeAgent"),
+        providerInstanceId,
+        ...(index === 2 ? {} : { subagentRuntimeId }),
+        threadId,
+        turnId,
+        createdAt: "2026-10-09T00:00:00.000Z",
+        payload: {
+          taskId: "native-root",
+          description: "Ordinary task update",
+          workflow: overrides.workflow,
+        },
+      });
+    }
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.id === "workflow-borrowed-3"),
+    );
+    const rows = thread.activities.filter((activity) =>
+      activity.id.startsWith("workflow-borrowed-"),
+    );
+    expect(rows).toHaveLength(4);
+    for (const row of rows) {
+      expect(row.payload).not.toHaveProperty("workflow");
+      expect(row.payload).not.toHaveProperty("workflowRetentionId");
+      expect((row.payload as Readonly<Record<string, unknown>> | undefined)?.detail).toBe(
+        "Ordinary task update",
+      );
+    }
+    expect(
+      await Effect.runPromise(harness.sql<{ readonly count: number }>`
+      SELECT COUNT(*) AS count FROM projection_subagent_lifecycle_sources WHERE thread_id = ${threadId}
+    `),
+    ).toEqual([{ count: 0 }]);
   });
 
   it("does not reopen a settled root turn for ambient task visibility", async () => {

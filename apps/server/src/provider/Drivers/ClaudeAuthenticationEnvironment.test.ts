@@ -45,6 +45,34 @@ function fixtureSpawner(
 }
 
 it.layer(NodeServices.layer)("Claude default authentication environment", (it) => {
+  for (const platform of ["darwin", "linux", "win32"] as const) {
+    it.effect(`excludes the chat output override from login selection on ${platform}`, () =>
+      Effect.gen(function* () {
+        const accountConfig = { ...config, maxOutputTokens: 128_000 };
+        const fixture = fixtureSpawner(() => login);
+        for (const inherited of [undefined, "32000"]) {
+          const parent = Object.freeze({
+            ...(inherited === undefined ? {} : { CLAUDE_CODE_MAX_OUTPUT_TOKENS: inherited }),
+          });
+          const resolve = yield* makeClaudeAuthenticationEnvironment(
+            accountConfig,
+            parent,
+            platform,
+          ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, fixture.spawner));
+          const selected = yield* resolve;
+          expect(selected.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe(inherited);
+          expect(Object.hasOwn(selected, "CLAUDE_CODE_MAX_OUTPUT_TOKENS")).toBe(
+            inherited !== undefined,
+          );
+          expect(parent.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe(inherited);
+        }
+        for (const command of fixture.commands) {
+          expect(command.options.env?.CLAUDE_CODE_MAX_OUTPUT_TOKENS).not.toBe("128000");
+        }
+      }),
+    );
+  }
+
   for (const [label, cafe, terminal, expected, expectedProbes] of [
     ["only Cafe logged in", login, noLogin, "cafe", 1],
     ["only terminal logged in", noLogin, login, "terminal", 2],
