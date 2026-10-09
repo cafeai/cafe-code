@@ -37,6 +37,20 @@ import {
   type SessionMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import { parseCliArgs } from "@cafecode/shared/cliArgs";
+import { CLAUDE_RESPONSE_LIMIT_MESSAGE } from "@cafecode/shared/claudeResponseLimits";
+import { sanitizeClaudeThinkingDiagnostics } from "../claudeThinkingDiagnostics.ts";
+import {
+  appendClaudePublicSummary,
+  claudeCommandInspectionPreview,
+  claudePublicSummaryDisplayText,
+  CLAUDE_PUBLIC_SUMMARY_ACTIVE_BLOCKS,
+  CLAUDE_PUBLIC_SUMMARY_BLOCKS,
+  CLAUDE_PUBLIC_SUMMARY_INTERVAL_MS,
+  makeClaudePublicSummaryText,
+  mergeClaudePublicSummarySnapshot,
+  retireClaudePublicSummaryKey,
+  type ClaudePublicSummaryText,
+} from "../claudePublicSummary.ts";
 import { publicClaudeCommands, UNAVAILABLE_COMMAND_CATALOG } from "../claudeCommands.ts";
 import { mapClaudeSessionQuotaReport, stripClaudeUsageReport } from "../claudeSessionQuota.ts";
 import { resolveConfiguredSubagentLimit } from "../Drivers/SubagentConcurrency.ts";
@@ -391,8 +405,28 @@ interface ClaudeTurnState {
   readonly items: Array<unknown>;
   readonly assistantTextBlocks: Map<number, AssistantTextBlockState>;
   readonly assistantTextBlockOrder: Array<AssistantTextBlockState>;
+  readonly publicSummaryBlocks: Map<string, ClaudePublicSummaryBlock>;
+  readonly reportedPublicSummarySnapshots: Set<string>;
+  readonly reportedPublicSummaryStreamKeys: Set<string>;
+  readonly retiredPublicSummaryNativeKeys: Set<string>;
+  publicSummaryFallbackDisabled: boolean;
+  publicSummaryNativeMessageKey?: string | undefined;
+  inspectionNativeMessageKey?: string | undefined;
+  publicSummaryNativeKeyFromStream: boolean;
   /** Native API message ids scope indexes; wrapper UUIDs identify individual snapshots. */
   assistantNativeMessageKey?: string | undefined;
+  /**
+   * Exact primary native error evidence for this response segment only. The
+   * assistant frame is diagnostic, not a terminal result or generated answer;
+   * retain the native session binding until its authoritative result settles.
+   */
+  responseLimitError?:
+    | {
+        readonly sessionId: string;
+        /** Bounded witnesses remain valid if command lifecycle arrives first. */
+        readonly promptUuids: ReadonlySet<string>;
+      }
+    | undefined;
   readonly pendingAssistantSnapshots: Array<AssistantTextBlockState>;
   readonly reportedAssistantSnapshotKeys: Set<string>;
   readonly capturedProposedPlanKeys: Set<string>;
@@ -438,6 +472,22 @@ interface AssistantTextBlockState {
   completionEmitted: boolean;
 }
 
+interface ClaudePublicSummaryBlock {
+  readonly itemId: string;
+  readonly nativeMessageKey: string;
+  readonly blockIndex: number;
+  readonly startedAt: string;
+  readonly text: ClaudePublicSummaryText;
+  publishedText?: string;
+  publishedTruncated?: boolean;
+  closed: boolean;
+  completed: boolean;
+  intermediatePublications: number;
+  terminalPublications: number;
+  snapshotSeen: boolean;
+  flushFiber?: Fiber.Fiber<void, never> | undefined;
+}
+
 interface PendingApproval {
   readonly requestType: CanonicalRequestType;
   readonly detail?: string;
@@ -468,7 +518,38 @@ interface ToolInFlight {
   readonly detail?: string;
   readonly input: Record<string, unknown>;
   readonly partialInputJson: string;
+  readonly startedAt?: string;
+  readonly inspectionNativeSessionId?: string;
   readonly lastEmittedInputFingerprint?: string;
+}
+
+/** New command inspection is an exact Bash allowlist, not raw tool JSON. */
+function claudeToolPresentationData(tool: ToolInFlight): Record<string, unknown> {
+  if (
+    tool.itemType !== "command_execution" ||
+    tool.toolName !== "Bash" ||
+    tool.inspectionNativeSessionId === undefined
+  ) {
+    return { toolName: tool.toolName, input: tool.input };
+  }
+  const command = typeof tool.input.command === "string" ? tool.input.command : undefined;
+  const description =
+    typeof tool.input.description === "string" ? tool.input.description : undefined;
+  const commandPreview =
+    command === undefined ? undefined : claudeCommandInspectionPreview(command, 4_096);
+  const descriptionPreview =
+    description === undefined ? undefined : claudeCommandInspectionPreview(description, 2_048);
+  return {
+    toolName: tool.toolName,
+    commandInspectionVersion: 1,
+    input: {
+      ...(commandPreview ? { command: commandPreview.text } : {}),
+      ...(descriptionPreview ? { description: descriptionPreview.text } : {}),
+    },
+    ...(commandPreview?.truncated ? { commandTruncated: true } : {}),
+    ...(descriptionPreview?.truncated ? { descriptionTruncated: true } : {}),
+    ...(tool.startedAt ? { startedAt: tool.startedAt } : {}),
+  };
 }
 
 type ClaudeTaskVisibilityAuthority = "provider" | "snapshot-retraction";
@@ -1673,7 +1754,7 @@ function boundedClaudeInitPluginDiagnostics(
 }
 
 function boundedClaudeNativeMessagePayload(message: SDKMessage): unknown {
-  const source = message as unknown as Record<string, unknown>;
+  const source = sanitizeClaudeThinkingDiagnostics(message) as Record<string, unknown>;
   if (source.type === "user") {
     const parentToolUseId = boundedClaudeNativeIdentifier(
       source.parent_tool_use_id,
@@ -1723,7 +1804,7 @@ function boundedClaudeNativeMessagePayload(message: SDKMessage): unknown {
       ),
     };
   }
-  if (source.type !== "system") return message;
+  if (source.type !== "system") return source;
 
   switch (source.subtype) {
     case "init":
@@ -2188,20 +2269,21 @@ type ClaudePromptCorrelation = {
 function knownClaudePromptUuids(
   context: ClaudeSessionContext,
   message: ClaudePromptCorrelation,
+  responseLimitPromptUuids?: ReadonlySet<string>,
 ): ReadonlyArray<string> | undefined {
   if (message.user_message_uuid === undefined && message.user_message_uuids === undefined) {
     return undefined;
   }
 
   const known = new Set<string>();
+  // The response-limit path may qualify a result against its exact admitted
+  // witnesses after a terminal command lifecycle already retired the input.
+  // Ordinary prompt bookkeeping always consults only the live ownership map.
+  const admittedUuids = responseLimitPromptUuids ?? context.promptLifecycleByUuid;
   const admit = (value: unknown) => {
     // Inputs are exact Cafe-minted UUIDs. Do not trim, invent, or retain an
     // unknown provider identity; the short length gate also bounds map hashing.
-    if (
-      typeof value === "string" &&
-      value.length === 36 &&
-      context.promptLifecycleByUuid.has(value)
-    ) {
+    if (typeof value === "string" && value.length === 36 && admittedUuids.has(value)) {
       known.add(value);
     }
   };
@@ -2375,6 +2457,88 @@ function isClaudeAuthFailureAssistantMessage(message: SDKMessage): boolean {
         text.toLowerCase().includes("invalid authentication credentials")
       );
     })
+  );
+}
+
+/** Structured SDK category only; child errors and matching prose are inert. */
+function hasExactPrimaryClaudeParent(message: SDKMessage): boolean {
+  const descriptor = Object.getOwnPropertyDescriptor(message, "parent_tool_use_id");
+  return descriptor
+    ? "value" in descriptor && (descriptor.value === null || descriptor.value === undefined)
+    : !("parent_tool_use_id" in message);
+}
+
+/** New presentation witnesses need an actual bounded opaque API identity. */
+function isBoundedClaudePublicNativeMessageId(id: unknown): id is string {
+  return typeof id === "string" && id.length > 0 && id.length <= 1_024;
+}
+
+function isPrimaryClaudeResponseLimitAssistantMessage(message: SDKMessage): boolean {
+  return (
+    message.type === "assistant" &&
+    message.error === "max_output_tokens" &&
+    hasExactPrimaryClaudeParent(message)
+  );
+}
+
+/**
+ * Limit telemetry cannot establish native identity or create a synthetic turn.
+ * Check before ensureThreadId, which ordinarily adopts identities from SDK
+ * conversation frames. Exact optional prompt stamps must belong to this query;
+ * an explicit foreign stamp cannot borrow the legacy uncorrelated fallback.
+ */
+function isCurrentClaudeResponseLimitAssistantMessage(
+  context: ClaudeSessionContext,
+  message: SDKMessage,
+): boolean {
+  if (!isPrimaryClaudeResponseLimitAssistantMessage(message) || message.type !== "assistant") {
+    return false;
+  }
+  const promptUuids = knownClaudePromptUuids(context, message);
+  return (
+    !context.stopped &&
+    context.turnState !== undefined &&
+    context.session.activeTurnId === context.turnState.turnId &&
+    context.resumeSessionId !== undefined &&
+    context.lastThreadStartedId === context.resumeSessionId &&
+    message.session_id === context.resumeSessionId &&
+    (promptUuids === undefined || promptUuids.length > 0)
+  );
+}
+
+/** Public summaries cannot acquire conversation/turn authority from their text. */
+function isCurrentClaudePublicSummaryMessage(context: ClaudeSessionContext, message: SDKMessage) {
+  if (message.type !== "assistant" && message.type !== "stream_event") return false;
+  const prompts = knownClaudePromptUuids(context, message);
+  return (
+    hasExactPrimaryClaudeParent(message) &&
+    !context.stopped &&
+    !context.authFailureSeen &&
+    context.turnState !== undefined &&
+    context.session.activeTurnId === context.turnState.turnId &&
+    context.resumeSessionId !== undefined &&
+    context.lastThreadStartedId === context.resumeSessionId &&
+    message.session_id === context.resumeSessionId &&
+    (prompts === undefined || prompts.length > 0)
+  );
+}
+
+function carriesClaudeThinkingContent(message: SDKMessage): boolean {
+  if (message.type === "stream_event") {
+    const event = message.event;
+    return (
+      (event.type === "content_block_delta" &&
+        (event.delta.type === "thinking_delta" || event.delta.type === "signature_delta")) ||
+      (event.type === "content_block_start" &&
+        (event.content_block.type === "thinking" ||
+          event.content_block.type === "redacted_thinking"))
+    );
+  }
+  return (
+    message.type === "assistant" &&
+    message.message.content.some(
+      (block) => block.type === "thinking" || block.type === "redacted_thinking",
+    )
   );
 }
 
@@ -3424,6 +3588,12 @@ function makeClaudeTurnState(input: {
     items: [],
     assistantTextBlocks: new Map(),
     assistantTextBlockOrder: [],
+    publicSummaryBlocks: new Map(),
+    reportedPublicSummarySnapshots: new Set(),
+    reportedPublicSummaryStreamKeys: new Set(),
+    retiredPublicSummaryNativeKeys: new Set(),
+    publicSummaryFallbackDisabled: false,
+    publicSummaryNativeKeyFromStream: false,
     pendingAssistantSnapshots: [],
     reportedAssistantSnapshotKeys: new Set(),
     capturedProposedPlanKeys: new Set(),
@@ -3433,6 +3603,18 @@ function makeClaudeTurnState(input: {
     watchdogWarningsEmitted: 0,
     nextSyntheticAssistantBlockIndex: -1,
   };
+}
+
+/** Retired source witnesses never become new fallback authority by eviction. */
+function retirePublicSummaryBlocks(turn: ClaudeTurnState | undefined): void {
+  if (!turn) return;
+  for (const block of turn.publicSummaryBlocks.values()) {
+    if (
+      !retireClaudePublicSummaryKey(turn.retiredPublicSummaryNativeKeys, block.nativeMessageKey)
+    ) {
+      turn.publicSummaryFallbackDisabled = true;
+    }
+  }
 }
 
 function sanitizeDiagnosticLine(value: string): string {
@@ -3673,6 +3855,14 @@ function extractAssistantTextBlocks(message: SDKMessage): Array<string> {
   }
 
   return fragments;
+}
+
+/** Preserve the existing UTF-16 snapshot commitment across all callers. */
+function claudeAssistantSnapshotKey(uuid: string): string {
+  return createHash("sha256")
+    .update("claude-assistant-snapshot-v1\0")
+    .update(Buffer.from(uuid, "utf16le"))
+    .digest("hex");
 }
 
 function extractContentBlockText(block: unknown): string {
@@ -4038,7 +4228,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // All callbacks carry the exact originating query context. Looking up the
     // current thread here would let a late old-query callback borrow its
     // replacement's generation and falsely reanimate a persisted worker.
-    const stamped = { ...event, subagentRuntimeId: context.subagentRuntimeId };
+    // Operational raw metadata is not SDK roundtrip context. Strip opaque
+    // thinking diagnostics here as well as in the native logger, including
+    // older fallback paths that carry an assistant snapshot directly.
+    const stamped = {
+      ...event,
+      ...(event.raw?.source === "claude.sdk.message"
+        ? { raw: { ...event.raw, payload: sanitizeClaudeThinkingDiagnostics(event.raw.payload) } }
+        : {}),
+      subagentRuntimeId: context.subagentRuntimeId,
+    };
     const binding =
       event.type === "task.started" ||
       event.type === "task.progress" ||
@@ -4300,6 +4499,209 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     };
   });
 
+  const publishPublicSummary = Effect.fn("publishPublicSummary")(function* (
+    context: ClaudeSessionContext,
+    block: ClaudePublicSummaryBlock,
+    terminalStatus?: "completed" | "failed",
+  ) {
+    const turn = context.turnState;
+    const displayText = claudePublicSummaryDisplayText(block.text.text);
+    if (!turn || displayText.trim().length === 0) return;
+    if (
+      block.completed &&
+      (!terminalStatus ||
+        (block.publishedText === displayText && block.publishedTruncated === block.text.truncated))
+    )
+      return;
+    if (!terminalStatus && block.intermediatePublications >= 16) return;
+    if (terminalStatus && block.terminalPublications >= 2) return;
+    if (
+      !terminalStatus &&
+      block.publishedText === displayText &&
+      block.publishedTruncated === block.text.truncated
+    )
+      return;
+    block.publishedText = displayText;
+    block.publishedTruncated = block.text.truncated;
+    if (terminalStatus) {
+      block.completed = true;
+      block.terminalPublications += 1;
+    } else block.intermediatePublications += 1;
+    const stamp = yield* makeEventStamp();
+    yield* offerRuntimeEvent(context, {
+      ...stamp,
+      // Keep the source block's receipt time stable when snapshots replace the
+      // same durable activity, so an update cannot move it past later tools.
+      createdAt: block.startedAt,
+      type: terminalStatus ? "item.completed" : "item.updated",
+      provider: PROVIDER,
+      threadId: context.session.threadId,
+      turnId: turn.turnId,
+      itemId: asRuntimeItemId(block.itemId),
+      payload: {
+        itemType: "reasoning",
+        status: terminalStatus ?? "inProgress",
+        title: "Claude summary",
+        detail: displayText,
+        data: {
+          summaryVersion: 1,
+          streamKind: "reasoning_summary_text",
+          truncated: block.text.truncated,
+        },
+      },
+      // Deliberately no raw SDK block, signature, or provider-controlled data.
+      providerRefs: nativeProviderRefs(context),
+    });
+  });
+
+  const flushPublicSummaries = Effect.fn("flushPublicSummaries")(function* (
+    context: ClaudeSessionContext,
+    terminalStatus?: "completed" | "failed",
+  ) {
+    for (const block of context.turnState?.publicSummaryBlocks.values() ?? []) {
+      if (block.flushFiber) {
+        const fiber = block.flushFiber;
+        block.flushFiber = undefined;
+        yield* Fiber.interrupt(fiber);
+      }
+      yield* publishPublicSummary(context, block, terminalStatus);
+    }
+  });
+
+  const appendPublicSummary = Effect.fn("appendPublicSummary")(function* (
+    context: ClaudeSessionContext,
+    blockIndex: number,
+    text: string,
+  ) {
+    const turn = context.turnState;
+    const nativeMessageKey = turn?.publicSummaryNativeMessageKey;
+    if (
+      !turn ||
+      turn.publicSummaryFallbackDisabled ||
+      !nativeMessageKey ||
+      !Number.isSafeInteger(blockIndex) ||
+      blockIndex < 0
+    )
+      return;
+    const key = `${nativeMessageKey}:${blockIndex}`;
+    let block = turn.publicSummaryBlocks.get(key);
+    if (!block) {
+      if (
+        turn.publicSummaryBlocks.size >= CLAUDE_PUBLIC_SUMMARY_BLOCKS ||
+        Array.from(turn.publicSummaryBlocks.values()).filter((entry) => !entry.closed).length >=
+          CLAUDE_PUBLIC_SUMMARY_ACTIVE_BLOCKS
+      )
+        return;
+      block = {
+        itemId: yield* Random.nextUUIDv4,
+        nativeMessageKey,
+        blockIndex,
+        startedAt: yield* nowIso,
+        text: makeClaudePublicSummaryText(),
+        closed: false,
+        completed: false,
+        intermediatePublications: 0,
+        terminalPublications: 0,
+        snapshotSeen: false,
+      };
+      turn.publicSummaryBlocks.set(key, block);
+    }
+    if (block.closed || block.completed || text.length === 0) return;
+    appendClaudePublicSummary(block.text, text);
+    if (block.publishedText === undefined) {
+      yield* publishPublicSummary(context, block);
+    } else if (
+      !block.flushFiber &&
+      block.intermediatePublications < 16 &&
+      (block.publishedText !== claudePublicSummaryDisplayText(block.text.text) ||
+        block.publishedTruncated !== block.text.truncated)
+    ) {
+      const exactBlock = block;
+      block.flushFiber = yield* Effect.gen(function* () {
+        yield* Effect.sleep(CLAUDE_PUBLIC_SUMMARY_INTERVAL_MS);
+        exactBlock.flushFiber = undefined;
+        // An old timer cannot borrow a new query, segment, turn or block.
+        if (
+          context.stopped ||
+          sessions.get(context.session.threadId) !== context ||
+          context.turnState !== turn ||
+          turn.publicSummaryBlocks.get(key) !== exactBlock
+        )
+          return;
+        yield* publishPublicSummary(context, exactBlock);
+      }).pipe(Effect.forkChild);
+    }
+  });
+
+  const backfillPublicSummarySnapshot = Effect.fn("backfillPublicSummarySnapshot")(function* (
+    context: ClaudeSessionContext,
+    message: Extract<SDKMessage, { type: "assistant" }>,
+  ) {
+    const turn = context.turnState;
+    if (
+      !turn ||
+      turn.publicSummaryFallbackDisabled ||
+      !isCurrentClaudePublicSummaryMessage(context, message) ||
+      message.error !== undefined ||
+      !isBoundedClaudePublicNativeMessageId(message.message.id)
+    )
+      return;
+    const nativeKey = createHash("sha256").update(message.message.id, "utf16le").digest("hex");
+    if (turn.retiredPublicSummaryNativeKeys.has(nativeKey)) return;
+    if (
+      turn.publicSummaryNativeKeyFromStream &&
+      turn.publicSummaryNativeMessageKey &&
+      turn.publicSummaryNativeMessageKey !== nativeKey
+    )
+      return;
+    if (message.message.content.length > 256) return;
+    const blocks = message.message.content.filter((block) => block.type === "thinking");
+    // SDK completed wrappers carry one source block. Without a unique native
+    // block witness, a multi-block older snapshot cannot guess indexes.
+    if (blocks.length !== 1) return;
+    const snapshot = blocks[0];
+    if (!snapshot || snapshot.type !== "thinking" || typeof snapshot.thinking !== "string") return;
+    const replayKey = claudeAssistantSnapshotKey(message.uuid);
+    if (
+      !rememberBoundedClaudeKey(
+        turn.reportedPublicSummarySnapshots,
+        replayKey,
+        CLAUDE_SUBAGENT_MESSAGE_DEDUPE_LIMIT,
+      )
+    )
+      return;
+    const candidates = Array.from(turn.publicSummaryBlocks.values()).filter(
+      (block) => block.nativeMessageKey === nativeKey,
+    );
+    if (candidates.length > 1) return;
+    let block = candidates[0];
+    if (!block) {
+      if (turn.publicSummaryFallbackDisabled) return;
+      // Closed source blocks must not be recreated by a late final wrapper.
+      if (
+        Array.from(turn.publicSummaryBlocks.values()).some(
+          (entry) => entry.nativeMessageKey === nativeKey,
+        )
+      )
+        return;
+      turn.publicSummaryNativeMessageKey = nativeKey;
+      turn.publicSummaryNativeKeyFromStream = false;
+      yield* appendPublicSummary(context, 0, "");
+      block = turn.publicSummaryBlocks.get(`${nativeKey}:0`);
+    }
+    if (!block) return;
+    if (block.snapshotSeen) return;
+    block.snapshotSeen = true;
+    if (!mergeClaudePublicSummarySnapshot(block.text, snapshot.thinking)) return;
+    block.closed = true;
+    if (block.flushFiber) {
+      const fiber = block.flushFiber;
+      block.flushFiber = undefined;
+      yield* Fiber.interrupt(fiber);
+    }
+    yield* publishPublicSummary(context, block, "completed");
+  });
+
   const ensureAssistantTextBlock = Effect.fn("ensureAssistantTextBlock")(function* (
     context: ClaudeSessionContext,
     blockIndex: number,
@@ -4470,10 +4872,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     if (message.type !== "assistant") {
       return;
     }
-    const snapshotKey = createHash("sha256")
-      .update("claude-assistant-snapshot-v1\0")
-      .update(Buffer.from(message.uuid, "utf16le"))
-      .digest("hex");
+    const snapshotKey = claudeAssistantSnapshotKey(message.uuid);
     if (
       !rememberBoundedClaudeKey(
         turnState.reportedAssistantSnapshotKeys,
@@ -4597,6 +4996,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
     const nextThreadId = message.session_id;
     if (context.resumeSessionId !== undefined && context.resumeSessionId !== nextThreadId) {
+      // A response-limit witness belongs only to the previous conversation;
+      // even a delayed result that later re-adopts that id cannot reuse it.
+      if (context.turnState) context.turnState.responseLimitError = undefined;
+      yield* flushPublicSummaries(context, "failed");
+      retirePublicSummaryBlocks(context.turnState);
+      context.turnState?.publicSummaryBlocks.clear();
+      if (context.turnState) {
+        context.turnState.publicSummaryNativeMessageKey = undefined;
+        context.turnState.inspectionNativeMessageKey = undefined;
+      }
       context.commandCatalogPushRevision += 1;
       context.pendingCommandCatalog = undefined;
       setCommandCatalog(context, UNAVAILABLE_COMMAND_CATALOG);
@@ -4908,6 +5317,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return;
     }
 
+    yield* flushPublicSummaries(context, status === "completed" ? "completed" : "failed");
+
     for (const [blockKey, tool] of context.inFlightTools.entries()) {
       // A response boundary is not terminal evidence for a detached call. Its
       // eventual result/notification retains the original item and turn, and
@@ -4927,10 +5338,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           status: status === "completed" ? "completed" : "failed",
           title: tool.title,
           ...(tool.detail ? { detail: tool.detail } : {}),
-          data: {
-            toolName: tool.toolName,
-            input: tool.input,
-          },
+          data: claudeToolPresentationData(tool),
         },
         providerRefs: nativeProviderRefs(context, {
           providerItemId: tool.itemId,
@@ -4959,9 +5367,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // turn items, diagnostics, and the canonical turn id, but reset all state
     // whose identifiers are scoped to one Claude response segment.
     turnState.assistantTextBlocks.clear();
+    retirePublicSummaryBlocks(turnState);
+    turnState.publicSummaryBlocks.clear();
+    turnState.reportedPublicSummarySnapshots.clear();
+    turnState.reportedPublicSummaryStreamKeys.clear();
+    turnState.publicSummaryNativeMessageKey = undefined;
+    turnState.inspectionNativeMessageKey = undefined;
+    turnState.publicSummaryNativeKeyFromStream = false;
     turnState.assistantTextBlockOrder.splice(0);
     turnState.pendingAssistantSnapshots.splice(0);
     turnState.assistantNativeMessageKey = undefined;
+    turnState.responseLimitError = undefined;
     turnState.reportedAssistantSnapshotKeys.clear();
     turnState.reportedSubagentMessageKeys.clear();
     turnState.nextSyntheticAssistantBlockIndex = -1;
@@ -5107,6 +5523,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const handleStreamEvent = Effect.fn("handleStreamEvent")(function* (
     context: ClaudeSessionContext,
     message: SDKMessage,
+    publicSummaryAdmitted: boolean,
+    primaryPresentationAdmitted: boolean,
   ) {
     if (message.type !== "stream_event") {
       return;
@@ -5122,9 +5540,36 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return;
     }
     if (!isNestedAgentStream && event.type === "message_start" && context.turnState) {
+      yield* flushPublicSummaries(context);
+      // A later native request supersedes earlier limit telemetry. Its own
+      // authoritative result determines success/failure; a recovered response
+      // must never inherit the failed request's presentation category.
+      context.turnState.responseLimitError = undefined;
       context.turnState.assistantNativeMessageKey =
         typeof event.message.id === "string"
           ? createHash("sha256").update(Buffer.from(event.message.id, "utf16le")).digest("hex")
+          : undefined;
+      context.turnState.publicSummaryNativeMessageKey =
+        publicSummaryAdmitted &&
+        isBoundedClaudePublicNativeMessageId(event.message.id) &&
+        context.turnState.assistantNativeMessageKey !== undefined &&
+        !context.turnState.retiredPublicSummaryNativeKeys.has(
+          context.turnState.assistantNativeMessageKey,
+        )
+          ? context.turnState.assistantNativeMessageKey
+          : undefined;
+      context.turnState.publicSummaryNativeKeyFromStream =
+        context.turnState.publicSummaryNativeMessageKey !== undefined;
+      context.turnState.inspectionNativeMessageKey =
+        primaryPresentationAdmitted &&
+        isBoundedClaudePublicNativeMessageId(event.message.id) &&
+        context.turnState.assistantNativeMessageKey !== undefined &&
+        !context.turnState.retiredPublicSummaryNativeKeys.has(
+          context.turnState.assistantNativeMessageKey,
+        ) &&
+        (!context.turnState.publicSummaryFallbackDisabled ||
+          (knownClaudePromptUuids(context, message)?.length ?? 0) > 0)
+          ? context.turnState.assistantNativeMessageKey
           : undefined;
     }
     if (!isNestedAgentStream) {
@@ -5158,6 +5603,19 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               ? event.delta.thinking
               : "";
         if (deltaText.length === 0) {
+          return;
+        }
+        if (event.delta.type === "thinking_delta") {
+          if (
+            isCurrentClaudePublicSummaryMessage(context, message) &&
+            rememberBoundedClaudeKey(
+              context.turnState.reportedPublicSummaryStreamKeys,
+              `${context.turnState.publicSummaryNativeMessageKey}:${event.index}:${claudeAssistantSnapshotKey(message.uuid)}`,
+              CLAUDE_SUBAGENT_MESSAGE_DEDUPE_LIMIT,
+            )
+          ) {
+            yield* appendPublicSummary(context, event.index, deltaText);
+          }
           return;
         }
         const streamKind = streamKindFromDeltaType(event.delta.type);
@@ -5259,10 +5717,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             status: "inProgress",
             title: nextTool.title,
             ...(nextTool.detail ? { detail: nextTool.detail } : {}),
-            data: {
-              toolName: nextTool.toolName,
-              input: nextTool.input,
-            },
+            data: claudeToolPresentationData(nextTool),
           },
           providerRefs: nativeProviderRefs(context, {
             providerItemId: nextTool.itemId,
@@ -5303,6 +5758,20 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     if (event.type === "content_block_start") {
       const { index, content_block: block } = event;
+      if (block.type === "thinking") {
+        if (
+          isCurrentClaudePublicSummaryMessage(context, message) &&
+          context.turnState &&
+          rememberBoundedClaudeKey(
+            context.turnState.reportedPublicSummaryStreamKeys,
+            `${context.turnState.publicSummaryNativeMessageKey}:${index}:${claudeAssistantSnapshotKey(message.uuid)}`,
+            CLAUDE_SUBAGENT_MESSAGE_DEDUPE_LIMIT,
+          )
+        ) {
+          yield* appendPublicSummary(context, index, block.thinking);
+        }
+        return;
+      }
       if (block.type === "text") {
         if (isNestedAgentStream) {
           return;
@@ -5321,6 +5790,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       }
 
       const toolName = block.name;
+      yield* flushPublicSummaries(context);
       const itemType = classifyToolItemType(toolName);
       const toolInput =
         typeof block.input === "object" && block.input !== null
@@ -5331,6 +5801,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const inputFingerprint =
         Object.keys(toolInput).length > 0 ? toolInputFingerprint(toolInput) : undefined;
 
+      const stamp = yield* makeEventStamp();
       const tool: ToolInFlight = {
         controlId: randomUUID(),
         controlGeneration: randomUUID(),
@@ -5342,11 +5813,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         detail,
         input: toolInput,
         partialInputJson: "",
+        startedAt: stamp.createdAt,
+        ...(primaryPresentationAdmitted &&
+        context.turnState?.inspectionNativeMessageKey !== undefined &&
+        toolName === "Bash" &&
+        itemType === "command_execution"
+          ? { inspectionNativeSessionId: message.session_id }
+          : {}),
         ...(inputFingerprint ? { lastEmittedInputFingerprint: inputFingerprint } : {}),
       };
       context.inFlightTools.set(claudeStreamBlockKey(parentToolUseId, index), tool);
 
-      const stamp = yield* makeEventStamp();
       yield* offerRuntimeEvent(context, {
         type: "item.started",
         eventId: stamp.eventId,
@@ -5360,10 +5837,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           status: "inProgress",
           title: tool.title,
           ...(tool.detail ? { detail: tool.detail } : {}),
-          data: {
-            toolName: tool.toolName,
-            input: toolInput,
-          },
+          data: claudeToolPresentationData(tool),
         },
         providerRefs: nativeProviderRefs(context, {
           providerItemId: tool.itemId,
@@ -5379,6 +5853,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     if (event.type === "content_block_stop") {
       const { index } = event;
+      const nativeKey = context.turnState?.publicSummaryNativeMessageKey;
+      const summaryBlock =
+        nativeKey && isCurrentClaudePublicSummaryMessage(context, message)
+          ? context.turnState?.publicSummaryBlocks.get(`${nativeKey}:${index}`)
+          : undefined;
+      if (summaryBlock) {
+        summaryBlock.closed = true;
+        yield* flushPublicSummaries(context);
+        yield* publishPublicSummary(context, summaryBlock, "completed");
+        return;
+      }
       const assistantBlock = isNestedAgentStream
         ? undefined
         : context.turnState?.assistantTextBlocks.get(index);
@@ -5478,11 +5963,34 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const redactedToolResultText = quarantineToolResultContent
         ? CLAUDE_RESOURCE_LINK_OVERFLOW_OMISSION
         : redactClaudeResourceString(toolResult.text, foregroundResourceProjection.redactions);
+      const completedAt = yield* nowIso;
+      const observedDuration = tool.startedAt
+        ? Date.parse(completedAt) - Date.parse(tool.startedAt)
+        : undefined;
+      const commandOutput =
+        tool.itemType === "command_execution" &&
+        tool.toolName === "Bash" &&
+        tool.inspectionNativeSessionId === message.session_id &&
+        hasExactPrimaryClaudeParent(message) &&
+        !quarantineToolResultContent
+          ? claudeCommandInspectionPreview(redactedToolResultText, 2_048)
+          : undefined;
       const toolData = {
-        toolName: tool.toolName,
-        input: tool.input,
+        ...claudeToolPresentationData(tool),
         result: redactedToolResultBlock,
         ...(foregroundResourceLinks ? { resourceLinks: foregroundResourceLinks } : {}),
+        ...(commandOutput
+          ? {
+              output: commandOutput.text,
+              outputTruncated: commandOutput.truncated,
+              completedAt,
+              ...(observedDuration !== undefined &&
+              Number.isFinite(observedDuration) &&
+              observedDuration >= 0
+                ? { durationMs: observedDuration }
+                : {}),
+            }
+          : {}),
       };
 
       const updatedStamp = yield* makeEventStamp();
@@ -5696,11 +6204,37 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const handleAssistantMessage = Effect.fn("handleAssistantMessage")(function* (
     context: ClaudeSessionContext,
     message: SDKMessage,
+    publicSummaryAdmitted: boolean,
   ) {
     if (message.type !== "assistant") {
       return;
     }
+    if (context.turnState && isCurrentClaudeResponseLimitAssistantMessage(context, message)) {
+      const promptUuids = knownClaudePromptUuids(context, message);
+      const promptWitnesses = new Set(promptUuids);
+      if (promptUuids === undefined) {
+        // Stop iterating at the bound rather than materializing the whole
+        // accepted-input queue merely to retain one segment's witnesses.
+        for (const uuid of context.promptLifecycleByUuid.keys()) {
+          promptWitnesses.add(uuid);
+          if (promptWitnesses.size >= CLAUDE_PROMPT_CORRELATION_LIMIT) break;
+        }
+      }
+      acknowledgeKnownClaudePromptsStarted(context, message);
+      context.turnState.responseLimitError = {
+        sessionId: message.session_id,
+        promptUuids: promptWitnesses,
+      };
+      // Qualified SDK 0.3.288 / bundled CLI 2.1.288 emits this category as a
+      // separate synthetic one-text diagnostic after bounded native recovery;
+      // genuine public partial blocks have already been yielded separately.
+      // Do not append diagnostic prose as an answer, complete the turn, or send
+      // input. Await the result and retain all already-received public content.
+      // https://code.claude.com/docs/en/agent-sdk/typescript#sdkassistantmessage
+      return;
+    }
     if (isClaudeAuthFailureAssistantMessage(message)) {
+      if (context.turnState) context.turnState.responseLimitError = undefined;
       context.authFailureSeen = true;
       yield* emitRuntimeWarning(
         context,
@@ -5721,6 +6255,26 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     const parentToolUseId = claudeParentToolUseId(message);
     if (parentToolUseId === undefined) {
+      if (
+        message.error === undefined &&
+        message.message.content.some(
+          (block) =>
+            (block.type === "text" && block.text.length > 0) ||
+            block.type === "tool_use" ||
+            block.type === "server_tool_use" ||
+            block.type === "mcp_tool_use",
+        ) &&
+        context.turnState &&
+        context.turnState.responseLimitError !== undefined &&
+        !context.turnState.reportedAssistantSnapshotKeys.has(
+          claudeAssistantSnapshotKey(message.uuid),
+        )
+      ) {
+        // A replay of public text already projected before the limit is not
+        // evidence of recovery. New primary blocks can supersede the marker;
+        // streaming producers also clear it at the stronger message_start edge.
+        context.turnState.responseLimitError = undefined;
+      }
       acknowledgeKnownClaudePromptsStarted(context, message);
     }
     if (isClaudeNestedStreamHidden(context, parentToolUseId)) {
@@ -5900,6 +6454,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       // output worth preserving; only the later result/interrupt event may
       // terminalize the turn.
       yield* backfillAssistantTextBlocksFromSnapshot(context, message);
+      if (publicSummaryAdmitted) yield* backfillPublicSummarySnapshot(context, message);
     }
 
     context.lastAssistantUuid = message.uuid;
@@ -5919,9 +6474,24 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const status = turnStatusFromResult(message);
     const resultErrors = "errors" in message && Array.isArray(message.errors) ? message.errors : [];
     const authFailure = isClaudeAuthFailureResult(message);
+    const responseLimitError = context.turnState?.responseLimitError;
+    const resultPromptUuids = knownClaudePromptUuids(
+      context,
+      message,
+      responseLimitError?.promptUuids,
+    );
+    const responseLimitFailure =
+      status === "failed" &&
+      !context.authFailureSeen &&
+      responseLimitError !== undefined &&
+      responseLimitError.sessionId === message.session_id &&
+      (resultPromptUuids === undefined || resultPromptUuids.length > 0) &&
+      !authFailure;
     const errorMessage =
       status !== "completed"
-        ? (resultPrimaryError(message) ?? resultErrors[0] ?? "Claude turn failed.")
+        ? responseLimitFailure
+          ? CLAUDE_RESPONSE_LIMIT_MESSAGE
+          : (resultPrimaryError(message) ?? resultErrors[0] ?? "Claude turn failed.")
         : undefined;
     const completedPromptCount = consumeClaudeResultPrompt(context, message);
     // Claude Code 2.1.245 / Agent SDK 0.3.245 adds queued_turn_count to the
@@ -7501,6 +8071,24 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // must not bypass privacy simply because they cannot update the metadata.
     const stripped = stripClaudeUsageReport(incomingMessage);
     const message = stripped.message;
+    const primaryPresentationAdmitted = isCurrentClaudePublicSummaryMessage(context, message);
+    const publicSummaryAdmitted =
+      primaryPresentationAdmitted && context.turnState?.publicSummaryFallbackDisabled !== true;
+    if (
+      message.type === "assistant" &&
+      carriesClaudeThinkingContent(message) &&
+      !publicSummaryAdmitted &&
+      context.turnState &&
+      isBoundedClaudePublicNativeMessageId(message.message.id)
+    ) {
+      // Preserve ordinary mixed text/tool processing, but do not let replay of
+      // its originally rejected thinking acquire authority after text adopts
+      // a native conversation identity through the existing ordinary path.
+      const key = createHash("sha256").update(message.message.id, "utf16le").digest("hex");
+      if (!retireClaudePublicSummaryKey(context.turnState.retiredPublicSummaryNativeKeys, key)) {
+        context.turnState.publicSummaryFallbackDisabled = true;
+      }
+    }
     if (stripped.hasReport) {
       const primary =
         message.type === "assistant" &&
@@ -7530,6 +8118,63 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     } else {
       yield* logNativeSdkMessage(context, message);
     }
+    let boundInspectionResult = false;
+    let hasInspector = false;
+    if (message.type === "user")
+      for (const tool of context.inFlightTools.values()) {
+        if (tool.inspectionNativeSessionId !== undefined) {
+          hasInspector = true;
+          break;
+        }
+      }
+    if (message.type === "user" && hasInspector) {
+      // A colliding native tool id is not authority to complete a primary
+      // inspector, adopt a session identity, or delete its eventual-result
+      // binding. Keep broader legacy/non-inspector tool policy unchanged.
+      if (Array.isArray(message.message.content) && message.message.content.length > 256) return;
+      const results = toolResultBlocksFromUserMessage(message);
+      const resultIds = new Set(results.map((result) => result.toolUseId));
+      const inspectorTools: ToolInFlight[] = [];
+      for (const tool of context.inFlightTools.values()) {
+        if (tool.inspectionNativeSessionId !== undefined && resultIds.has(tool.itemId))
+          inspectorTools.push(tool);
+      }
+      if (inspectorTools.length > 0) {
+        if (
+          !hasExactPrimaryClaudeParent(message) ||
+          context.stopped ||
+          context.authFailureSeen ||
+          sessions.get(context.session.threadId) !== context ||
+          inspectorTools.some((tool) => tool.inspectionNativeSessionId !== message.session_id)
+        )
+          return;
+        // Even an exact delayed result owns only this tool, not the current
+        // native conversation cursor (which may already have reset/rebound).
+        boundInspectionResult = true;
+      }
+    }
+    if (
+      isPrimaryClaudeResponseLimitAssistantMessage(message) &&
+      !isCurrentClaudeResponseLimitAssistantMessage(context, message)
+    ) {
+      // Keep foreign/idle/pre-init limit diagnostics only in the protected
+      // native log. They have no authority to rebind identity, start a turn,
+      // overwrite received text or categorize another response's result.
+      return;
+    }
+    if (
+      carriesClaudeThinkingContent(message) &&
+      !publicSummaryAdmitted &&
+      (message.type === "stream_event" ||
+        (message.type === "assistant" &&
+          message.message.content.every(
+            (block) => block.type === "thinking" || block.type === "redacted_thinking",
+          )))
+    ) {
+      // Disclosed summaries do not create synthetic turns or rebind native
+      // identity. Nested/malformed/foreign/idle frames stay diagnostic-only.
+      return;
+    }
     if (message.type === "system" && sdkMessageSubtype(message) === "session_title_changed") {
       // Claude Code 2.1.285 added this internal session-name notification,
       // which is still absent from the published SDK union. It may precede
@@ -7543,6 +8188,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // init frame and a foreign-session push must not rebind this query.
     if (
       !stripped.hasReport &&
+      !boundInspectionResult &&
       !(message.type === "system" && message.subtype === "commands_changed")
     ) {
       yield* ensureThreadId(context, message);
@@ -7555,6 +8201,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // until completeTurn would lose the last good totals if a later segment
     // crashes. Only bounded numeric/model metadata enters this new event.
     if (rawMessageType === "conversation_reset") {
+      if (context.turnState) context.turnState.responseLimitError = undefined;
+      yield* flushPublicSummaries(context, "failed");
+      retirePublicSummaryBlocks(context.turnState);
+      context.turnState?.publicSummaryBlocks.clear();
+      if (context.turnState) {
+        context.turnState.publicSummaryNativeMessageKey = undefined;
+        context.turnState.inspectionNativeMessageKey = undefined;
+      }
       setQuotaReport(context, undefined);
       const reset = message as unknown as Record<string, unknown>;
       const conversationId = reset.new_conversation_id;
@@ -7618,13 +8272,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     switch (message.type) {
       case "stream_event":
-        yield* handleStreamEvent(context, message);
+        yield* handleStreamEvent(
+          context,
+          message,
+          publicSummaryAdmitted,
+          primaryPresentationAdmitted,
+        );
         return;
       case "user":
         yield* handleUserMessage(context, message);
         return;
       case "assistant":
-        yield* handleAssistantMessage(context, message);
+        yield* handleAssistantMessage(context, message, publicSummaryAdmitted);
         return;
       case "result":
         yield* handleResultMessage(context, message);
@@ -7758,6 +8417,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const { quotaReport: _stoppedQuota, ...stoppedSession } = context.session;
     context.session = stoppedSession;
     context.stopped = true;
+    if (context.turnState) context.turnState.responseLimitError = undefined;
     // Any cleanup failure before query.close is also inconclusive teardown.
     // Keep the ownership fence until that exact query is proven closed.
     context.queryClosureUncertain = options?.queryAlreadyClosed !== true;

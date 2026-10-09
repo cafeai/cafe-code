@@ -4,6 +4,10 @@
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "exports": {
+    "./claudeResponseLimits": {
+      "types": "./src/claudeResponseLimits.ts",
+      "import": "./src/claudeResponseLimits.ts"
+    },
     "./codexHistorySafety": {
       "types": "./src/codexHistorySafety.ts",
       "import": "./src/codexHistorySafety.ts"

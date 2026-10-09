@@ -1,5 +1,6 @@
 import { FileAttachmentPill } from "./FileAttachmentPill";
 import { TurnConfigurationWorkEntry } from "./TurnConfigurationWorkEntry";
+import { ClaudeCommandWorkEntry, ClaudeSummaryWorkEntry } from "./ProviderOperationWorkEntry";
 import {
   type EnvironmentId,
   type EditorId,
@@ -2659,6 +2660,8 @@ const OrdinaryWorkEntryRow = memo(function OrdinaryWorkEntryRow(props: {
   const { activeThreadEnvironmentId, activeThreadId, timestampFormat } = use(TimelineRowCtx);
   if (props.workEntry.turnConfiguration)
     return <TurnConfigurationWorkEntry configuration={props.workEntry.turnConfiguration} />;
+  if (props.workEntry.publicSummary)
+    return <ClaudeSummaryWorkEntry summary={props.workEntry.publicSummary} />;
   if (props.workEntry.desktopObservation && activeThreadId)
     return (
       <DesktopObservation
@@ -2676,7 +2679,7 @@ const OrdinaryWorkEntryContent = memo(function OrdinaryWorkEntryContent(props: {
   workspaceRoot: string | undefined;
 }) {
   const { workEntry, workspaceRoot } = props;
-  const { activeThreadEnvironmentId } = use(TimelineRowCtx);
+  const { activeThreadEnvironmentId, timestampFormat } = use(TimelineRowCtx);
   const defaultEditor = useSettings((settings) => settings.defaultEditor);
   const availableEditors = useServerAvailableEditors();
   const canOpenLocalEditor =
@@ -2722,6 +2725,28 @@ const OrdinaryWorkEntryContent = memo(function OrdinaryWorkEntryContent(props: {
   }, [rawCommand, workEntry.changedFiles, workEntry.command, workEntry.detail, workspaceRoot]);
   const openVerb = canOpenLocalEditor ? "Open" : "Copy";
   const extraChangedFiles = workEntry.changedFiles?.slice(1) ?? [];
+  if (workEntry.commandInspection) {
+    return (
+      <div className="group/work-row flex min-w-0 items-start gap-1">
+        <div className="min-w-0 flex-1">
+          <ClaudeCommandWorkEntry
+            inspection={workEntry.commandInspection}
+            timestampFormat={timestampFormat}
+          />
+        </div>
+        {commandPathTokens.length > 0 ? (
+          <div className="pt-1">
+            <WorkEntryOpenPaths
+              paths={commandPathTokens}
+              workspaceRoot={workspaceRoot}
+              openVerb={openVerb}
+              onOpen={openResolvedFile}
+            />
+          </div>
+        ) : null}
+      </div>
+    );
+  }
   const rowContent = (
     <>
       <div className="flex items-center gap-2 transition-[opacity,translate] duration-200">

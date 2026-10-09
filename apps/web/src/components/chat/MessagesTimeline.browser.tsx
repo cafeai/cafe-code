@@ -112,8 +112,257 @@ vi.mock("@legendapp/list/react", async () => {
 
 import { MessagesTimeline } from "./MessagesTimeline";
 import { SubagentDetailView, type SubagentDetailSelection } from "./SubagentDetailView";
+import { deriveTimelineEntries, deriveWorkLogEntries } from "../../session-logic";
 
 const MESSAGE_CREATED_AT = "2026-04-13T12:00:00.000Z";
+
+it("renders public summaries and inspectable command work separately from ordinary assistant prose", async () => {
+  const turnId = TurnId.make("operation-turn");
+  const activities = [
+    {
+      id: EventId.make("summary-start"),
+      turnId,
+      createdAt: "2026-04-13T12:00:01.000Z",
+      sequence: 1,
+      kind: "reasoning.summary",
+      tone: "info" as const,
+      summary: "Claude summary",
+      payload: {
+        itemId: "summary-0",
+        streamKind: "reasoning_summary_text",
+        summaryVersion: 1,
+        provider: "claudeAgent",
+        detail: "Checking the repository.",
+        status: "inProgress",
+        truncated: false,
+      },
+    },
+    {
+      id: EventId.make("command-start"),
+      turnId,
+      createdAt: "2026-04-13T12:00:02.000Z",
+      sequence: 2,
+      kind: "tool.started",
+      tone: "tool" as const,
+      summary: "Command run",
+      payload: {
+        itemId: "command-0",
+        itemType: "command_execution",
+        data: {
+          toolName: "Bash",
+          commandInspectionVersion: 1,
+          inspectionProvider: "claudeAgent",
+          input: { command: "yarn test", description: "Run focused checks" },
+        },
+      },
+    },
+    {
+      id: EventId.make("command-complete"),
+      turnId,
+      createdAt: "2026-04-13T12:00:03.000Z",
+      sequence: 3,
+      kind: "tool.completed",
+      tone: "tool" as const,
+      summary: "Command completed",
+      payload: {
+        itemId: "command-0",
+        itemType: "command_execution",
+        status: "failed",
+        data: {
+          toolName: "Bash",
+          commandInspectionVersion: 1,
+          inspectionProvider: "claudeAgent",
+          output: "Received test failure",
+          outputTruncated: false,
+        },
+      },
+    },
+  ];
+  const intro = buildAssistantTimelineEntry({
+    text: "I will check the existing implementation.",
+    turnId,
+  });
+  const screen = await render(
+    <MessagesTimeline
+      {...buildProps()}
+      activeProvider={ProviderDriverKind.make("claudeAgent")}
+      timelineEntries={deriveTimelineEntries(
+        [intro.message],
+        [],
+        deriveWorkLogEntries(activities.slice(0, 2), turnId),
+      )}
+    />,
+  );
+  try {
+    await expect
+      .element(page.getByText("I will check the existing implementation.", { exact: true }))
+      .toBeVisible();
+    await expect.element(page.getByText("Checking the repository.", { exact: true })).toBeVisible();
+    await expect
+      .element(page.getByRole("button", { name: "Inspect command: Run focused checks" }))
+      .toBeVisible();
+    await page.getByRole("button", { name: "Inspect command: Run focused checks" }).click();
+    await expect.element(page.getByText("No output received yet.", { exact: true })).toBeVisible();
+    const settled = [
+      ...activities,
+      {
+        ...activities[0]!,
+        id: EventId.make("summary-partial"),
+        sequence: 4,
+        createdAt: "2026-04-13T12:00:04.000Z",
+        payload: {
+          ...activities[0]!.payload,
+          detail: "Checks received before the response stopped.",
+          status: "failed",
+        },
+      },
+    ];
+    await screen.rerender(
+      <MessagesTimeline
+        {...buildProps()}
+        activeProvider={ProviderDriverKind.make("claudeAgent")}
+        timelineEntries={deriveTimelineEntries(
+          [intro.message],
+          [],
+          deriveWorkLogEntries(settled, turnId),
+        )}
+      />,
+    );
+    await expect
+      .element(page.getByRole("button", { name: "Inspect command: Run focused checks" }))
+      .toHaveAttribute("aria-expanded", "true");
+    await expect.element(page.getByText("Partial", { exact: true })).toBeVisible();
+    await expect
+      .element(page.getByText("Checks received before the response stopped.", { exact: true }))
+      .toBeVisible();
+    await expect.element(page.getByText("Received test failure", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("Observed duration 1s", { exact: true })).toBeVisible();
+    expect(document.querySelectorAll("[data-claude-command-inspection]")).toHaveLength(1);
+    expect(intro.message.text).toBe("I will check the existing implementation.");
+    const history = document.querySelector('[data-testid="legend-list"]')!;
+    const summary = history.querySelector("[data-claude-public-summary]")!;
+    const command = history.querySelector("[data-claude-command-inspection]")!;
+    expect(
+      summary.compareDocumentPosition(command) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    // Replaying the same received lifecycle reconstructs one unchanged row;
+    // inspector state remains local and no fork/revert/provider call occurs.
+    await screen.rerender(
+      <MessagesTimeline
+        {...buildProps()}
+        activeProvider={ProviderDriverKind.make("claudeAgent")}
+        timelineEntries={deriveTimelineEntries(
+          [intro.message],
+          [],
+          deriveWorkLogEntries(settled, turnId),
+        )}
+      />,
+    );
+    await expect
+      .element(page.getByRole("button", { name: "Inspect command: Run focused checks" }))
+      .toHaveAttribute("aria-expanded", "true");
+  } finally {
+    await screen.unmount();
+  }
+});
+
+it("replays historical Claude operation rows through the existing bounded work-log page", async () => {
+  const threadId = ThreadId.make("historical-operation-thread");
+  const turnId = TurnId.make("historical-operation-turn");
+  const activities = [
+    {
+      id: EventId.make("historical-summary"),
+      turnId,
+      createdAt: "2026-04-13T12:00:01.000Z",
+      sequence: 1,
+      kind: "reasoning.summary",
+      tone: "info" as const,
+      summary: "Claude summary",
+      payload: {
+        itemId: "summary-0",
+        streamKind: "reasoning_summary_text",
+        summaryVersion: 1,
+        provider: "claudeAgent",
+        detail: "Received historical summary.",
+        status: "completed",
+        truncated: true,
+      },
+    },
+    {
+      id: EventId.make("historical-command"),
+      turnId,
+      createdAt: "2026-04-13T12:00:03.000Z",
+      sequence: 2,
+      kind: "tool.completed",
+      tone: "tool" as const,
+      summary: "Command completed",
+      payload: {
+        itemId: "command-0",
+        itemType: "command_execution",
+        status: "completed",
+        data: {
+          toolName: "Bash",
+          commandInspectionVersion: 1,
+          inspectionProvider: "claudeAgent",
+          input: { description: "Historical check", command: "yarn test" },
+          output: "Historical received output",
+          outputTruncated: true,
+          startedAt: "2026-04-13T12:00:02.000Z",
+          completedAt: "2026-04-13T12:00:03.000Z",
+        },
+      },
+    },
+  ];
+  const getThreadTurnActivityPage = vi.fn(async (input: { offset: number; limit: number }) => ({
+    threadId,
+    turnId,
+    offset: input.offset,
+    limit: input.limit,
+    totalCount: activities.length,
+    activities: activities.slice(input.offset, input.offset + input.limit),
+  }));
+  __setEnvironmentApiOverrideForTests(EnvironmentId.make("environment-local"), {
+    orchestration: { getThreadTurnActivityPage },
+  } as unknown as EnvironmentApi);
+  const screen = await render(
+    <MessagesTimeline
+      {...buildProps()}
+      activeThreadId={threadId}
+      timelineEntries={[
+        buildAssistantTimelineEntry({ turnId, text: "Historical final answer remains separate." }),
+      ]}
+      historicalWorkLogSummariesByTurnId={
+        new Map([[turnId, { turnId, previewEntries: [], snapshotEntryCount: 2 }]])
+      }
+    />,
+  );
+  try {
+    await page.getByRole("button", { name: /Work log/ }).click();
+    await expect
+      .element(page.getByText("Received historical summary.", { exact: true }))
+      .toBeVisible();
+    await page.getByRole("button", { name: "Inspect summary", exact: true }).click();
+    await expect
+      .element(page.getByText("Summary truncated to the retained preview.", { exact: true }))
+      .toBeVisible();
+    await page.getByRole("button", { name: "Inspect command: Historical check" }).click();
+    await expect
+      .element(page.getByText("Historical received output", { exact: true }))
+      .toBeVisible();
+    await expect
+      .element(page.getByText("Output truncated to the retained preview.", { exact: true }))
+      .toBeVisible();
+    await expect.element(page.getByText("Observed duration 1s", { exact: true })).toBeVisible();
+    await expect
+      .element(page.getByText("Historical final answer remains separate.", { exact: true }))
+      .toBeVisible();
+    expect(getThreadTurnActivityPage).toHaveBeenCalledTimes(2);
+    expect(getThreadTurnActivityPage.mock.calls.every(([input]) => input.limit <= 6)).toBe(true);
+  } finally {
+    await screen.unmount();
+    __resetEnvironmentApiOverridesForTests();
+  }
+});
 
 it("shows historical turn settings even when the current provider is different", async () => {
   const turnConfiguration = {
@@ -155,8 +404,12 @@ it("shows historical turn settings even when the current provider is different",
       )
       .toBeVisible();
     const row = document.querySelector<HTMLElement>("[data-turn-configuration-row]")!;
-    // The settings source moves to the row tooltip, shown on keyboard focus.
-    row.querySelector<HTMLElement>("[data-turn-configuration-settings]")!.focus();
+    // Programmatic focus inherits the preceding pointer modality. Exercise
+    // actual keyboard navigation, which is what opens the source tooltip.
+    const settings = row.querySelector<HTMLElement>("[data-turn-configuration-settings]")!;
+    await userEvent.keyboard("{Tab}");
+    expect(document.activeElement).toBe(settings);
+    expect(settings.matches(":focus-visible")).toBe(true);
     await expect.element(page.getByText(/^Existing session settings/)).toBeVisible();
     expect(row.textContent).not.toContain("Claude");
     expect(row.textContent).not.toContain("codex_original");

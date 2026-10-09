@@ -7998,6 +7998,178 @@ describe("ProviderRuntimeIngestion", () => {
     ).toBe(false);
   });
 
+  it("retains bounded Claude summary snapshots separately from answers and keeps sanitized primary command starts", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("summary-turn"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-summary"),
+      payload: {},
+    });
+    let liveSummaryId: string | undefined;
+    for (const [id, type, detail] of [
+      ["summary-live", "item.updated", "Inspected the adapter"],
+      ["summary-final", "item.completed", "Inspected the adapter; tests next"],
+    ] as const) {
+      harness.emit({
+        type,
+        eventId: asEventId(id),
+        provider: ProviderDriverKind.make("claudeAgent"),
+        createdAt: now,
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-summary"),
+        itemId: asItemId("summary-block"),
+        payload: {
+          itemType: "reasoning",
+          status: type === "item.completed" ? "completed" : "inProgress",
+          title: "Claude summary",
+          detail,
+          data: {
+            summaryVersion: 1,
+            streamKind: "reasoning_summary_text",
+            truncated: false,
+            signature: "must-not-promote",
+          },
+        },
+      });
+      if (type === "item.updated") {
+        const live = await waitForThread(harness.readModel, (entry) =>
+          entry.activities.some(
+            (activity) =>
+              activity.kind === "reasoning.summary" &&
+              (activity.payload as { status?: string }).status === "inProgress",
+          ),
+        );
+        const snapshots = live.activities.filter(
+          (activity) => activity.kind === "reasoning.summary",
+        );
+        expect(snapshots).toHaveLength(1);
+        expect((snapshots[0]?.payload as { detail?: string }).detail).toBe("Inspected the adapter");
+        expect(snapshots[0]?.createdAt).toBe(now);
+        liveSummaryId = snapshots[0]?.id;
+      }
+    }
+    harness.emit({
+      type: "item.started",
+      eventId: asEventId("bash-start"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-summary"),
+      itemId: asItemId("bash-item"),
+      payload: {
+        itemType: "command_execution",
+        status: "inProgress",
+        title: "Command run",
+        data: {
+          toolName: "Bash",
+          commandInspectionVersion: 1,
+          input: { command: "corepack yarn test", description: "Verify" },
+          startedAt: now,
+        },
+      },
+    });
+    // Neither another provider nor an unmarked Claude reasoning item is public
+    // summary authority, and tool heartbeats retain their existing quiet path.
+    for (const [provider, data] of [
+      ["codex", { streamKind: "reasoning_summary_text", truncated: false }],
+      ["claudeAgent", { streamKind: "reasoning_text" }],
+    ] as const) {
+      harness.emit({
+        type: "item.updated",
+        eventId: asEventId(`unowned-${provider}`),
+        provider: ProviderDriverKind.make(provider),
+        createdAt: now,
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-summary"),
+        itemId: asItemId(`unowned-${provider}`),
+        payload: { itemType: "reasoning", detail: "not promoted", data },
+      });
+    }
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) =>
+        entry.activities.some((activity) => activity.id === "bash-start") &&
+        entry.activities.some(
+          (activity) =>
+            activity.kind === "reasoning.summary" &&
+            (activity.payload as { status?: string }).status === "completed",
+        ),
+    );
+    const summaries = thread.activities.filter((activity) => activity.kind === "reasoning.summary");
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]?.id).toBe(liveSummaryId);
+    expect(summaries[0]?.createdAt).toBe(now);
+    expect(summaries[0]?.payload).toEqual({
+      summaryVersion: 1,
+      provider: "claudeAgent",
+      itemId: "summary-block",
+      streamKind: "reasoning_summary_text",
+      detail: "Inspected the adapter; tests next",
+      status: "completed",
+      truncated: false,
+    });
+    expect(thread.messages).toHaveLength(0);
+    const started = thread.activities.find((activity) => activity.id === "bash-start");
+    expect((started?.payload as { data?: unknown }).data).toEqual({
+      toolName: "Bash",
+      commandInspectionVersion: 1,
+      inspectionProvider: "claudeAgent",
+      input: { command: "corepack yarn test", description: "Verify" },
+      startedAt: now,
+    });
+    expect(thread.activities.some((activity) => activity.id.startsWith("unowned-"))).toBe(false);
+  });
+
+  it("strips counterfeit command inspector provenance from other provider lifecycle data", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("counterfeit-turn"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-counterfeit"),
+      payload: {},
+    });
+    for (const type of ["item.started", "item.updated", "item.completed"] as const)
+      harness.emit({
+        type,
+        eventId: asEventId(`counterfeit-${type}`),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: now,
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-counterfeit"),
+        itemId: asItemId("counterfeit-item"),
+        payload: {
+          itemType: "command_execution",
+          status: type === "item.completed" ? "completed" : "inProgress",
+          data: {
+            toolName: "Bash",
+            commandInspectionVersion: 1,
+            inspectionProvider: "claudeAgent",
+            input: { command: "counterfeit" },
+            output: "counterfeit",
+          },
+        },
+      });
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.id === "counterfeit-item.completed"),
+    );
+    for (const activity of thread.activities.filter((entry) =>
+      entry.id.startsWith("counterfeit-item."),
+    )) {
+      const data = (activity.payload as { data?: Record<string, unknown> }).data;
+      expect(data?.commandInspectionVersion).toBeUndefined();
+      expect(data?.inspectionProvider).toBeUndefined();
+    }
+  });
+
   it("maps session/thread lifecycle and item.started into session/activity projections", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

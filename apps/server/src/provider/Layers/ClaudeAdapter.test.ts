@@ -43,6 +43,7 @@ import {
   PROVIDER_SESSION_TITLE_MAX_CHARS,
 } from "@cafecode/contracts";
 import { createModelSelection } from "@cafecode/shared/model";
+import { CLAUDE_RESPONSE_LIMIT_MESSAGE } from "@cafecode/shared/claudeResponseLimits";
 import { assert, describe, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
@@ -247,6 +248,39 @@ function makeSuccessfulClaudeResult(sessionId: string): SDKResultSuccess {
     permission_denials: [],
     session_id: sessionId,
     uuid: "00000000-0000-4000-8000-000000000000",
+  };
+}
+
+/** Fully typed public block fixture; no native provider or profile is involved. */
+function makeClaudeResponseLimitAssistant(input: {
+  readonly sessionId: string;
+  readonly text: string;
+  readonly uuid?: SDKAssistantMessage["uuid"];
+  readonly error?: SDKAssistantMessage["error"];
+  readonly parentToolUseId?: string;
+  readonly userMessageUuid?: string;
+}): SDKAssistantMessage {
+  return {
+    type: "assistant",
+    session_id: input.sessionId,
+    uuid: input.uuid ?? "71000000-0000-4000-8000-000000000030",
+    parent_tool_use_id: input.parentToolUseId ?? null,
+    ...(input.error ? { error: input.error } : {}),
+    ...(input.userMessageUuid ? { user_message_uuid: input.userMessageUuid } : {}),
+    message: {
+      id: `api-${input.uuid ?? "response-limit"}`,
+      type: "message",
+      role: "assistant",
+      model: "claude-opus-4-6",
+      container: null,
+      context_management: null,
+      diagnostics: null,
+      stop_details: null,
+      stop_reason: null,
+      stop_sequence: null,
+      usage: makeSuccessfulClaudeResult(input.sessionId).usage,
+      content: [{ type: "text", text: input.text, citations: null }],
+    },
   };
 }
 
@@ -5104,7 +5138,8 @@ describe("ClaudeAdapterLive", () => {
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
 
-      const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 11).pipe(
+      const runtimeEventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.takeUntil((event) => event.type === "turn.completed"),
         Stream.runCollect,
         Effect.forkChild,
       );
@@ -5121,6 +5156,19 @@ describe("ClaudeAdapterLive", () => {
         attachments: [],
       });
 
+      harness.query.emit({
+        type: "system",
+        subtype: "init",
+        session_id: "sdk-session-tool-streams",
+        uuid: "summary-init",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "stream_event",
+        session_id: "sdk-session-tool-streams",
+        uuid: "summary-start",
+        parent_tool_use_id: null,
+        event: { type: "message_start", message: { id: "api-public-summary" } },
+      } as unknown as SDKMessage);
       harness.query.emit({
         type: "stream_event",
         session_id: "sdk-session-tool-streams",
@@ -5235,21 +5283,23 @@ describe("ClaudeAdapterLive", () => {
           "session.state.changed",
           "turn.started",
           "thread.started",
-          "content.delta",
+          "session.configured",
+          "item.updated",
           "item.started",
           "item.updated",
           "item.updated",
+          "item.completed",
           "item.completed",
           "turn.completed",
         ],
       );
 
       const reasoningDelta = runtimeEvents.find(
-        (event) => event.type === "content.delta" && event.payload.streamKind === "reasoning_text",
+        (event) => event.type === "item.updated" && event.payload.itemType === "reasoning",
       );
-      assert.equal(reasoningDelta?.type, "content.delta");
-      if (reasoningDelta?.type === "content.delta") {
-        assert.equal(reasoningDelta.payload.delta, "Let");
+      assert.equal(reasoningDelta?.type, "item.updated");
+      if (reasoningDelta?.type === "item.updated") {
+        assert.equal(reasoningDelta.payload.detail, "Let");
         assert.equal(String(reasoningDelta.turnId), String(turn.turnId));
       }
 
@@ -14324,6 +14374,1503 @@ describe("ClaudeAdapterLive", () => {
       }).pipe(Effect.provide(harness.layer));
     },
   );
+
+  it.effect(
+    "projects disclosed primary summaries and inspectable Bash results without opaque reasoning",
+    () => {
+      const nativeEvents: unknown[] = [];
+      const harness = makeHarness({
+        nativeEventLogger: {
+          filePath: "memory://public-summary",
+          write: (event) => {
+            nativeEvents.push(event);
+            return Effect.void;
+          },
+          close: () => Effect.void,
+        },
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const collected = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil((event) => event.type === "turn.completed"),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "Inspect", attachments: [] });
+        const sessionId = "sdk-public-summary";
+        const base = makeClaudeResponseLimitAssistant({ sessionId, text: "Public introduction." });
+        harness.query.emit(base);
+        const emit = (event: unknown, uuid: string) =>
+          harness.query.emit({
+            type: "stream_event",
+            session_id: sessionId,
+            uuid,
+            parent_tool_use_id: null,
+            event,
+          } as unknown as SDKMessage);
+        emit(
+          { type: "message_start", message: { ...base.message, id: "api-summary", content: [] } },
+          "summary-message",
+        );
+        emit(
+          {
+            type: "content_block_start",
+            index: 0,
+            content_block: { type: "thinking", thinking: "", signature: "OPAQUE_SIGNATURE" },
+          },
+          "summary-block",
+        );
+        const first = {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "thinking_delta", thinking: "Inspected " },
+        };
+        emit(first, "summary-first");
+        emit(first, "summary-first"); // Exact wrapper replay cannot duplicate prose.
+        emit(
+          {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "thinking_delta", thinking: "adapter." },
+          },
+          "summary-second",
+        );
+        emit(
+          {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "signature_delta", signature: "OPAQUE_SIGNATURE" },
+          },
+          "summary-signature",
+        );
+        const summary: SDKAssistantMessage = {
+          ...base,
+          uuid: "72000000-0000-4000-8000-000000000001",
+          message: {
+            ...base.message,
+            id: "api-summary",
+            content: [
+              {
+                type: "thinking",
+                thinking: "Inspected adapter. Next tests.",
+                signature: "OPAQUE_SIGNATURE",
+              },
+            ],
+          },
+        };
+        harness.query.emit(summary);
+        harness.query.emit(summary);
+        harness.query.emit({
+          ...summary,
+          uuid: "72000000-0000-4000-8000-000000000002",
+          message: {
+            ...summary.message,
+            content: [
+              {
+                type: "thinking",
+                thinking: "Inspected adapter. Next tests. Forged later suffix.",
+                signature: "OPAQUE_SIGNATURE",
+              },
+            ],
+          },
+        });
+        emit(
+          {
+            type: "content_block_start",
+            index: 1,
+            content_block: {
+              type: "tool_use",
+              id: "bash-public",
+              name: "Bash",
+              input: { command: "corepack yarn test", description: "Verify the tests" },
+            },
+          },
+          "bash-start",
+        );
+        harness.query.emit({
+          type: "user",
+          session_id: sessionId,
+          uuid: "bash-result",
+          parent_tool_use_id: null,
+          message: {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "bash-public",
+                is_error: true,
+                content: "sk-ant-do-not-persist\u202e\u0000\n" + "x".repeat(3_000),
+              },
+            ],
+          },
+        } as unknown as SDKMessage);
+        emit(
+          {
+            type: "content_block_start",
+            index: 2,
+            content_block: {
+              type: "tool_use",
+              id: "bash-controls",
+              name: "Bash",
+              input: { command: "\u202e".repeat(700), description: "\u202e".repeat(350) },
+            },
+          },
+          "bash-controls-start",
+        );
+        harness.query.emit({
+          type: "user",
+          session_id: sessionId,
+          uuid: "bash-controls-result",
+          parent_tool_use_id: null,
+          message: {
+            role: "user",
+            content: [
+              { type: "tool_result", tool_use_id: "bash-controls", content: "\u202e".repeat(350) },
+            ],
+          },
+        } as unknown as SDKMessage);
+        harness.query.emit(makeSuccessfulClaudeResult(sessionId));
+        const events = Array.from(yield* Fiber.join(collected));
+        const summaries = events.filter(
+          (
+            event,
+          ): event is Extract<ProviderRuntimeEvent, { type: "item.updated" | "item.completed" }> =>
+            (event.type === "item.updated" || event.type === "item.completed") &&
+            event.payload.itemType === "reasoning",
+        );
+        assert.equal(summaries.length, 2);
+        assert.equal(summaries[0]?.payload.detail, "Inspected ");
+        assert.equal(summaries[1]?.payload.detail, "Inspected adapter. Next tests.");
+        assert.equal(summaries[0]?.itemId, summaries[1]?.itemId);
+        assert.equal(summaries[0]?.createdAt, summaries[1]?.createdAt);
+        assert.equal(summaries[0]?.raw, undefined);
+        const started = events.find(
+          (event) => event.type === "item.started" && event.itemId === "bash-public",
+        );
+        const completed = events.find(
+          (event) => event.type === "item.completed" && event.itemId === "bash-public",
+        );
+        assert.equal(started?.type, "item.started");
+        assert.equal(completed?.type, "item.completed");
+        if (started?.type === "item.started" && completed?.type === "item.completed") {
+          const startData = started.payload.data as Record<string, unknown>;
+          const data = completed.payload.data as Record<string, unknown>;
+          assert.equal(startData.commandInspectionVersion, 1);
+          assert.deepEqual(startData.input, {
+            command: "corepack yarn test",
+            description: "Verify the tests",
+          });
+          assert.equal(data.outputTruncated, true);
+          assert.equal((data.output as string).length <= 2_048, true);
+          assert.equal((data.output as string).includes("sk-ant-do-not-persist"), false);
+          assert.equal((data.output as string).includes("\\u202e\\u0000"), true);
+          assert.equal(data.startedAt, started.createdAt);
+          assert.equal(typeof data.completedAt, "string");
+          assert.equal(typeof data.durationMs, "number");
+          assert.equal(completed.payload.status, "failed");
+        }
+        assert.equal(
+          events
+            .filter(
+              (event): event is Extract<ProviderRuntimeEvent, { type: "content.delta" }> =>
+                event.type === "content.delta" && event.payload.streamKind === "assistant_text",
+            )
+            .map((event) => event.payload.delta)
+            .join(""),
+          "Public introduction.",
+        );
+        assert.equal(JSON.stringify(events).includes("OPAQUE_SIGNATURE"), false);
+        assert.equal(JSON.stringify(nativeEvents).includes("OPAQUE_SIGNATURE"), false);
+        const expanded = events.find(
+          (event) => event.type === "item.completed" && event.itemId === "bash-controls",
+        );
+        assert.equal(expanded?.type, "item.completed");
+        if (expanded?.type === "item.completed") {
+          const data = expanded.payload.data as Record<string, unknown>;
+          assert.equal(data.commandTruncated, true);
+          assert.equal(data.descriptionTruncated, true);
+          assert.equal(data.outputTruncated, true);
+        }
+        assert.equal(harness.createInputs.length, 1);
+        assert.deepEqual(harness.query.setModelCalls, []);
+        assert.deepEqual(harness.query.setPermissionModeCalls, []);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  for (const nativeIdKind of ["empty", "overbound", "boundary"] as const) {
+    it.effect(
+      `admits new summary and inspection witnesses only for bounded native response ids (${nativeIdKind})`,
+      () => {
+        const harness = makeHarness();
+        return Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          const collected = yield* adapter.streamEvents.pipe(
+            Stream.takeUntil((event) => event.type === "turn.completed"),
+            Stream.runCollect,
+            Effect.forkChild,
+          );
+          yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+          yield* adapter.sendTurn({ threadId: THREAD_ID, input: "Inspect", attachments: [] });
+          const sessionId = "sdk-response-id-boundary";
+          const base = makeClaudeResponseLimitAssistant({ sessionId, text: "Intro" });
+          const nativeId =
+            nativeIdKind === "empty"
+              ? ""
+              : "n".repeat(nativeIdKind === "overbound" ? 1_025 : 1_024);
+          harness.query.emit(base);
+          const emit = (event: unknown, uuid: string) =>
+            harness.query.emit({
+              type: "stream_event",
+              session_id: sessionId,
+              uuid,
+              parent_tool_use_id: null,
+              event,
+            } as unknown as SDKMessage);
+          emit(
+            { type: "message_start", message: { ...base.message, id: nativeId, content: [] } },
+            "bounded-id-start",
+          );
+          emit(
+            {
+              type: "content_block_delta",
+              index: 0,
+              delta: { type: "thinking_delta", thinking: "Summary" },
+            },
+            "bounded-id-summary",
+          );
+          emit(
+            {
+              type: "content_block_delta",
+              index: 1,
+              delta: { type: "text_delta", text: "Ordinary answer" },
+            },
+            "bounded-id-text",
+          );
+          emit(
+            {
+              type: "content_block_start",
+              index: 2,
+              content_block: {
+                type: "tool_use",
+                id: "bounded-id-bash",
+                name: "Bash",
+                input: { command: "corepack yarn test" },
+              },
+            },
+            "bounded-id-tool",
+          );
+          const snapshot: SDKAssistantMessage = {
+            ...base,
+            uuid: "72000000-0000-4000-8000-000000000006",
+            message: {
+              ...base.message,
+              id: nativeId,
+              content: [
+                { type: "thinking", thinking: "Summary suffix", signature: "PRIVATE_SIGNATURE" },
+                { type: "text", text: "Ordinary answer", citations: null },
+                {
+                  type: "tool_use",
+                  id: "bounded-id-bash",
+                  name: "Bash",
+                  input: { command: "corepack yarn test" },
+                },
+              ],
+            },
+          };
+          harness.query.emit(snapshot);
+          harness.query.emit({
+            type: "user",
+            session_id: sessionId,
+            uuid: "bounded-id-result",
+            parent_tool_use_id: null,
+            message: {
+              role: "user",
+              content: [
+                {
+                  type: "tool_result",
+                  tool_use_id: "bounded-id-bash",
+                  content: "Ordinary tool output",
+                },
+              ],
+            },
+          } as unknown as SDKMessage);
+          harness.query.emit(makeSuccessfulClaudeResult(sessionId));
+          const events = Array.from(yield* Fiber.join(collected));
+          const summaries = events.filter(
+            (
+              event,
+            ): event is Extract<
+              ProviderRuntimeEvent,
+              { type: "item.updated" | "item.completed" }
+            > =>
+              (event.type === "item.updated" || event.type === "item.completed") &&
+              event.payload.itemType === "reasoning",
+          );
+          const completed = events.find(
+            (event) => event.type === "item.completed" && event.itemId === "bounded-id-bash",
+          );
+          assert.equal(completed?.type, "item.completed");
+          if (completed?.type === "item.completed") {
+            const data = completed.payload.data as Record<string, unknown>;
+            assert.equal(
+              data.commandInspectionVersion,
+              nativeIdKind === "boundary" ? 1 : undefined,
+            );
+            assert.equal(
+              data.output,
+              nativeIdKind === "boundary" ? "Ordinary tool output" : undefined,
+            );
+          }
+          assert.equal(summaries.length, nativeIdKind === "boundary" ? 2 : 0);
+          if (nativeIdKind === "boundary")
+            assert.equal(summaries.at(-1)?.payload.detail, "Summary suffix");
+          assert.equal(
+            events
+              .filter(
+                (event): event is Extract<ProviderRuntimeEvent, { type: "content.delta" }> =>
+                  event.type === "content.delta" && event.payload.streamKind === "assistant_text",
+              )
+              .map((event) => event.payload.delta)
+              .join(""),
+            "IntroOrdinary answer",
+          );
+          assert.equal(
+            events.find((event) => event.type === "turn.completed")?.payload.state,
+            "completed",
+          );
+        }).pipe(Effect.provide(harness.layer));
+      },
+    );
+  }
+
+  for (const invalidParent of [
+    "foreign-session",
+    "child",
+    "",
+    false,
+    "rebind-valid-old",
+  ] as const) {
+    it.effect(
+      `rejects colliding unowned Bash results before inspector mutation (${String(invalidParent)})`,
+      () => {
+        const harness = makeHarness();
+        return Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          const collected = yield* adapter.streamEvents.pipe(
+            Stream.takeUntil((event) => event.type === "turn.completed"),
+            Stream.runCollect,
+            Effect.forkChild,
+          );
+          yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+          yield* adapter.sendTurn({ threadId: THREAD_ID, input: "Inspect", attachments: [] });
+          const sessionId = "sdk-owned-inspector-result";
+          const base = makeClaudeResponseLimitAssistant({ sessionId, text: "Intro" });
+          harness.query.emit(base);
+          for (const event of [
+            {
+              type: "message_start",
+              message: { ...base.message, id: "api-owned-inspector", content: [] },
+            },
+            {
+              type: "content_block_start",
+              index: 0,
+              content_block: {
+                type: "tool_use",
+                id: "owned-bash",
+                name: "Bash",
+                input: { command: "corepack yarn test" },
+              },
+            },
+          ])
+            harness.query.emit({
+              type: "stream_event",
+              session_id: sessionId,
+              uuid: "owned-inspector-stream",
+              parent_tool_use_id: null,
+              event,
+            } as unknown as SDKMessage);
+          const finalSessionId =
+            invalidParent === "rebind-valid-old" ? "rebound-inspector-session" : sessionId;
+          if (invalidParent === "rebind-valid-old")
+            harness.query.emit({
+              type: "system",
+              subtype: "init",
+              session_id: finalSessionId,
+              uuid: "inspection-legitimate-rebind",
+            } as unknown as SDKMessage);
+          harness.query.emit({
+            type: "user",
+            session_id:
+              invalidParent === "foreign-session"
+                ? "foreign-inspector-session"
+                : invalidParent === "rebind-valid-old"
+                  ? finalSessionId
+                  : sessionId,
+            uuid: "invalid-inspector-result",
+            parent_tool_use_id:
+              invalidParent === "foreign-session" || invalidParent === "rebind-valid-old"
+                ? null
+                : invalidParent,
+            message: {
+              role: "user",
+              content: [
+                {
+                  type: "tool_result",
+                  tool_use_id: "owned-bash",
+                  is_error: true,
+                  content: "UNOWNED_OUTPUT",
+                },
+              ],
+            },
+          } as unknown as SDKMessage);
+          harness.query.emit({
+            type: "user",
+            session_id: sessionId,
+            uuid: "valid-inspector-result",
+            parent_tool_use_id: null,
+            message: {
+              role: "user",
+              content: [
+                { type: "tool_result", tool_use_id: "owned-bash", content: "Owned output" },
+              ],
+            },
+          } as unknown as SDKMessage);
+          harness.query.emit(makeSuccessfulClaudeResult(finalSessionId));
+          const events = Array.from(yield* Fiber.join(collected));
+          const completed = events.filter(
+            (event): event is Extract<ProviderRuntimeEvent, { type: "item.completed" }> =>
+              event.type === "item.completed" && event.itemId === "owned-bash",
+          );
+          assert.equal(completed.length, 1);
+          assert.equal(completed[0]?.payload.status, "completed");
+          const data = completed[0]?.payload.data as Record<string, unknown>;
+          assert.equal(data.output, "Owned output");
+          assert.equal(data.commandInspectionVersion, 1);
+          assert.equal(
+            events.filter((event) => event.type === "thread.started").length,
+            invalidParent === "rebind-valid-old" ? 2 : 1,
+          );
+          assert.equal(JSON.stringify(events).includes("UNOWNED_OUTPUT"), false);
+          const session = (yield* adapter.listSessions())[0];
+          const resumeCursor = session?.resumeCursor as { readonly resume?: string } | undefined;
+          assert.equal(resumeCursor?.resume, finalSessionId);
+        }).pipe(Effect.provide(harness.layer));
+      },
+    );
+  }
+
+  it.effect(
+    "fails closed on summary retirement overflow without changing answers or limit guidance",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const collected = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil((event) => event.type === "turn.completed"),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "Inspect", attachments: [] });
+        const sessionId = "sdk-summary-retirement-overflow";
+        const base = makeClaudeResponseLimitAssistant({ sessionId, text: "Preserved intro" });
+        harness.query.emit(base);
+        for (let index = 0; index < 65; index += 1)
+          harness.query.emit({
+            ...base,
+            session_id: "foreign-summary-session",
+            message: {
+              ...base.message,
+              id: `retired-summary-${index}`,
+              content: [
+                { type: "thinking", thinking: "Foreign summary", signature: "PRIVATE_SIGNATURE" },
+              ],
+            },
+          });
+        for (const event of [
+          {
+            type: "message_start",
+            message: { ...base.message, id: "retired-summary-64", content: [] },
+          },
+          {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "thinking_delta", thinking: "REPLAYED_OLD_SUMMARY" },
+          },
+        ])
+          harness.query.emit({
+            type: "stream_event",
+            session_id: sessionId,
+            uuid: "retirement-replay",
+            parent_tool_use_id: null,
+            event,
+          } as unknown as SDKMessage);
+        harness.query.emit(
+          makeClaudeResponseLimitAssistant({
+            sessionId,
+            text: "Private limit diagnostic",
+            error: "max_output_tokens",
+            uuid: "72000000-0000-4000-8000-000000000005",
+          }),
+        );
+        harness.query.emit({
+          ...makeSuccessfulClaudeResult(sessionId),
+          is_error: true,
+          result: "Native failed",
+        });
+        const events = Array.from(yield* Fiber.join(collected));
+        assert.equal(
+          events.some(
+            (event) =>
+              (event.type === "item.updated" || event.type === "item.completed") &&
+              event.payload.itemType === "reasoning",
+          ),
+          false,
+        );
+        assert.equal(
+          events.find((event) => event.type === "turn.completed")?.payload.errorMessage,
+          CLAUDE_RESPONSE_LIMIT_MESSAGE,
+        );
+        assert.equal(
+          events
+            .filter(
+              (event): event is Extract<ProviderRuntimeEvent, { type: "content.delta" }> =>
+                event.type === "content.delta" && event.payload.streamKind === "assistant_text",
+            )
+            .map((event) => event.payload.delta)
+            .join(""),
+          "Preserved intro",
+        );
+        assert.equal(harness.createInputs.length, 1);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect("coalesces live public summaries and preserves the received prefix on Stop", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const initial = yield* Deferred.make<void>();
+      const live = yield* Deferred.make<void>();
+      const events: ProviderRuntimeEvent[] = [];
+      const collected = yield* adapter.streamEvents.pipe(
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runForEach((event) =>
+          Effect.gen(function* () {
+            events.push(event);
+            if (event.type === "item.updated" && event.payload.itemType === "reasoning") {
+              if (event.payload.detail === "a") yield* Deferred.succeed(initial, undefined);
+              if (event.payload.detail === "ab") yield* Deferred.succeed(live, undefined);
+            }
+          }),
+        ),
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "Inspect", attachments: [] });
+      const sessionId = "sdk-summary-live";
+      const base = makeClaudeResponseLimitAssistant({ sessionId, text: "Answer intro" });
+      harness.query.emit(base);
+      const emit = (event: unknown, uuid: string) =>
+        harness.query.emit({
+          type: "stream_event",
+          session_id: sessionId,
+          parent_tool_use_id: null,
+          uuid,
+          event,
+        } as unknown as SDKMessage);
+      emit(
+        { type: "message_start", message: { ...base.message, id: "api-live", content: [] } },
+        "live-start",
+      );
+      emit(
+        { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "a" } },
+        "live-a",
+      );
+      yield* Deferred.await(initial);
+      emit(
+        { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "b" } },
+        "live-b",
+      );
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* TestClock.adjust(1_000);
+      yield* Deferred.await(live);
+      for (let index = 0; index < 32; index += 1) {
+        emit(
+          {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "thinking_delta", thinking: "c" },
+          },
+          `live-c-${index}`,
+        );
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        yield* TestClock.adjust(1_000);
+      }
+      emit(
+        { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "c" } },
+        "live-c",
+      );
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* adapter.stopSession(THREAD_ID);
+      yield* Fiber.join(collected);
+      const summaries = events.filter(
+        (
+          event,
+        ): event is Extract<ProviderRuntimeEvent, { type: "item.updated" | "item.completed" }> =>
+          (event.type === "item.updated" || event.type === "item.completed") &&
+          event.payload.itemType === "reasoning",
+      );
+      assert.equal(summaries.at(-1)?.payload.detail, "ab" + "c".repeat(33));
+      assert.equal(summaries.filter((event) => event.type === "item.updated").length <= 16, true);
+      assert.equal(summaries.at(-1)?.payload.status, "failed");
+      assert.equal(
+        events.find((event) => event.type === "turn.completed")?.payload.state,
+        "interrupted",
+      );
+      assert.equal(
+        events.some(
+          (event) =>
+            event.type === "content.delta" && event.payload.streamKind !== "assistant_text",
+        ),
+        false,
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  for (const scenario of [
+    "snapshot-only",
+    "snapshot-block-limit",
+    "sequential-snapshots",
+    "closed-repair",
+    "divergent",
+    "oversized",
+    "ambiguous",
+    "stale",
+    "reset",
+    "mixed",
+    "controls",
+  ] as const) {
+    it.effect(`keeps summary snapshot fallback bounded and source-owned (${scenario})`, () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const collected = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil((event) => event.type === "turn.completed"),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "Inspect", attachments: [] });
+        const sessionId = "sdk-summary-fallback";
+        const base = makeClaudeResponseLimitAssistant({ sessionId, text: "Preserved intro" });
+        if (scenario !== "mixed") harness.query.emit(base);
+        const emit = (event: unknown, uuid: string) =>
+          harness.query.emit({
+            type: "stream_event",
+            session_id: sessionId,
+            parent_tool_use_id: null,
+            uuid,
+            event,
+          } as unknown as SDKMessage);
+        if (
+          scenario !== "snapshot-only" &&
+          scenario !== "snapshot-block-limit" &&
+          scenario !== "sequential-snapshots" &&
+          scenario !== "mixed"
+        ) {
+          emit(
+            {
+              type: "message_start",
+              message: { ...base.message, id: "api-fallback", content: [] },
+            },
+            "fallback-start",
+          );
+          emit(
+            {
+              type: "content_block_delta",
+              index: 0,
+              delta: {
+                type: "thinking_delta",
+                thinking: scenario === "controls" ? "\u0001\u0085\u202e" : "a",
+              },
+            },
+            "fallback-a",
+          );
+          if (scenario === "closed-repair")
+            emit({ type: "content_block_stop", index: 0 }, "fallback-stop");
+          if (scenario === "ambiguous")
+            emit(
+              {
+                type: "content_block_delta",
+                index: 1,
+                delta: { type: "thinking_delta", thinking: "other" },
+              },
+              "fallback-other",
+            );
+          if (scenario === "stale")
+            emit(
+              {
+                type: "message_start",
+                message: { ...base.message, id: "api-new-request", content: [] },
+              },
+              "fallback-new",
+            );
+          if (scenario === "reset")
+            harness.query.emit({
+              type: "conversation_reset",
+              session_id: sessionId,
+              uuid: "fallback-reset",
+              new_conversation_id: sessionId,
+            } as unknown as SDKMessage);
+        }
+        const text =
+          scenario === "oversized"
+            ? "a".repeat(65_537)
+            : scenario === "divergent"
+              ? "different"
+              : scenario === "controls"
+                ? "\u0001\u0085\u202e"
+                : "ab";
+        const snapshot: SDKAssistantMessage = {
+          ...base,
+          uuid: "72000000-0000-4000-8000-000000000003",
+          message: {
+            ...base.message,
+            id: "api-fallback",
+            content: [
+              { type: "thinking", thinking: text, signature: "PRIVATE_SIGNATURE" },
+              ...(scenario === "snapshot-block-limit"
+                ? Array.from({ length: 256 }, () => ({
+                    type: "redacted_thinking" as const,
+                    data: "PRIVATE_SIGNATURE",
+                  }))
+                : []),
+              ...(scenario === "mixed"
+                ? [{ type: "text" as const, text: "Preserved mixed answer", citations: null }]
+                : []),
+            ],
+          },
+        };
+        harness.query.emit(snapshot);
+        harness.query.emit(snapshot);
+        if (scenario === "sequential-snapshots")
+          harness.query.emit({
+            ...snapshot,
+            uuid: "72000000-0000-4000-8000-000000000004",
+            message: {
+              ...snapshot.message,
+              id: "api-second-fallback",
+              content: [
+                {
+                  type: "thinking",
+                  thinking: "Next public summary",
+                  signature: "PRIVATE_SIGNATURE",
+                },
+              ],
+            },
+          });
+        harness.query.emit(makeSuccessfulClaudeResult(sessionId));
+        const events = Array.from(yield* Fiber.join(collected));
+        const summaries = events.filter(
+          (
+            event,
+          ): event is Extract<ProviderRuntimeEvent, { type: "item.updated" | "item.completed" }> =>
+            (event.type === "item.updated" || event.type === "item.completed") &&
+            event.payload.itemType === "reasoning",
+        );
+        const terminal = summaries.filter((event) => event.type === "item.completed");
+        if (scenario === "controls" || scenario === "snapshot-block-limit")
+          assert.equal(summaries.length, 0);
+        else if (scenario === "sequential-snapshots") {
+          assert.equal(terminal.length, 2);
+          assert.equal(terminal[1]?.payload.detail, "Next public summary");
+        } else if (scenario === "mixed") {
+          assert.equal(summaries.length, 0);
+          assert.equal(
+            events
+              .filter((event) => event.type === "content.delta")
+              .map((event) => event.payload.delta)
+              .join(""),
+            "Preserved mixed answer",
+          );
+        } else if (scenario === "snapshot-only" || scenario === "closed-repair") {
+          assert.equal(terminal.at(-1)?.payload.detail, "ab");
+          assert.equal(terminal.length <= 2, true);
+        } else {
+          assert.equal(
+            terminal.some((event) => event.payload.detail === "a"),
+            true,
+          );
+          assert.equal(
+            terminal.some((event) => event.payload.detail === "ab"),
+            false,
+          );
+        }
+        assert.equal(JSON.stringify(events).includes("PRIVATE_SIGNATURE"), false);
+      }).pipe(Effect.provide(harness.layer));
+    });
+  }
+
+  for (const parent of ["child-native", "", false, null] as const) {
+    it.effect(`does not promote unowned summary or Bash inspection (${String(parent)})`, () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const collected = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil((event) => event.type === "turn.completed"),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "Inspect", attachments: [] });
+        const sessionId = "sdk-unowned-summary";
+        const base = makeClaudeResponseLimitAssistant({ sessionId, text: "Preserved answer" });
+        harness.query.emit(base);
+        const sourceSession = parent === null ? "foreign-session" : sessionId;
+        for (const event of [
+          { type: "message_start", message: { ...base.message, id: "api-unowned", content: [] } },
+          {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "thinking_delta", thinking: "PRIVATE_CHILD_SUMMARY" },
+          },
+          {
+            type: "content_block_start",
+            index: 1,
+            content_block: {
+              type: "tool_use",
+              name: "Bash",
+              id: "bash-unowned",
+              input: { command: "private child command" },
+            },
+          },
+        ])
+          harness.query.emit({
+            type: "stream_event",
+            session_id: sourceSession,
+            uuid: "unowned-frame",
+            parent_tool_use_id: parent,
+            event,
+          } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "user",
+          session_id: sourceSession,
+          uuid: "unowned-result",
+          parent_tool_use_id: parent,
+          message: {
+            role: "user",
+            content: [
+              { type: "tool_result", tool_use_id: "bash-unowned", content: "PRIVATE_CHILD_OUTPUT" },
+            ],
+          },
+        } as unknown as SDKMessage);
+        harness.query.emit(makeSuccessfulClaudeResult(sourceSession));
+        const events = Array.from(yield* Fiber.join(collected));
+        assert.equal(
+          events.some(
+            (event) =>
+              (event.type === "item.updated" || event.type === "item.completed") &&
+              event.payload.itemType === "reasoning",
+          ),
+          false,
+        );
+        for (const event of events)
+          if (
+            event.type === "item.started" ||
+            event.type === "item.updated" ||
+            event.type === "item.completed"
+          ) {
+            const data = event.payload.data as Record<string, unknown> | undefined;
+            assert.notEqual(data?.commandInspectionVersion, 1);
+            assert.equal(data?.output, undefined);
+          }
+      }).pipe(Effect.provide(harness.layer));
+    });
+  }
+
+  it.effect(
+    "preserves partial Claude output and authoritative usage when a typed response limit settles",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const collected = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil((event) => event.type === "turn.completed"),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+        const turn = yield* adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: "Complete the existing analysis",
+          attachments: [],
+        });
+        const iterator = harness.getLastCreateQueryInput()?.prompt[Symbol.asyncIterator]();
+        if (!iterator) return assert.fail("Expected the existing SDK prompt stream");
+        const initialPrompt = yield* Effect.promise(() => iterator.next());
+        assert.equal(initialPrompt.done, false);
+        // A pending read resolves to a value if any code silently sends another
+        // paid prompt. Stop only closes it after the terminal result is checked.
+        const possibleUnsolicitedPrompt = iterator.next();
+        const nativeSessionId = "sdk-response-limit-preservation";
+        const intro = makeClaudeResponseLimitAssistant({
+          sessionId: nativeSessionId,
+          text: "Public introduction.",
+          uuid: "71000000-0000-4000-8000-000000000031",
+        });
+        harness.query.emit(intro);
+        const partial = makeClaudeResponseLimitAssistant({
+          sessionId: nativeSessionId,
+          text: "Received partial answer",
+          uuid: "71000000-0000-4000-8000-000000000032",
+        });
+        const streamEvents: Array<Extract<SDKMessage, { type: "stream_event" }>["event"]> = [
+          { type: "message_start", message: { ...partial.message, content: [] } },
+          {
+            type: "content_block_start",
+            index: 0,
+            content_block: { type: "text", text: "", citations: null },
+          },
+          {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "text_delta", text: "Received partial answer" },
+          },
+        ];
+        for (const event of streamEvents) {
+          harness.query.emit({
+            type: "stream_event",
+            session_id: nativeSessionId,
+            uuid: "71000000-0000-4000-8000-000000000033",
+            parent_tool_use_id: null,
+            event,
+          });
+        }
+        const nativeError = "PRIVATE_NATIVE_LIMIT_DIAGNOSTIC";
+        const limit = makeClaudeResponseLimitAssistant({
+          sessionId: nativeSessionId,
+          text: nativeError,
+          error: "max_output_tokens",
+          uuid: "71000000-0000-4000-8000-000000000034",
+          userMessageUuid: turn.turnId,
+        });
+        harness.query.emit(limit);
+        harness.query.emit(limit);
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        const active = (yield* adapter.listSessions())[0];
+        assert.equal(active?.status, "running");
+        assert.equal(active?.activeTurnId, turn.turnId);
+        const result: SDKResultSuccess = {
+          ...makeSuccessfulClaudeResult(nativeSessionId),
+          is_error: true,
+          result: nativeError,
+          stop_reason: "max_tokens",
+          user_message_uuid: turn.turnId,
+          usage: { ...makeSuccessfulClaudeResult(nativeSessionId).usage, output_tokens: 64_000 },
+        };
+        harness.query.emit(result);
+        const events = Array.from(yield* Fiber.join(collected));
+        assert.equal(
+          events
+            .filter((event) => event.type === "content.delta")
+            .map((event) => event.payload.delta)
+            .join(""),
+          "Public introduction.Received partial answer",
+        );
+        assert.equal(
+          events.filter(
+            (event) =>
+              event.type === "item.completed" && event.payload.itemType === "assistant_message",
+          ).length,
+          2,
+        );
+        const completed = events.find((event) => event.type === "turn.completed");
+        assert.equal(completed?.turnId, turn.turnId);
+        assert.equal(completed?.payload.state, "failed");
+        assert.equal(completed?.payload.errorMessage, CLAUDE_RESPONSE_LIMIT_MESSAGE);
+        assert.deepEqual(completed?.payload.usage, result.usage);
+        assert.equal(completed?.payload.stopReason, "max_tokens");
+        assert.equal(events.filter((event) => event.type === "turn.completed").length, 1);
+        const runtimeError = events.find((event) => event.type === "runtime.error");
+        assert.equal(runtimeError?.payload.message, CLAUDE_RESPONSE_LIMIT_MESSAGE);
+        const snapshot = yield* adapter.readThread(THREAD_ID);
+        assert.equal(JSON.stringify(snapshot).includes(nativeError), false);
+        assert.equal(snapshot.turns[0]?.id, turn.turnId);
+        const ready = (yield* adapter.listSessions())[0];
+        assert.equal(ready?.status, "ready");
+        assert.equal(ready?.activeTurnId, undefined);
+        assert.equal(
+          (ready?.resumeCursor as { readonly resume?: string } | undefined)?.resume,
+          nativeSessionId,
+        );
+        assert.equal(harness.createInputs.length, 1);
+        assert.deepEqual(harness.query.setModelCalls, []);
+        assert.deepEqual(harness.query.setPermissionModeCalls, []);
+        assert.deepEqual(harness.query.setMaxThinkingTokensCalls, []);
+        yield* adapter.stopSession(THREAD_ID);
+        assert.equal((yield* Effect.promise(() => possibleUnsolicitedPrompt)).done, true);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  for (const ignored of [
+    "prose",
+    "child",
+    "blank-parent",
+    "foreign-session",
+    "foreign-prompt",
+    "pre-init",
+  ] as const) {
+    it.effect(`does not borrow a Claude response-limit category from ${ignored}`, () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const collected = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil((event) => event.type === "turn.completed"),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "Analyze", attachments: [] });
+        const nativeSessionId = "sdk-response-limit-rejection";
+        if (ignored !== "pre-init") {
+          harness.query.emit(
+            makeClaudeResponseLimitAssistant({ sessionId: nativeSessionId, text: "Received text" }),
+          );
+        }
+        harness.query.emit(
+          makeClaudeResponseLimitAssistant({
+            sessionId: ignored === "foreign-session" ? "sdk-foreign-limit" : nativeSessionId,
+            text: "Claude's response exceeded the 64000 output token maximum.",
+            uuid: "71000000-0000-4000-8000-000000000035",
+            ...(ignored !== "prose" ? { error: "max_output_tokens" } : {}),
+            ...(ignored === "child" ? { parentToolUseId: "synthetic-agent-call" } : {}),
+            ...(ignored === "blank-parent" ? { parentToolUseId: " " } : {}),
+            ...(ignored === "foreign-prompt"
+              ? { userMessageUuid: "71000000-0000-4000-8000-000000000099" }
+              : {}),
+          }),
+        );
+        harness.query.emit({
+          ...makeSuccessfulClaudeResult(nativeSessionId),
+          is_error: true,
+          result: "Unrelated failure",
+        });
+        const events = Array.from(yield* Fiber.join(collected));
+        const completed = events.find((event) => event.type === "turn.completed");
+        assert.equal(completed?.payload.state, "failed");
+        assert.equal(completed?.payload.errorMessage, "Unrelated failure");
+        assert.equal(
+          events.some(
+            (event) =>
+              event.type === "runtime.error" &&
+              event.payload.message === CLAUDE_RESPONSE_LIMIT_MESSAGE,
+          ),
+          false,
+        );
+        assert.equal(
+          events.some(
+            (event) =>
+              event.type === "thread.started" &&
+              event.payload.providerThreadId === "sdk-foreign-limit",
+          ),
+          false,
+        );
+        if (ignored === "child") {
+          assert.equal(
+            events.some((event) => event.type === "task.progress"),
+            true,
+          );
+        }
+      }).pipe(Effect.provide(harness.layer));
+    });
+  }
+
+  for (const reordered of ["completed-command-first", "replayed-text"] as const) {
+    it.effect(`retains exact Claude response-limit evidence across ${reordered}`, () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const collected = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil((event) => event.type === "turn.completed"),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+        const turn = yield* adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: "Analyze",
+          attachments: [],
+        });
+        const nativeSessionId = "sdk-response-limit-reordered";
+        const intro = makeClaudeResponseLimitAssistant({
+          sessionId: nativeSessionId,
+          text: "Received text",
+        });
+        harness.query.emit(intro);
+        harness.query.emit(
+          makeClaudeResponseLimitAssistant({
+            sessionId: nativeSessionId,
+            text: "Native limit diagnostic",
+            error: "max_output_tokens",
+            uuid: "71000000-0000-4000-8000-000000000041",
+            userMessageUuid: turn.turnId,
+          }),
+        );
+        if (reordered === "replayed-text") {
+          harness.query.emit(intro);
+        } else {
+          // Native command lifecycle is intentionally decoded by the adapter
+          // even though SDK 0.3.288's public iterator union still omits it.
+          harness.query.emit({
+            type: "command_lifecycle",
+            command_uuid: turn.turnId,
+            state: "completed",
+            session_id: nativeSessionId,
+            uuid: "71000000-0000-4000-8000-000000000042",
+          } as unknown as SDKMessage);
+        }
+        harness.query.emit({
+          ...makeSuccessfulClaudeResult(nativeSessionId),
+          is_error: true,
+          result: "Native limit diagnostic",
+          user_message_uuid: turn.turnId,
+        });
+        const events = Array.from(yield* Fiber.join(collected));
+        const completed = events.find((event) => event.type === "turn.completed");
+        assert.equal(completed?.payload.errorMessage, CLAUDE_RESPONSE_LIMIT_MESSAGE);
+        assert.equal(events.filter((event) => event.type === "content.delta").length, 1);
+        assert.equal(events.filter((event) => event.type === "turn.completed").length, 1);
+      }).pipe(Effect.provide(harness.layer));
+    });
+  }
+
+  it.effect(
+    "does not attribute a foreign correlated result to the Claude response-limit witness",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const collected = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil((event) => event.type === "turn.completed"),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+        const turn = yield* adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: "Analyze",
+          attachments: [],
+        });
+        const nativeSessionId = "sdk-response-limit-result-correlation";
+        harness.query.emit(
+          makeClaudeResponseLimitAssistant({ sessionId: nativeSessionId, text: "Received text" }),
+        );
+        harness.query.emit(
+          makeClaudeResponseLimitAssistant({
+            sessionId: nativeSessionId,
+            text: "Native limit diagnostic",
+            error: "max_output_tokens",
+            uuid: "71000000-0000-4000-8000-000000000043",
+            userMessageUuid: turn.turnId,
+          }),
+        );
+        // A foreign stamp cannot borrow the captured category. Keep ordinary
+        // queue/result semantics, then settle the actual owned prompt normally.
+        harness.query.emit({
+          ...makeSuccessfulClaudeResult(nativeSessionId),
+          is_error: true,
+          result: "Foreign correlated error",
+          user_message_uuid: "71000000-0000-4000-8000-000000000099",
+        });
+        harness.query.emit({
+          ...makeSuccessfulClaudeResult(nativeSessionId),
+          is_error: true,
+          result: "Owned unrelated error",
+          user_message_uuid: turn.turnId,
+        });
+        const events = Array.from(yield* Fiber.join(collected));
+        const completed = events.find((event) => event.type === "turn.completed");
+        assert.equal(completed?.payload.errorMessage, "Owned unrelated error");
+        assert.equal(
+          events.some(
+            (event) =>
+              event.type === "runtime.warning" &&
+              JSON.stringify(event.payload.detail).includes(CLAUDE_RESPONSE_LIMIT_MESSAGE),
+          ),
+          false,
+        );
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  for (const boundary of ["native-rebind", "conversation-reset"] as const) {
+    it.effect(`retires Claude response-limit evidence at ${boundary}`, () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const collected = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil((event) => event.type === "turn.completed"),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+        const turn = yield* adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: "Analyze",
+          attachments: [],
+        });
+        const nativeSessionId = "sdk-response-limit-old-conversation";
+        harness.query.emit(
+          makeClaudeResponseLimitAssistant({ sessionId: nativeSessionId, text: "Received text" }),
+        );
+        harness.query.emit(
+          makeClaudeResponseLimitAssistant({
+            sessionId: nativeSessionId,
+            text: "Native limit diagnostic",
+            error: "max_output_tokens",
+            uuid: "71000000-0000-4000-8000-000000000045",
+            userMessageUuid: turn.turnId,
+          }),
+        );
+        if (boundary === "native-rebind") {
+          harness.query.emit({
+            type: "system",
+            subtype: "informational",
+            content: "New native conversation",
+            level: "info",
+            session_id: "sdk-response-limit-new-conversation",
+            uuid: "71000000-0000-4000-8000-000000000046",
+          });
+        } else {
+          harness.query.emit({
+            type: "conversation_reset",
+            new_conversation_id: "71000000-0000-4000-8000-000000000047",
+            session_id: nativeSessionId,
+            uuid: "71000000-0000-4000-8000-000000000048",
+          });
+        }
+        harness.query.emit({
+          ...makeSuccessfulClaudeResult(nativeSessionId),
+          is_error: true,
+          result: "Later unrelated error",
+          user_message_uuid: turn.turnId,
+        });
+        const events = Array.from(yield* Fiber.join(collected));
+        const completed = events.find((event) => event.type === "turn.completed");
+        assert.equal(completed?.payload.errorMessage, "Later unrelated error");
+        assert.equal(events.filter((event) => event.type === "turn.completed").length, 1);
+      }).pipe(Effect.provide(harness.layer));
+    });
+  }
+
+  for (const recovery of ["success", "new-request-failure", "new-block-failure"] as const) {
+    it.effect(`settles later Claude ${recovery} without a stale response-limit marker`, () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const collected = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil((event) => event.type === "turn.completed"),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "Analyze", attachments: [] });
+        const nativeSessionId = "sdk-response-limit-recovered";
+        harness.query.emit(
+          makeClaudeResponseLimitAssistant({ sessionId: nativeSessionId, text: "Received text" }),
+        );
+        harness.query.emit(
+          makeClaudeResponseLimitAssistant({
+            sessionId: nativeSessionId,
+            text: "Native limit diagnostic",
+            error: "max_output_tokens",
+            uuid: "71000000-0000-4000-8000-000000000036",
+          }),
+        );
+        const later = makeClaudeResponseLimitAssistant({
+          sessionId: nativeSessionId,
+          text: "Recovered answer",
+          uuid: "71000000-0000-4000-8000-000000000037",
+        });
+        if (recovery === "new-request-failure") {
+          harness.query.emit({
+            type: "stream_event",
+            session_id: nativeSessionId,
+            uuid: "71000000-0000-4000-8000-000000000038",
+            parent_tool_use_id: null,
+            event: { type: "message_start", message: { ...later.message, content: [] } },
+          });
+        } else if (recovery === "new-block-failure") {
+          harness.query.emit(later);
+        }
+        harness.query.emit({
+          ...makeSuccessfulClaudeResult(nativeSessionId),
+          is_error: recovery !== "success",
+          result: recovery === "success" ? "Recovered answer" : "Later unrelated error",
+        });
+        const events = Array.from(yield* Fiber.join(collected));
+        const completed = events.find((event) => event.type === "turn.completed");
+        assert.equal(completed?.payload.state, recovery === "success" ? "completed" : "failed");
+        assert.equal(
+          completed?.payload.errorMessage,
+          recovery === "success" ? undefined : "Later unrelated error",
+        );
+        assert.equal(
+          events.some(
+            (event) =>
+              event.type === "content.delta" && event.payload.delta === "Native limit diagnostic",
+          ),
+          false,
+        );
+      }).pipe(Effect.provide(harness.layer));
+    });
+  }
+
+  it.effect("keeps accepted Claude follow-ups active and resets the response-limit segment", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const collected = yield* adapter.streamEvents.pipe(
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+      const turn = yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "Analyze",
+        attachments: [],
+      });
+      yield* adapter.steerTurn({
+        threadId: THREAD_ID,
+        expectedTurnId: turn.turnId,
+        input: "Also review the edge case",
+        attachments: [],
+      });
+      const prompts = yield* Effect.promise(() =>
+        readPromptMessages(harness.getLastCreateQueryInput(), 2),
+      );
+      const firstPromptUuid = prompts[0]?.uuid;
+      const followUpPromptUuid = prompts[1]?.uuid;
+      if (!firstPromptUuid || !followUpPromptUuid)
+        return assert.fail("Expected both owned prompt UUIDs");
+      const nativeSessionId = "sdk-response-limit-queued";
+      harness.query.emit(
+        makeClaudeResponseLimitAssistant({ sessionId: nativeSessionId, text: "Received text" }),
+      );
+      harness.query.emit(
+        makeClaudeResponseLimitAssistant({
+          sessionId: nativeSessionId,
+          text: "Native limit diagnostic",
+          error: "max_output_tokens",
+          uuid: "71000000-0000-4000-8000-000000000039",
+        }),
+      );
+      harness.query.emit({
+        ...makeSuccessfulClaudeResult(nativeSessionId),
+        is_error: true,
+        result: "Native limit diagnostic",
+        user_message_uuid: firstPromptUuid,
+        queued_turn_count: 1,
+      });
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, turn.turnId);
+      // No new assistant block is required to clear segment-local evidence;
+      // result-time draining alone retires the failed segment's marker.
+      harness.query.emit({
+        ...makeSuccessfulClaudeResult(nativeSessionId),
+        is_error: true,
+        result: "Later unrelated error",
+        user_message_uuid: followUpPromptUuid,
+        queued_turn_count: 0,
+      });
+      const events = Array.from(yield* Fiber.join(collected));
+      assert.equal(events.filter((event) => event.type === "turn.completed").length, 1);
+      const completed = events.find((event) => event.type === "turn.completed");
+      assert.equal(completed?.turnId, turn.turnId);
+      assert.equal(completed?.payload.errorMessage, "Later unrelated error");
+      assert.equal(
+        events.some(
+          (event) =>
+            event.type === "runtime.warning" &&
+            JSON.stringify(event.payload.detail).includes(CLAUDE_RESPONSE_LIMIT_MESSAGE),
+        ),
+        true,
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  for (const terminal of ["auth", "auth-assistant", "interrupt", "stop"] as const) {
+    it.effect(`preserves Claude ${terminal} authority after response-limit telemetry`, () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const collected = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil((event) => event.type === "turn.completed"),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "Analyze", attachments: [] });
+        const nativeSessionId = "sdk-response-limit-control";
+        harness.query.emit(
+          makeClaudeResponseLimitAssistant({ sessionId: nativeSessionId, text: "Received text" }),
+        );
+        harness.query.emit(
+          makeClaudeResponseLimitAssistant({
+            sessionId: nativeSessionId,
+            text: "Native limit diagnostic",
+            error: "max_output_tokens",
+            uuid: "71000000-0000-4000-8000-000000000040",
+          }),
+        );
+        if (terminal === "stop") {
+          yield* Effect.yieldNow;
+          yield* Effect.yieldNow;
+          yield* adapter.stopSession(THREAD_ID);
+        } else {
+          if (terminal === "auth-assistant") {
+            harness.query.emit(
+              makeClaudeResponseLimitAssistant({
+                sessionId: nativeSessionId,
+                text: "Invalid authentication credentials",
+                error: "authentication_failed",
+                uuid: "71000000-0000-4000-8000-000000000044",
+              }),
+            );
+          }
+          harness.query.emit({
+            ...makeSuccessfulClaudeResult(nativeSessionId),
+            is_error: true,
+            result:
+              terminal === "auth"
+                ? "Invalid authentication credentials"
+                : terminal === "auth-assistant"
+                  ? "Unspecified execution failure"
+                  : "Interrupted by user",
+            ...(terminal === "auth" ? { api_error_status: 401 } : {}),
+          });
+        }
+        const events = Array.from(yield* Fiber.join(collected));
+        const completed = events.find((event) => event.type === "turn.completed");
+        assert.equal(
+          completed?.payload.state,
+          terminal === "auth" || terminal === "auth-assistant" ? "failed" : "interrupted",
+        );
+        assert.notEqual(completed?.payload.errorMessage, CLAUDE_RESPONSE_LIMIT_MESSAGE);
+        assert.equal(events.filter((event) => event.type === "turn.completed").length, 1);
+      }).pipe(Effect.provide(harness.layer));
+    });
+  }
 
   it.effect(
     "settles a truncated Claude stream from the authoritative result without message_stop",

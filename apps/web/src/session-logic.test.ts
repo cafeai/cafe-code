@@ -805,6 +805,142 @@ describe("deriveHistoricalWorkLogSummaries", () => {
 });
 
 describe("deriveWorkLogEntries", () => {
+  it("folds public summary snapshots in their first chronological position, isolated by turn and block", () => {
+    const summary = (
+      id: string,
+      turnId: string,
+      sequence: number,
+      detail: string,
+      itemId = "block-0",
+    ) =>
+      makeActivity({
+        id,
+        turnId,
+        sequence,
+        kind: "reasoning.summary",
+        tone: "info",
+        createdAt: `2026-10-09T00:00:0${sequence}.000Z`,
+        payload: {
+          itemId,
+          streamKind: "reasoning_summary_text",
+          summaryVersion: 1,
+          provider: "claudeAgent",
+          detail,
+          status: sequence === 3 ? "completed" : "inProgress",
+          truncated: false,
+        },
+      });
+    const tool = makeActivity({
+      id: "tool-between",
+      turnId: "turn-a",
+      sequence: 2,
+      createdAt: "2026-10-09T00:00:02.000Z",
+      kind: "tool.completed",
+      summary: "Read file",
+    });
+    const entries = deriveWorkLogEntries(
+      [
+        summary("summary-terminal", "turn-a", 3, "Checking complete"),
+        tool,
+        summary("summary-start", "turn-a", 1, "Checking"),
+        summary("next-block", "turn-a", 4, "Next step", "block-1"),
+        summary("other-turn", "turn-b", 5, "Other turn"),
+      ],
+      undefined,
+    );
+    expect(entries.map((entry) => entry.id)).toEqual([
+      "summary-start",
+      "tool-between",
+      "next-block",
+      "other-turn",
+    ]);
+    expect(entries[0]).toMatchObject({
+      createdAt: "2026-10-09T00:00:01.000Z",
+      label: "Claude summary",
+      publicSummary: { text: "Checking complete", status: "completed" },
+    });
+    expect(
+      deriveWorkLogEntries(
+        [
+          makeActivity({
+            id: "malformed",
+            turnId: "turn-a",
+            kind: "reasoning.summary",
+            payload: { detail: "signature-only private", streamKind: "reasoning_text" },
+          }),
+        ],
+        undefined,
+      ),
+    ).toEqual([]);
+  });
+
+  it("retains a live Claude command with description and merges received output/status/observed timing", () => {
+    const command = (id: string, kind: string, second: number, payload: Record<string, unknown>) =>
+      makeActivity({
+        id,
+        turnId: "turn-a",
+        sequence: second,
+        createdAt: `2026-10-09T00:00:0${second}.000Z`,
+        kind,
+        summary: "Command run",
+        payload: { itemId: "tool-a", itemType: "command_execution", ...payload },
+      });
+    const started = command("start", "tool.started", 1, {
+      data: {
+        toolName: "Bash",
+        commandInspectionVersion: 1,
+        inspectionProvider: "claudeAgent",
+        input: { description: "Run tests", command: "yarn test" },
+      },
+    });
+    expect(deriveWorkLogEntries([started], undefined)[0]).toMatchObject({
+      commandInspection: {
+        description: "Run tests",
+        command: "yarn test",
+        status: "inProgress",
+        startedAt: started.createdAt,
+      },
+    });
+    const updated = command("update", "tool.updated", 2, {
+      status: "inProgress",
+      data: {
+        toolName: "Bash",
+        commandInspectionVersion: 1,
+        inspectionProvider: "claudeAgent",
+        output: "test output",
+        outputTruncated: true,
+      },
+    });
+    const info = makeActivity({
+      id: "info",
+      turnId: "turn-a",
+      sequence: 3,
+      kind: "task.progress",
+      summary: "Received public update",
+    });
+    const completed = command("complete", "tool.completed", 4, {
+      status: "failed",
+      data: { toolName: "Bash", commandInspectionVersion: 1, inspectionProvider: "claudeAgent" },
+    });
+    const entries = deriveWorkLogEntries([completed, updated, info, started], undefined);
+    expect(entries.map((entry) => entry.id)).toEqual(["start", "info"]);
+    expect(entries[0]).toMatchObject({
+      command: "yarn test",
+      detail: "Run tests",
+      commandInspection: {
+        description: "Run tests",
+        command: "yarn test",
+        output: "test output",
+        outputTruncated: true,
+        status: "failed",
+        startedAt: started.createdAt,
+        completedAt: completed.createdAt,
+      },
+    });
+    expect(
+      deriveWorkLogEntries([completed], undefined)[0]?.commandInspection?.startedAt,
+    ).toBeUndefined();
+  });
   it("omits tool started entries and keeps completed entries", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({
@@ -823,6 +959,79 @@ describe("deriveWorkLogEntries", () => {
 
     const entries = deriveWorkLogEntries(activities, undefined);
     expect(entries.map((entry) => entry.id)).toEqual(["tool-complete"]);
+  });
+
+  it("does not revive terminal primary operations on delayed updates or another tool's success", () => {
+    const turnId = "terminal-operation-turn";
+    const command = (
+      id: string,
+      sequence: number,
+      itemId: string,
+      kind: string,
+      status: string,
+      output: string,
+    ) =>
+      makeActivity({
+        id,
+        turnId,
+        sequence,
+        kind,
+        payload: {
+          itemId,
+          itemType: "command_execution",
+          status,
+          data: {
+            toolName: "Bash",
+            commandInspectionVersion: 1,
+            inspectionProvider: "claudeAgent",
+            output,
+          },
+        },
+      });
+    const summary = (id: string, sequence: number, status: string, detail: string) =>
+      makeActivity({
+        id,
+        turnId,
+        sequence,
+        kind: "reasoning.summary",
+        tone: "info",
+        payload: {
+          itemId: "summary-block",
+          streamKind: "reasoning_summary_text",
+          summaryVersion: 1,
+          provider: "claudeAgent",
+          status,
+          detail,
+          truncated: false,
+        },
+      });
+    const entries = deriveWorkLogEntries(
+      [
+        command("failed", 1, "failed-command", "tool.completed", "failed", "Received failure"),
+        summary("partial", 2, "failed", "Received partial summary"),
+        command("late-update", 3, "failed-command", "tool.updated", "inProgress", "Stale update"),
+        summary("late-summary", 4, "inProgress", "Stale summary"),
+        command(
+          "other-success",
+          5,
+          "other-command",
+          "tool.completed",
+          "completed",
+          "Other command succeeded",
+        ),
+      ],
+      undefined,
+    );
+    expect(entries.map((entry) => entry.id)).toEqual(["failed", "partial", "other-success"]);
+    expect(entries[0]?.commandInspection).toMatchObject({
+      status: "failed",
+      output: "Received failure",
+    });
+    expect(entries[1]?.publicSummary).toMatchObject({
+      status: "failed",
+      text: "Received partial summary",
+    });
+    expect(entries[2]?.commandInspection?.status).toBe("completed");
   });
 
   it("omits ordinary task.started but shows task.progress and task.completed", () => {

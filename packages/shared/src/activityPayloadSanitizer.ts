@@ -86,7 +86,15 @@ function sanitizePayloadValue(value: unknown, key: string | null, depth: number)
   for (const [entryKey, entryValue] of entries.slice(0, TOOL_PAYLOAD_MAX_OBJECT_KEYS)) {
     if (typeof entryValue === "string" && OUTPUT_PREVIEW_KEYS.has(entryKey)) {
       output[entryKey] = truncatePayloadText(entryValue);
-      output[`${entryKey}Truncated`] = entryValue.length > TOOL_PAYLOAD_TEXT_PREVIEW_LIMIT;
+      // A prior bounded projection can already have omitted a suffix. Retain
+      // that evidence across repeated sanitization regardless of key order.
+      output[`${entryKey}Truncated`] =
+        entryValue.length > TOOL_PAYLOAD_TEXT_PREVIEW_LIMIT ||
+        Object.getOwnPropertyDescriptor(value, `${entryKey}Truncated`)?.value === true;
+      continue;
+    }
+    if (entryKey.endsWith("Truncated") && OUTPUT_PREVIEW_KEYS.has(entryKey.slice(0, -9))) {
+      output[entryKey] = output[entryKey] === true || entryValue === true;
       continue;
     }
     output[entryKey] = sanitizePayloadValue(entryValue, entryKey, depth + 1);

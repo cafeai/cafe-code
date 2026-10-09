@@ -27,6 +27,10 @@ import {
 } from "@cafecode/contracts";
 import { scopedThreadKey, scopeThreadRef } from "@cafecode/client-runtime";
 import { createModelCapabilities, createModelSelection } from "@cafecode/shared/model";
+import {
+  CLAUDE_RESPONSE_LIMIT_MESSAGE,
+  CLAUDE_SHORTER_CONTINUATION_PROMPT,
+} from "@cafecode/shared/claudeResponseLimits";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -2182,6 +2186,379 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
   });
 
   if (chatViewBrowserPart === "composer") {
+    const responseLimitSelection = createModelSelection(
+      ProviderInstanceId.make("claudeAgent"),
+      "claude-opus-4-8",
+      [{ id: "effort", value: "max" }],
+    );
+    const createResponseLimitSnapshot = (): OrchestrationReadModel => {
+      const base = createSnapshotForTargetUser({
+        targetMessageId: MessageId.make("response-limit-request"),
+        targetText: "Existing work",
+        provider: "claudeAgent",
+        runtimeMode: "approval-required",
+        sessionStatus: "error",
+      });
+      return {
+        ...base,
+        threads: base.threads.map((thread) => ({
+          ...thread,
+          modelSelection: responseLimitSelection,
+          latestTurn: {
+            turnId: "response-limit-failed-turn" as TurnId,
+            state: "error" as const,
+            requestedAt: isoAt(1),
+            startedAt: isoAt(2),
+            completedAt: isoAt(3200),
+            assistantMessageId: null,
+          },
+          session: {
+            ...thread.session!,
+            providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+            subagentRuntimeId: "c5278b1d-70a1-4b9f-9741-0ed1d8dbe9f2",
+            lastError: CLAUDE_RESPONSE_LIMIT_MESSAGE,
+            updatedAt: isoAt(3200),
+          },
+        })),
+      };
+    };
+    const configureResponseLimitFixture = (nextFixture: TestFixture) => {
+      nextFixture.serverConfig = {
+        ...nextFixture.serverConfig,
+        providers: [
+          ...nextFixture.serverConfig.providers,
+          {
+            driver: ProviderDriverKind.make("claudeAgent"),
+            instanceId: ProviderInstanceId.make("claudeAgent"),
+            enabled: true,
+            installed: true,
+            version: "2.1.288",
+            status: "ready",
+            auth: { status: "authenticated" },
+            checkedAt: NOW_ISO,
+            models: [
+              {
+                slug: responseLimitSelection.model,
+                name: "Claude Opus 4.8",
+                isCustom: false,
+                capabilities: createModelCapabilities({
+                  optionDescriptors: [
+                    {
+                      id: "effort",
+                      label: "Effort",
+                      type: "select",
+                      currentValue: "high",
+                      options: [
+                        { id: "high", label: "High", isDefault: true },
+                        { id: "max", label: "Max" },
+                      ],
+                    },
+                  ],
+                }),
+              },
+            ],
+            slashCommands: [],
+            skills: [],
+          },
+        ],
+      };
+    };
+
+    it.each([DEFAULT_VIEWPORT, COMPACT_FOOTER_VIEWPORT])(
+      "prepares an editable Claude shorter response at $name width and submits only through normal Send",
+      async (viewport) => {
+        const mounted = await mountChatView({
+          viewport,
+          snapshot: createResponseLimitSnapshot(),
+          configureFixture: configureResponseLimitFixture,
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
+        });
+        try {
+          const editor = await waitForComposerEditor();
+          const prepare = page.getByRole("button", { name: "Prepare shorter response" });
+          await expect.element(prepare).toBeEnabled();
+          const settingsBefore = useComposerDraftStore.getState().getComposerDraft(THREAD_REF);
+          await prepare.click();
+          await waitForComposerText(CLAUDE_SHORTER_CONTINUATION_PROMPT);
+          await vi.waitFor(() => expect(editor.contains(document.activeElement)).toBe(true));
+          await expect.element(prepare).toBeDisabled();
+          // A second stale click cannot prepare or submit another copy.
+          (prepare.element() as HTMLButtonElement).click();
+          expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)).toMatchObject({
+            prompt: CLAUDE_SHORTER_CONTINUATION_PROMPT,
+            modelSelectionByProvider: settingsBefore?.modelSelectionByProvider ?? {},
+            activeProvider: settingsBefore?.activeProvider ?? null,
+            runtimeMode: settingsBefore?.runtimeMode ?? null,
+            interactionMode: settingsBefore?.interactionMode ?? null,
+          });
+          expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.error).toBe(
+            CLAUDE_RESPONSE_LIMIT_MESSAGE,
+          );
+          expect(
+            wsRequests.filter(
+              (request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand,
+            ),
+          ).toHaveLength(0);
+          const rect = prepare.element().getBoundingClientRect();
+          expect(rect.left).toBeGreaterThanOrEqual(0);
+          expect(rect.right).toBeLessThanOrEqual(viewport.width);
+          await page
+            .getByTestId("composer-editor")
+            .fill("Give a concise answer from the existing work.");
+          (await waitForSendButton()).click();
+          await vi.waitFor(() => {
+            const commands = wsRequests.filter(
+              (request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand,
+            );
+            expect(commands).toHaveLength(1);
+            expect(commands[0]).toMatchObject({
+              type: "thread.turn.start",
+              threadId: THREAD_ID,
+              message: { text: "Give a concise answer from the existing work.", attachments: [] },
+              modelSelection: responseLimitSelection,
+              runtimeMode: "approval-required",
+              interactionMode: "default",
+            });
+          });
+        } finally {
+          await mounted.cleanup();
+        }
+      },
+    );
+
+    it.each([
+      "draft",
+      "file",
+      "image",
+      "queue edit",
+      "approval",
+      "question",
+      "account",
+      "error",
+      "new turn",
+    ] as const)(
+      "rejects a stale Claude shorter-response click after %s replacement",
+      async (state) => {
+        const mounted = await mountChatView({
+          viewport: DEFAULT_VIEWPORT,
+          snapshot: createResponseLimitSnapshot(),
+          configureFixture: configureResponseLimitFixture,
+        });
+        try {
+          await waitForComposerEditor();
+          const prepare = page.getByRole("button", { name: "Prepare shorter response" });
+          await expect.element(prepare).toBeEnabled();
+          const staleButton = prepare.element() as HTMLButtonElement;
+          if (state === "draft") {
+            useComposerDraftStore.getState().setPrompt(THREAD_REF, "My unsent draft");
+          } else if (state === "file") {
+            useComposerDraftStore.getState().setFiles(THREAD_REF, [
+              {
+                id: "unsent-file",
+                environmentId: LOCAL_ENVIRONMENT_ID,
+                targetThreadId: THREAD_ID,
+                name: "draft.txt",
+                mimeType: "text/plain",
+                sizeBytes: 1,
+                status: "failed",
+                error: "Synthetic unavailable upload",
+              },
+            ]);
+          } else if (state === "image") {
+            useComposerDraftStore.getState().addImages(THREAD_REF, [
+              {
+                id: "unsent-image",
+                type: "image",
+                name: "draft.png",
+                mimeType: "image/png",
+                sizeBytes: 1,
+                previewUrl: "data:image/png;base64,eA==",
+                file: new File(["x"], "draft.png", { type: "image/png" }),
+              },
+            ]);
+          } else if (state === "queue edit") {
+            expect(
+              useComposerDraftStore.getState().beginQueueEdit(THREAD_REF, "queued-edit", {
+                prompt: "",
+                images: [],
+                files: [],
+                modelSelection: responseLimitSelection,
+                runtimeMode: "approval-required",
+                interactionMode: "default",
+              }),
+            ).toBe(true);
+          } else if (state === "approval" || state === "question") {
+            const activity: OrchestrationReadModel["threads"][number]["activities"][number] = {
+              id: EventId.make(`response-limit-new-${state}`),
+              kind: state === "approval" ? "approval.requested" : "user-input.requested",
+              tone: "info",
+              summary: "Synthetic pending decision",
+              turnId: "response-limit-failed-turn" as TurnId,
+              createdAt: isoAt(3201),
+              payload: {
+                requestId: `response-limit-${state}`,
+                ...(state === "approval"
+                  ? { requestKind: "command" }
+                  : {
+                      isBlocking: true,
+                      questions: [
+                        {
+                          id: "choice",
+                          header: "Choice",
+                          question: "Choose a direction",
+                          options: [
+                            { label: "First", description: "First direction" },
+                            { label: "Second", description: "Second direction" },
+                          ],
+                        },
+                      ],
+                    }),
+              },
+            };
+            useStore.setState((store) => {
+              const environment = store.environmentStateById[LOCAL_ENVIRONMENT_ID]!;
+              return {
+                environmentStateById: {
+                  ...store.environmentStateById,
+                  [LOCAL_ENVIRONMENT_ID]: {
+                    ...environment,
+                    activityIdsByThreadId: {
+                      ...environment.activityIdsByThreadId,
+                      [THREAD_ID]: [activity.id],
+                    },
+                    activityByThreadId: {
+                      ...environment.activityByThreadId,
+                      [THREAD_ID]: { [activity.id]: activity },
+                    },
+                  },
+                },
+              };
+            });
+          } else if (state === "account") {
+            useComposerDraftStore
+              .getState()
+              .setModelSelection(
+                THREAD_REF,
+                createModelSelection(ProviderInstanceId.make("codex"), "gpt-5"),
+              );
+          } else if (state === "error") {
+            useStore.getState().setError(THREAD_REF, "A newer command failed.");
+          } else {
+            useStore.setState((store) => {
+              const environment = store.environmentStateById[LOCAL_ENVIRONMENT_ID]!;
+              return {
+                environmentStateById: {
+                  ...store.environmentStateById,
+                  [LOCAL_ENVIRONMENT_ID]: {
+                    ...environment,
+                    threadSessionById: {
+                      ...environment.threadSessionById,
+                      [THREAD_ID]: {
+                        ...environment.threadSessionById[THREAD_ID]!,
+                        status: "running",
+                        orchestrationStatus: "running",
+                        activeTurnId: "new-response" as TurnId,
+                      },
+                    },
+                  },
+                },
+              };
+            });
+          }
+          // Invoke before React commits the replacement, exercising the live
+          // store recheck rather than only the next render's disabled button.
+          staleButton.click();
+          await waitForLayout();
+          expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt ?? "").toBe(
+            state === "draft" ? "My unsent draft" : "",
+          );
+          expect(
+            wsRequests.filter(
+              (request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand,
+            ),
+          ).toHaveLength(0);
+          if (["draft", "file", "image", "queue edit", "approval", "question"].includes(state))
+            await expect.element(prepare).toBeDisabled();
+          else await expect.element(prepare).not.toBeInTheDocument();
+          const currentDraft = useComposerDraftStore.getState().getComposerDraft(THREAD_REF);
+          if (state === "file") expect(currentDraft?.files[0]?.id).toBe("unsent-file");
+          if (state === "image") expect(currentDraft?.images[0]?.id).toBe("unsent-image");
+          if (state === "queue edit") expect(currentDraft?.queueEditingItemId).toBe("queued-edit");
+          if (state === "error")
+            await expect.element(page.getByText("A newer command failed.")).toBeVisible();
+        } finally {
+          await mounted.cleanup();
+        }
+      },
+    );
+
+    it("does not prepare Claude continuation after navigating away and back to the failed chat", async () => {
+      const base = createResponseLimitSnapshot();
+      const secondId = ThreadId.make("response-limit-second-chat");
+      const source = base.threads[0]!;
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: {
+          ...base,
+          threads: [
+            ...base.threads,
+            {
+              ...source,
+              id: secondId,
+              title: "Another chat",
+              messages: [],
+              latestTurn: null,
+              session: { ...source.session!, threadId: secondId, status: "ready", lastError: null },
+            },
+          ],
+        },
+        configureFixture: configureResponseLimitFixture,
+      });
+      try {
+        await waitForComposerEditor();
+        const prepare = page.getByRole("button", { name: "Prepare shorter response" });
+        await expect.element(prepare).toBeEnabled();
+        const previousButton = prepare.element() as HTMLButtonElement;
+        await mounted.router.navigate({
+          to: "/$environmentId/$threadId",
+          params: { environmentId: LOCAL_ENVIRONMENT_ID, threadId: secondId },
+        });
+        await waitForURL(
+          mounted.router,
+          (path) => path === serverThreadPath(secondId),
+          "Navigate to second chat.",
+        );
+        previousButton.click();
+        expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt ?? "").toBe(
+          "",
+        );
+        expect(
+          useComposerDraftStore
+            .getState()
+            .getComposerDraft(scopeThreadRef(LOCAL_ENVIRONMENT_ID, secondId))?.prompt ?? "",
+        ).toBe("");
+        await mounted.router.navigate({
+          to: "/$environmentId/$threadId",
+          params: { environmentId: LOCAL_ENVIRONMENT_ID, threadId: THREAD_ID },
+        });
+        await waitForURL(
+          mounted.router,
+          (path) => path === serverThreadPath(THREAD_ID),
+          "Return to failed chat.",
+        );
+        await expect.element(prepare).toBeEnabled();
+        expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt ?? "").toBe(
+          "",
+        );
+        expect(
+          wsRequests.filter((request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand),
+        ).toHaveLength(0);
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
     it("shows manual compaction in the used-tools list without a user turn or composer notice", async () => {
       const base = createSnapshotForTargetUser({
         targetMessageId: "compact-history" as MessageId,

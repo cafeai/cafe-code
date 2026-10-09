@@ -25,6 +25,7 @@ import {
   type ProviderRuntimeEvent,
 } from "@cafecode/contracts";
 import { readCafeCodeEnv } from "@cafecode/shared/compatEnv";
+import { claudePublicSummaryDisplayText } from "../../provider/claudePublicSummary.ts";
 import { normalizeCodexAsyncQuestions } from "@cafecode/shared/codexAsyncQuestions";
 import { PROVIDER_PIPELINE_POLICY } from "@cafecode/shared/providerPipelinePolicy";
 import * as Cache from "effect/Cache";
@@ -537,6 +538,35 @@ function requestKindFromCanonicalRequestType(
   }
 }
 
+function runtimeToolPresentationData(
+  event: Extract<
+    ProviderRuntimeEvent,
+    { type: "item.started" | "item.updated" | "item.completed" }
+  >,
+) {
+  const sanitized = sanitizeProviderToolData(event.payload.data, {
+    itemType: event.payload.itemType,
+  });
+  const source = readUnknownRecord(sanitized);
+  if (!source) return sanitized;
+  const data = { ...source };
+  // Provider-controlled raw data from other adapters cannot counterfeit this
+  // newly reserved inspector contract. Only trusted canonical Claude identity
+  // plus its primary-adapter versioned marker mints presentation provenance.
+  delete data.commandInspectionVersion;
+  delete data.inspectionProvider;
+  if (
+    event.provider === "claudeAgent" &&
+    event.payload.itemType === "command_execution" &&
+    source.toolName === "Bash" &&
+    source.commandInspectionVersion === 1
+  ) {
+    data.commandInspectionVersion = 1;
+    data.inspectionProvider = "claudeAgent";
+  }
+  return data;
+}
+
 function runtimeEventToActivities(
   event: ProviderRuntimeEvent,
 ): ReadonlyArray<OrchestrationThreadActivity> {
@@ -546,6 +576,53 @@ function runtimeEventToActivities(
       ? { sequence: eventWithSequence.sessionSequence }
       : {};
   })();
+  if (
+    (event.type === "item.updated" || event.type === "item.completed") &&
+    event.provider === "claudeAgent" &&
+    event.payload.itemType === "reasoning" &&
+    event.itemId !== undefined &&
+    event.turnId !== undefined
+  ) {
+    const data = readUnknownRecord(event.payload.data);
+    const status = event.payload.status ?? "inProgress";
+    // Only the adapter's bounded disclosed-summary contract is promoted.
+    // Generic reasoning/content deltas and other providers remain unchanged.
+    if (
+      data?.summaryVersion !== 1 ||
+      data.streamKind !== "reasoning_summary_text" ||
+      typeof data.truncated !== "boolean" ||
+      typeof event.payload.detail !== "string" ||
+      event.payload.detail.trim().length === 0 ||
+      event.payload.detail.length > 4_096 ||
+      claudePublicSummaryDisplayText(event.payload.detail) !== event.payload.detail ||
+      (status !== "inProgress" && status !== "completed" && status !== "failed")
+    )
+      return [];
+    return [
+      {
+        id: EventId.make(
+          `claude-summary:${Crypto.createHash("sha256")
+            .update(JSON.stringify([event.turnId, event.itemId]), "utf8")
+            .digest("hex")}`,
+        ),
+        createdAt: event.createdAt,
+        tone: "info",
+        kind: "reasoning.summary",
+        summary: "Claude summary",
+        payload: {
+          summaryVersion: 1,
+          provider: "claudeAgent",
+          itemId: event.itemId,
+          streamKind: "reasoning_summary_text",
+          detail: event.payload.detail,
+          status,
+          truncated: data.truncated,
+        },
+        turnId: toTurnId(event.turnId) ?? null,
+        ...maybeSequence,
+      },
+    ];
+  }
   switch (event.type) {
     case "request.opened": {
       if (event.payload.requestType === "tool_user_input") {
@@ -919,9 +996,7 @@ function runtimeEventToActivities(
       if (!isToolLifecycleItemType(event.payload.itemType)) {
         return [];
       }
-      const sanitizedData = sanitizeProviderToolData(event.payload.data, {
-        itemType: event.payload.itemType,
-      });
+      const sanitizedData = runtimeToolPresentationData(event);
       return [
         {
           id: event.eventId,
@@ -974,9 +1049,7 @@ function runtimeEventToActivities(
       if (!isToolLifecycleItemType(event.payload.itemType)) {
         return [];
       }
-      const sanitizedData = sanitizeProviderToolData(event.payload.data, {
-        itemType: event.payload.itemType,
-      });
+      const sanitizedData = runtimeToolPresentationData(event);
       return [
         {
           id: event.eventId,
@@ -1019,6 +1092,7 @@ function runtimeEventToActivities(
       if (!isToolLifecycleItemType(event.payload.itemType)) {
         return [];
       }
+      const sanitizedData = runtimeToolPresentationData(event);
       return [
         {
           id: event.eventId,
@@ -1034,6 +1108,7 @@ function runtimeEventToActivities(
             ...(event.itemId !== undefined ? { itemId: event.itemId } : {}),
             ...(event.payload.title !== undefined ? { title: event.payload.title } : {}),
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
+            ...(sanitizedData !== undefined ? { data: sanitizedData } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,

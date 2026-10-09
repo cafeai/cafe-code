@@ -1,6 +1,7 @@
 import { memo, useCallback, useRef, useState } from "react";
 import type { EnvironmentId, TaskAtriumErrorDismissal, ThreadId } from "@cafecode/contracts";
 import { isCodexHistoryRecoveryRequiredError } from "@cafecode/shared/codexHistorySafety";
+import { isClaudeResponseLimitError } from "@cafecode/shared/claudeResponseLimits";
 import { Alert, AlertAction, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
 import { CircleAlertIcon, XIcon } from "lucide-react";
@@ -23,6 +24,8 @@ export const ThreadErrorBanner = memo(function ThreadErrorBanner({
   threadId,
   canContinueInNewChat = false,
   onContinueInNewChat,
+  canPrepareShorterResponse = false,
+  onPrepareShorterResponse,
 }: {
   error: string | null;
   /** Stable environment/thread identity for immediate local dismissal feedback. */
@@ -31,6 +34,9 @@ export const ThreadErrorBanner = memo(function ThreadErrorBanner({
   threadId: ThreadId;
   canContinueInNewChat?: boolean;
   onContinueInNewChat?: () => Promise<void>;
+  canPrepareShorterResponse?: boolean;
+  /** Prepare editable text only; ChatView revalidates current ownership and content. */
+  onPrepareShorterResponse?: (() => void) | undefined;
 }) {
   const [dismissedErrorsByScope, setDismissedErrorsByScope] = useState<
     Readonly<Record<string, { error: string; occurrence: TaskAtriumErrorDismissal | null }>>
@@ -56,6 +62,15 @@ export const ThreadErrorBanner = memo(function ThreadErrorBanner({
     ? buildThreadErrorDismissal({ environmentId, threadId, session, latestTurn, summary })
     : null;
   const isProviderFailure = Boolean(error && error === session?.lastError);
+  const isClaudeResponseLimitFailure =
+    isProviderFailure &&
+    error !== null &&
+    isClaudeResponseLimitError(error) &&
+    session?.provider === "claudeAgent" &&
+    session.orchestrationStatus === "error" &&
+    session.activeTurnId === undefined &&
+    latestTurn?.state === "error" &&
+    latestTurn.completedAt !== null;
 
   const [recoveryState, setRecoveryState] = useState<{
     scopeKey: string;
@@ -146,6 +161,24 @@ export const ThreadErrorBanner = memo(function ThreadErrorBanner({
           <span className="line-clamp-3" title={error}>
             {error}
           </span>
+          {isClaudeResponseLimitFailure && onPrepareShorterResponse ? (
+            <div className="flex flex-col items-start gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={!canPrepareShorterResponse}
+                onClick={() => {
+                  if (canPrepareShorterResponse) onPrepareShorterResponse();
+                }}
+              >
+                Prepare shorter response
+              </Button>
+              <span className="text-muted-foreground text-xs">
+                Review effort, then send from the composer.
+              </span>
+            </div>
+          ) : null}
           {isCodexHistoryRecoveryRequiredError(error) && onContinueInNewChat ? (
             <div className="flex flex-col items-start gap-2">
               <Button

@@ -35,6 +35,7 @@ import {
 } from "@cafecode/shared/model";
 
 import { truncate } from "@cafecode/shared/String";
+import { CLAUDE_SHORTER_CONTINUATION_PROMPT } from "@cafecode/shared/claudeResponseLimits";
 import { Debouncer } from "@tanstack/react-pacer";
 import {
   useCallback,
@@ -64,11 +65,12 @@ import {
 import { useDesktopDebugEnabled } from "~/lib/desktopDebugState";
 import { useWorkspaceProjects, useWorkspaceThreads } from "../environments/workspaceData";
 import { readPrimaryEnvironmentDescriptor, usePrimaryEnvironmentId } from "../environments/primary";
-import { useWsConnectionStatus } from "../rpc/wsConnectionState";
+import { getWsConnectionStatus, useWsConnectionStatus } from "../rpc/wsConnectionState";
 import { providerSkillsScopeRevision } from "./chat/useProviderSkills";
 import type { ProviderQuotaContext } from "./chat/useProviderQuota";
 import { selectedQuotaDriver } from "../lib/claudeSessionQuota";
 import { readEnvironmentApi } from "../environmentApi";
+import { getWorkspaceServerConfig } from "../environments/workspaceApi";
 import { MessageForkDialog } from "./chat/MessageForkDialog";
 import { isElectron } from "../env";
 import { readLocalApi } from "../localApi";
@@ -216,6 +218,11 @@ import { NoActiveThreadState } from "./NoActiveThreadState";
 import { resolveEffectiveEnvMode, resolveEnvironmentOptionLabel } from "./BranchToolbar.logic";
 import { ProviderStatusBanner } from "./chat/ProviderStatusBanner";
 import { ThreadErrorBanner } from "./chat/ThreadErrorBanner";
+import {
+  captureClaudeResponseLimitFailure,
+  isClaudeContinuationDraftEmpty,
+  isClaudeResponseLimitFailureCurrent,
+} from "./chat/claudeResponseLimitRecovery";
 import { useThreadActions } from "../hooks/useThreadActions";
 import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
 import {
@@ -996,6 +1003,11 @@ export default function ChatView(props: ChatViewProps) {
   const composerImagesRef = useRef<ComposerImageAttachment[]>([]);
   const queueEditingItemId = useComposerDraftStore(
     (store) => store.getComposerDraft(composerDraftTarget)?.queueEditingItemId,
+  );
+  // A Boolean selector changes only when eligibility changes, keeping ordinary
+  // composer keystrokes off this large chat view's render path.
+  const shorterContinuationDraftEmpty = useComposerDraftStore((store) =>
+    isClaudeContinuationDraftEmpty(store.getComposerDraft(composerDraftTarget)),
   );
   const localComposerRef = useRef<ChatComposerHandle | null>(null);
   const activeComposerHandle = useComposerHandleContext();
@@ -3761,6 +3773,121 @@ export default function ChatView(props: ChatViewProps) {
       focusComposer();
     });
   }, [focusComposer]);
+
+  const claudeResponseLimitFailure = captureClaudeResponseLimitFailure(
+    isServerThread ? activeThread : undefined,
+    composerActiveProvider ?? activeThread?.modelSelection.instanceId ?? null,
+  );
+  const canPrepareShorterResponse =
+    claudeResponseLimitFailure !== null &&
+    selectedProvider === "claudeAgent" &&
+    activeProviderStatus?.driver === "claudeAgent" &&
+    activeProviderStatus.enabled &&
+    pane.active &&
+    pane.visible &&
+    !isWorking &&
+    !activeEnvironmentUnavailable &&
+    (environmentId === primaryEnvironmentId
+      ? quotaConnectionStatus.phase === "connected"
+      : savedRuntime?.connectionState === "connected") &&
+    shorterContinuationDraftEmpty &&
+    activeFollowUpQueue.length === 0 &&
+    activePendingApproval === null &&
+    activePendingUserInput === null;
+  const prepareShorterResponse = () => {
+    // No awaits or provider I/O belong here. Bind the click to its rendered
+    // failure, then re-read every mutable owner/content gate synchronously.
+    // The ordinary Send gesture retains all existing provider validation and
+    // paid-inference authority after the user has reviewed this editable text.
+    if (
+      !canPrepareShorterResponse ||
+      !claudeResponseLimitFailure ||
+      !chatViewMountedRef.current ||
+      currentRouteThreadKeyRef.current !== routeThreadKey ||
+      !currentPaneRef.current.active ||
+      !currentPaneRef.current.visible ||
+      sendInFlightRef.current ||
+      queueDispatchInFlightRef.current ||
+      !getWorkspaceServerConfig(environmentId)?.providers.some(
+        (provider) =>
+          provider.instanceId === claudeResponseLimitFailure.instanceId &&
+          provider.driver === "claudeAgent" &&
+          provider.enabled,
+      ) ||
+      (followUpQueueByThreadIdRef.current[threadId] ?? []).some(
+        (item) => item.environmentId === environmentId,
+      ) ||
+      (environmentId === primaryEnvironmentId
+        ? getWsConnectionStatus().phase !== "connected"
+        : getSavedEnvironmentRuntimeState(environmentId)?.connectionState !== "connected")
+    ) {
+      return;
+    }
+    const currentThread = selectThreadByRef(useStore.getState(), routeThreadRef);
+    const draftStore = useComposerDraftStore.getState();
+    const draft = draftStore.getComposerDraft(composerDraftTarget);
+    const sendContext = readComposerHandle(composerRef)?.getSendContext();
+    if (
+      !currentThread ||
+      derivePendingApprovals(currentThread.activities).length !== 0 ||
+      derivePendingUserInputs(currentThread.activities).some((request) => request.isBlocking) ||
+      !isClaudeContinuationDraftEmpty(draft) ||
+      promptRef.current.length !== 0 ||
+      composerImagesRef.current.length !== 0 ||
+      !sendContext ||
+      sendContext.prompt.length !== 0 ||
+      sendContext.images.length !== 0 ||
+      sendContext.files.length !== 0 ||
+      sendContext.selectedProvider !== "claudeAgent" ||
+      !isClaudeResponseLimitFailureCurrent(
+        claudeResponseLimitFailure,
+        currentThread,
+        draft?.activeProvider ?? currentThread?.modelSelection.instanceId ?? null,
+      ) ||
+      sendContext.selectedModelSelection.instanceId !== claudeResponseLimitFailure.instanceId
+    ) {
+      return;
+    }
+    // The existing atomic empty-content transition preserves model/effort,
+    // account, permission mode and all other composer settings verbatim.
+    if (
+      !draftStore.restoreComposerContentIfEmpty(composerDraftTarget, {
+        prompt: CLAUDE_SHORTER_CONTINUATION_PROMPT,
+        images: [],
+        files: [],
+      })
+    ) {
+      return;
+    }
+    promptRef.current = CLAUDE_SHORTER_CONTINUATION_PROMPT;
+    composerRef.current?.resetCursorState({
+      cursor: collapseExpandedComposerCursor(
+        CLAUDE_SHORTER_CONTINUATION_PROMPT,
+        CLAUDE_SHORTER_CONTINUATION_PROMPT.length,
+      ),
+      prompt: CLAUDE_SHORTER_CONTINUATION_PROMPT,
+      detectTrigger: true,
+    });
+    // Focus is deferred until the editor reflects its new draft. Revalidate
+    // that same failure and draft on the frame too, so navigation, a new turn
+    // or user edits cannot make this older action steal another editor's focus.
+    window.requestAnimationFrame(() => {
+      const current = selectThreadByRef(useStore.getState(), routeThreadRef);
+      const currentDraft = useComposerDraftStore.getState().getComposerDraft(composerDraftTarget);
+      if (
+        chatViewMountedRef.current &&
+        currentRouteThreadKeyRef.current === routeThreadKey &&
+        currentDraft?.prompt === CLAUDE_SHORTER_CONTINUATION_PROMPT &&
+        isClaudeResponseLimitFailureCurrent(
+          claudeResponseLimitFailure,
+          current,
+          currentDraft.activeProvider ?? current?.modelSelection.instanceId ?? null,
+        )
+      ) {
+        focusComposer();
+      }
+    });
+  };
 
   const handleRuntimeModeChange = useCallback(
     (mode: RuntimeMode) => {
@@ -7524,6 +7651,12 @@ export default function ChatView(props: ChatViewProps) {
           latestTurnSettled
         }
         onContinueInNewChat={onContinueInNewChat}
+        canPrepareShorterResponse={canPrepareShorterResponse}
+        onPrepareShorterResponse={
+          claudeResponseLimitFailure && selectedProvider === "claudeAgent"
+            ? prepareShorterResponse
+            : undefined
+        }
       />
       {/* Main content area with optional plan / session rail */}
       <div className="flex min-h-0 min-w-0 flex-1">
