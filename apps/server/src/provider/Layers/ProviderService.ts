@@ -97,6 +97,7 @@ import {
   type ProviderRuntimeOwnerEvidence,
 } from "../providerRuntimeOwnerEvidence.ts";
 import { getCodexRootTurnCompletion } from "../codexRootTurnCompletion.ts";
+import { normalizeClaudeSubagentHistoryRoot } from "../claudeSubagentHistoryRoot.ts";
 import {
   ProviderSessionDirectory,
   type ProviderRuntimeBinding,
@@ -1041,6 +1042,51 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       }
 
       const cwd = boundedSubagentHistoryCwd(readPersistedCwd(binding.runtimePayload));
+      let resumeCursor: unknown | null;
+      if (event.provider === "claudeAgent") {
+        if (cwd === null) return;
+        const runtimeId = isRecord(binding.runtimePayload)
+          ? binding.runtimePayload.subagentRuntimeId
+          : undefined;
+        // Fresh Claude queries expose their durable transcript root at init,
+        // before a resumable checkpoint exists. Only the exact still-current
+        // account/query snapshot can supply that private identity; neither a
+        // null saved cursor nor an old child event may borrow a newer query.
+        if (typeof runtimeId !== "string" || runtimeId !== event.subagentRuntimeId) return;
+        const eventHistoryRoot = normalizeClaudeSubagentHistoryRoot({
+          resume:
+            event.type === "task.started" ||
+            event.type === "task.progress" ||
+            event.type === "task.completed"
+              ? event.claudeSubagentHistorySessionId
+              : undefined,
+        });
+        if (eventHistoryRoot === undefined) return;
+        const adapter = yield* registry.getByInstance(providerInstanceId);
+        const liveSessions = yield* adapter
+          .listSessions()
+          .pipe(Effect.timeout(PROVIDER_ORPHAN_INVENTORY_TIMEOUT));
+        if ((yield* registry.getByInstance(providerInstanceId)) !== adapter) return;
+        const liveSession = liveSessions.find(
+          (session) =>
+            session.threadId === event.threadId &&
+            session.provider === event.provider &&
+            session.providerInstanceId === providerInstanceId &&
+            session.subagentRuntimeId === runtimeId &&
+            session.cwd === cwd &&
+            session.status !== "closed",
+        );
+        const historyRoot = normalizeClaudeSubagentHistoryRoot(
+          liveSession?.subagentHistoryResumeCursor,
+        );
+        // A single native query can adopt a different conversation. Its runtime
+        // UUID alone is therefore insufficient to attribute an earlier child
+        // to the latest session UUID: the immutable event stamp must agree.
+        if (historyRoot === undefined || historyRoot.resume !== eventHistoryRoot.resume) return;
+        resumeCursor = historyRoot;
+      } else {
+        resumeCursor = freezeSubagentHistoryResumeCursor(binding.resumeCursor);
+      }
       const persistedAt = yield* nowIso;
       yield* directory.upsertSubagentHistoryBinding({
         threadId: event.threadId,
@@ -1049,7 +1095,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         historyId: subagent.historyId ?? null,
         providerName: event.provider,
         providerInstanceId,
-        resumeCursor: freezeSubagentHistoryResumeCursor(binding.resumeCursor),
+        resumeCursor,
         cwd,
         createdAt: persistedAt,
         updatedAt: persistedAt,
@@ -1079,6 +1125,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     readonly resumeCursor?: unknown;
   }): Effect.Effect<void> =>
     Effect.gen(function* () {
+      // Claude's ordinary send receipt is not native-history authority: a new
+      // query may still have no UUID, and resumed checkpoints contain mutable
+      // turn counters. Its exact child lifecycle captures a stable native root
+      // through the generation-fenced inventory path above instead. Do not
+      // precreate an incomplete immutable root that later init cannot repair.
+      if (input.provider === "claudeAgent") return;
       const persistedAt = yield* nowIso;
       const cwd = boundedSubagentHistoryCwd(readPersistedCwd(input.binding.runtimePayload));
       yield* directory.upsertSubagentHistoryBinding({

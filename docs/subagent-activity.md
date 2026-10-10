@@ -38,6 +38,13 @@ not claim that old data is current. Native indexed history can lag active work.
 Normal restart of the rebuilt backend is required to receive the updated detail
 fields from its daemon. No provider session is restarted merely to view history.
 
+Claude supports public transcripts while a child is still active. Cafe retains
+its native conversation identity separately from resume checkpoints, so an
+unfinished first root turn can display persisted child messages. Missing older
+root provenance or not-yet-written native history can still be unavailable;
+Cafe never guesses a task's transcript ID or borrows a replacement session.
+See [stable Claude history roots](decisions/claude-subagent-history-root.md).
+
 Large Codex command results are handled by a separate bounded history reader;
 they are never displayed as raw output. If native history exceeds its limits,
 Cafe retains safely read entries or tries one separately verified public-summary

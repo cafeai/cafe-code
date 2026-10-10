@@ -79,6 +79,14 @@ export const ProviderSession = Schema.Struct({
   maxConcurrentSubagents: Schema.optional(Schema.NullOr(MaxConcurrentSubagents)),
   threadId: ThreadId,
   resumeCursor: Schema.optional(Schema.Unknown),
+  // Server-owned read-only history coordinates, distinct from permission to
+  // resume a conversation. Claude can identify persisted child history during
+  // an unfinished first turn, before publishing a durable resume checkpoint.
+  // Never project this private native identity into renderer session metadata.
+  // Older daemons omit it and must not have their live root guessed instead.
+  subagentHistoryResumeCursor: Schema.optional(
+    Schema.Struct({ resume: Schema.String.check(Schema.isUUID()) }),
+  ),
   activeTurnId: Schema.optional(TurnId),
   // Fresh Codex runtime evidence, not a durable or renderer-authored override.
   // Aggregate child work can keep activeTurnId running after its native root

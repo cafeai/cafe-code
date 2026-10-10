@@ -6,15 +6,135 @@ import * as Schema from "effect/Schema";
 import {
   ProviderDaemonBootstrap,
   ProviderDaemonAdapterCapabilities,
+  ProviderDaemonEventRecord,
   ProviderDaemonLiveness,
   ProviderDaemonMarker,
   ProviderDaemonSubagentDetail,
   ProviderDaemonRpcRequest,
+  ProviderDaemonRpcResultByMethod,
   WindowsProcessIdentity,
 } from "./providerDaemon.ts";
 
 const OWNERSHIP_ID = "9a90b48d-868f-4614-ae9c-66d50293d52b";
 const decodeDaemonLiveness = Schema.decodeUnknownSync(ProviderDaemonLiveness);
+
+it("carries optional private history coordinates through authenticated daemon session results", () => {
+  const legacy = {
+    provider: "claudeAgent",
+    providerInstanceId: "claude_personal",
+    status: "running",
+    runtimeMode: "full-access",
+    threadId: "thread-history",
+    createdAt: "2026-10-11T00:00:00Z",
+    updatedAt: "2026-10-11T00:00:00Z",
+  };
+  const current = {
+    ...legacy,
+    subagentHistoryResumeCursor: { resume: "00000000-0000-4000-8000-000000000941" },
+  };
+  for (const session of [legacy, current]) {
+    const start = ProviderDaemonRpcResultByMethod.startSession;
+    const decodedSession = Schema.decodeUnknownSync(start)(session);
+    assert.deepEqual(
+      Schema.decodeUnknownSync(start)(Schema.encodeSync(start)(decodedSession)),
+      session,
+    );
+    const list = ProviderDaemonRpcResultByMethod.listSessions;
+    const decodedSessions = Schema.decodeUnknownSync(list)([session]);
+    assert.deepEqual(Schema.decodeUnknownSync(list)(Schema.encodeSync(list)(decodedSessions)), [
+      session,
+    ]);
+  }
+});
+
+it("rejects malformed or padded private Claude history roots across daemon session results", () => {
+  const historySessionId = "00000000-0000-4000-8000-000000000941";
+  const session = {
+    provider: "claudeAgent",
+    providerInstanceId: "claude_personal",
+    status: "running",
+    runtimeMode: "full-access",
+    threadId: "thread-history",
+    createdAt: "2026-10-11T00:00:00Z",
+    updatedAt: "2026-10-11T00:00:00Z",
+  };
+  for (const subagentHistoryResumeCursor of [
+    null,
+    historySessionId,
+    {},
+    [],
+    { sessionId: historySessionId },
+    { resume: null },
+    { resume: 15 },
+    { resume: "not-a-uuid" },
+    { resume: ` ${historySessionId}` },
+    { resume: `${historySessionId} ` },
+    { resume: `\t${historySessionId}\r\n` },
+    { resume: "00000000-0000-0000-8000-000000000941" },
+    { resume: "00000000-0000-4000-0000-000000000941" },
+  ]) {
+    const invalid = { ...session, subagentHistoryResumeCursor };
+    assert.throws(() =>
+      Schema.decodeUnknownSync(ProviderDaemonRpcResultByMethod.startSession)(invalid),
+    );
+    assert.throws(() =>
+      Schema.decodeUnknownSync(ProviderDaemonRpcResultByMethod.listSessions)([invalid]),
+    );
+  }
+});
+
+it("retains exact current and legacy Claude task roots through daemon-record JSON transport", () => {
+  const historySessionId = "00000000-0000-4000-8000-000000000961";
+  const recordJson = Schema.fromJsonString(ProviderDaemonEventRecord);
+  const decodeRecord = Schema.decodeUnknownSync(ProviderDaemonEventRecord);
+  const encodeRecordJson = Schema.encodeSync(recordJson);
+  const decodeRecordJson = Schema.decodeUnknownSync(recordJson);
+  const base = {
+    eventId: "claude-history-task",
+    provider: "claudeAgent",
+    providerInstanceId: "claude_history_account",
+    createdAt: "2026-10-11T00:00:00Z",
+    threadId: "claude-history-parent",
+    turnId: "claude-history-turn",
+    subagentRuntimeId: "00000000-0000-4000-8000-000000000962",
+  };
+  const tasks = [
+    { type: "task.started", payload: { taskId: "native-task" } },
+    {
+      type: "task.progress",
+      payload: { taskId: "native-task", description: "Reviewing files" },
+    },
+    { type: "task.completed", payload: { taskId: "native-task", status: "completed" } },
+  ];
+  for (const task of tasks) {
+    const legacy = { ...base, ...task };
+    const current = { ...legacy, claudeSubagentHistorySessionId: historySessionId };
+    for (const event of [legacy, current]) {
+      const input = { cursor: 1, emittedAt: base.createdAt, event };
+      const decoded = decodeRecord(input);
+      assert.deepEqual(decoded, input);
+      assert.deepEqual(JSON.parse(encodeRecordJson(decoded)), input);
+      assert.deepEqual(decodeRecordJson(JSON.stringify(input)), input);
+      assert.deepEqual(decodeRecordJson(encodeRecordJson(decoded)), input);
+    }
+    for (const claudeSubagentHistorySessionId of [
+      "not-a-uuid",
+      ` ${historySessionId}`,
+      `${historySessionId} `,
+      `\t${historySessionId}\r\n`,
+      null,
+      {},
+    ]) {
+      const input = {
+        cursor: 1,
+        emittedAt: base.createdAt,
+        event: { ...legacy, claudeSubagentHistorySessionId },
+      };
+      assert.throws(() => decodeRecord(input));
+      assert.throws(() => decodeRecordJson(JSON.stringify(input)));
+    }
+  }
+});
 
 it("preserves explicit subagent concurrency support across daemon capability encode/decode", () => {
   const decode = Schema.decodeUnknownSync(ProviderDaemonAdapterCapabilities);

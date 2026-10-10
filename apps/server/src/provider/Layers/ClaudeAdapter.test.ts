@@ -8707,9 +8707,15 @@ describe("ClaudeAdapterLive", () => {
     },
   );
 
-  it.effect(
-    "retains task incarnation authority when a live background binding is restored after generic map eviction",
-    () => {
+  it.effect.each([
+    {
+      originalRoot: "00000000-0000-4000-8000-000000000031",
+      expectedRoot: "00000000-0000-4000-8000-000000000031",
+    },
+    { originalRoot: "synthetic", expectedRoot: undefined },
+  ])(
+    "retains task incarnation authority when a live background binding is restored after generic map eviction ($originalRoot)",
+    ({ originalRoot, expectedRoot }) => {
       const harness = makeHarness({ nativeVersion: "2.1.287", environment: {} });
       return Effect.gen(function* () {
         const adapter = yield* ClaudeAdapter;
@@ -8730,10 +8736,11 @@ describe("ClaudeAdapterLive", () => {
           ),
           Effect.forkChild,
         );
+        const replacementRoot = "00000000-0000-4000-8000-000000000032";
         const base = {
           type: "system",
           task_id: "reused-task",
-          session_id: "synthetic",
+          session_id: originalRoot,
           uuid: "00000000-0000-4000-8000-000000000023",
         };
         harness.query.emit({
@@ -8762,21 +8769,28 @@ describe("ClaudeAdapterLive", () => {
           type: "system",
           subtype: "background_tasks_changed",
           tasks: [{ task_id: "reused-task", description: "New task" }],
-          session_id: "synthetic",
+          session_id: originalRoot,
           uuid: "snapshot",
         } as unknown as SDKMessage;
         harness.query.emit(snapshot);
+        // The same SDK query can adopt a replacement native root while an
+        // older background task remains live. Generic-map eviction must not
+        // make restoration borrow that replacement root's history authority.
+        emitWorkflowFixtureInit(harness.query, "2.1.287", replacementRoot);
         for (let index = 0; index < 4096; index++)
           harness.query.emit({
             ...base,
+            session_id: replacementRoot,
             subtype: "task_started",
             task_id: `filler-${index}`,
+            tool_use_id: `filler-tool-${index}`,
             task_type: "local_bash",
             description: "Filler",
           } as SDKMessage);
-        harness.query.emit(snapshot);
+        harness.query.emit({ ...snapshot, session_id: replacementRoot } as SDKMessage);
         harness.query.emit({
           ...base,
+          session_id: replacementRoot,
           subtype: "task_notification",
           status: "completed",
           summary: "Ambiguous old result",
@@ -8784,6 +8798,7 @@ describe("ClaudeAdapterLive", () => {
         } as SDKMessage);
         harness.query.emit({
           ...base,
+          session_id: replacementRoot,
           subtype: "task_progress",
           tool_use_id: "new-tool",
           description: "New task",
@@ -8799,6 +8814,9 @@ describe("ClaudeAdapterLive", () => {
         );
         if (initial?.type !== "task.started" || restored?.type !== "task.progress")
           throw new Error("Missing exact binding evidence");
+        assert.equal(initial.claudeSubagentHistorySessionId, expectedRoot);
+        assert.equal(restored.claudeSubagentHistorySessionId, expectedRoot);
+        assert.notEqual(restored.claudeSubagentHistorySessionId, replacementRoot);
         const reference = restored.payload.individualTaskControl!;
         assert.ok(reference);
         assert.equal(
@@ -10048,7 +10066,30 @@ describe("ClaudeAdapterLive", () => {
 
         const readSubagentDetail = adapter.readSubagentDetail;
         assert.ok(readSubagentDetail);
-        const detail = yield* readSubagentDetail(THREAD_ID, taskId, { cwd });
+        const activeSession = (yield* adapter.listSessions()).find(
+          (session) => session.threadId === THREAD_ID,
+        );
+        // History has a native root as soon as SDK init/task metadata arrives.
+        // That is not permission to resume an unfinished first root turn.
+        assert.equal(activeSession?.resumeCursor, undefined);
+        assert.deepEqual(activeSession?.subagentHistoryResumeCursor, { resume: sessionId });
+        // An incomplete persisted root is not a wildcard for this live query.
+        // It must remain refused even though the exact transcript exists.
+        const incompleteRoot = yield* readSubagentDetail(THREAD_ID, taskId, {
+          resumeCursor: null,
+          cwd,
+        }).pipe(Effect.result);
+        assert.equal(incompleteRoot._tag, "Failure");
+        if (incompleteRoot._tag === "Failure") {
+          assert.equal(incompleteRoot.failure._tag, "ProviderSubagentDetailReadError");
+          if (incompleteRoot.failure._tag === "ProviderSubagentDetailReadError") {
+            assert.equal(incompleteRoot.failure.reason, "session-unavailable");
+          }
+        }
+        const detail = yield* readSubagentDetail(THREAD_ID, taskId, {
+          resumeCursor: activeSession?.subagentHistoryResumeCursor,
+          cwd,
+        });
         assert.deepEqual(
           detail.messages.map(({ role, text }) => ({ role, text })),
           [
@@ -10057,6 +10098,72 @@ describe("ClaudeAdapterLive", () => {
           ],
         );
         assert.equal(JSON.stringify(detail).includes("PRIVATE"), false);
+        const replacementRootId = "00000000-0000-4000-8000-000000000945";
+        const replacementStarted = yield* Stream.filter(
+          adapter.streamEvents,
+          (event) =>
+            event.type === "thread.started" && event.payload.providerThreadId === replacementRootId,
+        ).pipe(Stream.take(1), Stream.runDrain, Effect.forkChild);
+        harness.query.emit({
+          type: "system",
+          subtype: "init",
+          session_id: replacementRootId,
+          capabilities: [],
+          uuid: "00000000-0000-4000-8000-000000000946",
+        } as unknown as SDKMessage);
+        yield* Fiber.join(replacementStarted);
+        const progressEvents: ProviderRuntimeEvent[] = [];
+        const delayedProgress = yield* Stream.filter(
+          adapter.streamEvents,
+          (event) => event.type === "task.progress" && String(event.payload.taskId) === taskId,
+        ).pipe(
+          Stream.tap((event) => Effect.sync(() => progressEvents.push(event))),
+          Stream.take(1),
+          Stream.runDrain,
+          Effect.forkChild,
+        );
+        harness.query.emit({
+          type: "system",
+          subtype: "task_progress",
+          task_id: taskId,
+          tool_use_id: toolUseId,
+          description: "Still the original task",
+          session_id: replacementRootId,
+          uuid: "00000000-0000-4000-8000-000000000947",
+        } as unknown as SDKMessage);
+        yield* Fiber.join(delayedProgress);
+        // The query generation is unchanged, but the task still owns its old
+        // native root. Its delayed event must not authorize the replacement.
+        const oldProgress = progressEvents[0];
+        assert.equal(oldProgress?.type, "task.progress");
+        assert.equal(
+          oldProgress?.type === "task.progress"
+            ? oldProgress.claudeSubagentHistorySessionId
+            : undefined,
+          sessionId,
+        );
+        const replacement = (yield* adapter.listSessions()).find(
+          (session) => session.threadId === THREAD_ID,
+        );
+        assert.deepEqual(replacement?.subagentHistoryResumeCursor, { resume: replacementRootId });
+        const wrongRoot = yield* readSubagentDetail(THREAD_ID, taskId, {
+          resumeCursor: replacement?.subagentHistoryResumeCursor,
+          cwd,
+          historyId,
+        }).pipe(Effect.result);
+        assert.equal(wrongRoot._tag, "Failure");
+        if (
+          wrongRoot._tag === "Failure" &&
+          wrongRoot.failure._tag === "ProviderSubagentDetailReadError"
+        ) {
+          assert.equal(wrongRoot.failure.reason, "child-identity-mismatch");
+        }
+        const original = yield* readSubagentDetail(THREAD_ID, taskId, {
+          resumeCursor: { resume: sessionId },
+          cwd,
+          historyId,
+        });
+        assert.deepEqual(original.messages, detail.messages);
       }).pipe(
         Effect.ensuring(
           Effect.sync(() => {
@@ -10740,10 +10847,19 @@ describe("ClaudeAdapterLive", () => {
     "shows an assistant-first subagent and lets its later task start replace the recovery title",
     () => {
       const harness = makeHarness();
+      const originalRoot = "00000000-0000-4000-8000-000000000041";
+      const replacementRoot = "00000000-0000-4000-8000-000000000042";
       return Effect.gen(function* () {
         const adapter = yield* ClaudeAdapter;
+        const completedTurn = yield* Deferred.make<ProviderRuntimeEvent>();
         const taskEventsFiber = yield* Stream.filter(
-          adapter.streamEvents,
+          adapter.streamEvents.pipe(
+            Stream.tap((event) =>
+              event.type === "turn.completed"
+                ? Deferred.succeed(completedTurn, event)
+                : Effect.void,
+            ),
+          ),
           (event) => event.type === "task.progress" || event.type === "task.started",
         ).pipe(Stream.take(5), Stream.runCollect, Effect.forkChild);
 
@@ -10751,6 +10867,10 @@ describe("ClaudeAdapterLive", () => {
           threadId: THREAD_ID,
           provider: ProviderDriverKind.make("claudeAgent"),
           runtimeMode: "full-access",
+        });
+        const originalTurn = yield* adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: "start an assistant-first background reviewer",
         });
 
         // parent_tool_use_id is the SDK's explicit indication that this frame
@@ -10760,7 +10880,7 @@ describe("ClaudeAdapterLive", () => {
           type: "assistant",
           parent_tool_use_id: "agent-tool-assistant-first",
           task_description: "Recovered child title",
-          session_id: "sdk-session-assistant-first-subagent",
+          session_id: originalRoot,
           uuid: "assistant-first-subagent-progress",
           message: {
             id: "assistant-first-subagent-message",
@@ -10776,7 +10896,7 @@ describe("ClaudeAdapterLive", () => {
           type: "assistant",
           parent_tool_use_id: "agent-tool-independent",
           task_description: "Independent child title",
-          session_id: "sdk-session-assistant-first-subagent",
+          session_id: originalRoot,
           uuid: "assistant-first-independent-progress",
           message: {
             id: "assistant-first-independent-message",
@@ -10788,6 +10908,19 @@ describe("ClaudeAdapterLive", () => {
             },
           },
         } as unknown as SDKMessage);
+        harness.query.emit(makeSuccessfulClaudeResult(originalRoot));
+        assert.equal((yield* Deferred.await(completedTurn)).turnId, originalTurn.turnId);
+        yield* TestClock.adjust(1_000);
+        const laterTurn = yield* adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: "begin an unrelated later root turn while the reviewer remains active",
+        });
+        assert.notEqual(laterTurn.turnId, originalTurn.turnId);
+        // First authoritative task-generation assignment is a promotion of the
+        // assistant-first binding, not a new incarnation. A settled root turn,
+        // new Cafe turn and root replacement between those frames must not
+        // replace its first observed history root, owning turn or start clock.
+        emitWorkflowFixtureInit(harness.query, "2.1.287", replacementRoot);
         harness.query.emit({
           type: "system",
           subtype: "task_started",
@@ -10795,7 +10928,7 @@ describe("ClaudeAdapterLive", () => {
           tool_use_id: "agent-tool-assistant-first",
           description: "Authoritative child title",
           task_type: "local_agent",
-          session_id: "sdk-session-assistant-first-subagent",
+          session_id: replacementRoot,
           uuid: "assistant-first-subagent-started",
         } as unknown as SDKMessage);
         harness.query.emit({
@@ -10804,7 +10937,7 @@ describe("ClaudeAdapterLive", () => {
           // A replayed assistant frame can retain the provisional description;
           // it must not roll the authoritative task_started title backward.
           task_description: "Recovered child title",
-          session_id: "sdk-session-assistant-first-subagent",
+          session_id: replacementRoot,
           uuid: "assistant-first-subagent-late-progress",
           message: {
             id: "assistant-first-subagent-late-message",
@@ -10847,12 +10980,30 @@ describe("ClaudeAdapterLive", () => {
           ],
         );
         assert.equal(taskEvents[4]?.payload.description, "Authoritative child title");
+        // The retired provisional alias has no live binding and its ambient
+        // retraction deliberately carries no history authority. Promotion and
+        // subsequent child progress must keep the original root, not borrow
+        // the replacement query's root when receiving a task generation.
+        assert.deepEqual(
+          taskEvents.map((event) => event.claudeSubagentHistorySessionId),
+          [originalRoot, originalRoot, undefined, originalRoot, originalRoot],
+        );
+        assert.equal(
+          taskEvents.some((event) => event.claudeSubagentHistorySessionId === replacementRoot),
+          false,
+        );
         const owningTurnId = taskEvents[0]?.turnId;
         assert.ok(owningTurnId);
-        assert.equal(
-          taskEvents.every((event) => event.turnId === owningTurnId),
-          true,
+        assert.equal(owningTurnId, originalTurn.turnId);
+        const originalStartedAt = taskEvents[0]?.createdAt;
+        assert.ok(originalStartedAt);
+        assert.equal(taskEvents[0]?.payload.subagent?.startedAt, originalStartedAt);
+        assert.deepEqual(
+          taskEvents.map((event) => [event.turnId, event.payload.subagent?.startedAt]),
+          Array.from({ length: taskEvents.length }, () => [owningTurnId, originalStartedAt]),
         );
+        assert.equal(taskEvents[3]?.payload.subagent?.startedAt, originalStartedAt);
+        assert.equal(taskEvents[4]?.payload.subagent?.startedAt, originalStartedAt);
         assert.equal(
           taskEvents.every((event) => event.payload.subagent?.historyId === undefined),
           true,

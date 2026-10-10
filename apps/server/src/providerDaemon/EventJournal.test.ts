@@ -168,6 +168,73 @@ function makeCommandEvent(id: string, output: string): ProviderRuntimeEvent {
 }
 
 describe("ProviderDaemonEventJournal", () => {
+  it("retains current and legacy Claude task history roots through SQLite append and replay", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const historySessionId = "00000000-0000-4000-8000-000000000961";
+        const base = {
+          provider: "claudeAgent",
+          providerInstanceId: "claude_history_account",
+          createdAt: "2026-10-11T00:00:00Z",
+          threadId: "claude-history-parent",
+          turnId: "claude-history-turn",
+          subagentRuntimeId: "00000000-0000-4000-8000-000000000962",
+        };
+        const tasks = [
+          { type: "task.started", payload: { taskId: "native-task" } },
+          {
+            type: "task.progress",
+            payload: { taskId: "native-task", description: "Reviewing files" },
+          },
+          { type: "task.completed", payload: { taskId: "native-task", status: "completed" } },
+        ];
+        const inputs = tasks.flatMap((task, index) => [
+          { ...base, ...task, eventId: `claude-history-legacy-${index}` },
+          {
+            ...base,
+            ...task,
+            eventId: `claude-history-current-${index}`,
+            claudeSubagentHistorySessionId: historySessionId,
+          },
+        ]);
+        const decodeEvent = Schema.decodeUnknownSync(ProviderRuntimeEventSchema);
+        const events = inputs.map((input) => decodeEvent(input));
+        // Compare against unencoded input before publication, then inspect
+        // actual SQLite bytes. A shared lossy task codec must not conceal
+        // history-root loss by producing equal live and replayed records.
+        expect(events).toEqual(inputs);
+        const ownerKey = "synthetic-claude-task-history";
+        const journal = yield* makePersistentProviderDaemonEventJournal({ capacity: 10, ownerKey });
+        const delivered: ProviderDaemonEventRecord[] = [];
+        const subscription = yield* journal.subscribeWithReplayBoundary((record) => {
+          delivered.push(record);
+        });
+        yield* Effect.addFinalizer(() => Effect.sync(subscription.unsubscribe));
+        const published = yield* Effect.forEach(events, (event) => journal.publish(event), {
+          concurrency: 1,
+        });
+        expect(subscription.replayBoundaryCursor).toBe(0);
+        expect(published.map((record) => record.event)).toEqual(inputs);
+        expect(delivered).toEqual(published);
+        const replayJournal = yield* makePersistentProviderDaemonEventJournal({
+          capacity: 10,
+          ownerKey,
+        });
+        const replayed = yield* replayJournal.replayAfter(0);
+        expect(replayed).toEqual(published);
+        expect(replayed.map((record) => record.cursor)).toEqual([1, 2, 3, 4, 5, 6]);
+        const sql = yield* SqlClient.SqlClient;
+        const rows = yield* sql<{ readonly eventJson: string }>`
+          SELECT event_json AS "eventJson"
+          FROM provider_daemon_events
+          WHERE owner_key = ${ownerKey}
+          ORDER BY cursor
+        `;
+        expect(rows.map((row) => JSON.parse(row.eventJson))).toEqual(inputs);
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+    );
+  });
+
   it.each(assistantSourceFixtures)(
     "preserves exact assistant source through persistent publish, live delivery and replay: $name",
     async ({ chunks }) => {

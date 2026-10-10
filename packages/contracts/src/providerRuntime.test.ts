@@ -72,6 +72,58 @@ describe("ItemLifecyclePayload source text", () => {
 });
 
 describe("ProviderRuntimeEvent", () => {
+  it("preserves exact Claude task history identity through object and JSON codecs", () => {
+    const historySessionId = "00000000-0000-4000-8000-000000000961";
+    const base = {
+      eventId: "claude-history-task",
+      provider: "claudeAgent",
+      providerInstanceId: "claude_history_account",
+      createdAt: "2026-10-11T00:00:00Z",
+      threadId: "claude-history-parent",
+      turnId: "claude-history-turn",
+      subagentRuntimeId: "00000000-0000-4000-8000-000000000962",
+    };
+    const tasks = [
+      { type: "task.started", payload: { taskId: "native-task" } },
+      {
+        type: "task.progress",
+        payload: { taskId: "native-task", description: "Reviewing files" },
+      },
+      { type: "task.completed", payload: { taskId: "native-task", status: "completed" } },
+    ];
+    for (const task of tasks) {
+      const legacy = { ...base, ...task };
+      const current = { ...legacy, claudeSubagentHistorySessionId: historySessionId };
+      for (const input of [legacy, current]) {
+        // A task's root is ownership evidence, not a normalizable display
+        // identifier. Check each codec independently so encode and decode
+        // cannot agree on silently discarding the new private field.
+        const decoded = decodeRuntimeEvent(input);
+        expect(decoded).toEqual(input);
+        expect(JSON.parse(encodeRuntimeEventJson(decoded))).toEqual(input);
+        expect(decodeRuntimeEventJson(JSON.stringify(input))).toEqual(input);
+        expect(decodeRuntimeEventJson(encodeRuntimeEventJson(decoded))).toEqual(input);
+      }
+      for (const claudeSubagentHistorySessionId of [
+        "",
+        "not-a-uuid",
+        ` ${historySessionId}`,
+        `${historySessionId} `,
+        `\t${historySessionId}\r\n`,
+        "00000000-0000-0000-8000-000000000961",
+        "00000000-0000-4000-0000-000000000961",
+        null,
+        15,
+        {},
+        [],
+      ]) {
+        const invalid = { ...legacy, claudeSubagentHistorySessionId };
+        expect(() => decodeRuntimeEvent(invalid)).toThrow();
+        expect(() => decodeRuntimeEventJson(JSON.stringify(invalid))).toThrow();
+      }
+    }
+  });
+
   it("admits only inert content-free native retry bookkeeping without invoking accessors", () => {
     const payload = {
       message: "Provider reconnecting",

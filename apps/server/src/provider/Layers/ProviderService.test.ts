@@ -81,6 +81,7 @@ import {
 } from "../../persistence/Layers/Sqlite.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { makeAdapterRegistryMock } from "../testUtils/providerAdapterRegistryMock.ts";
+import { normalizeClaudeSubagentHistoryRoot } from "../claudeSubagentHistoryRoot.ts";
 
 const defaultServerSettingsLayer = ServerSettingsService.layerTest();
 
@@ -93,6 +94,8 @@ const claudeAgentInstanceId = ProviderInstanceId.make("claudeAgent");
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
 const CLAUDE_AGENT_DRIVER = ProviderDriverKind.make("claudeAgent");
 const TEST_DRIVER = ProviderDriverKind.make("testDriver");
+const CLAUDE_HISTORY_ROOT = "00000000-0000-4000-8000-000000000951";
+const CLAUDE_HISTORY_RUNTIME = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000952");
 
 type LegacyProviderRuntimeEvent = {
   readonly type: string;
@@ -121,6 +124,15 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     (input: ProviderSessionStartInput): Effect.Effect<ProviderSession, ProviderAdapterError> =>
       Effect.sync(() => {
         const now = "2026-01-01T00:00:00.000Z";
+        const resumeCursor =
+          input.resumeCursor ??
+          (provider === CLAUDE_AGENT_DRIVER
+            ? { resume: CLAUDE_HISTORY_ROOT }
+            : { opaque: `resume-${String(input.threadId)}` });
+        const claudeHistoryRoot =
+          provider === CLAUDE_AGENT_DRIVER
+            ? normalizeClaudeSubagentHistoryRoot(resumeCursor)
+            : undefined;
         const session: ProviderSession = {
           provider,
           ...(input.providerInstanceId !== undefined
@@ -129,9 +141,11 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
           status: "ready",
           runtimeMode: input.runtimeMode,
           threadId: input.threadId,
-          resumeCursor: input.resumeCursor ?? {
-            opaque: `resume-${String(input.threadId)}`,
-          },
+          resumeCursor,
+          ...(provider === CLAUDE_AGENT_DRIVER
+            ? { subagentRuntimeId: CLAUDE_HISTORY_RUNTIME }
+            : {}),
+          ...(claudeHistoryRoot ? { subagentHistoryResumeCursor: claudeHistoryRoot } : {}),
           cwd: input.cwd ?? process.cwd(),
           ...(input.maxConcurrentSubagents !== undefined
             ? { maxConcurrentSubagents: input.maxConcurrentSubagents }
@@ -3768,6 +3782,8 @@ routing.layer("ProviderServiceLive routing", (it) => {
         type: "task.progress",
         eventId: asEventId("event-claude-subagent-detail"),
         provider: CLAUDE_AGENT_DRIVER,
+        subagentRuntimeId: session.subagentRuntimeId,
+        claudeSubagentHistorySessionId: CLAUDE_HISTORY_ROOT,
         createdAt: "2026-01-01T00:00:03.000Z",
         threadId,
         turnId,
@@ -3806,6 +3822,265 @@ routing.layer("ProviderServiceLive routing", (it) => {
           historyId: "claude-agent-1",
         },
       ]);
+    }),
+  );
+
+  it.effect(
+    "captures a fresh active Claude native history root without a resumable checkpoint",
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const directory = yield* ProviderSessionDirectory;
+        const repository = yield* ProviderSessionRuntimeRepository;
+        const sql = yield* SqlClient.SqlClient;
+        const threadId = asThreadId("thread-fresh-claude-native-history");
+        const cwd = path.join(os.tmpdir(), "cafe-fresh-claude-native-history-fixture");
+        yield* sql`
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, branch, worktree_path,
+          latest_turn_id, created_at, updated_at
+        ) VALUES (
+          ${threadId}, NULL, 'Fresh Claude history', NULL, NULL, NULL,
+          '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
+        )
+      `;
+        const session = yield* provider.startSession(threadId, {
+          provider: CLAUDE_AGENT_DRIVER,
+          providerInstanceId: claudeAgentInstanceId,
+          threadId,
+          cwd,
+          runtimeMode: "approval-required",
+          // A new native query has no resumable UUID before its first result.
+          resumeCursor: { threadId },
+        });
+        const { turnId } = yield* provider.sendTurn({
+          threadId,
+          input: "Delegate",
+          attachments: [],
+        });
+        const initialRoots = yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count FROM provider_subagent_history_roots
+        WHERE thread_id = ${threadId}
+      `;
+        assert.deepEqual(initialRoots, [{ count: 0 }]);
+        routing.claude.updateSession(threadId, (current) => ({
+          ...current,
+          subagentHistoryResumeCursor: { resume: CLAUDE_HISTORY_ROOT },
+        }));
+        const emitChild = (historyId?: string) =>
+          routing.claude.emit({
+            type: "task.progress",
+            eventId: asEventId(historyId ? "claude-history-upgrade" : "claude-active-history"),
+            provider: CLAUDE_AGENT_DRIVER,
+            subagentRuntimeId: session.subagentRuntimeId,
+            claudeSubagentHistorySessionId: CLAUDE_HISTORY_ROOT,
+            createdAt: "2026-01-01T00:00:03.000Z",
+            threadId,
+            turnId,
+            payload: {
+              taskId: "claude-live-child",
+              description: "Active exact child",
+              subagent: {
+                threadId: "claude-live-child",
+                ...(historyId ? { historyId } : {}),
+                status: "active",
+              },
+            },
+          });
+        emitChild();
+        yield* advanceTestClock(50);
+        const nativeRoot = Option.getOrThrow(
+          yield* repository.getSubagentHistoryBinding({
+            threadId,
+            turnId,
+            subagentId: "claude-live-child",
+            historyId: null,
+          }),
+        );
+        assert.deepEqual(nativeRoot.resumeCursor, { resume: CLAUDE_HISTORY_ROOT });
+        routing.claude.readSubagentDetail.mockClear();
+        routing.claude.startSession.mockClear();
+        yield* provider.readSubagentDetail({ threadId, turnId, subagentId: "claude-live-child" });
+        assert.deepEqual(routing.claude.readSubagentDetail.mock.calls[0], [
+          threadId,
+          "claude-live-child",
+          { resumeCursor: { resume: CLAUDE_HISTORY_ROOT }, cwd },
+        ]);
+
+        // The root finishes while its child continues. Ordinary resumability and
+        // checkpoint counts advance, but the child's immutable native root does
+        // not; a later SDK-discovered Agent history id must still be retained.
+        routing.claude.updateSession(threadId, (current) => ({
+          ...current,
+          status: "ready",
+          activeTurnId: undefined,
+          resumeCursor: { threadId, resume: CLAUDE_HISTORY_ROOT, turnCount: 9 },
+        }));
+        routing.claude.emit({
+          type: "turn.completed",
+          eventId: asEventId("claude-root-completed-child-active"),
+          provider: CLAUDE_AGENT_DRIVER,
+          subagentRuntimeId: session.subagentRuntimeId,
+          createdAt: "2026-01-01T00:00:04.000Z",
+          threadId,
+          turnId,
+          payload: {
+            state: "completed",
+            resumeCursor: { threadId, resume: CLAUDE_HISTORY_ROOT, turnCount: 9 },
+          },
+        });
+        yield* advanceTestClock(50);
+        assert.deepEqual(Option.getOrThrow(yield* directory.getBinding(threadId)).resumeCursor, {
+          threadId,
+          resume: CLAUDE_HISTORY_ROOT,
+          turnCount: 9,
+        });
+        emitChild("claude-history-id");
+        yield* advanceTestClock(50);
+        yield* provider.readSubagentDetail({
+          threadId,
+          turnId,
+          subagentId: "claude-live-child",
+          historyId: "claude-history-id",
+        });
+        assert.deepEqual(routing.claude.readSubagentDetail.mock.calls[1], [
+          threadId,
+          "claude-live-child",
+          {
+            resumeCursor: { resume: CLAUDE_HISTORY_ROOT },
+            cwd,
+            historyId: "claude-history-id",
+          },
+        ]);
+        assert.equal(routing.claude.startSession.mock.calls.length, 0);
+      }),
+  );
+
+  it.effect("refuses Claude history capture from stale or mismatched native ownership", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const repository = yield* ProviderSessionRuntimeRepository;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = asThreadId("thread-fenced-claude-native-history");
+      const cwd = path.join(os.tmpdir(), "cafe-fenced-claude-native-history-fixture");
+      const otherRoot = "00000000-0000-4000-8000-000000000953";
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, branch, worktree_path,
+          latest_turn_id, created_at, updated_at
+        ) VALUES (
+          ${threadId}, NULL, 'Fenced Claude history', NULL, NULL, NULL,
+          '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
+        )
+      `;
+      const session = yield* provider.startSession(threadId, {
+        provider: CLAUDE_AGENT_DRIVER,
+        providerInstanceId: claudeAgentInstanceId,
+        threadId,
+        cwd,
+        runtimeMode: "approval-required",
+      });
+      const { turnId } = yield* provider.sendTurn({ threadId, input: "Delegate", attachments: [] });
+      const emit = (childId: string, runtimeId = session.subagentRuntimeId, root?: string) =>
+        routing.claude.emit({
+          type: "task.started",
+          eventId: asEventId(`history-${childId}`),
+          provider: CLAUDE_AGENT_DRIVER,
+          subagentRuntimeId: runtimeId,
+          ...(root ? { claudeSubagentHistorySessionId: root } : {}),
+          createdAt: "2026-01-01T00:00:03.000Z",
+          threadId,
+          turnId,
+          payload: {
+            taskId: childId,
+            description: "Exact child",
+            subagent: { threadId: childId, status: "active" },
+          },
+        });
+      const assertMissing = (subagentId: string) =>
+        repository
+          .getSubagentHistoryBinding({ threadId, turnId, subagentId, historyId: null })
+          .pipe(
+            Effect.tap((binding) => Effect.sync(() => assert.equal(Option.isNone(binding), true))),
+          );
+      emit("missing-root-stamp");
+      emit(
+        "wrong-runtime",
+        SubagentRuntimeId.make("00000000-0000-4000-8000-000000000954"),
+        CLAUDE_HISTORY_ROOT,
+      );
+      emit("wrong-event-root", session.subagentRuntimeId, otherRoot);
+      yield* advanceTestClock(50);
+      for (const child of ["missing-root-stamp", "wrong-runtime", "wrong-event-root"])
+        yield* assertMissing(child);
+
+      for (const [child, override] of [
+        ["wrong-snapshot-account", { providerInstanceId: ProviderInstanceId.make("claude-other") }],
+        [
+          "wrong-snapshot-runtime",
+          { subagentRuntimeId: SubagentRuntimeId.make("00000000-0000-4000-8000-000000000954") },
+        ],
+        ["wrong-snapshot-cwd", { cwd: path.join(cwd, "other") }],
+        ["wrong-snapshot-driver", { provider: CODEX_DRIVER }],
+      ] as const) {
+        routing.claude.updateSession(threadId, () => ({ ...session, ...override }));
+        emit(child, session.subagentRuntimeId, CLAUDE_HISTORY_ROOT);
+        yield* advanceTestClock(50);
+        yield* assertMissing(child);
+      }
+      routing.claude.updateSession(threadId, () => session);
+      const inventoryStarted = yield* Deferred.make<void>();
+      const stalledEventDelivered = yield* provider.streamEvents.pipe(
+        Stream.filter((event) => event.eventId === asEventId("history-stalled-inventory")),
+        Stream.take(1),
+        Stream.runDrain,
+        Effect.forkChild,
+      );
+      routing.claude.listSessions.mockImplementationOnce(() =>
+        Deferred.succeed(inventoryStarted, undefined).pipe(Effect.andThen(Effect.never)),
+      );
+      emit("stalled-inventory", session.subagentRuntimeId, CLAUDE_HISTORY_ROOT);
+      yield* Deferred.await(inventoryStarted);
+      // A hung in-process inventory cannot authorize history or indefinitely
+      // park canonical lifecycle publication. Advance only its fixed five-
+      // second production budget, not a broadened test deadline or retry.
+      yield* advanceTestClock(5_000);
+      yield* Fiber.join(stalledEventDelivered);
+      yield* assertMissing("stalled-inventory");
+      emit("original-root", session.subagentRuntimeId, CLAUDE_HISTORY_ROOT);
+      yield* advanceTestClock(50);
+      assert.equal(
+        Option.isSome(
+          yield* repository.getSubagentHistoryBinding({
+            threadId,
+            turnId,
+            subagentId: "original-root",
+            historyId: null,
+          }),
+        ),
+        true,
+      );
+      // Native session changes can happen without a new query generation. The
+      // event and snapshot agree here, but the already-frozen turn root must
+      // still refuse a different native conversation for a second child.
+      routing.claude.updateSession(threadId, (current) => ({
+        ...current,
+        subagentHistoryResumeCursor: { resume: otherRoot },
+      }));
+      emit("same-runtime-new-root", session.subagentRuntimeId, otherRoot);
+      yield* advanceTestClock(50);
+      yield* assertMissing("same-runtime-new-root");
+      assert.deepEqual(
+        Option.getOrThrow(
+          yield* repository.getSubagentHistoryBinding({
+            threadId,
+            turnId,
+            subagentId: "original-root",
+            historyId: null,
+          }),
+        ).resumeCursor,
+        { resume: CLAUDE_HISTORY_ROOT },
+      );
     }),
   );
 
@@ -4510,6 +4785,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
         type: "turn.completed",
         eventId: asEventId("evt-runtime-resume-cursor"),
         provider: ProviderDriverKind.make("claudeAgent"),
+        subagentRuntimeId: session.subagentRuntimeId,
         createdAt: "2026-01-01T00:00:10.000Z",
         threadId: session.threadId,
         turnId: asTurnId("turn-runtime-resume-cursor"),

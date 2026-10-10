@@ -10169,6 +10169,7 @@ describe("ProviderRuntimeIngestion", () => {
   it("preserves structured subagent presentation across the durable task lifecycle", async () => {
     const harness = await createHarness();
     const startedAt = "2026-01-01T00:00:00.000Z";
+    const privateNativeRoot = "00000000-0000-4000-8000-000000000948";
     const subagent = {
       threadId: "provider-child-audit",
       label: "Audit chat pipeline",
@@ -10182,6 +10183,7 @@ describe("ProviderRuntimeIngestion", () => {
       type: "task.started",
       eventId: asEventId("evt-subagent-started"),
       provider: ProviderDriverKind.make("codex"),
+      claudeSubagentHistorySessionId: privateNativeRoot,
       createdAt: startedAt,
       threadId: asThreadId("thread-1"),
       turnId: asTurnId("turn-subagent-1"),
@@ -10197,6 +10199,7 @@ describe("ProviderRuntimeIngestion", () => {
       type: "task.progress",
       eventId: asEventId("evt-subagent-progress"),
       provider: ProviderDriverKind.make("codex"),
+      claudeSubagentHistorySessionId: privateNativeRoot,
       createdAt: "2026-01-01T00:00:05.000Z",
       threadId: asThreadId("thread-1"),
       turnId: asTurnId("turn-subagent-1"),
@@ -10211,6 +10214,7 @@ describe("ProviderRuntimeIngestion", () => {
       type: "task.completed",
       eventId: asEventId("evt-subagent-completed"),
       provider: ProviderDriverKind.make("codex"),
+      claudeSubagentHistorySessionId: privateNativeRoot,
       createdAt: "2026-01-01T00:01:05.000Z",
       threadId: asThreadId("thread-1"),
       turnId: asTurnId("turn-subagent-1"),
@@ -10247,6 +10251,9 @@ describe("ProviderRuntimeIngestion", () => {
         subagent: { ...subagent, status: "completed" },
       },
     });
+    // Native history coordinates authorize server-side reads; they are not
+    // renderer-visible task metadata on either provider's shared projection.
+    expect(JSON.stringify(thread).includes(privateNativeRoot)).toBe(false);
   });
 
   it("persists exact stamped Claude workflow lifecycle digests without adding snapshot counters to billing", async () => {

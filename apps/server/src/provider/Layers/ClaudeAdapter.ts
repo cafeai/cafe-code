@@ -601,6 +601,8 @@ interface ClaudeTaskBinding {
   readonly toolUseKey?: string;
   /** Exact SDK transcript identity returned by a structured Agent result. */
   readonly historyId?: string;
+  /** First observed native conversation for this task incarnation, never a live-slot fallback. */
+  readonly historyResumeSessionId?: string;
   readonly description?: string;
   /** A fallback/recovery description cannot supersede a native lifecycle title. */
   readonly provisionalDescription: boolean;
@@ -1041,6 +1043,8 @@ function upsertClaudeTaskBinding(
     readonly toolUseKey?: string | undefined;
     readonly toolUseId?: string | undefined;
     readonly historyId?: string | undefined;
+    /** Explicit retained root; null preserves known-unknown ownership on restoration. */
+    readonly historyResumeSessionId?: string | null;
     readonly description?: string | undefined;
     readonly provisionalDescription?: boolean | undefined;
     readonly provisionalTaskIdentity?: boolean | undefined;
@@ -1102,14 +1106,12 @@ function upsertClaudeTaskBinding(
   const objective =
     claudeSubagentDisplayLine(input.objective, CLAUDE_SUBAGENT_OBJECTIVE_LIMIT) ??
     previous?.objective;
-  // The first observed clock remains authoritative. Progress snapshots repeat
-  // duration metadata and must not make a long-running row jump forward every
-  // time Claude reports another update.
-  const newIncarnation =
-    input.taskGeneration !== undefined && input.taskGeneration !== previous?.taskGeneration;
-  const startedAt =
-    (newIncarnation ? undefined : previous?.startedAt) ??
-    claudeSubagentDisplayLine(input.startedAt, 80);
+  // The first observed clock remains authoritative. Assigning a first control
+  // generation promotes an already observed child; it does not start another
+  // incarnation or move that child's original turn. Actual native task reuse
+  // clears both task/tool maps before entering this helper. Repeated snapshots
+  // must not make a long-running row jump forward on each update either.
+  const startedAt = previous?.startedAt ?? claudeSubagentDisplayLine(input.startedAt, 80);
   // These identities come from different SDK fields and stay distinct. In
   // particular, never infer an Agent transcript id from a task/tool id.
   const toolUseId = exactClaudeProviderIdentity(input.toolUseId) ?? previous?.toolUseId;
@@ -1122,11 +1124,22 @@ function upsertClaudeTaskBinding(
   // turn settles. Preserve the first owning turn so a later ambient retraction
   // targets the exact renderer row instead of creating a second cross-turn key.
   const turnId =
-    previous !== undefined && !newIncarnation
+    previous !== undefined
       ? previous.turnId
       : input.turnId !== undefined
         ? input.turnId
         : (context.turnState?.turnId ?? null);
+  // Query generation and conversation UUID are different scopes. A /clear
+  // may change the latter without replacing the query, while background child
+  // updates still belong to their original conversation and owning turn.
+  const historyResumeSessionId =
+    input.historyResumeSessionId !== undefined
+      ? (input.historyResumeSessionId ?? undefined)
+      : previous !== undefined
+        ? previous.historyResumeSessionId
+        : context.resumeSessionId !== undefined && isUuid(context.resumeSessionId)
+          ? context.resumeSessionId
+          : undefined;
   const visibilityState = previous?.visibilityState ?? {
     visibility:
       context.hiddenTranscriptTaskIds.has(taskMapKey) ||
@@ -1198,6 +1211,7 @@ function upsertClaudeTaskBinding(
     ...(toolUseId ? { toolUseId } : {}),
     ...(toolUseKey ? { toolUseKey } : {}),
     ...(historyId ? { historyId } : {}),
+    ...(historyResumeSessionId ? { historyResumeSessionId } : {}),
     ...(description ? { description } : {}),
     provisionalDescription,
     provisionalTaskIdentity,
@@ -1277,6 +1291,9 @@ function restoreClaudeRetainedTaskBinding(
     ...(toolUseKey ? { toolUseKey } : {}),
     ...(retained.toolUseId ? { toolUseId: retained.toolUseId } : {}),
     ...(retained.historyId ? { historyId: retained.historyId } : {}),
+    // Generic map eviction is not a new task incarnation. Carry the original
+    // root explicitly, including unknown, instead of borrowing the live slot.
+    historyResumeSessionId: retained.historyResumeSessionId ?? null,
     ...(retained.description ? { description: retained.description } : {}),
     provisionalDescription: retained.provisionalDescription,
     provisionalTaskIdentity: retained.provisionalTaskIdentity,
@@ -4408,6 +4425,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     context: ClaudeSessionContext,
     event: ProviderRuntimeEvent,
   ): Effect.Effect<void> => {
+    const binding =
+      event.type === "task.started" ||
+      event.type === "task.progress" ||
+      event.type === "task.completed"
+        ? context.taskBindingsByTaskId.get(String(event.payload.taskId))
+        : undefined;
     // All callbacks carry the exact originating query context. Looking up the
     // current thread here would let a late old-query callback borrow its
     // replacement's generation and falsely reanimate a persisted worker.
@@ -4420,13 +4443,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ? { raw: { ...event.raw, payload: sanitizeClaudeThinkingDiagnostics(event.raw.payload) } }
         : {}),
       subagentRuntimeId: context.subagentRuntimeId,
+      // Snapshot the native root at emission, not when a queued event is later
+      // consumed. One query can adopt a different conversation after /clear;
+      // its runtime generation alone cannot bind a delayed child to that root.
+      ...(binding?.historyResumeSessionId !== undefined
+        ? {
+            claudeSubagentHistorySessionId: binding.historyResumeSessionId,
+          }
+        : {}),
     };
-    const binding =
-      event.type === "task.started" ||
-      event.type === "task.progress" ||
-      event.type === "task.completed"
-        ? context.taskBindingsByTaskId.get(String(event.payload.taskId))
-        : undefined;
     const workflow: RuntimeWorkflowPresentation | undefined =
       binding?.taskType === "local_workflow"
         ? {
@@ -5216,6 +5241,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       if (context.resumeSessionId !== undefined) context.forkMessageIds = Object.create(null);
     }
     context.resumeSessionId = message.session_id;
+    // History authorization only needs the exact native conversation identity.
+    // Keep it separate from updateResumeCursor's completion/rewind discipline:
+    // observing SDK init does not make an unfinished first turn resumable.
+    // A changed or malformed native root clears the previous history identity;
+    // service persistence separately fences this snapshot to its query runtime.
+    context.session = {
+      ...context.session,
+      subagentHistoryResumeCursor: isUuid(nextThreadId) ? { resume: nextThreadId } : undefined,
+    };
     yield* updateResumeCursor(context);
 
     if (context.lastThreadStartedId !== nextThreadId) {
@@ -6569,11 +6603,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         claudeSubagentDisplayLine(message.task_description, CLAUDE_TASK_DESCRIPTION_TEXT_LIMIT) ??
         existingBinding?.description ??
         (subagentType ? `${subagentType} subagent` : "Claude subagent");
+      // A nested assistant can be the first observation of this child before
+      // its authoritative task start arrives. Retain this receive-time clock
+      // with the binding so later identity promotion cannot reset its age.
+      const stamp = yield* makeEventStamp();
       const binding = existingBinding
         ? upsertClaudeTaskBinding(context, {
             taskId: existingBinding.taskId,
             toolUseKey,
             description: recoveredDescription,
+            startedAt: stamp.createdAt,
             provisionalDescription: true,
             ...(subagentType ? { subagentType } : {}),
             // A non-null parent_tool_use_id is the SDK's structured proof that
@@ -6586,6 +6625,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             taskId: parentToolUseId,
             toolUseId: parentToolUseId,
             description: recoveredDescription,
+            startedAt: stamp.createdAt,
             provisionalDescription: true,
             provisionalTaskIdentity: true,
             ...(subagentType ? { subagentType } : {}),
@@ -6599,7 +6639,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         text.length > CLAUDE_SUBAGENT_PROGRESS_TEXT_LIMIT
           ? `${text.slice(0, CLAUDE_SUBAGENT_PROGRESS_TEXT_LIMIT - 3)}...`
           : text;
-      const stamp = yield* makeEventStamp();
       const subagent = claudeSubagentPresentation(binding, "active");
       const visibility = claudeTaskVisibilityForBinding(context, binding);
       yield* offerRuntimeEvent(context, {
@@ -9958,6 +9997,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(modelSelection ? { modelSelection } : {}),
         ...(threadId ? { threadId } : {}),
         ...(initialResumeCursor !== undefined ? { resumeCursor: initialResumeCursor } : {}),
+        ...(existingResumeSessionId !== undefined
+          ? { subagentHistoryResumeCursor: { resume: existingResumeSessionId } }
+          : {}),
         createdAt: startedAt,
         updatedAt: startedAt,
       };
@@ -10784,6 +10826,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const cwd = liveSession?.session.cwd ?? persistedCwd;
       if (!resumeSessionId || !isUuid(resumeSessionId) || !cwd || cwd.trim().length === 0) {
         return yield* makeProviderSubagentDetailReadError("session-unavailable");
+      }
+      if (
+        liveBinding?.historyResumeSessionId !== undefined &&
+        liveBinding.historyResumeSessionId !== resumeSessionId
+      ) {
+        return yield* makeProviderSubagentDetailReadError("child-identity-mismatch");
       }
       const historySessionStore = makeClaudeSubagentHistorySessionStore({
         path,

@@ -1247,6 +1247,11 @@ export type ProviderRuntimeUserInputResolvedEvent =
 
 const ProviderRuntimeTaskStartedEvent = Schema.Struct({
   ...ProviderRuntimeEventBase.fields,
+  // Private owner-authored native root for read-only Claude child history.
+  // This is not a renderer task field, resume checkpoint, or input authority.
+  // Keep it task-only and exact so authenticated journal transport cannot
+  // erase the emission-time identity or normalize a malformed spelling.
+  claudeSubagentHistorySessionId: Schema.optional(Schema.String.check(Schema.isUUID())),
   type: TaskStartedType,
   payload: TaskStartedPayload,
 });
@@ -1254,6 +1259,7 @@ export type ProviderRuntimeTaskStartedEvent = typeof ProviderRuntimeTaskStartedE
 
 const ProviderRuntimeTaskProgressEvent = Schema.Struct({
   ...ProviderRuntimeEventBase.fields,
+  claudeSubagentHistorySessionId: Schema.optional(Schema.String.check(Schema.isUUID())),
   type: TaskProgressType,
   payload: TaskProgressPayload,
 });
@@ -1261,6 +1267,7 @@ export type ProviderRuntimeTaskProgressEvent = typeof ProviderRuntimeTaskProgres
 
 const ProviderRuntimeTaskCompletedEvent = Schema.Struct({
   ...ProviderRuntimeEventBase.fields,
+  claudeSubagentHistorySessionId: Schema.optional(Schema.String.check(Schema.isUUID())),
   type: TaskCompletedType,
   payload: TaskCompletedPayload,
 });
