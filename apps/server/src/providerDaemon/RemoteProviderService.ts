@@ -11,6 +11,7 @@ import {
   ProviderDaemonRpcRequest,
   ProviderDaemonRpcResultByMethod,
   type ThreadId,
+  type ProviderInstanceId,
   type ProviderRuntimeEvent,
   type ProviderDaemonClientConfig,
   type ProviderCompactThreadInput,
@@ -463,6 +464,24 @@ const rpc = <M extends ProviderDaemonRpcRequest["method"]>(
         : toRemoteRequestError(request.method, cause),
   });
 
+/**
+ * Read one exact instance's capability through the ordinary authenticated RPC
+ * and both existing result decoders. Keeping this finite read separate from
+ * constructing the bridge permits isolated transport qualification without
+ * opening its perpetual event subscription or invoking a provider process.
+ * Missing/false capability remains unsupported; malformed wire data fails the
+ * normal RPC schema boundary rather than acquiring truthy execution authority.
+ */
+export const requestProviderDaemonCapabilities = (
+  daemonConfig: ProviderDaemonClientConfig,
+  instanceId: ProviderInstanceId,
+) =>
+  rpc(daemonConfig, { method: "getCapabilities", payload: { instanceId } }).pipe(
+    Effect.map(
+      (capabilities) => decodeAdapterCapabilities(capabilities) as ProviderAdapterCapabilities,
+    ),
+  );
+
 async function readEventStream(
   daemonConfig: ProviderDaemonClientConfig,
   afterCursor: number,
@@ -829,11 +848,15 @@ const makeRemoteProviderService = Effect.gen(function* () {
         recoverRemoteSessionInventory,
       ),
     getCapabilities: (instanceId) =>
-      guardedRpc({ method: "getCapabilities", payload: { instanceId } }).pipe(
-        Effect.map(
-          (capabilities) => decodeAdapterCapabilities(capabilities) as ProviderAdapterCapabilities,
-        ),
-      ),
+      guardRemoteProviderThreadOperation({
+        retiredThreadIds: hardDeleteRetiredThreadIds,
+        operation: "ProviderDaemonRemoteProviderService.getCapabilities",
+        threadIds: providerDaemonRequestThreadIds({
+          method: "getCapabilities",
+          payload: { instanceId },
+        }),
+        effect: requestProviderDaemonCapabilities(daemonConfig, instanceId),
+      }),
     getInstanceInfo: (instanceId) =>
       guardedRpc({ method: "getInstanceInfo", payload: { instanceId } }).pipe(
         Effect.map((info) => decodeInstanceRoutingInfo(info) as ProviderInstanceRoutingInfo),

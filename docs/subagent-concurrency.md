@@ -70,6 +70,15 @@ Cafe qualifies Codex CLI 0.159.0+ and Claude Code 2.1.217+ from the configured
 runtime's existing health result, not model names or SDK package versions.
 Unknown and prerelease versions do not qualify automatically.
 
+The authenticated provider-daemon capability response preserves the selected
+adapter's optional subagent-support boolean through remote result decoding.
+An explicit true is required; false or omission from an older daemon remains
+unsupported. This transport evidence does not bypass the native idle boundary or
+prove available worker capacity. Adopting the rebuilt backend fixes reception of
+an explicit true already emitted by its daemon. A daemon that omits the field
+still cannot certify support; Cafe does not restart an active daemon or replay a
+rejected prompt to apply this repair.
+
 - Codex receives the existing structured native agent overrides: N spawned
   threads and N+1 total resident threads including the root. Completed history is
   not a concurrent-agent count; native admission and idle unloading remain owned

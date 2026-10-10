@@ -7695,19 +7695,17 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         try {
           await waitForServerConfigToApply();
           useComposerDraftStore.getState().setPrompt(THREAD_REF, prompt);
-          useComposerDraftStore
-            .getState()
-            .addImages(THREAD_REF, [
-              {
-                id: "live-steer-image",
-                type: "image",
-                name: "draft.png",
-                mimeType: "image/png",
-                sizeBytes: 1,
-                previewUrl: "data:image/png;base64,eA==",
-                file: new File(["x"], "draft.png", { type: "image/png" }),
-              },
-            ]);
+          useComposerDraftStore.getState().addImages(THREAD_REF, [
+            {
+              id: "live-steer-image",
+              type: "image",
+              name: "draft.png",
+              mimeType: "image/png",
+              sizeBytes: 1,
+              previewUrl: "data:image/png;base64,eA==",
+              file: new File(["x"], "draft.png", { type: "image/png" }),
+            },
+          ]);
           // Let the independent composer image-persistence effect finish its
           // own read first. The only deferred read below is turn preparation,
           // not an arbitrary earlier image/storage operation.

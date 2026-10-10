@@ -435,6 +435,10 @@ export const ProviderDaemonLeaseResponse = Schema.Struct({
 export type ProviderDaemonLeaseResponse = typeof ProviderDaemonLeaseResponse.Type;
 
 export const ProviderDaemonAdapterCapabilities = Schema.Struct({
+  // Preserve the native adapter's qualified capability across the daemon
+  // boundary. Legacy owners omit this field; absence remains unsupported and
+  // must never be upgraded from a model name or a cached renderer snapshot.
+  subagentConcurrency: Schema.optional(Schema.Boolean),
   sessionModelSwitch: Schema.Literals(["in-session", "restart-resume", "unsupported"]),
   liveSteer: Schema.Literals(["supported", "unsupported"]),
   // Optional on the wire so a newly built desktop can still interrogate an
