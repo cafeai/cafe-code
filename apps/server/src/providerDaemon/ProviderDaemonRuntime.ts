@@ -8,6 +8,7 @@ import { OpenCodeRuntimeLive } from "../provider/opencodeRuntime.ts";
 import { ProviderAdapterRegistryLive } from "../provider/Layers/ProviderAdapterRegistry.ts";
 import { ProviderEventLoggersLive } from "../provider/Layers/ProviderEventLoggers.ts";
 import { ProviderInstanceRegistryHydrationLive } from "../provider/Layers/ProviderInstanceRegistryHydration.ts";
+import { makeProviderRegistryLive } from "../provider/Layers/ProviderRegistry.ts";
 import { ProviderServiceLive } from "../provider/Layers/ProviderService.ts";
 import { ProviderSessionDirectoryLive } from "../provider/Layers/ProviderSessionDirectory.ts";
 import { ProviderSessionRuntimeRepositoryLive } from "../persistence/Layers/ProviderSessionRuntime.ts";
@@ -35,7 +36,14 @@ const ProviderSessionDirectoryLayerLive = ProviderSessionDirectoryLive.pipe(
 );
 
 const ProviderAdapterRegistryLayerLive = ProviderAdapterRegistryLive.pipe(
-  Layer.provideMerge(ProviderInstanceRegistryHydrationLive),
+  // The native adapter's version-qualified capabilities belong to this owner,
+  // not the backend's independent status/cache snapshot. The same two-wide
+  // registry queue admits initial/replacement probes and releases managed
+  // periodic clocks. It starts in the owner's scope without delaying daemon
+  // HTTP readiness; capability reads await only their exact generation.
+  Layer.provideMerge(
+    makeProviderRegistryLive({ statusCache: "disabled", initialAdmission: "background" }),
+  ),
 );
 
 const ProviderServiceLayerLive = ProviderServiceLive.pipe(
@@ -47,10 +55,21 @@ const ProviderRuntimeInventoryLayerLive = ProviderRuntimeInventoryLocalLive.pipe
   Layer.provide(ProviderAdapterRegistryLayerLive),
 );
 
-const LocalProviderRuntimeLayerLive = Layer.mergeAll(
+/**
+ * Local owner graph, accepting its instance registry from the enclosing runtime.
+ * Both service routing and inventory share the exact same adapter/admission
+ * layer object, so Effect memoization constructs one owner per instance. Tests
+ * can supply synthetic managed instances to this production graph without
+ * creating provider processes, credentials, homes, or application settings.
+ */
+export const ProviderDaemonLocalRuntimeLive = Layer.mergeAll(
   ProviderServiceLayerLive,
   ProviderRuntimeInventoryLayerLive,
   ProviderSupervisorRegistryLive,
+);
+
+const LocalProviderRuntimeLayerLive = ProviderDaemonLocalRuntimeLive.pipe(
+  Layer.provideMerge(ProviderInstanceRegistryHydrationLive),
 );
 
 const RemoteSupervisorProviderRuntimeLayerLive = Layer.mergeAll(

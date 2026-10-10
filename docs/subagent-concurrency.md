@@ -69,6 +69,10 @@ intentionally session-unbound until its first send.
 Cafe qualifies Codex CLI 0.159.0+ and Claude Code 2.1.217+ from the configured
 runtime's existing health result, not model names or SDK package versions.
 Unknown and prerelease versions do not qualify automatically.
+The native version parser preserves prerelease identity. Malformed tokens and
+build-metadata spellings that the shared version comparison does not support
+remain unknown; it never strips a suffix or selects a later unrelated SDK version
+to grant support.
 
 The authenticated provider-daemon capability response preserves the selected
 adapter's optional subagent-support boolean through remote result decoding.
@@ -78,6 +82,42 @@ prove available worker capacity. Adopting the rebuilt backend fixes reception of
 an explicit true already emitted by its daemon. A daemon that omits the field
 still cannot certify support; Cafe does not restart an active daemon or replay a
 rejected prompt to apply this repair.
+
+Qualification runs inside the daemon that owns the native adapter, separately
+from the backend’s presentation snapshot. Both reuse the same registry-owned
+two-wide initial admission policy within their own process. The daemon does not
+read or write the backend’s durable status cache. Its listener can become ready
+while slow account probes run; a capability read waits for the exact selected
+instance’s existing admission and rechecks ownership after replacement. It does
+not launch another probe, cancel the owner’s probe when the caller disconnects,
+or use a different account’s result. Failed or inconclusive native version
+evidence cannot grant support; a later authentication failure does not erase a
+successfully observed version or certify session usability. Periodic checks begin
+only after initial admission settles.
+
+Rich daemon health and compact desktop debug include optional
+`providerQualification` counts for known versions, unknown versions and explicitly
+reported pending probes. These are volatile owner observations, not a capacity
+claim; absence on an older daemon is unavailable evidence, not zero. They contain
+no account labels, provider output or native version strings.
+Reported pending counts describe retained snapshots, not necessarily unresolved
+admission: a failed probe can leave pending presentation while its capability
+has already settled false. Registry setup failure instead yields a fixed bounded
+request failure; it never waits forever or grants unqualified support.
+
+This initialization repair requires a rebuilt **daemon**, not only a backend/UI
+reload that adopts a surviving old daemon. Cafe never interrupts active work to
+apply it automatically. For a source checkout, after all provider work is safely
+stopped and saved, the existing user-requested restart command replaces the
+desktop/backend and provider runtimes and relaunches with debug enabled:
+
+```sh
+yarn restart:desktop -- node apps/desktop/scripts/start-electron.mjs --cafe-debug
+```
+
+This command terminates Cafe-owned processes; do not use it while work should
+continue. Rejected input is never replayed automatically. See the
+[runtime qualification decision](decisions/provider-runtime-qualification.md).
 
 - Codex receives the existing structured native agent overrides: N spawned
   threads and N+1 total resident threads including the root. Completed history is

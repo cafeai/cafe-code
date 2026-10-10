@@ -359,6 +359,14 @@ export const ProviderDaemonSupervisorProcess = Schema.Struct({
 });
 export type ProviderDaemonSupervisorProcess = typeof ProviderDaemonSupervisorProcess.Type;
 
+/** Content-free status observations owned by this runtime, never admission authority. */
+export const ProviderDaemonQualificationSummary = Schema.Struct({
+  versionKnownCount: NonNegativeInt,
+  versionUnknownCount: NonNegativeInt,
+  pendingCount: NonNegativeInt,
+});
+export type ProviderDaemonQualificationSummary = typeof ProviderDaemonQualificationSummary.Type;
+
 export const ProviderDaemonHealth = Schema.Struct({
   ok: Schema.Literal(true),
   mode: ProviderRuntimeProcessMode,
@@ -372,6 +380,7 @@ export const ProviderDaemonHealth = Schema.Struct({
   startedAt: IsoDateTime,
   activeSessionCount: NonNegativeInt,
   configuredInstanceCount: NonNegativeInt,
+  providerQualification: Schema.optional(ProviderDaemonQualificationSummary),
   eventCursor: NonNegativeInt,
   transport: Schema.optional(ProviderDaemonTransport),
   activeStreamCount: Schema.optional(NonNegativeInt),

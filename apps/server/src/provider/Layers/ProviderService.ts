@@ -88,6 +88,7 @@ import {
 } from "../Errors.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import { ProviderAdapterRegistry } from "../Services/ProviderAdapterRegistry.ts";
+import { ProviderRegistry } from "../Services/ProviderRegistry.ts";
 import { ProviderService, type ProviderServiceShape } from "../Services/ProviderService.ts";
 import {
   makeProviderRuntimeOwnerPayload,
@@ -635,6 +636,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const canonicalEventLogger = options?.canonicalEventLogger ?? eventLoggers.canonical;
 
   const registry = yield* ProviderAdapterRegistry;
+  // Status ownership is optional for legacy/test services. When present, its
+  // read-only generation barrier qualifies capabilities without starting a
+  // probe, changing a session, or adopting cached backend version evidence.
+  const statusRegistry = yield* Effect.serviceOption(ProviderRegistry);
   const directory = yield* ProviderSessionDirectory;
   const readRewind = (threadId: ThreadId) =>
     directory.rewinds
@@ -3100,7 +3105,19 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   }).pipe(Effect.forkScoped);
 
   const getCapabilities: ProviderServiceShape["getCapabilities"] = (instanceId) =>
-    registry.getByInstance(instanceId).pipe(Effect.map((adapter) => adapter.capabilities));
+    Effect.gen(function* () {
+      const wait = Option.isSome(statusRegistry)
+        ? statusRegistry.value.awaitInstanceInitialRefresh
+        : undefined;
+      while (true) {
+        const qualifiedInstance = wait ? yield* wait(instanceId) : undefined;
+        const adapter = yield* registry.getByInstance(instanceId);
+        // A replacement can race the completed wait. Never return its old
+        // predecessor's capability, or read an unqualified heir's adapter.
+        if (wait && qualifiedInstance?.adapter !== adapter) continue;
+        return adapter.capabilities;
+      }
+    });
 
   const getInstanceInfo: ProviderServiceShape["getInstanceInfo"] = (instanceId) =>
     registry.getInstanceInfo(instanceId);

@@ -31,7 +31,6 @@ import {
 import {
   buildServerProvider,
   DEFAULT_TIMEOUT_MS,
-  detailFromResult,
   isCommandMissingCause,
   parseGenericCliVersion,
   providerModelsFromSettings,
@@ -655,9 +654,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   }
 
   const version = versionProbe.success.value;
-  const parsedVersion = parseGenericCliVersion(`${version.stdout}\n${version.stderr}`);
   if (version.code !== 0) {
-    const detail = detailFromResult(version);
     return buildServerProvider({
       presentation: CLAUDE_PRESENTATION,
       enabled: claudeSettings.enabled,
@@ -665,15 +662,18 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
       models: allModels,
       probe: {
         installed: true,
-        version: parsedVersion,
+        // A failed launcher can print dependency versions or private output.
+        // Only a successful --version result can establish native capability
+        // evidence; keep failed output out of both status and repair guidance.
+        version: null,
         status: "error",
         auth: { status: "unknown" },
-        message: detail
-          ? `Claude Agent CLI is installed but failed to run. ${detail}`
-          : "Claude Agent CLI is installed but failed to run.",
+        message:
+          "Claude Agent CLI is installed but failed to run. Check its installation and the binary selected in provider settings.",
       },
     });
   }
+  const parsedVersion = parseGenericCliVersion(`${version.stdout}\n${version.stderr}`);
 
   const models = providerModelsFromSettings(
     getBuiltInClaudeModelsForVersion(parsedVersion),

@@ -1,6 +1,85 @@
 import { assert, describe, it } from "@effect/vitest";
-import type { ProviderDaemonHealth } from "@cafecode/contracts";
-import { windowsSupervisorOwnershipMetadata } from "./ProviderRuntimeInventory.ts";
+import {
+  ProviderDaemonHealth,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  type ServerProvider,
+} from "@cafecode/contracts";
+import * as Schema from "effect/Schema";
+import {
+  summarizeProviderQualification,
+  windowsSupervisorOwnershipMetadata,
+} from "./ProviderRuntimeInventory.ts";
+
+describe("Owner-local qualification diagnostics", () => {
+  const provider: ServerProvider = {
+    instanceId: ProviderInstanceId.make("synthetic-owner"),
+    driver: ProviderDriverKind.make("codex"),
+    enabled: true,
+    installed: true,
+    version: null,
+    status: "warning",
+    auth: { status: "unknown" },
+    checkedAt: "2026-10-10T00:00:00.000Z",
+    models: [],
+    slashCommands: [],
+    skills: [],
+  };
+
+  it("counts unknown and reported pending independently without exposing identity or content", () => {
+    const summary = summarizeProviderQualification([
+      { ...provider, version: "0.159.2" },
+      provider,
+      {
+        ...provider,
+        probeDiagnostics: {
+          attemptCount: 0,
+          consecutiveInconclusiveCount: 0,
+          lastOutcome: "pending",
+          lastStartedAt: null,
+          lastFinishedAt: null,
+          lastDurationMs: null,
+          periodicIntervalMs: null,
+          periodicPhaseOffsetMs: null,
+          nextScheduledAt: null,
+        },
+      },
+    ]);
+    assert.deepEqual(summary, { versionKnownCount: 1, versionUnknownCount: 2, pendingCount: 1 });
+    assert.notInclude(JSON.stringify(summary), provider.instanceId);
+    assert.deepEqual(summarizeProviderQualification([]), {
+      versionKnownCount: 0,
+      versionUnknownCount: 0,
+      pendingCount: 0,
+    });
+  });
+
+  it("preserves optional numeric evidence through health decoding without granting admission", () => {
+    const health = {
+      ok: true,
+      mode: "provider-daemon",
+      pid: 27,
+      ppid: 1,
+      version: "0.0.0-test",
+      startedAt: "2026-10-10T00:00:00.000Z",
+      activeSessionCount: 0,
+      configuredInstanceCount: 3,
+      eventCursor: 0,
+    } as const;
+    const decode = Schema.decodeUnknownSync(ProviderDaemonHealth);
+    assert.isUndefined(decode(health).providerQualification);
+    const summary = { versionKnownCount: 1, versionUnknownCount: 2, pendingCount: 1 };
+    assert.deepEqual(
+      decode({ ...health, providerQualification: summary }).providerQualification,
+      summary,
+    );
+    for (const value of [-1, 0.5, "1", Number.POSITIVE_INFINITY]) {
+      assert.throws(() =>
+        decode({ ...health, providerQualification: { ...summary, pendingCount: value } }),
+      );
+    }
+  });
+});
 
 describe("Windows upstream supervisor identity propagation", () => {
   const legacyHealth: ProviderDaemonHealth = {

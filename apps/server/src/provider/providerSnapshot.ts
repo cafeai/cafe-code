@@ -165,8 +165,25 @@ export function extractAuthBoolean(value: unknown): boolean | undefined {
 }
 
 export function parseGenericCliVersion(output: string): string | null {
-  const match = output.match(/\b(\d+\.\d+\.\d+)\b/);
-  return match?.[1] ?? null;
+  // Native capability admission consumes this value, not just the provider
+  // badge. Preserve prerelease suffixes so a qualified stable-release floor
+  // cannot accidentally admit a prerelease after its suffix is dropped.
+  // Consider the complete first dotted numeric token before validating it.
+  // A missing patch or malformed suffix must not backtrack into a stable
+  // prefix or select a later unrelated SDK version from diagnostic text.
+  // Build metadata is unsupported by our shared minimum-version comparator:
+  // it can fall back to lexical ordering and admit a numerically older CLI.
+  // Treat the complete token as unknown rather than stripping that metadata.
+  const candidate = output.match(/\b(\d+\.\d+[\w.+-]*)/)?.[1];
+  if (
+    candidate === undefined ||
+    !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(
+      candidate,
+    )
+  ) {
+    return null;
+  }
+  return candidate;
 }
 
 export function providerModelsFromSettings(

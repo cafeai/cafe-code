@@ -1095,6 +1095,7 @@ function summarizeProviderDaemonHealthForCompactDebug(
     return null;
   }
   const runtimeEvents = readRecord(health.runtimeEvents);
+  const providerQualification = readRecord(health.providerQualification);
   const rpc = readRecord(health.rpc);
   const supervisor = readRecord(health.supervisor);
   const supervisorProcess = readRecord(health.supervisorProcess);
@@ -1117,6 +1118,26 @@ function summarizeProviderDaemonHealthForCompactDebug(
     startedAt: readString(health.startedAt),
     activeSessionCount: readNumber(health.activeSessionCount),
     configuredInstanceCount: readNumber(health.configuredInstanceCount),
+    providerQualification:
+      providerQualification === null
+        ? null
+        : {
+            versionKnownCount: readBoundedInteger(
+              providerQualification.versionKnownCount,
+              0,
+              Number.MAX_SAFE_INTEGER,
+            ),
+            versionUnknownCount: readBoundedInteger(
+              providerQualification.versionUnknownCount,
+              0,
+              Number.MAX_SAFE_INTEGER,
+            ),
+            pendingCount: readBoundedInteger(
+              providerQualification.pendingCount,
+              0,
+              Number.MAX_SAFE_INTEGER,
+            ),
+          },
     activeStreamCount: readNumber(health.activeStreamCount),
     retainedEventCount: readNumber(health.retainedEventCount),
     eventCursor: readNumber(health.eventCursor),

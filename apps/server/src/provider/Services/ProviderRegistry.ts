@@ -22,6 +22,8 @@ import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as Stream from "effect/Stream";
 import type { ProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
+import type { ProviderInstance } from "../ProviderDriver.ts";
+import type { ProviderAdapterRequestError } from "../Errors.ts";
 
 export type ProviderMaintenanceActionKind = "update";
 
@@ -39,6 +41,20 @@ export interface ProviderRegistryShape {
    * instances of the same driver) and disambiguate via `instanceId`.
    */
   readonly getProviders: Effect.Effect<ReadonlyArray<ServerProvider>>;
+
+  /**
+   * Wait only for this owner's already-admitted initial probe, never request a
+   * refresh. The returned instance is the exact settled runtime generation;
+   * callers must recheck their routed adapter before reading capabilities.
+   * Replacement/removal wakes a waiter to re-observe the new owner, while
+   * caller cancellation never cancels the registry-owned probe. A setup defect
+   * fails with a fixed, content-free qualification error rather than releasing
+   * an uncertified native getter or hanging indefinitely. Optional for
+   * legacy and synthetic status services which do not own native adapters.
+   */
+  readonly awaitInstanceInitialRefresh?: (
+    instanceId: ProviderInstanceId,
+  ) => Effect.Effect<ProviderInstance | undefined, ProviderAdapterRequestError>;
 
   /**
    * Refresh all providers, or the default instance of the specified
