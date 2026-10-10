@@ -30,6 +30,29 @@ when the pinned renderer omits their slices below 1% from the drawing.
 - **Copy** copies that DSL, without adding fences or altering its contents.
 - **Expand** opens a larger view with Fit, Reset, zoom, scrolling and pointer
   panning. Escape closes it and restores keyboard focus.
+- **⋯ Image actions** offers **Copy image** and **Save as PNG**, in the inline
+  toolbar and expanded viewer. Copy writes an actual PNG image and confirms
+  with a brief toast; the existing Copy button still copies the original DSL.
+  Save opens the desktop's native destination picker, or downloads a PNG in a
+  browser. Successful saves and cancellation are quiet.
+
+Image export captures the complete diagram at intrinsic resolution, irrespective
+of scroll position, Fit or zoom. The opaque background matches its rendered theme.
+Images beyond the shared bitmap budget are proportionally reduced, never cropped.
+The limits are defined in `packages/contracts/src/imageExport.ts`. An incomplete,
+failed or still-changing themed diagram cannot export an image; Source remains
+available. A browser without image clipboard permission/support can still save
+as PNG. Browser download dispatch is not a receipt that the OS wrote the file.
+
+Markdown tables have the same three-dot image menu in both views. Full-content
+exports preserve text, table borders, code, emphasis, link labels and rendered
+math, using bundled local typefaces. App-owned decorative file icons use local
+File/Folder glyphs; ordinary embedded images must already be decoded and readable
+without a new fetch. Unsupported, unreadable or oversized content fails visibly
+instead of producing a silently incomplete table. Export never follows links,
+replays provider work, reads the clipboard or sends content to a remote renderer.
+See the [image export decision](decisions/diagram-table-image-export.md) for
+resource, publication, lifecycle and verification boundaries.
 
 Diagrams render as soon as their own closing fence arrives, even while later
 prose is still streaming. Unclosed fences stay source even in truncated history.
@@ -81,6 +104,8 @@ Use the repository's pinned Node and Corepack Yarn. Focused checks:
 corepack yarn workspace @cafecode/web test src/lib/remarkMermaid.test.ts src/lib/chatMarkdownMermaid.test.ts src/lib/chatClipboard.test.ts src/lib/mermaid/renderService.test.ts
 corepack yarn workspace @cafecode/web test:browser src/components/ChatMarkdown.browser.tsx src/components/MermaidBlock.browser.tsx src/components/MermaidPreview.browser.tsx src/components/MermaidRendering.browser.tsx src/components/MermaidSecurity.browser.tsx
 corepack yarn workspace @cafecode/desktop test src/preload.test.ts src/window/DesktopWindow.test.ts
+corepack yarn workspace @cafecode/web test:browser src/components/DiagramImageExport.browser.tsx src/components/MarkdownTableExport.browser.tsx src/components/ImageExportMenu.browser.tsx
+corepack yarn workspace @cafecode/desktop test src/imageExport/PngExport.test.ts src/ipc/methods/imageExport.test.ts
 ```
 
 CI runs the diagram browser coverage on all three supported desktop operating

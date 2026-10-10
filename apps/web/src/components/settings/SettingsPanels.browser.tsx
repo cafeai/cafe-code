@@ -623,6 +623,8 @@ const createDesktopBridgeStub = (overrides?: {
     openPath: vi.fn().mockResolvedValue(true),
     revealPath: vi.fn().mockResolvedValue(true),
     copyText: vi.fn().mockResolvedValue(undefined),
+    copyPng: vi.fn().mockResolvedValue(undefined),
+    savePng: vi.fn().mockResolvedValue("cancelled"),
     onMenuAction: () => () => {},
     getUpdateState: vi.fn().mockResolvedValue(idleUpdateState),
     setUpdateChannel:

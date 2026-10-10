@@ -1,6 +1,7 @@
 import { Maximize2Icon, MinusIcon, PlusIcon } from "lucide-react";
 import {
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ComponentProps,
@@ -10,7 +11,9 @@ import {
 import type { ExtraProps } from "react-markdown";
 
 import { isElectron } from "../env";
+import { useTheme } from "../hooks/useTheme";
 import { isWindowsPlatform } from "../lib/utils";
+import { ImageExportMenu } from "./ImageExportMenu";
 import { Button } from "./ui/button";
 import { Dialog, DialogDescription, DialogPopup, DialogTitle, DialogTrigger } from "./ui/dialog";
 import "./MarkdownTableViewer.css";
@@ -20,6 +23,8 @@ type TableProps = ComponentProps<"table">;
 interface ExpandedTableProps {
   children: ReactNode;
   tableProps: TableProps;
+  exportContentKey: unknown;
+  createPng: (signal: AbortSignal) => Promise<Blob>;
 }
 
 interface TableGeometry {
@@ -38,7 +43,7 @@ const INITIAL_GEOMETRY: TableGeometry = {
 const MIN_ZOOM = 0.01;
 const MAX_ZOOM = 4;
 
-function ExpandedTable({ children, tableProps }: ExpandedTableProps) {
+function ExpandedTable({ children, tableProps, exportContentKey, createPng }: ExpandedTableProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
@@ -193,6 +198,14 @@ function ExpandedTable({ children, tableProps }: ExpandedTableProps) {
         >
           <PlusIcon />
         </Button>
+        <div className="markdown-table-expanded-export">
+          <ImageExportMenu
+            label="Table"
+            contentKey={exportContentKey}
+            createPng={createPng}
+            suggestedName="table.png"
+          />
+        </div>
       </div>
       <div
         ref={viewportRef}
@@ -239,6 +252,29 @@ function ExpandedTable({ children, tableProps }: ExpandedTableProps) {
  * semantic table and the same sanitized React children fully interactive. */
 export function MarkdownTable({ node: _node, children, ...props }: TableProps & ExtraProps) {
   const [expanded, setExpanded] = useState(false);
+  const { resolvedTheme } = useTheme();
+  const sourceTableRef = useRef<HTMLTableElement>(null);
+  // Both menus export the same unscaled source. Neither scrolling the inline
+  // table nor fitting/zooming the expanded viewer changes the exported extent.
+  const exportContentKey = useMemo(
+    () => ({
+      children,
+      node: _node,
+      className: props.className,
+      style: props.style,
+      resolvedTheme,
+    }),
+    [children, _node, props.className, props.style, resolvedTheme],
+  );
+  const createPng = async (signal: AbortSignal): Promise<Blob> => {
+    // Fonts and the presentation snapshotter are needed only for explicit
+    // export actions, so ordinary chat rendering does not load their module.
+    const { createTablePng } = await import("../lib/tableImageExport");
+    signal.throwIfAborted();
+    const table = sourceTableRef.current;
+    if (!table?.isConnected) throw new Error("This table could not be exported as an image.");
+    return createTablePng(table, signal);
+  };
   const reserveNativeTitlebar =
     isElectron && typeof navigator !== "undefined" && isWindowsPlatform(navigator.platform);
 
@@ -246,6 +282,12 @@ export function MarkdownTable({ node: _node, children, ...props }: TableProps & 
     <Dialog open={expanded} onOpenChange={setExpanded}>
       <div className="markdown-table-block">
         <div className="markdown-table-inline-toolbar">
+          <ImageExportMenu
+            label="Table"
+            contentKey={exportContentKey}
+            createPng={createPng}
+            suggestedName="table.png"
+          />
           <DialogTrigger
             aria-label="Expand table"
             render={<Button size="icon-xs" variant="ghost" />}
@@ -254,7 +296,9 @@ export function MarkdownTable({ node: _node, children, ...props }: TableProps & 
           </DialogTrigger>
         </div>
         <div className="chat-markdown-table-scroll">
-          <table {...props}>{children}</table>
+          <table {...props} ref={sourceTableRef}>
+            {children}
+          </table>
         </div>
       </div>
       <DialogPopup
@@ -262,7 +306,9 @@ export function MarkdownTable({ node: _node, children, ...props }: TableProps & 
         bottomStickOnMobile={false}
         data-cafe-window-no-drag="true"
       >
-        <ExpandedTable tableProps={props} children={children} />
+        <ExpandedTable tableProps={props} exportContentKey={exportContentKey} createPng={createPng}>
+          {children}
+        </ExpandedTable>
       </DialogPopup>
     </Dialog>
   );

@@ -10,11 +10,13 @@ import {
 import { CheckIcon, CopyIcon, Maximize2Icon, MinusIcon, PlusIcon } from "lucide-react";
 
 import { copyTextToClipboard } from "../lib/copyToClipboard";
+import { createMermaidPng } from "../lib/imageExport";
 import { renderMermaid, type MermaidResult } from "../lib/mermaid/renderService";
 import { useDelayedFlag } from "../hooks/useDelayedFlag";
 import { Button } from "./ui/button";
 import { Dialog, DialogDescription, DialogPopup, DialogTitle, DialogTrigger } from "./ui/dialog";
 import { Spinner } from "./ui/spinner";
+import { ImageExportMenu } from "./ImageExportMenu";
 import "./MermaidBlock.css";
 
 interface MermaidBlockProps {
@@ -36,7 +38,15 @@ interface DiagramImage {
 const MIN_ZOOM = 0.01;
 const MAX_ZOOM = 4;
 
-function ExpandedDiagram({ result, url }: DiagramImage) {
+function ExpandedDiagram({
+  result,
+  url,
+  exportTheme,
+  exportDisabled,
+}: DiagramImage & {
+  exportTheme: "dark" | "light";
+  exportDisabled: boolean;
+}) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{
     pointerId: number;
@@ -154,6 +164,15 @@ function ExpandedDiagram({ result, url }: DiagramImage) {
         >
           <PlusIcon />
         </Button>
+        <div className="ml-auto">
+          <ImageExportMenu
+            label="Diagram"
+            contentKey={result}
+            disabled={exportDisabled}
+            createPng={(signal) => createMermaidPng(result, exportTheme, signal)}
+            suggestedName="diagram.png"
+          />
+        </div>
       </div>
       <div
         ref={viewportRef}
@@ -355,6 +374,20 @@ export const MermaidBlock = memo(function MermaidBlock({
               {copied ? <CheckIcon /> : <CopyIcon />}
               {copied ? "Copied" : "Copy"}
             </Button>
+            <ImageExportMenu
+              label="Diagram"
+              contentKey={ready?.result}
+              disabled={!ready || ready.theme !== theme || !shownImage}
+              createPng={(signal) => {
+                // A retained old-theme preview may stay visible while its
+                // replacement renders, but it must never export with a new
+                // theme's background or the next source's content.
+                if (!ready || ready.theme !== theme)
+                  return Promise.reject(new Error("Image unavailable."));
+                return createMermaidPng(ready.result, ready.theme, signal);
+              }}
+              suggestedName="diagram.png"
+            />
             <DialogTrigger
               disabled={!shownImage}
               aria-label="Expand diagram"
@@ -405,7 +438,12 @@ export const MermaidBlock = memo(function MermaidBlock({
       </div>
       {shownImage && (
         <DialogPopup className="mermaid-expanded-dialog" bottomStickOnMobile={false}>
-          <ExpandedDiagram result={shownImage.result} url={shownImage.url} />
+          <ExpandedDiagram
+            result={shownImage.result}
+            url={shownImage.url}
+            exportTheme={ready!.theme}
+            exportDisabled={ready!.theme !== theme}
+          />
         </DialogPopup>
       )}
     </Dialog>

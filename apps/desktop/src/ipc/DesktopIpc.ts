@@ -11,6 +11,11 @@ export interface DesktopIpcWebContents {
 export interface DesktopIpcWebFrame {
   readonly url: string;
   readonly top?: DesktopIpcWebFrame | null;
+  /** Native document identity is required by delayed image-save publication. */
+  readonly detached?: boolean;
+  readonly frameToken?: string;
+  readonly processId?: number;
+  readonly routingId?: number;
 }
 
 export interface DesktopIpcInvokeEvent {
@@ -40,7 +45,7 @@ export interface DesktopIpcMain {
 
 export interface DesktopIpcMethod<E, R> {
   readonly channel: string;
-  readonly handler: (raw: unknown) => Effect.Effect<unknown, E, R>;
+  readonly handler: (raw: unknown, event: DesktopIpcInvokeEvent) => Effect.Effect<unknown, E, R>;
 }
 
 export interface DesktopSyncIpcMethod<E, R> {
@@ -150,7 +155,7 @@ export const make = (ipcMain: DesktopIpcMain): DesktopIpcShape => {
             return runPromise(
               Effect.gen(function* () {
                 yield* Effect.annotateCurrentSpan({ channel });
-                return yield* handler(raw);
+                return yield* handler(raw, event);
               }).pipe(Effect.annotateLogs({ channel }), Effect.withSpan("desktop.ipc.invoke")),
             );
           });
@@ -224,7 +229,8 @@ export interface DesktopIpcMethodRegistration<
     ResultDecodingServices,
     ResultEncodingServices
   >;
-  readonly handler: (input: Payload) => Effect.Effect<Result, E, R>;
+  /** Passed only after top-level sender validation; native pickers bind to this sender. */
+  readonly handler: (input: Payload, event: DesktopIpcInvokeEvent) => Effect.Effect<Result, E, R>;
 }
 
 export const makeIpcMethod = <
@@ -260,9 +266,9 @@ export const makeIpcMethod = <
 
   return {
     channel: method.channel,
-    handler: (raw) =>
+    handler: (raw, event) =>
       decode(raw).pipe(
-        Effect.flatMap(method.handler),
+        Effect.flatMap((input) => method.handler(input, event)),
         Effect.flatMap(encode),
         Effect.withSpan("desktop.ipc.method", { attributes: { channel: method.channel } }),
       ),

@@ -5,6 +5,7 @@ export * from "./desktopBootstrap.ts";
 export * from "./dictation.ts";
 export * from "./remoteAccess.ts";
 export * from "./ipc.ts";
+export * from "./imageExport.ts";
 export * from "./provider.ts";
 export * from "./providerSkills.ts";
 export * from "./providerCommands.ts";

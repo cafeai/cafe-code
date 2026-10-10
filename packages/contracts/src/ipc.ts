@@ -32,6 +32,7 @@ import type {
   VcsCreateRefResult,
 } from "./git.ts";
 import type { FilesystemBrowseInput, FilesystemBrowseResult } from "./filesystem.ts";
+import type { SavePngInput, SavePngResult } from "./imageExport.ts";
 import type {
   ProjectSearchEntriesInput,
   ProjectSearchEntriesResult,
@@ -444,6 +445,10 @@ export interface DesktopBridge {
   openPath: (path: string) => Promise<boolean>;
   revealPath: (path: string) => Promise<boolean>;
   copyText: (text: string) => Promise<void>;
+  /** Write-only image export; the main process independently admits PNG bytes. */
+  copyPng: (png: Uint8Array) => Promise<void>;
+  /** The renderer supplies bytes and a basename, never a filesystem destination. */
+  savePng: (input: SavePngInput) => Promise<SavePngResult>;
   onMenuAction: (listener: (action: string) => void) => () => void;
   getUpdateState: () => Promise<DesktopUpdateState>;
   setUpdateChannel: (channel: DesktopUpdateChannel) => Promise<DesktopUpdateState>;

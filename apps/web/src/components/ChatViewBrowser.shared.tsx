@@ -1969,6 +1969,8 @@ function createDesktopBridgeForChatViewTests(
     openPath: async () => true,
     revealPath: async () => true,
     copyText: async () => undefined,
+    copyPng: async () => undefined,
+    savePng: async () => "cancelled",
     onMenuAction: () => () => undefined,
     getUpdateState: async () => {
       throw new Error("getUpdateState not implemented in ChatView browser test");

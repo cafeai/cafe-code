@@ -89,6 +89,8 @@ if (process.isMainFrame === true) {
     openVirtualDesktop: (input) =>
       ipcRenderer.invoke(IpcChannels.OPEN_VIRTUAL_DESKTOP_CHANNEL, input),
     copyText: (text: string) => ipcRenderer.invoke(IpcChannels.COPY_TEXT_CHANNEL, text),
+    copyPng: (png) => ipcRenderer.invoke(IpcChannels.COPY_PNG_CHANNEL, png),
+    savePng: (input) => ipcRenderer.invoke(IpcChannels.SAVE_PNG_CHANNEL, input),
     onMenuAction: (listener) => {
       const wrappedListener = (_event: Electron.IpcRendererEvent, action: unknown) => {
         if (typeof action !== "string") return;
