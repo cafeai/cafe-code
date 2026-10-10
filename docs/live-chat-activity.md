@@ -1,6 +1,6 @@
 # Live chat activity
 
-Last updated: 2026-10-11 02:01:33 JST (UTC+0900)
+Last updated: 2026-10-11 03:11:45 JST (UTC+0900)
 
 The composer has one compact activity line above the editor. It shows Working,
 Running command, a computer action, or waiting for a tool, agent, answer or
@@ -37,6 +37,20 @@ change send/queue admission, grant task controls, or launch or probe a provider.
 Individual controls still require their existing exact account, runtime and
 generation binding. Read-only work remains visible when the composer selects
 another account.
+
+## Ordinary provider tasks
+
+Ordinary tasks use compact icon/title rows with their available individual
+actions inline. While Claude is still streaming tool arguments, the exact empty
+`Agent: {}` / `Task: {}` and `Bash: {}` placeholders appear as Agent task and
+Shell command. Useful received descriptions and commands remain visible;
+unknown tool names and literal braces in commands are not rewritten. Long
+titles wrap within the card, including at larger interface sizes.
+
+Labels use bounded existing public text, with invisible terminal/bidi controls
+removed and markup rendered as inert text. Naming does not inspect additional
+raw inputs, infer completion, grant controls or retry an uncertain action.
+Workflow and subagent detail controls retain their existing footer placement.
 
 ## Computer use
 

@@ -45,6 +45,58 @@ function activity(kind: string, payload: Record<string, unknown>): Orchestration
   };
 }
 describe("ordinary provider task controls", () => {
+  it("formats controlled and read-only native placeholders without changing control identity", () => {
+    const started = activity("tool.started", {
+      itemId: "raw-bash-item",
+      itemType: "command_execution",
+      data: { toolName: "Bash", input: {} },
+      detail: "Bash: {}",
+      individualTaskControl: { ...reference, taskId: "server-minted-control" },
+    });
+    const controlled = deriveActiveProviderTasks({ ...context, activities: [started] })[0];
+    expect(controlled?.title).toBe("Shell command");
+    expect(controlled?.kind).toBe("command");
+    expect(controlled?.reference?.taskId).toBe("server-minted-control");
+    const observed = deriveActiveProviderTasks({
+      ...context,
+      providerInstanceId: ProviderInstanceId.make("other"),
+      activities: [started],
+    })[0];
+    expect(observed?.title).toBe("Shell command");
+    expect(observed?.reference).toBeUndefined();
+    expect(
+      deriveActiveProviderTasks({
+        ...context,
+        activities: [started],
+        liveWork: { runtimeId, taskCount: 0, agentCount: 0 },
+      }),
+    ).toEqual([]);
+  });
+
+  it("formats an unstamped foreground placeholder but never derives controls from its label", () => {
+    const started = activity("tool.started", {
+      itemId: "agent-tool",
+      itemType: "collab_agent_tool_call",
+      data: { toolName: "Agent", input: {} },
+      detail: "Agent: {}",
+    });
+    const foreground = deriveActiveProviderTasks({
+      ...context,
+      activeTurnId: started.turnId,
+      activeTurnRunning: true,
+      activities: [started],
+    })[0];
+    expect(foreground?.title).toBe("Agent task");
+    expect(foreground?.reference).toBeUndefined();
+    expect(
+      deriveActiveProviderTasks({
+        ...context,
+        activeTurnId: started.turnId,
+        activeTurnRunning: false,
+        activities: [started],
+      }),
+    ).toEqual([]);
+  });
   it("keeps workflow roots in their own presentation section even without mutation capability", () => {
     const started = activity("task.started", {
       taskId: "workflow-root",

@@ -8,6 +8,7 @@ import {
   type TurnId,
 } from "@cafecode/contracts";
 import * as Schema from "effect/Schema";
+import { BotIcon, TerminalIcon, WrenchIcon } from "lucide-react";
 import { useState } from "react";
 import { isSubagentRuntimeCurrent, type SubagentRuntimeContext } from "../../subagent-activity";
 import { deriveWorkflowTasks, readWorkflowTaskPresentation } from "../../workflowTaskActivity";
@@ -18,6 +19,10 @@ import { deriveWorkLogEntries } from "../../session-logic";
 import { readComputerUsePresentation } from "./computerUsePresentation";
 import { deriveLiveWorkObservations, isLiveWorkRuntimeCurrent } from "@cafecode/shared/liveWork";
 import { WorkflowTaskCard } from "./WorkflowTasks";
+import {
+  readProviderTaskPresentation,
+  type ProviderTaskPresentation,
+} from "./providerTaskPresentation";
 
 const isControl = Schema.is(ProviderIndividualTaskControl);
 export interface ProviderTasksContext {
@@ -30,9 +35,8 @@ export interface ProviderTasksContext {
   activeTurnRunning?: boolean | undefined;
   liveWork?: OrchestrationLiveWork | undefined;
 }
-export interface ActiveProviderTask {
+export interface ActiveProviderTask extends ProviderTaskPresentation {
   key: string;
-  title: string;
   turnId: TurnId;
   reference?: ProviderIndividualTaskControl | undefined;
 }
@@ -88,10 +92,7 @@ export function deriveActiveProviderTasks(context: ProviderTasksContext): Active
       key,
       turnId: activity.turnId,
       reference,
-      title:
-        typeof data.detail === "string" && data.detail.trim()
-          ? data.detail.slice(0, 300)
-          : activity.summary,
+      ...readProviderTaskPresentation(activity),
     });
   }
   if (
@@ -113,7 +114,7 @@ export function deriveActiveProviderTasks(context: ProviderTasksContext): Active
       current.set(key, {
         key,
         turnId: activity.turnId,
-        title: entry?.command ?? entry?.detail ?? entry?.label ?? activity.summary,
+        ...readProviderTaskPresentation(activity, entry?.command ?? entry?.detail ?? entry?.label),
       });
     }
   for (const activity of deriveForegroundTools(
@@ -129,8 +130,10 @@ export function deriveActiveProviderTasks(context: ProviderTasksContext): Active
     current.set(key, {
       key,
       turnId: activity.turnId,
-      title:
-        computerUse?.active ?? entry?.command ?? entry?.detail ?? entry?.label ?? activity.summary,
+      ...readProviderTaskPresentation(
+        activity,
+        computerUse?.active ?? entry?.command ?? entry?.detail ?? entry?.label,
+      ),
     });
   }
   return [...current.values()];
@@ -219,17 +222,40 @@ export function ProviderTasks({ context }: { context: ProviderTasksContext }) {
             {tasks.slice(selectedPage * 5, (selectedPage + 1) * 5).map((task) => (
               <div
                 key={`${task.key}:${task.reference?.capability.taskGeneration ?? "read-only"}`}
-                className="rounded-lg border border-border-subtle"
+                data-provider-task-row
+                className="flex flex-wrap items-start gap-x-3 gap-y-2 rounded-xl border border-border-subtle px-3 py-2"
               >
-                <p className="break-words px-3 py-2 text-xs text-foreground [overflow-wrap:anywhere]">
-                  {task.title}
-                </p>
+                <div className="flex min-w-0 flex-1 basis-36 items-start gap-2 py-1">
+                  {task.kind === "agent" ? (
+                    <BotIcon
+                      className="mt-0.5 size-3.5 shrink-0 text-muted-foreground"
+                      aria-hidden="true"
+                    />
+                  ) : task.kind === "command" ? (
+                    <TerminalIcon
+                      className="mt-0.5 size-3.5 shrink-0 text-muted-foreground"
+                      aria-hidden="true"
+                    />
+                  ) : (
+                    <WrenchIcon
+                      className="mt-0.5 size-3.5 shrink-0 text-muted-foreground"
+                      aria-hidden="true"
+                    />
+                  )}
+                  <p
+                    data-provider-task-title
+                    className="min-w-0 break-words text-xs font-medium text-foreground [overflow-wrap:anywhere]"
+                  >
+                    {task.title}
+                  </p>
+                </div>
                 {task.reference ? (
                   <IndividualTaskControls
                     environmentId={context.environmentId}
                     threadId={context.threadId}
                     turnId={task.turnId}
                     reference={task.reference}
+                    layout="inline"
                   />
                 ) : null}
               </div>

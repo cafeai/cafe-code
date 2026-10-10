@@ -48,11 +48,15 @@ export function IndividualTaskControls({
   threadId,
   turnId,
   reference,
+  layout = "footer",
 }: {
   environmentId: EnvironmentId;
   threadId: ThreadId;
   turnId: TurnId;
   reference: ProviderIndividualTaskControl;
+  /** Ordinary task rows use a compact inline action group. Workflow/subagent
+   * detail surfaces keep the default footer; delivery semantics are identical. */
+  layout?: "footer" | "inline";
 }) {
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -96,7 +100,13 @@ export function IndividualTaskControls({
     }
   };
   return (
-    <div className="space-y-2 border-t border-border-subtle px-4 py-3 sm:px-6">
+    <div
+      className={cn(
+        layout === "inline"
+          ? "min-w-0 max-w-full space-y-2"
+          : "space-y-2 border-t border-border-subtle px-4 py-3 sm:px-6",
+      )}
+    >
       <div className="flex flex-wrap items-center gap-2" aria-label="Individual task controls">
         {control.canBackground && (
           <Button

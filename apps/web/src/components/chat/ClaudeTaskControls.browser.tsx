@@ -99,6 +99,55 @@ function workflowContext(
     activities,
   };
 }
+/** Synthetic foreground controls share the exact server-minted task identity
+ * used by production rows. The display description is deliberately separate:
+ * cleaning a label cannot create a capability or change its dispatch target. */
+function ordinaryTaskActivity({
+  index,
+  toolName,
+  detail,
+  canStop = false,
+}: {
+  index: number;
+  toolName: "Agent" | "Bash";
+  detail: string;
+  canStop?: boolean;
+}): OrchestrationThreadActivity {
+  return {
+    id: EventId.make(`ordinary-task-${index}`),
+    kind: "tool.started",
+    sequence: index + 1,
+    tone: "info",
+    summary: `${toolName}: {}`,
+    turnId,
+    createdAt: "2026-10-11T00:00:00.000Z",
+    payload: {
+      itemId: `foreground-item-${index}`,
+      itemType: toolName === "Bash" ? "command_execution" : "collab_agent_tool_call",
+      data: { toolName, input: {} },
+      detail,
+      individualTaskControl: {
+        runtimeId: SubagentRuntimeId.make(subagent.runtimeId!),
+        taskId: `server-task-${index}`,
+        capability: { ...subagent.taskControl!, canStop },
+      },
+    },
+  };
+}
+function ordinaryTaskContext(
+  activities: readonly OrchestrationThreadActivity[],
+): ProviderTasksContext {
+  return {
+    environmentId,
+    threadId,
+    providerInstanceId: subagent.taskControl!.providerInstanceId,
+    runtimeSession: {
+      orchestrationStatus: "running",
+      subagentRuntimeId: subagent.runtimeId,
+    },
+    activities,
+  };
+}
 function PriorityHarness() {
   const [priority, setPriority] = useState<ProviderDeliveryPriority | undefined>();
   return (
@@ -112,6 +161,219 @@ function PriorityHarness() {
 }
 afterEach(() => vi.clearAllMocks());
 describe("Claude priority and exact task controls", () => {
+  it("uses human task labels instead of empty tool-input previews and preserves real descriptions", async () => {
+    await render(
+      <ProviderTasks
+        context={ordinaryTaskContext([
+          ordinaryTaskActivity({ index: 0, toolName: "Agent", detail: "Agent: {}" }),
+          ordinaryTaskActivity({ index: 1, toolName: "Bash", detail: "Bash: {}" }),
+          ordinaryTaskActivity({
+            index: 2,
+            toolName: "Agent",
+            detail: "Review the renderer ownership checks",
+          }),
+          ordinaryTaskActivity({
+            index: 3,
+            toolName: "Bash",
+            detail: "Inspect the focused browser test results",
+          }),
+        ])}
+      />,
+    );
+    await expect.element(page.getByText("Agent task", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("Shell command", { exact: true })).toBeVisible();
+    await expect
+      .element(page.getByText("Review the renderer ownership checks", { exact: true }))
+      .toBeVisible();
+    await expect
+      .element(page.getByText("Inspect the focused browser test results", { exact: true }))
+      .toBeVisible();
+    const titles = [...document.querySelectorAll("[data-provider-task-title]")].map(
+      (element) => element.textContent,
+    );
+    expect(titles).toEqual([
+      "Agent task",
+      "Shell command",
+      "Review the renderer ownership checks",
+      "Inspect the focused browser test results",
+    ]);
+    expect(titles.join(" ")).not.toContain("{}");
+    expect(document.querySelectorAll("[data-provider-task-row]")).toHaveLength(4);
+  });
+
+  it("keeps compact controls exact-owned and once-only after an uncertain background receipt", async () => {
+    controlTask.mockResolvedValue({ status: "unknown" });
+    const activity = ordinaryTaskActivity({ index: 0, toolName: "Bash", detail: "Bash: {}" });
+    const context = ordinaryTaskContext([activity]);
+    const view = await render(<ProviderTasks context={context} />);
+    const background = page.getByRole("button", { name: "Run in background", exact: true });
+    background.element().focus();
+    await userEvent.keyboard("{Enter}");
+    await expect
+      .element(page.getByRole("status"))
+      .toHaveTextContent(
+        "Delivery is uncertain. Waiting for a provider update; this action will not be repeated automatically.",
+      );
+    expect(controlTask).toHaveBeenCalledExactlyOnceWith({
+      threadId,
+      turnId,
+      providerInstanceId: "account-a",
+      runtimeId: subagent.runtimeId,
+      taskId: "server-task-0",
+      taskGeneration: subagent.taskControl!.taskGeneration,
+      action: "background",
+    });
+    await expect.element(background).toBeDisabled();
+    // The same incarnation keeps its consumed action across label/projection
+    // refreshes. A prettier caption must not silently renew mutation authority.
+    await view.rerender(
+      <ProviderTasks
+        context={{
+          ...context,
+          activities: [
+            {
+              ...activity,
+              payload: {
+                ...(activity.payload as Record<string, unknown>),
+                detail: "Waiting for the command result",
+              },
+            },
+          ],
+        }}
+      />,
+    );
+    await expect.element(background).toBeDisabled();
+    await userEvent.keyboard("{Enter}");
+    expect(controlTask).toHaveBeenCalledTimes(1);
+    await view.rerender(
+      <ProviderTasks
+        context={{ ...context, providerInstanceId: ProviderInstanceId.make("other-account") }}
+      />,
+    );
+    await expect
+      .element(page.getByRole("button", { name: "Run in background", exact: true }))
+      .not.toBeInTheDocument();
+    await expect
+      .element(page.getByRole("button", { name: "Stop task", exact: true }))
+      .not.toBeInTheDocument();
+    expect(controlTask).toHaveBeenCalledTimes(1);
+  });
+
+  for (const [width, dark, scale] of [
+    [430, true, "130%"],
+    [430, false, "80%"],
+    [960, false, "130%"],
+    [960, true, "80%"],
+  ] as const) {
+    it(`keeps ordinary task rows compact and inert at ${width}px, ${scale} and ${dark ? "dark" : "light"}`, async () => {
+      const originalViewport = { width: window.innerWidth, height: window.innerHeight };
+      const previousFontSize = document.documentElement.style.fontSize;
+      const wasDark = document.documentElement.classList.contains("dark");
+      document.documentElement.classList.toggle("dark", dark);
+      document.documentElement.style.fontSize = scale;
+      await page.viewport(width + 24, 900);
+      const context = ordinaryTaskContext([
+        ordinaryTaskActivity({ index: 0, toolName: "Agent", detail: "Agent: {}", canStop: true }),
+        ordinaryTaskActivity({ index: 1, toolName: "Bash", detail: "Bash: {}" }),
+        ordinaryTaskActivity({
+          index: 2,
+          toolName: "Bash",
+          detail: "<img src=x onerror=alert('inert')> ".repeat(12),
+          canStop: true,
+        }),
+      ]);
+      const view = await render(
+        <div style={{ width, maxWidth: "100%" }}>
+          <ProviderTasks context={context} />
+        </div>,
+      );
+      try {
+        await expect.element(page.getByText("Agent task", { exact: true })).toBeVisible();
+        await expect.element(page.getByText("Shell command", { exact: true })).toBeVisible();
+        const rows = document.querySelectorAll<HTMLElement>("[data-provider-task-row]");
+        expect(rows).toHaveLength(3);
+        for (const row of rows) {
+          expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth + 1);
+          expect(row.getBoundingClientRect().right).toBeLessThanOrEqual(window.innerWidth + 1);
+          expect(row.querySelector("img, script, a")).toBeNull();
+          const title = row.querySelector<HTMLElement>("[data-provider-task-title]")!;
+          const action = row.querySelector<HTMLButtonElement>("button")!;
+          expect(title).not.toBeNull();
+          expect(action).not.toBeNull();
+          // Both title and control remain within the one flat row. Wide cards
+          // align them horizontally; narrow ones may wrap without a nested
+          // bordered footer or any sideways scrolling.
+          expect(action.getBoundingClientRect().right).toBeLessThanOrEqual(
+            row.getBoundingClientRect().right + 1,
+          );
+          if (width === 960) {
+            const titleBounds = title.getBoundingClientRect();
+            const actionBounds = action.getBoundingClientRect();
+            expect(actionBounds.top).toBeLessThan(titleBounds.bottom);
+            expect(actionBounds.bottom).toBeGreaterThan(titleBounds.top);
+          }
+          // This branch runs with a real browser media preference in the
+          // opt-in reduced-motion qualification, not a matchMedia override.
+          if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+            expect(getComputedStyle(row).animationName).toBe("none");
+            expect(getComputedStyle(title).animationName).toBe("none");
+          }
+        }
+        const background = page.getByRole("button", { name: "Run in background", exact: true });
+        await expect.element(background.first()).toBeVisible();
+        const stop = page.getByRole("button", { name: "Stop task", exact: true });
+        await expect.element(stop.first()).toBeVisible();
+        const tip = page.getByRole("button", { name: "About stopping a task", exact: true });
+        tip.first().element().focus();
+        await userEvent.keyboard("{Enter}");
+        await expect.element(tip.first()).toHaveAttribute("aria-describedby");
+        await expect
+          .element(page.getByText("Stops only this task. Stop chat remains a separate control."))
+          .toBeVisible();
+        await userEvent.keyboard("{Escape}");
+        const screenshotDirectory = import.meta.env.VITE_CLAUDE_TASK_SCREENSHOT_DIR;
+        if (typeof screenshotDirectory === "string" && screenshotDirectory.length > 0) {
+          // After qualifying hostile text as inert, capture representative
+          // bounded task descriptions for design review rather than publishing
+          // the deliberately adversarial fixture as ordinary product copy.
+          await view.rerender(
+            <div style={{ width, maxWidth: "100%" }}>
+              <ProviderTasks
+                context={ordinaryTaskContext([
+                  ordinaryTaskActivity({
+                    index: 0,
+                    toolName: "Agent",
+                    detail: "Agent: {}",
+                    canStop: true,
+                  }),
+                  ordinaryTaskActivity({ index: 1, toolName: "Bash", detail: "Bash: {}" }),
+                  ordinaryTaskActivity({
+                    index: 2,
+                    toolName: "Agent",
+                    detail: "Review renderer ownership checks",
+                    canStop: true,
+                  }),
+                ])}
+              />
+            </div>,
+          );
+          await expect
+            .element(page.getByText("Review renderer ownership checks", { exact: true }))
+            .toBeVisible();
+          await page.screenshot({
+            path: `${screenshotDirectory}/provider-task-${dark ? "dark" : "light"}-${width}-${scale.replace("%", "")}.png`,
+            fullPage: true,
+          });
+        }
+      } finally {
+        await view.unmount();
+        document.documentElement.classList.toggle("dark", wasDark);
+        document.documentElement.style.fontSize = previousFontSize;
+        await page.viewport(originalViewport.width, originalViewport.height);
+      }
+    });
+  }
+
   it("renders received workflow phases and inert agents while controlling only the exact root", async () => {
     controlTask.mockResolvedValue({ status: "accepted" });
     const view = await render(<ProviderTasks context={workflowContext()} />);
