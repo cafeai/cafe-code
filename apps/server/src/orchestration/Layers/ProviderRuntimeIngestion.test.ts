@@ -677,6 +677,222 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it.each([
+    ["manual", "already-pending"],
+    ["automatic", "already-pending"],
+    ["manual", "pending-during-proof"],
+    ["automatic", "pending-during-proof"],
+    ["manual", "pending-during-dispatch"],
+    ["automatic", "pending-during-dispatch"],
+  ] as const)(
+    "retains newer %s pending input through a late Codex system error: %s",
+    async (kind, scenario) => {
+      const reached = Effect.runSync(Deferred.make<void>());
+      const release = Effect.runSync(Deferred.make<void>());
+      let gateInventory = false;
+      const harness = await createHarness({
+        dispatchGate: (command, dispatch) =>
+          scenario === "pending-during-dispatch" &&
+          command.type === "thread.session.set" &&
+          String(command.commandId).includes(
+            ":late-system-error-after-newer-input:thread-session-set",
+          )
+            ? Deferred.succeed(reached, undefined).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.andThen(dispatch(command)),
+              )
+            : dispatch(command),
+        listSessionsGate: (read) =>
+          gateInventory
+            ? Deferred.succeed(reached, undefined).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.andThen(read),
+              )
+            : read,
+      });
+      const threadId = asThreadId("thread-1");
+      const turnId = asTurnId("late-system-error-failed-root");
+      const messageId = asMessageId("late-system-error-newer-input");
+      const failedAt = "2026-01-01T00:00:02.000Z";
+      const requestedAt = "2026-01-01T00:00:03.000Z";
+      const identity = {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        subagentRuntimeId: SubagentRuntimeId.make("00000000-0000-4000-8000-000000000063"),
+        threadId,
+      };
+      const nativeSession: ProviderSession = {
+        ...identity,
+        status: "ready",
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:01.000Z",
+        updatedAt: failedAt,
+        codexRootTurnFailure: {
+          turnId,
+          providerThreadId: "private-late-system-error-native-conversation",
+          observedAt: failedAt,
+          category: "server",
+        },
+      };
+      harness.setProviderSession(nativeSession);
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("late-system-error-original-human-input"),
+          threadId,
+          message: {
+            messageId: asMessageId("late-system-error-original-message"),
+            role: "user",
+            text: "Do the original work",
+            attachments: [],
+          },
+          runtimeMode: "approval-required",
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          createdAt: "2026-01-01T00:00:01.000Z",
+        }),
+      );
+      harness.emit({
+        ...identity,
+        type: "turn.started",
+        eventId: asEventId("late-system-error-root-start"),
+        turnId,
+        createdAt: "2026-01-01T00:00:01.000Z",
+      });
+      await harness.drain();
+      harness.emit({
+        ...identity,
+        type: "turn.completed",
+        eventId: asEventId("late-system-error-root-completed"),
+        turnId,
+        createdAt: failedAt,
+        payload: {
+          state: "failed",
+          errorMessage: "The earlier root failed",
+          nativeContextAvailable: true,
+          codexTransientFailure: "server",
+        },
+      });
+      await harness.drain();
+      const readyThread = (await harness.readModel()).threads[0]!;
+      expect(readyThread.session).toMatchObject({
+        status: "ready",
+        activeTurnId: null,
+        lastError: "The earlier root failed",
+        updatedAt: failedAt,
+      });
+      const failureEvent = (
+        await Effect.runPromise(Stream.runCollect(harness.engine.readEvents(0)))
+      ).find(
+        (event) =>
+          event.type === "thread.activity-appended" &&
+          (event.payload.activity.payload as { recovery?: unknown } | undefined)?.recovery ===
+            "codex-transient-root-failed",
+      )!;
+      expect(failureEvent).toBeDefined();
+      let pendingSession: ProviderRuntimeTestThread["session"] = null;
+      const admitNewInput = async () => {
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make(
+              kind === "automatic"
+                ? "server:late-system-error-newer-input-start"
+                : "late-system-error-newer-input-start",
+            ),
+            threadId,
+            message: {
+              messageId,
+              role: "user",
+              text: "This newly submitted input must remain pending",
+              attachments: [],
+            },
+            runtimeMode: readyThread.runtimeMode,
+            interactionMode: readyThread.interactionMode,
+            ...(kind === "automatic"
+              ? {
+                  modelSelection: readyThread.modelSelection,
+                  subagentLimits: readyThread.subagentLimits ?? {},
+                  runtimeRecovery: {
+                    sourceEventSequence: failureEvent.sequence,
+                    turnId,
+                    sessionUpdatedAt: failedAt,
+                    codexTransientFailure: {
+                      providerInstanceId: identity.providerInstanceId,
+                      subagentRuntimeId: identity.subagentRuntimeId,
+                      chainSourceEventSequence: failureEvent.sequence,
+                      retryAttempt: 0,
+                    },
+                  },
+                }
+              : {}),
+            createdAt: requestedAt,
+          }),
+        );
+        pendingSession = (await harness.readModel()).threads[0]!.session;
+        expect(pendingSession).toMatchObject({ status: kind === "manual" ? "starting" : "ready" });
+      };
+      if (scenario === "already-pending") {
+        await admitNewInput();
+      } else if (scenario === "pending-during-proof") {
+        gateInventory = true;
+      } else {
+        // The diagnostic has no current failed-root proof. It therefore reads
+        // no pending input and prepares an ordinary conservative error write.
+        // Only the serialized engine can fence input admitted after that read.
+        const { codexRootTurnFailure: _proof, ...withoutProof } = nativeSession;
+        harness.setProviderSession(withoutProof);
+      }
+      harness.emit({
+        ...identity,
+        type: "thread.state.changed",
+        eventId: asEventId("late-system-error-after-newer-input"),
+        createdAt: "2026-01-01T00:00:04.000Z",
+        raw: {
+          source: "codex.app-server.notification",
+          method: "thread/status/changed",
+          payload: { status: { type: "systemError" } },
+        },
+        payload: { state: "error" },
+      });
+      if (scenario !== "already-pending") {
+        await Effect.runPromise(Deferred.await(reached));
+        try {
+          // An automatic start retains ready/null and the failure clock, so
+          // the usual captured session-tuple CAS cannot detect this new input.
+          // Admission can win during either the proof read or queued dispatch;
+          // neither boundary permits the old watch to consume that input.
+          await admitNewInput();
+        } finally {
+          await Effect.runPromise(Deferred.succeed(release, undefined));
+        }
+      }
+      await harness.drain();
+      const afterDiagnostic = (await harness.readModel()).threads[0]!;
+      expect(await harness.readTurnStartBinding(threadId, null)).toMatchObject({
+        messageId,
+        requestedAt,
+      });
+      expect(afterDiagnostic.messages.find((message) => message.id === messageId)).toMatchObject({
+        role: "user",
+        text: "This newly submitted input must remain pending",
+      });
+      expect(afterDiagnostic.session).toEqual(pendingSession);
+      expect(
+        await Effect.runPromise(harness.sql<{ state: string; completedAt: string }>`
+          SELECT state, completed_at AS "completedAt" FROM projection_turns
+          WHERE thread_id = ${threadId} AND turn_id = ${turnId}
+        `),
+      ).toEqual([{ state: "error", completedAt: failedAt }]);
+      expect(
+        afterDiagnostic.activities.filter(
+          (activity) =>
+            (activity.payload as { recovery?: unknown } | undefined)?.recovery ===
+            "codex-transient-root-failed",
+        ),
+      ).toHaveLength(1);
+    },
+  );
+
+  it.each([
     { phase: "prepared", restart: false },
     { phase: "finished", restart: false },
     { phase: "prepared", restart: true },
@@ -1403,6 +1619,281 @@ describe("ProviderRuntimeIngestion", () => {
       retryAttempt: 1,
     });
   });
+
+  it("retains exact failed-root recovery through an earlier unscoped Codex system error", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("system-error-before-root-failure");
+    const instanceId = ProviderInstanceId.make("codex");
+    const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000061");
+    const startedAt = "2026-01-01T00:00:01.000Z";
+    const diagnosticAt = "2026-01-01T00:00:02.123Z";
+    const completedAt = "2026-01-01T00:00:02.124Z";
+    const definitiveMessage = "The root response failed after native retries.";
+    const identity = {
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: instanceId,
+      subagentRuntimeId: runtimeId,
+      threadId,
+    };
+    harness.setProviderSession({
+      ...identity,
+      status: "ready",
+      runtimeMode: "approval-required",
+      createdAt: startedAt,
+      updatedAt: completedAt,
+      lastError: definitiveMessage,
+      codexRootTurnFailure: {
+        turnId,
+        providerThreadId: "private-system-error-native-conversation",
+        observedAt: completedAt,
+        category: "server",
+      },
+    });
+    harness.emit({
+      ...identity,
+      type: "turn.started",
+      eventId: asEventId("system-error-root-start"),
+      turnId,
+      createdAt: startedAt,
+    });
+    await harness.drain();
+
+    // Codex reports the thread's systemError before the authoritative failed
+    // turn. The former is intentionally unscoped; it cannot erase the exact
+    // native root identity needed by the later definitive completion.
+    harness.emit({
+      ...identity,
+      type: "thread.state.changed",
+      eventId: asEventId("system-error-unscoped-thread-error"),
+      createdAt: diagnosticAt,
+      payload: { state: "error" },
+    });
+    harness.emit({
+      ...identity,
+      type: "runtime.error",
+      eventId: asEventId("system-error-root-diagnostic"),
+      turnId,
+      createdAt: diagnosticAt,
+      raw: {
+        source: "codex.app-server.notification",
+        method: "error",
+        payload: { willRetry: false, error: { message: "A preliminary root diagnostic" } },
+      },
+      payload: { message: "A preliminary root diagnostic", class: "provider_error" },
+    });
+    await harness.drain();
+    expect((await harness.readModel()).threads[0]!.session).toMatchObject({
+      status: "running",
+      activeTurnId: turnId,
+    });
+    harness.emit({
+      ...identity,
+      type: "turn.completed",
+      eventId: asEventId("system-error-definitive-root-failure"),
+      turnId,
+      createdAt: completedAt,
+      payload: {
+        state: "failed",
+        errorMessage: definitiveMessage,
+        nativeContextAvailable: true,
+        codexTransientFailure: "server",
+      },
+    });
+    await harness.drain();
+    const thread = (await harness.readModel()).threads[0]!;
+    expect(thread.session).toMatchObject({
+      status: "ready",
+      activeTurnId: null,
+      lastError: definitiveMessage,
+      providerInstanceId: instanceId,
+      subagentRuntimeId: runtimeId,
+      updatedAt: completedAt,
+    });
+    expect(thread.latestTurn).toMatchObject({ turnId, state: "error", completedAt });
+    const markers = thread.activities.filter(
+      (activity) =>
+        (activity.payload as { recovery?: unknown } | undefined)?.recovery ===
+        "codex-transient-root-failed",
+    );
+    expect(markers).toHaveLength(1);
+    expect(markers[0]?.payload).toEqual({
+      recovery: "codex-transient-root-failed",
+      providerInstanceId: instanceId,
+      subagentRuntimeId: runtimeId,
+      sessionUpdatedAt: completedAt,
+    });
+    expect(JSON.stringify(markers[0]?.payload)).not.toContain(
+      "private-system-error-native-conversation",
+    );
+
+    // Replayed non-conclusive diagnostics may remain useful received history,
+    // but are not evidence that the positively verified context died later.
+    harness.emit({
+      ...identity,
+      type: "thread.state.changed",
+      eventId: asEventId("system-error-delayed-thread-error"),
+      createdAt: "2026-01-01T00:00:03.000Z",
+      payload: { state: "error" },
+    });
+    await harness.drain();
+    expect((await harness.readModel()).threads[0]!.session).toEqual(thread.session);
+  });
+
+  it.each([
+    "unchanged-tuple",
+    "stop-intent",
+    "new-input",
+    "other-account",
+    "new-runtime",
+    "other-latest-turn",
+    "different-proof-time",
+  ] as const)(
+    "reconciles an already failed Codex diagnostic only with exact authority: %s",
+    async (scenario) => {
+      const harness = await createHarness();
+      const threadId = asThreadId("thread-1");
+      const turnId = asTurnId("preterminalized-system-error-root");
+      const instanceId = ProviderInstanceId.make("codex");
+      const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000071");
+      const startedAt = "2026-01-01T00:00:01.000Z";
+      const diagnosticAt = "2026-01-01T00:00:02.123Z";
+      const completedAt = "2026-01-01T00:00:02.124Z";
+      const definitiveMessage = "Definitive server-side root failure";
+      const identity = {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: instanceId,
+        subagentRuntimeId: runtimeId,
+        threadId,
+      };
+      harness.setProviderSession({
+        ...identity,
+        status: "ready",
+        runtimeMode: "approval-required",
+        createdAt: startedAt,
+        updatedAt: completedAt,
+        codexRootTurnFailure: {
+          turnId,
+          providerThreadId: "private-preterminalized-native-conversation",
+          observedAt: scenario === "different-proof-time" ? diagnosticAt : completedAt,
+          category: "server",
+        },
+      });
+      harness.emit({
+        ...identity,
+        type: "turn.started",
+        eventId: asEventId("preterminalized-system-error-start"),
+        turnId,
+        createdAt: startedAt,
+      });
+      await harness.drain();
+
+      // Reproduce the old build's committed public tuple directly: the exact
+      // root has already become failed at the preliminary diagnostic timestamp.
+      // Native availability is not enough to reconcile this historical tuple:
+      // its diagnostic publication time is not the definitive failure time.
+      // Do not relax the existing exact-publication fence or infer authority.
+      const startedSession = (await harness.readModel()).threads[0]!.session!;
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("preterminalized-system-error-public-tuple"),
+          threadId,
+          session: {
+            ...startedSession,
+            status: "error",
+            activeTurnId: null,
+            lastError: "Provider thread error",
+            updatedAt: diagnosticAt,
+          },
+          createdAt: diagnosticAt,
+        }),
+      );
+      const failedSession = (await harness.readModel()).threads[0]!.session!;
+      if (scenario === "stop-intent") {
+        // Stop authority exists as soon as the client command commits, before
+        // the asynchronous provider close can publish a stopped session tuple.
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.session.stop",
+            commandId: CommandId.make("preterminalized-system-error-stop"),
+            threadId,
+            createdAt: "2026-01-01T00:00:02.1235Z",
+          }),
+        );
+      } else if (scenario === "new-input") {
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make("preterminalized-system-error-new-input"),
+            threadId,
+            message: {
+              messageId: asMessageId("preterminalized-system-error-new-input-message"),
+              role: "user",
+              text: "New explicit input",
+              attachments: [],
+            },
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            runtimeMode: "approval-required",
+            createdAt: "2026-01-01T00:00:02.1235Z",
+          }),
+        );
+      } else if (scenario === "other-account" || scenario === "new-runtime") {
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("preterminalized-system-error-replacement-owner"),
+            threadId,
+            session: {
+              ...failedSession,
+              providerInstanceId:
+                scenario === "other-account" ? ProviderInstanceId.make("codex-other") : instanceId,
+              subagentRuntimeId:
+                scenario === "new-runtime"
+                  ? SubagentRuntimeId.make("00000000-0000-4000-8000-000000000072")
+                  : runtimeId,
+              updatedAt: "2026-01-01T00:00:02.1235Z",
+            },
+            createdAt: "2026-01-01T00:00:02.1235Z",
+          }),
+        );
+      } else if (scenario === "other-latest-turn") {
+        harness.emit({
+          ...identity,
+          type: "turn.started",
+          eventId: asEventId("preterminalized-system-error-new-root"),
+          turnId: asTurnId("preterminalized-newer-root"),
+          createdAt: "2026-01-01T00:00:02.1235Z",
+        });
+        await harness.drain();
+      }
+      const beforeCompletion = (await harness.readModel()).threads[0]!;
+      const completion = {
+        ...identity,
+        type: "turn.completed" as const,
+        eventId: asEventId("preterminalized-system-error-definitive"),
+        turnId,
+        createdAt: completedAt,
+        payload: {
+          state: "failed" as const,
+          errorMessage: definitiveMessage,
+          nativeContextAvailable: true as const,
+          codexTransientFailure: "server" as const,
+        },
+      };
+      harness.emit(completion);
+      await harness.drain();
+      const afterCompletion = (await harness.readModel()).threads[0]!;
+      const markers = afterCompletion.activities.filter(
+        (activity) =>
+          (activity.payload as { recovery?: unknown } | undefined)?.recovery ===
+          "codex-transient-root-failed",
+      );
+      expect(afterCompletion.session).toEqual(beforeCompletion.session);
+      expect(afterCompletion.latestTurn).toEqual(beforeCompletion.latestTurn);
+      expect(markers).toHaveLength(0);
+    },
+  );
 
   it.each(["stopped", "new-turn", "new-runtime"] as const)(
     "does not let a completion with absent generation evidence overwrite a %s lifecycle",
@@ -2441,6 +2932,7 @@ describe("ProviderRuntimeIngestion", () => {
     "partial-fanout",
     "delayed-error",
     "category-disagreement",
+    "proof-time-disagreement",
     "child-start",
     "child-progress",
     "child-completed",
@@ -2465,7 +2957,8 @@ describe("ProviderRuntimeIngestion", () => {
       codexRootTurnFailure: {
         turnId,
         providerThreadId: "private-native-conversation",
-        observedAt: completedAt,
+        observedAt:
+          scenario === "proof-time-disagreement" ? "2026-01-01T00:00:01.999Z" : completedAt,
         ...(transient && scenario !== "category-disagreement"
           ? { category: "server" as const }
           : {}),

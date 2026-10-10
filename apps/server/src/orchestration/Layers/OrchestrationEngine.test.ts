@@ -891,6 +891,183 @@ describe("OrchestrationEngine startup-failure admission", () => {
   });
 });
 
+async function createWatchFixture() {
+  const system = await createOrchestrationSystem();
+  const threadId = ThreadId.make("unscoped-watch-thread");
+  const session = {
+    threadId,
+    status: "ready" as const,
+    providerName: "codex" as const,
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    subagentRuntimeId: SubagentRuntimeId.make("00000000-0000-4000-8000-000000000143"),
+    runtimeMode: "full-access" as const,
+    activeTurnId: null,
+    lastError: null,
+    updatedAt: now(),
+  };
+  const dispatch = (command: OrchestrationCommand) => system.run(system.engine.dispatch(command));
+  await dispatch({
+    type: "thread.create",
+    commandId: CommandId.make("unscoped-watch-create"),
+    threadId,
+    projectId: null,
+    title: "Unscoped watch",
+    modelSelection: { instanceId: session.providerInstanceId, model: "gpt-6-astra" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    createdAt: now(),
+  });
+  await dispatch({
+    type: "thread.session.set",
+    commandId: CommandId.make("server:unscoped-watch-ready"),
+    threadId,
+    session,
+    createdAt: now(),
+  });
+  const command: Extract<OrchestrationCommand, { type: "thread.session.set" }> = {
+    type: "thread.session.set",
+    commandId: CommandId.make("server:unscoped-watch-error"),
+    threadId,
+    session: { ...session, status: "error", lastError: "Provider thread error" },
+    expectedSessionLifecycle: sessionLifecycleSnapshot(session),
+    expectedSubagentRuntimeId: session.subagentRuntimeId,
+    requiresNoPendingTurnStart: true,
+    createdAt: now(),
+  };
+  // Seed only isolated in-memory projection state. The dispatch-race
+  // ingestion fixture separately creates the automatic continuation through
+  // its durable command; here the test focuses on this exact atomic guard.
+  const seedTurn = (
+    input: {
+      threadId?: ThreadId;
+      turnId?: TurnId;
+      state?: "pending" | "completed";
+    } = {},
+  ) =>
+    system.run(system.sql`
+        INSERT INTO projection_turns
+          (thread_id, turn_id, pending_message_id, state, requested_at,
+           checkpoint_files_json)
+        VALUES (${input.threadId ?? threadId}, ${input.turnId ?? null},
+          'unscoped-watch-pending-message', ${input.state ?? "pending"}, ${now()}, '[]')
+      `);
+  const readTurns = () =>
+    system.run(system.sql<Record<string, unknown>>`
+        SELECT * FROM projection_turns WHERE thread_id = ${threadId} ORDER BY row_id
+      `);
+  return { ...system, dispatch, threadId, session, command, seedTurn, readTurns };
+}
+
+describe("OrchestrationEngine unscoped-watch pending admission", () => {
+  it.each(["absent", "foreign-thread", "bound-turn", "terminal-row"] as const)(
+    "admits an exact watch without pending input: %s",
+    async (variant) => {
+      const system = await createWatchFixture();
+      try {
+        if (variant === "foreign-thread")
+          await system.seedTurn({ threadId: ThreadId.make("unscoped-watch-peer") });
+        if (variant === "bound-turn")
+          await system.seedTurn({ turnId: TurnId.make("unscoped-watch-bound-turn") });
+        if (variant === "terminal-row") await system.seedTurn({ state: "completed" });
+        const before = await system.readModel();
+        await system.dispatch(system.command);
+        const after = await system.readModel();
+        expect(after.threads[0]?.session?.status).toBe("error");
+        const events = await system.run(
+          system.engine.readEvents(before.snapshotSequence).pipe(Stream.runCollect),
+        );
+        expect(events).toHaveLength(1);
+        expect(events[0]?.type).toBe("thread.session-set");
+        expect(events[0]?.payload).not.toHaveProperty("requiresNoPendingTurnStart");
+        const [row] = await system.run(system.sql<{ payload_json: string }>`
+          SELECT payload_json FROM orchestration_events
+          WHERE command_id = ${system.command.commandId}
+        `);
+        expect(row).toBeDefined();
+        expect(JSON.parse(row!.payload_json)).not.toHaveProperty("requiresNoPendingTurnStart");
+      } finally {
+        await system.dispose();
+      }
+    },
+  );
+
+  it("rejects pending work without events or row consumption and keeps rejected replay fenced", async () => {
+    const system = await createWatchFixture();
+    try {
+      await system.seedTurn();
+      const before = await system.readModel();
+      const pendingBefore = await system.readTurns();
+      const result = await system.run(
+        system.engine
+          .dispatch(system.command)
+          .pipe(Effect.match({ onSuccess: () => null, onFailure: (error) => error })),
+      );
+      expect(result).toMatchObject({
+        _tag: "OrchestrationCommandInvariantError",
+        detail: SESSION_LIFECYCLE_SUPERSEDED,
+      });
+      expect(await system.readModel()).toEqual(before);
+      expect(await system.readTurns()).toEqual(pendingBefore);
+      expect(
+        await system.run(system.engine.readEvents(before.snapshotSequence).pipe(Stream.runCollect)),
+      ).toHaveLength(0);
+      const receipts = await system.run(system.sql<{ status: string }>`
+        SELECT status FROM orchestration_command_receipts
+        WHERE command_id = ${system.command.commandId}
+      `);
+      expect(receipts).toEqual([{ status: "rejected" }]);
+      // A removed provisional row is not permission to replay an old watch.
+      // Its existing rejected receipt must retain benign supersession, with no
+      // later session mutation even though the original condition disappeared.
+      await system.run(system.sql`
+        DELETE FROM projection_turns WHERE thread_id = ${system.threadId} AND turn_id IS NULL
+      `);
+      const replay = await system.run(
+        system.engine
+          .dispatch(system.command)
+          .pipe(Effect.match({ onSuccess: () => null, onFailure: (error) => error })),
+      );
+      expect(replay?._tag).toBe("OrchestrationCommandPreviouslyRejectedError");
+      expect(replay && isSupersededSessionLifecycle(replay)).toBe(true);
+      expect(await system.readModel()).toEqual(before);
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it("replays an accepted receipt without consuming subsequently pending work", async () => {
+    const system = await createWatchFixture();
+    try {
+      const receipt = await system.dispatch(system.command);
+      await system.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("server:unscoped-watch-current-ready"),
+        threadId: system.threadId,
+        session: system.session,
+        createdAt: now(),
+      });
+      await system.seedTurn();
+      const before = await system.readModel();
+      const pendingBefore = await system.readTurns();
+      expect(await system.dispatch(system.command)).toEqual(receipt);
+      expect(await system.readModel()).toEqual(before);
+      expect(await system.readTurns()).toEqual(pendingBefore);
+      expect(
+        await system.run(system.engine.readEvents(before.snapshotSequence).pipe(Stream.runCollect)),
+      ).toHaveLength(0);
+      const receipts = await system.run(system.sql<{ status: string }>`
+        SELECT status FROM orchestration_command_receipts
+        WHERE command_id = ${system.command.commandId}
+      `);
+      expect(receipts).toEqual([{ status: "accepted" }]);
+    } finally {
+      await system.dispose();
+    }
+  });
+});
+
 describe("OrchestrationEngine completed-root replacement admission", () => {
   it.each(["accepted", "interrupt", "session-stop", "newer-projection", "invalid-intent"] as const)(
     "atomically fences %s without timestamp ordering",

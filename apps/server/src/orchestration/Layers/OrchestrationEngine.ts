@@ -458,6 +458,43 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           yield* assertUserMessageIdentityAvailable(envelope.command);
         }
 
+        if (
+          envelope.command.type === "thread.session.set" &&
+          envelope.command.requiresNoPendingTurnStart === true
+        ) {
+          // An unscoped native watch can observe an idle lifecycle tuple before
+          // an automatic continuation is admitted, then wait in this queue.
+          // Unlike ordinary turn starts, that continuation can leave the tuple
+          // unchanged while its pending message is durable. Recheck the exact
+          // pending projection here, inside the same serial worker that commits
+          // the session update, so an old watch cannot consume that new intent.
+          // Receipt lookup deliberately precedes this admission-only condition:
+          // a previously accepted command must replay its receipt, not mutate
+          // the session again or reinterpret a newer pending turn as its own.
+          const pendingTurnStarts = yield* sql<{ readonly present: number }>`
+            SELECT 1 AS "present"
+            FROM projection_turns
+              INDEXED BY idx_projection_turns_thread_requested
+            WHERE thread_id = ${envelope.command.threadId}
+              AND turn_id IS NULL
+              AND state = 'pending'
+              AND pending_message_id IS NOT NULL
+              AND checkpoint_turn_count IS NULL
+            ORDER BY requested_at DESC
+            LIMIT 1
+          `.pipe(
+            Effect.mapError(
+              toPersistenceSqlError("OrchestrationEngine.processEnvelope:pendingTurnStart"),
+            ),
+          );
+          if (pendingTurnStarts.length > 0) {
+            return yield* new OrchestrationCommandInvariantError({
+              commandType: envelope.command.type,
+              detail: SESSION_LIFECYCLE_SUPERSEDED,
+            });
+          }
+        }
+
         // Serialized command admission linearizes this durable check before
         // any later Stop/start/settings command. The provider reactor repeats
         // it immediately before I/O, covering controls accepted after this

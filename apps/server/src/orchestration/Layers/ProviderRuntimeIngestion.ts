@@ -1319,6 +1319,28 @@ const make = Effect.gen(function* () {
       );
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
+  // Availability is a fresh native-owner fact, never inferred from projected
+  // status or a received error string. Share the exact identity check between
+  // definitive failure publication and late thread-diagnostic suppression.
+  const readCurrentCodexFailedRootProof = (event: ProviderRuntimeEvent, turnId: TurnId) =>
+    providerService.listSessions().pipe(
+      Effect.map(
+        (sessions) =>
+          sessions.find(
+            (session) =>
+              session.threadId === event.threadId &&
+              session.provider === "codex" &&
+              session.providerInstanceId === event.providerInstanceId &&
+              session.subagentRuntimeId === event.subagentRuntimeId &&
+              session.status === "ready" &&
+              session.activeTurnId === undefined &&
+              session.codexRootTurnFailure?.turnId === turnId,
+          )?.codexRootTurnFailure,
+      ),
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause) : Effect.succeed(undefined),
+      ),
+    );
   const usageStats = yield* UsageStatsService;
   const receiptBus = yield* RuntimeReceiptBus;
   const projectionStateRepository = yield* ProjectionStateRepository;
@@ -2939,6 +2961,52 @@ const make = Effect.gen(function* () {
         (!isCodexAggregateReopenEvent ||
           explicitTerminalTurnRecovery !== undefined ||
           restoresFalseOrphanTerminal);
+      // Codex may publish its unscoped systemError immediately before the
+      // definitive failed turn (official app-server error/turn lifecycle).
+      // The thread diagnostic must not discard the concrete root identity:
+      // doing so closes SQL truth early and makes the exact terminal-time
+      // availability guard reject the following authoritative completion.
+      // Nor may a delayed diagnostic demote an already verified failed-root
+      // context. Only that exact current owner/root/time proof permits ignoring
+      // it; unknown, replaced, stopped and legacy contexts stay conservative.
+      const isCodexThreadError =
+        event.provider === "codex" &&
+        event.type === "thread.state.changed" &&
+        event.payload.state === "error";
+      const preservesTrackedCodexRoot = isCodexThreadError && activeTurnId !== null;
+      const suppressesVerifiedFailedRootThreadError =
+        isCodexThreadError &&
+        runtimeGenerationVerified &&
+        sameRuntimeBinding &&
+        incomingRuntimeId !== undefined &&
+        incomingRuntimeId === currentRuntimeId &&
+        activeTurnId === null &&
+        thread.session?.status === "ready" &&
+        thread.session.lastError !== null &&
+        thread.latestTurn?.state === "error" &&
+        (eventTurnId === undefined || sameId(eventTurnId, thread.latestTurn.turnId)) &&
+        (yield* readCurrentCodexFailedRootProof(event, thread.latestTurn.turnId))?.observedAt ===
+          thread.session.updatedAt;
+      // A watch diagnostic has no turn id and cannot consume newer input.
+      // Manual starts project starting/null, while fenced recovery admission
+      // deliberately retains ready/null and its failed-root tuple. Protect both
+      // without publishing readiness or changing any session/root timestamp.
+      // Read the pending row freshly after the inventory await above: the
+      // memoized pre-await pending observation may already be superseded.
+      const isCurrentUnscopedCodexThreadWatchError =
+        isCodexThreadError &&
+        eventTurnId === undefined &&
+        event.raw?.source === "codex.app-server.notification" &&
+        event.raw.method === "thread/status/changed" &&
+        runtimeGenerationVerified &&
+        sameRuntimeBinding &&
+        incomingRuntimeId !== undefined &&
+        incomingRuntimeId === currentRuntimeId;
+      const suppressesPendingInputThreadWatchError =
+        isCurrentUnscopedCodexThreadWatchError &&
+        Option.isSome(
+          yield* projectionTurnRepository.getPendingTurnStartByThreadId({ threadId: thread.id }),
+        );
       const acceptedTurnStartedSourcePlan =
         event.type === "turn.started" && shouldApplyThreadLifecycle
           ? yield* getSourceProposedPlanReferenceForAcceptedTurnStart(thread.id, eventTurnId)
@@ -3026,7 +3094,7 @@ const make = Effect.gen(function* () {
                   ? (eventTurnId ??
                     activeTurnId ??
                     (thread.latestTurn?.state === "running" ? thread.latestTurn.turnId : null))
-                  : sessionRelevantThreadState === "idle"
+                  : sessionRelevantThreadState === "idle" || preservesTrackedCodexRoot
                     ? activeTurnId
                     : null
                 : event.type === "turn.aborted" ||
@@ -3044,6 +3112,12 @@ const make = Effect.gen(function* () {
               return runtimeStatus === "ready" && hasPendingTurnStart ? "starting" : runtimeStatus;
             }
             case "thread.state.changed":
+              if (preservesTrackedCodexRoot) {
+                // Preserve the observed lifecycle, not a manufactured running
+                // state. The subsequent root-scoped error/completion supplies
+                // the real failure detail and terminal boundary.
+                return thread.session!.status;
+              }
               if (
                 sessionRelevantThreadState === "idle" &&
                 interruptedGoalThreadIds.has(thread.id)
@@ -3108,22 +3182,28 @@ const make = Effect.gen(function* () {
         })();
         const lastError = mayRecoverRuntimeOwnershipLoss
           ? PROVIDER_RUNTIME_OWNERSHIP_LOST_REASON
-          : event.type === "session.state.changed" && event.payload.state === "error"
-            ? (event.payload.reason ?? thread.session?.lastError ?? "Provider session error")
-            : event.type === "thread.state.changed" && sessionRelevantThreadState === "error"
-              ? (thread.session?.lastError ?? "Provider thread error")
-              : event.type === "turn.aborted"
-                ? event.payload.reason
-                : event.type === "turn.completed" &&
-                    normalizeRuntimeTurnState(event.payload.state) === "failed"
-                  ? (event.payload.errorMessage ?? thread.session?.lastError ?? "Turn failed")
-                  : restoresFalseOrphanTerminal
-                    ? null
-                    : status === "ready" || status === "starting"
+          : preservesTrackedCodexRoot
+            ? (thread.session?.lastError ?? null)
+            : event.type === "session.state.changed" && event.payload.state === "error"
+              ? (event.payload.reason ?? thread.session?.lastError ?? "Provider session error")
+              : event.type === "thread.state.changed" && sessionRelevantThreadState === "error"
+                ? (thread.session?.lastError ?? "Provider thread error")
+                : event.type === "turn.aborted"
+                  ? event.payload.reason
+                  : event.type === "turn.completed" &&
+                      normalizeRuntimeTurnState(event.payload.state) === "failed"
+                    ? (event.payload.errorMessage ?? thread.session?.lastError ?? "Turn failed")
+                    : restoresFalseOrphanTerminal
                       ? null
-                      : (thread.session?.lastError ?? null);
+                      : status === "ready" || status === "starting"
+                        ? null
+                        : (thread.session?.lastError ?? null);
 
-        if (shouldApplyThreadLifecycle) {
+        if (
+          shouldApplyThreadLifecycle &&
+          !suppressesVerifiedFailedRootThreadError &&
+          !suppressesPendingInputThreadWatchError
+        ) {
           if (event.type === "turn.started" && acceptedTurnStartedSourcePlan !== null) {
             yield* markSourceProposedPlanImplemented(
               acceptedTurnStartedSourcePlan.sourceThreadId,
@@ -3149,6 +3229,12 @@ const make = Effect.gen(function* () {
             commandId: providerCommandId(event, "thread-session-set"),
             threadId: thread.id,
             expectedSubagentRuntimeId: currentRuntimeId ?? null,
+            // Repeat the pending-input refusal inside serialized admission.
+            // An automatic continuation can commit after the fresh read above
+            // without changing the captured ready/null lifecycle tuple.
+            ...(isCurrentUnscopedCodexThreadWatchError
+              ? { requiresNoPendingTurnStart: true as const }
+              : {}),
             session: {
               threadId: thread.id,
               status,
@@ -3262,25 +3348,8 @@ const make = Effect.gen(function* () {
           // request. The proof is freshly minted by the current native owner;
           // missing/closed/uncertain inventory preserves the conservative error
           // state. Do not log provider-controlled failure text on this path.
-          const nativeFailure = yield* providerService.listSessions().pipe(
-            Effect.map(
-              (sessions) =>
-                sessions.find(
-                  (session) =>
-                    session.threadId === thread.id &&
-                    session.provider === "codex" &&
-                    session.providerInstanceId === event.providerInstanceId &&
-                    session.subagentRuntimeId === incomingRuntimeId &&
-                    session.status === "ready" &&
-                    session.activeTurnId === undefined &&
-                    session.codexRootTurnFailure?.turnId === eventTurnId,
-                )?.codexRootTurnFailure,
-            ),
-            Effect.catchCause((cause) =>
-              Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause) : Effect.succeed(undefined),
-            ),
-          );
-          if (nativeFailure !== undefined) {
+          const nativeFailure = yield* readCurrentCodexFailedRootProof(event, eventTurnId);
+          if (nativeFailure !== undefined && nativeFailure.observedAt === now) {
             // A ready replay has already committed this availability phase.
             // Repeating ready/null would clear a recovery start admitted while
             // inventory was awaited (such an intent deliberately leaves the
@@ -3633,6 +3702,19 @@ const make = Effect.gen(function* () {
       if (event.type === "runtime.error") {
         const runtimeErrorMessage = event.payload.message;
 
+        // The native error notification precedes turn/completed and is not a
+        // separate process-loss boundary. Keep an exact tracked root until its
+        // terminal frame: publishing error with a concrete active id yields
+        // different shell/read-model normalization and can make the following
+        // terminal lifecycle CAS fail. Received diagnostic activity still
+        // records the error below; unscoped/process/transport failures retain
+        // their existing authority and no provider call is retried here.
+        const isPreliminaryTrackedCodexRootError =
+          event.provider === "codex" &&
+          event.raw?.source === "codex.app-server.notification" &&
+          event.raw.method === "error" &&
+          eventMatchesTrackedActiveTurn;
+
         // A delayed root-scoped diagnostic is not process-death evidence. The
         // exact indexed terminal outcome remains immutable when no native root
         // is active; otherwise this old error could erase ready-context proof
@@ -3641,6 +3723,7 @@ const make = Effect.gen(function* () {
         const isLateTerminalCodexError =
           event.provider === "codex" && activeTurnId === null && observesAlreadyTerminalTurn;
         const shouldApplyRuntimeError =
+          !isPreliminaryTrackedCodexRootError &&
           !isLateTerminalCodexError &&
           !isUnboundCodexTerminalDuringRecovery &&
           (!STRICT_PROVIDER_LIFECYCLE_GUARD ||

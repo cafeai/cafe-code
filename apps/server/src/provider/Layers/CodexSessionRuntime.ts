@@ -3985,6 +3985,37 @@ export function readCodexRootTurnFailure(input: {
 }
 
 /**
+ * A terminal frame may retain context availability only for the current native
+ * root with no outstanding admission or sticky history uncertainty. The caller
+ * supplies fresh owner observations under its lifecycle boundary; this pure
+ * predicate is not a health probe or permission to create a replacement owner.
+ */
+export function codexTerminalContextIsAvailable(input: {
+  readonly session: ProviderSession;
+  readonly turnId: TurnId;
+  readonly providerThreadId: string | undefined;
+  readonly latestRootTurnId: string | undefined;
+  readonly nativeTurnStartPending: boolean;
+  readonly manualCompactionPending: boolean;
+  readonly nativeContextAvailable: boolean;
+  readonly historyUsable: boolean;
+}): boolean {
+  return (
+    input.session.provider === "codex" &&
+    input.session.status !== "closed" &&
+    input.session.subagentRuntimeId !== undefined &&
+    input.providerThreadId !== undefined &&
+    input.providerThreadId === currentProviderThreadId(input.session) &&
+    input.latestRootTurnId === String(input.turnId) &&
+    (input.session.activeTurnId === input.turnId || input.session.activeTurnId === undefined) &&
+    !input.nativeTurnStartPending &&
+    !input.manualCompactionPending &&
+    input.nativeContextAvailable &&
+    input.historyUsable
+  );
+}
+
+/**
  * Repeat the owner/root check after local parameter preparation and immediately
  * before the sole transport submission. This check does not hold the permit
  * while waiting for ACK: native terminal-before-ACK evidence and Stop must keep
@@ -4073,6 +4104,91 @@ export const commitCodexRootErrorLifecycleBoundary = Effect.fn(
       yield* updateSession(input.sessionRef, {
         status: input.willRetry ? "running" : "error",
         ...(input.errorMessage !== undefined ? { lastError: input.errorMessage } : {}),
+      });
+      return true;
+    }),
+  );
+});
+
+/**
+ * Reconcile a native thread-watch diagnostic separately from definitive root
+ * completion. systemError is not scoped to a native turn. Clearing the active
+ * pointer here makes the later exact turn/completed unable to apply its patch;
+ * treating a delayed watch diagnostic as process death also erases the fresh
+ * failed-root proof. Neither preservation below creates readiness or reopens
+ * a root: active identity remains unchanged, and ready is retained only from
+ * already definitive, exact-owner failure evidence.
+ *
+ * Keep the raw-notification boundary shared with synthetic tests; no provider
+ * process, profile or thread/read request is needed to qualify it. The permit
+ * serializes these checks with Stop, pending starts, compaction and root swaps.
+ */
+export const reconcileCodexSystemErrorThreadStatusLifecycleBoundary = Effect.fn(
+  "reconcileCodexSystemErrorThreadStatusLifecycleBoundary",
+)(function* (input: {
+  readonly semaphore: Semaphore.Semaphore;
+  readonly completionsRef: Ref.Ref<Map<string, CodexAggregateRootCompletion>>;
+  readonly latestRootTurnIdRef: Ref.Ref<string | undefined>;
+  readonly nativeTurnStartPendingRef: Ref.Ref<boolean>;
+  readonly manualCompactionPendingRef: Ref.Ref<boolean>;
+  readonly closedRef: Ref.Ref<boolean>;
+  readonly sessionRef: Ref.Ref<ProviderSession>;
+  readonly nativeContextAvailable: Effect.Effect<boolean>;
+  readonly historyUsable: Effect.Effect<boolean>;
+  readonly notification: CodexServerNotification;
+}) {
+  return yield* input.semaphore.withPermits(1)(
+    Effect.gen(function* () {
+      const session = yield* Ref.get(input.sessionRef);
+      const providerThreadId = readNotificationThreadId(input.notification);
+      if (
+        input.notification.method !== "thread/status/changed" ||
+        readNotificationThreadStatusType(input.notification) !== "systemError" ||
+        providerThreadId === undefined ||
+        providerThreadId !== currentProviderThreadId(session) ||
+        (yield* Ref.get(input.closedRef)) ||
+        session.status === "closed" ||
+        (yield* Ref.get(input.nativeTurnStartPendingRef)) ||
+        (yield* Ref.get(input.manualCompactionPendingRef))
+      )
+        return false;
+      // Native process observation may await. Read the sticky local history
+      // fence afterward, and repeat lifecycle checks before touching state:
+      // parent-scope finalization can reserve closed outside this permit.
+      const nativeContextAvailable = yield* input.nativeContextAvailable;
+      const failure = (yield* input.historyUsable)
+        ? readCodexRootTurnFailure({
+            session,
+            completions: yield* Ref.get(input.completionsRef),
+            latestRootTurnId: yield* Ref.get(input.latestRootTurnIdRef),
+            nativeContextAvailable,
+            nativeTurnStartPending: false,
+            manualCompactionPending: false,
+            closed: false,
+          })
+        : undefined;
+      if (
+        (yield* Ref.get(input.closedRef)) ||
+        (yield* Ref.get(input.sessionRef)) !== session ||
+        (yield* Ref.get(input.nativeTurnStartPendingRef)) ||
+        (yield* Ref.get(input.manualCompactionPendingRef))
+      )
+        return false;
+      if (failure !== undefined) {
+        // Preserve the exact original error and terminal time. The public
+        // recovery marker uses that tuple as an immutable lifecycle fence;
+        // rewriting an already-ready session would invalidate its countdown.
+        return true;
+      }
+      yield* updateSession(input.sessionRef, {
+        status: "error",
+        // A thread watch has no turn id and cannot retire a current root,
+        // including when a delayed diagnostic belongs to older work. Only a
+        // definitive turn terminal or a separately verified owner-loss/Stop
+        // boundary can release this identity. Unknown contexts remain error
+        // and never gain failed-root proof from this preservation alone.
+        activeTurnId: session.activeTurnId,
+        lastError: session.lastError ?? "Codex app-server reported a systemError thread status.",
       });
       return true;
     }),
@@ -6193,14 +6309,19 @@ export const makeCodexSessionRuntime = (
     ) =>
       Effect.gen(function* () {
         const session = yield* Ref.get(sessionRef);
-        return (
-          providerThreadId !== undefined &&
-          providerThreadId === currentProviderThreadId(session) &&
-          (yield* Ref.get(latestHistoryRootTurnRef)) === String(turnId) &&
-          (session.activeTurnId === turnId || session.activeTurnId === undefined) &&
-          !(yield* Ref.get(nativeTurnStartPendingRef)) &&
-          (yield* nativeContextAvailable)
-        );
+        return codexTerminalContextIsAvailable({
+          session,
+          turnId,
+          providerThreadId,
+          latestRootTurnId: yield* Ref.get(latestHistoryRootTurnRef),
+          nativeTurnStartPending: yield* Ref.get(nativeTurnStartPendingRef),
+          manualCompactionPending: yield* Ref.get(manualCompactionPendingRef),
+          nativeContextAvailable: yield* nativeContextAvailable,
+          historyUsable:
+            providerThreadId !== undefined &&
+            !(yield* historySafety.knownBlocked(providerThreadId)) &&
+            (yield* Ref.get(uncertainHistoryThreadRef)) !== providerThreadId,
+        });
       });
     const offerEvent = (event: ProviderEvent) =>
       Queue.offer(events, runtimeGeneration.stampEvent(event)).pipe(Effect.asVoid);
@@ -7760,11 +7881,22 @@ export const makeCodexSessionRuntime = (
             }
 
             if (statusType === "systemError") {
-              yield* updateSession(sessionRef, {
-                status: "error",
-                activeTurnId: undefined,
-                lastError:
-                  session.lastError ?? "Codex app-server reported a systemError thread status.",
+              yield* reconcileCodexSystemErrorThreadStatusLifecycleBoundary({
+                semaphore: aggregateLifecycleSemaphore,
+                completionsRef: aggregateRootCompletionsRef,
+                latestRootTurnIdRef: latestHistoryRootTurnRef,
+                nativeTurnStartPendingRef,
+                manualCompactionPendingRef,
+                closedRef,
+                sessionRef,
+                nativeContextAvailable,
+                historyUsable: Effect.gen(function* () {
+                  return (
+                    !(yield* historySafety.knownBlocked(providerThreadId)) &&
+                    (yield* Ref.get(uncertainHistoryThreadRef)) !== providerThreadId
+                  );
+                }),
+                notification,
               });
               return;
             }

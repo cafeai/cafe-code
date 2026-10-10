@@ -1,6 +1,6 @@
 # Provider stream reconciliation
 
-Last updated: 2026-10-10 21:31:04 JST (UTC+0900)
+Last updated: 2026-10-10 23:17:37 JST (UTC+0900)
 
 ## Ownership and exact text
 
@@ -68,6 +68,31 @@ until a matching immutable attempt/ACK receipt and fresh same-owner proof permit
 an internal atomic failed-turn association. Do not invent a running state or
 erase observed execution timestamps; newer controls still veto the association.
 See [the persistent recovery decision](decisions/codex-persistent-transient-recovery.md).
+
+Codex can send an unscoped `thread/status/changed: systemError`, followed by a
+root-scoped nonretrying `error`, immediately before the definitive failed
+`turn/completed`. Keep the concrete root identity through those preliminary
+notifications: neither diagnostic establishes process death or a terminal
+timestamp. The definitive completion closes the root with its actual failure
+detail and time before fresh exact owner inventory may publish ready context.
+A late unscoped thread error cannot demote that already verified failed-root
+context when the same account, generation, root and immutable failure time still
+match fresh inventory. Missing/uncertain inventory retains conservative handling.
+An exact current-generation unscoped native thread-watch diagnostic also cannot
+consume a newer pending input. Suppress its lifecycle write entirely, preserving
+the manual `starting` or automatic-recovery `ready` tuple as observed. Read pending
+input freshly after any awaited inventory observation; this protection does not
+grant readiness or retry authority.
+Repeat the no-pending refusal under serialized engine admission: an automatic
+intent may commit after that read without changing the session's lifecycle tuple.
+This internal command guard is not client-controllable or copied into events.
+
+The native boundary also rejects availability during pending compaction, sticky
+history uncertainty or context closure. Stop, newer root/start and control fences
+remain governing; preserving an active identity does not invent a new running
+turn or authorize inference. Existing failed/null historical tuples are not
+automatically retimestamped or repaired. Normal rebuilt backend/daemon adoption
+and a deliberate subsequent turn are required for an already stranded session.
 
 A subagent's restart and a metadata refresh for its previous completed run can
 arrive in the same millisecond. Timestamp plus opaque UUID sorting is not their

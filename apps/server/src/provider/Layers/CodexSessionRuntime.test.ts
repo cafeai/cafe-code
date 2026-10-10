@@ -64,6 +64,7 @@ import {
   admitCodexTurnStartLifecycleBoundary,
   assertCodexFailedRootContinuationBoundary,
   commitCodexRootErrorLifecycleBoundary,
+  reconcileCodexSystemErrorThreadStatusLifecycleBoundary,
   readCodexRootTurnFailure,
   admitCodexPendingSteerProcessing,
   admitCodexReasoningEffortRequest,
@@ -94,6 +95,7 @@ import {
   codexElapsedDelayMilliseconds,
   codexElapsedDelayRemainingMilliseconds,
   codexTerminalSessionPatch,
+  codexTerminalContextIsAvailable,
   codexSubagentProjectionMethod,
   isRecoverableThreadResumeError,
   isCodexContextCompactionItemType,
@@ -152,6 +154,9 @@ import {
 } from "../codexSteerCorrelation.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
 const decodeMessageId = Schema.decodeUnknownSync(MessageId);
+const decodeCodexErrorNotification = Schema.decodeUnknownSync(
+  EffectCodexSchema.V2ErrorNotification,
+);
 
 const publicEntry = (
   id: string,
@@ -3268,6 +3273,316 @@ describe("Codex failed-root continuation authority", () => {
         nativeContextAvailable: Effect.succeed(true),
       };
     });
+
+  const systemErrorNotification = {
+    method: "thread/status/changed",
+    params: { threadId: "native-thread", status: { type: "systemError" } },
+  };
+
+  effectIt.effect(
+    "raw systemError/error/failed-completion ordering preserves exact native failure availability",
+    () =>
+      Effect.gen(function* () {
+        for (const lateStatus of [false, true]) {
+          for (const transient of [false, true]) {
+            const boundary = yield* makeBoundary();
+            yield* Ref.set(boundary.completionsRef, new Map());
+            yield* Ref.set(boundary.sessionRef, {
+              ...session,
+              status: "running",
+              activeTurnId: failedTurnId,
+              lastError: undefined,
+            });
+            const statusBoundary = {
+              ...boundary,
+              notification: systemErrorNotification,
+              historyUsable: Effect.succeed(true),
+            };
+            if (!lateStatus) {
+              assert.equal(
+                yield* reconcileCodexSystemErrorThreadStatusLifecycleBoundary(statusBoundary),
+                true,
+              );
+              // A thread-watch error has no root terminal identity. Discarding
+              // this pointer prevents the definitive completion from applying
+              // its exact-turn patch even though the native process survives.
+              assert.equal((yield* Ref.get(boundary.sessionRef)).activeTurnId, failedTurnId);
+            }
+            const rawError = decodeCodexErrorNotification({
+              threadId: "native-thread",
+              turnId: failedTurnId,
+              willRetry: false,
+              error: {
+                message: "Definitive native request failed",
+                codexErrorInfo: transient ? "internalServerError" : "unauthorized",
+              },
+            });
+            assert.equal(
+              yield* commitCodexRootErrorLifecycleBoundary({
+                ...boundary,
+                providerThreadId: rawError.threadId,
+                turnId: TurnId.make(rawError.turnId),
+                willRetry: rawError.willRetry,
+                errorMessage: rawError.error.message,
+              }),
+              true,
+            );
+            const rawCompletion = {
+              method: "turn/completed",
+              params: {
+                threadId: "native-thread",
+                turn: { id: failedTurnId, status: "failed", items: [], error: rawError.error },
+              },
+            };
+            const observedAt = "2026-10-10T11:01:01.000Z";
+            const definitive = readCodexAggregateRootCompletion(rawCompletion, observedAt)!;
+            const managedRef = yield* Ref.make<ReadonlySet<string>>(new Set());
+            const pendingAggregateRef = yield* Ref.make<ReadonlySet<string>>(new Set());
+            const steerSemaphore = yield* Semaphore.make(1);
+            const pendingSteersRef = yield* Ref.make(
+              new Map<string, CodexPendingSteerProcessing>(),
+            );
+            let published = false;
+            yield* boundary.semaphore.withPermits(1)(
+              Effect.gen(function* () {
+                const result = yield* commitCodexAggregateRootCompletion({
+                  ...boundary,
+                  completion: definitive,
+                  managedRef,
+                  pendingRef: pendingAggregateRef,
+                  hasUnfinishedChildren: true,
+                });
+                assert.equal(result.action, "terminal");
+                assert.equal(
+                  yield* publishCodexTurnCompletionAfterLifecycleBoundary({
+                    semaphore: steerSemaphore,
+                    pendingRef: pendingSteersRef,
+                    sessionRef: boundary.sessionRef,
+                    turnId: failedTurnId,
+                    turnStatus: definitive.state,
+                    errorMessage: definitive.errorMessage,
+                    observedAt,
+                    nativeContextAvailable: codexTerminalContextIsAvailable({
+                      session: yield* Ref.get(boundary.sessionRef),
+                      turnId: failedTurnId,
+                      providerThreadId: "native-thread",
+                      latestRootTurnId: yield* Ref.get(boundary.latestRootTurnIdRef),
+                      nativeTurnStartPending: yield* Ref.get(boundary.nativeTurnStartPendingRef),
+                      manualCompactionPending: yield* Ref.get(boundary.manualCompactionPendingRef),
+                      nativeContextAvailable: true,
+                      historyUsable: true,
+                    }),
+                    publish: Effect.sync(() => {
+                      published = true;
+                    }),
+                  }),
+                  true,
+                );
+              }),
+            );
+            if (lateStatus) {
+              assert.equal(
+                yield* reconcileCodexSystemErrorThreadStatusLifecycleBoundary(statusBoundary),
+                true,
+              );
+            }
+            const after = yield* Ref.get(boundary.sessionRef);
+            assert.equal(published, true);
+            assert.equal(after.status, "ready");
+            assert.equal(after.activeTurnId, undefined);
+            assert.equal(after.lastError, "Definitive native request failed");
+            assert.equal(after.updatedAt, observedAt);
+            assert.deepEqual(
+              readCodexRootTurnFailure({
+                session: after,
+                completions: yield* Ref.get(boundary.completionsRef),
+                latestRootTurnId: yield* Ref.get(boundary.latestRootTurnIdRef),
+                nativeContextAvailable: true,
+                nativeTurnStartPending: false,
+                manualCompactionPending: false,
+                closed: false,
+              }),
+              {
+                turnId: failedTurnId,
+                providerThreadId: "native-thread",
+                observedAt,
+                ...(transient ? { category: "server" } : {}),
+              },
+            );
+            assert.equal((yield* Ref.get(pendingAggregateRef)).size, 0);
+          }
+        }
+      }),
+  );
+
+  effectIt.effect(
+    "raw systemError cannot mutate a closed, foreign or pending native generation",
+    () =>
+      Effect.gen(function* () {
+        for (const scenario of [
+          "closed",
+          "foreign",
+          "missing-thread",
+          "pending",
+          "compacting",
+        ] as const) {
+          const boundary = yield* makeBoundary();
+          if (scenario === "closed") yield* Ref.set(boundary.closedRef, true);
+          if (scenario === "pending") yield* Ref.set(boundary.nativeTurnStartPendingRef, true);
+          if (scenario === "compacting") yield* Ref.set(boundary.manualCompactionPendingRef, true);
+          const before = yield* Ref.get(boundary.sessionRef);
+          assert.equal(
+            yield* reconcileCodexSystemErrorThreadStatusLifecycleBoundary({
+              ...boundary,
+              historyUsable: Effect.succeed(true),
+              notification: {
+                ...systemErrorNotification,
+                params: {
+                  ...(scenario === "missing-thread"
+                    ? {}
+                    : {
+                        threadId:
+                          scenario === "foreign" ? "foreign-native-thread" : "native-thread",
+                      }),
+                  status: { type: "systemError" },
+                },
+              },
+            }),
+            false,
+            scenario,
+          );
+          assert.deepEqual(yield* Ref.get(boundary.sessionRef), before, scenario);
+        }
+      }),
+  );
+
+  it("terminal availability requires exact current root, native owner and usable history", () => {
+    const input = {
+      session: { ...session, status: "error" as const, activeTurnId: failedTurnId },
+      turnId: failedTurnId,
+      providerThreadId: "native-thread",
+      latestRootTurnId: String(failedTurnId),
+      nativeTurnStartPending: false,
+      manualCompactionPending: false,
+      nativeContextAvailable: true,
+      historyUsable: true,
+    };
+    assert.equal(codexTerminalContextIsAvailable(input), true);
+    for (const patch of [
+      { providerThreadId: undefined },
+      { providerThreadId: "foreign-native-thread" },
+      { latestRootTurnId: undefined },
+      { latestRootTurnId: "newer-native-root" },
+      { nativeTurnStartPending: true },
+      { manualCompactionPending: true },
+      { nativeContextAvailable: false },
+      { historyUsable: false },
+      { session: { ...input.session, status: "closed" as const } },
+      { session: { ...input.session, activeTurnId: TurnId.make("newer-native-root") } },
+      { session: { ...input.session, subagentRuntimeId: undefined } },
+    ])
+      assert.equal(codexTerminalContextIsAvailable({ ...input, ...patch }), false);
+  });
+
+  effectIt.effect(
+    "scope closure or newer authority while native observation awaits prevents watch mutation",
+    () =>
+      Effect.gen(function* () {
+        for (const scenario of ["closed", "changed-session", "pending", "compacting"] as const) {
+          const boundary = yield* makeBoundary();
+          const observing = yield* Deferred.make<void>();
+          const releaseObservation = yield* Deferred.make<void>();
+          const fiber = yield* reconcileCodexSystemErrorThreadStatusLifecycleBoundary({
+            ...boundary,
+            notification: systemErrorNotification,
+            historyUsable: Effect.succeed(true),
+            nativeContextAvailable: Deferred.succeed(observing, undefined).pipe(
+              Effect.andThen(Deferred.await(releaseObservation)),
+              Effect.as(true),
+            ),
+          }).pipe(Effect.forkChild);
+          yield* Deferred.await(observing);
+          // Parent-scope teardown does not need to acquire the root permit to
+          // reserve closed. Synthetic changed-state cases also ensure this
+          // diagnostic cannot carry a captured session across an await.
+          if (scenario === "closed") {
+            yield* Ref.set(boundary.closedRef, true);
+            yield* Ref.update(boundary.sessionRef, (value) => ({
+              ...value,
+              status: "closed" as const,
+            }));
+          }
+          if (scenario === "changed-session")
+            yield* Ref.update(boundary.sessionRef, (value) => ({
+              ...value,
+              status: "running" as const,
+              activeTurnId: TurnId.make("replacement-native-root"),
+            }));
+          if (scenario === "pending") yield* Ref.set(boundary.nativeTurnStartPendingRef, true);
+          if (scenario === "compacting") yield* Ref.set(boundary.manualCompactionPendingRef, true);
+          const beforeRelease = yield* Ref.get(boundary.sessionRef);
+          yield* Deferred.succeed(releaseObservation, undefined);
+          assert.equal(yield* Fiber.join(fiber), false, scenario);
+          assert.deepEqual(yield* Ref.get(boundary.sessionRef), beforeRelease, scenario);
+        }
+      }),
+  );
+
+  effectIt.effect(
+    "late raw systemError never grants availability to unknown, changed or unsafe history",
+    () =>
+      Effect.gen(function* () {
+        for (const scenario of [
+          "unknown-root",
+          "newer-root",
+          "context",
+          "history",
+          "newer-active",
+        ] as const) {
+          const boundary = yield* makeBoundary();
+          const newTurnId = TurnId.make("newer-active-native-root");
+          if (scenario === "unknown-root") yield* Ref.set(boundary.latestRootTurnIdRef, undefined);
+          if (scenario === "newer-root" || scenario === "newer-active")
+            yield* Ref.set(boundary.latestRootTurnIdRef, String(newTurnId));
+          if (scenario === "newer-active")
+            yield* Ref.update(boundary.sessionRef, (value) => ({
+              ...value,
+              status: "running" as const,
+              activeTurnId: newTurnId,
+              lastError: undefined,
+            }));
+          assert.equal(
+            yield* reconcileCodexSystemErrorThreadStatusLifecycleBoundary({
+              ...boundary,
+              historyUsable: Effect.succeed(scenario !== "history"),
+              nativeContextAvailable: Effect.succeed(scenario !== "context"),
+              notification: systemErrorNotification,
+            }),
+            true,
+          );
+          const after = yield* Ref.get(boundary.sessionRef);
+          assert.equal(after.status, "error", scenario);
+          assert.equal(
+            after.activeTurnId,
+            scenario === "newer-active" ? newTurnId : undefined,
+            scenario,
+          );
+          assert.equal(
+            readCodexRootTurnFailure({
+              session: after,
+              completions: yield* Ref.get(boundary.completionsRef),
+              latestRootTurnId: yield* Ref.get(boundary.latestRootTurnIdRef),
+              nativeContextAvailable: true,
+              nativeTurnStartPending: false,
+              manualCompactionPending: false,
+              closed: false,
+            }),
+            undefined,
+            scenario,
+          );
+        }
+      }),
+  );
 
   it("requires fresh exact newest transient-root and native-owner evidence", () => {
     const input = {

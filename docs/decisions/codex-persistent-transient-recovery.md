@@ -4,7 +4,7 @@ Decision status: Accepted within the current user-authorized repair
 Implementation status: Implemented; normal rebuilt-runtime adoption required
 Verification status: Local source/default/browser qualification passes; no live provider qualification
 Created: 2026-10-10 21:31:04 JST (UTC+0900)
-Last updated: 2026-10-10 22:30:18 JST (UTC+0900)
+Last updated: 2026-10-10 23:17:37 JST (UTC+0900)
 Decision authority: the user's request for persistent backed-off recovery until
 explicit Stop, correct surviving-child presentation, and compact Stop/restart UI.
 Partially supersedes: the failed-root availability assumption in
@@ -124,6 +124,32 @@ This does not weaken approvals or native whole-tree idle admission for settings.
   platform-specific process, permission or credential policy is introduced.
 
 ## Verification
+
+### Implementation ordering correction
+
+The native thread-watch `systemError` and root-scoped `error` can precede the
+definitive failed completion. They retain the tracked root identity until that
+completion, rather than closing it early and invalidating its exact-time
+availability transition. A later thread-watch diagnostic preserves readiness only
+with fresh same-owner failed-root proof; it cannot create readiness. Native
+unscoped watch diagnostics cannot consume newer pending input: preserve its
+observed manual-starting or recovery-ready tuple without any lifecycle write,
+using a fresh pending-input read after awaited inventory. This is not availability
+publication and does not authorize continuation. A server-only no-pending guard
+repeats that refusal in serialized command admission, covering recovery input
+which commits after ingestion's read without changing the lifecycle tuple.
+The guard is neither a client command field nor persisted event data.
+Native closure, pending root admission/compaction and sticky history uncertainty veto
+availability. The existing strict public terminal-time fence remains unchanged,
+and fresh native proof must attest that same definitive time. Old failed/null
+tuples are not repaired through timestamp relaxation or retrospective backfill.
+
+Synthetic regressions exercise both event orders, diagnostic-before-terminal
+state, idempotent replay, permanent errors, missing/foreign proof, Stop, newer
+input/root and awaited-observation races. This is an implementation correction
+under the accepted decision, not expanded retry or historical-repair authority.
+
+### Qualification
 
 Use the repository-pinned Node/Corepack Yarn toolchain. Qualify native terminal
 and pre-I/O guards, structured error admission, terminal-before-ACK, Stop/new-input,

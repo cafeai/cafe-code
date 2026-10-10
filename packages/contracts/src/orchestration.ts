@@ -1404,6 +1404,11 @@ const ThreadSessionSetCommand = Schema.Struct({
   // session tuple above. The engine checks this sequence in its serial worker;
   // this server-only admission field is never copied into the persisted event.
   expectedTurnStartIntentSequence: Schema.optional(NonNegativeInt),
+  // Server-only admission fence for unscoped diagnostics. Automatic recovery
+  // can queue a new input without changing the lifecycle tuple, so its pending
+  // row must be checked under the engine's serialized worker as well. This
+  // guard is never accepted from clients or copied into persisted events.
+  requiresNoPendingTurnStart: Schema.optional(Schema.Literal(true)),
   // Positive native starts have their own turn-admission semantics, but must
   // still not replace a newer native context while their observation is queued.
   expectedSubagentRuntimeId: Schema.optional(Schema.NullOr(SubagentRuntimeId)),
