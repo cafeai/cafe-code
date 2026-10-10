@@ -21,6 +21,7 @@ import { Button, buttonVariants } from "../ui/button";
 import {
   Menu,
   MenuGroup,
+  MenuItem,
   MenuPopup,
   MenuRadioGroup,
   MenuRadioItem,
@@ -179,6 +180,14 @@ function getTraitsSectionVisibility(input: {
   const showFastMode = selected.fastModeDescriptor !== null;
   const showContextWindow = selected.contextWindowDescriptor !== null;
   const showAgent = selected.agentDescriptor !== null;
+  const hasUnavailableDaybreak =
+    input.provider === "codex" &&
+    input.modelOptions?.some(
+      (option) =>
+        option.id === "cyberAccessProgram" &&
+        (option.value === "daybreakBlue" || option.value === "daybreakRed"),
+    ) === true &&
+    !selected.descriptors.some((descriptor) => descriptor.id === "cyberAccessProgram");
 
   return {
     ...selected,
@@ -187,7 +196,14 @@ function getTraitsSectionVisibility(input: {
     showFastMode,
     showContextWindow,
     showAgent,
-    hasAnyControls: showEffort || showThinking || showFastMode || showContextWindow || showAgent,
+    hasUnavailableDaybreak,
+    hasAnyControls:
+      showEffort ||
+      showThinking ||
+      showFastMode ||
+      showContextWindow ||
+      showAgent ||
+      hasUnavailableDaybreak,
   };
 }
 
@@ -212,6 +228,12 @@ export function getTraitsTriggerLabel(
     .map((descriptor) => {
       if (ultrathinkPromptControlled && descriptor.id === primarySelectDescriptor?.id) {
         return "Ultrathink";
+      }
+      if (descriptor.id === "cyberAccessProgram") {
+        return descriptor.currentValue === "daybreakBlue" ||
+          descriptor.currentValue === "daybreakRed"
+          ? "Daybreak"
+          : undefined;
       }
       if (descriptor.type === "boolean") {
         if (descriptor.id === "fastMode") {
@@ -275,6 +297,7 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
     primarySelectDescriptor,
     ultrathinkPromptControlled,
     ultrathinkInBodyText,
+    hasUnavailableDaybreak,
     hasAnyControls,
   } = getTraitsSectionVisibility({
     provider,
@@ -285,7 +308,16 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
     allowPromptInjectedEffort,
   });
   const updateDescriptors = (nextDescriptors: ReadonlyArray<ProviderOptionDescriptor>) => {
-    updateModelOptions(buildProviderOptionSelectionsFromDescriptors(nextDescriptors));
+    const nextOptions = buildProviderOptionSelectionsFromDescriptors(nextDescriptors);
+    const retained =
+      provider === "codex"
+        ? modelOptions?.find((option) => option.id === "cyberAccessProgram")
+        : undefined;
+    updateModelOptions(
+      retained && !nextDescriptors.some((entry) => entry.id === "cyberAccessProgram")
+        ? [...(nextOptions ?? []), retained]
+        : nextOptions,
+    );
   };
 
   const handleSelectChange = (
@@ -329,6 +361,13 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
                 This saved tier is unavailable. Choose an available tier before sending.
               </p>
             ) : null}
+            {descriptor.id === "cyberAccessProgram" &&
+            descriptor.currentValue &&
+            !descriptor.options.some((option) => option.id === descriptor.currentValue) ? (
+              <p role="status" className="px-2 pb-1.5 text-destructive-foreground text-xs">
+                This Daybreak setting is unavailable. Choose a supported setting before sending.
+              </p>
+            ) : null}
             {ultrathinkInBodyText && descriptor.id === primarySelectDescriptor?.id ? (
               <div className="px-2 pb-1.5 text-muted-foreground text-xs">
                 Your prompt contains &quot;ultrathink&quot; in the text. Remove it to change this
@@ -348,6 +387,9 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
                   key={option.id}
                   value={option.id}
                   disabled={ultrathinkInBodyText && descriptor.id === primarySelectDescriptor?.id}
+                  title={
+                    descriptor.id === "cyberAccessProgram" ? descriptor.description : undefined
+                  }
                 >
                   {option.label}
                   {option.isDefault ? " (default)" : ""}
@@ -378,6 +420,22 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
           </MenuGroup>
         </div>
       ))}
+      {hasUnavailableDaybreak ? (
+        <>
+          {descriptors.length > 0 ? <MenuDivider /> : null}
+          <MenuItem
+            title="Daybreak is unavailable for this account and model. Turn the saved setting off to continue."
+            onClick={() =>
+              updateModelOptions([
+                ...(buildProviderOptionSelectionsFromDescriptors(descriptors) ?? []),
+                { id: "cyberAccessProgram", value: "standard" },
+              ])
+            }
+          >
+            Turn unavailable Daybreak off
+          </MenuItem>
+        </>
+      ) : null}
     </>
   );
 });
@@ -417,11 +475,9 @@ export const TraitsPicker = memo(function TraitsPicker({
     return null;
   }
 
-  const triggerLabel = getTraitsTriggerLabel(
-    descriptors,
-    primarySelectDescriptor,
-    ultrathinkPromptControlled,
-  );
+  const triggerLabel =
+    getTraitsTriggerLabel(descriptors, primarySelectDescriptor, ultrathinkPromptControlled) ||
+    "Model settings";
 
   const isCodexStyle = provider === "codex";
 

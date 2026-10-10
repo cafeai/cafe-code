@@ -4850,6 +4850,29 @@ function makeThreadOpenResponse(
 }
 
 describe("buildTurnStartParams", () => {
+  it.each(["standard", "daybreakBlue", "daybreakRed"] as const)(
+    "preserves explicit %s cyber treatment through experimental request decoding",
+    (cyberAccessProgram) => {
+      const params = Effect.runSync(
+        buildTurnStartParams({
+          threadId: "provider-thread-daybreak",
+          runtimeMode: "approval-required",
+          prompt: "Review this patch",
+          cyberAccessProgram,
+        }),
+      );
+      assert.equal(params.cyberAccessProgram, cyberAccessProgram);
+      assert.equal(params.approvalPolicy, "untrusted");
+      const ordinary = Effect.runSync(
+        buildTurnStartParams({
+          threadId: "ordinary",
+          runtimeMode: "approval-required",
+          prompt: "Hello",
+        }),
+      );
+      assert.equal(Object.hasOwn(ordinary, "cyberAccessProgram"), false);
+    },
+  );
   it("includes plan collaboration mode when requested", () => {
     const params = Effect.runSync(
       buildTurnStartParams({

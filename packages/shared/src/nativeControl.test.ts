@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   NativeDesktopPrivacy,
   NATIVE_CONTROL_TOOLS,
+  NATIVE_CONTROL_DEFAULT_TOOLS,
   isNativeControlServer,
   validateNativeToolCall,
   compactNativeToolResult,
@@ -9,6 +10,74 @@ import {
 } from "./nativeControl.ts";
 
 describe("local native catalog", () => {
+  it("advertises a small bound interface and keeps reviewed legacy tools callable", () => {
+    expect(NATIVE_CONTROL_DEFAULT_TOOLS.map((tool) => tool.name).toSorted()).toEqual([
+      "computer_act",
+      "computer_advanced",
+      "computer_observe",
+      "computer_select",
+      "health",
+      "open_url",
+      "release_control",
+    ]);
+    expect(() =>
+      validateNativeToolCall("computer_select", { app: "Calculator", view: "both" }),
+    ).not.toThrow();
+    expect(() =>
+      validateNativeToolCall("computer_advanced", {
+        operation: "call",
+        name: "invoke_menu",
+        arguments: { pid: 1, window_id: 2, path: ["File", "Save"] },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      validateNativeToolCall("computer_advanced", {
+        operation: "call",
+        name: "computer_act",
+        arguments: {},
+      }),
+    ).toThrow();
+    expect(() =>
+      validateNativeToolCall("computer_advanced", {
+        operation: "call",
+        name: "not_a_tool",
+        arguments: {},
+      }),
+    ).toThrow();
+    expect(() =>
+      validateNativeToolCall("computer_advanced", {
+        operation: "call",
+        name: "click",
+        arguments: { session: "foreign" },
+      }),
+    ).toThrow();
+  });
+  it("validates every batch step using the published contract before dispatch", () => {
+    const valid = { target: "target", actions: [{ type: "key", keys: ["cmd", "v"] }] };
+    expect(() => validateNativeToolCall("computer_act", valid)).not.toThrow();
+    for (const step of [
+      { type: "type", text: "x", pid: 12 },
+      { type: "click", point: { x: -1, y: 0 } },
+      { type: "type", text: "x", session: "foreign" },
+      { type: "key", keys: [] },
+      { type: "arbitrary_native_tool" },
+    ])
+      expect(() =>
+        validateNativeToolCall("computer_act", { ...valid, actions: [...valid.actions, step] }),
+      ).toThrow();
+    expect(() =>
+      validateNativeToolCall("computer_act", {
+        target: "target",
+        actions: Array.from({ length: 17 }, () => valid.actions[0]),
+      }),
+    ).toThrow();
+    expect(() =>
+      validateNativeToolCall("computer_observe", { target: "target", full: null }),
+    ).toThrow();
+    const select = NATIVE_CONTROL_DEFAULT_TOOLS.find((tool) => tool.name === "computer_select")!;
+    expect(select.inputSchema).toHaveProperty("anyOf");
+    expect(JSON.stringify(select.inputSchema)).toContain('"additionalProperties":false');
+  });
   it("keeps transport authority and file outputs out of advertised schemas and calls", () => {
     const schemas = JSON.stringify(NATIVE_CONTROL_TOOLS);
     expect(schemas).not.toContain('"screenshot_out_file"');

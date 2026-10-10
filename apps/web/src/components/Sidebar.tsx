@@ -186,7 +186,7 @@ import {
 import { sortThreads } from "../lib/threadSort";
 import { isLatestTurnSettled } from "../session-logic";
 import { SidebarUpdatePill } from "./sidebar/SidebarUpdatePill";
-import { SidebarSourceUpdateBadge } from "./sidebar/SidebarSourceUpdateBadge";
+import { SidebarStatusBadge } from "./sidebar/SidebarStatusBadge";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { useIsMobile } from "~/hooks/useMediaQuery";
 import { CommandDialogTrigger } from "./ui/command";
@@ -3421,7 +3421,7 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
           render={
             // In Electron the wordmark shares the frameless title bar, so
             // keep it non-interactive: a <span> inherits the header's
-            // `drag-region` (letting the whole 52px band drag the window),
+            // `drag-region` (letting the whole title band drag the window),
             // whereas an <a>/<button> would opt out via `.drag-region a`.
             // On the web it stays a link back to the threads home.
             isElectron ? (
@@ -3505,7 +3505,7 @@ const SidebarChromeFooter = memo(function SidebarChromeFooter() {
       <SidebarProviderUpdatePill />
       <SidebarUpdatePill />
       <SidebarFooterNavigation
-        settingsTrailing={<SidebarSourceUpdateBadge />}
+        settingsTrailing={<SidebarStatusBadge />}
         atriumEnabled={atriumEnabled}
         atriumOpen={atriumOpen}
         settingsActive={isOnSettingsFooter}

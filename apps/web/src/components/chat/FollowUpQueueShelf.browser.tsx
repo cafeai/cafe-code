@@ -7,6 +7,53 @@ import { render } from "vitest-browser-react";
 import { FollowUpQueueShelf } from "./ChatComposer";
 
 describe("FollowUpQueueShelf", () => {
+  it.each([
+    { deliveryStatus: "sending" as const, label: "Sending" },
+    { deliveryStatus: "received" as const, label: "Received" },
+    { deliveryStatus: "waiting" as const, label: "Waiting" },
+  ])(
+    "shows $label beside the exact steering message without resend controls",
+    async ({ deliveryStatus, label }) => {
+      const screen = await render(
+        <div style={{ width: 280 }}>
+          <FollowUpQueueShelf
+            items={[]}
+            steeringItems={[
+              {
+                id: "message-1",
+                preview: "Please check the current progress",
+                promptText: "Please check the current progress",
+                dispatchedAt: "2026-10-09T12:00:00.000Z",
+                deliveryStatus,
+              },
+            ]}
+            actionLabel="Send"
+            actionTitle="Send message"
+            onToggleExpanded={vi.fn()}
+            onAction={vi.fn()}
+            onRemove={vi.fn()}
+            onClear={vi.fn()}
+            onExpandImage={vi.fn()}
+          />
+        </div>,
+      );
+      try {
+        const status = page.getByRole("status");
+        await expect.element(status).toHaveTextContent(label);
+        await expect.element(status).toHaveAttribute("data-steering-status", deliveryStatus);
+        await expect.element(page.getByRole("button")).not.toBeInTheDocument();
+        const row = document.querySelector<HTMLElement>('[data-cafe-followup-steering="true"]')!;
+        expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth);
+        const badge = document.querySelector<HTMLElement>("[data-steering-status]")!;
+        expect(badge.getBoundingClientRect().right).toBeLessThanOrEqual(
+          row.getBoundingClientRect().right,
+        );
+      } finally {
+        await screen.unmount();
+      }
+    },
+  );
+
   it.each([true, false])("exposes explicit paused retry with allowed=%s", async (allowed) => {
     const onAction = vi.fn();
     const screen = await render(

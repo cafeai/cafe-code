@@ -13,6 +13,7 @@ const inputTools = new Set([
   "drag",
   "scroll",
   "type_text",
+  "set_value",
   "press_key",
   "hotkey",
 ]);
@@ -21,6 +22,7 @@ const browserInputTools = new Set([
   "browser_type",
   "browser_pointer",
   "browser_navigate",
+  "browser_set_input_files",
 ]);
 const foregroundRefusals = new Set([
   "same_pid_keyboard_ambiguity",
@@ -31,11 +33,26 @@ const cafeArguments = new Set([
   "auto_foreground",
   "observe_after",
   "observe_query",
+  "observe_screenshot",
   "max_results",
   "max_windows",
   "include_auxiliary_windows",
   "include_page_state",
 ]);
+
+// Cua 0.34.0's electron_background_ax_refusal is a typed BEFORE-INPUT
+// refusal. A generic background_unavailable code is not sufficient evidence.
+export const ELECTRON_TEXT_REFUSAL_REASON =
+  'The Electron AX target cannot establish a safe exact background text route on macOS because its ancestry is web content or could not be proven native; use the pixel-targeted type_text form (x,y) or delivery_mode:"foreground".';
+
+function canUseForeground(name: string, refusal: Fields): boolean {
+  return (
+    foregroundRefusals.has(String(refusal.code)) ||
+    (name === "type_text" &&
+      refusal.code === "background_unavailable" &&
+      refusal.reason === ELECTRON_TEXT_REFUSAL_REASON)
+  );
+}
 const browsers = new Set([
   "com.kagi.kagimacOS",
   "com.apple.Safari",
@@ -242,9 +259,11 @@ class NativeControlActions {
       args.delivery_mode !== "foreground" &&
       response.isError === true &&
       refusal?.effect === "refused" &&
-      foregroundRefusals.has(String(refusal.code)) &&
+      canUseForeground(name, refusal) &&
       target &&
-      typeof target.window_id === "number"
+      typeof target.window_id === "number" &&
+      (refusal.pid === undefined || refusal.pid === target.pid) &&
+      (refusal.window_id === undefined || refusal.window_id === target.window_id)
     ) {
       response = await this.native(name, { ...args, ...target, delivery_mode: "foreground" });
       fallback = {
@@ -255,9 +274,11 @@ class NativeControlActions {
         focus_may_change: true,
       };
     }
-    if (response.isError) return response;
     const observe =
-      args.observe_after === true || (fallback !== undefined && args.observe_after !== false);
+      args.observe_after === true ||
+      (args.observe_after !== false &&
+        (fallback !== undefined ||
+          (response.isError === true && response.structuredContent?.effect !== "refused")));
     const data: Fields = {
       ...response.structuredContent,
       ...(fallback ? { cafe_fallback: fallback } : {}),
@@ -273,9 +294,23 @@ class NativeControlActions {
         ...observationTarget,
         ...(typeof args.observe_query === "string" ? { query: args.observe_query } : {}),
         max_results: 200,
+        // A tree-only read replaces Cua's latest screenshot mapping. Preserve
+        // coordinate grounding by returning the NEW capture alongside state.
+        include_screenshot:
+          args.observe_screenshot === true ||
+          (typeof args.x === "number" && typeof args.y === "number"),
       });
       if (observation.isError) data.observation_error = observation.content;
-      else data.observation = observation.structuredContent;
+      else {
+        data.observation = observation.structuredContent;
+        response = {
+          ...response,
+          content: [
+            ...response.content.filter((part) => part.type === "text"),
+            ...observation.content.filter((part) => part.type !== "text"),
+          ],
+        };
+      }
     } else if (observe) {
       data.observation_error =
         "Supply exact pid/window_id to include a post-action window observation.";
@@ -285,7 +320,7 @@ class NativeControlActions {
 
   private async browserAction(name: string, args: Fields): Promise<NativeToolResult> {
     const response = await this.native(name, args);
-    if (response.isError || args.observe_after === false) return response;
+    if (args.observe_after === false) return response;
     const observation = await this.native("get_browser_state", {
       target_id: args.target_id,
       tab_id: args.tab_id,

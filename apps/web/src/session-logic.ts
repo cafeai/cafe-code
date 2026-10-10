@@ -18,6 +18,8 @@ import {
 } from "@cafecode/contracts";
 import { summarizeToolArguments } from "@cafecode/shared/toolActivity";
 import { readDesktopObservationItem } from "@cafecode/shared/desktopObservation";
+import { isRoutineProviderWorkLogActivity } from "@cafecode/shared/providerWorkLog";
+import { readComputerUsePresentation } from "./components/chat/computerUsePresentation";
 import { readTurnConfiguration, presentTurnConfiguration } from "./turnConfiguration";
 
 import {
@@ -73,6 +75,7 @@ export interface WorkLogEntry {
   itemType?: ToolLifecycleItemType;
   requestKind?: PendingApproval["requestKind"];
   desktopObservation?: NonNullable<ReturnType<typeof readDesktopObservationItem>>;
+  computerUse?: boolean;
   /** Frozen accepted-turn settings; never reconstructed from today's catalog. */
   turnConfiguration?: ProviderTurnConfiguration;
   subagent?: {
@@ -628,6 +631,7 @@ export function deriveWorkLogEntries(
     .filter((activity) => activity.summary !== "Checkpoint captured")
     .filter((activity) => !isPlanBoundaryToolActivity(activity))
     .filter((activity) => !isRetryableSteerDeliveryActivity(activity))
+    .filter((activity) => !isRoutineProviderWorkLogActivity(activity))
     // The native ACK is retained in durable history for diagnosis, but a valid
     // configuration row already communicates this same accepted start. Match
     // the exact turn/task identity, never a generic task label or today's turn.
@@ -939,7 +943,10 @@ function toDerivedWorkLogEntry(
     activity.payload && typeof activity.payload === "object"
       ? (activity.payload as Record<string, unknown>)
       : null;
-  const commandPreview = extractToolCommand(payload);
+  const computerUse = readComputerUsePresentation(activity);
+  const commandPreview = computerUse
+    ? { command: null, rawCommand: null }
+    : extractToolCommand(payload);
   const changedFiles = extractChangedFiles(payload);
   const compaction = isContextCompactionActivity(activity);
   // Native titles are often identical at start and completion. The tool row
@@ -977,7 +984,7 @@ function toDerivedWorkLogEntry(
     id: activity.id,
     turnId: activity.turnId,
     createdAt: activity.createdAt,
-    label: taskLabel || activity.summary,
+    label: computerUse?.label ?? taskLabel ?? activity.summary,
     tone:
       activity.kind === "task.progress"
         ? "thinking"
@@ -998,7 +1005,7 @@ function toDerivedWorkLogEntry(
   const requestKind = extractWorkLogRequestKind(payload);
   const observation = readDesktopObservationItem(asRecord(payload?.data)?.item);
   if (observation) entry.desktopObservation = observation;
-  if (detail && !turnConfiguration) {
+  if (detail && !turnConfiguration && !computerUse) {
     entry.detail = detail;
   }
   if (commandPreview.command) {
@@ -1010,7 +1017,10 @@ function toDerivedWorkLogEntry(
   if (changedFiles.length > 0) {
     entry.changedFiles = changedFiles;
   }
-  if (title) {
+  if (computerUse) {
+    entry.computerUse = true;
+    entry.toolTitle = "Computer use";
+  } else if (title) {
     entry.toolTitle = title;
   }
   if (itemType) {

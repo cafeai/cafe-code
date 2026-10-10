@@ -65,6 +65,8 @@ import { useDesktopDebugEnabled } from "~/lib/desktopDebugState";
 import { useWorkspaceProjects, useWorkspaceThreads } from "../environments/workspaceData";
 import { readPrimaryEnvironmentDescriptor, usePrimaryEnvironmentId } from "../environments/primary";
 import { readEnvironmentApi } from "../environmentApi";
+import { deskTabKey } from "../deskModel";
+import { useDeskStore } from "../deskStore";
 import { MessageForkDialog } from "./chat/MessageForkDialog";
 import { isElectron } from "../env";
 import { readLocalApi } from "../localApi";
@@ -106,6 +108,7 @@ import {
   selectProjectByRef,
   selectThreadByRef,
   selectThreadDetailHydratedByRef,
+  selectSidebarThreadSummaryByRef,
   useStore,
 } from "../store";
 import { createProjectSelectorByRef, createThreadSelectorByRef } from "../storeSelectors";
@@ -135,6 +138,8 @@ import { BranchToolbar } from "./BranchToolbar";
 import { resolveShortcutCommand } from "../keybindings";
 import PlanSidebar from "./PlanSidebar";
 import { SessionRail } from "./chat/SessionRail";
+import { deriveChatActivityPresentation } from "./chat/chatActivity";
+import { isLiveWorkRuntimeCurrent } from "@cafecode/shared/liveWork";
 import { ComposerAsyncQuestionsPanel } from "./chat/ComposerAsyncQuestionsPanel";
 import { persistExactAsyncQuestionAnswer, type AsyncQuestion } from "./chat/asyncQuestions";
 import { ChevronDownIcon, TriangleAlertIcon } from "lucide-react";
@@ -220,6 +225,7 @@ import {
   collectUserMessageBlobPreviewUrls,
   createLocalDispatchSnapshot,
   deriveRetryableSteerReplayCandidates,
+  deriveSteeringDeliveryStatus,
   deriveComposerSendState,
   doesSteerFailureActivityMatchPending,
   doesSteerProcessingActivityMatchPending,
@@ -570,6 +576,7 @@ interface PendingSteerDispatch {
   readonly snapshot: ComposerSendSnapshot;
   readonly dispatchedAt: string;
   readonly intentSequence: number | null;
+  readonly deliveryStatus?: SteeringFollowUpViewItem["deliveryStatus"];
 }
 
 interface PendingSteerInterruptRecovery {
@@ -930,6 +937,12 @@ export default function ChatView(props: ChatViewProps) {
   const serverThreadDetailHydrated = useStore((store) =>
     routeKind === "server" ? selectThreadDetailHydratedByRef(store, routeThreadRef) : true,
   );
+  const liveWork = useStore((store) =>
+    routeKind === "server"
+      ? selectSidebarThreadSummaryByRef(store, routeThreadRef)?.liveWork
+      : undefined,
+  );
+  const sessionRailFocusRef = useRef<HTMLDivElement>(null);
   const setStoreThreadError = useStore((store) => store.setError);
   const markThreadVisited = useUiStateStore((store) => store.markThreadVisited);
   const activeThreadLastVisitedAt = useUiStateStore((store) =>
@@ -1837,7 +1850,27 @@ export default function ChatView(props: ChatViewProps) {
         ) {
           continue;
         }
-        if (thread === undefined || !threadHasResolvedPendingSteer(thread, pending)) {
+        if (thread === undefined) {
+          continue;
+        }
+        if (!threadHasResolvedPendingSteer(thread, pending)) {
+          const deliveryStatus = deriveSteeringDeliveryStatus({
+            provider: thread.session?.provider,
+            activities: thread.activities,
+            pendingMessageId: pending.messageId,
+            pendingIntentSequence: pending.intentSequence,
+            dispatchedAt: pending.dispatchedAt,
+            previousStatus: pending.deliveryStatus,
+          });
+          // Detail snapshots retain a bounded activity tail. Remember observed
+          // receipt/wait phases so trimming or catch-up cannot flash "Sending".
+          if (
+            (deliveryStatus === "received" || deliveryStatus === "waiting") &&
+            deliveryStatus !== pending.deliveryStatus
+          ) {
+            next ??= { ...current };
+            next[messageId] = { ...pending, deliveryStatus };
+          }
           continue;
         }
         next ??= { ...current };
@@ -2195,12 +2228,21 @@ export default function ChatView(props: ChatViewProps) {
   }, [activeLatestTurn?.state, activeLatestTurn?.turnId, threadActivities, subagentRuntimeSession]);
   const activeSubagentEntries = useMemo(
     () =>
-      deriveActiveSubagentWorkEntries(
-        threadActivities,
-        activeLatestTurn?.state === "running" ? activeLatestTurn.turnId : null,
-        { runtimeSession: subagentRuntimeSession },
-      ),
-    [activeLatestTurn?.state, activeLatestTurn?.turnId, threadActivities, subagentRuntimeSession],
+      isLiveWorkRuntimeCurrent(liveWork?.runtimeId, subagentRuntimeSession) &&
+      liveWork?.agentCount === 0
+        ? []
+        : deriveActiveSubagentWorkEntries(
+            threadActivities,
+            activeLatestTurn?.state === "running" ? activeLatestTurn.turnId : null,
+            { runtimeSession: subagentRuntimeSession },
+          ),
+    [
+      activeLatestTurn?.state,
+      activeLatestTurn?.turnId,
+      threadActivities,
+      subagentRuntimeSession,
+      liveWork,
+    ],
   );
   const latestTurnHasToolActivity = useMemo(
     () => hasToolActivityForTurn(threadActivities, activeLatestTurn?.turnId),
@@ -2958,6 +3000,7 @@ export default function ChatView(props: ChatViewProps) {
     queueDispatchInFlightRef,
     sendInFlightRef,
   ]);
+  const steeringProvider = activeThread?.session?.provider;
   const steeringFollowUpViewItems = useMemo<readonly SteeringFollowUpViewItem[]>(
     () =>
       Object.values(pendingSteerDispatchByMessageId)
@@ -2970,8 +3013,16 @@ export default function ChatView(props: ChatViewProps) {
           dispatchedAt: pending.dispatchedAt,
           files: pending.snapshot.files,
           environmentId: pending.environmentId,
+          deliveryStatus: deriveSteeringDeliveryStatus({
+            provider: steeringProvider,
+            activities: threadActivities,
+            pendingMessageId: pending.messageId,
+            pendingIntentSequence: pending.intentSequence,
+            dispatchedAt: pending.dispatchedAt,
+            previousStatus: pending.deliveryStatus,
+          }),
         })),
-    [activeThreadId, pendingSteerDispatchByMessageId],
+    [activeThreadId, pendingSteerDispatchByMessageId, threadActivities, steeringProvider],
   );
   const canActivateRunningFollowUpQueueAction = canDispatchRunningQueuedFollowUp({
     phase: followUpQueuePhase,
@@ -3934,6 +3985,16 @@ export default function ChatView(props: ChatViewProps) {
     },
     [hideScrollToBottom, recordChatViewTimelineScrollDebugEvent],
   );
+  const keepSendingTabOpen = useCallback(() => {
+    // Sending commits to this chat before any asynchronous preparation or ACK.
+    // keepOpen only promotes an existing scoped preview: it never opens a
+    // dismissed tab, changes focus, or affects another server's same chat id.
+    useDeskStore.getState().dispatch({
+      type: "keepOpen",
+      tabKey: deskTabKey({ kind: "server", threadRef: routeThreadRef }),
+    });
+  }, [routeThreadRef]);
+
   const pinTimelineToEndForLocalMessage = useCallback(() => {
     // Sending a local user message is an explicit request to move to the new
     // conversation tail. Do not trust LegendList's last scroll measurement
@@ -5536,11 +5597,13 @@ export default function ChatView(props: ChatViewProps) {
     });
     if (delivery === "queue") {
       if (!hasSendableContent) return;
+      keepSendingTabOpen();
       pinTimelineToEndForLocalMessage();
       await enqueueFollowUpSnapshot(snapshot);
       return;
     }
     if (delivery === "steer") {
+      if (hasSendableContent) keepSendingTabOpen();
       await dispatchSteerSnapshot(snapshot);
       return;
     }
@@ -5610,6 +5673,7 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
 
+    keepSendingTabOpen();
     setSendInFlight(true);
     beginLocalDispatch({ preparingWorktree: Boolean(baseBranchForWorktree) });
 
@@ -5915,6 +5979,7 @@ export default function ChatView(props: ChatViewProps) {
       await onSend(e);
       return;
     }
+    keepSendingTabOpen();
     if (delivery === "queue") {
       pinTimelineToEndForLocalMessage();
       await enqueueFollowUpSnapshot(snapshot);
@@ -6751,6 +6816,7 @@ export default function ChatView(props: ChatViewProps) {
         text: trimmed,
       });
 
+      keepSendingTabOpen();
       setSendInFlight(true);
       beginLocalDispatch({ preparingWorktree: false });
       setThreadError(threadIdForSend, null);
@@ -6832,6 +6898,7 @@ export default function ChatView(props: ChatViewProps) {
       isComposerConnecting,
       isSendBusy,
       isServerThread,
+      keepSendingTabOpen,
       persistThreadSettingsForNextTurn,
       pinTimelineToEndForLocalMessage,
       resetLocalDispatch,
@@ -7314,6 +7381,9 @@ export default function ChatView(props: ChatViewProps) {
             providerInstanceId: scheduledModelSelection.instanceId,
             activities: threadActivities,
             runtimeSession: subagentRuntimeSession,
+            activeTurnId: activeLatestTurn?.turnId ?? null,
+            activeTurnRunning: phase === "running",
+            liveWork,
           }
         : undefined,
     [
@@ -7322,6 +7392,42 @@ export default function ChatView(props: ChatViewProps) {
       scheduledModelSelection,
       threadActivities,
       subagentRuntimeSession,
+      activeLatestTurn?.turnId,
+      phase,
+      liveWork,
+    ],
+  );
+
+  const chatActivity = useMemo(
+    () =>
+      deriveChatActivityPresentation({
+        activities: threadActivities,
+        runtimeSession: subagentRuntimeSession,
+        liveWork,
+        turnId: activeLatestTurn?.turnId ?? null,
+        running: isWorking,
+        preparing: isPreparingWorktree,
+        connecting: isComposerConnecting,
+        streaming: timelineMessages.some(
+          (message) =>
+            message.role === "assistant" &&
+            message.streaming &&
+            message.turnId === activeLatestTurn?.turnId,
+        ),
+        approvalCount: pendingApprovals.length,
+        questionCount: pendingUserInputs.filter((question) => question.isBlocking).length,
+      }),
+    [
+      threadActivities,
+      subagentRuntimeSession,
+      liveWork,
+      activeLatestTurn?.turnId,
+      isWorking,
+      isPreparingWorktree,
+      isComposerConnecting,
+      timelineMessages,
+      pendingApprovals.length,
+      pendingUserInputs,
     ],
   );
 
@@ -7501,6 +7607,7 @@ export default function ChatView(props: ChatViewProps) {
                 : {})}
               isThreadHistoryHydrating={isServerThread && !serverThreadDetailHydrated}
               isWorking={isWorking}
+              showWorkingIndicator={!chatActivity}
               activeTurnInProgress={isWorking || !latestTurnSettled}
               activeTurnId={activeLatestTurn?.turnId ?? null}
               activeTurnStartedAt={activeWorkStartedAt}
@@ -7591,6 +7698,8 @@ export default function ChatView(props: ChatViewProps) {
               <ComposerBannerStack className="relative z-0" items={composerBannerItems} />
               <div className="relative z-10">
                 <ChatComposer
+                  activity={chatActivity}
+                  onFocusSessionRail={() => sessionRailFocusRef.current?.focus()}
                   onStartCodeReview={startCodeReview}
                   codeReviewDisabled={reviewDisabled}
                   composerRef={composerRef}
@@ -7741,6 +7850,8 @@ export default function ChatView(props: ChatViewProps) {
                 : undefined
             }
             data-chat-right-column="true"
+            ref={sessionRailFocusRef}
+            tabIndex={-1}
           >
             {shouldRenderPlanSidebar ? (
               <PlanSidebar

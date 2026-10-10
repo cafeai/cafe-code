@@ -16,6 +16,7 @@ import { type ComposerImageAttachment, type DraftThreadState } from "../composer
 import * as Schema from "effect/Schema";
 import { selectThreadByRef, useStore } from "../store";
 import type { DraftThreadEnvMode } from "../composerDraftStore";
+import { readCodexRoutineWarningStatus } from "@cafecode/shared/providerWorkLog";
 
 export const LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "cafe-code:last-invoked-script-by-project";
 export const LEGACY_LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "cafecode:last-invoked-script-by-project";
@@ -347,6 +348,63 @@ export function canRetryLegacyCodexRootCompletion(input: {
 function readIntentSequence(payload: Readonly<Record<string, unknown>> | null): number | null {
   const value = payload?.intentSequence;
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+export type SteeringDeliveryStatus = "sending" | "received" | "waiting" | "steering";
+
+/** Presentation only: neither an ACK nor a timed observation settles a steer. */
+export function deriveSteeringDeliveryStatus(input: {
+  readonly provider: string | null | undefined;
+  readonly activities: readonly OrchestrationThreadActivity[];
+  readonly pendingMessageId: string;
+  readonly pendingIntentSequence: number | null;
+  readonly dispatchedAt: string;
+  readonly previousStatus?: SteeringDeliveryStatus | undefined;
+}): SteeringDeliveryStatus {
+  if (input.provider !== "codex") return "steering";
+  const previousStatus =
+    input.previousStatus === "received" || input.previousStatus === "waiting"
+      ? input.previousStatus
+      : "sending";
+  let accepted: OrchestrationThreadActivity | undefined;
+  for (const activity of input.activities) {
+    if (activity.kind !== "provider.turn.steer.accepted") continue;
+    const payload = readUnknownRecord(activity.payload);
+    if (
+      payload?.provider !== "codex" ||
+      payload.messageId !== input.pendingMessageId ||
+      readNonEmptyString(payload.acceptedTurnId) === null
+    ) {
+      continue;
+    }
+    const intentSequence = readIntentSequence(payload);
+    if (input.pendingIntentSequence !== null && intentSequence !== null) {
+      if (input.pendingIntentSequence !== intentSequence) continue;
+    } else if (activity.createdAt < input.dispatchedAt) {
+      continue;
+    }
+    accepted = activity;
+  }
+  // The orchestration command receipt is not the provider's acceptance receipt.
+  if (!accepted) return previousStatus;
+  const acceptedPayload = readUnknownRecord(accepted.payload);
+  const correlationId = readNonEmptyString(acceptedPayload?.clientCorrelationId);
+  if (correlationId === null) return previousStatus === "waiting" ? "waiting" : "received";
+  const waiting = input.activities.some((activity) => {
+    if (
+      activity.kind !== "runtime.warning" ||
+      activity.createdAt < accepted.createdAt ||
+      activity.turnId !== acceptedPayload?.acceptedTurnId
+    ) {
+      return false;
+    }
+    const payload = readUnknownRecord(activity.payload);
+    return (
+      readCodexRoutineWarningStatus(payload?.message) === "steer-wait" &&
+      readUnknownRecord(payload?.detail)?.clientCorrelationId === correlationId
+    );
+  });
+  return waiting || previousStatus === "waiting" ? "waiting" : "received";
 }
 
 export function doesSteerFailureActivityMatchPending(input: {

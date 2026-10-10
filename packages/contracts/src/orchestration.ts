@@ -449,6 +449,13 @@ export const OrchestrationProjectShell = Schema.Struct({
 });
 export type OrchestrationProjectShell = typeof OrchestrationProjectShell.Type;
 
+export const OrchestrationLiveWork = Schema.Struct({
+  runtimeId: SubagentRuntimeId,
+  taskCount: NonNegativeInt,
+  agentCount: NonNegativeInt,
+});
+export type OrchestrationLiveWork = typeof OrchestrationLiveWork.Type;
+
 export const OrchestrationThreadShell = Schema.Struct({
   id: ThreadId,
   projectId: Schema.NullOr(ProjectId),
@@ -471,6 +478,7 @@ export const OrchestrationThreadShell = Schema.Struct({
   hasPendingApprovals: Schema.Boolean,
   hasPendingUserInput: Schema.Boolean,
   hasActionableProposedPlan: Schema.Boolean,
+  liveWork: Schema.optional(OrchestrationLiveWork),
 });
 export type OrchestrationThreadShell = typeof OrchestrationThreadShell.Type;
 

@@ -102,7 +102,10 @@ function getWindowTitleBarOptions(shouldUseDarkColors: boolean): WindowTitleBarO
   if (process.platform === "darwin") {
     return {
       titleBarStyle: "hiddenInset",
-      trafficLightPosition: { x: 16, y: 18 },
+      // The 14px buttons sit centred in the renderer's 44px title band
+      // (--app-titlebar-height in apps/web/src/index.css): (44 - 14) / 2 = 15.
+      // Keep the two in sync so sidebar, Desk tab and Settings titles line up.
+      trafficLightPosition: { x: 16, y: 15 },
     };
   }
 

@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import * as fs from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import release from "../native/cua-driver/release.json" with { type: "json" };
 import policy from "../native/cua-driver/build.json" with { type: "json" };
@@ -97,7 +97,12 @@ async function main(): Promise<void> {
   );
   const temporary = await fs.mkdtemp(join(reviewRoot, "runtime-"));
   const binary = "cua-driver";
-  const bytes = await fs.readFile(join(rustRoot, "target/release", binary));
+  // Cargo may use CARGO_TARGET_DIR for a shared build cache. Read the output
+  // from this build's own metadata instead of assuming a local target folder.
+  const targetDirectory = (JSON.parse(metadata) as { target_directory?: unknown }).target_directory;
+  if (typeof targetDirectory !== "string" || !isAbsolute(targetDirectory))
+    throw new Error("Native build metadata has no absolute output directory.");
+  const bytes = await fs.readFile(join(targetDirectory, "release", binary));
   await fs.writeFile(join(temporary, binary), bytes, { flag: "wx", mode: 0o755 });
   await fs.writeFile(
     join(temporary, "manifest.json"),

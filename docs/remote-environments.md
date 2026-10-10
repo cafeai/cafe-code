@@ -22,6 +22,22 @@ connections fail while a browser can reach the same server, check System Setting
 context can fail after relaunching from another; app identity and OS permission
 state must be checked separately from certificate trust and the saved login.
 
+Source launches brand and ad-hoc sign their private Electron runtime copy so
+the main app and helpers have matching Cafe bundle and signing identifiers.
+The launcher seals nested frameworks first and verifies the full bundle before
+caching it. An old source copy whose signing identifier remains `Electron` can
+fail LAN admission even when the settings switch is enabled. Updating the source
+launcher rebuilds that cache on the next launch; the installed Electron package
+and packaged release signing are separate. This development signature does not
+grant Local Network access or provide an Apple-issued persistent signing identity.
+Default `yarn restart:desktop` launches the Mac source app through LaunchServices
+after its graceful shutdown, using the absolute main entrypoint and clearing
+inherited Electron Node-only mode. This also avoids carrying the identity of a
+terminal that has exited into repeated provider-triggered restarts. App output
+remains in private `source-launch-*.stdout.log` / `*.stderr.log` files under Cafe's
+restart log directory. An explicit custom restart command retains its chosen
+launch context.
+
 For a self-signed HTTPS server, the desktop app asks for certificate approval
 before sending a sign-in credential. Compare the displayed SHA-256 fingerprint
 with the server's public certificate. Approval applies only to that HTTPS/WSS

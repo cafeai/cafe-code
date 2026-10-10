@@ -33,7 +33,8 @@ const usage = `Usage:
 
 Schedules a detached Node helper that waits briefly, runs Cafe Code's killall --graceful entrypoint, then
 relaunches Cafe Code. The default launch command is:
-  node apps/desktop/scripts/start-electron.mjs
+  node apps/desktop/scripts/start-electron-launchservices.mjs (macOS)
+  node apps/desktop/scripts/start-electron.mjs (other hosts)
 
 Options:
   --wait-ms <n>           Delay before killing the current app (default: 1500)
@@ -146,8 +147,16 @@ export function parseRestartCafeCodeArgs(args: ReadonlyArray<string>): RestartCa
   };
 }
 
-export function defaultLaunchCommand(nodePath = process.execPath): ReadonlyArray<string> {
-  return [nodePath, "apps/desktop/scripts/start-electron.mjs"];
+export function defaultLaunchCommand(
+  nodePath = process.execPath,
+  platform: NodeJS.Platform = process.platform,
+): ReadonlyArray<string> {
+  return [
+    nodePath,
+    platform === "darwin"
+      ? "apps/desktop/scripts/start-electron-launchservices.mjs"
+      : "apps/desktop/scripts/start-electron.mjs",
+  ];
 }
 
 export function resolveRestartLogDir(input: {

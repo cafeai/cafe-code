@@ -12,6 +12,12 @@ import {
 
 const DEFAULT_PROVIDER_DRIVER_KIND = ProviderDriverKind.make("codex");
 
+/** Retired picker aliases remain readable in saved chats, but are not new choices. */
+export function isCodexDaybreakAlias(model: string): boolean {
+  const slug = model.trim().toLowerCase();
+  return slug === "gpt-daybreak-blue-latest" || slug === "gpt-daybreak-red-latest";
+}
+
 export interface SelectableModelOption {
   slug: string;
   name: string;
@@ -118,6 +124,18 @@ function resolveDescriptorChoiceValue(
     return trimmed;
   }
   if (
+    descriptor.id === "cyberAccessProgram" &&
+    (trimmed === "daybreakBlue" || trimmed === "daybreakRed")
+  ) {
+    // The saved choice means On. Keep it On when changing models, resolving
+    // Red where advertised and Blue otherwise. Lost access stays invalid.
+    return (
+      descriptor.options.find((option) => option.id === "daybreakRed")?.id ??
+      descriptor.options.find((option) => option.id === "daybreakBlue")?.id ??
+      trimmed
+    );
+  }
+  if (
     descriptor.promptInjectedValues?.includes(trimmed) &&
     descriptor.options.some((option) => option.id === trimmed)
   ) {
@@ -126,10 +144,9 @@ function resolveDescriptorChoiceValue(
   if (descriptor.options.some((option) => option.id === trimmed)) {
     return trimmed;
   }
-  // Service tiers can spend a different entitlement. Preserve a removed choice
-  // for explicit user correction and server rejection instead of silently
-  // replacing it with the first/default paid choice after a catalogue refresh.
-  if (descriptor.id === "serviceTier") return trimmed;
+  // Preserve removed tier/program choices for explicit correction and server
+  // rejection rather than silently resetting a saved selection on refresh.
+  if (descriptor.id === "serviceTier" || descriptor.id === "cyberAccessProgram") return trimmed;
   return descriptor.currentValue ?? descriptor.options.find((option) => option.isDefault)?.id;
 }
 

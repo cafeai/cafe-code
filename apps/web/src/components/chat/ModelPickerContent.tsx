@@ -3,7 +3,7 @@ import {
   type ProviderDriverKind,
   type ResolvedKeybindingsConfig,
 } from "@cafecode/contracts";
-import { resolveSelectableModel } from "@cafecode/shared/model";
+import { isCodexDaybreakAlias, resolveSelectableModel } from "@cafecode/shared/model";
 import { memo, useMemo, useState, useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { SearchIcon } from "lucide-react";
 import { ModelListRow } from "./ModelListRow";
@@ -201,6 +201,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
         continue;
       }
       for (const model of models) {
+        if (entry.driverKind === "codex" && isCodexDaybreakAlias(model.slug)) continue;
         out.push({
           slug: model.slug,
           name: model.name,

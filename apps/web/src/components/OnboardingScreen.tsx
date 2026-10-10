@@ -624,9 +624,11 @@ export function OnboardingScreen() {
   const headerClassName = useMemo(
     () =>
       cn(
-        "relative z-10 flex h-[52px] shrink-0 items-center justify-between gap-2 px-4",
-        isElectron &&
-          "drag-region wco:h-[env(titlebar-area-height)] wco:pr-[calc(100vw-env(titlebar-area-width)-env(titlebar-area-x)+1em)]",
+        "relative z-10 flex shrink-0 items-center justify-between gap-2 px-4",
+        // Desktop shares the native title band so the window buttons stay centred.
+        isElectron
+          ? "drag-region h-(--app-titlebar-height) wco:h-[env(titlebar-area-height)] wco:pr-[calc(100vw-env(titlebar-area-width)-env(titlebar-area-x)+1em)]"
+          : "h-[52px]",
       ),
     [],
   );

@@ -1,5 +1,6 @@
 import { FileAttachmentPill } from "./FileAttachmentPill";
 import { TurnConfigurationWorkEntry } from "./TurnConfigurationWorkEntry";
+import { ComputerUseIcon } from "./ComputerUseIcon";
 import {
   type EnvironmentId,
   type EditorId,
@@ -271,6 +272,7 @@ interface MessagesTimelineProps {
   /** True until the detail stream has delivered its first complete snapshot. */
   isThreadHistoryHydrating?: boolean;
   isWorking: boolean;
+  showWorkingIndicator?: boolean;
   activeTurnInProgress: boolean;
   activeTurnId?: TurnId | null;
   activeTurnStartedAt: string | null;
@@ -316,6 +318,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   scheduledFollowups,
   isThreadHistoryHydrating = false,
   isWorking,
+  showWorkingIndicator = true,
   activeTurnInProgress,
   activeTurnId,
   activeTurnStartedAt,
@@ -367,6 +370,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         completionDividerAfterEntryId,
         completionSummary,
         isWorking,
+        showWorkingIndicator,
         activeTurnInProgress,
         activeTurnId: activeTurnId ?? null,
         activeTurnStartedAt,
@@ -380,6 +384,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       completionDividerAfterEntryId,
       completionSummary,
       isWorking,
+      showWorkingIndicator,
       activeTurnInProgress,
       activeTurnId,
       activeTurnStartedAt,
@@ -1334,7 +1339,11 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
   return (
     <div
       className={cn(
-        "pb-4",
+        row.kind === "message" && row.message.role === "assistant"
+          ? "pb-4 [@media(hover:hover)]:pb-8"
+          : row.kind === "message" && row.message.role === "user"
+            ? "pb-4 [@media(hover:hover)]:pb-5"
+            : "pb-4",
         row.kind === "message" && row.message.role === "assistant" ? "group/assistant" : null,
         // Translate on the row's own content never changes the size LegendList
         // measures on its container.
@@ -1678,7 +1687,7 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
   );
 
   return (
-    <div className="min-w-0 px-1 py-0.5" onContextMenu={handleContextMenu}>
+    <div className="relative min-w-0 px-1 py-0.5" onContextMenu={handleContextMenu}>
       <div data-chat-copy-region="assistant" data-chat-copy-message-id={row.message.id}>
         <ChatMarkdown
           text={messageText}
@@ -1689,7 +1698,13 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
           skills={ctx.skills}
         />
       </div>
-      <div className="mt-1.5 flex items-center gap-2">
+      <div
+        className={cn(
+          "mt-1.5 flex items-center gap-2 [@media(hover:hover)]:absolute [@media(hover:hover)]:left-1 [@media(hover:hover)]:top-full [@media(hover:hover)]:mt-0.5",
+          contextCopied ? "opacity-100" : ASSISTANT_MESSAGE_META_REVEAL_CLASS_NAME,
+        )}
+        data-assistant-message-footer="true"
+      >
         <p
           className={cn(
             "text-2xs text-subtle-foreground tabular-nums",
@@ -2428,6 +2443,10 @@ const CollapsibleUserMessageBody = memo(function CollapsibleUserMessageBody(prop
           className={cn(
             "mt-1.5 flex items-center gap-2",
             canCollapse && props.footer ? "justify-between" : "justify-end",
+            !canCollapse &&
+              props.footer &&
+              "[@media(hover:hover)]:absolute [@media(hover:hover)]:right-3 [@media(hover:hover)]:-bottom-0.5 [@media(hover:hover)]:mt-0 [@media(hover:hover)]:translate-y-1/2",
+            !canCollapse && props.footer && USER_MESSAGE_META_REVEAL_CLASS_NAME,
           )}
           data-user-message-footer="true"
         >
@@ -2574,7 +2593,8 @@ function workEntryRawCommand(
   return rawCommand === workEntry.command.trim() ? null : rawCommand;
 }
 
-function workEntryIcon(workEntry: TimelineWorkEntry): LucideIcon {
+function workEntryIcon(workEntry: TimelineWorkEntry): LucideIcon | typeof ComputerUseIcon {
+  if (workEntry.computerUse) return ComputerUseIcon;
   if (workEntry.requestKind === "command") return TerminalIcon;
   if (workEntry.requestKind === "terminal-input") return TerminalIcon;
   if (workEntry.requestKind === "file-read") return EyeIcon;
@@ -2639,6 +2659,7 @@ function openFileWithPreferredEditor(input: {
 }
 
 function toolWorkEntryHeading(workEntry: TimelineWorkEntry): string {
+  if (workEntry.computerUse) return workEntry.label;
   if (!workEntry.toolTitle) {
     return capitalizePhrase(normalizeCompactToolLabel(workEntry.label));
   }

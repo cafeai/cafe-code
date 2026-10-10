@@ -8,6 +8,7 @@ import {
   PROVIDER_PIPELINE_POLICY,
 } from "@cafecode/shared/providerPipelinePolicy";
 import { setProviderSubscriptionDiagnostics } from "@cafecode/shared/providerPipelineDiagnostics";
+import { readLiveWorkObservation } from "@cafecode/shared/liveWork";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -105,6 +106,7 @@ function isThreadDetailEvent(event: OrchestrationEvent): boolean {
 
 function doesActivityAffectShell(event: OrchestrationEvent): boolean {
   if (event.type !== "thread.activity-appended") return true;
+  if (readLiveWorkObservation(event.payload.activity)) return true;
   switch (event.payload.activity.kind) {
     case "approval.requested":
     case "approval.resolved":

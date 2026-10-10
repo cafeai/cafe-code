@@ -534,7 +534,9 @@ body::after {
 :root {
   --thread-status-dot-size: 0.375rem;
   /* Electron's frameless title bar band (traffic lights / window controls).
-     Pixel-based on purpose: it matches native chrome, not the interface size. */
+     Pixel-based on purpose: it matches native chrome, not the interface size.
+     macOS centres its window buttons in this band via trafficLightPosition in
+     apps/desktop/src/window/DesktopWindow.ts; change both together. */
   --app-titlebar-height: 44px;
 }
 

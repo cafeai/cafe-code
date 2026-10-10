@@ -361,21 +361,53 @@ describe("ProviderModelPicker", () => {
     }
   });
 
-  it("uses available compact-footer width to show Daybreak Blue without clipping", async () => {
+  it("hides retired Daybreak aliases even when cached in the provider catalogue", async () => {
+    const mounted = await mountPicker({
+      model: "account-model",
+      lockedProvider: ProviderDriverKind.make("codex"),
+      providers: [
+        buildCodexProvider([
+          { slug: "account-model", name: "Account model", isCustom: false, capabilities: {} },
+          {
+            slug: "gpt-daybreak-blue-latest",
+            name: "Daybreak Blue",
+            isCustom: false,
+            capabilities: {},
+          },
+          {
+            slug: "gpt-daybreak-red-latest",
+            name: "Daybreak Red",
+            isCustom: false,
+            capabilities: {},
+          },
+        ]),
+      ],
+    });
+    try {
+      await page.getByRole("button", { name: "Account model", exact: true }).click();
+      expect(getModelPickerListText()).toContain("Account model");
+      expect(getModelPickerListText()).not.toContain("Daybreak");
+      expect(mounted.onInstanceModelChange).not.toHaveBeenCalled();
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("uses available compact-footer width to show the model name without clipping", async () => {
     const originalViewport = { width: window.innerWidth, height: window.innerHeight };
     await page.viewport(477, Math.max(700, originalViewport.height));
 
-    const daybreakModel = {
-      slug: "gpt-daybreak-blue-latest",
-      name: "Daybreak Blue",
+    const model = {
+      slug: "gpt-6.1-sol",
+      name: "GPT-6.1 Sol",
       isCustom: false,
       capabilities: createModelCapabilities({ optionDescriptors: [] }),
     };
     const mounted = await mountPicker({
       activeInstanceId: CODEX_INSTANCE_ID,
-      model: daybreakModel.slug,
+      model: model.slug,
       lockedProvider: ProviderDriverKind.make("codex"),
-      providers: [buildCodexProvider([daybreakModel])],
+      providers: [buildCodexProvider([model])],
       compact: true,
       hostWidth: 260,
     });
@@ -389,7 +421,7 @@ describe("ProviderModelPicker", () => {
           '[data-provider-model-trigger-title="true"]',
         );
         expect(trigger).not.toBeNull();
-        expect(title?.textContent).toBe("Daybreak Blue");
+        expect(title?.textContent).toBe("GPT-6.1 Sol");
         expect(title!.scrollWidth).toBeLessThanOrEqual(title!.clientWidth);
         expect(trigger!.getBoundingClientRect().right).toBeLessThanOrEqual(
           mounted.host.getBoundingClientRect().right,

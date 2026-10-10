@@ -63,6 +63,31 @@ const ULTRATHINK_FRAME_CLASSES = {
 } as const;
 
 describe("getComposerProviderState", () => {
+  it("dispatches the persisted Daybreak choice and retains it for validation after capability loss", () => {
+    const input = {
+      provider: PROVIDER,
+      model: MODEL,
+      prompt: "",
+      modelOptions: selections(["cyberAccessProgram", "daybreakBlue"]),
+    };
+    const descriptor = selectDescriptor("cyberAccessProgram", [
+      { id: "standard", label: "Off" },
+      { id: "daybreakBlue", label: "On" },
+    ]);
+    const enabled = getComposerProviderState({ ...input, models: modelWith([descriptor]) });
+    expect(enabled.modelOptionsForDispatch).toEqual(input.modelOptions);
+    expect(enabled.traitsTriggerLabel).toBe("Daybreak");
+    const lost = getComposerProviderState({ ...input, models: modelWith([]) });
+    expect(lost.modelOptionsForDispatch).toEqual(input.modelOptions);
+    expect(lost.traitsTriggerLabel).toBeNull();
+    const off = getComposerProviderState({
+      ...input,
+      models: modelWith([descriptor]),
+      modelOptions: selections(["cyberAccessProgram", "standard"]),
+    });
+    expect(off.modelOptionsForDispatch).toEqual(selections(["cyberAccessProgram", "standard"]));
+    expect(off.traitsTriggerLabel).toBeNull();
+  });
   it("returns descriptor defaults when no selections are provided", () => {
     const state = getComposerProviderState({
       provider: PROVIDER,

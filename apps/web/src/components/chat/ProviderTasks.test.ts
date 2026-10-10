@@ -71,13 +71,13 @@ describe("ordinary provider task controls", () => {
       expect(deriveActiveProviderTasks({ ...context, activities: [started, update] })).toEqual([]);
       expect(deriveActiveProviderTasks({ ...context, activities: [update, started] })).toEqual([]);
     }
-    expect(
-      deriveActiveProviderTasks({
-        ...context,
-        providerInstanceId: ProviderInstanceId.make("other"),
-        activities: [started],
-      }),
-    ).toEqual([]);
+    const otherAccountTasks = deriveActiveProviderTasks({
+      ...context,
+      providerInstanceId: ProviderInstanceId.make("other"),
+      activities: [started],
+    });
+    expect(otherAccountTasks).toHaveLength(1);
+    expect(otherAccountTasks[0]?.reference).toBeUndefined();
     expect(
       deriveActiveProviderTasks({
         ...context,
@@ -103,7 +103,7 @@ describe("ordinary provider task controls", () => {
       },
     });
     expect(
-      deriveActiveProviderTasks({ ...context, activities: [started] })[0]?.reference.taskId,
+      deriveActiveProviderTasks({ ...context, activities: [started] })[0]?.reference?.taskId,
     ).toBe("server-minted-control");
     const sibling = activity("tool.started", {
       itemId: "sibling",
@@ -116,7 +116,7 @@ describe("ordinary provider task controls", () => {
     });
     expect(
       deriveActiveProviderTasks({ ...context, activities: [started, sibling, detached] }).map(
-        (task) => task.reference.taskId,
+        (task) => task.reference?.taskId,
       ),
     ).toEqual(["sibling-control"]);
   });

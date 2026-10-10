@@ -70,12 +70,22 @@ export function getComposerProviderState(input: ComposerProviderStateInput): Com
     primarySelectDescriptor ?? null,
     ultrathinkActive,
   );
+  const dispatchOptions = buildProviderOptionSelectionsFromDescriptors(descriptors);
+  const retainedDaybreak =
+    provider === "codex"
+      ? modelOptions?.find((option) => option.id === "cyberAccessProgram")
+      : undefined;
 
   return {
     provider,
     promptEffort,
     traitsTriggerLabel: traitsTriggerLabel || null,
-    modelOptionsForDispatch: buildProviderOptionSelectionsFromDescriptors(descriptors),
+    // A disappeared entitlement must reach server validation, not silently
+    // erase an explicit On/Off choice and fall back to provider auto-routing.
+    modelOptionsForDispatch:
+      retainedDaybreak && !descriptors.some((entry) => entry.id === "cyberAccessProgram")
+        ? [...(dispatchOptions ?? []), retainedDaybreak]
+        : dispatchOptions,
     ...(ultrathinkActive
       ? {
           composerFrameClassName: "ultrathink-frame",

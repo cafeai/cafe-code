@@ -645,7 +645,19 @@ export function TextGenerationModelSettingsRow() {
             models={
               // Use the exact instance's models so custom text-generation instances
               // keep their own model list instead of falling back to the default kind.
-              textGenInstanceEntry?.models ?? []
+              (textGenInstanceEntry?.models ?? []).map((model) => ({
+                ...model,
+                ...(textGenProvider === "codex" && model.capabilities
+                  ? {
+                      capabilities: {
+                        ...model.capabilities,
+                        optionDescriptors: model.capabilities.optionDescriptors?.filter(
+                          (option) => option.id !== "cyberAccessProgram",
+                        ),
+                      },
+                    }
+                  : {}),
+              }))
             }
             model={textGenModel}
             prompt=""

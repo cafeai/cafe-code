@@ -71,6 +71,82 @@ async function fixture(fault?: "action" | "cleanup") {
 }
 
 describe("Electron-owned native control authority", () => {
+  it("reacquires within the same active turn after release and rejects previous target handles", async () => {
+    const f = await fixture();
+    try {
+      const binding = await f.bind();
+      await binding.update("activate");
+      await binding.update("begin-turn");
+      f.request.mockImplementation(async (body) =>
+        body.method === "trusted_session_end"
+          ? { closed: true }
+          : {
+              content: [],
+              structuredContent: { pid: 1, window_id: 2, snapshot_id: "s00000001", elements: [] },
+            },
+      );
+      const selected = await binding.call("computer_select", { pid: 1, window_id: 2 });
+      const selectedState = JSON.parse(String(selected.result.content[0]!.text)) as {
+        target: string;
+      };
+      await binding.call("release_control");
+      const old = await binding.call("computer_observe", { target: selectedState.target });
+      expect(old.result.isError).toBe(true);
+      expect(f.controller.session).toHaveBeenCalledTimes(2);
+      const sessions = vi.mocked(f.controller.session).mock.calls.map(([label]) => label);
+      expect(new Set(sessions).size).toBe(2);
+      expect(
+        f.request.mock.calls.filter(([body]) => body.name === "get_window_state"),
+      ).toHaveLength(1);
+      const current = await binding.call("computer_select", { pid: 1, window_id: 2 });
+      expect(current.result.isError).not.toBe(true);
+      expect(JSON.parse(String(current.result.content[0]!.text)).target).not.toBe(
+        selectedState.target,
+      );
+      await binding.update("end-turn");
+      expect((await binding.call("computer_select", { pid: 1, window_id: 2 })).result.isError).toBe(
+        true,
+      );
+      expect(f.controller.session).toHaveBeenCalledTimes(2);
+    } finally {
+      await f.host.close();
+    }
+  });
+  it("rechecks trusted chat admission between every action in a bound batch", async () => {
+    const f = await fixture();
+    let disabling: Promise<unknown> | undefined;
+    try {
+      const binding = await f.bind();
+      await binding.update("activate");
+      await binding.update("begin-turn");
+      f.request.mockImplementation(async (body) => {
+        if (body.method === "trusted_session_end") return { closed: true };
+        if (body.name === "press_key") {
+          disabling = f.host.setChatEnabled("fixture-thread" as ThreadId, false);
+          return { content: [], structuredContent: { effect: "unverifiable" } };
+        }
+        return {
+          content: [],
+          structuredContent: { pid: 1, window_id: 2, snapshot_id: "s00000001", elements: [] },
+        };
+      });
+      const selected = await binding.call("computer_select", { pid: 1, window_id: 2 });
+      const target = JSON.parse(String(selected.result.content[0]!.text)).target as string;
+      const response = await binding.call("computer_act", {
+        target,
+        actions: [
+          { type: "key", keys: ["return"] },
+          { type: "key", keys: ["escape"] },
+        ],
+      });
+      expect(response.result.isError).toBe(true);
+      await disabling;
+      expect(f.request.mock.calls.filter(([body]) => body.name === "press_key")).toHaveLength(1);
+      expect(f.request).toHaveBeenCalledWith({ method: "trusted_session_end" });
+    } finally {
+      await f.host.close();
+    }
+  });
   it("rechecks chat opt-in between a refused action and its automatic foreground fallback", async () => {
     const f = await fixture();
     let disabling: Promise<unknown> | undefined;
@@ -122,7 +198,7 @@ describe("Electron-owned native control authority", () => {
         (await binding.call("get_window_state", { pid: 1, window_id: 2 })).result.isError,
       ).not.toBe(true);
       expect(f.controller.session).toHaveBeenCalledWith(
-        expect.stringMatching(/^Codex · [0-9a-f]{8}$/u),
+        expect.stringMatching(/^Codex · [0-9a-f]{8} · [0-9a-f-]{36}$/u),
       );
       expect(f.request).toHaveBeenCalledWith({
         method: "trusted_session_call",
@@ -337,12 +413,20 @@ describe("Electron-owned native control authority", () => {
     try {
       const b = await f.bind();
       const catalog = (await b.rpc("tools/list")).result.tools!;
-      expect(catalog.some((tool) => tool.name === "click")).toBe(true);
+      expect(catalog.map((tool) => tool.name)).toEqual([
+        "computer_select",
+        "computer_observe",
+        "computer_act",
+        "computer_advanced",
+        "health",
+        "open_url",
+        "release_control",
+      ]);
       expect(catalog.some((tool) => /install|update|model|remote|session/u.test(tool.name))).toBe(
         false,
       );
-      expect(catalog.some((tool) => tool.name === "launch_app")).toBe(true);
-      expect(catalog.some((tool) => tool.name === "browser_click")).toBe(true);
+      expect(catalog.some((tool) => tool.name === "launch_app")).toBe(false);
+      expect(catalog.some((tool) => tool.name === "browser_click")).toBe(false);
       expect((await b.call("click", {})).result.isError).toBe(true);
       await b.update("activate");
       expect((await b.call("click", {})).result.isError).toBe(true);

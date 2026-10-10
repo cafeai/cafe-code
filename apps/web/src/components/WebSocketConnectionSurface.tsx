@@ -50,8 +50,8 @@ export function WebSocketConnectionCoordinator() {
   const status = useWsConnectionStatus();
   const lastForcedReconnectAtRef = useRef(0);
 
-  // Reconnect status is surfaced inline by ConnectionStatusIndicator in the chat
-  // header (spinner + retry detail on hover/tap); failures here stay quiet so the
+  // Reconnect status is surfaced by ConnectionStatusIndicator beside Settings
+  // (spinner + retry detail on hover/tap); failures here stay quiet so the
   // transport can keep retrying without stacking toasts.
   const runReconnect = useEffectEvent(() => {
     lastForcedReconnectAtRef.current = Date.now();

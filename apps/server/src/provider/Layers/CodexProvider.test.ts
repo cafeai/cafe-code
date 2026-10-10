@@ -184,6 +184,66 @@ describe("Codex CLI health probe command", () => {
 });
 
 describe("Codex picker model/list refresh", () => {
+  it("maps caller-specific Daybreak support and removes retired aliases without lending access to custom models", async () => {
+    const client = makeModelListClient(() =>
+      Effect.succeed({
+        data: [
+          {
+            ...makeModel("blue"),
+            availableAccessPrograms: { cyber: ["standard", "daybreakBlue"] },
+          },
+          {
+            ...makeModel("red"),
+            availableAccessPrograms: { cyber: ["standard", "daybreakBlue", "daybreakRed"] },
+          },
+          { ...makeModel("ordinary"), availableAccessPrograms: { cyber: ["standard"] } },
+          makeModel("legacy"),
+          makeModel("gpt-daybreak-blue-latest"),
+          makeModel("gpt-daybreak-red-latest"),
+        ],
+      }),
+    );
+    const discovered = await Effect.runPromise(requestAllCodexModelsWithClient(client));
+    const models = finalizeCodexModelListRefresh(discovered, [
+      "custom",
+      "gpt-daybreak-blue-latest",
+    ]);
+    expect(models?.map((model) => model.slug)).toEqual([
+      "blue",
+      "red",
+      "ordinary",
+      "legacy",
+      "custom",
+    ]);
+    const options = (slug: string) =>
+      models
+        ?.find((model) => model.slug === slug)
+        ?.capabilities?.optionDescriptors?.find((entry) => entry.id === "cyberAccessProgram");
+    expect(options("blue")).toMatchObject({
+      currentValue: "standard",
+      options: [
+        { id: "standard", label: "Off" },
+        { id: "daybreakBlue", label: "On" },
+      ],
+    });
+    expect(options("red")).toMatchObject({
+      currentValue: "standard",
+      options: [
+        { id: "standard", label: "Off" },
+        { id: "daybreakRed", label: "On" },
+      ],
+    });
+    expect(options("ordinary")).toBeUndefined();
+    expect(options("legacy")).toBeUndefined();
+    expect(options("custom")).toBeUndefined();
+    expect(
+      fallbackCodexModelsFromSettings(
+        decodeCodexSettings({
+          customModels: ["gpt-daybreak-blue-latest", "gpt-daybreak-red-latest"],
+        }),
+      ).some((model) => model.slug.includes("daybreak")),
+    ).toBe(false);
+  });
   it("lists Astra first during cold-start fallback and de-duplicates custom entries", () => {
     const models = fallbackCodexModelsFromSettings(
       decodeCodexSettings({ customModels: ["gpt-6-astra"] }),
@@ -480,7 +540,7 @@ describe("Codex picker model/list refresh", () => {
             modelCalls += 1;
             return {
               data: Array.from({ length: CODEX_MODEL_LIST_MAX_MODELS + 1 }, (_, index) =>
-                makeModel(`gpt-overflow-${index}`),
+                makeModel(index === 0 ? "gpt-daybreak-blue-latest" : `gpt-overflow-${index}`),
               ),
               nextCursor: null,
             };

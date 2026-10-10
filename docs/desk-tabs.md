@@ -10,13 +10,21 @@ chat header above them. Native window controls retain their own space. Project
 context remains in each tab's hover title and the sidebar. Source-build badges
 such as **Newer dev** sit beside **Settings** at the bottom of the sidebar.
 
+Web clients narrower than 768px show one chat with its normal title and sidebar
+button, without a tab strip or group controls. Open the sidebar to switch chats
+in Projects or Desk. Saved tabs, drafts and split layouts remain intact; tabs and
+splits return when the browser becomes wide enough. The desktop app retains tabs
+at every width.
+
 - In **Settings → Chats → Single-click behavior**, choose **Preview** (the default)
   or **Open**. Open keeps each clicked chat as a regular tab.
 - With Preview selected, click a chat in Projects, Chats or search to preview it in the current group.
   Preview titles are italic. Opening another chat replaces that group's preview;
   selecting a kept tab dismisses it. Each visible split group has its own preview.
   Double-click the chat row or its tab to keep it open, or choose **Keep open**
-  from the tab's context menu. Kept tabs retain normal titles and restore on restart.
+  from the tab's context menu. Sending a message also keeps its preview open
+  immediately, including queued messages and live steering. Kept tabs retain
+  normal titles and restore on restart.
   Previews are excluded from saved layouts and reopen history. Dragging a tab to
   rearrange or split it keeps it open. Closing a preview retains its input and work.
 - Use the **New chat** icon beside **Chats** in Projects, or the global New chat
@@ -65,6 +73,8 @@ such as **Newer dev** sit beside **Settings** at the bottom of the sidebar.
   Top tabs show only an always-visible close X; rename also remains in their
   right-click menu. Group names fill a flat section of the tab bar beside their
   drag handle. Click a pane's group name to rename the group.
+  The desktop title bar keeps a small blank area just before the upper-right
+  focus and menu icons for moving the window, even when the tabs fill the row.
   In the Desk sidebar, hover or keyboard
   focus a group heading to replace its count with a pencil; click the pencil or
   press F2 to edit the name inline. Enter or clicking away saves, Escape cancels,
@@ -91,6 +101,8 @@ move projects, copy chats, or synchronize a layout to another computer.
 
 Up to four panes can be visible; each can contain many tabs. Smaller windows
 show one group at a time with group-switching controls while retaining the saved
-split layout. Standalone creation and its durable catalog are documented in
+split layout. Tabs share the available width and shrink evenly as more open,
+with truncated titles and visible close buttons. Once they reach their minimum
+width, the strip scrolls. Standalone creation and its durable catalog are documented in
 [Chats without projects](standalone-chats.md); the original tab-group navigation
 and provider-neutral close behavior remain unchanged.

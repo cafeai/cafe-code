@@ -5,6 +5,7 @@ import {
   MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN,
   MessageId,
   NonNegativeInt,
+  SubagentRuntimeId,
   OrchestrationCheckpointFile,
   OrchestrationProposedPlanId,
   OrchestrationReadModel,
@@ -24,10 +25,18 @@ import {
   type OrchestrationSession,
   type OrchestrationThreadActivity,
   type OrchestrationThreadShell,
+  type OrchestrationLiveWork,
   ModelSelection,
   ProjectId,
   ThreadId,
 } from "@cafecode/contracts";
+import {
+  CODEX_ROUTINE_WARNING_FORMATS,
+  CODEX_STEER_PROGRESS_MESSAGES,
+  CODEX_STEER_PROGRESS_TASK_PREFIXES,
+  CODEX_STEER_WAIT_MESSAGE,
+  CODEX_TURN_RUNNING_MESSAGE,
+} from "@cafecode/shared/providerWorkLog";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -591,6 +600,41 @@ function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: st
 
 const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+  const listLiveWorkRows = SqlSchema.findAll({
+    Request: Schema.NullOr(ThreadId),
+    Result: Schema.Struct({
+      threadId: ThreadId,
+      runtimeId: SubagentRuntimeId,
+      taskCount: NonNegativeInt,
+      agentCount: NonNegativeInt,
+    }),
+    execute: (threadId) => sql`
+      SELECT sessions.thread_id AS "threadId", sessions.subagent_runtime_id AS "runtimeId",
+        SUM(CASE WHEN work.is_agent = 0 AND work.active = 1 THEN 1 ELSE 0 END) AS "taskCount",
+        SUM(CASE WHEN work.is_agent = 1 AND work.active = 1 THEN 1 ELSE 0 END) AS "agentCount"
+      FROM projection_thread_sessions AS sessions
+      LEFT JOIN projection_live_work AS work
+        ON work.thread_id = sessions.thread_id AND work.runtime_id = sessions.subagent_runtime_id
+        AND work.active = 1
+      WHERE sessions.status NOT IN ('stopped', 'error')
+        AND ${threadId === null ? sql`1 = 1` : sql`sessions.thread_id = ${threadId}`}
+        AND EXISTS (SELECT 1 FROM projection_live_work AS observed
+          WHERE observed.thread_id = sessions.thread_id AND observed.runtime_id = sessions.subagent_runtime_id)
+      GROUP BY sessions.thread_id, sessions.subagent_runtime_id`,
+  });
+  const readLiveWorkSummaries = (threadId: ThreadId | null) =>
+    listLiveWorkRows(threadId).pipe(
+      Effect.map(
+        (rows) =>
+          new Map(
+            rows.map(
+              ({ threadId: id, ...summary }) =>
+                [id, summary satisfies OrchestrationLiveWork] as const,
+            ),
+          ),
+      ),
+      Effect.mapError(toPersistenceSqlError("ProjectionSnapshotQuery.liveWork:query")),
+    );
   const repositoryIdentityResolver = yield* RepositoryIdentityResolver;
   const lifecycleHydrationScope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
     Scope.close(scope, Exit.void),
@@ -614,6 +658,24 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
    * presentation metadata must not create empty historical Work Log pages.
    * They retain the normal bounded thread-detail activity hydration window.
    */
+  const routineSteerProgressPredicate = sql.or([
+    ...CODEX_STEER_PROGRESS_TASK_PREFIXES.map(
+      (prefix) => sql`COALESCE(json_extract(payload_json, '$.taskId'), '') GLOB ${`${prefix}*`}`,
+    ),
+    ...CODEX_STEER_PROGRESS_MESSAGES.map(
+      (message) =>
+        sql`(json_extract(payload_json, '$.detail') = ${message} OR json_extract(payload_json, '$.description') = ${message})`,
+    ),
+  ]);
+  const routineRuntimeWarningPredicate = sql.or([
+    ...[CODEX_STEER_WAIT_MESSAGE, CODEX_TURN_RUNNING_MESSAGE].map(
+      (message) => sql`json_extract(payload_json, '$.message') = ${message}`,
+    ),
+    ...CODEX_ROUTINE_WARNING_FORMATS.map(
+      (format) =>
+        sql`COALESCE(json_extract(payload_json, '$.message'), '') GLOB ${`${format.prefix}*${format.suffix}`}`,
+    ),
+  ]);
   const historicalWorkLogActivityPredicate = sql.and([
     "kind != 'context-window.updated'",
     "kind != 'checkpoint.captured'",
@@ -623,7 +685,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     "(kind != 'tool.started' OR json_extract(payload_json, '$.itemType') = 'context_compaction')",
     "NOT (kind IN ('task.started', 'task.progress', 'task.completed') AND json_type(payload_json, '$.subagent') IS NOT NULL)",
     "NOT (kind IN ('tool.updated', 'tool.completed') AND COALESCE(json_extract(payload_json, '$.detail'), '') LIKE 'ExitPlanMode:%')",
-    "NOT (kind = 'provider.turn.steer.failed' AND json_extract(payload_json, '$.retryableFollowUp') = 1)",
+    "NOT (kind = 'provider.turn.steer.failed' AND COALESCE(json_extract(payload_json, '$.retryableFollowUp'), 0) = 1)",
+    "kind != 'provider.turn.steer.accepted'",
+    sql`NOT (kind = 'task.progress' AND COALESCE(${routineSteerProgressPredicate}, 0))`,
+    sql`NOT (kind = 'runtime.warning' AND COALESCE(${routineRuntimeWarningPredicate}, 0))`,
   ]);
   // Diagnostics are bounded and keyed only by Cafe thread/turn identity. Never
   // log provider child ids or presentation text when the safety ceiling trips.
@@ -2645,6 +2710,14 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           SELECT activity_id
           FROM recent_activity_ids
           UNION
+          SELECT work.activity_id
+          FROM projection_live_work AS work
+          JOIN projection_thread_sessions AS sessions
+            ON sessions.thread_id = work.thread_id
+            AND sessions.subagent_runtime_id = work.runtime_id
+          WHERE work.thread_id = ${threadId} AND work.active = 1
+            AND sessions.status NOT IN ('stopped', 'error')
+          UNION
           SELECT activity_id
           FROM latest_task_plan_activity_id
           UNION
@@ -3454,6 +3527,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       .pipe(
         Effect.flatMap(([projectRows, threadRows, sessionRows, latestTurnRows, stateRows]) =>
           Effect.gen(function* () {
+            const liveWorkByThread = yield* readLiveWorkSummaries(null);
             let updatedAt: string | null = null;
             for (const row of projectRows) {
               updatedAt = maxIso(updatedAt, row.updatedAt);
@@ -3522,6 +3596,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   hasPendingApprovals: row.pendingApprovalCount > 0,
                   hasPendingUserInput: row.pendingUserInputCount > 0,
                   hasActionableProposedPlan: row.hasActionableProposedPlan > 0,
+                  ...(liveWorkByThread.get(row.threadId)
+                    ? { liveWork: liveWorkByThread.get(row.threadId)! }
+                    : {}),
                 })),
               updatedAt: updatedAt ?? "1970-01-01T00:00:00.000Z",
             };
@@ -3592,6 +3669,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       .pipe(
         Effect.flatMap(([projectRows, threadRows, sessionRows, latestTurnRows, stateRows]) =>
           Effect.gen(function* () {
+            const liveWorkByThread = yield* readLiveWorkSummaries(null);
             let updatedAt: string | null = null;
             for (const row of projectRows) {
               updatedAt = maxIso(updatedAt, row.updatedAt);
@@ -3659,6 +3737,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 hasPendingApprovals: row.pendingApprovalCount > 0,
                 hasPendingUserInput: row.pendingUserInputCount > 0,
                 hasActionableProposedPlan: row.hasActionableProposedPlan > 0,
+                ...(liveWorkByThread.get(row.threadId)
+                  ? { liveWork: liveWorkByThread.get(row.threadId)! }
+                  : {}),
               })),
               updatedAt: updatedAt ?? "1970-01-01T00:00:00.000Z",
             };
@@ -3731,6 +3812,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       .pipe(
         Effect.flatMap(([projectRows, threadRows, sessionRows, latestTurnRows, stateRows]) =>
           Effect.gen(function* () {
+            const liveWorkByThread = yield* readLiveWorkSummaries(null);
             let updatedAt: string | null = null;
             for (const row of projectRows) {
               updatedAt = maxIso(updatedAt, row.updatedAt);
@@ -3802,6 +3884,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 hasPendingApprovals: row.pendingApprovalCount > 0,
                 hasPendingUserInput: row.pendingUserInputCount > 0,
                 hasActionableProposedPlan: row.hasActionableProposedPlan > 0,
+                ...(liveWorkByThread.get(row.threadId)
+                  ? { liveWork: liveWorkByThread.get(row.threadId)! }
+                  : {}),
               })),
               updatedAt: updatedAt ?? "1970-01-01T00:00:00.000Z",
             };
@@ -4011,6 +4096,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         return Option.none<OrchestrationThreadShell>();
       }
 
+      const liveWork = (yield* readLiveWorkSummaries(threadId)).get(threadId);
+
       return Option.some({
         id: threadRow.value.threadId,
         projectId: threadRow.value.projectId,
@@ -4038,6 +4125,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         hasPendingApprovals: threadRow.value.pendingApprovalCount > 0,
         hasPendingUserInput: threadRow.value.pendingUserInputCount > 0,
         hasActionableProposedPlan: threadRow.value.hasActionableProposedPlan > 0,
+        ...(liveWork ? { liveWork } : {}),
       } satisfies OrchestrationThreadShell);
     });
 

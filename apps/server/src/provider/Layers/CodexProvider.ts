@@ -32,7 +32,8 @@ import type {
 } from "@cafecode/contracts";
 import { ProviderDriverKind, ServerSettingsError } from "@cafecode/contracts";
 
-import { createModelCapabilities } from "@cafecode/shared/model";
+import { createModelCapabilities, isCodexDaybreakAlias } from "@cafecode/shared/model";
+import { makeCodexDaybreakDescriptor } from "../codexDaybreak.ts";
 import {
   AUTH_PROBE_TIMEOUT_MS,
   DEFAULT_TIMEOUT_MS,
@@ -724,6 +725,7 @@ function mapCodexModelCapabilities(
         },
   );
   const defaultReasoning = reasoningOptions.find((option) => option.isDefault)?.id;
+  const daybreak = makeCodexDaybreakDescriptor(model.availableAccessPrograms?.cyber);
   // Match ModelPreset::supports_fast_mode in Codex rust-v0.153.3
   // (codex-rs/protocol/src/openai_models.rs). Current catalogues advertise
   // the wire id in serviceTiers; older providers may supply only the
@@ -779,6 +781,7 @@ function mapCodexModelCapabilities(
         // routing, and catalogue order is never consent to paid service.
         options: [{ id: "default", label: "Standard" }, ...tiers],
       },
+      ...(daybreak ? [daybreak] : []),
     ],
   });
 }
@@ -939,15 +942,6 @@ const STATIC_CODEX_MODELS: ReadonlyArray<ServerProviderModel> = [
     }),
   },
   {
-    slug: "gpt-daybreak-blue-latest",
-    name: "Daybreak Blue",
-    isCustom: false,
-    capabilities: makeStaticCodexReasoningCapabilities({
-      defaultEffort: "low",
-      supportedEfforts: CODEX_ULTRA_REASONING_EFFORTS,
-    }),
-  },
-  {
     slug: "gpt-5.5",
     name: "GPT-5.5",
     isCustom: false,
@@ -1002,6 +996,9 @@ function appendCustomCodexModels(
   models: ReadonlyArray<ServerProviderModel>,
   customModels: ReadonlyArray<string>,
 ): ReadonlyArray<ServerProviderModel> {
+  // Filter cached rows as well as live discovery. Stored chat selections stay
+  // readable, but neither a stale catalog nor a custom entry reintroduces aliases.
+  models = models.filter((model) => !isCodexDaybreakAlias(model.slug));
   if (customModels.length === 0) {
     return models;
   }
@@ -1011,7 +1008,7 @@ function appendCustomCodexModels(
   const customEntries: ServerProviderModel[] = [];
   for (const rawModel of customModels) {
     const slug = rawModel.trim();
-    if (!slug || seen.has(slug)) {
+    if (!slug || seen.has(slug) || isCodexDaybreakAlias(slug)) {
       continue;
     }
     seen.add(slug);
@@ -1031,7 +1028,7 @@ function appendCustomCodexModels(
             ...(fallbackCapabilities.optionDescriptors
               ? {
                   optionDescriptors: fallbackCapabilities.optionDescriptors.filter(
-                    (entry) => entry.id !== "serviceTier",
+                    (entry) => entry.id !== "serviceTier" && entry.id !== "cyberAccessProgram",
                   ),
                 }
               : {}),
@@ -1118,7 +1115,8 @@ export const requestAllCodexModelsWithClient = Effect.fn("requestAllCodexModels"
 
     const nextCursor = response.nextCursor ?? undefined;
     if (nextCursor === undefined || nextCursor.length === 0) {
-      return models;
+      // Hidden aliases still count toward the native catalogue bounds.
+      return models.filter((model) => !isCodexDaybreakAlias(model.slug));
     }
     if (models.length >= CODEX_MODEL_LIST_MAX_MODELS) {
       return yield* Effect.fail(

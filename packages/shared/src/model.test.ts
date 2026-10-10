@@ -45,6 +45,33 @@ const codexCaps: ModelCapabilities = createModelCapabilities({
 });
 
 describe("native input capabilities", () => {
+  it("keeps a saved Daybreak On choice across compatible model changes without clearing lost access", () => {
+    for (const [saved, advertised, expected] of [
+      ["daybreakBlue", ["standard", "daybreakRed"], "daybreakRed"],
+      ["daybreakRed", ["standard", "daybreakBlue"], "daybreakBlue"],
+      ["daybreakBlue", ["standard", "daybreakBlue", "daybreakRed"], "daybreakRed"],
+      ["daybreakRed", ["standard"], "daybreakRed"],
+      ["standard", ["daybreakRed"], "standard"],
+    ] as const) {
+      const descriptors = getProviderOptionDescriptors({
+        caps: {
+          optionDescriptors: [
+            {
+              id: "cyberAccessProgram",
+              label: "Daybreak",
+              type: "select",
+              options: advertised.map((id) => ({ id, label: id })),
+              currentValue: "standard",
+            },
+          ],
+        },
+        selections: [{ id: "cyberAccessProgram", value: saved }],
+      });
+      expect(buildProviderOptionSelectionsFromDescriptors(descriptors)).toEqual([
+        { id: "cyberAccessProgram", value: expected },
+      ]);
+    }
+  });
   it("maps legacy Fast into exact service tiers and never auto-selects paid routing", () => {
     const caps: ModelCapabilities = {
       optionDescriptors: [

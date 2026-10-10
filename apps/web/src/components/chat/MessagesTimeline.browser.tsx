@@ -13,9 +13,10 @@ import {
 } from "@cafecode/contracts";
 import { createRef } from "react";
 import type { LegendListRef } from "@legendapp/list/react";
-import { page, userEvent } from "vitest/browser";
+import { cdp, page, userEvent } from "vitest/browser";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
+import { applyInterfaceScalePercent } from "../../interfaceScale";
 import {
   __resetEnvironmentApiOverridesForTests,
   __setEnvironmentApiOverrideForTests,
@@ -341,6 +342,153 @@ function buildAssistantTimelineEntry(input?: {
     },
   };
 }
+
+it.each([80, 100, 130] as const)(
+  "keeps short messages compact and hover actions clear of adjacent rows at %i percent",
+  async (scale) => {
+    const viewport = { width: window.innerWidth, height: window.innerHeight };
+    await page.viewport(1200, 800);
+    const wasDark = document.documentElement.classList.contains("dark");
+    const previousTheme = localStorage.getItem("cafe-code:theme");
+    localStorage.setItem("cafe-code:theme", scale === 80 ? "light" : "dark");
+    document.documentElement.classList.toggle("dark", scale !== 80);
+    applyInterfaceScalePercent(scale);
+    const view = await render(
+      <div className="bg-background text-foreground" style={{ width: 900, height: 540 }}>
+        <MessagesTimeline
+          {...buildProps()}
+          activeProvider={ProviderDriverKind.make("claudeAgent")}
+          onForkMessage={vi.fn()}
+          timelineEntries={[
+            buildUserTimelineEntry("Open YouTube and check my subscriber count."),
+            buildAssistantTimelineEntry({ text: "I’ll open YouTube and check your channel." }),
+            {
+              id: "spacing-compaction",
+              kind: "work",
+              createdAt: "2026-04-13T12:00:02.000Z",
+              entry: {
+                id: "spacing-compaction",
+                createdAt: "2026-04-13T12:00:02.000Z",
+                label: "Compacting context",
+                tone: "info",
+              },
+            },
+          ]}
+        />
+      </div>,
+    );
+    try {
+      expect(document.documentElement.classList.contains("dark")).toBe(scale !== 80);
+      const user = document.querySelector<HTMLElement>('[data-message-role="user"]')!;
+      const body = user.querySelector<HTMLElement>("[data-user-message-body]")!;
+      const bubble = body.closest<HTMLElement>(".group")!;
+      const assistant = document.querySelector<HTMLElement>('[data-message-role="assistant"]')!;
+      const next = document.querySelector<HTMLElement>('[data-timeline-row-kind="work"]')!;
+      const userFooter = user.querySelector<HTMLElement>("[data-user-message-footer]")!;
+      const assistantFooter = assistant.querySelector<HTMLElement>(
+        "[data-assistant-message-footer]",
+      )!;
+      const bubbleHeight = bubble.getBoundingClientRect().height;
+      const assistantHeight = assistant.getBoundingClientRect().height;
+      const bubbleStyle = getComputedStyle(bubble);
+      const bottomGap = bubble.getBoundingClientRect().bottom - body.getBoundingClientRect().bottom;
+      expect(bottomGap).toBeCloseTo(Number.parseFloat(bubbleStyle.paddingBottom) + 1, 0);
+      expect(bottomGap).toBeCloseTo(
+        body.getBoundingClientRect().top - bubble.getBoundingClientRect().top,
+        0,
+      );
+
+      await page.elementLocator(bubble).hover();
+      await expect.poll(() => getComputedStyle(userFooter).opacity).toBe("1");
+      expect(bubble.getBoundingClientRect().height).toBe(bubbleHeight);
+      expect(userFooter.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+        assistant.getBoundingClientRect().top,
+      );
+      // Fractional rem sizes can round adjacent edges by a fraction of a pixel.
+      expect(userFooter.getBoundingClientRect().top + 0.1).toBeGreaterThanOrEqual(
+        body.getBoundingClientRect().bottom,
+      );
+
+      await page.elementLocator(assistant).hover();
+      await expect.poll(() => getComputedStyle(assistantFooter).opacity).toBe("1");
+      expect(assistant.getBoundingClientRect().height).toBe(assistantHeight);
+      expect(assistantFooter.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+        next.getBoundingClientRect().top,
+      );
+      const markdown = assistant.querySelector<HTMLElement>("[data-chat-copy-region]")!;
+      const rootSize = Number.parseFloat(getComputedStyle(document.documentElement).fontSize);
+      expect(
+        next.getBoundingClientRect().top - markdown.getBoundingClientRect().bottom,
+      ).toBeLessThanOrEqual(rootSize * 2.25);
+      await page.screenshot({
+        path: `../../../../../.explorations/message-spacing/hover-${scale}.png`,
+      });
+      await page.elementLocator(document.body).hover();
+      const copy = assistantFooter.querySelector<HTMLButtonElement>(
+        'button[aria-label="Copy message"]',
+      )!;
+      copy.focus();
+      await expect.poll(() => getComputedStyle(assistantFooter).opacity).toBe("1");
+      expect(assistant.getBoundingClientRect().height).toBe(assistantHeight);
+    } finally {
+      await view.unmount();
+      applyInterfaceScalePercent(undefined);
+      if (previousTheme === null) localStorage.removeItem("cafe-code:theme");
+      else localStorage.setItem("cafe-code:theme", previousTheme);
+      document.documentElement.classList.toggle("dark", wasDark);
+      await page.viewport(viewport.width, viewport.height);
+    }
+  },
+);
+
+it("keeps message actions visible and inside the normal layout on touch screens", async () => {
+  const input = cdp();
+  await input.send("Emulation.setDeviceMetricsOverride", {
+    width: 430,
+    height: 932,
+    deviceScaleFactor: 1,
+    mobile: true,
+  });
+  await input.send("Emulation.setTouchEmulationEnabled", { enabled: true });
+  let view: Awaited<ReturnType<typeof render>> | undefined;
+  try {
+    expect(window.matchMedia("(hover: none)").matches).toBe(true);
+    view = await render(
+      <div className="bg-background text-foreground" style={{ width: "100%", height: 540 }}>
+        <MessagesTimeline
+          {...buildProps()}
+          activeProvider={ProviderDriverKind.make("claudeAgent")}
+          onForkMessage={vi.fn()}
+          timelineEntries={[
+            buildUserTimelineEntry("Open YouTube and check my subscriber count."),
+            buildAssistantTimelineEntry({ text: "I’ll open YouTube and check your channel." }),
+          ]}
+        />
+      </div>,
+    );
+    const userFooter = document.querySelector<HTMLElement>("[data-user-message-footer]")!;
+    const assistantFooter = document.querySelector<HTMLElement>("[data-assistant-message-footer]")!;
+    await expect.poll(() => getComputedStyle(userFooter).opacity).toBe("1");
+    await expect.poll(() => getComputedStyle(assistantFooter).opacity).toBe("1");
+    expect(getComputedStyle(userFooter).position).toBe("static");
+    expect(getComputedStyle(assistantFooter).position).toBe("static");
+    const bubble = userFooter.closest<HTMLElement>(".group")!;
+    expect(userFooter.getBoundingClientRect().bottom).toBeLessThan(
+      bubble.getBoundingClientRect().bottom,
+    );
+    await expect
+      .element(page.getByRole("button", { name: "Copy message", exact: true }).first())
+      .toBeVisible();
+    await expect
+      .element(page.getByRole("button", { name: "Fork from this message", exact: true }).first())
+      .toBeVisible();
+    await page.screenshot({ path: "../../../../../.explorations/message-spacing/touch.png" });
+  } finally {
+    await view?.unmount();
+    await input.send("Emulation.setTouchEmulationEnabled", { enabled: false });
+    await input.send("Emulation.clearDeviceMetricsOverride");
+  }
+});
 
 function buildLiveSubagentWorkEntry(id: string, label: string) {
   return {

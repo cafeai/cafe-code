@@ -3,6 +3,7 @@ import {
   EnvironmentId,
   EventId,
   MessageId,
+  type OrchestrationThreadActivity,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -17,6 +18,7 @@ import {
   canRetryLegacyCodexRootCompletion,
   createLocalDispatchSnapshot,
   deriveRetryableSteerReplayCandidates,
+  deriveSteeringDeliveryStatus,
   deriveComposerSendState,
   deriveLockedProvider,
   doesSteerFailureActivityMatchPending,
@@ -39,6 +41,130 @@ import {
 } from "./ChatView.logic";
 
 const localEnvironmentId = EnvironmentId.make("environment-local");
+
+describe("steering delivery presentation", () => {
+  const accepted = {
+    id: EventId.make("accepted"),
+    kind: "provider.turn.steer.accepted",
+    tone: "info",
+    summary: "Steer accepted",
+    turnId: TurnId.make("turn-1"),
+    createdAt: "2026-10-09T12:00:01.000Z",
+    payload: {
+      provider: "codex",
+      messageId: "message-1",
+      acceptedTurnId: "turn-1",
+      intentSequence: 42,
+      clientCorrelationId: "correlation-1",
+    },
+  } satisfies OrchestrationThreadActivity;
+  const waiting = {
+    ...accepted,
+    id: EventId.make("waiting"),
+    kind: "runtime.warning",
+    summary: "Runtime warning",
+    createdAt: "2026-10-09T12:00:16.000Z",
+    payload: {
+      message:
+        "Codex accepted turn/steer; it is queued until the active turn finishes current child-process work (4 live descendant processes).",
+      detail: { clientCorrelationId: "correlation-1" },
+    },
+  } satisfies OrchestrationThreadActivity;
+  const pending = {
+    provider: "codex",
+    pendingMessageId: "message-1",
+    pendingIntentSequence: 42,
+    dispatchedAt: "2026-10-09T12:00:00.000Z",
+  };
+
+  it("distinguishes dispatch from provider receipt and a correlated wait", () => {
+    expect(deriveSteeringDeliveryStatus({ ...pending, activities: [] })).toBe("sending");
+    expect(deriveSteeringDeliveryStatus({ ...pending, activities: [accepted] })).toBe("received");
+    expect(deriveSteeringDeliveryStatus({ ...pending, activities: [accepted, waiting] })).toBe(
+      "waiting",
+    );
+    expect(deriveSteeringDeliveryStatus({ ...pending, activities: [waiting] })).toBe("sending");
+  });
+
+  it("ignores sibling and older-generation acceptance", () => {
+    for (const payload of [
+      { ...accepted.payload, messageId: "sibling-message" },
+      { ...accepted.payload, intentSequence: 41 },
+      { ...accepted.payload, provider: "claudeAgent" },
+      { ...accepted.payload, acceptedTurnId: null },
+    ]) {
+      expect(
+        deriveSteeringDeliveryStatus({ ...pending, activities: [{ ...accepted, payload }] }),
+      ).toBe("sending");
+    }
+  });
+
+  it("does not use a sibling, earlier-attempt or unrelated warning", () => {
+    const warnings = [
+      { ...waiting, payload: { ...waiting.payload, detail: { clientCorrelationId: "sibling" } } },
+      { ...waiting, turnId: TurnId.make("sibling-turn") },
+      { ...waiting, createdAt: "2026-10-09T11:59:59.000Z" },
+      { ...waiting, payload: { ...waiting.payload, message: "Provider transport retrying" } },
+      { ...waiting, kind: "runtime.error" },
+    ];
+    for (const warning of warnings) {
+      expect(deriveSteeringDeliveryStatus({ ...pending, activities: [accepted, warning] })).toBe(
+        "received",
+      );
+    }
+  });
+
+  it("uses the exact intent sequence across client clock skew, and time before ACK", () => {
+    const futureDispatch = { ...pending, dispatchedAt: "2026-10-09T12:01:00.000Z" };
+    expect(
+      deriveSteeringDeliveryStatus({ ...futureDispatch, activities: [accepted, waiting] }),
+    ).toBe("waiting");
+    expect(
+      deriveSteeringDeliveryStatus({
+        ...futureDispatch,
+        pendingIntentSequence: null,
+        activities: [accepted, waiting],
+      }),
+    ).toBe("sending");
+    expect(
+      deriveSteeringDeliveryStatus({
+        ...pending,
+        pendingIntentSequence: null,
+        activities: [accepted],
+      }),
+    ).toBe("received");
+  });
+
+  it("preserves generic steering for other providers and legacy receipt without a token", () => {
+    expect(
+      deriveSteeringDeliveryStatus({ ...pending, provider: "claudeAgent", activities: [] }),
+    ).toBe("steering");
+    expect(
+      deriveSteeringDeliveryStatus({
+        ...pending,
+        activities: [
+          { ...accepted, payload: { ...accepted.payload, clientCorrelationId: undefined } },
+          waiting,
+        ],
+      }),
+    ).toBe("received");
+  });
+
+  it("retains an observed phase when bounded snapshots trim diagnostic activities", () => {
+    for (const previousStatus of ["received", "waiting"] as const) {
+      expect(deriveSteeringDeliveryStatus({ ...pending, activities: [], previousStatus })).toBe(
+        previousStatus,
+      );
+    }
+    expect(
+      deriveSteeringDeliveryStatus({
+        ...pending,
+        activities: [accepted],
+        previousStatus: "waiting",
+      }),
+    ).toBe("waiting");
+  });
+});
 
 const fetchBoundedRetryImage: typeof fetch = async () =>
   new Response(new Uint8Array([137, 80, 78, 71]), {

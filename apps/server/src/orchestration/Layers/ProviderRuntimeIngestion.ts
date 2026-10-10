@@ -732,6 +732,7 @@ function runtimeEventToActivities(
                   ? `${event.payload.taskType} task started`
                   : "Task started",
           payload: {
+            ...(event.subagentRuntimeId ? { nativeWorkRuntimeId: event.subagentRuntimeId } : {}),
             ...(event.payload.individualTaskControl
               ? { individualTaskControl: event.payload.individualTaskControl }
               : {}),
@@ -758,6 +759,7 @@ function runtimeEventToActivities(
           kind: "task.progress",
           summary: event.payload.subagent ? "Subagent update" : "Reasoning update",
           payload: {
+            ...(event.subagentRuntimeId ? { nativeWorkRuntimeId: event.subagentRuntimeId } : {}),
             ...(event.payload.individualTaskControl
               ? { individualTaskControl: event.payload.individualTaskControl }
               : {}),
@@ -795,6 +797,7 @@ function runtimeEventToActivities(
                   ? "Subagent completed"
                   : "Task completed",
           payload: {
+            ...(event.subagentRuntimeId ? { nativeWorkRuntimeId: event.subagentRuntimeId } : {}),
             taskId: event.payload.taskId,
             status: event.payload.status,
             ...(event.payload.visibility ? { visibility: event.payload.visibility } : {}),
@@ -930,6 +933,7 @@ function runtimeEventToActivities(
           kind: "tool.updated",
           summary: event.payload.title ?? "Tool updated",
           payload: {
+            ...(event.subagentRuntimeId ? { nativeWorkRuntimeId: event.subagentRuntimeId } : {}),
             ...(event.payload.individualTaskControl
               ? { individualTaskControl: event.payload.individualTaskControl }
               : {}),
@@ -985,6 +989,7 @@ function runtimeEventToActivities(
           kind: "tool.completed",
           summary: itemLifecycleActivitySummary(event.payload, "completed"),
           payload: {
+            ...(event.subagentRuntimeId ? { nativeWorkRuntimeId: event.subagentRuntimeId } : {}),
             itemType: event.payload.itemType,
             ...(event.payload.status ? { status: event.payload.status } : {}),
             ...(event.itemId !== undefined ? { itemId: event.itemId } : {}),
@@ -1027,6 +1032,7 @@ function runtimeEventToActivities(
           kind: "tool.started",
           summary: itemLifecycleActivitySummary(event.payload, "started"),
           payload: {
+            ...(event.subagentRuntimeId ? { nativeWorkRuntimeId: event.subagentRuntimeId } : {}),
             ...(event.payload.individualTaskControl
               ? { individualTaskControl: event.payload.individualTaskControl }
               : {}),

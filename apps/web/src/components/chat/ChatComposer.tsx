@@ -79,10 +79,7 @@ import { type ComposerCommandItem, ComposerCommandMenu } from "./ComposerCommand
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
 import { NativeCodexReview } from "./NativeCodexReview";
-import {
-  ClaudeDeliveryPriorityPicker,
-  ClaudeDeliveryPriorityControl,
-} from "./ClaudeDeliveryPriorityPicker";
+import { ClaudeDeliveryPriorityPicker } from "./ClaudeDeliveryPriorityPicker";
 import { ComposerTab } from "./ComposerTab";
 import { useUiStateStore } from "../../uiStateStore";
 import { ComposerAttachImageButton } from "./ComposerAttachImageButton";
@@ -110,6 +107,8 @@ import {
   type SubagentConcurrencyPresentation,
 } from "../../subagentConcurrency";
 import { ComputerUseButton } from "./ComputerUseButton";
+import { ComposerActivityStatus } from "./ComposerActivityStatus";
+import type { ChatActivityPresentation } from "./chatActivity";
 import { buildExpandedImagePreview, type ExpandedImagePreview } from "./ExpandedImagePreview";
 import { basenameOfPath } from "../../vscode-icons";
 import { cn, newCommandId, randomUUID } from "~/lib/utils";
@@ -381,7 +380,27 @@ export interface SteeringFollowUpViewItem {
   dispatchedAt: string;
   files?: readonly ChatFileAttachment[];
   environmentId?: EnvironmentId;
+  deliveryStatus?: "sending" | "received" | "waiting" | "steering";
 }
+
+const STEERING_DELIVERY_PRESENTATION = {
+  sending: {
+    label: "Sending",
+    description: "Sending your message. Waiting for Codex to confirm receipt.",
+  },
+  received: {
+    label: "Received",
+    description: "Codex received your message. Waiting for it to pick it up.",
+  },
+  waiting: {
+    label: "Waiting",
+    description: "Codex received your message and hasn't picked it up yet.",
+  },
+  steering: {
+    label: "Steering",
+    description: "Waiting for the provider to pick up your message.",
+  },
+} as const;
 
 function queuedMessageCountLabel(count: number): string | null {
   if (count <= 0) return null;
@@ -505,46 +524,51 @@ export function FollowUpQueueShelf(props: {
         ) : null}
       </div>
       <div ref={rowsRef} className="relative z-10 mt-1.5 grid gap-1">
-        {steeringItems.map((item) => (
-          <div
-            key={item.id}
-            className="rounded-xl border border-border-subtle bg-muted/20 p-2"
-            data-cafe-followup-steering="true"
-          >
-            <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2">
-              <span
-                className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground"
-                aria-hidden="true"
-              >
-                <LoaderCircleIcon className="size-4 animate-spin" />
-              </span>
-              <div
-                className="min-w-0 truncate text-left text-muted-foreground"
-                title={item.promptText.trim().length > 0 ? item.promptText : item.preview}
-              >
-                {item.preview}
+        {steeringItems.map((item) => {
+          const status = STEERING_DELIVERY_PRESENTATION[item.deliveryStatus ?? "steering"];
+          return (
+            <div
+              key={item.id}
+              className="rounded-xl border border-border-subtle bg-muted/20 p-2"
+              data-cafe-followup-steering="true"
+              aria-label="Follow-up steering into active turn"
+            >
+              <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2">
+                <span
+                  className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground"
+                  aria-hidden="true"
+                >
+                  <LoaderCircleIcon className="size-4 animate-spin" />
+                </span>
+                <div
+                  className="min-w-0 truncate text-left text-muted-foreground"
+                  title={item.promptText.trim().length > 0 ? item.promptText : item.preview}
+                >
+                  {item.preview}
+                </div>
+                <span
+                  className="h-7 shrink-0 whitespace-nowrap rounded-md border border-border px-2 py-1 text-muted-foreground text-xs"
+                  role="status"
+                  title={status.description}
+                  data-steering-status={item.deliveryStatus ?? "steering"}
+                >
+                  {status.label}
+                </span>
               </div>
-              <span
-                className="h-7 shrink-0 rounded-md border border-border px-2 py-1 text-muted-foreground text-xs"
-                aria-label="Follow-up steering into active turn"
-                title="Follow-up accepted for the active turn; waiting for the provider to act on it."
-              >
-                Steering
-              </span>
+              {item.files && item.environmentId && item.files.length > 0 ? (
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {item.files.map((attachment) => (
+                    <FileAttachmentPill
+                      key={attachment.id}
+                      attachment={attachment}
+                      environmentId={item.environmentId!}
+                    />
+                  ))}
+                </div>
+              ) : null}
             </div>
-            {item.files && item.environmentId && item.files.length > 0 ? (
-              <div className="mt-2 flex flex-wrap gap-1">
-                {item.files.map((attachment) => (
-                  <FileAttachmentPill
-                    key={attachment.id}
-                    attachment={attachment}
-                    environmentId={item.environmentId!}
-                  />
-                ))}
-              </div>
-            ) : null}
-          </div>
-        ))}
+          );
+        })}
         {props.items.map((item) => {
           const retryStatus = automaticSteerRetryStatus(item);
           return (
@@ -773,6 +797,8 @@ export interface ChatComposerProps extends ComposerInteractionCallbacks {
   goalControlsSupported: boolean;
   scheduledFollowups?: ScheduledFollowupsContext | undefined;
   providerTasks?: ProviderTasksContext | undefined;
+  activity?: ChatActivityPresentation | null | undefined;
+  onFocusSessionRail?: (() => void) | undefined;
 
   // Mode
   runtimeMode: RuntimeMode;
@@ -894,6 +920,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     onShowSessionRail,
     scheduledFollowups,
     providerTasks,
+    activity,
+    onFocusSessionRail,
     goalControlsSupported,
     runtimeMode,
     interactionMode,
@@ -1184,8 +1212,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // Provider-owned controls stay discoverable while their actions are blocked.
   // Eligibility still binds dispatch to the exact account and session above.
   const showNativeReviewControl = selectedProvider === "codex";
-  const showDeliveryPriorityControl = selectedProvider === "claudeAgent";
-  const hasComposerTab = showNativeReviewControl || showDeliveryPriorityControl;
+  const hasComposerTab = showNativeReviewControl;
   const nativeReviewControlDisabled = !nativeReviewAvailable || nativeReviewDisabled;
   const nativeReviewDisabledReason =
     environmentUnavailable !== null || isConnecting
@@ -1201,18 +1228,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               : nativeReviewDisabled
                 ? "Wait for the current work to finish and the Codex session to be ready."
                 : undefined;
-  const deliveryPriorityDisabled =
-    !deliveryPriorityAvailable || isSendBusy || isConnecting || environmentUnavailable !== null;
-  const deliveryPriorityDisabledReason =
-    environmentUnavailable !== null || isConnecting
-      ? "Reconnect to this server to change message delivery."
-      : !selectedProviderStatus
-        ? "Waiting for the selected Claude account’s provider information."
-        : !deliveryPriorityAvailable
-          ? "Message delivery options require a supported Claude version for this account."
-          : isSendBusy
-            ? "Wait for the current message to finish sending before changing delivery."
-            : undefined;
   const providerActions =
     nativeReviewAvailable && !nativeReviewDisabled ? (
       <MenuItem
@@ -1957,6 +1972,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // The retained side-panel control is intentionally limited to authored plan
   // documents so a task update can never reopen the old Tasks panel.
   const showPlanSidebarToggle = sidebarProposedPlan !== null;
+  const taskPopoverKey = JSON.stringify([environmentId, activeThreadId]);
+  const [taskPopoverState, setTaskPopoverState] = useState({ key: taskPopoverKey, open: false });
+  const taskPopoverOpen = taskPopoverState.key === taskPopoverKey && taskPopoverState.open;
+  const setTaskPopoverOpen = (open: boolean) => setTaskPopoverState({ key: taskPopoverKey, open });
   const composerFooterActionLayoutKey = useMemo(() => {
     if (activePendingProgress) {
       return `pending:${activePendingProgress.questionIndex}:${activePendingProgress.isLastQuestion}:${activePendingIsResponding}:dictation:${showComposerDictation}`;
@@ -3286,6 +3305,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         aria-hidden="true"
         onChange={onComposerFileInputChange}
       />
+      {activity ? (
+        <div className="min-w-0 mb-1">
+          <ComposerActivityStatus
+            activity={activity}
+            onOpenTasks={() => {
+              if (sessionRailVisible) onFocusSessionRail?.();
+              else setTaskPopoverOpen(true);
+            }}
+          />
+        </div>
+      ) : null}
       <div
         className={cn(
           "group relative isolate rounded-2xl p-px transition-[color,background-color,border-color] duration-(--duration-slow) motion-reduce:transition-none",
@@ -3343,16 +3373,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     ) : null}
                   </TooltipPopup>
                 </Tooltip>
-              ) : null}
-              {showDeliveryPriorityControl ? (
-                <ClaudeDeliveryPriorityControl
-                  key={deliveryChoiceKey}
-                  value={deliveryPriority}
-                  onChange={(priority) => setDeliveryChoice({ key: deliveryChoiceKey, priority })}
-                  disabled={deliveryPriorityDisabled}
-                  disabledReason={deliveryPriorityDisabledReason}
-                  collapsed={composerTabCollapsed}
-                />
               ) : null}
             </ComposerTab>
           </div>
@@ -3827,6 +3847,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   className="absolute bottom-0 right-0 flex items-center justify-end gap-1.5"
                 >
                   <ComposerTaskProgress
+                    open={taskPopoverOpen}
+                    onOpenChange={setTaskPopoverOpen}
+                    activeTaskCount={activity?.taskCount}
+                    activeAgentCount={activity?.agentCount}
                     providerTasks={providerTasks}
                     scheduledFollowups={scheduledFollowups}
                     plan={activePlan}
@@ -3880,6 +3904,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             !showCollapsedMobilePromptRow) ? null : activePendingApproval ? (
             <div className="flex min-w-0 items-center justify-end gap-2 px-2.5 pb-2.5 sm:px-3 sm:pb-3">
               <ComposerTaskProgress
+                open={taskPopoverOpen}
+                onOpenChange={setTaskPopoverOpen}
+                activeTaskCount={activity?.taskCount}
+                activeAgentCount={activity?.agentCount}
                 providerTasks={providerTasks}
                 scheduledFollowups={scheduledFollowups}
                 plan={activePlan}
@@ -3973,6 +4001,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   controls so the status remains legible on narrow screens. The
                   popover itself is portaled and cannot be clipped by the footer. */}
               <ComposerTaskProgress
+                open={taskPopoverOpen}
+                onOpenChange={setTaskPopoverOpen}
+                activeTaskCount={activity?.taskCount}
+                activeAgentCount={activity?.agentCount}
                 providerTasks={providerTasks}
                 scheduledFollowups={scheduledFollowups}
                 plan={activePlan}

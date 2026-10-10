@@ -3,6 +3,7 @@ import {
   executeNativeControlTool,
   projectNativeObservation,
   projectNativeWindows,
+  ELECTRON_TEXT_REFUSAL_REASON,
 } from "./NativeControlActions.ts";
 import { nativeToolArguments, type NativeToolResult } from "@cafecode/shared/nativeControl";
 
@@ -104,14 +105,8 @@ describe("Cafe native action recovery", () => {
     ok({ effect: "partial", delivery: { delivered_count: 3 } }),
   ])("never replays an uncertain, partial, successful or unrelated refusal", async (response) => {
     const invoke = vi.fn().mockResolvedValue(response);
-    expect(
-      await executeNativeControlTool(
-        "type_text",
-        { pid: 10, window_id: 20, text: "hello" },
-        invoke,
-      ),
-    ).toEqual(response);
-    expect(invoke).toHaveBeenCalledTimes(1);
+    await executeNativeControlTool("type_text", { pid: 10, window_id: 20, text: "hello" }, invoke);
+    expect(invoke.mock.calls.filter(([name]) => name === "type_text")).toHaveLength(1);
   });
   it("honors background-only requests and propagates a lost reply without replay", async () => {
     const invoke = vi.fn().mockResolvedValue(refused());
@@ -154,6 +149,73 @@ describe("Cafe native action recovery", () => {
     });
     expect(invoke.mock.calls[0]![1]).not.toHaveProperty("observe_after");
     expect(invoke.mock.calls[0]![1]).not.toHaveProperty("observe_query");
+  });
+});
+
+describe("native regression cases from the Axiom investigation", () => {
+  it("recovers only the pinned before-input Electron refusal", async () => {
+    const invoke = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ...refused("background_unavailable"),
+        structuredContent: {
+          ...refused("background_unavailable").structuredContent,
+          reason: ELECTRON_TEXT_REFUSAL_REASON,
+        },
+      })
+      .mockResolvedValueOnce(ok({ effect: "confirmed" }));
+    await executeNativeControlTool(
+      "type_text",
+      { pid: 10, window_id: 20, text: "hello", observe_after: false },
+      invoke,
+    );
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(invoke.mock.calls[1]![1]).toMatchObject({ delivery_mode: "foreground" });
+    invoke.mockReset().mockResolvedValue(refused("background_unavailable"));
+    await executeNativeControlTool("type_text", { pid: 10, window_id: 20, text: "hello" }, invoke);
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+  it("returns a new capture and image after coordinate input instead of clearing the screenshot mapping", async () => {
+    const image = { type: "image", data: "new-capture", mimeType: "image/png" };
+    const invoke = vi
+      .fn()
+      .mockResolvedValueOnce(ok({ effect: "confirmed" }))
+      .mockResolvedValueOnce({ ...ok({ ...page, capture_id: "fresh-capture" }), content: [image] });
+    const response = await executeNativeControlTool(
+      "click",
+      { pid: 10, window_id: 20, x: 40, y: 50, observe_after: true },
+      invoke,
+    );
+    expect(invoke.mock.calls[1]![1]).toMatchObject({ include_screenshot: true });
+    expect(response.structuredContent?.observation).toMatchObject({ capture_id: "fresh-capture" });
+    expect(response.content).toContainEqual(image);
+  });
+  it("observes an AX error that may already have opened a file and never repeats it", async () => {
+    const invoke = vi
+      .fn()
+      .mockResolvedValueOnce({ isError: true, content: [{ type: "text", text: "AXOpen -25205" }] })
+      .mockResolvedValueOnce(ok(page));
+    const response = await executeNativeControlTool(
+      "click",
+      { pid: 10, window_id: 20, element_token: "s00000000:1" },
+      invoke,
+    );
+    expect(response.isError).toBe(true);
+    expect(response.structuredContent?.observation).toMatchObject({ snapshot_id: "s00000001" });
+    expect(invoke.mock.calls.map(([name]) => name)).toEqual(["click", "get_window_state"]);
+  });
+  it("includes direct value updates in observation without sending Cafe-only fields to Cua", async () => {
+    const invoke = vi
+      .fn()
+      .mockResolvedValueOnce(ok({ effect: "unverifiable" }))
+      .mockResolvedValueOnce(ok(page));
+    const response = await executeNativeControlTool(
+      "set_value",
+      { pid: 10, window_id: 20, value: "hello", observe_after: true },
+      invoke,
+    );
+    expect(response.structuredContent?.observation).toBeDefined();
+    expect(invoke.mock.calls[0]![1]).not.toHaveProperty("observe_after");
   });
 });
 

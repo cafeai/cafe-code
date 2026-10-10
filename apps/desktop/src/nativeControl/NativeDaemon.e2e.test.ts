@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
 import { dirname, join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { NATIVE_CONTROL_VERSION } from "@cafecode/shared/nativeControl";
 import { NativeDaemon } from "./NativeDaemon.ts";
@@ -40,19 +41,23 @@ it.skipIf(process.env.CAFE_CODE_CUA_NATIVE_E2E !== "1")(
           }),
         ]),
       });
-      const connection = await daemon.session("native-fixture-screen");
-      try {
-        const screen = await connection.request({
-          method: "trusted_session_call",
-          name: "get_screen_size",
-          args: {},
-        });
-        expect(Array.isArray(screen.content)).toBe(true);
-        expect(screen.isError).not.toBe(true);
-        const ended = await connection.request({ method: "trusted_session_end" });
-        expect(ended.closed).toBe(true);
-      } finally {
-        connection.close();
+      // Ended labels are tombstoned by this daemon generation. Reacquisition
+      // uses a distinct episode, as the host does for a still-connected chat.
+      for (let episode = 0; episode < 2; episode++) {
+        const connection = await daemon.session("native-fixture-screen-" + randomUUID());
+        try {
+          const screen = await connection.request({
+            method: "trusted_session_call",
+            name: "get_screen_size",
+            args: {},
+          });
+          expect(Array.isArray(screen.content)).toBe(true);
+          expect(screen.isError).not.toBe(true);
+          const ended = await connection.request({ method: "trusted_session_end" });
+          expect(ended.closed).toBe(true);
+        } finally {
+          connection.close();
+        }
       }
     } finally {
       await daemon.stop();

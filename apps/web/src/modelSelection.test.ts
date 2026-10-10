@@ -85,6 +85,35 @@ describe("model selection before provider hydration", () => {
 });
 
 describe("instance-scoped model selection", () => {
+  it("removes Daybreak aliases from live and custom Codex choices without changing other providers", () => {
+    const aliases = ["gpt-daybreak-blue-latest", "gpt-daybreak-red-latest"];
+    const providers = [
+      provider({ instanceId: "codex", models: ["gpt-6-sol", ...aliases] }),
+      provider({ instanceId: "claude_other", models: aliases }),
+    ];
+    const entries = deriveProviderInstanceEntries(providers);
+    const settings: UnifiedSettings = {
+      ...DEFAULT_UNIFIED_SETTINGS,
+      providerInstances: {
+        [ProviderInstanceId.make("codex")]: {
+          driver: ProviderDriverKind.make("codex"),
+          config: { customModels: aliases },
+        },
+      },
+    };
+    expect(
+      getAppModelOptionsForInstance(
+        settings,
+        entries.find((entry) => entry.instanceId === "codex")!,
+      ).map((option) => option.slug),
+    ).toEqual(["gpt-6-sol"]);
+    expect(
+      getAppModelOptionsForInstance(
+        settings,
+        entries.find((entry) => entry.instanceId === "claude_other")!,
+      ).map((option) => option.slug),
+    ).toEqual(aliases);
+  });
   it("keeps custom models on the provider instance that declared them", () => {
     const providers = [
       provider({
@@ -293,6 +322,52 @@ function codexProvider(instanceId = "codex"): ServerProvider {
 }
 
 describe("text-generation helper selection", () => {
+  it("omits the turn-only Daybreak option from Codex helpers while preserving other providers", () => {
+    for (const driver of ["codex", "claudeAgent"] as const) {
+      const instanceId = ProviderInstanceId.make("custom_account");
+      const selection = {
+        instanceId,
+        model: "helper-model",
+        options: [
+          { id: "reasoningEffort", value: "medium" },
+          { id: "cyberAccessProgram", value: "daybreakBlue" },
+        ],
+      };
+      const snapshot = provider({
+        provider: ProviderDriverKind.make(driver),
+        instanceId,
+        models: ["helper-model"],
+      });
+      const result = resolveAppModelSelectionState(
+        { ...DEFAULT_UNIFIED_SETTINGS, textGenerationModelSelection: selection },
+        [
+          {
+            ...snapshot,
+            models: snapshot.models.map((model) => ({
+              ...model,
+              capabilities: {
+                optionDescriptors: [
+                  {
+                    id: "cyberAccessProgram",
+                    label: "Daybreak",
+                    type: "select" as const,
+                    currentValue: "standard",
+                    options: [
+                      { id: "standard", label: "Off" },
+                      { id: "daybreakBlue", label: "On" },
+                    ],
+                  },
+                ],
+              },
+            })),
+          },
+        ],
+      );
+      expect(result.options?.some((option) => option.id === "cyberAccessProgram")).toBe(
+        driver !== "codex",
+      );
+    }
+  });
   it("uses Sol 6.1 Medium instead of the native chat model and Low effort defaults", () => {
     expect(resolveAppModelSelectionState(DEFAULT_UNIFIED_SETTINGS, [codexProvider()])).toEqual({
       instanceId: "codex",

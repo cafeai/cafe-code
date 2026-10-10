@@ -73,7 +73,7 @@ export const SidebarFooterNavigation = memo(function SidebarFooterNavigation({
           onClick={onOpenSettings}
         >
           <SettingsIcon className="size-3.5" />
-          <span className="text-ui">Settings</span>
+          <span className="truncate text-ui">Settings</span>
         </SidebarMenuButton>
         {settingsTrailing}
       </SidebarMenuItem>

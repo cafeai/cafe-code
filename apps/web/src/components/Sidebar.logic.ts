@@ -1,4 +1,5 @@
 import * as React from "react";
+import { isLiveWorkRuntimeCurrent } from "@cafecode/shared/liveWork";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@cafecode/contracts/settings";
 import {
   getThreadSortTimestamp,
@@ -83,6 +84,7 @@ export function buildSidebarThreadContextMenuItems(input: {
 export interface ThreadStatusPill {
   label:
     | "Working"
+    | "Background work"
     | "Connecting"
     | "Completed"
     | "Failed"
@@ -99,6 +101,7 @@ const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
   "Awaiting Input": 5,
   Failed: 4,
   Working: 3,
+  "Background work": 3,
   Connecting: 3,
   "Plan Ready": 2,
   Completed: 1,
@@ -120,6 +123,7 @@ const ATTENTION_STATUS_CLASSES = {
  */
 const THREAD_STATUS_PILLS: Record<ThreadStatusPill["label"], ThreadStatusPill> = {
   Working: { label: "Working", ...RUNNING_STATUS_CLASSES, pulse: true },
+  "Background work": { label: "Background work", ...RUNNING_STATUS_CLASSES, pulse: true },
   Connecting: { label: "Connecting", ...RUNNING_STATUS_CLASSES, pulse: true },
   "Pending Approval": { label: "Pending Approval", ...ATTENTION_STATUS_CLASSES, pulse: false },
   "Awaiting Input": { label: "Awaiting Input", ...ATTENTION_STATUS_CLASSES, pulse: false },
@@ -150,6 +154,7 @@ type ThreadStatusInput = Pick<
   | "interactionMode"
   | "latestTurn"
   | "session"
+  | "liveWork"
 > & {
   lastVisitedAt?: string | undefined;
 };
@@ -457,6 +462,14 @@ export function resolveThreadStatusPill(input: {
     return getThreadStatusPill("Connecting");
   }
 
+  if (
+    thread.liveWork &&
+    isLiveWorkRuntimeCurrent(thread.liveWork.runtimeId, thread.session) &&
+    thread.liveWork.taskCount + thread.liveWork.agentCount > 0
+  ) {
+    return getThreadStatusPill("Background work");
+  }
+
   const hasPlanReadyPrompt =
     !thread.hasPendingUserInput &&
     thread.interactionMode === "plan" &&
@@ -507,6 +520,7 @@ const HIDDEN_THREAD_STATUS_PHRASES: Record<
   "Pending Approval": { one: "needs approval", other: "need approval" },
   "Awaiting Input": { one: "needs input", other: "need input" },
   Working: { one: "working", other: "working" },
+  "Background work": { one: "running background work", other: "running background work" },
   Connecting: { one: "connecting", other: "connecting" },
   "Plan Ready": { one: "plan ready", other: "plans ready" },
   Failed: { one: "failed", other: "failed" },

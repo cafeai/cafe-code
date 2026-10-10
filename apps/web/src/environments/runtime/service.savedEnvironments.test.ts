@@ -1,6 +1,6 @@
 import { QueryClient } from "@tanstack/react-query";
 import { EnvironmentId } from "@cafecode/contracts";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockCreateEnvironmentConnection = vi.fn();
 const mockCreateWsRpcClient = vi.fn();
@@ -224,8 +224,15 @@ describe("saved environment startup", () => {
   let remoteSessionStateRequested: Promise<void>;
   let signalRemoteSessionStateRequested: () => void;
 
+  beforeAll(async () => {
+    // Load the shared runtime under the hook budget, as the other environment
+    // fixtures do. Cold module evaluation under the full Turbo graph must not
+    // consume this in-memory startup test's five-second assertion budget.
+    // The scoped reset below already clears connections and runtime state.
+    await import("./service");
+  });
+
   beforeEach(() => {
-    vi.resetModules();
     vi.clearAllMocks();
 
     savedConnectionCreated = new Promise<void>((resolve) => {

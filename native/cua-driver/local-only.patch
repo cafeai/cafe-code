@@ -151,3 +151,72 @@ index 8c48b9e..b73bba7 100644
  }
  
  pub fn status() -> TelemetryStatus {
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/browser/electron_js.rs b/libs/cua-driver/rust/crates/platform-macos/src/browser/electron_js.rs
+index fd6bde6..a761a25 100644
+--- a/libs/cua-driver/rust/crates/platform-macos/src/browser/electron_js.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/browser/electron_js.rs
+@@ -17,2 +17,11 @@ impl ElectronJs {
+         if let Some(app) = app {
++            // Use the live process's kernel-derived bundle path first. The
++            // display name need not match a bundle in /Applications (source
++            // Electron fixtures and renamed/custom installs are common).
++            if let Some(bp) = app.launch_path.as_deref() {
++                let electron_fw = format!("{bp}/Contents/Frameworks/Electron Framework.framework");
++                if std::path::Path::new(&electron_fw).exists() {
++                    return true;
++                }
++            }
+             // Try to infer bundle path from app name.
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/type_text.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/type_text.rs
+index 7551db4..f17e078 100644
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/type_text.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/type_text.rs
+@@ -1212,2 +1212,5 @@ fn type_text_blocking(
+         let screen_sharing_target = crate::input::keyboard::is_screen_sharing_pid(pid);
++        let electron_hid = window_id.is_some()
++            && !screen_sharing_target
++            && crate::browser::electron_js::ElectronJs::is_electron(pid);
+         if let Some(refusal) = synthesis_preflight(
+@@ -1273,2 +1276,33 @@ fn type_text_blocking(
+             }
++            Some(wid) if electron_hid => {
++                // Cafe qualification found that Electron can discard every
++                // PID-routed Unicode event even after exact pixel focus. Use
++                // the existing exact-window foreground HID guard instead of
++                // treating foreground activation as a PID-delivery fix. This
++                // is a selected route, never a retry of uncertain input.
++                let mut typed_delivery = (false, None);
++                crate::input::skylight::with_foreground_hid_activation(
++                    pid as libc::pid_t,
++                    wid,
++                    || {
++                        if let Some((ptr, _)) = element_ptr_and_idx {
++                            let _ = crate::input::ax_actions::focus_element(ptr);
++                        }
++                        if foreground_settle_ms > 0 {
++                            std::thread::sleep(std::time::Duration::from_millis(
++                                foreground_settle_ms,
++                            ));
++                        }
++                        crate::input::keyboard::type_text_global(text, delay_ms)?;
++                        typed_delivery = await_typed_delivery(
++                            before.as_deref(),
++                            text,
++                            std::time::Instant::now() + DELIVERY_DRAIN_TIMEOUT,
++                            || read_axvalue_bound(pid, element_ptr_and_idx, window_id),
++                        );
++                        Ok(())
++                    },
++                )?;
++                (typed_delivery, true)
++            }
+             Some(wid) => {
+@@ -1296,3 +1330,7 @@ fn type_text_blocking(
+         return Ok(TypeTextDelivery::Typed(TypeTextOutcome {
+-            detail: format!(" via foreground keystrokes ({delay_ms}ms delay)"),
++            detail: if electron_hid {
++                format!(" via exact-window foreground HID Unicode ({delay_ms}ms delay)")
++            } else {
++                format!(" via foreground keystrokes ({delay_ms}ms delay)")
++            },
+             path: if fronted {

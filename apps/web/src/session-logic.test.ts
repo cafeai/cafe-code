@@ -1475,6 +1475,84 @@ describe("deriveWorkLogEntries", () => {
     expect(entries[0]?.label).toBe("Searching for API endpoints");
   });
 
+  it("omits routine Codex delivery and running observations without hiding failures", () => {
+    const hidden = [
+      { kind: "provider.turn.steer.accepted", payload: { messageId: "steer-1" } },
+      { kind: "task.progress", payload: { taskId: "codex-turn-steer:receipt-1" } },
+      { kind: "task.progress", payload: { taskId: "codex-turn-steer-processing:receipt-1" } },
+      {
+        kind: "task.progress",
+        payload: { detail: "Codex app-server began processing turn/steer." },
+      },
+      {
+        kind: "runtime.warning",
+        payload: {
+          message:
+            "Codex app-server accepted turn/steer but has not emitted the steer user message yet.",
+        },
+      },
+      {
+        kind: "runtime.warning",
+        payload: {
+          message:
+            "Codex accepted turn/steer; it is queued until the active turn finishes current child-process work (4 live descendant processes).",
+        },
+      },
+      {
+        kind: "runtime.warning",
+        payload: {
+          message:
+            "Codex still reports the active turn as in progress; app-server has 11 live descendant processes still running.",
+        },
+      },
+      {
+        kind: "runtime.warning",
+        payload: {
+          message:
+            "Codex still reports the active turn as in progress after delayed snapshot polling.",
+        },
+      },
+    ].map((activity, index) =>
+      makeActivity({ ...activity, id: `routine-${index}`, sequence: index + 1 }),
+    );
+    const visible = [
+      makeActivity({
+        id: "actual-warning",
+        kind: "runtime.warning",
+        payload: { message: "Connection lost" },
+      }),
+      makeActivity({
+        id: "actual-error",
+        kind: "runtime.error",
+        tone: "error",
+        payload: {
+          message:
+            "Codex app-server accepted turn/steer but has not emitted the steer user message yet.",
+        },
+      }),
+      makeActivity({ id: "failed-steer", kind: "provider.turn.steer.failed", tone: "error" }),
+      makeActivity({
+        id: "normal-progress",
+        kind: "task.progress",
+        payload: { detail: "Running tests" },
+      }),
+    ];
+    expect(
+      deriveWorkLogEntries(
+        [
+          ...hidden,
+          ...visible.map((activity, index) => ({
+            ...activity,
+            sequence: hidden.length + index + 1,
+          })),
+        ],
+        undefined,
+      ).map((entry) => entry.id),
+    ).toEqual(visible.map((activity) => activity.id));
+    expect(deriveWorkLogEntries(hidden, undefined)).toEqual([]);
+    expect(hidden).toHaveLength(8);
+  });
+
   it("shows runtime warning message details in work log entries", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

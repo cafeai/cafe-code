@@ -5600,6 +5600,148 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 
+  it.effect("omits routine steering diagnostics from historical presence, counts and pages", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("thread-steering-presentation");
+      const hiddenTurn = TurnId.make("turn-steering-only");
+      const mixedTurn = TurnId.make("turn-steering-and-work");
+      const hidden = [
+        { kind: "provider.turn.steer.accepted", payload: { messageId: "message-1" } },
+        { kind: "task.progress", payload: { taskId: "codex-turn-steer:correlation-1" } },
+        { kind: "task.progress", payload: { taskId: "codex-turn-steer-processing:correlation-1" } },
+        { kind: "task.progress", payload: { detail: "Codex app-server accepted turn/steer." } },
+        {
+          kind: "task.progress",
+          payload: { description: "Codex app-server began processing turn/steer." },
+        },
+        {
+          kind: "task.progress",
+          payload: {
+            detail: "Codex app-server observed the correlated user message after recovery.",
+          },
+        },
+        {
+          kind: "runtime.warning",
+          payload: {
+            message:
+              "Codex app-server accepted turn/steer but has not emitted the steer user message yet.",
+          },
+        },
+        {
+          kind: "runtime.warning",
+          payload: {
+            message:
+              "Codex still reports the active turn as in progress after delayed snapshot polling.",
+          },
+        },
+        {
+          kind: "runtime.warning",
+          payload: {
+            message:
+              "Codex accepted turn/steer; it is queued until the active turn finishes current child-process work (1 live descendant process).",
+          },
+        },
+        {
+          kind: "runtime.warning",
+          payload: {
+            message:
+              "Codex accepted turn/steer; it is queued until the active turn finishes current child-process work (4 live descendant processes).",
+          },
+        },
+        {
+          kind: "runtime.warning",
+          payload: {
+            message:
+              "Codex still reports the active turn as in progress; app-server has 1 live descendant process still running.",
+          },
+        },
+        {
+          kind: "runtime.warning",
+          payload: {
+            message:
+              "Codex still reports the active turn as in progress; app-server has 11 live descendant processes still running.",
+          },
+        },
+      ];
+      const visible = [
+        { kind: "runtime.warning", payload: { message: "Provider connection lost" } },
+        {
+          kind: "runtime.warning",
+          payload: {
+            message:
+              "Codex still reports the active turn as in progress after delayed snapshot polling. Recovery failed.",
+          },
+        },
+        { kind: "runtime.error", payload: hidden[6]!.payload },
+        { kind: "task.progress", payload: { detail: "Running tests" } },
+        { kind: "runtime.warning", payload: {} },
+        { kind: "provider.turn.steer.failed", payload: { detail: "Message delivery failed" } },
+      ];
+      for (const turnId of [hiddenTurn, mixedTurn]) {
+        for (const [index, activity] of hidden.entries()) {
+          yield* sql`
+            INSERT INTO projection_thread_activities
+              (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at)
+            VALUES
+              (${`${turnId}-routine-${index}`}, ${threadId}, ${turnId}, 'info', ${activity.kind},
+               'Routine diagnostic', ${JSON.stringify(activity.payload)}, ${index + 1}, '2026-10-09T12:00:00.000Z')
+          `;
+        }
+      }
+      for (const [index, activity] of visible.entries()) {
+        yield* sql`
+          INSERT INTO projection_thread_activities
+            (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at)
+          VALUES
+            (${`visible-steering-${index}`}, ${threadId}, ${mixedTurn}, 'info', ${activity.kind},
+             'Useful activity', ${JSON.stringify(activity.payload)}, ${hidden.length + index + 1}, '2026-10-09T12:00:01.000Z')
+        `;
+      }
+      const presence = yield* snapshotQuery.getThreadTurnWorkLogPresence({
+        threadId,
+        turnIds: [hiddenTurn, mixedTurn, TurnId.make("turn-absent")],
+      });
+      assert.deepStrictEqual(presence.turnIdsWithWorkLog, [mixedTurn]);
+      const hiddenPage = yield* snapshotQuery.getThreadTurnActivityPage({
+        threadId,
+        turnId: hiddenTurn,
+        offset: 0,
+        limit: 2,
+      });
+      assert.equal(hiddenPage.totalCount, 0);
+      assert.deepStrictEqual(hiddenPage.activities, []);
+      const firstPage = yield* snapshotQuery.getThreadTurnActivityPage({
+        threadId,
+        turnId: mixedTurn,
+        offset: 0,
+        limit: 2,
+      });
+      assert.equal(firstPage.totalCount, visible.length);
+      assert.deepStrictEqual(
+        firstPage.activities.map((activity) => activity.id),
+        ["visible-steering-0", "visible-steering-1"],
+      );
+      const secondPage = yield* snapshotQuery.getThreadTurnActivityPage({
+        threadId,
+        turnId: mixedTurn,
+        offset: 2,
+        limit: 10,
+      });
+      assert.deepStrictEqual(
+        secondPage.activities.map((activity) => activity.id),
+        ["visible-steering-2", "visible-steering-3", "visible-steering-4", "visible-steering-5"],
+      );
+      // Presentation filtering never deletes the receipts used by recovery.
+      const retained = yield* sql<{ count: number }>`
+        SELECT COUNT(*) AS count FROM projection_thread_activities
+        WHERE thread_id = ${threadId} AND turn_id = ${hiddenTurn}
+      `;
+      assert.equal(retained[0]?.count, hidden.length);
+    }),
+  );
+
   it.effect("excludes non-rendered work-log activity from turn activity pages", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;

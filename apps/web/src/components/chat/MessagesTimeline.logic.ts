@@ -303,6 +303,7 @@ export function deriveMessagesTimelineRows(input: {
   completionDividerAfterEntryId: string | null;
   completionSummary?: string | null;
   isWorking: boolean;
+  showWorkingIndicator?: boolean | undefined;
   activeTurnInProgress?: boolean;
   activeTurnId?: TurnId | null;
   activeTurnStartedAt: string | null;
@@ -463,7 +464,7 @@ export function deriveMessagesTimelineRows(input: {
 
   pushUnanchoredWorkBefore();
 
-  if (input.isWorking) {
+  if (input.isWorking && input.showWorkingIndicator !== false) {
     nextRows.push({
       kind: "working",
       id: "working-indicator-row",

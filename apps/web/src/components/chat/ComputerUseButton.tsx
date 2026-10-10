@@ -1,6 +1,6 @@
 import type { NativeControlChatState, ProviderDriverKind, ThreadId } from "@cafecode/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { MousePointer2Icon } from "lucide-react";
+import { ComputerUseIcon } from "./ComputerUseIcon";
 import { useEffect } from "react";
 import { cn } from "~/lib/utils";
 import { Button } from "../ui/button";
@@ -75,13 +75,13 @@ export function ComputerUseButton({
         render={
           <Button
             type="button"
-            size="icon-sm"
+            size="sm"
             variant="ghost"
             aria-label="Computer use"
             aria-pressed={data.enabled}
             aria-disabled={pending || unavailable}
             className={cn(
-              "shrink-0",
+              "shrink-0 gap-1.5 px-2 text-xs",
               data.enabled
                 ? "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary"
                 : "text-muted-foreground hover:text-foreground",
@@ -94,10 +94,8 @@ export function ComputerUseButton({
           />
         }
       >
-        <MousePointer2Icon
-          aria-hidden="true"
-          className={cn("size-4", data.enabled && "fill-primary/20")}
-        />
+        <ComputerUseIcon className="size-4 shrink-0" />
+        <span>Computer use</span>
       </TooltipTrigger>
       <TooltipPopup className="max-w-64">{detail}</TooltipPopup>
     </Tooltip>

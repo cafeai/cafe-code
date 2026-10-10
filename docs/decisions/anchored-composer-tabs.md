@@ -3,20 +3,20 @@
 Status: Implemented under the user's request for compact delivery controls; minimized tabs now form a shallow lip with a lowered caret.
 
 One generic **Composer tools** tab above the composer contains controls belonging
-to the selected provider, including Codex Code review and Claude message delivery.
+to the selected provider, currently Codex Code review. Claude message delivery
+lives only in the existing extra-options menu.
 Keep the tab visible whenever that provider has controls, including when their
-actions are temporarily unavailable; providers without controls, such as Grok,
+actions are temporarily unavailable; providers without tab controls, such as Claude and Grok,
 have no tab. Dim unavailable controls, keep their hover/focus explanation available,
 and guard mouse and keyboard activation without relaxing action admission.
 Each feature supplies
 only its own control; neither owns a separate tab or collapse state. Render these
 controls as independent children so future features can appear together in the
-same container. The tab adapts to its contents without replacing its caret when
-the provider changes. The existing options-menu shortcuts remain available and share the
-same controlled review dialog or account-scoped delivery choice. This replaces
-only the menu-only presentation from the provider-aware composer decision.
+same container. The tab adapts to its contents, and the shared collapse preference
+survives provider changes even when the selected provider has no tab. The Code
+review options-menu shortcut shares the same controlled review dialog.
 
-Delivery shows its current choice in a short label. The popup lists Automatic,
+The extra-options menu lists Automatic,
 Now, Next and Later, with explanations in hover/focus tooltips rather than inline
 prose. Choosing an option never submits the composer. Automatic still means an
 omitted priority; account/chat changes retain the existing reset and dispatch
@@ -52,8 +52,8 @@ typing area's rounded top corners.
 
 Review activation still requires the exact selected Codex account and saved ready
 session. Busy work dims its trigger without discarding a submitting dialog.
-Claude delivery activation still requires its advertised runtime capability;
-an unavailable control cannot change delivery priority or open its options popup.
+Claude delivery choices require their advertised runtime capability and remain
+disabled while sending or disconnected.
 Provider/account/runtime changes invalidate the dialog, and the same native
 permission disclosure, structured target validation and no-replay behavior apply.
 No provider protocol, queue, permission or lifecycle changes are introduced.

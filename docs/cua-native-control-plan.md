@@ -92,6 +92,11 @@ establish native Linux or Windows qualification.
 
 ## Implemented Mac milestone
 
+- The six-part follow-up adds session-bound apps/tabs, explicit text entry,
+  validated action batches, bounded settling and native accessibility diffs,
+  fresh lifecycle labels, and a concise default tool catalog. See
+  [Computer-use interface](decisions/computer-use-interface.md) for the contract,
+  examples and qualification limits.
 - Pinned source build and telemetry/dependency patch; automatic verified native
   preparation before desktop build cache lookup.
 - Electron-owned helper and authenticated session-only MCP host; active-turn
@@ -106,10 +111,11 @@ establish native Linux or Windows qualification.
 
 The first user test after merging is `corepack yarn build:desktop --force`, then
 the user's normal desktop launch. Local control starts enabled on Mac; each
-local Codex/Claude chat starts with computer use off and has a cursor icon
+local Codex/Claude chat starts with computer use off and has a Computer use control
 immediately to the right of the thinking controls. Click it to opt that chat in.
 The native cursor displays its provider/binding label and is removed when
-control is released. The Mac catalog includes exact-window background input,
+control is released. The default catalog binds targets and batches predictable
+actions. Advanced discovery includes exact-window background input,
 native app launching, menu/value actions, clipboard, browser DOM tools, zoom and
 state verification. Compact AX/browser reads and deduplicated structured output
 reduce image/tree tokens; native app support determines whether background
@@ -153,7 +159,7 @@ calls return fresh exact-tab snapshots by default; `observe_query` narrows them
 and `observe_after:false` omits them. Existing-profile preparation can enable
 the supported browser's native debugging setting and reports that side effect.
 The composer tooltip makes desktop and browser page access explicit; new chats
-still require the user to enable their cursor button.
+still require the user to enable their Computer use control.
 
 Manual native qualification used the pinned helper and a disposable local HTML
 page in Orion: URL navigation verified loaded content, background AX clicking

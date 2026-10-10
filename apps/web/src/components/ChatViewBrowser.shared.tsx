@@ -19,7 +19,7 @@ import {
   type ServerConfig,
   type ServerLifecycleWelcomePayload,
   ThreadId,
-  type TurnId,
+  TurnId,
   WS_METHODS,
   OrchestrationSessionStatus,
   DEFAULT_SERVER_SETTINGS,
@@ -38,8 +38,8 @@ import { render } from "vitest-browser-react";
 
 import { useCommandPaletteStore } from "../commandPaletteStore";
 import { showContextMenuFallback } from "../contextMenuFallback";
-import { createDeskState, deskTabKey } from "../deskModel";
-import { useDeskStore } from "../deskStore";
+import { createDeskState, deskTabKey, hydrateDesk } from "../deskModel";
+import { deskStorageKey, useDeskStore } from "../deskStore";
 import { useComposerDraftStore, DraftId } from "../composerDraftStore";
 import {
   __resetEnvironmentApiOverridesForTests,
@@ -1742,16 +1742,21 @@ async function expectComposerActionsContained(): Promise<void> {
   );
 }
 
-async function waitForInteractionModeButton(
-  expectedLabel: "Build" | "Plan",
-): Promise<HTMLButtonElement> {
-  return waitForElement(
-    () =>
-      Array.from(document.querySelectorAll("button")).find(
-        (button) => button.textContent?.trim() === expectedLabel,
-      ) as HTMLButtonElement | null,
-    `Unable to find ${expectedLabel} interaction mode button.`,
-  );
+async function expectComposerInteractionMode(expectedLabel: "Build" | "Plan"): Promise<void> {
+  await page.getByRole("button", { name: "More composer controls", exact: true }).click();
+  await expect
+    .element(page.getByRole("menuitemradio", { name: expectedLabel, exact: true }))
+    .toHaveAttribute("aria-checked", "true");
+  await expect
+    .element(
+      page.getByRole("menuitemradio", {
+        name: expectedLabel === "Build" ? "Plan" : "Build",
+        exact: true,
+      }),
+    )
+    .toHaveAttribute("aria-checked", "false");
+  await userEvent.keyboard("{Escape}");
+  await expect.element(page.getByRole("menu")).not.toBeInTheDocument();
 }
 
 async function waitForServerConfigToApply(): Promise<void> {
@@ -4621,8 +4626,8 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       });
 
       try {
-        const initialModeButton = await waitForInteractionModeButton("Build");
-        expect(initialModeButton.title).toContain("Switch to Plan");
+        await expectComposerInteractionMode("Build");
+        if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
 
         window.dispatchEvent(
           new KeyboardEvent("keydown", {
@@ -4634,7 +4639,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         );
         await waitForLayout();
 
-        expect((await waitForInteractionModeButton("Build")).title).toContain("Switch to Plan");
+        await expectComposerInteractionMode("Build");
 
         const composerEditor = await waitForComposerEditor();
         composerEditor.focus();
@@ -4647,13 +4652,9 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           }),
         );
 
-        await vi.waitFor(
-          async () => {
-            expect((await waitForInteractionModeButton("Plan")).title).toContain("Switch to Build");
-          },
-          { timeout: 8_000, interval: 16 },
-        );
+        await expectComposerInteractionMode("Plan");
 
+        composerEditor.focus();
         composerEditor.dispatchEvent(
           new KeyboardEvent("keydown", {
             key: "Tab",
@@ -4663,12 +4664,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           }),
         );
 
-        await vi.waitFor(
-          async () => {
-            expect((await waitForInteractionModeButton("Build")).title).toContain("Switch to Plan");
-          },
-          { timeout: 8_000, interval: 16 },
-        );
+        await expectComposerInteractionMode("Build");
       } finally {
         await mounted.cleanup();
       }
@@ -4718,11 +4714,6 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           () => document.querySelector<HTMLElement>('[data-chat-composer-footer="true"]'),
           "Unable to find composer footer.",
         );
-        const optionsButton = await waitForElement(
-          () =>
-            footer.querySelector<HTMLButtonElement>('button[aria-label="More composer controls"]'),
-          "Unable to find the combined composer options button.",
-        );
         expect(
           Array.from(footer.querySelectorAll("button")).some((button) =>
             ["Ask permissions", "Accept edits", "Plan", "Auto", "Bypass permissions"].includes(
@@ -4731,7 +4722,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           ),
         ).toBe(false);
 
-        optionsButton.click();
+        await page.getByRole("button", { name: "More composer controls", exact: true }).click();
         // Routine descriptions moved into tooltips; Bypass keeps its warning visible.
         await waitForMenuRadioItemContainingText("Ask permissions");
         await waitForMenuRadioItemContainingText("Accept edits");
@@ -5894,18 +5885,13 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           { timeout: 8_000, interval: 16 },
         );
 
-        const emitProcessingActivity = (
-          messageId: MessageId,
+        const emitSteeringActivity = (
           eventId: string,
-          correlationLocation: "payload" | "usage",
+          kind: string,
+          payload: Record<string, unknown>,
         ) => {
           const currentThread = fixture.snapshot.threads[0]!;
           const snapshotSequence = fixture.snapshot.snapshotSequence + 1;
-          const processingPayload = {
-            taskId: `codex-turn-steer-processing:${activeTurnId}`,
-            detail: "Codex app-server began processing turn/steer.",
-            ...(correlationLocation === "payload" ? { messageId } : { usage: { messageId } }),
-          };
           const nextThread: OrchestrationReadModel["threads"][number] = {
             ...currentThread,
             activities: [
@@ -5913,9 +5899,9 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
               {
                 id: EventId.make(eventId),
                 tone: "info",
-                kind: "task.progress",
+                kind,
                 summary: "Reasoning update",
-                payload: processingPayload,
+                payload,
                 turnId: activeTurnId,
                 sequence: currentThread.activities.length + 1,
                 createdAt: new Date(Date.now() + snapshotSequence * 1_000).toISOString(),
@@ -5937,12 +5923,64 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           });
         };
 
+        const deliveryBadge = () => document.querySelector<HTMLElement>("[data-steering-status]");
+        expect(deliveryBadge()?.dataset.steeringStatus).toBe("sending");
+        const acceptancePayload = {
+          provider: "codex",
+          acceptedTurnId: activeTurnId,
+          intentSequence: runningSnapshot.snapshotSequence + 1,
+          clientCorrelationId: "browser-steer-correlation",
+        };
+        emitSteeringActivity("sibling-accepted", "provider.turn.steer.accepted", {
+          ...acceptancePayload,
+          messageId: "sibling-message",
+        });
+        await waitForLayout();
+        expect(deliveryBadge()?.dataset.steeringStatus).toBe("sending");
+        emitSteeringActivity("exact-accepted", "provider.turn.steer.accepted", {
+          ...acceptancePayload,
+          messageId: dispatchedMessageId!,
+        });
+        await vi.waitFor(() => expect(deliveryBadge()?.dataset.steeringStatus).toBe("received"));
+        const waitMessage =
+          "Codex accepted turn/steer; it is queued until the active turn finishes current child-process work (4 live descendant processes).";
+        emitSteeringActivity("sibling-waiting", "runtime.warning", {
+          message: waitMessage,
+          detail: { clientCorrelationId: "sibling-correlation" },
+        });
+        await waitForLayout();
+        expect(deliveryBadge()?.dataset.steeringStatus).toBe("received");
+        for (const delay of [15, 60, 120]) {
+          emitSteeringActivity(`exact-waiting-${delay}`, "runtime.warning", {
+            message: waitMessage,
+            detail: {
+              clientCorrelationId: "browser-steer-correlation",
+              elapsedDelay: `${delay} seconds`,
+            },
+          });
+          await vi.waitFor(() => expect(deliveryBadge()?.dataset.steeringStatus).toBe("waiting"));
+          expect(document.querySelectorAll('[data-cafe-followup-steering="true"]')).toHaveLength(1);
+          expect(document.body.textContent).not.toContain(waitMessage);
+          expect(document.body.textContent).not.toContain("Steer accepted");
+        }
+        const emitProcessingActivity = (
+          messageId: MessageId,
+          eventId: string,
+          correlationLocation: "payload" | "usage",
+        ) =>
+          emitSteeringActivity(eventId, "task.progress", {
+            taskId: `codex-turn-steer-processing:${activeTurnId}`,
+            detail: "Codex app-server began processing turn/steer.",
+            ...(correlationLocation === "payload" ? { messageId } : { usage: { messageId } }),
+          });
+
         emitProcessingActivity(
           "different-steer-message" as MessageId,
           "activity-other-steer-processing",
           "usage",
         );
         await waitForLayout();
+        expect(deliveryBadge()?.dataset.steeringStatus).toBe("waiting");
         expect(
           document.querySelector('[aria-label="Follow-up steering into active turn"]'),
         ).not.toBeNull();
@@ -5959,6 +5997,9 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
             ).toBeNull();
           },
           { timeout: 8_000, interval: 16 },
+        );
+        expect(document.body.textContent).not.toContain(
+          "Codex app-server began processing turn/steer.",
         );
         expect(
           wsRequests.filter(
@@ -8232,6 +8273,98 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         expect(document.querySelectorAll('[data-testid="composer-editor"]')).toHaveLength(2),
       );
     };
+    it.each([80, 100, 130] as const)(
+      "uses sidebar navigation without tabs on narrow web clients at %i percent",
+      async (interfaceScalePercent) => {
+        localStorage.setItem("cafe-code:theme", interfaceScalePercent === 80 ? "light" : "dark");
+        const mounted = await mountChatView({
+          viewport: WIDE_FOOTER_VIEWPORT,
+          snapshot: withSecondThread(
+            createSnapshotForTargetUser({
+              targetMessageId: MessageId.make(`mobile-desk-${interfaceScalePercent}`),
+              targetText: "Mobile navigation fixture",
+            }),
+          ),
+          configureFixture: (next) => {
+            next.serverConfig = {
+              ...next.serverConfig,
+              clientSettings: { ...next.serverConfig.clientSettings, interfaceScalePercent },
+            };
+          },
+        });
+        try {
+          await splitChats();
+          useDeskStore.getState().dispatch({ type: "sidebarMode", mode: "desk" });
+          useComposerDraftStore.getState().setPrompt(secondRef, "Keep my mobile draft");
+          const editor = await waitForElement(
+            () =>
+              document.querySelector<HTMLElement>(
+                '.desk-pane[data-active="true"] [data-testid="composer-editor"]',
+              ),
+            "active split composer",
+          );
+          const layout = useDeskStore.getState().desk.layout;
+          const groups = useDeskStore.getState().desk.groups;
+          await mounted.setViewport(COMPACT_FOOTER_VIEWPORT);
+          await vi.waitFor(() => {
+            expect(document.querySelectorAll(".desk-pane")).toHaveLength(1);
+            expect(document.querySelector(".desk-group-bar")).toBeNull();
+            expect(document.querySelector('[role="tablist"]')).toBeNull();
+            expect(document.querySelector(".desk-group-switcher")).toBeNull();
+            const heading = document.querySelector<HTMLElement>("[data-chat-header-title]")!;
+            expect(heading.textContent).toBe("Second Desk chat");
+            expect(heading.getBoundingClientRect().width).toBeGreaterThan(50);
+            expect(getComputedStyle(heading).clipPath).toBe("none");
+          });
+          await expect
+            .element(page.getByTestId("composer-editor"))
+            .toHaveTextContent("Keep my mobile draft");
+          expect(page.getByTestId("composer-editor").element()).toBe(editor);
+          expect(useDeskStore.getState().desk.layout).toBe(layout);
+          expect(useDeskStore.getState().desk.groups).toBe(groups);
+          await page.screenshot({
+            path: `../../../../.explorations/mobile-tabs/mobile-${interfaceScalePercent}.png`,
+          });
+
+          if (interfaceScalePercent === 100) {
+            await mounted.setViewport({ ...COMPACT_FOOTER_VIEWPORT, width: 767 });
+            await vi.waitFor(() => expect(document.querySelector(".desk-group-bar")).toBeNull());
+            await mounted.setViewport({ ...COMPACT_FOOTER_VIEWPORT, width: 768 });
+            await expect.element(page.getByRole("tablist")).toBeVisible();
+            await mounted.setViewport(COMPACT_FOOTER_VIEWPORT);
+            await vi.waitFor(() => expect(document.querySelector(".desk-group-bar")).toBeNull());
+            expect(page.getByTestId("composer-editor").element()).toBe(editor);
+          }
+
+          await page.getByRole("button", { name: "Toggle Sidebar", exact: true }).click();
+          await page.getByRole("button", { name: THREAD_TITLE, exact: true }).click();
+          await expect
+            .element(page.getByRole("heading", { name: THREAD_TITLE, exact: true }))
+            .toBeVisible();
+          await vi.waitFor(() =>
+            expect(
+              document.querySelector('[data-sidebar="sidebar"][data-mobile="true"]'),
+            ).toBeNull(),
+          );
+          expect(useComposerDraftStore.getState().getComposerDraft(secondRef)?.prompt).toBe(
+            "Keep my mobile draft",
+          );
+          expect(document.querySelectorAll(".desk-pane")).toHaveLength(1);
+
+          await mounted.setViewport(WIDE_FOOTER_VIEWPORT);
+          await vi.waitFor(() => {
+            expect(document.querySelectorAll(".desk-pane")).toHaveLength(2);
+            expect(document.querySelectorAll('[role="tablist"]')).toHaveLength(2);
+          });
+          expect(useDeskStore.getState().desk.layout).toBe(layout);
+          expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual([firstKey]);
+          expect(useDeskStore.getState().desk.groups.g2?.tabs).toEqual([secondKey]);
+          expect(wsRequests.some((body) => body.type === "thread.turn.interrupt")).toBe(false);
+        } finally {
+          await mounted.cleanup();
+        }
+      },
+    );
     it.each(["project", "standalone"] as const)(
       "previews %s chat rows, keeps them on double-click and retains input when dismissed",
       async (kind) => {
@@ -8293,6 +8426,178 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         }
       },
     );
+    it.each([
+      ["project", "send"],
+      ["standalone", "send"],
+      ["project", "queue"],
+      ["project", "steer"],
+    ] as const)(
+      "keeps a %s preview immediately when submitting a %s message",
+      async (kind, delivery) => {
+        const base = withSecondThread(
+          createSnapshotForTargetUser({
+            targetMessageId: MessageId.make("preview-send"),
+            targetText: "Preview send fixture",
+          }),
+        );
+        const activeTurnId = TurnId.make("preview-send-active-turn");
+        const snapshot = {
+          ...base,
+          threads: base.threads.map((thread) => ({
+            ...thread,
+            ...(kind === "standalone" ? { projectId: null } : {}),
+            ...(thread.id === secondId && delivery !== "send"
+              ? {
+                  latestTurn: {
+                    turnId: activeTurnId,
+                    state: "running" as const,
+                    requestedAt: isoAt(1000),
+                    startedAt: isoAt(1001),
+                    completedAt: null,
+                    assistantMessageId: null,
+                  },
+                  session: { ...thread.session!, status: "running" as const, activeTurnId },
+                }
+              : {}),
+          })),
+        };
+        let release!: (value: { sequence: number }) => void;
+        const pending = new Promise<{ sequence: number }>((resolve) => {
+          release = resolve;
+        });
+        const mounted = await mountChatView({
+          viewport: DEFAULT_VIEWPORT,
+          snapshot,
+          configureFixture: (next) => {
+            next.serverConfig = {
+              ...next.serverConfig,
+              ...(delivery === "steer"
+                ? {
+                    keybindings: [
+                      {
+                        command: "composer.steer",
+                        shortcut: {
+                          key: "enter",
+                          modKey: false,
+                          ctrlKey: true,
+                          metaKey: false,
+                          altKey: false,
+                          shiftKey: false,
+                        },
+                      },
+                    ],
+                  }
+                : {}),
+              providers: next.serverConfig.providers.map((provider) => ({
+                ...provider,
+                runtimeCapabilities: {
+                  liveSteer: delivery === "steer" ? "supported" : "unsupported",
+                  threadGoals: "unsupported",
+                },
+              })),
+            };
+          },
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+              ? body.threadId === secondId &&
+                (body.type === "thread.turn.start" || body.type === "thread.turn.steer")
+                ? pending
+                : { sequence: 2 }
+              : undefined,
+        });
+        const prompt = `Keep this ${delivery} tab`;
+        try {
+          const firstRow = page.getByTestId(`thread-row-${THREAD_ID}`);
+          await firstRow.dblClick();
+          await page.getByTestId(`thread-row-${secondId}`).click();
+          // Running tabs include their status in the accessible name.
+          const tab = page.getByRole("tab", { name: /Second Desk chat$/ });
+          await expect.element(tab).toHaveAttribute("data-preview", "true");
+          useComposerDraftStore.getState().setPrompt(secondRef, prompt);
+          await expect.element(page.getByTestId("composer-editor")).toHaveTextContent(prompt);
+          if (delivery === "steer") {
+            (await waitForComposerEditor()).focus();
+            await userEvent.keyboard("{Control>}{Enter}{/Control}");
+          } else if (delivery === "queue") {
+            await page.getByRole("button", { name: "Queue message", exact: true }).click();
+          } else {
+            await page.getByRole("button", { name: "Send message", exact: true }).click();
+          }
+          await expect.element(tab).toHaveAttribute("data-preview", "false");
+          expect(getComputedStyle(tab.element().querySelector(".desk-tab-title")!).fontStyle).toBe(
+            "normal",
+          );
+          // The source request remains unacknowledged, but the tab is already
+          // durable and selecting a different chat must no longer dismiss it.
+          const restored = hydrateDesk(
+            window.localStorage.getItem(deskStorageKey(LOCAL_ENVIRONMENT_ID)),
+            LOCAL_ENVIRONMENT_ID,
+          );
+          expect(restored.groups.g1?.tabs).toContain(secondKey);
+          expect(restored.groups.g1?.previewTabKey).toBeUndefined();
+          if (delivery === "queue") {
+            await vi.waitFor(() =>
+              expect(
+                document.querySelector('[data-cafe-followup-queue="true"]')?.textContent,
+              ).toContain(prompt),
+            );
+          } else {
+            await vi.waitFor(() =>
+              expect(
+                wsRequests.some(
+                  (body) =>
+                    body.threadId === secondId &&
+                    body.type ===
+                      (delivery === "steer" ? "thread.turn.steer" : "thread.turn.start"),
+                ),
+              ).toBe(true),
+            );
+          }
+          await firstRow.click();
+          await expect.element(tab).toBeVisible();
+          expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual([firstKey, secondKey]);
+          expect(wsRequests.some((body) => body.type === "thread.turn.interrupt")).toBe(false);
+        } finally {
+          release({ sequence: 2 });
+          await mounted.cleanup();
+        }
+      },
+    );
+
+    it("keeps typing and control-only commands temporary until a message is sent", async () => {
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: withSecondThread(
+          createSnapshotForTargetUser({
+            targetMessageId: MessageId.make("preview-mode-only"),
+            targetText: "Preview mode fixture",
+          }),
+        ),
+      });
+      try {
+        await page.getByTestId(`thread-row-${THREAD_ID}`).dblClick();
+        await page.getByTestId(`thread-row-${secondId}`).click();
+        const tab = page.getByRole("tab", { name: "Second Desk chat", exact: true });
+        useComposerDraftStore.getState().setPrompt(secondRef, "/plan");
+        await expect.element(page.getByTestId("composer-editor")).toHaveTextContent("/plan");
+        await expect.element(tab).toHaveAttribute("data-preview", "true");
+        await page.getByRole("button", { name: "Send message", exact: true }).click();
+        await vi.waitFor(() =>
+          expect(
+            useComposerDraftStore.getState().getComposerDraft(secondRef)?.interactionMode,
+          ).toBe("plan"),
+        );
+        await expect.element(tab).toHaveAttribute("data-preview", "true");
+        expect(
+          wsRequests.some(
+            (body) => body.type === "thread.turn.start" || body.type === "thread.turn.steer",
+          ),
+        ).toBe(false);
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
     it.each(["project", "standalone"] as const)(
       "keeps single-clicked %s chats open when the default behavior is Open",
       async (kind) => {

@@ -2,18 +2,12 @@
 
 ## Message delivery
 
-Selecting Claude in the composer shows the compact **Delivery · Automatic**
-control inside the shared composer tools tab. It stays visible and dimmed when
-the account's runtime capability is unavailable, the server is reconnecting, or a
-message is being sent. Hover or focus the control for the reason. For a qualified
-account, its popup offers Automatic, Now,
-Next and Later; hover or focus an option for its explanation. The existing
-model-options menu also keeps the same **Message delivery** choices when the
-account supports them. Providers without tab controls, such as Grok, hide the tab.
-The shared caret minimizes or restores every control in the tab at a fixed position
-without moving the composer. One layout preference applies across all chats and
-providers and survives navigation and reloads; delivery priority remains scoped
-to the selected chat/account.
+Open the composer's extra-options menu to find **Message delivery** when the
+selected Claude account supports it. Choose Automatic, Now, Next or Later;
+hover or focus an option for its explanation. The choices are disabled while
+reconnecting or sending a message. Claude has no separate delivery control or
+empty tab above the composer. Delivery priority remains scoped to the selected
+chat/account.
 **Automatic** preserves the provider's existing behavior; Cafe does not assume
 that omission is equivalent to one of the explicit choices.
 

@@ -22,6 +22,41 @@ another tier, model or account.
 Accepted-turn work logs and Atrium cards show the frozen submitted tier. These
 are settings records, not independent confirmation of effective routing or billing.
 
+## Daybreak
+
+Open the composer model settings to choose **Daybreak · Off / On**. The control
+appears only when the selected Codex account's model catalogue advertises Daybreak
+for that model. Standard-only and older catalogues do not imply access.
+
+**On** uses Daybreak Red when the account and model advertise Red, and Daybreak
+Blue otherwise when Blue is supported. Switching between compatible models keeps
+the saved choice On and resolves the program for the new model. **Off** explicitly
+requests Standard. A model that accepts only Daybreak offers On; select a model
+that supports Standard to turn it off. Opening the settings menu never enables
+Daybreak. If an enabled choice loses its advertised support, sending fails with
+guidance to refresh and choose a supported model or setting. The model settings
+menu also offers **Turn unavailable Daybreak off** for a saved On choice after
+access disappears; it does not offer On without advertised support.
+
+The standalone Daybreak Blue/Red aliases are no longer selectable, including in
+cached and custom model lists. Saved chats retain their existing model identity;
+Cafe does not rewrite their history or silently replace their model.
+
+Cafe persists this choice with the chat's existing model options and sends the
+resolved `cyberAccessProgram` on ordinary Codex `turn/start` requests. Native
+`daybreakEnabled` thread metadata is a preference, not turn routing authority;
+Cafe does not synchronize its saved choice through that metadata. Native reviews
+retain their session settings, and one-shot title/branch helpers do not expose
+this turn-only control. Daybreak does not change Cafe's access or approval mode;
+Codex remains responsible for authorization.
+
+The public [Daybreak guide](https://developers.openai.com/api/docs/guides/daybreak)
+explains why Red approval does not make Red valid for every model. API program
+names use underscores; the Codex app-server protocol uses `standard`,
+`daybreakBlue` and `daybreakRed`. The experimental turn field was qualified
+against isolated schema exports from Codex 0.159.1 and 0.162.0 and is retained by
+Cafe's local decoder without modifying the stable generated protocol pin.
+
 ## Skill picker
 
 Type `$` in the composer to discover enabled skills for the selected Codex account

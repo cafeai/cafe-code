@@ -7,7 +7,6 @@ import {
 import { memo } from "react";
 import { Badge } from "../ui/badge";
 import { ContentSidebarTriggerWithUnreadDot } from "../sidebar/unseenCompletions";
-import { ConnectionStatusIndicator } from "./ConnectionStatusIndicator";
 import { OpenInPicker } from "./OpenInPicker";
 import { usePrimaryEnvironmentId } from "../../environments/primary";
 import { getLocalShellCapabilities } from "../../localCapabilities";
@@ -65,7 +64,6 @@ export const ChatHeader = memo(function ChatHeader({
         <h2 data-chat-header-title className="sr-only">
           {activeThreadTitle}
         </h2>
-        <ConnectionStatusIndicator environmentId={activeThreadEnvironmentId} />
         {showOpenInPicker && (
           <OpenInPicker
             environmentId={activeThreadEnvironmentId}
@@ -84,9 +82,8 @@ export const ChatHeader = memo(function ChatHeader({
         <ContentSidebarTriggerWithUnreadDot />
         <h2
           // Desktop keeps a single truncated line; on mobile (max-md) allow up to
-          // two lines so the chat title is not cut off as aggressively. Inside a
-          // Desk pane the tab already shows the title, so desk.css keeps this
-          // heading for assistive technology only (one title per view).
+          // two lines so the chat title is not cut off as aggressively. When
+          // Desk tabs are visible, the compact header above uses sr-only instead.
           data-chat-header-title
           className="min-w-0 shrink truncate text-sm font-medium text-foreground max-md:line-clamp-2 max-md:whitespace-normal"
           title={activeThreadTitle}
@@ -113,7 +110,6 @@ export const ChatHeader = memo(function ChatHeader({
         )}
       </div>
       <div className="flex shrink-0 items-center justify-end gap-2 @3xl/header-actions:gap-3">
-        <ConnectionStatusIndicator environmentId={activeThreadEnvironmentId} />
         {showOpenInPicker && (
           <OpenInPicker
             environmentId={activeThreadEnvironmentId}

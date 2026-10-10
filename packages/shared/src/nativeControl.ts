@@ -3,6 +3,17 @@ import * as fs from "node:fs/promises";
 import { createHash } from "node:crypto";
 import catalog from "../../../native/cua-driver/catalog.json" with { type: "json" };
 import release from "../../../native/cua-driver/release.json" with { type: "json" };
+import { COMPUTER_CONTROL_TOOLS, validateComputerCall } from "./nativeComputer.ts";
+export {
+  decodeComputerSelect,
+  decodeComputerObserve,
+  decodeComputerAct,
+  decodeComputerAdvanced,
+  type ComputerSelect,
+  type ComputerObserve,
+  type ComputerAct,
+  type ComputerAction,
+} from "./nativeComputer.ts";
 
 export const NATIVE_CONTROL_HOST_FILE = "native-control-host.json";
 export const NATIVE_CONTROL_PATH = "/mcp/native-control";
@@ -19,7 +30,7 @@ export const NATIVE_CONTROL_ENVIRONMENT = Object.freeze({
 });
 
 export const NATIVE_CONTROL_INSTRUCTIONS =
-  "Enable this chat's cursor button, check health, and finish with release_control. Use open_url for the user's signed-in browser. Use recommended_window and fresh element_token handles. Cafe automatically switches definite background refusals to foreground; this can change focus. Request observe_after:true (optionally observe_query) to act and read in one call; returned snapshots replace old tokens. Query searches broadly and max_results bounds output. Request screenshots only for pixel grounding. Never repeat an input with uncertain completion. Prefer semantic DOM refs and exact-tab browser_* tools when connected; enabled computer use authorizes browser_prepare for supported existing profiles. Use the advertised schemas without repeated discovery.";
+  "Enable this chat's Computer use control, check health, and finish with release_control. Bind the requested app with computer_select, then reuse its target handle with computer_observe and computer_act. Batch short predictable actions; each batch returns updated state. Use fresh element handles, or request view:both before screenshot-coordinate input. Accessibility-only observations clear pixel grounding. Cafe handles exact-window routing and definite before-input foreground recovery, which may change focus. Never repeat uncertain or partial input; inspect returned state first. Stable state does not prove task success: verify the requested result. Use open_url for the user's signed-in browser and computer_select with browser:true for supported DOM control. computer_advanced discovers uncommon reviewed operations on demand. Handles expire on release; select again during an active turn. No sleeps or repeated unchanged reads are needed.";
 
 /** Defaults reduce image and tree tokens while callers retain explicit control
  * over capture/limits. Search traversal and response size are separate: a
@@ -80,19 +91,24 @@ export const nativeControlError = (message: string): NativeToolResult => ({
 function cafeNativeTool(tool: (typeof catalog.tools)[number]) {
   const inputSchema = structuredClone(tool.inputSchema);
   const properties = inputSchema.properties as Record<string, unknown>;
-  if ("delivery_mode" in properties && !tool.name.startsWith("browser_")) {
-    properties.delivery_mode = {
-      type: "string",
-      enum: ["background", "foreground"],
-      description:
-        "Default background. Cafe retries definite targeting refusals in foreground, which can change focus. Set auto_foreground:false to keep background-only delivery.",
-    };
-    properties.auto_foreground = {
-      type: "boolean",
-      default: true,
-      description:
-        "Automatically use foreground delivery after a definite background targeting refusal. Never repeats an input with uncertain completion.",
-    };
+  if (
+    ("delivery_mode" in properties || tool.name === "set_value") &&
+    !tool.name.startsWith("browser_")
+  ) {
+    if ("delivery_mode" in properties) {
+      properties.delivery_mode = {
+        type: "string",
+        enum: ["background", "foreground"],
+        description:
+          "Default background. Cafe retries definite targeting refusals in foreground, which can change focus. Set auto_foreground:false to keep background-only delivery.",
+      };
+      properties.auto_foreground = {
+        type: "boolean",
+        default: true,
+        description:
+          "Automatically use foreground delivery after a definite background targeting refusal. Never repeats an input with uncertain completion.",
+      };
+    }
     properties.observe_after = {
       type: "boolean",
       description:
@@ -103,9 +119,20 @@ function cafeNativeTool(tool: (typeof catalog.tools)[number]) {
       description:
         "Optional text filter for observe_after. Searches broadly and returns matching elements with fresh tokens.",
     };
+    properties.observe_screenshot = {
+      type: "boolean",
+      description:
+        "Return a new screenshot with the observation. Coordinate input includes it automatically so later pixel actions have fresh grounding.",
+    };
   }
   if (
-    ["browser_click", "browser_type", "browser_pointer", "browser_navigate"].includes(tool.name)
+    [
+      "browser_click",
+      "browser_type",
+      "browser_pointer",
+      "browser_navigate",
+      "browser_set_input_files",
+    ].includes(tool.name)
   ) {
     properties.observe_after = {
       type: "boolean",
@@ -198,6 +225,7 @@ function cafeNativeTool(tool: (typeof catalog.tools)[number]) {
 }
 
 export const NATIVE_CONTROL_TOOLS = [
+  ...COMPUTER_CONTROL_TOOLS,
   {
     name: "health",
     description:
@@ -291,6 +319,21 @@ export const NATIVE_CONTROL_TOOLS = [
     },
   },
 ] as const;
+const defaultNames = new Set([
+  "health",
+  "computer_select",
+  "computer_observe",
+  "computer_act",
+  "computer_advanced",
+  "open_url",
+  "release_control",
+]);
+export const NATIVE_CONTROL_DEFAULT_TOOLS = NATIVE_CONTROL_TOOLS.filter((tool) =>
+  defaultNames.has(tool.name),
+);
+export const NATIVE_CONTROL_ADVANCED_TOOLS = NATIVE_CONTROL_TOOLS.filter(
+  (tool) => !defaultNames.has(tool.name),
+);
 const names = new Set<string>(NATIVE_CONTROL_TOOLS.map((tool) => tool.name));
 const reserved = new Set([
   "session",
@@ -330,6 +373,15 @@ export function validateNativeToolCall(name: unknown, input: unknown): Record<st
   visit(input, 0);
   if (JSON.stringify(input).length > 128 * 1024)
     throw new Error("Native desktop arguments are too large.");
+  validateComputerCall(name, input);
+  if (name === "computer_advanced") {
+    const args = input as Record<string, unknown>;
+    if (args.operation === "call") {
+      if (!NATIVE_CONTROL_ADVANCED_TOOLS.some((tool) => tool.name === args.name))
+        throw new Error("Unsupported advanced computer operation.");
+      validateNativeToolCall(args.name, args.arguments ?? {});
+    }
+  }
   return input as Record<string, unknown>;
 }
 

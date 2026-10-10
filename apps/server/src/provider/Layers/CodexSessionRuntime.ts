@@ -224,6 +224,11 @@ const CodexThreadStartParamsWithRuntimeWorkspaceRoots = EffectCodexSchema.V2Thre
 const CodexTurnStartParamsWithExperimentalFields = EffectCodexSchema.V2TurnStartParams.pipe(
   Schema.fieldsAssign({
     collaborationMode: Schema.optionalKey(EffectCodexSchema.V2TurnStartParams__CollaborationMode),
+    // Codex 0.159.1 and 0.162.0 experimental exports include this turn-only
+    // selection. daybreakEnabled is separate client preference metadata; it
+    // cannot select the program or authorize access. Cafe persists that intent
+    // in its existing model options and submits the exact program each turn.
+    cyberAccessProgram: Schema.optionalKey(EffectCodexSchema.V2TurnStartParams__CyberAccessProgram),
     environments: Schema.optionalKey(CodexLocalTurnEnvironments),
     runtimeWorkspaceRoots: Schema.optionalKey(CodexRuntimeWorkspaceRoots),
   }),
@@ -482,6 +487,7 @@ export interface CodexSessionRuntimeOptions {
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
+  readonly cyberAccessProgram?: EffectCodexSchema.V2TurnStartParams__CyberAccessProgram | undefined;
   readonly codexReview?: import("@cafecode/contracts").CodexReviewTarget;
   /** Internal exact-root recovery guard; never forwarded as app-server params. */
   readonly expectedCompletedRootTurnId?: TurnId | undefined;
@@ -1675,6 +1681,7 @@ function buildCodexCollaborationMode(input: {
 }
 
 export function buildTurnStartParams(input: {
+  readonly cyberAccessProgram?: EffectCodexSchema.V2TurnStartParams__CyberAccessProgram;
   readonly threadId: string;
   readonly cwd?: string;
   readonly runtimeMode: RuntimeMode;
@@ -1749,6 +1756,9 @@ export function buildTurnStartParams(input: {
     ),
     ...(input.model ? { model: input.model } : {}),
     ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
+    ...(input.cyberAccessProgram !== undefined
+      ? { cyberAccessProgram: input.cyberAccessProgram }
+      : {}),
     ...(input.effort ? { effort: input.effort } : {}),
     ...(collaborationMode ? { collaborationMode } : {}),
   }).pipe(
@@ -8637,6 +8647,9 @@ export const makeCodexSessionRuntime = (
               ...(input.attachments ? { attachments: input.attachments } : {}),
               ...(normalizedModel ? { model: normalizedModel } : {}),
               ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
+              ...(input.cyberAccessProgram !== undefined
+                ? { cyberAccessProgram: input.cyberAccessProgram }
+                : {}),
               ...(input.effort ? { effort: input.effort } : {}),
               ...(nativeReasoningEffort !== undefined ? { nativeReasoningEffort } : {}),
               ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),

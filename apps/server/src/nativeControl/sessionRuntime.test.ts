@@ -80,6 +80,9 @@ it.each(["codex", "claudeAgent"] as const)(
     expect((await call()).value.result?.isError).toBe(true);
     await binding!.activate();
     await binding!.beginTurn();
+    // An active provider turn still needs the trusted per-chat opt-in.
+    expect((await call()).value.result?.isError).toBe(true);
+    await f.host.setChatEnabled(ThreadId.make("synthetic-thread"), true);
     expect((await call()).value.result?.isError).not.toBe(true);
     await binding!.endTurn();
     expect((await call()).value.result?.isError).toBe(true);

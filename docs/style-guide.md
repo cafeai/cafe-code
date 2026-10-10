@@ -48,13 +48,13 @@ Desk tabs, the Desk list, the command palette and Atrium. Navigation derives it
 with `resolveThreadStatusPill` and renders it with `ThreadStatusLabel`.
 `getThreadStatusPill` owns the shared colours and indicators; avoid a second palette.
 
-| State     | Token                                       | Meaning                                 |
-| --------- | ------------------------------------------- | --------------------------------------- |
-| Running   | `status-running` (an accent-colour spinner) | Working or connecting                   |
-| Attention | `status-attention` (amber)                  | Needs approval, needs input, plan ready |
-| Done      | `status-done` (green)                       | Finished and not yet viewed             |
-| Error     | `status-error` (red)                        | Latest turn failed and not yet viewed   |
-| Idle      | no dot                                      | Viewed and not working                  |
+| State     | Token                                       | Meaning                                          |
+| --------- | ------------------------------------------- | ------------------------------------------------ |
+| Running   | `status-running` (an accent-colour spinner) | Working, connecting or confirmed background work |
+| Attention | `status-attention` (amber)                  | Needs approval, needs input, plan ready          |
+| Done      | `status-done` (green)                       | Finished and not yet viewed                      |
+| Error     | `status-error` (red)                        | Latest turn failed and not yet viewed            |
+| Idle      | no dot                                      | Viewed and not working                           |
 
 Text on a status tint uses the matching `text-status-*-foreground`. Projects
 show their most urgent chat's state.
@@ -63,6 +63,14 @@ Atrium retains recently terminal work even after a chat has been read. Its
 projection determines the card's lifecycle, using `getThreadStatusPill` for
 the same presentation. Reading a chat clears its navigation unread indicator
 while the retained Atrium card remains available.
+
+Show live activity once, in the compact line above the composer. Use specific
+plain-language states when the provider supplies evidence: Running command,
+Waiting for an agent, or Waiting for your answer. Confirmed native work can
+continue after the response ends; keep its navigation spinner and show
+Background work running. The line opens the existing Tasks surface when there
+is work to inspect. Avoid a second timer or a new status panel. See
+`docs/live-chat-activity.md` for the evidence boundary.
 
 Decorative layers (sidebar stars, ambiance, Atrium scene) derive their colour
 from the accent and sidebar colour settings and always sit behind content.
@@ -118,7 +126,8 @@ radii.
 - **Desk tabs** fill the top window bar, using a taller row instead of stacked
   title and tab rows. Leave native window controls clear and keep buttons out
   of the drag region. Open actions live in the tab menu; source-build status
-  sits beside Settings in the sidebar footer.
+  sits beside Settings in the sidebar footer. Connection issues for the selected
+  server temporarily replace that badge; build status returns after recovery.
 - **Settings pages** use `SettingsPageContainer` at its standard width and
   start with a page title. Its `wide` variant is for tables and dashboards only.
 - **Chat content** uses the shared reading width; the composer aligns to it.
@@ -157,6 +166,11 @@ variant there.
   custom elements use `focus-ring`).
 - **Disabled:** 50% opacity. If a tooltip explains why, keep it focusable.
 - **Pressed:** a slightly darker fill or a 0.98 scale, at most 100ms.
+- On devices with hover, message timestamps and actions use a compact area
+  outside short user bubbles and beneath assistant text. Hidden metadata must
+  not add an empty line inside a bubble; hover and keyboard focus must not
+  resize timeline rows. Touch devices keep these controls visible in the normal
+  message flow, and long-message expand controls always retain their own space.
 
 ## 8. Motion
 
@@ -234,6 +248,10 @@ The entrance utilities `animate-enter-rise`, `animate-enter-fade`,
 - **Don't repeat.** Never restate what a switch, badge, button or heading
   already shows, and don't narrate the screen ("the summary above remains
   available").
+- **Delivery status stays with the message.** Show Sending, Received and
+  delayed pickup in the steering shelf. Routine delivery receipts and periodic
+  "still working" checks stay in diagnostics, rather than repeating as work-log
+  rows. Keep actual failures visible and preserve exact-message confirmation.
 - **Metadata on demand.** Timestamps, durations, paths, IDs, environment
   variable names, version requirements and technical caveats go in a hover,
   an `InfoTip` or a collapsed "Advanced" section.

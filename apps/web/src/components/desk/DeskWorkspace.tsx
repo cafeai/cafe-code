@@ -52,6 +52,7 @@ import {
 } from "../../deskModel";
 import { useWorkspaceEnvironmentId } from "~/environments/workspace";
 import { useSettings } from "../../hooks/useSettings";
+import { useIsMobile } from "../../hooks/useMediaQuery";
 import {
   DraftId,
   finalizePromotedDraftThreadByRef,
@@ -96,6 +97,10 @@ type DropHint =
   | { kind: "insert"; groupId: string; index: number }
   | { kind: "pane"; groupId: string; edge: ReturnType<typeof deskDropEdge> }
   | null;
+// Width of the edge fade on an overflowing tab strip. It is passed to desk.css
+// as --desk-strip-fade and also keeps a revealed tab clear of the fade.
+const TAB_STRIP_FADE_REM = 1.5;
+const tabStripStyle = { "--desk-strip-fade": `${TAB_STRIP_FADE_REM}rem` } as CSSProperties;
 const rectStyle = (r: DeskRect): CSSProperties => ({
   left: `${r.x * 100}%`,
   top: `${r.y * 100}%`,
@@ -513,6 +518,38 @@ function GroupTabs({
     id: `strip:${group.id}`,
     data: { kind: "strip", groupId: group.id } satisfies DragData,
   });
+  useLayoutEffect(() => {
+    const element = strip.current;
+    if (!element) return;
+    // Mark each edge that has tabs scrolled beyond it; desk.css fades only
+    // those edges. Observing the cells as well as the strip catches title and
+    // interface-size changes that alter scrollWidth without resizing the strip;
+    // the mutation observer follows tabs as they open and close.
+    const update = () => {
+      const max = element.scrollWidth - element.clientWidth;
+      // One pixel of slack absorbs fractional widths at non-100% scales.
+      element.dataset.overflowStart = String(element.scrollLeft > 1);
+      element.dataset.overflowEnd = String(element.scrollLeft < max - 1);
+    };
+    update();
+    const sizes = new ResizeObserver(update);
+    sizes.observe(element);
+    for (const cell of element.children) sizes.observe(cell);
+    const cells = new MutationObserver((records) => {
+      for (const record of records) {
+        for (const node of record.removedNodes) if (node instanceof Element) sizes.unobserve(node);
+        for (const node of record.addedNodes) if (node instanceof Element) sizes.observe(node);
+      }
+      update();
+    });
+    cells.observe(element, { childList: true });
+    element.addEventListener("scroll", update, { passive: true });
+    return () => {
+      cells.disconnect();
+      sizes.disconnect();
+      element.removeEventListener("scroll", update);
+    };
+  }, []);
   useEffect(() => {
     const bar = strip.current;
     const reveal = () => {
@@ -525,8 +562,14 @@ function GroupTabs({
       if (!bar || !tab) return;
       const a = tab.getBoundingClientRect(),
         b = bar.getBoundingClientRect();
-      if (a.left < b.left) bar.scrollLeft -= b.left - a.left;
-      if (a.right > b.right) bar.scrollLeft += a.right - b.right;
+      // Also keep the cell clear of an edge fade. At either scroll end there is
+      // no fade there and scrollLeft clamps, so the margin costs nothing. When
+      // the cell cannot fit between both fades, keep its title start visible.
+      const fade =
+        TAB_STRIP_FADE_REM * parseFloat(getComputedStyle(document.documentElement).fontSize);
+      if (a.left < b.left + fade) bar.scrollLeft -= b.left + fade - a.left;
+      else if (a.right > b.right - fade)
+        bar.scrollLeft += Math.min(a.right - (b.right - fade), a.left - (b.left + fade));
     };
     reveal();
     const observer = new ResizeObserver(reveal);
@@ -562,6 +605,7 @@ function GroupTabs({
           drop.setNodeRef(element);
         }}
         className="desk-tab-strip"
+        style={tabStripStyle}
         role="tablist"
         aria-label={`${group.name} tabs`}
       >
@@ -769,6 +813,8 @@ function ResizeDivider({
 
 export default function DeskWorkspace() {
   useDeskRouteSync();
+  const isMobile = useIsMobile();
+  const compactNavigation = !isElectron && isMobile;
   const desk = useDeskStore((s) => s.desk);
   const draftEditors = useDeskStore((s) => s.draftEditors);
   const activeDraftId = useDeskStore((s) => s.activeDraftId);
@@ -833,7 +879,9 @@ export default function DeskWorkspace() {
   // Collapse only when the layout cannot fit at ANY admissible ratios, not
   // because one user-selected ratio made an otherwise viable pane too small.
   const narrow = area.width > 0 && (area.width < 760 || fittedLayout === null);
-  const isolated = desk.focusedGroupId ?? (narrow ? desk.activeGroupId : null);
+  const isolated = compactNavigation
+    ? desk.activeGroupId
+    : (desk.focusedGroupId ?? (narrow ? desk.activeGroupId : null));
   const restoreGroups = desk.focusedGroupId !== null || (narrow && groupIds.length > 1);
   const canRestoreGroups = groupIds.length < 2 || !narrow;
   const toggleGroupFocus = (groupId: string) => {
@@ -1219,61 +1267,67 @@ export default function DeskWorkspace() {
                         dispatch({ type: "sessionRail", groupId, docked }),
                     }}
                   >
-                    {renderChat(target, (controls) => (
-                      <>
-                        <GroupTabs
-                          controls={controls}
-                          rect={rect}
-                          group={group}
-                          pendingEditor={pendingEditor}
-                          hint={hint}
-                          restoreGroups={restoreGroups}
-                          canRestoreGroups={canRestoreGroups}
-                          onToggleFocus={() => toggleGroupFocus(groupId)}
-                          onMenu={(key, pos) => {
-                            void showMenu(groupId, key, pos);
-                          }}
-                          onRename={rename}
-                          onRenameGroup={() => {
-                            setGroupName(group.name);
-                            setRenameGroup({ groupId, desk: useDeskStore.getState().desk });
-                          }}
-                        />
-                        {isolated && groupIds.length > 1 && (
-                          <div
-                            className="desk-group-switcher"
-                            role="group"
-                            aria-label="Chat groups"
-                          >
-                            {groupIds.map((id) => (
-                              <button
-                                key={id}
-                                aria-pressed={id === isolated}
-                                onClick={() => {
-                                  dispatch({ type: "activateGroup", groupId: id });
-                                  if (desk.focusedGroupId) dispatch({ type: "focus", groupId: id });
+                    {renderChat(
+                      target,
+                      compactNavigation
+                        ? undefined
+                        : (controls) => (
+                            <>
+                              <GroupTabs
+                                controls={controls}
+                                rect={rect}
+                                group={group}
+                                pendingEditor={pendingEditor}
+                                hint={hint}
+                                restoreGroups={restoreGroups}
+                                canRestoreGroups={canRestoreGroups}
+                                onToggleFocus={() => toggleGroupFocus(groupId)}
+                                onMenu={(key, pos) => {
+                                  void showMenu(groupId, key, pos);
                                 }}
-                              >
-                                {desk.groups[id]!.name}
-                              </button>
-                            ))}
-                            {desk.focusedGroupId && (
-                              <button
-                                disabled={!canRestoreGroups}
-                                title={
-                                  canRestoreGroups
-                                    ? undefined
-                                    : "Enlarge the window to restore all groups"
-                                }
-                                onClick={() => toggleGroupFocus(groupId)}
-                              >
-                                Restore layout
-                              </button>
-                            )}
-                          </div>
-                        )}
-                      </>
-                    ))}
+                                onRename={rename}
+                                onRenameGroup={() => {
+                                  setGroupName(group.name);
+                                  setRenameGroup({ groupId, desk: useDeskStore.getState().desk });
+                                }}
+                              />
+                              {isolated && groupIds.length > 1 && (
+                                <div
+                                  className="desk-group-switcher"
+                                  role="group"
+                                  aria-label="Chat groups"
+                                >
+                                  {groupIds.map((id) => (
+                                    <button
+                                      key={id}
+                                      aria-pressed={id === isolated}
+                                      onClick={() => {
+                                        dispatch({ type: "activateGroup", groupId: id });
+                                        if (desk.focusedGroupId)
+                                          dispatch({ type: "focus", groupId: id });
+                                      }}
+                                    >
+                                      {desk.groups[id]!.name}
+                                    </button>
+                                  ))}
+                                  {desk.focusedGroupId && (
+                                    <button
+                                      disabled={!canRestoreGroups}
+                                      title={
+                                        canRestoreGroups
+                                          ? undefined
+                                          : "Enlarge the window to restore all groups"
+                                      }
+                                      onClick={() => toggleGroupFocus(groupId)}
+                                    >
+                                      Restore layout
+                                    </button>
+                                  )}
+                                </div>
+                              )}
+                            </>
+                          ),
+                    )}
                   </ChatPaneContext>
                 </Pane>
               );

@@ -8,7 +8,11 @@ import { Popover, PopoverPopup, PopoverTitle, PopoverTrigger } from "../ui/popov
 import { SessionPlacementButton } from "./SessionRail";
 import { TaskProgressDetails } from "./TaskProgressDetails";
 import { ScheduledFollowups, type ScheduledFollowupsContext } from "./ScheduledFollowups";
-import { ProviderTasks, type ProviderTasksContext } from "./ProviderTasks";
+import {
+  ProviderTasks,
+  deriveActiveProviderTasks,
+  type ProviderTasksContext,
+} from "./ProviderTasks";
 import {
   deriveTaskProgressPresentation,
   type ComposerTaskProgressPlan,
@@ -38,9 +42,18 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
   readonly onShowOnSide?: () => void;
   readonly scheduledFollowups?: ScheduledFollowupsContext | undefined;
   readonly providerTasks?: ProviderTasksContext | undefined;
+  readonly open?: boolean | undefined;
+  readonly onOpenChange?: ((open: boolean) => void) | undefined;
+  readonly activeTaskCount?: number | undefined;
+  readonly activeAgentCount?: number | undefined;
 }) {
   const { plan } = props;
-  const [open, setOpen] = useState(false);
+  const [internalOpen, setInternalOpen] = useState(false);
+  const open = props.open ?? internalOpen;
+  const setOpen = (value: boolean) => {
+    if (props.onOpenChange) props.onOpenChange(value);
+    else setInternalOpen(value);
+  };
   const openModeRef = useRef<"hover" | "press" | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const subagents = (props.subagents ?? []).filter(
@@ -49,6 +62,12 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
   );
   const hasPlan = Boolean(plan && plan.steps.length > 0);
   const hasSubagents = subagents.length > 0;
+  const taskCount = Math.max(
+    props.activeTaskCount ?? 0,
+    props.providerTasks ? deriveActiveProviderTasks(props.providerTasks).length : 0,
+  );
+  const agentCount = Math.max(props.activeAgentCount ?? 0, subagents.length);
+  const activeCount = taskCount + agentCount;
   if (
     props.sessionRailVisible ||
     (!hasPlan && !hasSubagents && !props.scheduledFollowups && !props.providerTasks)
@@ -70,6 +89,7 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
       return;
     }
     if (details.reason === "trigger-hover" || details.reason === "trigger-focus") {
+      if (!nextOpen && props.open && openModeRef.current === null) return;
       // Once pinned by click/tap/keyboard, leaving the hover corridor or moving
       // focus into the scroll region must not close the popover.
       if (!nextOpen && openModeRef.current === "press") return;
@@ -90,7 +110,9 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
     ? `Task progress: step ${currentIndex} of ${total}${hasSubagents ? `, ${subagents.length} active ${subagents.length === 1 ? "subagent" : "subagents"}` : ""}`
     : hasSubagents
       ? `${subagents.length} active ${subagents.length === 1 ? "subagent" : "subagents"}`
-      : "Tasks and scheduled follow-ups";
+      : activeCount
+        ? `${activeCount} active ${activeCount === 1 ? "task" : "tasks"}`
+        : "Tasks and scheduled follow-ups";
 
   const triggerContent = (
     <>
@@ -131,7 +153,10 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
         {hasPlan ? `Step ${currentIndex} / ${total}` : null}
         {hasPlan && hasSubagents ? " · " : null}
         {hasSubagents ? `${subagents.length} ${subagents.length === 1 ? "agent" : "agents"}` : null}
-        {!hasPlan && !hasSubagents ? "Tasks" : null}
+        {!hasPlan && !hasSubagents ? `Tasks${activeCount ? ` · ${activeCount}` : ""}` : null}
+        {(hasPlan || hasSubagents) && taskCount
+          ? ` · ${taskCount} ${taskCount === 1 ? "task" : "tasks"}`
+          : null}
       </span>
     </>
   );

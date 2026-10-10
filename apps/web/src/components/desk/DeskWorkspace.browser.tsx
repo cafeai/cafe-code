@@ -481,6 +481,9 @@ describe("Desk workspace navigation chrome", () => {
         expect(parseFloat(getComputedStyle(right).paddingRight)).toBeGreaterThan(130);
         expect(parseFloat(getComputedStyle(left).paddingRight)).toBe(0);
         expect(parseFloat(getComputedStyle(lower).paddingRight)).toBe(0);
+        expect(getComputedStyle(right, "::after").content).toBe('""');
+        expect(getComputedStyle(left, "::after").content).toBe("none");
+        expect(getComputedStyle(lower, "::after").content).toBe("none");
         expect(lower.classList.contains("drag-region")).toBe(false);
         expect(lower.getBoundingClientRect().height).toBeCloseTo(44, 0);
       });
@@ -491,23 +494,34 @@ describe("Desk workspace navigation chrome", () => {
   });
 
   it.each([
-    { platform: "mac", scale: 100, x: 0, controls: 0, dark: true },
-    { platform: "windows", scale: 80, x: 0, controls: 138, dark: true },
-    { platform: "windows", scale: 130, x: 0, controls: 138, dark: false },
-    { platform: "linux", scale: 100, x: 0, controls: 138, dark: true },
-    { platform: "linux-left", scale: 130, x: 100, controls: 0, dark: false },
+    { platform: "mac", scale: 100, x: 0, controls: 0, dark: true, width: 1440 },
+    { platform: "windows", scale: 80, x: 0, controls: 138, dark: true, width: 1440 },
+    { platform: "windows", scale: 130, x: 0, controls: 138, dark: false, width: 1440 },
+    { platform: "linux", scale: 100, x: 0, controls: 138, dark: true, width: 1440 },
+    { platform: "linux-left", scale: 130, x: 100, controls: 0, dark: false, width: 1440 },
+    { platform: "mac", scale: 100, x: 0, controls: 0, dark: true, width: 480 },
+    { platform: "windows", scale: 80, x: 0, controls: 138, dark: true, width: 480 },
+    { platform: "linux", scale: 130, x: 0, controls: 138, dark: false, width: 480 },
   ])(
-    "keeps taller titlebar tabs clear of $platform controls at $scale%",
-    async ({ platform, scale, x, controls, dark }) => {
+    "keeps titlebar controls and a drag area before the actions usable on $platform at $scale% and $width px",
+    async ({ platform, scale, x, controls, dark, width }) => {
+      await page.viewport(width, 900);
       applyInterfaceScalePercent(scale);
       document.documentElement.classList.toggle("dark", dark);
       document.documentElement.classList.toggle("wco", platform !== "mac");
       document.documentElement.style.setProperty("--app-titlebar-area-x", `${x}px`);
       document.documentElement.style.setProperty(
         "--app-titlebar-area-width",
-        `${1440 - x - controls}px`,
+        `${width - x - controls}px`,
       );
-      const { host, cleanup } = await setup(["one", "two"]);
+      // Tabs shrink before the strip overflows, so three fit even at 480 px.
+      // Open enough there to exercise the clipped, edge-faded overflow path.
+      const ids =
+        width === 480 ? ["one", "two", "three", "four", "five", "six"] : ["one", "two", "three"];
+      mocks.environment.threadShellById = Object.fromEntries(
+        ids.map((id) => [id, { id, archivedAt: null }]),
+      );
+      const { host, cleanup } = await setup(ids);
       try {
         const bar = host.querySelector<HTMLElement>(".desk-group-bar")!;
         const box = bar.getBoundingClientRect();
@@ -517,17 +531,49 @@ describe("Desk workspace navigation chrome", () => {
         expect(box.top).toBeLessThanOrEqual(1);
         expect(parseFloat(style.paddingLeft)).toBeCloseTo(Math.max(0, x - box.left), 0);
         expect(parseFloat(style.paddingRight)).toBeCloseTo(
-          Math.max(0, controls - (1440 - box.right)),
+          Math.max(0, controls - (width - box.right)),
           0,
         );
         for (const button of bar.querySelectorAll("button")) {
           const bounds = button.getBoundingClientRect();
-          expect(bounds.left).toBeGreaterThanOrEqual(x);
-          expect(bounds.right).toBeLessThanOrEqual(1440 - controls);
+          expect(getComputedStyle(button).getPropertyValue("-webkit-app-region")).toBe("no-drag");
+          const stripBounds = button.closest(".desk-tab-strip")?.getBoundingClientRect();
+          // Overflowing tabs are clipped by the strip. Check the visible
+          // intersection, while keeping ordinary controls' full bounds exact.
+          const left = stripBounds ? Math.max(bounds.left, stripBounds.left) : bounds.left;
+          const right = stripBounds ? Math.min(bounds.right, stripBounds.right) : bounds.right;
+          if (left > right) continue;
+          expect(left).toBeGreaterThanOrEqual(x);
+          expect(right).toBeLessThanOrEqual(width - controls);
+        }
+        const actions = bar.querySelector<HTMLElement>('button[aria-label="Main tab actions"]')!;
+        const focus = bar.querySelector<HTMLElement>(":scope > .desk-icon")!;
+        const strip = bar.querySelector<HTMLElement>(".desk-tab-strip")!;
+        const usableRight = box.right - parseFloat(style.paddingRight);
+        const dragWidth = (32 * scale) / 100;
+        expect(usableRight - actions.getBoundingClientRect().right).toBeCloseTo(0, 1);
+        expect(
+          focus.getBoundingClientRect().left - strip.getBoundingClientRect().right,
+        ).toBeCloseTo(dragWidth, 1);
+        // Hit-test the reserved area: no tab, action or overlay can intercept it.
+        expect(
+          document.elementFromPoint(
+            strip.getBoundingClientRect().right + dragWidth / 2,
+            box.top + box.height / 2,
+          ),
+        ).toBe(bar);
+        expect(style.getPropertyValue("-webkit-app-region")).toBe("drag");
+        if (width === 480) {
+          expect(strip.scrollWidth).toBeGreaterThan(strip.clientWidth);
+          // Overlay scrollbars give no overflow hint, so a clipped edge fades.
+          await vi.waitFor(() => {
+            expect([strip.dataset.overflowStart, strip.dataset.overflowEnd]).toContain("true");
+            expect(getComputedStyle(strip).maskImage).not.toBe("none");
+          });
         }
         await page.screenshot({
           element: host,
-          path: `../../../../../.explorations/titlebar-visual/${platform}-${scale}-${dark ? "dark" : "light"}.png`,
+          path: `../../../../../.explorations/titlebar-visual/${platform}-${scale}-${width}-${dark ? "dark" : "light"}.png`,
         });
       } finally {
         await cleanup();
@@ -1005,8 +1051,10 @@ describe("Desk workspace navigation chrome", () => {
           { x: pane.left + pane.width / 2, y: pane.top + pane.height / 2 },
           async (moveTo) => {
             // Choose an earlier tab on the left so the requested clipping is
-            // reachable before the strip hits its maximum scroll offset.
-            const targetIndex = side === "left" ? 7 : 8;
+            // reachable before the strip hits its maximum scroll offset. An
+            // overflowing strip holds its tabs at their minimum width, which
+            // shortens that scroll range.
+            const targetIndex = side === "left" ? 5 : 8;
             const cell = screen
               .getByRole("tab", { name: `Chat clipped-${targetIndex}`, exact: true })
               .element()
@@ -1045,6 +1093,8 @@ describe("Desk workspace navigation chrome", () => {
               const currentCell = cell.getBoundingClientRect();
               const paintedWidth = Number.parseFloat(getComputedStyle(marker, "::before").width);
               expect(paintedWidth).toBe(2);
+              // The overflow edge fade would hide a marker held at the edge.
+              expect(getComputedStyle(strip).maskImage).toBe("none");
               expect(bounds.left).toBeGreaterThanOrEqual(currentViewport.left);
               expect(bounds.left + paintedWidth).toBeLessThanOrEqual(currentViewport.right + 0.5);
               if (side === "left") expect(currentCell.left).toBeLessThan(currentViewport.left);

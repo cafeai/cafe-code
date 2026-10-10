@@ -44,10 +44,17 @@ describe("restart-cafe-code", () => {
     expect(() => parseRestartCafeCodeArgs(["--"])).toThrow("Expected a launch command");
   });
 
-  it("builds the default desktop launch command through Node", () => {
-    expect(defaultLaunchCommand("/opt/bin/node")).toEqual([
-      "/opt/bin/node",
+  it.each(["linux", "win32"] as const)("preserves the Node desktop launch on %s", (platform) => {
+    expect(defaultLaunchCommand("node", platform)).toEqual([
+      "node",
       "apps/desktop/scripts/start-electron.mjs",
+    ]);
+  });
+
+  it("relaunches the Mac app through LaunchServices rather than a stale terminal context", () => {
+    expect(defaultLaunchCommand("node", "darwin")).toEqual([
+      "node",
+      "apps/desktop/scripts/start-electron-launchservices.mjs",
     ]);
   });
 

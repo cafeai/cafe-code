@@ -30,15 +30,27 @@ it.skipIf(process.env.CAFE_CODE_MCP_BRIDGE_E2E !== "1")(
         health: async () => ({ content: [{ type: "text", text: "fixture health" }] }),
         session: async () => ({
           close: () => {},
-          request: async (body) =>
-            body.method === "trusted_session_end"
-              ? { closed: true }
-              : {
-                  content: [
-                    { type: "text", text: "fixture observation" },
-                    { type: "image", mimeType: "image/png", data: image },
-                  ],
-                },
+          request: async (body) => {
+            if (body.method === "trusted_session_end") return { closed: true };
+            return {
+              content: [
+                { type: "text", text: "fixture observation" },
+                { type: "image", mimeType: "image/png", data: image },
+              ],
+              structuredContent:
+                body.name === "press_key"
+                  ? { effect: "unverifiable" }
+                  : {
+                      pid: 1,
+                      window_id: 2,
+                      snapshot_id: "s00000001",
+                      elements: [],
+                      capture_id: "fixture-capture",
+                      screenshot_width: 1,
+                      screenshot_height: 1,
+                    },
+            };
+          },
         }),
       },
     });
@@ -68,15 +80,41 @@ it.skipIf(process.env.CAFE_CODE_MCP_BRIDGE_E2E !== "1")(
       });
       await client.connect(transport);
       const names = (await client.listTools()).tools.map((v) => v.name);
-      expect(names).toContain("get_desktop_state");
+      expect(names.toSorted()).toEqual([
+        "computer_act",
+        "computer_advanced",
+        "computer_observe",
+        "computer_select",
+        "health",
+        "open_url",
+        "release_control",
+      ]);
       expect(names).not.toContain("install_extension");
       expect((await client.callTool({ name: "get_desktop_state", arguments: {} })).isError).toBe(
         true,
       );
       await binding!.activate();
       await binding!.beginTurn();
+      await host.setChatEnabled(ThreadId.make("synthetic-thread"), true);
       const result = await client.callTool({ name: "get_desktop_state", arguments: {} });
       expect(result.content).toContainEqual({ type: "image", mimeType: "image/png", data: image });
+      const selected = await client.callTool({
+        name: "computer_select",
+        arguments: { pid: 1, window_id: 2, view: "both" },
+      });
+      expect(selected.isError).not.toBe(true);
+      const selectedContent = selected.content as { type: string; text?: string }[];
+      const target = (JSON.parse(selectedContent[0]!.text!) as { target: string }).target;
+      const batch = await client.callTool({
+        name: "computer_act",
+        arguments: {
+          target,
+          actions: [{ type: "key", keys: ["return"] }],
+          view: "both",
+        },
+      });
+      expect(batch.isError).not.toBe(true);
+      expect(batch.content).toContainEqual({ type: "image", mimeType: "image/png", data: image });
       await binding!.endTurn();
       expect((await client.callTool({ name: "click", arguments: { x: 10, y: 20 } })).isError).toBe(
         true,

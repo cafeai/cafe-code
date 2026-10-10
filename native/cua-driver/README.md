@@ -25,7 +25,8 @@ the Turbo cache lookup. An existing matching runtime is verified and reused
 offline. First preparation requires Git and Cargo/Rust plus Apple's command line
 tools; it fetches the exact source commit, checks/applies the patch and builds
 with the patched locked dependency graph. `corepack yarn cua:prepare --force`
-deliberately rebuilds the source. No upstream installer runs and no user Cua or
+deliberately rebuilds the source. Build output follows Cargo's own metadata,
+including an explicit `CARGO_TARGET_DIR` cache. No upstream installer runs and no user Cua or
 provider profile is edited.
 
 The source patch removes the Cua telemetry crate and makes driver telemetry
@@ -36,6 +37,17 @@ excludes the affected XML and atomic-polyfill paths. The informational
 overlay. Native session cursors are enabled at the user's request; Cafe does not
 install custom themes or fonts. This informational maintenance finding remains
 an upgrade-review item, rather than a reason to disable the cursor feature.
+
+The Mac source patch identifies Electron from the live process's bundle path,
+including source launches and custom locations, before legacy name lookup.
+It also corrects explicit foreground Unicode typing in an
+exact Electron window. The upstream foreground path still posts Unicode keys
+to the process; a disposable Electron fixture received zero characters on that
+route. Cafe selects the existing exact-window foreground HID guard and global
+Unicode sender for Electron instead, retaining bounded read-back and prior
+focus restoration. Background input, other native apps and Screen Sharing
+retain their existing routes. This is selected before input, never a retry of
+partial or uncertain delivery. The patch hash in `build.json` binds this change.
 
 The runtime lives in ignored `runtime/darwin-<arch>` with source/patch/binary
 hash provenance. Artifact packaging stages only matching verified bytes and
@@ -153,6 +165,7 @@ Native health/screen-size qualification is opt-in:
 
 ```sh
 CAFE_CODE_CUA_NATIVE_E2E=1 corepack yarn workspace @cafecode/desktop exec vitest run --config ../../vitest.config.ts src/nativeControl/NativeDaemon.e2e.test.ts
+CAFE_CODE_CUA_INPUT_E2E=1 corepack yarn workspace @cafecode/desktop exec vitest run --config ../../vitest.config.ts src/nativeControl/NativeComputerInput.e2e.test.ts
 CAFE_CODE_CUA_SIGNING_E2E=1 corepack yarn workspace @cafecode/desktop exec vitest run --config ../../vitest.config.ts src/nativeControl/CuaSigning.e2e.test.ts
 CAFE_CODE_MCP_BRIDGE_E2E=1 corepack yarn workspace @cafeai/cafe-code exec vitest run --config vitest.e2e.config.ts integration/CafeMcpBridge.e2e.test.ts integration/NativeControlBridge.e2e.test.ts
 ```
@@ -160,6 +173,10 @@ CAFE_CODE_MCP_BRIDGE_E2E=1 corepack yarn workspace @cafeai/cafe-code exec vitest
 The bridge fixture uses a synthetic controller and no real provider or paid
 inference. Actual screenshot/input permission qualification is a user-initiated
 Mac test after grants; a passing health test alone does not establish that.
+The input fixture opens only its owned disposable Electron window and isolated
+profile. It verifies actual renderer input events, exact Unicode text, one
+submission, and same-turn release/reacquisition through the real Cafe host and
+pinned native driver. It does not operate user apps or alter the clipboard.
 
 `release.json` is the single production pin for version, immutable source commit,
 platform archives, exact byte lengths, SHA-256 hashes and signing identity.

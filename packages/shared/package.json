@@ -4,6 +4,10 @@
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "exports": {
+    "./liveWork": {
+      "types": "./src/liveWork.ts",
+      "import": "./src/liveWork.ts"
+    },
     "./nativeRuntime": {
       "types": "./src/nativeRuntime.ts",
       "import": "./src/nativeRuntime.ts"
@@ -99,6 +103,10 @@
     "./toolActivity": {
       "types": "./src/toolActivity.ts",
       "import": "./src/toolActivity.ts"
+    },
+    "./providerWorkLog": {
+      "types": "./src/providerWorkLog.ts",
+      "import": "./src/providerWorkLog.ts"
     },
     "./activityPayloadSanitizer": {
       "types": "./src/activityPayloadSanitizer.ts",

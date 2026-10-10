@@ -61,6 +61,7 @@ import {
 import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import { buildCodexSteerClientCorrelationId } from "../codexSteerCorrelation.ts";
+import { makeCodexDaybreakDescriptor } from "../codexDaybreak.ts";
 import {
   type CodexSessionRuntimeOptions,
   type CodexSessionRuntimeError,
@@ -1009,6 +1010,12 @@ const providerSessionDirectoryTestLayer = Layer.succeed(ProviderSessionDirectory
 
 const validationRuntimeFactory = makeRuntimeFactory();
 const advertisedTierModels: readonly ServerProviderModel[] = [
+  ...(["daybreakBlue", "daybreakRed"] as const).map((program) => ({
+    slug: program,
+    name: program,
+    isCustom: false,
+    capabilities: { optionDescriptors: [makeCodexDaybreakDescriptor(["standard", program])!] },
+  })),
   {
     slug: "catalogued-tier-model",
     name: "Catalogued tier model",
@@ -1048,6 +1055,57 @@ const validationLayer = it.layer(
 );
 
 validationLayer("CodexAdapterLive validation", (it) => {
+  it.effect(
+    "routes Blue/Red On and explicit Off to the exact runtime and rejects lost access before send",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* CodexAdapter;
+        for (const program of ["daybreakBlue", "daybreakRed"] as const) {
+          const threadId = asThreadId(`daybreak-${program}`);
+          const selection = (value: string) =>
+            createModelSelection(ProviderInstanceId.make("codex"), program, [
+              { id: "cyberAccessProgram", value },
+            ]);
+          yield* adapter.startSession({
+            threadId,
+            runtimeMode: "approval-required",
+            modelSelection: selection(program),
+          });
+          const runtime = validationRuntimeFactory.lastRuntime;
+          assert.ok(runtime);
+          runtime.sendTurnImpl.mockClear();
+          yield* adapter.sendTurn({ threadId, input: "On", modelSelection: selection(program) });
+          yield* adapter.sendTurn({
+            threadId,
+            input: "On after changing models",
+            modelSelection: selection(program === "daybreakBlue" ? "daybreakRed" : "daybreakBlue"),
+          });
+          yield* adapter.sendTurn({
+            threadId,
+            input: "Off",
+            modelSelection: selection("standard"),
+          });
+          assert.deepEqual(
+            runtime.sendTurnImpl.mock.calls.map(([input]) => input.cyberAccessProgram),
+            [program, program, "standard"],
+          );
+          const count = runtime.sendTurnImpl.mock.calls.length;
+          const failed = yield* Effect.exit(
+            adapter.sendTurn({
+              threadId,
+              input: "Unavailable",
+              modelSelection: createModelSelection(
+                ProviderInstanceId.make("codex"),
+                "unadvertised",
+                [{ id: "cyberAccessProgram", value: program }],
+              ),
+            }),
+          );
+          assert.equal(failed._tag, "Failure");
+          assert.equal(runtime.sendTurnImpl.mock.calls.length, count);
+        }
+      }),
+  );
   it.effect(
     "passes an advertised tier exactly at start and rejects an unknown tier before runtime construction",
     () =>
@@ -1563,6 +1621,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
         codexReview,
         modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-6.1-sol", [
           { id: "serviceTier", value: "not-advertised" },
+          { id: "cyberAccessProgram", value: "not-advertised" },
           { id: "reasoningEffort", value: "ultra" },
         ]),
         interactionMode: "plan",
@@ -1575,6 +1634,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       assert.equal(runtime.sendTurnImpl.mock.calls[0]?.[0]?.model, undefined);
       assert.equal(runtime.sendTurnImpl.mock.calls[0]?.[0]?.effort, undefined);
       assert.equal(runtime.sendTurnImpl.mock.calls[0]?.[0]?.serviceTier, undefined);
+      assert.equal(runtime.sendTurnImpl.mock.calls[0]?.[0]?.cyberAccessProgram, undefined);
       assert.equal(runtime.sendTurnImpl.mock.calls[0]?.[0]?.interactionMode, undefined);
 
       const invalid = yield* Effect.exit(

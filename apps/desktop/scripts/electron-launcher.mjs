@@ -14,16 +14,20 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { MAC_LOCAL_NETWORK_USAGE_DESCRIPTION } from "../../../scripts/lib/mac-app-privacy.ts";
+import {
+  MAC_SOURCE_BUNDLE_IDENTIFIER,
+  signMacSourceRuntime,
+} from "../../../scripts/lib/mac-source-runtime-signing.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export const desktopDir = resolve(__dirname, "..");
 
 const macAppName = "Cafe Code";
-const macBundleIdentifier = "com.cafeai.cafecode";
-// Rebuild cached source bundles so an existing installation also receives the
-// Local Network usage declaration on its next launch.
-const macRuntimeLauncherVersion = 2;
+const macBundleIdentifier = MAC_SOURCE_BUNDLE_IDENTIFIER;
+// Rebuild cached bundles with signatures matching their branded plists. A
+// leftover Electron signing identity can fail macOS Local Network admission.
+const macRuntimeLauncherVersion = 3;
 const macRuntimeDir = join(desktopDir, ".electron-runtime");
 const macRuntimeMetadataPath = join(macRuntimeDir, "metadata.json");
 const macRuntimeAppBundlePath = join(macRuntimeDir, `${macAppName}.app`);
@@ -146,6 +150,7 @@ function resolveBrandedMacElectronPath(electronExecutablePath) {
   }
 
   patchMacAppBundlePlists(macRuntimeAppBundlePath);
+  signMacSourceRuntime(macRuntimeAppBundlePath);
   writeFileSync(macRuntimeMetadataPath, `${JSON.stringify(expectedMetadata, null, 2)}\n`);
   return macRuntimeExecutablePath;
 }

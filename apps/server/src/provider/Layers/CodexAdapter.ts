@@ -71,6 +71,7 @@ import * as EffectCodexSchema from "effect-codex-app-server/schema";
 import { getModelSelectionStringOptionValue } from "@cafecode/shared/model";
 import { summarizeToolArguments } from "@cafecode/shared/toolActivity";
 import { resolveCodexServiceTier } from "../codexServiceTier.ts";
+import { resolveCodexDaybreak } from "../codexDaybreak.ts";
 import { isCodexHistoryRecoveryRequiredError } from "@cafecode/shared/codexHistorySafety";
 import { makeCodexHistorySafetyStore } from "../../persistence/CodexHistorySafety.ts";
 
@@ -4788,10 +4789,22 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           });
         }
 
+        const advertisedModels = options?.getModels ? yield* options.getModels() : undefined;
+        const daybreak = resolveCodexDaybreak(
+          input.modelSelection,
+          boundInstanceId,
+          advertisedModels,
+        );
+        if (daybreak.error)
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "startSession",
+            issue: daybreak.error,
+          });
         const tier = resolveCodexServiceTier(
           input.modelSelection,
           boundInstanceId,
-          options?.getModels ? yield* options.getModels() : undefined,
+          advertisedModels,
         );
         if (tier.error)
           return yield* new ProviderAdapterValidationError({
@@ -5334,14 +5347,24 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     // Native review inherits its materialized session/review-model settings.
     // No ordinary composer override is supported by review/start; do not even
     // validate a draft tier as if it were going to be submitted here.
+    const advertisedModels =
+      input.codexReview === undefined && options?.getModels
+        ? yield* options.getModels()
+        : undefined;
+    const daybreak =
+      input.codexReview === undefined
+        ? resolveCodexDaybreak(input.modelSelection, boundInstanceId, advertisedModels)
+        : {};
+    if (daybreak.error)
+      return yield* new ProviderAdapterValidationError({
+        provider: PROVIDER,
+        operation: "sendTurn",
+        issue: daybreak.error,
+      });
     const tier =
       input.codexReview !== undefined
         ? {}
-        : resolveCodexServiceTier(
-            input.modelSelection,
-            boundInstanceId,
-            options?.getModels ? yield* options.getModels() : undefined,
-          );
+        : resolveCodexServiceTier(input.modelSelection, boundInstanceId, advertisedModels);
     if (tier.error)
       return yield* new ProviderAdapterValidationError({
         provider: PROVIDER,
@@ -5386,6 +5409,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             }
           : {}),
         ...(tier.serviceTier !== undefined ? { serviceTier: tier.serviceTier } : {}),
+        ...(daybreak.cyberAccessProgram !== undefined
+          ? { cyberAccessProgram: daybreak.cyberAccessProgram }
+          : {}),
         ...(input.codexReview === undefined && input.interactionMode !== undefined
           ? { interactionMode: input.interactionMode }
           : {}),

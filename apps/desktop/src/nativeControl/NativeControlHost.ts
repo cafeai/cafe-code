@@ -5,7 +5,7 @@ import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   NATIVE_CONTROL_HOST_FILE,
   NATIVE_CONTROL_PATH,
-  NATIVE_CONTROL_TOOLS,
+  NATIVE_CONTROL_DEFAULT_TOOLS,
   NATIVE_CONTROL_VERSION,
   nativeControlError,
   nativeControlTokenDigest,
@@ -17,7 +17,7 @@ import {
 } from "@cafecode/shared/nativeControl";
 import type { NativeControlChatState, NativeControlState, ThreadId } from "@cafecode/contracts";
 import { NativeDaemon, verifyNativeRuntime, type NativeDaemonConnection } from "./NativeDaemon.ts";
-import { executeNativeControlTool } from "./NativeControlActions.ts";
+import { NativeComputerSession } from "./NativeComputerSession.ts";
 
 export interface NativeController {
   start: () => Promise<void>;
@@ -36,6 +36,7 @@ interface Session {
   turnActive: boolean;
   revoked: boolean;
   connection?: NativeDaemonConnection | undefined;
+  computer?: NativeComputerSession | undefined;
   inFlight?: Promise<NativeToolResult> | undefined;
   releasing?: Promise<void> | undefined;
 }
@@ -325,6 +326,8 @@ export class NativeControlHost {
           session.connection = undefined;
         }
       }
+      session.computer?.clear();
+      session.computer = undefined;
       if (this.owner === session) this.owner = undefined;
     };
     const releasing = cleanup();
@@ -364,7 +367,9 @@ export class NativeControlHost {
         ),
       );
     if (name === "release_control")
-      return this.release(session).then(() => ({
+      // The provider still owns an active turn. Only its lifecycle signal can
+      // end that authority; releasing the desktop ends this native episode.
+      return this.release(session, false).then(() => ({
         content: [{ type: "text", text: "Desktop control released." }],
       }));
     if (name === "health") return this.diagnostics();
@@ -375,7 +380,9 @@ export class NativeControlHost {
         // binding on Cua's native cursor. The SDK injects it into native calls;
         // no model-supplied label can substitute another session's identity.
         session.connection ??= await this.controller.session(
-          `${session.provider === "claudeAgent" ? "Claude" : session.provider === "codex" ? "Codex" : "Cafe"} · ${session.id.slice(0, 8)}`,
+          // Cua tombstones ended public labels within a daemon generation.
+          // A new control episode must never revive the previous lifecycle.
+          `${session.provider === "claudeAgent" ? "Claude" : session.provider === "codex" ? "Codex" : "Cafe"} · ${session.id.slice(0, 8)} · ${randomUUID()}`,
         );
         if (
           !this.enabled ||
@@ -385,27 +392,28 @@ export class NativeControlHost {
         )
           return nativeControlError("Desktop access was revoked before the action started.");
         const connection = session.connection;
-        const result = await executeNativeControlTool(
-          name,
-          args,
-          async (nativeName, nativeArgs) => {
-            // Composite navigation and automatic fallback retain the same owner
-            // and must observe disable/end-turn between native subcalls.
-            if (
-              !this.enabled ||
-              !session.turnActive ||
-              session.revoked ||
-              session.connection !== connection ||
-              (session.provider !== "human" && !this.enabledThreads.has(session.threadId))
-            )
-              return nativeControlError("Desktop access was revoked before the action started.");
-            return (await connection.request({
-              method: "trusted_session_call",
-              name: nativeName,
-              args: nativeArgs,
-            })) as unknown as NativeToolResult;
-          },
-        );
+        session.computer ??= new NativeComputerSession(async (nativeName, nativeArgs) => {
+          // Composite navigation and automatic fallback retain the same owner
+          // and must observe disable/end-turn between native subcalls.
+          if (
+            !this.enabled ||
+            this.phase !== "ready" ||
+            !session.active ||
+            !session.turnActive ||
+            session.revoked ||
+            session.expires < Date.now() ||
+            this.owner !== session ||
+            session.connection !== connection ||
+            (session.provider !== "human" && !this.enabledThreads.has(session.threadId))
+          )
+            return nativeControlError("Desktop access was revoked before the action started.");
+          return (await connection.request({
+            method: "trusted_session_call",
+            name: nativeName,
+            args: nativeArgs,
+          })) as unknown as NativeToolResult;
+        });
+        const result = await session.computer.call(name, args);
         return compactNativeToolResult(result);
       } catch {
         this.enabled = false;
@@ -415,6 +423,8 @@ export class NativeControlHost {
         await this.controller.stop();
         session.connection?.close();
         session.connection = undefined;
+        session.computer?.clear();
+        session.computer = undefined;
         return nativeControlError(this.detail);
       }
     };
@@ -469,7 +479,7 @@ export class NativeControlHost {
             instructions: NATIVE_CONTROL_INSTRUCTIONS,
           };
         else if (message.method === "ping") result = {};
-        else if (message.method === "tools/list") result = { tools: NATIVE_CONTROL_TOOLS };
+        else if (message.method === "tools/list") result = { tools: NATIVE_CONTROL_DEFAULT_TOOLS };
         else if (message.method === "tools/call") {
           const params = message.params as Record<string, unknown> | undefined;
           if (typeof params?.name !== "string") {

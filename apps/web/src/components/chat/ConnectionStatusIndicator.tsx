@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useDelayedFlag } from "~/hooks/useDelayedFlag";
 import { CircleAlertIcon, LoaderCircleIcon, RefreshCwIcon, WifiOffIcon } from "lucide-react";
 import type { EnvironmentId } from "@cafecode/contracts";
@@ -90,7 +90,7 @@ const CONNECTION_ISSUE_SHOW_DELAY_MS = 1_000;
 const CONNECTION_ISSUE_MIN_VISIBLE_MS = 600;
 
 /**
- * Compact connection-status chip for the chat header. Replaces the full-size
+ * Compact connection-status chip beside Settings. Replaces the full-size
  * reconnect toast: the chip shows only a spinner + short label, and the retry
  * countdown / attempt detail lives in a popover opened on hover (desktop) or
  * tap (mobile). Renders nothing while the socket is healthy.
@@ -101,9 +101,14 @@ const CONNECTION_ISSUE_MIN_VISIBLE_MS = 600;
 export function ConnectionStatusIndicator({
   environmentId,
   className,
+  fallback = null,
+  side = "bottom",
 }: {
   readonly environmentId: EnvironmentId;
   readonly className?: string;
+  /** The lower-priority status returns only after the connection chip exits. */
+  readonly fallback?: ReactNode;
+  readonly side?: "top" | "bottom";
 }) {
   const status = useWsConnectionStatus();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
@@ -156,7 +161,7 @@ export function ConnectionStatusIndicator({
   }, [isCountingDown, savedNextRetryAt, status.nextRetryAt]);
 
   if (!rendered || displayIssue === null) {
-    return null;
+    return fallback;
   }
 
   const visual = ISSUE_VISUALS[displayIssue];
@@ -188,6 +193,7 @@ export function ConnectionStatusIndicator({
         render={
           <button
             type="button"
+            data-cafe-connection-status
             data-state={shown ? "open" : "closed"}
             className={cn(
               "inline-flex shrink-0 animate-enter-fade items-center gap-1.5 rounded-full border border-border bg-muted px-2 py-0.5 text-2xs font-medium transition-[background-color,opacity] duration-(--duration-fast) ease-out hover:bg-accent data-[state=closed]:pointer-events-none data-[state=closed]:opacity-0",
@@ -196,12 +202,15 @@ export function ConnectionStatusIndicator({
             )}
             aria-label={`Connection ${visual.label}. Show reconnect details.`}
           >
-            <Icon className={cn("size-3", visual.spin && "animate-spin")} aria-hidden="true" />
-            <span className="whitespace-nowrap">{visual.label}</span>
+            <Icon
+              className={cn("size-3 shrink-0", visual.spin && "animate-spin")}
+              aria-hidden="true"
+            />
+            <span className="truncate">{visual.label}</span>
           </button>
         }
       />
-      <PopoverPopup tooltipStyle side="bottom" align="end" className="w-max max-w-64 px-3 py-2">
+      <PopoverPopup tooltipStyle side={side} align="end" className="w-max max-w-64 px-3 py-2">
         <div className="space-y-1.5 leading-tight">
           <div className="text-xs font-medium text-foreground">
             {displayIssue === "offline" ? "Offline" : `Disconnected from ${connectionDisplayName}`}

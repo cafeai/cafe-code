@@ -1,6 +1,7 @@
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 import { NonNegativeInt } from "@cafecode/contracts";
+import { readLiveWorkObservation } from "@cafecode/shared/liveWork";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -187,8 +188,30 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
       `,
   });
 
-  const upsert: ProjectionThreadActivityRepositoryShape["upsert"] = (row) =>
-    upsertProjectionThreadActivityRow(row).pipe(
+  const upsert: ProjectionThreadActivityRepositoryShape["upsert"] = (row) => {
+    const work = readLiveWorkObservation(row);
+    const write = work
+      ? sql.withTransaction(
+          Effect.gen(function* () {
+            yield* upsertProjectionThreadActivityRow(row);
+            yield* sql`INSERT INTO projection_live_work
+        (thread_id, runtime_id, turn_id, lane, work_id, is_agent, active, sequence, created_at, activity_id)
+        VALUES (${row.threadId}, ${work.runtimeId}, ${row.turnId ?? ""}, ${work.lane}, ${work.workId},
+          ${work.agent ? 1 : 0}, ${work.active ? 1 : 0}, ${row.sequence ?? null}, ${row.createdAt}, ${row.activityId})
+        ON CONFLICT (thread_id, runtime_id, turn_id, lane, work_id) DO UPDATE SET
+          is_agent = excluded.is_agent, active = excluded.active, sequence = excluded.sequence,
+          created_at = excluded.created_at, activity_id = excluded.activity_id
+        WHERE CASE
+          WHEN excluded.sequence IS NOT NULL AND projection_live_work.sequence IS NOT NULL
+            AND excluded.sequence != projection_live_work.sequence
+            THEN excluded.sequence > projection_live_work.sequence
+          ELSE excluded.created_at > projection_live_work.created_at
+            OR (excluded.created_at = projection_live_work.created_at AND excluded.activity_id >= projection_live_work.activity_id)
+          END`;
+          }),
+        )
+      : upsertProjectionThreadActivityRow(row);
+    return write.pipe(
       Effect.mapError(
         toPersistenceSqlOrDecodeError(
           "ProjectionThreadActivityRepository.upsert:query",
@@ -196,6 +219,7 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
         ),
       ),
     );
+  };
 
   const listByThreadId: ProjectionThreadActivityRepositoryShape["listByThreadId"] = (input) =>
     listProjectionThreadActivityRows(input).pipe(
@@ -244,11 +268,18 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
       );
 
   const deleteByThreadId: ProjectionThreadActivityRepositoryShape["deleteByThreadId"] = (input) =>
-    deleteProjectionThreadActivityRows(input).pipe(
-      Effect.mapError(
-        toPersistenceSqlError("ProjectionThreadActivityRepository.deleteByThreadId:query"),
-      ),
-    );
+    sql
+      .withTransaction(
+        Effect.gen(function* () {
+          yield* sql`DELETE FROM projection_live_work WHERE thread_id = ${input.threadId}`;
+          yield* deleteProjectionThreadActivityRows(input);
+        }),
+      )
+      .pipe(
+        Effect.mapError(
+          toPersistenceSqlError("ProjectionThreadActivityRepository.deleteByThreadId:query"),
+        ),
+      );
 
   return {
     upsert,

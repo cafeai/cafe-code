@@ -10,6 +10,7 @@ import {
 } from "@cafecode/contracts";
 import {
   createModelSelection,
+  isCodexDaybreakAlias,
   normalizeModelSlug,
   resolveSelectableModel,
 } from "@cafecode/shared/model";
@@ -125,6 +126,7 @@ export function normalizeCustomModelSlugs(
     const normalized = normalizeModelSlug(candidate, provider);
     if (
       !normalized ||
+      (provider === "codex" && isCodexDaybreakAlias(normalized)) ||
       normalized.length > MAX_CUSTOM_MODEL_LENGTH ||
       builtInModelSlugs.has(normalized) ||
       seen.has(normalized)
@@ -148,7 +150,9 @@ export function getAppModelOptions(
   provider: ProviderDriverKind,
   _selectedModel?: string | null,
 ): AppModelOption[] {
-  const options: AppModelOption[] = getProviderModels(providers, provider).map(toAppModelOption);
+  const options: AppModelOption[] = getProviderModels(providers, provider)
+    .filter((model) => provider !== "codex" || !isCodexDaybreakAlias(model.slug))
+    .map(toAppModelOption);
   const seen = new Set(options.map((option) => option.slug));
   const builtInModelSlugs = new Set(
     getProviderModels(providers, provider)
@@ -196,7 +200,9 @@ export function getAppModelOptionsForInstance(
   settings: UnifiedSettings,
   entry: ProviderInstanceEntry,
 ): AppModelOption[] {
-  const options: AppModelOption[] = entry.models.map(toAppModelOption);
+  const options: AppModelOption[] = entry.models
+    .filter((model) => entry.driverKind !== "codex" || !isCodexDaybreakAlias(model.slug))
+    .map(toAppModelOption);
   const seen = new Set(options.map((option) => option.slug));
   const builtInModelSlugs = new Set(
     entry.models.filter((model) => !model.isCustom).map((model) => model.slug),
@@ -205,7 +211,7 @@ export function getAppModelOptionsForInstance(
   const customModels = readInstanceCustomModels(settings, entry.instanceId, entry.driverKind);
   const normalizer = entry.driverKind;
   for (const slug of normalizeCustomModelSlugs(customModels, builtInModelSlugs, normalizer)) {
-    if (seen.has(slug)) {
+    if (seen.has(slug) || (entry.driverKind === "codex" && isCodexDaybreakAlias(slug))) {
       continue;
     }
 
@@ -283,6 +289,10 @@ function helperOptions(
   driver: ProviderDriverKind | undefined,
   options: ModelSelection["options"],
 ): ModelSelection["options"] {
+  // Daybreak is a turn/start control, not a supported one-shot CLI option.
+  if (driver === "codex") {
+    options = options?.filter((option) => option.id !== "cyberAccessProgram");
+  }
   // This default belongs only to Cafe's one-shot helper requests. A normal
   // conversation must continue to use its own explicit/native model defaults.
   return driver === "codex" && !options?.some((option) => option.id === "reasoningEffort")
@@ -359,7 +369,7 @@ export function resolveAppModelSelectionState(
     return createModelSelection(
       entry.instanceId,
       model,
-      descriptors?.length ? modelOptionsForDispatch : requestedOptions,
+      helperOptions(provider, descriptors?.length ? modelOptionsForDispatch : requestedOptions),
     );
   }
 
@@ -385,6 +395,6 @@ export function resolveAppModelSelectionState(
   return createModelSelection(
     defaultInstanceIdForDriver(provider),
     model,
-    descriptors?.length ? modelOptionsForDispatch : requestedOptions,
+    helperOptions(provider, descriptors?.length ? modelOptionsForDispatch : requestedOptions),
   );
 }
