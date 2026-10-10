@@ -74,6 +74,18 @@ export function CodexRecoveryNotice(props: {
   }, [retryAtMs]);
   const label = codexRecoveryLabel(props.presentation, nowMs);
   const count = props.presentation.activeAgentCount;
+  // Lead with the current whole-chat operation, not the historical failed root.
+  // The work log retains that terminal fact; a tooltip explains it without
+  // implying that live children or an owned recovery wait have stopped. A local
+  // countdown never upgrades received waiting metadata into a running turn.
+  const heading =
+    props.presentation.stage === "backoff" || props.presentation.stage === "reconnecting"
+      ? "Reconnecting"
+      : props.presentation.stage === "reconciling"
+        ? "Checking recovery"
+        : props.presentation.stage === "uncertain"
+          ? "Needs reconciliation"
+          : "Agents running";
 
   return (
     <div
@@ -81,8 +93,13 @@ export function CodexRecoveryNotice(props: {
       className="flex min-w-0 items-center gap-2 rounded-lg border border-border-subtle bg-raised/60 px-3 py-2"
     >
       <p className="min-w-0 flex-1 text-xs leading-5 text-muted-foreground" role="status">
-        <span className="font-medium text-foreground">Root failed</span>
-        {label ? <span> · {label}</span> : null}
+        <span
+          className="font-medium text-foreground"
+          title="The root response failed; this chat still has pending recovery or running agents. Retry numbers count Cafe continuation attempts, separately from provider-managed retries. A + means only a lower bound is known."
+        >
+          {heading}
+        </span>
+        {label && label !== heading ? <span> · {label}</span> : null}
         {count > 0 ? (
           <span>
             {" "}

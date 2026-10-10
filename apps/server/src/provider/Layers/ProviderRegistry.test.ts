@@ -330,6 +330,46 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
   "ProviderRegistry",
   (it) => {
     describe("checkCodexProviderStatus", () => {
+      it.effect(
+        "keeps GPT-5.5 retirement availability scoped to each native account catalogue",
+        () =>
+          Effect.gen(function* () {
+            // Retirement applies to ChatGPT sign-in, not API-key authentication.
+            // These are synthetic account/catalogue responses: there is no date
+            // guess, credential read, or attempt to infer account entitlement.
+            const current = makeCodexProbeSnapshot().models;
+            const chatgpt = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+              Effect.succeed(makeCodexProbeSnapshot({ models: current })),
+            );
+            const apiModel = {
+              slug: "gpt-5.5",
+              name: "API GPT-5.5",
+              isCustom: false,
+              capabilities: codexModelCapabilities,
+            };
+            const apiKey = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+              Effect.succeed(
+                makeCodexProbeSnapshot({
+                  account: { account: { type: "apiKey" }, requiresOpenaiAuth: false },
+                  models: [...current, apiModel],
+                }),
+              ),
+            );
+            assert.equal(chatgpt.auth.type, "chatgpt");
+            assert.deepStrictEqual(chatgpt.models, current);
+            assert.equal(
+              chatgpt.models.some((model) => model.slug === "gpt-5.5"),
+              false,
+            );
+            assert.equal(apiKey.auth.type, "apiKey");
+            assert.deepStrictEqual(apiKey.models, [...current, apiModel]);
+            assert.deepStrictEqual(
+              apiKey.models.find((model) => model.slug === "gpt-5.5"),
+              apiModel,
+            );
+          }),
+      );
+
       it.effect("uses the app-server account and model list for provider status", () =>
         Effect.gen(function* () {
           const status = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
@@ -3659,7 +3699,11 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           ),
           false,
         );
-        assert.isUndefined(formatClaudeModelUpgradeMessage("2.1.284"));
+        assert.equal(
+          formatClaudeModelUpgradeMessage("2.1.284"),
+          "Claude Code v2.1.284 is too old for Claude Haiku 5.5. Upgrade to v2.1.293 or newer to access it.",
+        );
+        assert.isUndefined(formatClaudeModelUpgradeMessage("2.1.293"));
 
         for (const model of getBuiltInClaudeModelsForVersion("2.1.219")) {
           const descriptors = model.capabilities?.optionDescriptors ?? [];

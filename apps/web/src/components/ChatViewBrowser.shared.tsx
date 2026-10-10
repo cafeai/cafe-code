@@ -2067,7 +2067,13 @@ async function mountChatView(options: {
   };
 }
 
-type ChatViewBrowserPart = "composer" | "navigation" | "layout" | "desk" | "standalone";
+type ChatViewBrowserPart =
+  | "composer"
+  | "navigation"
+  | "layout"
+  | "desk"
+  | "standalone"
+  | "recovery-footer";
 
 const chatViewBrowserPart = (
   globalThis as typeof globalThis & {
@@ -2195,6 +2201,206 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
     document.body.innerHTML = "";
   });
 
+  if (chatViewBrowserPart === "recovery-footer") {
+    const snapshotWithTerminalRoot = (
+      mode: "retry" | "agents" | "uncertain" | "foreign" | "cancelled",
+    ): OrchestrationReadModel => {
+      const base = createSnapshotWithActiveSubagent();
+      const failedAt = isoAt(1_010);
+      return {
+        ...base,
+        threads: base.threads.map((thread) => {
+          if (thread.id !== THREAD_ID) return thread;
+          const turnId = thread.latestTurn!.turnId;
+          const childRows =
+            mode === "uncertain" || mode === "cancelled"
+              ? []
+              : thread.activities.map((row) =>
+                  mode !== "foreign"
+                    ? row
+                    : {
+                        ...row,
+                        payload: {
+                          ...(row.payload as Record<string, unknown>),
+                          subagent: {
+                            ...((row.payload as Record<string, unknown>).subagent as object),
+                            runtimeId: "b73284bf-01be-4dbf-94c8-b54e54f17802",
+                          },
+                        },
+                      },
+                );
+          return {
+            ...thread,
+            latestTurn: { ...thread.latestTurn!, state: "error", completedAt: failedAt },
+            session: {
+              ...thread.session!,
+              status: "ready",
+              activeTurnId: null,
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              updatedAt: failedAt,
+              lastError: "Synthetic transient root failure",
+            },
+            activities: [
+              ...childRows,
+              {
+                id: EventId.make("root-footer-command"),
+                kind: "tool.completed",
+                tone: "tool",
+                summary: "Ran command",
+                turnId,
+                sequence: 2,
+                createdAt: isoAt(1_009),
+                payload: {
+                  itemId: "finished-command",
+                  itemType: "command_execution",
+                  status: "completed",
+                },
+              },
+              ...(mode === "agents"
+                ? []
+                : [
+                    {
+                      id: EventId.make("root-footer-recovery"),
+                      kind: "runtime.warning",
+                      tone: "info" as const,
+                      summary: "Recovery metadata",
+                      turnId,
+                      sequence: 3,
+                      createdAt: failedAt,
+                      payload: {
+                        recovery:
+                          mode === "uncertain"
+                            ? "codex-transient-recovery-uncertain"
+                            : mode === "cancelled"
+                              ? "codex-transient-recovery-cancelled"
+                              : "codex-transient-recovery-waiting",
+                        providerInstanceId: mode === "foreign" ? "foreign-account" : "codex",
+                        subagentRuntimeId: SUBAGENT_RUNTIME_ID,
+                        sessionUpdatedAt: failedAt,
+                        ...(mode === "uncertain" || mode === "cancelled"
+                          ? {}
+                          : {
+                              stage: "backoff",
+                              retryAttempt: 3,
+                              continuationOrdinal: 37,
+                              retryAt: isoAt(1_055),
+                            }),
+                      },
+                    },
+                  ]),
+            ],
+          };
+        }),
+      };
+    };
+
+    it.each([
+      ["retry", "Reconnecting · root 9s"],
+      ["agents", "Agents running · root 9s"],
+      ["uncertain", "Needs reconciliation · root 9s"],
+    ] as const)(
+      "keeps %s context visibly active and exposes the red composer Stop without reopening the root",
+      async (mode, label) => {
+        const snapshot = snapshotWithTerminalRoot(mode);
+        const mounted = await mountChatView({
+          viewport: WIDE_FOOTER_VIEWPORT,
+          snapshot,
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+              ? { sequence: snapshot.snapshotSequence + 1 }
+              : undefined,
+        });
+        try {
+          await waitForComposerEditor();
+          await vi.waitFor(() =>
+            expect(
+              document.querySelector('[data-completion-divider="true"]')?.textContent,
+            ).toContain(label),
+          );
+          const stop = page.getByRole("button", { name: "Stop recovery", exact: true });
+          await expect.element(stop).toBeVisible();
+          expect(stop.element().className).toContain("bg-destructive/90");
+          await stop.click();
+          await vi.waitFor(() => {
+            const commands = wsRequests.filter(
+              (request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand,
+            );
+            expect(
+              commands.filter((request) => request.type === "thread.session.stop"),
+            ).toHaveLength(1);
+            expect(
+              commands.some(
+                (request) =>
+                  request.type === "thread.turn.start" || request.type === "thread.turn.interrupt",
+              ),
+            ).toBe(false);
+          });
+          expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.latestTurn).toEqual(
+            snapshot.threads[0]!.latestTurn,
+          );
+        } finally {
+          await mounted.cleanup();
+        }
+      },
+    );
+
+    it.each(["foreign", "cancelled"] as const)(
+      "does not revive Stop or active footer from %s recovery evidence",
+      async (mode) => {
+        const snapshot = snapshotWithTerminalRoot(mode);
+        const mounted = await mountChatView({ viewport: WIDE_FOOTER_VIEWPORT, snapshot });
+        try {
+          await waitForComposerEditor();
+          await vi.waitFor(() =>
+            expect(
+              document.querySelector('[data-completion-divider="true"]')?.textContent,
+            ).toContain("Worked for 9s"),
+          );
+          expect(document.querySelector('button[aria-label="Stop recovery"]')).toBeNull();
+          expect((await waitForSendButton()).disabled).toBe(true);
+          expect(
+            wsRequests.some(
+              (request) =>
+                request.type === "thread.session.stop" || request.type === "thread.turn.start",
+            ),
+          ).toBe(false);
+        } finally {
+          await mounted.cleanup();
+        }
+      },
+    );
+
+    it("keeps a terminal-root draft sendable as a new turn and never labels it a running-turn queue", async () => {
+      const snapshot = snapshotWithTerminalRoot("retry");
+      const mounted = await mountChatView({
+        viewport: WIDE_FOOTER_VIEWPORT,
+        snapshot,
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+            ? { sequence: snapshot.snapshotSequence + 1 }
+            : undefined,
+      });
+      try {
+        await waitForComposerEditor();
+        await expect
+          .element(page.getByRole("button", { name: "Stop recovery", exact: true }))
+          .toBeVisible();
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, "Take a new direction");
+        const send = await waitForSendButton();
+        expect(send.disabled).toBe(false);
+        expect(document.querySelector('button[aria-label="Queue message"]')).toBeNull();
+        send.click();
+        await vi.waitFor(() => {
+          const command = wsRequests.find((request) => request.type === "thread.turn.start");
+          expect(command?.message).toMatchObject({ text: "Take a new direction" });
+          expect(wsRequests.some((request) => request.type === "thread.session.stop")).toBe(false);
+        });
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+  }
+
   if (chatViewBrowserPart === "composer") {
     const createCodexRecoverySnapshot = (uncertain = false): OrchestrationReadModel => {
       const base = createSnapshotWithActiveSubagent();
@@ -2238,6 +2444,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
                         ? {}
                         : {
                             retryAttempt: 3,
+                            continuationOrdinal: 37,
                             stage: "backoff",
                             retryAt: new Date(Date.parse(failedAt) + 60_000).toISOString(),
                           }),
@@ -2248,6 +2455,133 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         ),
       };
     };
+    it.each(["light", "dark"] as const)(
+      "uses only a compact notice for exact pending recovery without dismissing failures in %s mode",
+      async (theme) => {
+        localStorage.setItem("cafe-code:theme", theme);
+        const base = createCodexRecoverySnapshot();
+        const source = base.threads[0]!;
+        const failure = source.session!.lastError!;
+        const snapshot: OrchestrationReadModel = {
+          ...base,
+          threads: [
+            {
+              ...source,
+              activities: [
+                {
+                  id: EventId.make("pending-recovery-root-error"),
+                  kind: "runtime.error",
+                  tone: "error",
+                  summary: "Runtime error",
+                  turnId: source.latestTurn!.turnId,
+                  payload: { message: failure },
+                  createdAt: source.session!.updatedAt,
+                },
+                ...source.activities,
+              ],
+            },
+          ],
+        };
+        const toastSpy = vi.spyOn(toastManager, "add");
+        const mounted = await mountChatView({
+          viewport: WIDE_FOOTER_VIEWPORT,
+          snapshot,
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+            body.type === "thread.turn.start"
+              ? failBrowserWsRpc(
+                  new OrchestrationDispatchCommandError({ message: "Manual send rejected" }),
+                )
+              : undefined,
+        });
+        const errorBanner = () =>
+          Array.from(document.querySelectorAll<HTMLElement>('[data-slot="alert"]')).find(
+            (element) => element.textContent?.includes(failure),
+          ) ?? null;
+        const publish = (recovery: string, ownerPatch: Record<string, unknown> = {}) => {
+          const previous = fixture.snapshot.threads[0]!;
+          const sequence = fixture.snapshot.snapshotSequence + 1;
+          const marker = source.activities.at(-1)!;
+          const thread = {
+            ...previous,
+            activities: [
+              ...previous.activities,
+              {
+                ...marker,
+                id: EventId.make(`notification-${sequence}`),
+                sequence,
+                payload: { ...(marker.payload as object), recovery, ...ownerPatch },
+              },
+            ],
+          };
+          fixture.snapshot = { ...fixture.snapshot, snapshotSequence: sequence, threads: [thread] };
+          rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+            kind: "snapshot",
+            snapshot: { snapshotSequence: sequence, thread },
+          });
+        };
+        try {
+          await waitForComposerEditor();
+          await vi.waitFor(() => {
+            expect(
+              document.querySelector('[data-codex-recovery-notice="true"]')?.textContent,
+            ).toContain("Reconnecting");
+            expect(errorBanner()).toBeNull();
+            expect(
+              [...document.querySelectorAll("[data-work-log]")]
+                .map((node) => node.textContent)
+                .join(" "),
+            ).toContain("Runtime error");
+          });
+          expect(toastSpy.mock.calls.some(([options]) => options.description === failure)).toBe(
+            false,
+          );
+          expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.error).toBe(failure);
+          expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.latestTurn).toEqual(
+            source.latestTurn,
+          );
+
+          // A foreign marker must not retire the current owner's compact wait.
+          publish("codex-transient-recovery-uncertain", { providerInstanceId: "foreign-account" });
+          await waitForLayout();
+          expect(errorBanner()).toBeNull();
+
+          // Unknown acknowledgment and cancellation restore the actionable
+          // original error without acknowledging or deleting its history.
+          for (const recovery of [
+            "codex-transient-recovery-uncertain",
+            "codex-transient-recovery-cancelled",
+            "codex-transient-root-failed",
+          ]) {
+            publish(recovery);
+            await vi.waitFor(() => expect(errorBanner()).not.toBeNull());
+            expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.error).toBe(failure);
+            publish("codex-transient-recovery-waiting");
+            await vi.waitFor(() => expect(errorBanner()).toBeNull());
+          }
+
+          // A rejected new manual send remains a separate, visible occurrence
+          // even while the failed provider root still has a pending recovery.
+          useComposerDraftStore.getState().setPrompt(THREAD_REF, "A new manual direction");
+          (await waitForSendButton()).click();
+          await vi.waitFor(() => {
+            expect(findSendFailureToastTitle()).not.toBeNull();
+            expect(document.querySelector('button[aria-label="Dismiss error"]')).not.toBeNull();
+            expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.error).toBe(
+              "Failed to send message.",
+            );
+          });
+          expect(
+            selectThreadByRef(useStore.getState(), THREAD_REF)?.activities.some(
+              (activity) => activity.id === "pending-recovery-root-error",
+            ),
+          ).toBe(true);
+        } finally {
+          toastSpy.mockRestore();
+          await mounted.cleanup();
+        }
+      },
+    );
     it.each([false, true])(
       "keeps terminal-root recovery Stop independent from input with rail docked=%s",
       async (docked) => {
@@ -2278,9 +2612,9 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
             '[data-codex-recovery-notice="true"]',
           )!;
           expect(document.querySelectorAll('[data-codex-recovery-notice="true"]')).toHaveLength(1);
-          expect(notice.textContent).toContain("Root failed");
+          expect(notice.textContent).toContain("Reconnecting");
           expect(notice.textContent).toContain("1 agent active");
-          expect(notice.textContent).toMatch(/Retry in \d+s/u);
+          expect(notice.textContent).toMatch(/Retry #37 in \d+s/u);
           if (docked) expect(findSessionRail()?.contains(notice)).toBe(true);
           await stop.click();
           await vi.waitFor(() => {

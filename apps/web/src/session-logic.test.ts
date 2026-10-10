@@ -1813,6 +1813,110 @@ describe("deriveWorkLogEntries", () => {
     });
   });
 
+  it("renders native retry observations as finite fixed copy without provider prose or JSON", () => {
+    const retry = (payload: Record<string, unknown>) =>
+      deriveWorkLogEntries(
+        [
+          makeActivity({
+            kind: "runtime.warning",
+            summary: "Provider transport retrying",
+            payload,
+          }),
+        ],
+        undefined,
+      )[0]!;
+    const privatePayload = {
+      message: "Reconnecting... 1/5 private native diagnostic",
+      detail: { willRetry: true, error: { message: "private diagnostic", secret: "never show" } },
+      retrying: true,
+    };
+    expect(
+      retry({ ...privatePayload, nativeRetry: { observedCount: 12, timing: "unknown" } }),
+    ).toMatchObject({ label: "Provider retry · 12" });
+    expect(
+      retry({
+        ...privatePayload,
+        nativeRetry: { observedCount: 1024, timing: "unknown", countLimited: true },
+      }),
+    ).toMatchObject({ label: "Provider retry · 1024+" });
+    for (const nativeRetry of [
+      undefined,
+      { observedCount: 0, timing: "unknown" },
+      { observedCount: 1025, timing: "unknown" },
+      { observedCount: 0.5, timing: "unknown" },
+      { observedCount: 12, timing: "known" },
+      { observedCount: 12, timing: "unknown", countLimited: false },
+      { observedCount: 12, timing: "unknown", countLimited: "true" },
+      { observedCount: 12, timing: "unknown", countLimited: undefined },
+      Object.create({ observedCount: 12, timing: "unknown" }),
+    ]) {
+      const row = retry({ ...privatePayload, nativeRetry });
+      expect(row.label).toBe("Provider retry");
+      expect(row).not.toHaveProperty("detail");
+      expect(JSON.stringify(row)).not.toContain("private");
+      expect(JSON.stringify(row)).not.toContain("1/5");
+      expect(JSON.stringify(row)).not.toContain("in 12s");
+    }
+    let reads = 0;
+    const accessor = Object.defineProperty({}, "observedCount", {
+      get() {
+        reads += 1;
+        return 12;
+      },
+    });
+    expect(retry({ ...privatePayload, nativeRetry: accessor }).label).toBe("Provider retry");
+    expect(reads).toBe(0);
+    const detail = {
+      toJSON() {
+        reads += 1;
+        return { privateText: "never stringify" };
+      },
+    };
+    expect(
+      retry({ ...privatePayload, detail, nativeRetry: { observedCount: 12, timing: "unknown" } })
+        .label,
+    ).toBe("Provider retry · 12");
+    expect(reads).toBe(0);
+    // Prose alone is not a semantic retry flag or a cumulative count source.
+    expect(retry({ message: "Reconnecting... 3/5" }).label).toBe("Provider transport retrying");
+  });
+
+  it("keeps saved Cafe waits static and distinguishes their continuation count from native retry cycles", () => {
+    const wait = makeActivity({
+      id: "cafe-wait",
+      kind: "runtime.warning",
+      tone: "info",
+      createdAt: "2026-02-23T00:00:00.000Z",
+      turnId: "failed-root",
+      payload: {
+        recovery: "codex-transient-recovery-waiting",
+        stage: "backoff",
+        retryAttempt: 30,
+        continuationOrdinal: 37,
+        continuationOrdinalLowerBound: true,
+        retryAt: "2026-02-23T00:00:45.000Z",
+        detail: { secret: "not public" },
+      },
+    });
+    const row = deriveWorkLogEntries([wait], undefined)[0]!;
+    expect(row.label).toBe("Cafe recovery · Retry #37+ · backoff 45s");
+    expect(row).not.toHaveProperty("detail");
+    const summaries = deriveHistoricalWorkLogSummaries({
+      messages: [],
+      activities: [wait],
+      latestTurnId: TurnId.make("new-root"),
+    });
+    expect(summaries.get(TurnId.make("failed-root"))?.previewEntries[0]).toEqual(row);
+    expect(deriveWorkLogEntries(structuredClone([wait]), undefined)[0]).toEqual(row);
+    const attempted = {
+      ...wait,
+      payload: { recovery: "codex-transient-continuation-attempted", continuationOrdinal: 38 },
+    };
+    const attemptedRow = deriveWorkLogEntries([attempted], undefined)[0]!;
+    expect(attemptedRow.label).toBe("Cafe recovery · Retry #38");
+    expect(attemptedRow).not.toHaveProperty("detail");
+  });
+
   it("hides retryable steer delivery failures from the normal work log", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

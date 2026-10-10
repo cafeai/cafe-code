@@ -1,6 +1,6 @@
 # Provider stream reconciliation
 
-Last updated: 2026-10-10 23:17:37 JST (UTC+0900)
+Last updated: 2026-10-11 01:53:21 JST (UTC+0900)
 
 ## Ownership and exact text
 
@@ -68,6 +68,32 @@ until a matching immutable attempt/ACK receipt and fresh same-owner proof permit
 an internal atomic failed-turn association. Do not invent a running state or
 erase observed execution timestamps; newer controls still veto the association.
 See [the persistent recovery decision](decisions/codex-persistent-transient-recovery.md).
+
+Remote compaction has its own finite native retry loop. Codex 0.162.1 wraps its
+exhausted stream error in the exact `Error running remote compact task: ` prefix
+while retaining `codexErrorInfo: other`. Cafe recognizes that single anchored
+wrapper around the already qualified UUID-bearing processing error. Arbitrary
+nested prefixes, prose, contradictory details and permanent error variants remain
+non-retryable. The final failed turn releases its tracked automatic-compaction
+items even without an item completion, allowing fresh native owner proof to
+qualify continuation; manual or uncertain compaction still vetoes admission.
+The compact notice leads with **Reconnecting** or **Agents running**, not a claim
+that the whole chat stopped. The root's terminal error stays in the work log.
+
+Native reconnect counters are observations, not Cafe submissions: show cumulative
+deduplicated native warnings per exact runtime/target/turn without recycling the
+provider's prose fractions or inventing its unreported timer. Cafe continuation
+ordinals are durable accepted-chain metadata independent of delay saturation;
+legacy saturated counts and tracking ceilings remain explicit lower bounds.
+Only Cafe's bounded actual sleep deadline produces a live countdown. One latest
+exact-owned current-turn recovery marker survives the ordinary activity tail on
+both snapshot rehydration and live renderer pruning. Cancellation, uncertain ACK
+and attempted submission end older countdowns without claiming a running/accepted
+root. Recovery display and failed-root child observations never retimestamp the
+terminal root, in either the projection or renderer.
+Qualified terminal child errors retain failed status and bounded detail in the
+child task without emitting a redundant parent-clock warning. Missing child
+identity retains a diagnostic fallback; it does not invent child ownership.
 
 Codex can send an unscoped `thread/status/changed: systemError`, followed by a
 root-scoped nonretrying `error`, immediately before the definitive failed

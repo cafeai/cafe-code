@@ -250,6 +250,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
     isComplete: boolean;
   } | null;
   isRunning: boolean;
+  recoveryStopAvailable?: boolean | undefined;
   showPlanFollowUpPrompt: boolean;
   promptHasText: boolean;
   isSendBusy: boolean;
@@ -286,6 +287,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         compact={props.compact}
         pendingAction={props.pendingAction}
         isRunning={props.isRunning}
+        recoveryStopAvailable={props.recoveryStopAvailable}
         showPlanFollowUpPrompt={props.showPlanFollowUpPrompt}
         promptHasText={props.promptHasText}
         isSendBusy={props.isSendBusy}
@@ -762,6 +764,8 @@ export interface ChatComposerProps extends ComposerInteractionCallbacks {
 
   // Session phase
   phase: SessionPhase;
+  /** Exact owned recovery/context only; never substitutes for the root phase. */
+  recoveryStopAvailable?: boolean | undefined;
   isConnecting: boolean;
   isSendBusy: boolean;
   isPreparingWorktree: boolean;
@@ -899,6 +903,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     isServerThread,
     isLocalDraftThread: _isLocalDraftThread,
     phase,
+    recoveryStopAvailable = false,
     isConnecting,
     isSendBusy,
     isPreparingWorktree,
@@ -1977,8 +1982,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     if (activePendingProgress) {
       return `pending:${activePendingProgress.questionIndex}:${activePendingProgress.isLastQuestion}:${activePendingIsResponding}:dictation:${showComposerDictation}`;
     }
-    if (phase === "running") {
-      return `running:${composerSendState.hasSendableContent}:${postSubmitInterruptGuardActive}:dictation:${showComposerDictation}`;
+    if (phase === "running" || recoveryStopAvailable) {
+      return `running:${phase}:${recoveryStopAvailable}:${composerSendState.hasSendableContent}:${postSubmitInterruptGuardActive}:dictation:${showComposerDictation}`;
     }
     if (showPlanFollowUpPrompt) {
       return `${prompt.trim().length > 0 ? "plan:refine" : "plan:implement"}:dictation:${showComposerDictation}`;
@@ -1992,6 +1997,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     isPreparingWorktree,
     isSendBusy,
     phase,
+    recoveryStopAvailable,
     postSubmitInterruptGuardActive,
     prompt,
     showComposerDictation,
@@ -3869,6 +3875,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     compact
                     pendingAction={pendingPrimaryAction}
                     isRunning={phase === "running"}
+                    recoveryStopAvailable={recoveryStopAvailable}
                     showPlanFollowUpPrompt={
                       pendingUserInputs.length === 0 && showPlanFollowUpPrompt
                     }
@@ -4038,6 +4045,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   {...(onShowSessionRail ? { onShowSessionRail } : {})}
                   pendingAction={pendingPrimaryAction}
                   isRunning={phase === "running"}
+                  recoveryStopAvailable={recoveryStopAvailable}
                   showPlanFollowUpPrompt={pendingUserInputs.length === 0 && showPlanFollowUpPrompt}
                   promptHasText={prompt.trim().length > 0}
                   isSendBusy={isComposerPrimaryActionBusy}

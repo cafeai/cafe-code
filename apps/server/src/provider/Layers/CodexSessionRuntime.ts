@@ -28,7 +28,10 @@ import {
   TurnId,
 } from "@cafecode/contracts";
 import { normalizeModelSlug } from "@cafecode/shared/model";
-import { classifyCodexTransientFailure } from "../codexTransientFailure.ts";
+import {
+  classifyCodexTransientFailure,
+  redactCodexFailureDiagnosticPayload,
+} from "../codexTransientFailure.ts";
 import {
   hasVisibleProviderSubagentPublicText,
   type ProviderSubagentActivityInput,
@@ -3007,7 +3010,15 @@ export function isCodexPrivateMetadataNotification(method: string): boolean {
   // Source: rust-v0.157.0 app-server-protocol/src/protocol/v2/account.rs,
   // GatewayOAuthChangedNotification. A future login UI must consume it via a
   // private, live-only channel, not the durable conversation event stream.
-  return method === "thread/attachment/updated" || method === "account/gatewayOAuth/changed";
+  // 0.162's prediction result is speculative model text, not an assistant
+  // item, goal, user request or liveness edge. Cafe has no authenticated
+  // prediction surface or retention contract; discard it before observers,
+  // logging and child ownership can treat it as ordinary conversation work.
+  return (
+    method === "thread/attachment/updated" ||
+    method === "account/gatewayOAuth/changed" ||
+    method === "thread/prediction/updated"
+  );
 }
 
 function readNotificationThreadId(notification: CodexServerNotification): string | undefined {
@@ -4764,6 +4775,28 @@ export function sanitizeCodexProtocolDiagnosticPayload(input: {
 
   const payload = readRecord(input.payload);
   const method = payload ? readString(payload.method) : undefined;
+  if (
+    method === "error" ||
+    method === "turn/completed" ||
+    method === "turn/started" ||
+    method === "thread/started"
+  ) {
+    if (input.stage === "decode_failed")
+      return {
+        method,
+        stage: input.stage,
+        diagnosticClass: "native-error-decode-failure-redacted",
+      };
+    // Construct a copy without the schema cause or extension-bearing rejected
+    // input. The original notification still drives lifecycle/classification.
+    return { method, params: redactCodexFailureDiagnosticPayload(method, payload?.params) };
+  }
+  if (method === "thread/prediction/updated" || method === "thread/attachment/updated") {
+    // This defense also covers typed-client decode failures, whose schema
+    // issue can embed private attachment values or speculative text before the
+    // runtime's early discard.
+    return { method, diagnosticClass: "private-metadata-redacted", stage: input.stage };
+  }
   if (input.direction === "incoming" && input.stage === "decode_failed" && !method) {
     // A malformed JSON frame has no trustworthy method to route through the
     // private-notification filters. Schema causes can embed the entire actual
@@ -5757,8 +5790,12 @@ const readCodexSubagentPublicHistoryWithClient = Effect.fn(
         role: item.type === "userMessage" ? "user" : "assistant",
         text,
         ...(item.type === "agentMessage" &&
-        (item.phase === "commentary" || item.phase === "final_answer")
-          ? { phase: item.phase }
+        (item.phase === "commentary" ||
+          item.phase === "partial_answer" ||
+          item.phase === "final_answer")
+          ? // A partial answer is public interim output, not a final answer or
+            // proof that its native root/children have finished.
+            { phase: item.phase === "partial_answer" ? "commentary" : item.phase }
           : {}),
         ...(startedAtMs !== undefined ? { startedAtMs } : {}),
         ...(completedAtMs !== undefined ? { completedAtMs } : {}),
@@ -5921,8 +5958,10 @@ export const readCodexSubagentSummaryWithInitializedClient = Effect.fn(
           role: item.type === "userMessage" ? "user" : "assistant",
           text,
           ...(item.type === "agentMessage" &&
-          (item.phase === "commentary" || item.phase === "final_answer")
-            ? { phase: item.phase }
+          (item.phase === "commentary" ||
+            item.phase === "partial_answer" ||
+            item.phase === "final_answer")
+            ? { phase: item.phase === "partial_answer" ? "commentary" : item.phase }
             : {}),
         });
       }
@@ -9920,6 +9959,9 @@ export const makeCodexSessionRuntime = (
             }
             yield* client.request("thread/goal/set", {
               threadId: providerThreadId,
+              // This pause follows the owner's explicit Stop, not an
+              // automatic failure/recovery or inferred model instruction.
+              origin: "user",
               status: "paused",
             });
           }).pipe(
@@ -9998,6 +10040,12 @@ export const makeCodexSessionRuntime = (
             yield* assertHistoryUsable(providerThreadId);
           const response = yield* client.request("thread/goal/set", {
             threadId: providerThreadId,
+            // The existing authenticated goal-control path (and explicit
+            // Stop reconciliation) is the source of this provenance. It
+            // neither creates consent nor authorizes new goal mutations.
+            // Match Codex 0.162.1 TUI app_server_session.rs:1599–1607; older
+            // providers ignore this optional field without changing defaults.
+            origin: "user",
             ...(input.objective !== undefined ? { objective: input.objective } : {}),
             ...(input.status !== undefined ? { status: input.status } : {}),
             ...(input.tokenBudget !== undefined ? { tokenBudget: input.tokenBudget } : {}),
@@ -10008,6 +10056,7 @@ export const makeCodexSessionRuntime = (
         const providerThreadId = yield* readProviderThreadId;
         return yield* client.request("thread/goal/clear", {
           threadId: providerThreadId,
+          origin: "user",
         });
       }),
       readThread: Effect.gen(function* () {

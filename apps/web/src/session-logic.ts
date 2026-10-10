@@ -17,6 +17,7 @@ import {
   type TurnId,
 } from "@cafecode/contracts";
 import { summarizeToolArguments } from "@cafecode/shared/toolActivity";
+import { codexRecoveryWorkLogLabel, nativeRetryWorkLogLabel } from "./codexRecovery";
 import { readDesktopObservationItem } from "@cafecode/shared/desktopObservation";
 import { isRoutineProviderWorkLogActivity } from "@cafecode/shared/providerWorkLog";
 import { readComputerUsePresentation } from "./components/chat/computerUsePresentation";
@@ -970,6 +971,23 @@ function toDerivedWorkLogEntry(
   activity: OrchestrationThreadActivity,
   turnConfiguration?: ProviderTurnConfiguration,
 ): DerivedWorkLogEntry {
+  const retryLabel =
+    activity.kind === "runtime.warning"
+      ? (codexRecoveryWorkLogLabel(activity) ?? nativeRetryWorkLogLabel(activity.payload))
+      : null;
+  if (retryLabel) {
+    // Admit retry metadata before generic tool/detail extraction. Native JSON
+    // is neither a display preview nor a callback/stringification surface for
+    // these fixed operational rows, and prose fractions never become totals.
+    return {
+      id: activity.id,
+      turnId: activity.turnId,
+      createdAt: activity.createdAt,
+      label: retryLabel,
+      tone: "info",
+      activityKind: activity.kind,
+    };
+  }
   const payload =
     activity.payload && typeof activity.payload === "object"
       ? (activity.payload as Record<string, unknown>)

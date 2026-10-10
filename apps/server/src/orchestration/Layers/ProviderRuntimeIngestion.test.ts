@@ -69,6 +69,7 @@ import {
   type OrchestrationEngineShape,
 } from "../Services/OrchestrationEngine.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
+import { classifyCodexTransientFailure } from "../../provider/codexTransientFailure.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { RuntimeReceiptBus } from "../Services/RuntimeReceiptBus.ts";
 import { ServerConfig } from "../../config.ts";
@@ -1617,6 +1618,7 @@ describe("ProviderRuntimeIngestion", () => {
       status: "accepted",
       chainSourceEventSequence: marker.sequence,
       retryAttempt: 1,
+      continuationOrdinal: 2,
     });
   });
 
@@ -2923,6 +2925,7 @@ describe("ProviderRuntimeIngestion", () => {
 
   it.each([
     "transient",
+    "remote-compaction",
     "permanent",
     "missing-marker",
     "missing-proof",
@@ -2936,6 +2939,7 @@ describe("ProviderRuntimeIngestion", () => {
     "child-start",
     "child-progress",
     "child-completed",
+    "child-failed",
   ] as const)("keeps root failure separate from native availability: %s", async (scenario) => {
     const harness = await createHarness();
     const threadId = asThreadId("thread-1");
@@ -2944,6 +2948,12 @@ describe("ProviderRuntimeIngestion", () => {
     const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000021");
     const completedAt = "2026-01-01T00:00:02.000Z";
     const transient = scenario !== "permanent";
+    const remoteCompactionCategory = classifyCodexTransientFailure({
+      message:
+        "Error running remote compact task: stream disconnected before completion: An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists. Please include the request ID eb45b1d3-36e9-4f02-a321-8ea87f01185c in your message.",
+      codexErrorInfo: "other",
+    });
+    if (scenario === "remote-compaction") expect(remoteCompactionCategory).toBe("server");
     const session: ProviderSession = {
       provider: ProviderDriverKind.make("codex"),
       providerInstanceId: instanceId,
@@ -3027,14 +3037,20 @@ describe("ProviderRuntimeIngestion", () => {
         state: "failed",
         errorMessage: "Root response failed",
         ...(scenario === "missing-marker" ? {} : { nativeContextAvailable: true as const }),
-        ...(transient ? { codexTransientFailure: "server" as const } : {}),
+        ...(transient
+          ? {
+              codexTransientFailure:
+                scenario === "remote-compaction" ? remoteCompactionCategory! : ("server" as const),
+            }
+          : {}),
       },
     });
     await harness.drain();
     if (
       scenario === "child-start" ||
       scenario === "child-progress" ||
-      scenario === "child-completed"
+      scenario === "child-completed" ||
+      scenario === "child-failed"
     ) {
       const childAt = "2026-01-01T00:00:04.000Z";
       const identity = {
@@ -3068,11 +3084,15 @@ describe("ProviderRuntimeIngestion", () => {
             : {
                 ...identity,
                 type: "task.completed",
-                eventId: asEventId("surviving-child-completed"),
+                eventId: asEventId(`surviving-child-${scenario.slice(6)}`),
                 payload: {
                   taskId: RuntimeTaskId.make("surviving-child"),
-                  status: "completed",
-                  subagent: { ...subagent, status: "completed" },
+                  status: scenario === "child-failed" ? "failed" : "completed",
+                  subagent: {
+                    ...subagent,
+                    status: scenario === "child-failed" ? "failed" : "completed",
+                  },
+                  ...(scenario === "child-failed" ? { summary: "Child capacity failure" } : {}),
                 },
               },
       );
@@ -3082,6 +3102,46 @@ describe("ProviderRuntimeIngestion", () => {
           (entry) => entry.id === `surviving-child-${scenario.slice(6)}`,
         )?.createdAt,
       ).toBe(childAt);
+      if (scenario === "child-failed") {
+        // The adapter retains the terminal error in this child task instead of
+        // adding an unscoped warning that could re-date the failed parent.
+        expect(
+          (await harness.readModel()).threads[0]!.activities.find(
+            (entry) => entry.id === "surviving-child-failed",
+          )?.payload,
+        ).toMatchObject({
+          taskId: "surviving-child",
+          status: "failed",
+          detail: "Child capacity failure",
+          subagent: { status: "failed" },
+        });
+      }
+      if (scenario === "child-progress") {
+        // A child's typed reconnect warning is grouped under its failed root,
+        // just like its progress. Neither bookkeeping edge can mutate the
+        // root's frozen failure proof or stop its independently active child.
+        harness.emit({
+          ...identity,
+          type: "runtime.warning",
+          eventId: asEventId("surviving-child-native-retry"),
+          payload: {
+            message: "Provider reconnecting",
+            detail: { willRetry: true },
+            nativeRetry: { observedCount: 12, timing: "unknown" },
+          },
+        });
+        await harness.drain();
+        const retryActivity = (await harness.readModel()).threads[0]!.activities.find(
+          (entry) => entry.id === "surviving-child-native-retry",
+        );
+        expect(retryActivity?.payload).toEqual({
+          message: "Provider reconnecting",
+          detail: { willRetry: true },
+          retrying: true,
+          nativeRetry: { observedCount: 12, timing: "unknown" },
+        });
+        expect(retryActivity?.createdAt).toBe(childAt);
+      }
       expect(
         await Effect.runPromise(harness.sql<{ completedAt: string }>`
         SELECT completed_at AS "completedAt" FROM projection_turns
@@ -3112,13 +3172,15 @@ describe("ProviderRuntimeIngestion", () => {
     const thread = (await harness.readModel()).threads[0]!;
     const available =
       scenario === "transient" ||
+      scenario === "remote-compaction" ||
       scenario === "permanent" ||
       scenario === "partial-fanout" ||
       scenario === "delayed-error" ||
       scenario === "category-disagreement" ||
       scenario === "child-start" ||
       scenario === "child-progress" ||
-      scenario === "child-completed";
+      scenario === "child-completed" ||
+      scenario === "child-failed";
     expect(thread.session).toMatchObject({
       status: available ? "ready" : "error",
       activeTurnId: null,

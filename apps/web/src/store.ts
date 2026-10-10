@@ -21,9 +21,11 @@ import type {
   ScopedThreadRef,
 } from "@cafecode/contracts";
 import {
+  isCodexNativeRetryWarningPayload,
   isProviderDriverKind,
   MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN,
   ProviderDriverKind,
+  RuntimeSubagentPresentation,
 } from "@cafecode/contracts";
 import type { ThreadId, TurnId } from "@cafecode/contracts";
 import * as Schema from "effect/Schema";
@@ -47,7 +49,9 @@ import { readTurnConfiguration } from "./turnConfiguration";
 import { readWorkflowTaskPresentation } from "./workflowTaskActivity";
 import { subagentLimitsEqual } from "./subagentConcurrency";
 import { threadForkPrefix } from "./lib/threadForkPrefix";
+import { isCurrentCodexRecoveryMarker } from "./codexRecovery";
 const isProviderDriverKindValue = Schema.is(ProviderDriverKind);
+const isRuntimeSubagentPresentation = Schema.is(RuntimeSubagentPresentation);
 
 export interface EnvironmentState {
   projectIds: ProjectId[];
@@ -1081,6 +1085,52 @@ function latestTurnStateIsTerminal(state: NonNullable<Thread["latestTurn"]>["sta
   return state === "completed" || state === "error" || state === "interrupted";
 }
 
+/**
+ * Match the projection pipeline's narrow terminal-clock exclusions. Retry
+ * bookkeeping is not renewed root execution; schema-valid child work beneath
+ * a failed root has its own clock. Ordinary late real tool work keeps the
+ * existing clock extension semantics. This never changes lifecycle status.
+ */
+function isTerminalClockBookkeeping(
+  event: Extract<OrchestrationEvent, { type: "thread.activity-appended" }>,
+  state: NonNullable<Thread["latestTurn"]>["state"],
+): boolean {
+  const activity = event.payload.activity;
+  if (
+    activity.kind === "provider.turn.configuration" ||
+    activity.kind === "provider.context.bootstrap.accepted" ||
+    activity.kind === "runtime.error"
+  )
+    return true;
+  if (
+    state === "error" &&
+    activity.kind === "runtime.warning" &&
+    (event.commandId?.startsWith("provider:codex:") || event.commandId?.startsWith("server:")) &&
+    isCodexNativeRetryWarningPayload(activity.payload)
+  )
+    return true;
+  const payload = activity.payload;
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return false;
+  const recovery = Object.getOwnPropertyDescriptor(payload, "recovery")?.value;
+  if (
+    event.commandId?.startsWith("server:") &&
+    activity.kind === "runtime.warning" &&
+    [
+      "codex-transient-recovery-waiting",
+      "codex-transient-continuation-attempted",
+      "codex-transient-continuation-accepted",
+      "codex-transient-recovery-cancelled",
+      "codex-transient-recovery-uncertain",
+    ].includes(recovery)
+  )
+    return true;
+  return (
+    state === "error" &&
+    ["task.started", "task.progress", "task.completed"].includes(activity.kind) &&
+    isRuntimeSubagentPresentation(Object.getOwnPropertyDescriptor(payload, "subagent")?.value)
+  );
+}
+
 function shouldIgnoreStaleSessionSet(thread: Thread, incomingSession: ThreadSession): boolean {
   const previousSession = thread.session;
   if (previousSession === null) {
@@ -1268,6 +1318,7 @@ function structuredTaskLifecycleKeys(
 function retainThreadActivityWindow(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
   currentTurnId: TurnId | null | undefined,
+  session: Thread["session"],
 ): OrchestrationThreadActivity[] {
   const byId = new Map<string, OrchestrationThreadActivity>();
   for (const activity of activities) byId.set(activity.id, activity);
@@ -1285,6 +1336,15 @@ function retainThreadActivityWindow(
       )
     : undefined;
   if (latestTurnConfiguration) retainedIds.add(latestTurnConfiguration.id);
+
+  // Native children can produce more than the ordinary tail while a failed
+  // root waits. Keep exactly one latest owner-bound operational marker so a
+  // reload does not lose its retry number/deadline or resurrect a cancelled
+  // wait. Foreign/replayed owner metadata earns no retention exception.
+  const latestRecovery = ordered.findLast((activity) =>
+    isCurrentCodexRecoveryMarker(activity, currentTurnId ?? null, session),
+  );
+  if (latestRecovery) retainedIds.add(latestRecovery.id);
 
   const retainedSubagentIdentities = new Set<string>();
   const latestSubagentLifecycleByKey = new Map<string, OrchestrationThreadActivity>();
@@ -2494,15 +2554,16 @@ function applyEnvironmentOrchestrationEvent(
             appendedActivity,
           ],
           thread.latestTurn?.turnId ?? appendedActivity.turnId,
+          thread.session,
         );
         const latestTurn =
           // Accepted settings are presentation metadata, not a model execution
           // edge. Their late durable append must not inflate generation time,
           // completion labels or terminal lifecycle state after a fast turn.
-          event.payload.activity.kind !== "provider.turn.configuration" &&
           event.payload.activity.turnId !== null &&
           thread.latestTurn?.turnId === event.payload.activity.turnId &&
-          latestTurnStateIsTerminal(thread.latestTurn.state)
+          latestTurnStateIsTerminal(thread.latestTurn.state) &&
+          !isTerminalClockBookkeeping(event, thread.latestTurn.state)
             ? buildLatestTurn({
                 previous: thread.latestTurn,
                 turnId: thread.latestTurn.turnId,

@@ -2332,10 +2332,13 @@ describe("ProviderCommandReactor", () => {
       harness: Awaited<ReturnType<typeof createHarness>>,
       root = failedRoot,
       startBeforeMarker = false,
+      observedAt?: string,
     ) {
-      const at = new Date(
-        Date.parse("2026-01-01T00:00:04.000Z") + harness.sendTurn.mock.calls.length * 1000,
-      ).toISOString();
+      const at =
+        observedAt ??
+        new Date(
+          Date.parse("2026-01-01T00:00:04.000Z") + harness.sendTurn.mock.calls.length * 1000,
+        ).toISOString();
       await harness.setRunningCodexTurn(root, at);
       for (const status of ["error", "ready"] as const)
         await Effect.runPromise(
@@ -2518,6 +2521,112 @@ describe("ProviderCommandReactor", () => {
         WHERE intent.source_kind = 'intent' ORDER BY intent.sequence`);
       expect(rows.map((row) => row.attempt)).toEqual([0, 1]);
       expect(harness.startSession).not.toHaveBeenCalled();
+    });
+
+    it("continues past the saturated attempt counter until explicit Stop without replaying work", async () => {
+      const clock = await makeClock();
+      const harness = await createHarness({ startReactor: false, testClock: clock });
+      harness.sendTurn.mockImplementation(() =>
+        Effect.sync(() => {
+          const turnId = TurnId.make(`continued-root-${harness.sendTurn.mock.calls.length}`);
+          // Match the live native owner at ACK, allowing ordinary accepted-start
+          // reconciliation to consume the exact pending continuation input.
+          const prior = harness.runtimeSessions[0]!;
+          const { codexRootTurnFailure: _failure, ...owner } = prior;
+          harness.runtimeSessions.splice(0, 1, {
+            ...owner,
+            status: "running",
+            activeTurnId: turnId,
+          });
+          return { threadId, turnId };
+        }),
+      );
+      await seed(harness);
+      const terminalTime = await failedCompletedAt(harness);
+      let clockNow = Date.parse("2026-01-01T00:00:10.000Z");
+      // Exercise the real SQL-backed worker rather than only its delay helper.
+      // Thirty is a bounded persisted exponent, not a retry-count ceiling. Every
+      // newly accepted native root supplies its own definite failure proof.
+      for (let attempt = 0; attempt < 36; attempt += 1) {
+        try {
+          await waitForIntent(harness, attempt + 1);
+        } catch (cause) {
+          throw new Error(`Missing persistent recovery intent ${attempt + 1}`, { cause });
+        }
+        const elapsed = attempt === 0 ? 1000 : 60_000;
+        await Effect.runPromise(clock.adjust(elapsed));
+        clockNow += elapsed;
+        await waitFor(() => harness.sendTurn.mock.calls.length === attempt + 1);
+        await harness.drain();
+        const request = harness.sendTurn.mock.calls[attempt]?.[0];
+        expect(request?.expectedFailedRoot?.turnId).toBe(
+          attempt === 0 ? failedRoot : TurnId.make(`continued-root-${attempt}`),
+        );
+        expect(request?.input).not.toContain(originalText);
+        expect(request).not.toHaveProperty("attachments");
+        await Effect.runPromise(clock.adjust(1));
+        clockNow += 1;
+        await recordFailure(
+          harness,
+          TurnId.make(`continued-root-${attempt + 1}`),
+          false,
+          new Date(clockNow).toISOString(),
+        );
+      }
+      await waitForIntent(harness, 37);
+      const rows = await Effect.runPromise(harness.sql<{ readonly attempt: number }>`
+        SELECT json_extract(event.payload_json, '$.runtimeRecovery.codexTransientFailure.retryAttempt') AS attempt
+        FROM orchestration_codex_transient_recovery_intents AS intent
+        JOIN orchestration_events AS event ON event.sequence = intent.sequence
+        WHERE intent.source_kind = 'intent' ORDER BY intent.sequence`);
+      expect(rows.map((row) => row.attempt)).toEqual(
+        Array.from({ length: 37 }, (_, attempt) => Math.min(attempt, 30)),
+      );
+      const ordinalRows = await Effect.runPromise(harness.sql<{ readonly ordinal: number }>`
+        SELECT json_extract(event.payload_json, '$.runtimeRecovery.codexTransientFailure.continuationOrdinal') AS ordinal
+        FROM orchestration_codex_transient_recovery_intents AS intent
+        JOIN orchestration_events AS event ON event.sequence = intent.sequence
+        WHERE intent.source_kind = 'intent' ORDER BY intent.sequence`);
+      expect(ordinalRows.map((row) => row.ordinal)).toEqual(
+        Array.from({ length: 37 }, (_, index) => index + 1),
+      );
+      // The operational deadline is the actual bounded sleep, not the native
+      // provider's internal retry fraction or a prediction from its warning.
+      const waits = await Effect.runPromise(harness.sql<{
+        readonly ordinal: number;
+        readonly delay: number;
+      }>`
+        SELECT json_extract(payload_json, '$.activity.payload.continuationOrdinal') AS ordinal,
+          CAST(ROUND((julianday(json_extract(payload_json, '$.activity.payload.retryAt')) -
+            julianday(json_extract(payload_json, '$.activity.createdAt'))) * 86400000) AS INTEGER) AS delay
+        FROM orchestration_events WHERE event_type = 'thread.activity-appended'
+          AND json_extract(payload_json, '$.activity.payload.recovery') = 'codex-transient-recovery-waiting'
+        ORDER BY sequence`);
+      expect(waits.map((row) => row.ordinal)).toEqual(
+        Array.from({ length: 37 }, (_, index) => index + 1),
+      );
+      waits.forEach((row, index) => {
+        const base = Math.min(60000, 1000 * 2 ** Math.min(index, 6));
+        expect(row.delay).toBeGreaterThanOrEqual(base * 0.75);
+        expect(row.delay).toBeLessThanOrEqual(base);
+      });
+      expect(await failedCompletedAt(harness)).toBe(terminalTime);
+      expect(harness.startSession).not.toHaveBeenCalled();
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      expect(harness.steerTurn).not.toHaveBeenCalled();
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.stop",
+          commandId: CommandId.make("cmd-stop-saturated-recovery"),
+          threadId,
+          createdAt: "2026-01-01T01:00:00.000Z",
+        }),
+      );
+      await waitFor(() => harness.stopSession.mock.calls.length === 1);
+      await harness.drain();
+      await Effect.runPromise(clock.adjust(120_000));
+      await harness.drain();
+      expect(harness.sendTurn).toHaveBeenCalledTimes(36);
     });
 
     it.each(["failure", "intent"] as const)(

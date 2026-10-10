@@ -2489,6 +2489,32 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             activity_id DESC
           LIMIT 1
         ),
+        latest_recovery_presentation_activity_id AS (
+          -- One exact-owned current-turn display observation survives an
+          -- arbitrary child/tool tail. Cancellation and uncertain ACK dominate
+          -- an earlier countdown just as they do in the live renderer. Indexed
+          -- owner equality plus native ordering bounds the lookup to one row;
+          -- no transcript JSON scan or provider work is authorized here.
+          SELECT activity_id FROM projection_thread_activities
+            INDEXED BY idx_projection_recovery_presentation_owner_order
+          WHERE thread_id = ${threadId}
+            AND turn_id = (SELECT latest_turn_id FROM projection_threads
+              WHERE thread_id = ${threadId} LIMIT 1)
+            AND kind = 'runtime.warning'
+            AND json_extract(payload_json, '$.recovery') IN (
+              'codex-transient-root-failed', 'codex-transient-recovery-waiting',
+              'codex-transient-recovery-cancelled', 'codex-transient-recovery-uncertain',
+              'codex-transient-continuation-attempted'
+            )
+            AND json_extract(payload_json, '$.providerInstanceId') = (
+              SELECT provider_instance_id FROM projection_thread_sessions WHERE thread_id = ${threadId})
+            AND json_extract(payload_json, '$.subagentRuntimeId') = (
+              SELECT subagent_runtime_id FROM projection_thread_sessions WHERE thread_id = ${threadId})
+            AND json_extract(payload_json, '$.sessionUpdatedAt') = (
+              SELECT updated_at FROM projection_thread_sessions WHERE thread_id = ${threadId})
+          ORDER BY CASE WHEN sequence IS NULL THEN 0 ELSE 1 END DESC,
+            sequence DESC, created_at DESC, activity_id DESC LIMIT 1
+        ),
         subagent_hydration AS (
           SELECT CASE
             WHEN COUNT(*) = 3 AND COALESCE(SUM(completed), 0) = 3 THEN 1
@@ -2752,6 +2778,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           UNION
           SELECT activity_id
           FROM latest_turn_configuration_activity_id
+          UNION
+          SELECT activity_id
+          FROM latest_recovery_presentation_activity_id
           UNION
           SELECT activity_id
           FROM global_subagent_lifecycle_activity_ids

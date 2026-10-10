@@ -96,9 +96,7 @@ import {
   deriveWorkLogEntries,
   deriveSubagentWorkEntries,
   hasActionableProposedPlan,
-  hasToolActivityForTurn,
   isLatestTurnSettled,
-  formatElapsed,
   type WorkLogEntry,
 } from "../session-logic";
 import { type LegendListRef } from "@legendapp/list/react";
@@ -143,9 +141,13 @@ import { BranchToolbar } from "./BranchToolbar";
 import { resolveShortcutCommand } from "../keybindings";
 import PlanSidebar from "./PlanSidebar";
 import { deriveChatActivityPresentation } from "./chat/chatActivity";
+import { deriveTurnCompletionSummary } from "./chat/turnCompletion";
 import { isLiveWorkRuntimeCurrent } from "@cafecode/shared/liveWork";
 import { CodexRecoveryNotice, SessionRail } from "./chat/SessionRail";
-import { deriveCodexRecoveryPresentation } from "../codexRecovery";
+import {
+  deriveCodexRecoveryPresentation,
+  shouldSuppressCodexRecoveryErrorNotification,
+} from "../codexRecovery";
 import { ComposerAsyncQuestionsPanel } from "./chat/ComposerAsyncQuestionsPanel";
 import { persistExactAsyncQuestionAnswer, type AsyncQuestion } from "./chat/asyncQuestions";
 import { ChevronDownIcon, TriangleAlertIcon } from "lucide-react";
@@ -2266,10 +2268,6 @@ export default function ChatView(props: ChatViewProps) {
       }),
     [activeThread, threadActivities, activeSubagentEntries],
   );
-  const latestTurnHasToolActivity = useMemo(
-    () => hasToolActivityForTurn(threadActivities, activeLatestTurn?.turnId),
-    [activeLatestTurn?.turnId, threadActivities],
-  );
   const pendingApprovals = useMemo(
     () => derivePendingApprovals(threadActivities),
     [threadActivities],
@@ -2684,20 +2682,10 @@ export default function ChatView(props: ChatViewProps) {
     turnDiffSummaryByAssistantMessageId,
   ]);
 
-  const completionSummary = useMemo(() => {
-    if (!latestTurnSettled) return null;
-    if (!activeLatestTurn?.startedAt) return null;
-    if (!activeLatestTurn.completedAt) return null;
-    if (!latestTurnHasToolActivity) return null;
-
-    const elapsed = formatElapsed(activeLatestTurn.startedAt, activeLatestTurn.completedAt);
-    return elapsed ? `Worked for ${elapsed}` : null;
-  }, [
-    activeLatestTurn?.completedAt,
-    activeLatestTurn?.startedAt,
-    latestTurnHasToolActivity,
-    latestTurnSettled,
-  ]);
+  const completionSummary = useMemo(
+    () => deriveTurnCompletionSummary({ thread: activeThread, liveWork }),
+    [activeThread, liveWork],
+  );
   const completionDividerAfterEntryId = useMemo(() => {
     if (!latestTurnSettled) return null;
     if (!completionSummary) return null;
@@ -7938,7 +7926,15 @@ export default function ChatView(props: ChatViewProps) {
       {/* Error banner */}
       <ProviderStatusBanner status={activeProviderStatus} />
       <ThreadErrorBanner
-        error={activeThread.error}
+        error={
+          !activeEnvironmentUnavailable &&
+          shouldSuppressCodexRecoveryErrorNotification({
+            thread: activeThread,
+            activities: threadActivities,
+          })
+            ? null
+            : activeThread.error
+        }
         scopeKey={`${activeThread.environmentId}\u0000${activeThread.id}`}
         environmentId={activeThread.environmentId}
         threadId={activeThread.id}
@@ -8088,6 +8084,7 @@ export default function ChatView(props: ChatViewProps) {
                   isServerThread={isServerThread}
                   isLocalDraftThread={isLocalDraftThread}
                   phase={phase}
+                  recoveryStopAvailable={codexRecovery !== null}
                   isConnecting={isComposerConnecting}
                   isSendBusy={isSendBusy}
                   isPreparingWorktree={isPreparingWorktree}

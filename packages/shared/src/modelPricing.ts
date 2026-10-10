@@ -61,8 +61,18 @@ const BUNDLED_RATES: ReadonlyArray<readonly [prefix: string, rate: ModelRate]> =
   ["claude-opus-4-5", { input: 5, cachedInput: 0.5, cacheWrite: 6.25, output: 25 }],
   ["claude-opus-4", { input: 15, cachedInput: 1.5, cacheWrite: 18.75, output: 75 }],
   ["claude-opus", { input: 15, cachedInput: 1.5, cacheWrite: 18.75, output: 75 }],
+  // Verified 2026-10-11: https://www.anthropic.com/claude-haiku-5-5.
+  // The October 7 cache-read reduction applies to Sonnet 5.5 only. Its longer
+  // prefix must not change historical Sonnet 5's separate standard rate.
+  ["claude-sonnet-5-5", { input: 2, cachedInput: 0.1, cacheWrite: 2.5, output: 10 }],
   ["claude-sonnet-5", { input: 2, cachedInput: 0.2, cacheWrite: 2.5, output: 10 }],
   ["claude-sonnet", { input: 3, cachedInput: 0.3, cacheWrite: 3.75, output: 15 }],
+  // Haiku 5.5's standard baseline covers prompts up to 100K tokens. Individual
+  // longer prompts use 5x rates, but aggregate ledger input is not a request
+  // size: applying that threshold here would misprice many small requests.
+  // Keep this explicitly a standard-rate estimate, not a reconstructed bill;
+  // user overrides remain authoritative, and cache writes use the 5m rate.
+  ["claude-haiku-5-5", { input: 0.1, cachedInput: 0.01, cacheWrite: 0.125, output: 0.5 }],
   ["claude-haiku-4-5", { input: 1, cachedInput: 0.1, cacheWrite: 1.25, output: 5 }],
   ["claude-haiku", { input: 0.8, cachedInput: 0.08, cacheWrite: 1, output: 4 }],
   // Fable 5.1 cuts cache reads from 0.1x to 0.025x of base input, so keep its

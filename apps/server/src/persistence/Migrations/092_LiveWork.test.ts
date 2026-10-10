@@ -44,16 +44,20 @@ describe("092_LiveWork", () => {
       const sql = yield* SqlClient.SqlClient;
       yield* runMigrations({ toMigrationInclusive: 91 });
       const ran = yield* runMigrations();
-      assert.deepEqual(ran, [[92, "LiveWork"]]);
+      assert.deepEqual(ran, [
+        [92, "LiveWork"],
+        [93, "RecoveryPresentationIndex"],
+      ]);
       assert.deepEqual(
         yield* sql<{ name: string }>`
-          SELECT name FROM effect_sql_migrations WHERE migration_id IN (90, 91, 92)
+          SELECT name FROM effect_sql_migrations WHERE migration_id IN (90, 91, 92, 93)
           ORDER BY migration_id
         `,
         [
           { name: "WorkflowLifecycleRetention" },
           { name: "CodexTransientRecoveryIntents" },
           { name: "LiveWork" },
+          { name: "RecoveryPresentationIndex" },
         ],
       );
       assert.deepEqual(yield* sql`SELECT * FROM projection_live_work`, []);
@@ -81,6 +85,7 @@ describe("092_LiveWork", () => {
       assert.deepEqual(yield* runMigrations(), [
         [91, "CodexTransientRecoveryIntents"],
         [92, "LiveWork"],
+        [93, "RecoveryPresentationIndex"],
       ]);
       assert.deepEqual(yield* sql`SELECT * FROM projection_live_work`, before);
       assert.deepEqual(

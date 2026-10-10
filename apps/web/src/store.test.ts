@@ -4,6 +4,7 @@ import {
   DEFAULT_MODEL,
   EnvironmentId,
   EventId,
+  CommandId,
   MessageId,
   MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN,
   ProjectId,
@@ -39,6 +40,7 @@ import { deriveActiveSubagentWorkEntries, deriveSubagentWorkEntries } from "./se
 import { deriveWorkflowTasks } from "./workflowTaskActivity";
 import { DEFAULT_INTERACTION_MODE, DEFAULT_RUNTIME_MODE, type Thread } from "./types";
 import { threadForkPrefix } from "./lib/threadForkPrefix";
+import { deriveCodexRecoveryPresentation } from "./codexRecovery";
 
 const localEnvironmentId = EnvironmentId.make("environment-local");
 const remoteEnvironmentId = EnvironmentId.make("environment-remote");
@@ -936,6 +938,288 @@ describe("setThreadBranch", () => {
 });
 
 describe("incremental orchestration updates", () => {
+  it("preserves only the failed-root clock for canonical native retry warnings", () => {
+    const at = "2026-02-27T00:00:02.000Z";
+    const turnId = TurnId.make("native-retry-clock-root");
+    const thread = makeThread({
+      latestTurn: {
+        turnId,
+        state: "error",
+        requestedAt: at,
+        startedAt: at,
+        completedAt: at,
+        assistantMessageId: null,
+      },
+    });
+    const activity: Thread["activities"][number] = {
+      id: EventId.make("native-retry-clock-child"),
+      kind: "runtime.warning",
+      tone: "info",
+      summary: "Provider reconnecting",
+      turnId,
+      createdAt: "2026-02-27T00:00:04.000Z",
+      payload: {
+        message: "Provider reconnecting",
+        retrying: true,
+        detail: { willRetry: true },
+      },
+    };
+    const nativeCommandId = CommandId.make(
+      `provider:codex:${thread.id}:native-event:thread-activity-append:${activity.id}`,
+    );
+    const append = (
+      payload: unknown,
+      commandId = nativeCommandId,
+      latestTurn = thread.latestTurn,
+    ) =>
+      threadsOf(
+        applyOrchestrationEvent(
+          makeState({ ...thread, latestTurn }),
+          makeEvent(
+            "thread.activity-appended",
+            { threadId: thread.id, activity: { ...activity, payload } },
+            { commandId },
+          ),
+          localEnvironmentId,
+        ),
+      )[0]?.latestTurn;
+    const canonical = activity.payload as Record<string, unknown>;
+
+    // Actual app-server ingestion uses the provider prefix. The server prefix
+    // is also trusted bookkeeping, without creating a lifecycle/retry grant.
+    for (const commandId of [nativeCommandId, CommandId.make("server:native-retry")]) {
+      for (const payload of [
+        canonical,
+        { ...canonical, nativeRetry: { observedCount: 12, timing: "unknown" } },
+        {
+          ...canonical,
+          nativeRetry: { observedCount: 1_024, timing: "unknown", countLimited: true },
+        },
+      ]) {
+        expect(append(payload, commandId)).toEqual(thread.latestTurn);
+      }
+    }
+
+    // A content-free shape must be exact, including the optional bounded
+    // counter. Ordinary, malformed, or client-attributed warnings retain the
+    // existing clock extension rather than receiving a broad exemption.
+    for (const payload of [
+      { message: "Ordinary warning" },
+      { ...canonical, retrying: false },
+      { ...canonical, detail: { willRetry: false } },
+      { ...canonical, detail: { willRetry: true, error: "extra" } },
+      { ...canonical, extra: true },
+      { ...canonical, nativeRetry: { observedCount: 0, timing: "unknown" } },
+      { ...canonical, nativeRetry: { observedCount: 1_025, timing: "unknown" } },
+      {
+        ...canonical,
+        nativeRetry: { observedCount: 12, timing: "unknown", countLimited: false },
+      },
+      { ...canonical, nativeRetry: { observedCount: 12, timing: "known" } },
+    ]) {
+      expect(append(payload)?.completedAt).toBe(activity.createdAt);
+    }
+    expect(append(canonical, CommandId.make("client:native-retry"))?.completedAt).toBe(
+      activity.createdAt,
+    );
+    for (const state of ["completed", "interrupted"] as const) {
+      expect(
+        append(canonical, nativeCommandId, { ...thread.latestTurn!, state })?.completedAt,
+      ).toBe(activity.createdAt);
+    }
+  });
+  it("preserves the failed-root clock for received recovery bookkeeping and child work", () => {
+    const at = "2026-02-27T00:00:00.000Z";
+    const turnId = TurnId.make("failed-clock-root");
+    const thread = makeThread({
+      latestTurn: {
+        turnId,
+        state: "error",
+        requestedAt: at,
+        startedAt: at,
+        completedAt: at,
+        assistantMessageId: null,
+      },
+    });
+    const activity: Thread["activities"][number] = {
+      id: EventId.make("late-recovery-clock"),
+      kind: "runtime.warning",
+      tone: "info",
+      summary: "Recovery waiting",
+      turnId,
+      createdAt: "2026-02-27T00:00:45.000Z",
+      payload: { recovery: "codex-transient-recovery-waiting" },
+    };
+    for (const patch of [
+      {},
+      { kind: "runtime.error", payload: { message: "Late root diagnostic" } },
+      { kind: "task.progress", payload: { subagent: { threadId: "child", status: "active" } } },
+    ]) {
+      const next = applyOrchestrationEvent(
+        makeState(thread),
+        makeEvent(
+          "thread.activity-appended",
+          { threadId: thread.id, activity: { ...activity, ...patch } },
+          { commandId: CommandId.make("server:recovery-clock") },
+        ),
+        localEnvironmentId,
+      );
+      expect(threadsOf(next)[0]?.latestTurn).toEqual(thread.latestTurn);
+    }
+    // Native real tool work and malformed/untrusted recovery-shaped rows retain
+    // their established timing behavior, rather than gaining a broad exemption.
+    for (const [patch, commandId] of [
+      [{ kind: "tool.completed", payload: {} }, CommandId.make("server:real-tool")],
+      [{}, CommandId.make("client:untrusted-recovery")],
+      [
+        { kind: "task.progress", payload: { subagent: { threadId: "child", status: "bogus" } } },
+        CommandId.make("server:invalid-child"),
+      ],
+    ] as const) {
+      const next = applyOrchestrationEvent(
+        makeState(thread),
+        makeEvent(
+          "thread.activity-appended",
+          { threadId: thread.id, activity: { ...activity, ...patch } },
+          { commandId },
+        ),
+        localEnvironmentId,
+      );
+      expect(threadsOf(next)[0]?.latestTurn?.completedAt).toBe(activity.createdAt);
+    }
+  });
+  it.each([
+    "codex-transient-recovery-waiting",
+    "codex-transient-continuation-attempted",
+    "codex-transient-recovery-cancelled",
+    "codex-transient-recovery-uncertain",
+  ])(
+    "retains one exact-owner %s marker across heavy activity, replay and replacement",
+    (recovery) => {
+      const turnId = TurnId.make("recovery-root");
+      const observedAt = "2026-02-27T00:00:00.000Z";
+      const owner = {
+        providerInstanceId: "codex-work",
+        subagentRuntimeId: "10000000-0000-4000-8000-000000000001",
+        sessionUpdatedAt: observedAt,
+      };
+      const waiting: Thread["activities"][number] = {
+        id: EventId.make("old-wait"),
+        sequence: 1,
+        kind: "runtime.warning",
+        tone: "info",
+        summary: "Recovery waiting",
+        turnId,
+        createdAt: observedAt,
+        payload: {
+          ...owner,
+          recovery: "codex-transient-recovery-waiting",
+          stage: "backoff",
+          retryAttempt: 30,
+          continuationOrdinal: 37,
+          retryAt: "2026-02-27T00:00:45.000Z",
+        },
+      };
+      const latest = {
+        ...waiting,
+        id: EventId.make("latest-recovery"),
+        sequence: 2,
+        payload: { ...(waiting.payload as object), recovery },
+      };
+      const foreign = {
+        ...latest,
+        id: EventId.make("foreign-recovery"),
+        sequence: 3,
+        payload: { ...(latest.payload as object), providerInstanceId: "foreign-account" },
+      };
+      const tail = Array.from({ length: 501 }, (_, index) => ({
+        ...waiting,
+        id: EventId.make(`recovery-tail-${index}`),
+        sequence: index + 4,
+        kind: "tool.completed",
+        summary: "Ran command",
+        payload: {},
+      }));
+      const thread = makeThread({
+        session: {
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId: ProviderInstanceId.make(owner.providerInstanceId),
+          subagentRuntimeId: owner.subagentRuntimeId,
+          status: "ready",
+          orchestrationStatus: "ready",
+          createdAt: observedAt,
+          updatedAt: observedAt,
+          lastError: "Synthetic failed root",
+        },
+        latestTurn: {
+          turnId,
+          state: "error",
+          requestedAt: observedAt,
+          startedAt: observedAt,
+          completedAt: observedAt,
+          assistantMessageId: null,
+        },
+        activities: [waiting, latest, foreign, ...tail.slice(0, 500)],
+      });
+      const append = (state: AppState, activity = tail[500]!) =>
+        applyOrchestrationEvent(
+          state,
+          makeEvent(
+            "thread.activity-appended",
+            { threadId: thread.id, activity },
+            { sequence: activity.sequence },
+          ),
+          localEnvironmentId,
+        );
+      const next = append(makeState(thread));
+      const retained = threadsOf(next)[0]!;
+      expect(retained.activities).toHaveLength(501);
+      expect(retained.activities.filter((activity) => activity.kind === "runtime.warning")).toEqual(
+        [latest],
+      );
+      const presentation = () =>
+        deriveCodexRecoveryPresentation({
+          thread: retained,
+          activities: retained.activities,
+          activeSubagents: [],
+        });
+      if (recovery === "codex-transient-recovery-waiting") {
+        expect(presentation()).toMatchObject({ stage: "backoff", continuationOrdinal: 37 });
+      } else if (recovery === "codex-transient-recovery-uncertain") {
+        expect(presentation()).toMatchObject({ stage: "uncertain", retryAtMs: null });
+      } else if (recovery === "codex-transient-continuation-attempted") {
+        expect(presentation()).toMatchObject({
+          stage: "reconnecting",
+          continuationOrdinal: 37,
+          retryAtMs: null,
+        });
+      } else expect(presentation()).toBeNull();
+      // An exact durable replay is idempotent; it cannot increment a derived count.
+      expect(threadsOf(append(next))[0]?.activities).toEqual(retained.activities);
+      const reloaded = makeState(structuredClone(retained));
+      const afterReload = append(reloaded, {
+        ...tail[500]!,
+        id: EventId.make("post-reload"),
+        sequence: 506,
+      });
+      expect(threadsOf(afterReload)[0]?.activities).toContainEqual(latest);
+      for (const session of [
+        { ...retained.session!, providerInstanceId: ProviderInstanceId.make("other-account") },
+        { ...retained.session!, subagentRuntimeId: "replacement" },
+        { ...retained.session!, updatedAt: "2026-02-27T00:00:01.000Z" },
+      ]) {
+        const changed = append(makeState({ ...retained, session }), {
+          ...tail[500]!,
+          id: EventId.make("changed-owner"),
+          sequence: 506,
+        });
+        expect(threadsOf(changed)[0]?.activities).toHaveLength(500);
+        expect(
+          threadsOf(changed)[0]?.activities.some((activity) => activity.id === latest.id),
+        ).toBe(false);
+      }
+    },
+  );
   it("does not mark bootstrap complete for incremental events", () => {
     const state = withActiveEnvironmentState(localEnvironmentStateOf(makeState(makeThread())), {
       bootstrapComplete: false,

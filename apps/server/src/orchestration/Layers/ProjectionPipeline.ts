@@ -1,4 +1,5 @@
 import {
+  isCodexNativeRetryWarningPayload,
   ApprovalRequestId,
   type ChatAttachment,
   type OrchestrationEvent,
@@ -1750,6 +1751,18 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               // unchanged, and reserve this exception for schema-valid child
               // lifecycle events beneath an already failed root.
               const payload = event.payload.activity.payload;
+              if (
+                existingTurn.value.state === "error" &&
+                (event.commandId?.startsWith("server:") ||
+                  event.commandId?.startsWith("provider:codex:")) &&
+                event.payload.activity.kind === "runtime.warning" &&
+                isCodexNativeRetryWarningPayload(payload)
+              ) {
+                // Native retry observations can belong to an independently
+                // running child. Grouping them under the parent is not proof
+                // that its failed root resumed or changed its terminal time.
+                return;
+              }
               if (
                 existingTurn.value.state === "error" &&
                 ["task.started", "task.progress", "task.completed"].includes(

@@ -54,15 +54,21 @@ describe("SessionRail", () => {
       const view = await render(
         <div style={{ width: 260 }}>
           <CodexRecoveryNotice
-            presentation={{ activeAgentCount: 2, stage: "backoff", retryAtMs: Date.now() + 60_000 }}
+            presentation={{
+              activeAgentCount: 2,
+              stage: "backoff",
+              retryAtMs: Date.now() + 60_000,
+              continuationOrdinal: 37,
+              continuationOrdinalLowerBound: true,
+            }}
             onStop={onStop}
           />
         </div>,
       );
       try {
         const notice = document.querySelector<HTMLElement>('[data-codex-recovery-notice="true"]')!;
-        await expect.element(page.getByRole("status")).toMatchTextContent("Root failed");
-        await expect.element(page.getByRole("status")).toMatchTextContent(/Retry in \d+s/u);
+        await expect.element(page.getByRole("status")).toMatchTextContent("Reconnecting");
+        await expect.element(page.getByRole("status")).toMatchTextContent(/Retry #37\+ in \d+s/u);
         await expect.element(page.getByRole("status")).toMatchTextContent("2 agents active");
         const stop = page.getByRole("button", {
           name: "Stop recovery and running agents",
@@ -77,13 +83,20 @@ describe("SessionRail", () => {
         await view.rerender(
           <div style={{ width: 260 }}>
             <CodexRecoveryNotice
-              presentation={{ activeAgentCount: 2, stage: "backoff", retryAtMs: Date.now() - 1 }}
+              presentation={{
+                activeAgentCount: 2,
+                stage: "backoff",
+                retryAtMs: Date.now() - 1,
+                continuationOrdinal: 38,
+              }}
               onStop={onStop}
               disabled
             />
           </div>,
         );
         await expect.element(page.getByRole("status")).toMatchTextContent("Reconnecting");
+        await expect.element(page.getByRole("status")).toMatchTextContent("Retry #38");
+        expect(document.body.textContent).not.toContain("in 0s");
         await expect.element(stop).toBeDisabled();
         expect(document.body.textContent).not.toContain("Running root");
         await view.rerender(
@@ -96,6 +109,20 @@ describe("SessionRail", () => {
         );
         await expect.element(page.getByRole("status")).toMatchTextContent("Needs reconciliation");
         await expect.element(stop).toBeEnabled();
+        expect(document.body.textContent).not.toContain("Retry in");
+        await view.rerender(
+          <div style={{ width: 260 }}>
+            <CodexRecoveryNotice
+              presentation={{ activeAgentCount: 2, stage: null, retryAtMs: null }}
+              onStop={onStop}
+            />
+          </div>,
+        );
+        await expect
+          .element(page.getByRole("status"))
+          .toHaveTextContent("Agents running · 2 agents active");
+        await expect.element(stop).toBeEnabled();
+        expect(document.body.textContent).not.toContain("Reconnecting");
         expect(document.body.textContent).not.toContain("Retry in");
       } finally {
         await view.unmount();

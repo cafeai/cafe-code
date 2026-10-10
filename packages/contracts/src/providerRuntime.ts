@@ -649,6 +649,65 @@ const RuntimeSubagentRole = TrimmedNonEmptyStringSchema.check(Schema.isMaxLength
 const RuntimeSubagentObjective = TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(240));
 
 /**
+ * Presentation-only native reconnect observations for one exact runtime/turn.
+ * The native protocol does not report its next retry deadline. Keeping timing
+ * explicitly unknown prevents a renderer from borrowing Cafe's separate timer
+ * or treating provider prose as a scheduling/control capability. A bounded
+ * counter becomes a lower bound at the tracking ceiling, never a retry limit.
+ */
+export const ProviderNativeRetryProgress = Schema.Struct({
+  observedCount: PositiveInt.check(Schema.isLessThanOrEqualTo(1_024)),
+  timing: Schema.Literal("unknown"),
+  countLimited: Schema.optional(Schema.Literal(true)),
+});
+export type ProviderNativeRetryProgress = typeof ProviderNativeRetryProgress.Type;
+
+/**
+ * Exact content-free canonical retry bookkeeping, not a liveness/retry grant.
+ * A child warning is grouped under its root turn for history, but must not
+ * extend an already failed root's immutable completion watermark. Check only
+ * own inert data descriptors and finite known shapes: malformed/ordinary
+ * warnings keep their existing clock semantics, and getters never execute.
+ */
+export function isCodexNativeRetryWarningPayload(value: unknown): boolean {
+  const own = (candidate: unknown, keys: ReadonlyArray<string>) => {
+    if (candidate === null || typeof candidate !== "object" || Array.isArray(candidate))
+      return null;
+    try {
+      const prototype = Object.getPrototypeOf(candidate);
+      if (prototype !== Object.prototype && prototype !== null) return null;
+      const ownKeys = Reflect.ownKeys(candidate);
+      if (ownKeys.length > keys.length) return null;
+      const result = Object.create(null) as Record<string, unknown>;
+      for (const key of ownKeys) {
+        if (typeof key !== "string" || !keys.includes(key)) return null;
+        const descriptor = Object.getOwnPropertyDescriptor(candidate, key);
+        if (!descriptor || !("value" in descriptor)) return null;
+        result[key] = descriptor.value;
+      }
+      return result;
+    } catch {
+      return null;
+    }
+  };
+  const payload = own(value, ["message", "detail", "retrying", "nativeRetry"]);
+  if (payload?.message !== "Provider reconnecting" || payload.retrying !== true) return false;
+  const detail = own(payload.detail, ["willRetry"]);
+  if (detail?.willRetry !== true) return false;
+  if (!Object.hasOwn(payload, "nativeRetry")) return true;
+  const native = own(payload.nativeRetry, ["observedCount", "timing", "countLimited"]);
+  return (
+    native !== null &&
+    native.timing === "unknown" &&
+    typeof native.observedCount === "number" &&
+    Number.isSafeInteger(native.observedCount) &&
+    native.observedCount >= 1 &&
+    native.observedCount <= 1_024 &&
+    (!Object.hasOwn(native, "countLimited") || native.countLimited === true)
+  );
+}
+
+/**
  * Provider-owned identity and display metadata for one nested agent task.
  *
  * The opaque child thread id is the durable coalescing key. All user-visible
@@ -680,6 +739,7 @@ export const RuntimeSubagentPresentation = Schema.Struct({
   objective: Schema.optional(RuntimeSubagentObjective),
   status: Schema.optional(Schema.Literals(["waiting", "active", "completed", "failed", "stopped"])),
   startedAt: Schema.optional(IsoDateTime),
+  nativeRetry: Schema.optional(ProviderNativeRetryProgress),
 });
 export type RuntimeSubagentPresentation = typeof RuntimeSubagentPresentation.Type;
 
@@ -935,6 +995,7 @@ export type FilesPersistedPayload = typeof FilesPersistedPayload.Type;
 const RuntimeWarningPayload = Schema.Struct({
   message: TrimmedNonEmptyStringSchema,
   detail: Schema.optional(Schema.Unknown),
+  nativeRetry: Schema.optional(ProviderNativeRetryProgress),
 });
 export type RuntimeWarningPayload = typeof RuntimeWarningPayload.Type;
 

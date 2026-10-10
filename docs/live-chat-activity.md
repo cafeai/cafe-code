@@ -1,5 +1,7 @@
 # Live chat activity
 
+Last updated: 2026-10-11 02:01:33 JST (UTC+0900)
+
 The composer has one compact activity line above the editor. It shows Working,
 Running command, a computer action, or waiting for a tool, agent, answer or
 approval. Questions and approvals use the attention colour. When work is
@@ -20,7 +22,7 @@ replaced observation does not remain active. Routine steer and turn-progress
 messages do not count as independent work. Silence, elapsed time and saved
 Working labels are never liveness evidence.
 
-Migration 90 creates a small lifecycle-head projection and seeds existing
+Migration 92 creates a small lifecycle-head projection and seeds existing
 explicitly bound observations once. Activity ingestion updates it incrementally
 inside the same transaction as the activity row. Shell snapshots read indexed
 current-runtime counts rather than loading the transcript. A known zero count

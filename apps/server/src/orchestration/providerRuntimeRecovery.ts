@@ -41,7 +41,7 @@ export const buildCodexTransientFailureMarkerPayload = (input: {
 export const saturateRuntimeRecoveryAttempt = (attempt: number) =>
   Math.min(30, Math.max(0, Number.isSafeInteger(attempt) ? attempt : 30));
 
-/** Equal jitter never removes the wait and cannot exceed the 60-second cap. */
+/** Exponential backoff with 75–100% jitter always waits and caps at 60 seconds. */
 export const codexTransientRecoveryDelayMs = (attempt: number, jitter: number) => {
   const boundedJitter = Number.isFinite(jitter) ? Math.min(1, Math.max(0, jitter)) : 1;
   const base = Math.min(60_000, 1_000 * 2 ** Math.min(saturateRuntimeRecoveryAttempt(attempt), 6));
@@ -60,11 +60,14 @@ export type CodexTransientRecoveryChain =
       readonly status: "fresh";
       readonly chainSourceEventSequence: number;
       readonly retryAttempt: 0;
+      readonly continuationOrdinal: 1;
     }
   | {
       readonly status: "accepted";
       readonly chainSourceEventSequence: number;
       readonly retryAttempt: number;
+      readonly continuationOrdinal?: number;
+      readonly continuationOrdinalLowerBound?: true;
     }
   | { readonly status: "pending" };
 
@@ -92,6 +95,9 @@ export const makeCodexTransientRecoveryChainReader = Effect.gen(function* () {
         readonly retryAttempt: number;
         readonly instanceId: string;
         readonly runtimeId: string;
+        readonly continuationOrdinal: unknown;
+        readonly continuationOrdinalType: string | null;
+        readonly continuationOrdinalLowerBoundType: string | null;
       }>`
       WITH latest_control AS (
         SELECT COALESCE(MAX(sequence), 0) AS sequence
@@ -110,7 +116,13 @@ export const makeCodexTransientRecoveryChainReader = Effect.gen(function* () {
         json_extract(event.payload_json, '$.runtimeRecovery.codexTransientFailure.chainSourceEventSequence') AS chainSource,
         json_extract(event.payload_json, '$.runtimeRecovery.codexTransientFailure.retryAttempt') AS retryAttempt,
         json_extract(event.payload_json, '$.runtimeRecovery.codexTransientFailure.providerInstanceId') AS instanceId,
-        json_extract(event.payload_json, '$.runtimeRecovery.codexTransientFailure.subagentRuntimeId') AS runtimeId
+        json_extract(event.payload_json, '$.runtimeRecovery.codexTransientFailure.subagentRuntimeId') AS runtimeId,
+        CASE WHEN json_type(event.payload_json, '$.runtimeRecovery.codexTransientFailure.continuationOrdinal') = 'integer'
+          AND json_extract(event.payload_json, '$.runtimeRecovery.codexTransientFailure.continuationOrdinal') BETWEEN 1 AND ${Number.MAX_SAFE_INTEGER}
+          THEN json_extract(event.payload_json, '$.runtimeRecovery.codexTransientFailure.continuationOrdinal')
+          ELSE NULL END AS continuationOrdinal,
+        json_type(event.payload_json, '$.runtimeRecovery.codexTransientFailure.continuationOrdinal') AS continuationOrdinalType,
+        json_type(event.payload_json, '$.runtimeRecovery.codexTransientFailure.continuationOrdinalLowerBound') AS continuationOrdinalLowerBoundType
       FROM latest_intent JOIN orchestration_events AS event ON event.sequence = latest_intent.sequence
       WHERE event.aggregate_kind = 'thread' AND event.stream_id = ${input.threadId}
         AND event.actor_kind = 'server' AND event.event_type = 'thread.turn-start-requested'
@@ -122,6 +134,7 @@ export const makeCodexTransientRecoveryChainReader = Effect.gen(function* () {
           status: "fresh",
           chainSourceEventSequence: input.sourceEventSequence,
           retryAttempt: 0,
+          continuationOrdinal: 1,
         } as const;
       if (
         intent.instanceId !== input.providerInstanceId ||
@@ -156,14 +169,48 @@ export const makeCodexTransientRecoveryChainReader = Effect.gen(function* () {
           json_extract(attempt.payload_json, '$.activity.payload.attemptOwnerId')
       LIMIT 1
     `.pipe(Effect.mapError(toPersistenceSqlError("CodexTransientRecoveryChain.receipt")));
+      // Advance display bookkeeping only from the same authenticated acceptance
+      // used by the existing retry chain. This O(1) ledger lookup avoids counting
+      // arbitrary transcript rows or trusting provider warning fractions. Missing
+      // legacy metadata can be reconstructed below the old exponent ceiling; at
+      // that ceiling only a lower bound is knowable. Present malformed metadata
+      // is neither authority nor permission to fabricate a legacy count.
+      const qualifiedLowerBound =
+        intent.continuationOrdinalLowerBoundType === null ||
+        intent.continuationOrdinalLowerBoundType === "true";
+      const previousOrdinal = intent.continuationOrdinal;
+      const nextOrdinal = !qualifiedLowerBound
+        ? {}
+        : intent.continuationOrdinalType === null
+          ? intent.continuationOrdinalLowerBoundType !== null
+            ? {}
+            : {
+                continuationOrdinal: intent.retryAttempt + 2,
+                ...(intent.retryAttempt === 30
+                  ? { continuationOrdinalLowerBound: true as const }
+                  : {}),
+              }
+          : intent.continuationOrdinalType === "integer" &&
+              typeof previousOrdinal === "number" &&
+              Number.isSafeInteger(previousOrdinal) &&
+              previousOrdinal > 0
+            ? {
+                continuationOrdinal: Math.min(Number.MAX_SAFE_INTEGER, previousOrdinal + 1),
+                ...(intent.continuationOrdinalLowerBoundType === "true" ||
+                previousOrdinal === Number.MAX_SAFE_INTEGER
+                  ? { continuationOrdinalLowerBound: true as const }
+                  : {}),
+              }
+            : {};
       return receipts[0]?.accepted === 1
         ? ({
             status: "accepted",
             chainSourceEventSequence: intent.chainSource,
             retryAttempt: saturateRuntimeRecoveryAttempt(intent.retryAttempt + 1),
+            ...nextOrdinal,
           } as const)
         : ({ status: "pending" } as const);
-    });
+    }).pipe(Effect.map((chain): CodexTransientRecoveryChain => chain));
 });
 
 /**

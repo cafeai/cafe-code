@@ -754,6 +754,9 @@ function runtimeEventToActivities(
             message: truncateDetail(event.payload.message),
             ...(event.payload.detail !== undefined ? { detail: event.payload.detail } : {}),
             ...(isRetrying ? { retrying: true } : {}),
+            ...(event.payload.nativeRetry !== undefined
+              ? { nativeRetry: event.payload.nativeRetry }
+              : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,

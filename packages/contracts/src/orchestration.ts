@@ -1095,6 +1095,13 @@ export const ThreadTurnRuntimeRecovery = Schema.Struct({
       subagentRuntimeId: SubagentRuntimeId,
       chainSourceEventSequence: PositiveInt,
       retryAttempt: NonNegativeInt.check(Schema.isLessThanOrEqualTo(30)),
+      // Count accepted Cafe continuation generations independently from the
+      // capped delay exponent and native reconnect observations. These optional
+      // values are display metadata only and never participate in admission.
+      continuationOrdinal: Schema.optional(
+        PositiveInt.check(Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER)),
+      ),
+      continuationOrdinalLowerBound: Schema.optional(Schema.Literal(true)),
     }),
   ),
 });

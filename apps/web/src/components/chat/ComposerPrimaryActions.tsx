@@ -16,6 +16,8 @@ interface ComposerPrimaryActionsProps {
   compact: boolean;
   pendingAction: PendingActionState | null;
   isRunning: boolean;
+  /** Recovery owns a stoppable context without making a failed root running. */
+  recoveryStopAvailable?: boolean | undefined;
   showPlanFollowUpPrompt: boolean;
   promptHasText: boolean;
   isSendBusy: boolean;
@@ -67,6 +69,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   compact,
   pendingAction,
   isRunning,
+  recoveryStopAvailable = false,
   showPlanFollowUpPrompt,
   promptHasText,
   isSendBusy,
@@ -138,11 +141,13 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
     );
   }
 
-  if (isRunning) {
+  if (isRunning || recoveryStopAvailable) {
     // A sendable draft always wins the shared primary-action slot. Aside from
     // preventing accidental interruption, this mirrors the established
     // keyboard path: a normal submit during a running turn queues a follow-up;
-    // explicit steering and interruption remain separate user intents.
+    // explicit steering and interruption remain separate user intents. A
+    // failed-root recovery does not change that form's native phase: its draft
+    // sends a new manual turn rather than being mislabeled a running-turn queue.
     if (hasSendableContent || postSubmitInterruptGuardActive) {
       // Do not disable the button merely because the click armed the guard:
       // disabling a submit button during its click dispatch can suppress the
@@ -158,7 +163,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
           disabled={
             isSendBusy || isConnecting || isEnvironmentUnavailable || sendTemporarilyGuarded
           }
-          aria-label="Queue message"
+          aria-label={isRunning ? "Queue message" : "Send message"}
         >
           <ArrowUpIcon aria-hidden="true" className="size-4" strokeWidth={2.25} />
         </button>
@@ -174,7 +179,8 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
         )}
         {...pointerFocusProps}
         onClick={onInterrupt}
-        aria-label="Stop generation"
+        disabled={recoveryStopAvailable && (isSendBusy || isConnecting || isEnvironmentUnavailable)}
+        aria-label={recoveryStopAvailable ? "Stop recovery" : "Stop generation"}
       >
         <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
           <rect x="2" y="2" width="8" height="8" rx="1.5" />

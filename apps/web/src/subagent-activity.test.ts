@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { EventId, TurnId, type OrchestrationThreadActivity } from "@cafecode/contracts";
+import {
+  EventId,
+  ProviderInstanceId,
+  TurnId,
+  type OrchestrationThreadActivity,
+} from "@cafecode/contracts";
 
 import { deriveSubagentActivities, type SubagentRuntimeContext } from "./subagent-activity";
 import { deriveActiveSubagentWorkEntries, deriveHistoricalWorkLogSummaries } from "./session-logic";
@@ -42,6 +47,39 @@ function activity(
 }
 
 describe("subagent native runtime liveness overlay", () => {
+  it("revokes an older task receipt on liveness-only progress without hiding the live child", () => {
+    const capability = {
+      providerInstanceId: ProviderInstanceId.make("claude-account"),
+      taskGeneration: "00000000-0000-4000-8000-000000000002",
+      canStop: true,
+      canBackground: false,
+    };
+    const base = activity("task.started", 1);
+    const started = {
+      ...base,
+      payload: { ...base.payload, subagent: { ...base.payload.subagent, taskControl: capability } },
+    };
+    const newerLevel = activity("task.progress", 2);
+    expect(deriveSubagentActivities([started], { runtimeSession })[0]?.taskControl).toEqual(
+      capability,
+    );
+    // The provider has observed a newer native run, but its explicit start
+    // bookend has not arrived. A complete progress sibling omits controls,
+    // and neither durable replay nor Work Log conversion may inherit them.
+    for (const rows of [
+      [started, newerLevel],
+      [newerLevel, started],
+    ]) {
+      const child = deriveSubagentActivities(rows, { runtimeSession })[0];
+      expect(child).toMatchObject({ status: "active", id: "exact-child" });
+      expect(child?.taskControl).toBeUndefined();
+      expect(
+        deriveActiveSubagentWorkEntries(rows, currentTurn, { runtimeSession })[0]?.subagent
+          ?.taskControl,
+      ).toBeUndefined();
+    }
+  });
+
   it("keeps quiet older-turn children active across ready parent state and renderer reconnects", () => {
     const rows = [activity("task.started", 1)];
     const first = deriveSubagentActivities(rows, { runtimeSession });

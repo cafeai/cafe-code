@@ -22,6 +22,7 @@ import {
   type ProviderSession,
   type RuntimeMode,
   TurnId,
+  type ThreadTurnRuntimeRecovery,
 } from "@cafecode/contracts";
 import {
   isTemporaryWorktreeBranch,
@@ -5273,7 +5274,7 @@ const make = Effect.gen(function* () {
     if (transientRecoveryWaits.has(event.sequence)) return;
     const context = transientRecoveryContexts.get(event.payload.threadId);
     if (context === undefined) return;
-    const waitRecovery =
+    const waitRecovery: ThreadTurnRuntimeRecovery | undefined =
       event.type === "thread.turn-start-requested"
         ? event.payload.runtimeRecovery
         : {
@@ -5325,6 +5326,14 @@ const make = Effect.gen(function* () {
             sessionUpdatedAt: context.sessionUpdatedAt,
             retryAt,
             retryAttempt: saturateRuntimeRecoveryAttempt(attempt),
+            ...(waitRecovery.codexTransientFailure?.continuationOrdinal !== undefined
+              ? {
+                  continuationOrdinal: waitRecovery.codexTransientFailure.continuationOrdinal,
+                  ...(waitRecovery.codexTransientFailure.continuationOrdinalLowerBound === true
+                    ? { continuationOrdinalLowerBound: true }
+                    : {}),
+                }
+              : {}),
             stage: event.type === "thread.activity-appended" ? "reconciling" : "backoff",
           },
           createdAt: now,
@@ -5434,6 +5443,14 @@ const make = Effect.gen(function* () {
         chainSourceEventSequence:
           chain.status === "pending" ? event.sequence : chain.chainSourceEventSequence,
         retryAttempt: chain.status === "pending" ? 0 : chain.retryAttempt,
+        ...(chain.status !== "pending" && chain.continuationOrdinal !== undefined
+          ? {
+              continuationOrdinal: chain.continuationOrdinal,
+              ...(chain.status === "accepted" && chain.continuationOrdinalLowerBound === true
+                ? { continuationOrdinalLowerBound: true as const }
+                : {}),
+            }
+          : {}),
       },
     };
     if (!(yield* readRuntimeRecoveryBarrier({ ...runtimeRecovery, threadId }))) return;
@@ -5607,6 +5624,17 @@ const make = Effect.gen(function* () {
             recovery: "codex-transient-continuation-attempted",
             sourceEventSequence: recovery.sourceEventSequence,
             attemptOwnerId,
+            providerInstanceId: transient.providerInstanceId,
+            subagentRuntimeId: transient.subagentRuntimeId,
+            sessionUpdatedAt: recovery.sessionUpdatedAt,
+            ...(transient.continuationOrdinal !== undefined
+              ? {
+                  continuationOrdinal: transient.continuationOrdinal,
+                  ...(transient.continuationOrdinalLowerBound === true
+                    ? { continuationOrdinalLowerBound: true }
+                    : {}),
+                }
+              : {}),
           },
           createdAt: now,
         },

@@ -577,6 +577,12 @@ interface ClaudeTaskVisibilityState {
 }
 
 interface ClaudeTaskBinding {
+  /** Public SDK run id, compared as opaque strings, never as a timestamp. */
+  readonly nativeRunId?: string | undefined;
+  /** A newer level revoked the old receipt; only an explicit start may renew it. */
+  readonly awaitingRunStart?: boolean | undefined;
+  /** A known same-query parent only; this is not transcript or control authority. */
+  readonly parentTaskId?: RuntimeTaskId | undefined;
   readonly taskType?: string;
   readonly workflowName?: string;
   readonly retiredToolUseKeys?: ReadonlyArray<string> | undefined;
@@ -953,8 +959,48 @@ function exactClaudeProviderIdentity(
   return normalized;
 }
 
-function claudeParentToolUseId(message: SDKMessage): string | undefined {
-  return trimmedStringValue((message as unknown as Record<string, unknown>).parent_tool_use_id);
+function claudeParentToolUseId(
+  message: SDKMessage,
+  context?: ClaudeSessionContext,
+): string | undefined {
+  const record = message as unknown as Record<string, unknown>;
+  const explicit = trimmedStringValue(record.parent_tool_use_id);
+  if (explicit || !context) return explicit;
+  // SDK 0.3.295 documents agent_id as the task id, not the transcript id.
+  // Only a previously qualified task/tool association can resolve this alias.
+  const identity = ownClaudeTaskIdentity(record, "agent_id");
+  const taskId = identity.value && canonicalClaudeTaskId(identity.value);
+  return taskId
+    ? (
+        context.taskBindingsByTaskId.get(String(taskId)) ??
+        context.backgroundTaskBindings.get(String(taskId))
+      )?.toolUseId
+    : undefined;
+}
+
+/** Inspect own data descriptors before logging or projecting extension fields.
+ * Accessor/inherited metadata is not received JSON and must never acquire
+ * lifecycle authority or execute a getter while diagnostics inspect it. */
+function ownClaudeTaskIdentity(
+  record: Record<string, unknown>,
+  key: "run_id" | "agent_id" | "parent_task_id",
+): { readonly valid: boolean; readonly value?: string } {
+  const descriptor = Object.getOwnPropertyDescriptor(record, key);
+  if (!descriptor) return { valid: !(key in record) };
+  if (!("value" in descriptor)) return { valid: false };
+  if (descriptor.value === undefined) return { valid: true };
+  const value = exactClaudeProviderIdentity(descriptor.value);
+  return { valid: value !== undefined && value === descriptor.value, ...(value ? { value } : {}) };
+}
+
+function hasCurrentClaudeTaskSession(context: ClaudeSessionContext, message: SDKMessage): boolean {
+  return (
+    !context.stopped &&
+    !context.authFailureSeen &&
+    context.resumeSessionId !== undefined &&
+    context.lastThreadStartedId === context.resumeSessionId &&
+    message.session_id === context.resumeSessionId
+  );
 }
 
 function claudeStreamBlockKey(parentToolUseId: string | undefined, blockIndex: number): string {
@@ -985,6 +1031,9 @@ function upsertClaudeTaskBinding(
   input: {
     readonly retiredToolUseKeys?: ReadonlyArray<string>;
     readonly incarnationRequiresToolUseId?: boolean;
+    readonly nativeRunId?: string | undefined;
+    readonly awaitingRunStart?: boolean | undefined;
+    readonly parentTaskId?: RuntimeTaskId | undefined;
     readonly taskId: RuntimeTaskId;
     readonly nativeTaskId?: string | undefined;
     readonly taskGeneration?: string | undefined;
@@ -1117,6 +1166,15 @@ function upsertClaudeTaskBinding(
     taskType === "agent" ||
     taskType === "subagent";
   const binding: ClaudeTaskBinding = {
+    ...(input.awaitingRunStart !== undefined || previous?.awaitingRunStart !== undefined
+      ? { awaitingRunStart: input.awaitingRunStart ?? previous?.awaitingRunStart }
+      : {}),
+    ...((input.nativeRunId ?? previous?.nativeRunId)
+      ? { nativeRunId: input.nativeRunId ?? previous?.nativeRunId }
+      : {}),
+    ...((input.parentTaskId ?? previous?.parentTaskId)
+      ? { parentTaskId: input.parentTaskId ?? previous?.parentTaskId }
+      : {}),
     ...((input.incarnationRequiresToolUseId ?? previous?.incarnationRequiresToolUseId)
       ? { incarnationRequiresToolUseId: true }
       : {}),
@@ -1153,9 +1211,12 @@ function upsertClaudeTaskBinding(
 
   context.taskBindingsByTaskId.delete(taskMapKey);
   context.taskBindingsByTaskId.set(taskMapKey, binding);
-  if (input.toolUseKey) {
-    context.taskBindingsByToolUseId.delete(input.toolUseKey);
-    context.taskBindingsByToolUseId.set(input.toolUseKey, binding);
+  const retainedToolUseKey = input.toolUseKey ?? previous?.toolUseKey;
+  if (retainedToolUseKey) {
+    // A membership-only update still replaces the exact tool alias. Otherwise
+    // bounded cache restoration could recover the old run/control receipt.
+    context.taskBindingsByToolUseId.delete(retainedToolUseKey);
+    context.taskBindingsByToolUseId.set(retainedToolUseKey, binding);
   }
   while (context.taskBindingsByToolUseId.size > CLAUDE_TASK_BINDING_LIMIT) {
     const oldest = context.taskBindingsByToolUseId.keys().next().value;
@@ -1201,6 +1262,11 @@ function restoreClaudeRetainedTaskBinding(
   const toolUseKey = retained.toolUseKey ?? canonicalClaudeToolUseBindingKey(retained.toolUseId);
   return upsertClaudeTaskBinding(context, {
     taskId: retained.taskId,
+    ...(retained.nativeRunId ? { nativeRunId: retained.nativeRunId } : {}),
+    ...(retained.awaitingRunStart !== undefined
+      ? { awaitingRunStart: retained.awaitingRunStart }
+      : {}),
+    ...(retained.parentTaskId ? { parentTaskId: retained.parentTaskId } : {}),
     ...(retained.taskType ? { taskType: retained.taskType } : {}),
     ...(retained.workflowName ? { workflowName: retained.workflowName } : {}),
     ...(retained.nativeTaskId ? { nativeTaskId: retained.nativeTaskId } : {}),
@@ -1236,6 +1302,9 @@ function bindClaudeTaskToToolUse(
   context: ClaudeSessionContext,
   input: {
     readonly taskId: string;
+    readonly nativeRunId?: string | undefined;
+    readonly awaitingRunStart?: boolean | undefined;
+    readonly parentTaskId?: RuntimeTaskId | undefined;
     readonly toolUseId?: string | undefined;
     readonly historyId?: string | undefined;
     readonly description?: string | undefined;
@@ -1262,6 +1331,9 @@ function bindClaudeTaskToToolUse(
   const toolUseKey = canonicalClaudeToolUseBindingKey(input.toolUseId);
   return upsertClaudeTaskBinding(context, {
     taskId,
+    ...(input.nativeRunId ? { nativeRunId: input.nativeRunId } : {}),
+    ...(input.awaitingRunStart !== undefined ? { awaitingRunStart: input.awaitingRunStart } : {}),
+    ...(input.parentTaskId ? { parentTaskId: input.parentTaskId } : {}),
     ...(toolUseKey ? { toolUseKey } : {}),
     ...(input.toolUseId !== undefined ? { toolUseId: input.toolUseId } : {}),
     ...(input.historyId !== undefined ? { historyId: input.historyId } : {}),
@@ -1303,6 +1375,10 @@ function findClaudeTaskBinding(
 
 interface ClaudeAuthoritativeTaskIdentity {
   readonly taskId: RuntimeTaskId;
+  readonly nativeRunId?: string;
+  readonly newerRun?: boolean;
+  readonly awaitingRunStart?: boolean;
+  readonly parentTaskId?: RuntimeTaskId;
   readonly toolUseKey?: string;
   readonly provisionalAlias?: ClaudeTaskBinding;
 }
@@ -1312,6 +1388,7 @@ function prepareClaudeAuthoritativeTaskIdentity(
   rawTaskId: unknown,
   rawToolUseId: unknown,
   allowNewIncarnation = false,
+  record: Record<string, unknown> = {},
 ): ClaudeAuthoritativeTaskIdentity | undefined {
   const taskId = canonicalClaudeTaskId(rawTaskId);
   if (!taskId) return undefined;
@@ -1320,7 +1397,52 @@ function prepareClaudeAuthoritativeTaskIdentity(
   const current =
     context.taskBindingsByTaskId.get(String(taskId)) ??
     context.backgroundTaskBindings.get(String(taskId));
-  if (!allowNewIncarnation && current?.incarnationRequiresToolUseId && !toolUseKey)
+  const run = ownClaudeTaskIdentity(record, "run_id");
+  const parent = ownClaudeTaskIdentity(record, "parent_task_id");
+  if (!run.valid || !parent.valid) return undefined;
+  // The public contract orders run ids lexicographically. Only an explicit
+  // start can advance an existing run; every other edge must match exactly.
+  // Once the producer supplies a run id, missing ids cannot borrow authority
+  // from a later incarnation. Legacy tasks with no run id retain their policy.
+  const newerRun =
+    !!run.value &&
+    !!current &&
+    (current.awaitingRunStart === true ||
+      (current.nativeRunId
+        ? run.value > current.nativeRunId
+        : current.taskGeneration !== undefined));
+  if (
+    current?.nativeRunId &&
+    (!run.value ||
+      run.value < current.nativeRunId ||
+      (run.value > current.nativeRunId && !allowNewIncarnation) ||
+      (allowNewIncarnation &&
+        run.value === current.nativeRunId &&
+        !current.awaitingRunStart &&
+        context.terminalTaskIds.has(String(taskId))))
+  )
+    return undefined;
+  const parentId = parent.value && canonicalClaudeTaskId(parent.value);
+  const knownParent =
+    parentId && parentId !== taskId
+      ? (context.taskBindingsByTaskId.get(String(parentId)) ??
+        context.backgroundTaskBindings.get(String(parentId)))
+      : undefined;
+  const parentTaskId = knownParent?.isSubagent ? knownParent.taskId : current?.parentTaskId;
+  // A resumed task keeps its original known parent. Unknown native parent ids
+  // are inert metadata, as the SDK explicitly requires; never guess a join.
+  if (current?.parentTaskId && knownParent && knownParent.taskId !== current.parentTaskId)
+    return undefined;
+  const extension = {
+    ...(run.value ? { nativeRunId: run.value } : {}),
+    ...(newerRun ? { newerRun: true } : {}),
+    // A legacy task's first run-aware edge may be the only evidence of a
+    // resumed incarnation when its start was missed. Keep that liveness data,
+    // but revoke the old receipt until an explicit exact-run start renews it.
+    ...(newerRun && !allowNewIncarnation ? { awaitingRunStart: true } : {}),
+    ...(parentTaskId ? { parentTaskId } : {}),
+  };
+  if (!allowNewIncarnation && current?.incarnationRequiresToolUseId && !toolUseKey && !run.value)
     return undefined;
   if (toolUseKey && current?.retiredToolUseKeys?.includes(toolUseKey)) return undefined;
   // A delayed frame from an earlier incarnation cannot rebind or finish the
@@ -1330,7 +1452,7 @@ function prepareClaudeAuthoritativeTaskIdentity(
     current?.toolUseKey &&
     toolUseKey &&
     current.toolUseKey !== toolUseKey &&
-    !(allowNewIncarnation && context.terminalTaskIds.has(String(taskId)))
+    !(allowNewIncarnation && (context.terminalTaskIds.has(String(taskId)) || newerRun))
   )
     return undefined;
   const correlatedBinding = toolUseKey
@@ -1339,6 +1461,7 @@ function prepareClaudeAuthoritativeTaskIdentity(
   const provisionalTaskId = correlatedBinding?.provisionalTaskId;
   if (!provisionalTaskId || provisionalTaskId === taskId) {
     return {
+      ...extension,
       taskId,
       ...(toolUseKey ? { toolUseKey } : {}),
     };
@@ -1359,12 +1482,14 @@ function prepareClaudeAuthoritativeTaskIdentity(
     provisionalAlias.provisionalToolUseKey !== toolUseKey
   ) {
     return {
+      ...extension,
       taskId,
       ...(toolUseKey ? { toolUseKey } : {}),
     };
   }
   context.taskBindingsByTaskId.delete(provisionalTaskKey);
   return {
+    ...extension,
     taskId,
     ...(toolUseKey ? { toolUseKey } : {}),
     provisionalAlias,
@@ -2479,6 +2604,7 @@ function isClaudeAuthFailureAssistantMessage(message: SDKMessage): boolean {
   if (message.type !== "assistant") {
     return false;
   }
+  if (!hasExactPrimaryClaudeParent(message)) return false;
   const record = message as Record<string, unknown>;
   if (record.error === "authentication_failed") {
     return true;
@@ -2502,6 +2628,8 @@ function isClaudeAuthFailureAssistantMessage(message: SDKMessage): boolean {
 
 /** Structured SDK category only; child errors and matching prose are inert. */
 function hasExactPrimaryClaudeParent(message: SDKMessage): boolean {
+  const agent = ownClaudeTaskIdentity(message as unknown as Record<string, unknown>, "agent_id");
+  if (!agent.valid || agent.value !== undefined) return false;
   const descriptor = Object.getOwnPropertyDescriptor(message, "parent_tool_use_id");
   return descriptor
     ? "value" in descriptor && (descriptor.value === null || descriptor.value === undefined)
@@ -4316,6 +4444,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         : undefined;
     const taskControl =
       binding?.taskGeneration &&
+      !binding.awaitingRunStart &&
       binding.nativeTaskId &&
       !binding.provisionalTaskIdentity &&
       binding.visibilityState.visibility === "visible" &&
@@ -5614,7 +5743,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     const { event } = message;
-    const parentToolUseId = claudeParentToolUseId(message);
+    const parentToolUseId = claudeParentToolUseId(message, context);
     const isNestedAgentStream = parentToolUseId !== undefined;
     if (!isNestedAgentStream) {
       acknowledgeKnownClaudePromptsStarted(context, message);
@@ -5973,7 +6102,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return;
     }
 
-    if (isClaudeNestedStreamHidden(context, claudeParentToolUseId(message))) {
+    const parentToolUseId = claudeParentToolUseId(message, context);
+    if (isClaudeNestedStreamHidden(context, parentToolUseId)) {
       return;
     }
 
@@ -6003,7 +6133,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       toolResults.length === 1 ? claudeAgentOutputHistoryIdentity(message) : undefined;
     for (const toolResult of toolResults) {
       const toolEntry = Array.from(context.inFlightTools.entries()).find(
-        ([, tool]) => tool.itemId === toolResult.toolUseId,
+        ([key, tool]) =>
+          tool.itemId === toolResult.toolUseId &&
+          (!ownClaudeTaskIdentity(message as unknown as Record<string, unknown>, "agent_id")
+            .value ||
+            (parentToolUseId !== undefined &&
+              key.startsWith(`child:${parentToolUseId.length}:${parentToolUseId}:`))),
       );
       if (!toolEntry) {
         continue;
@@ -6336,7 +6471,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return;
     }
 
-    const parentToolUseId = claudeParentToolUseId(message);
+    const parentToolUseId = claudeParentToolUseId(message, context);
     if (parentToolUseId === undefined) {
       if (
         message.error === undefined &&
@@ -6936,7 +7071,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // correlation before the first reply frame; that UUID is real liveness
         // evidence, unlike the approximate token count. Never apply child
         // thinking telemetry to the primary prompt queue.
-        if (claudeParentToolUseId(message) === undefined) {
+        if (claudeParentToolUseId(message, context) === undefined) {
           acknowledgeKnownClaudePromptsStarted(context, message);
         }
         return;
@@ -7011,11 +7146,36 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             continue;
           }
           const canonicalTaskKey = String(canonicalTaskId);
+          const current =
+            context.taskBindingsByTaskId.get(canonicalTaskKey) ??
+            context.backgroundTaskBindings.get(canonicalTaskKey);
+          const runId = ownClaudeTaskIdentity(taskRecord, "run_id").value;
+          if (current?.nativeRunId && (!runId || runId < current.nativeRunId)) {
+            // One late/ambiguous run makes replacement membership uncertain.
+            // Keep the previous whole level rather than retracting current work
+            // on the basis of a mixed stale snapshot. A fresh level can settle it.
+            return;
+          }
+          const parentId = canonicalClaudeTaskId(
+            ownClaudeTaskIdentity(taskRecord, "parent_task_id").value,
+          );
+          const parent =
+            parentId &&
+            (context.taskBindingsByTaskId.get(String(parentId)) ??
+              context.backgroundTaskBindings.get(String(parentId)));
+          if (current?.parentTaskId && parent?.isSubagent && parent.taskId !== current.parentTaskId)
+            return;
           // A terminal notification may legally precede the level snapshot
           // that removes this task. Do not let that stale snapshot resurrect a
           // completed row. A genuine task-id reuse begins with task_started,
           // which explicitly clears this bounded tombstone.
-          if (context.terminalTaskIds.has(canonicalTaskKey)) {
+          if (
+            context.terminalTaskIds.has(canonicalTaskKey) &&
+            !(
+              runId &&
+              (current?.awaitingRunStart || !current?.nativeRunId || runId > current.nativeRunId)
+            )
+          ) {
             continue;
           }
           stagedTasks.push({ taskRecord, taskId, canonicalTaskKey });
@@ -7097,8 +7257,30 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
                 ? "ambient"
                 : "visible";
           setClaudeTaskFallbackVisibility(context, taskId, visibility);
+          const parentId = canonicalClaudeTaskId(
+            ownClaudeTaskIdentity(taskRecord, "parent_task_id").value,
+          );
+          const parent =
+            parentId &&
+            (context.taskBindingsByTaskId.get(String(parentId)) ??
+              context.backgroundTaskBindings.get(String(parentId)));
           const binding = bindClaudeTaskToToolUse(context, {
             taskId,
+            // Levels may precede starts. Advance the opaque high-water mark
+            // immediately and revoke old controls, but never manufacture a new
+            // control receipt until the corresponding explicit start arrives.
+            ...(ownClaudeTaskIdentity(taskRecord, "run_id").value
+              ? {
+                  nativeRunId: ownClaudeTaskIdentity(taskRecord, "run_id").value,
+                  awaitingRunStart:
+                    previousBinding?.awaitingRunStart === true ||
+                    previousBinding?.nativeRunId !==
+                      ownClaudeTaskIdentity(taskRecord, "run_id").value,
+                }
+              : {}),
+            ...(parent?.isSubagent && parent.taskId !== canonicalTaskKey
+              ? { parentTaskId: parent.taskId }
+              : {}),
             description,
             ...(taskType ? { taskType } : {}),
             ...(trimmedStringValue(taskRecord.subagent_type)
@@ -7116,7 +7298,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           }
           if (
             previousBackgroundTaskIds.has(canonicalTaskKey) &&
-            previousVisibility === visibility
+            previousVisibility === visibility &&
+            previousBinding?.nativeRunId === binding.nativeRunId &&
+            previousBinding?.awaitingRunStart === binding.awaitingRunStart
           ) {
             // Level snapshots repeat every still-live task on each membership
             // change. Re-emitting all of them creates quadratic work-log churn
@@ -7429,6 +7613,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           message.task_id,
           message.tool_use_id,
           true,
+          taskStartedRecord,
         );
         if (!authoritativeIdentity) {
           yield* emitRuntimeWarning(context, "Claude task start was missing a task id.", message);
@@ -7438,12 +7623,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           message.ambient === true || message.skip_transcript === true ? "ambient" : "visible";
         const priorBinding = context.taskBindingsByTaskId.get(String(authoritativeIdentity.taskId));
         const retiredToolUseKeys = [...(priorBinding?.retiredToolUseKeys ?? [])];
-        const reusedNativeTaskId = context.terminalTaskIds.has(
-          String(authoritativeIdentity.taskId),
-        );
+        const reusedNativeTaskId =
+          authoritativeIdentity.newerRun === true ||
+          context.terminalTaskIds.has(String(authoritativeIdentity.taskId));
         if (reusedNativeTaskId) {
           context.workflowSnapshots.delete(String(authoritativeIdentity.taskId));
-          if (priorBinding?.toolUseKey) retiredToolUseKeys.push(priorBinding.toolUseKey);
+          if (
+            priorBinding?.toolUseKey &&
+            priorBinding.toolUseKey !== authoritativeIdentity.toolUseKey
+          )
+            retiredToolUseKeys.push(priorBinding.toolUseKey);
           if (retiredToolUseKeys.length > 128) {
             context.taskLivenessUncertain = true;
             yield* emitRuntimeWarning(
@@ -7456,6 +7645,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           // Native task ids may be reused. A new explicit start must not borrow
           // the previous worker's tool/history identities or control receipt.
           context.taskBindingsByTaskId.delete(String(authoritativeIdentity.taskId));
+          context.backgroundTaskBindings.delete(String(authoritativeIdentity.taskId));
           for (const [key, old] of context.taskBindingsByToolUseId) {
             if (old.taskId === authoritativeIdentity.taskId)
               context.taskBindingsByToolUseId.delete(key);
@@ -7464,6 +7654,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         setClaudeTaskFallbackVisibility(context, message.task_id, visibility);
         let startedBinding = bindClaudeTaskToToolUse(context, {
           taskId: message.task_id,
+          ...(authoritativeIdentity.nativeRunId
+            ? { nativeRunId: authoritativeIdentity.nativeRunId }
+            : {}),
+          ...(authoritativeIdentity.parentTaskId
+            ? { parentTaskId: authoritativeIdentity.parentTaskId }
+            : {}),
           ...(message.tool_use_id ? { toolUseId: message.tool_use_id } : {}),
           description,
           provisionalDescription: nativeDescription === undefined,
@@ -7488,6 +7684,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           return;
         }
         startedBinding = upsertClaudeTaskBinding(context, {
+          awaitingRunStart: false,
           retiredToolUseKeys,
           incarnationRequiresToolUseId:
             reusedNativeTaskId || priorBinding?.incarnationRequiresToolUseId === true,
@@ -7496,6 +7693,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           nativeTaskId: admittedClaudeControlIdentity(message.task_id),
           taskGeneration:
             startedBinding.taskGeneration &&
+            !reusedNativeTaskId &&
             !context.terminalTaskIds.has(String(startedBinding.taskId))
               ? startedBinding.taskGeneration
               : randomUUID(),
@@ -7568,6 +7766,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           context,
           message.task_id,
           message.tool_use_id,
+          false,
+          message as unknown as Record<string, unknown>,
         );
         if (!authoritativeIdentity) {
           yield* emitRuntimeWarning(
@@ -7579,6 +7779,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         }
         const progressBinding = bindClaudeTaskToToolUse(context, {
           taskId: message.task_id,
+          ...(authoritativeIdentity.nativeRunId
+            ? { nativeRunId: authoritativeIdentity.nativeRunId }
+            : {}),
+          ...(authoritativeIdentity.awaitingRunStart ? { awaitingRunStart: true } : {}),
           ...(message.tool_use_id ? { toolUseId: message.tool_use_id } : {}),
           description,
           provisionalDescription: nativeDescription === undefined,
@@ -7653,7 +7857,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           return;
         }
         const patchedToolUseId = patch.tool_use_id ?? record.tool_use_id;
-        if (!prepareClaudeAuthoritativeTaskIdentity(context, taskId, patchedToolUseId)) return;
+        const authoritativeIdentity = prepareClaudeAuthoritativeTaskIdentity(
+          context,
+          taskId,
+          patchedToolUseId,
+          false,
+          record,
+        );
+        if (!authoritativeIdentity) return;
 
         const skipTranscript = patch.skip_transcript === true || record.skip_transcript === true;
         const ambient = patch.ambient ?? record.ambient;
@@ -7685,6 +7896,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
         let updatedBinding = bindClaudeTaskToToolUse(context, {
           taskId,
+          ...(authoritativeIdentity.nativeRunId
+            ? { nativeRunId: authoritativeIdentity.nativeRunId }
+            : {}),
+          ...(authoritativeIdentity.awaitingRunStart ? { awaitingRunStart: true } : {}),
           ...(patchedDescription ? { description: patchedDescription } : {}),
           ...(trimmedStringValue(patch.subagent_type ?? record.subagent_type)
             ? { subagentType: trimmedStringValue(patch.subagent_type ?? record.subagent_type) }
@@ -7810,6 +8025,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           context,
           message.task_id,
           message.tool_use_id,
+          false,
+          taskNotificationRecord,
         );
         if (!authoritativeIdentity) {
           yield* emitRuntimeWarning(
@@ -7828,6 +8045,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         });
         let notificationBinding = bindClaudeTaskToToolUse(context, {
           taskId: message.task_id,
+          ...(authoritativeIdentity.nativeRunId
+            ? { nativeRunId: authoritativeIdentity.nativeRunId }
+            : {}),
+          ...(authoritativeIdentity.awaitingRunStart ? { awaitingRunStart: true } : {}),
           ...(message.tool_use_id ? { toolUseId: message.tool_use_id } : {}),
           // `summary` is the terminal result, not the task title. Only use it
           // as a label when Cafe missed every earlier lifecycle edge.
@@ -8173,6 +8394,134 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     context: ClaudeSessionContext,
     incomingMessage: SDKMessage,
   ) {
+    const identityFrame = incomingMessage as unknown as Record<string, unknown>;
+    const extensionRecords = [identityFrame];
+    if (
+      incomingMessage.type === "system" &&
+      incomingMessage.subtype === "background_tasks_changed"
+    ) {
+      const session = Object.getOwnPropertyDescriptor(identityFrame, "session_id");
+      if (
+        !session ||
+        !("value" in session) ||
+        session.value !== context.resumeSessionId ||
+        !hasCurrentClaudeTaskSession(context, incomingMessage) ||
+        sessions.get(context.session.threadId) !== context
+      )
+        return;
+      const tasksDescriptor = Object.getOwnPropertyDescriptor(identityFrame, "tasks");
+      if (
+        !tasksDescriptor ||
+        !("value" in tasksDescriptor) ||
+        !Array.isArray(tasksDescriptor.value)
+      )
+        return;
+      const tasks = tasksDescriptor.value;
+      // Native JSON arrays use the ordinary Array prototype and have no local
+      // method/constructor overrides. Reject those before slice or diagnostic
+      // projection could invoke species or a provider-authored method getter.
+      if (
+        Object.getPrototypeOf(tasks) !== Array.prototype ||
+        ["constructor", "map", "slice"].some((key) => Object.hasOwn(tasks, key))
+      )
+        return;
+      // Reject non-JSON row authority without evaluating indexed getters or
+      // inherited identities. The existing snapshot bound remains unchanged.
+      for (let index = 0; index < Math.min(tasks.length, CLAUDE_TASK_BINDING_LIMIT); index++) {
+        const entry = Object.getOwnPropertyDescriptor(tasks, String(index));
+        if (!entry || !("value" in entry) || !recordValue(entry.value)) return;
+        const task = Object.getOwnPropertyDescriptor(entry.value, "task_id");
+        if (!task || !("value" in task) || exactClaudeProviderIdentity(task.value) !== task.value)
+          return;
+        extensionRecords.push(entry.value as Record<string, unknown>);
+      }
+    }
+    let carriesIdentityExtension = false;
+    for (const record of extensionRecords) {
+      for (const key of ["run_id", "parent_task_id", "agent_id"] as const) {
+        const identity = ownClaudeTaskIdentity(record, key);
+        if (!identity.valid) return;
+        if (identity.value !== undefined) carriesIdentityExtension = true;
+      }
+    }
+    const taskDescriptor = Object.getOwnPropertyDescriptor(identityFrame, "task_id");
+    const taskId =
+      taskDescriptor && "value" in taskDescriptor
+        ? canonicalClaudeTaskId(taskDescriptor.value)
+        : undefined;
+    if (
+      taskId &&
+      (
+        context.taskBindingsByTaskId.get(String(taskId)) ??
+        context.backgroundTaskBindings.get(String(taskId))
+      )?.nativeRunId
+    )
+      carriesIdentityExtension = true;
+    if (carriesIdentityExtension) {
+      const sessionDescriptor = Object.getOwnPropertyDescriptor(identityFrame, "session_id");
+      if (
+        !sessionDescriptor ||
+        !("value" in sessionDescriptor) ||
+        sessionDescriptor.value !== context.resumeSessionId ||
+        !hasCurrentClaudeTaskSession(context, incomingMessage) ||
+        sessions.get(context.session.threadId) !== context
+      )
+        return;
+      if (
+        incomingMessage.type === "system" &&
+        [
+          "task_started",
+          "task_progress",
+          "task_updated",
+          "task_notification",
+          "background_tasks_changed",
+        ].includes(incomingMessage.subtype)
+      ) {
+        const parent = Object.getOwnPropertyDescriptor(identityFrame, "parent_tool_use_id");
+        if (
+          parent
+            ? !("value" in parent) || (parent.value !== null && parent.value !== undefined)
+            : "parent_tool_use_id" in identityFrame
+        )
+          return;
+      }
+      for (const record of extensionRecords) {
+        if (
+          !ownClaudeTaskIdentity(record, "run_id").value &&
+          !ownClaudeTaskIdentity(record, "parent_task_id").value
+        )
+          continue;
+        const task = Object.getOwnPropertyDescriptor(record, "task_id");
+        if (!task || !("value" in task) || exactClaudeProviderIdentity(task.value) !== task.value)
+          return;
+      }
+      const agent = ownClaudeTaskIdentity(identityFrame, "agent_id").value;
+      if (agent) {
+        const taskId = canonicalClaudeTaskId(agent);
+        const binding =
+          taskId &&
+          (context.taskBindingsByTaskId.get(String(taskId)) ??
+            context.backgroundTaskBindings.get(String(taskId)));
+        const parentDescriptor = Object.getOwnPropertyDescriptor(
+          identityFrame,
+          "parent_tool_use_id",
+        );
+        if (
+          !binding ||
+          !binding.isSubagent ||
+          !binding.toolUseId ||
+          binding.awaitingRunStart ||
+          context.terminalTaskIds.has(String(binding.taskId)) ||
+          (parentDescriptor &&
+            (!("value" in parentDescriptor) ||
+              (parentDescriptor.value !== null &&
+                parentDescriptor.value !== undefined &&
+                parentDescriptor.value !== binding.toolUseId))) ||
+          (!parentDescriptor && "parent_tool_use_id" in identityFrame)
+        )
+          return;
+      }
+    }
     // Redaction is deliberately before every logger, accounting mapper, raw
     // event and transcript projection. Even rejected/foreign/subagent reports
     // must not bypass privacy simply because they cannot update the metadata.
@@ -8197,9 +8546,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       }
     }
     if (stripped.hasReport) {
-      const primary =
-        message.type === "assistant" &&
-        (message.parent_tool_use_id === null || message.parent_tool_use_id === undefined);
+      const primary = message.type === "assistant" && hasExactPrimaryClaudeParent(message);
       const sameNativeSession =
         typeof message.session_id === "string" &&
         message.session_id.length > 0 &&
@@ -11153,6 +11500,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         input.providerInstanceId !== boundInstanceId ||
         input.runtimeId !== context.subagentRuntimeId ||
         !binding ||
+        binding.awaitingRunStart ||
         binding.turnId !== input.turnId ||
         binding.taskGeneration !== input.taskGeneration ||
         !binding.nativeTaskId ||

@@ -77,7 +77,8 @@ describe("resolveModelRate", () => {
     ["claude-opus-4-6", { input: 5, cachedInput: 0.5, cacheWrite: 6.25, output: 25 }],
     ["claude-opus-4-5", { input: 5, cachedInput: 0.5, cacheWrite: 6.25, output: 25 }],
     ["claude-sonnet-5", { input: 2, cachedInput: 0.2, cacheWrite: 2.5, output: 10 }],
-    ["claude-sonnet-5-5", { input: 2, cachedInput: 0.2, cacheWrite: 2.5, output: 10 }],
+    ["claude-sonnet-5-5", { input: 2, cachedInput: 0.1, cacheWrite: 2.5, output: 10 }],
+    ["claude-haiku-5-5", { input: 0.1, cachedInput: 0.01, cacheWrite: 0.125, output: 0.5 }],
     ["claude-haiku-4-5", { input: 1, cachedInput: 0.1, cacheWrite: 1.25, output: 5 }],
   ] as const)("uses the published standard rates for %s and preserves overrides", (model, rate) => {
     expect(resolveModelRate(model)).toEqual(rate);
@@ -93,12 +94,37 @@ describe("resolveModelRate", () => {
     expect(resolveModelRate("gpt-6-astra", { gpt: custom })).toEqual(custom);
   });
 
+  it("keeps the Sonnet 5.5 cache reduction separate from older Sonnet 5", () => {
+    expect(resolveModelRate("claude-sonnet-5-5-20261007")?.cachedInput).toBe(0.1);
+    expect(resolveModelRate("claude-sonnet-5-20260701")?.cachedInput).toBe(0.2);
+    expect(resolveModelRate("claude-sonnet-4-6")?.cachedInput).toBe(0.3);
+  });
+
   it("prices a model the bundled table has never heard of", () => {
     expect(resolveModelRate("acme-1", { "acme-1": RATE })).toEqual(RATE);
   });
 });
 
 describe("computeModelCost", () => {
+  it("does not infer Haiku 5.5 long-context billing from cumulative token totals", () => {
+    const standard = resolveModelRate("claude-haiku-5-5")!;
+    // These aggregate counters could represent many <=100K prompts. The
+    // ledger cannot recover their individual sizes, so crossing 100K in a
+    // rollup must not switch either input or output to the long-prompt rate.
+    const counts = {
+      inputTokens: 1_000_000,
+      cachedInputTokens: 600_000,
+      cacheWriteInputTokens: 300_000,
+      outputTokens: 100_000,
+    };
+    expect(computeModelCost(counts, standard)).toBeCloseTo(0.1035, 8);
+    expect(rollUpCost([{ model: "claude-haiku-5-5", ...counts }]).cost).toBeCloseTo(0.1035, 8);
+    const override: ModelRate = { input: 0.5, cachedInput: 0.05, cacheWrite: 0.625, output: 2.5 };
+    expect(
+      rollUpCost([{ model: "claude-haiku-5-5", ...counts }], { "claude-haiku-5-5": override }).cost,
+    ).toBeCloseTo(0.5175, 8);
+  });
+
   it("charges cache reads and writes at their own rates, not the input rate", () => {
     // 1M input of which 600k cached and 300k written, leaving 100k fresh.
     const cost = computeModelCost(

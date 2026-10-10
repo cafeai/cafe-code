@@ -5,6 +5,8 @@ import {
   ItemLifecyclePayload,
   ProviderRuntimeEvent,
   UsageAccountingSnapshot,
+  ProviderNativeRetryProgress,
+  isCodexNativeRetryWarningPayload,
 } from "./providerRuntime.ts";
 
 const decodeRuntimeEvent = Schema.decodeUnknownSync(ProviderRuntimeEvent);
@@ -70,6 +72,90 @@ describe("ItemLifecyclePayload source text", () => {
 });
 
 describe("ProviderRuntimeEvent", () => {
+  it("admits only inert content-free native retry bookkeeping without invoking accessors", () => {
+    const payload = {
+      message: "Provider reconnecting",
+      retrying: true,
+      detail: { willRetry: true },
+      nativeRetry: { observedCount: 12, timing: "unknown" },
+    };
+    expect(isCodexNativeRetryWarningPayload(payload)).toBe(true);
+    expect(
+      isCodexNativeRetryWarningPayload({
+        ...payload,
+        nativeRetry: { ...payload.nativeRetry, countLimited: true },
+      }),
+    ).toBe(true);
+    const { nativeRetry: _retry, ...legacy } = payload;
+    expect(isCodexNativeRetryWarningPayload(legacy)).toBe(true);
+    for (const malformed of [
+      { ...payload, retrying: false },
+      { ...payload, message: "Other warning" },
+      { ...payload, detail: { willRetry: true, private: "must not qualify" } },
+      { ...payload, nativeRetry: { observedCount: 12, timing: "guessed" } },
+      { ...payload, nativeRetry: { ...payload.nativeRetry, countLimited: false } },
+      { ...payload, nativeRetry: undefined },
+      { ...payload, private: "unknown" },
+      Object.create(payload),
+    ])
+      expect(isCodexNativeRetryWarningPayload(malformed)).toBe(false);
+    let reads = 0;
+    const accessor = Object.defineProperty({}, "message", {
+      get() {
+        reads += 1;
+        return payload.message;
+      },
+    });
+    expect(isCodexNativeRetryWarningPayload(accessor)).toBe(false);
+    const detailAccessor = {
+      ...payload,
+      detail: Object.defineProperty({}, "willRetry", {
+        get() {
+          reads += 1;
+          return true;
+        },
+      }),
+    };
+    expect(isCodexNativeRetryWarningPayload(detailAccessor)).toBe(false);
+    expect(reads).toBe(0);
+  });
+  it("keeps bounded native retry observations separate from scheduling authority", () => {
+    const decode = Schema.decodeUnknownSync(ProviderNativeRetryProgress);
+    expect(decode({ observedCount: 12, timing: "unknown" })).toEqual({
+      observedCount: 12,
+      timing: "unknown",
+    });
+    expect(decode({ observedCount: 1024, timing: "unknown", countLimited: true })).toEqual({
+      observedCount: 1024,
+      timing: "unknown",
+      countLimited: true,
+    });
+    for (const observedCount of [0, -1, 1.5, 1025, Number.MAX_SAFE_INTEGER, "12", null])
+      expect(() => decode({ observedCount, timing: "unknown" })).toThrow();
+    expect(() => decode({ observedCount: 12, timing: "scheduled" })).toThrow();
+    expect(() => decode({ observedCount: 12, timing: "unknown", countLimited: false })).toThrow();
+    const warning = {
+      type: "runtime.warning",
+      eventId: "retry-display",
+      provider: "codex",
+      providerInstanceId: "exact-account",
+      createdAt: "2026-10-10T11:01:00Z",
+      threadId: "thread-1",
+      turnId: "root",
+      payload: {
+        message: "Provider reconnecting",
+        detail: { willRetry: true },
+        nativeRetry: { observedCount: 12, timing: "unknown" },
+      },
+    };
+    expect(decodeRuntimeEventJson(encodeRuntimeEventJson(decodeRuntimeEvent(warning)))).toEqual(
+      warning,
+    );
+    // Old providers have neither count nor native deadline and stay valid.
+    expect(
+      decodeRuntimeEvent({ ...warning, payload: { message: "Provider reconnecting" } }).payload,
+    ).toEqual({ message: "Provider reconnecting" });
+  });
   it("round trips content-free failed-root evidence and rejects permissive availability flags", () => {
     const input = {
       type: "turn.completed",
