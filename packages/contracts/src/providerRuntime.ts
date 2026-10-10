@@ -505,13 +505,22 @@ const TurnStartedPayload = Schema.Struct({
 });
 export type TurnStartedPayload = typeof TurnStartedPayload.Type;
 
-const TurnCompletedPayload = Schema.Struct({
+// Content-free native failure evidence. These categories describe a terminal
+// Codex root, not a general permission to retry an arbitrary provider action.
+export const CodexTransientFailureCategory = Schema.Literals(["transport", "server", "rate-limit"]);
+export type CodexTransientFailureCategory = typeof CodexTransientFailureCategory.Type;
+
+export const TurnCompletedPayload = Schema.Struct({
   state: RuntimeTurnState,
   stopReason: Schema.optional(Schema.NullOr(TrimmedNonEmptyStringSchema)),
   usage: Schema.optional(Schema.Unknown),
   modelUsage: Schema.optional(UnknownRecordSchema),
   totalCostUsd: Schema.optional(Schema.Number),
   errorMessage: Schema.optional(TrimmedNonEmptyStringSchema),
+  codexTransientFailure: Schema.optional(CodexTransientFailureCategory),
+  // Only the native owner may emit this positive observation. Omission from
+  // older daemons or a closed/unknown context is never equivalent to true.
+  nativeContextAvailable: Schema.optional(Schema.Literal(true)),
 });
 export type TurnCompletedPayload = typeof TurnCompletedPayload.Type;
 

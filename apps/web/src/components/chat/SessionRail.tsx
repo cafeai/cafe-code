@@ -1,6 +1,6 @@
 import type { ServerProviderAccountRateLimits } from "@cafecode/contracts";
-import { PanelBottomIcon, PanelRightIcon } from "lucide-react";
-import { forwardRef, memo, type ReactNode } from "react";
+import { PanelBottomIcon, PanelRightIcon, SquareIcon } from "lucide-react";
+import { forwardRef, memo, useEffect, useState, type ReactNode } from "react";
 
 import type { ContextWindowSnapshot } from "~/lib/contextWindow";
 import { cn } from "~/lib/utils";
@@ -11,6 +11,7 @@ import { ScrollArea } from "../ui/scroll-area";
 import { ContextWindowDetails } from "./ContextWindowDetails";
 import { useProviderQuota, type ProviderQuotaContext } from "./useProviderQuota";
 import type { SubagentConcurrencyPresentation } from "../../subagentConcurrency";
+import { codexRecoveryLabel, type CodexRecoveryPresentation } from "../../codexRecovery";
 import { TaskProgressDetails } from "./TaskProgressDetails";
 import { ScheduledFollowups, type ScheduledFollowupsContext } from "./ScheduledFollowups";
 import { ProviderTasks, hasProviderTaskContent, type ProviderTasksContext } from "./ProviderTasks";
@@ -47,6 +48,65 @@ export function SessionPlacementButton(props: {
   );
 }
 
+/**
+ * The failed root and still-live children are deliberately separate facts. This
+ * compact notice is shared by the Tasks rail and undocked composer. Its clock
+ * renders only a received server deadline; reaching zero does not claim that a
+ * retry started. Stop is a separate explicit action, so typing/sending a new
+ * instruction remains available while the parent is terminal.
+ */
+export function CodexRecoveryNotice(props: {
+  readonly presentation: CodexRecoveryPresentation;
+  readonly onStop: () => void;
+  readonly disabled?: boolean | undefined;
+}) {
+  const [nowMs, setNowMs] = useState(Date.now);
+  const retryAtMs = props.presentation.retryAtMs;
+  useEffect(() => {
+    setNowMs(Date.now());
+    if (retryAtMs === null || retryAtMs <= Date.now()) return;
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+      setNowMs(now);
+      if (now >= retryAtMs) window.clearInterval(timer);
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, [retryAtMs]);
+  const label = codexRecoveryLabel(props.presentation, nowMs);
+  const count = props.presentation.activeAgentCount;
+
+  return (
+    <div
+      data-codex-recovery-notice="true"
+      className="flex min-w-0 items-center gap-2 rounded-lg border border-border-subtle bg-raised/60 px-3 py-2"
+    >
+      <p className="min-w-0 flex-1 text-xs leading-5 text-muted-foreground" role="status">
+        <span className="font-medium text-foreground">Root failed</span>
+        {label ? <span> · {label}</span> : null}
+        {count > 0 ? (
+          <span>
+            {" "}
+            · {count} {count === 1 ? "agent active" : "agents active"}
+          </span>
+        ) : null}
+      </p>
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        className="h-7 shrink-0 gap-1.5 px-2 text-muted-foreground hover:text-foreground"
+        disabled={props.disabled}
+        onClick={props.onStop}
+        aria-label="Stop recovery and running agents"
+        title="Stop pending recovery and all running agents in this chat"
+      >
+        <SquareIcon aria-hidden="true" className="size-3" />
+        Stop
+      </Button>
+    </div>
+  );
+}
+
 interface SessionRailProps {
   readonly plan: ComposerTaskProgressPlan | null | undefined;
   readonly subagents?: ReadonlyArray<WorkLogEntry>;
@@ -61,6 +121,9 @@ interface SessionRailProps {
   readonly onShowInComposer: () => void;
   readonly scheduledFollowups?: ScheduledFollowupsContext | undefined;
   readonly providerTasks?: ProviderTasksContext | undefined;
+  readonly codexRecovery?: CodexRecoveryPresentation | null | undefined;
+  readonly onStopCodexRecovery?: (() => void) | undefined;
+  readonly codexRecoveryStopDisabled?: boolean;
   readonly className?: string;
 }
 
@@ -110,6 +173,15 @@ export const SessionRail = memo(
             data-session-rail-tasks="true"
             data-task-list-scroll="true"
           >
+            {props.codexRecovery && props.onStopCodexRecovery ? (
+              <div className="mb-3">
+                <CodexRecoveryNotice
+                  presentation={props.codexRecovery}
+                  onStop={props.onStopCodexRecovery}
+                  disabled={props.codexRecoveryStopDisabled}
+                />
+              </div>
+            ) : null}
             {props.providerTasks ? <ProviderTasks context={props.providerTasks} /> : null}
             {hasPlan || hasSubagents ? (
               <TaskProgressDetails

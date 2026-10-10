@@ -4,7 +4,7 @@ import type {
   ProjectId,
   ThreadId,
 } from "@cafecode/contracts";
-import { OrchestrationCommand } from "@cafecode/contracts";
+import { OrchestrationCommand, ThreadTurnStartRequestedPayload } from "@cafecode/contracts";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
@@ -40,7 +40,10 @@ import {
   OrchestrationThreadHardDeleteError,
 } from "../Errors.ts";
 import { decideOrchestrationCommand } from "../decider.ts";
-import { makeRuntimeRecoveryBarrierReader } from "../providerRuntimeRecovery.ts";
+import {
+  codexTransientAcceptanceCommandId,
+  makeRuntimeRecoveryBarrierReader,
+} from "../providerRuntimeRecovery.ts";
 import {
   markScheduledFollowUpAdmitted,
   verifyScheduledFollowUpAdmission,
@@ -501,6 +504,62 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             });
           }
         }
+        let codexFailedRootVerified = false;
+        if (
+          envelope.command.type === "thread.session.set" &&
+          envelope.command.codexFailedRoot !== undefined
+        ) {
+          const command = envelope.command;
+          const failed = command.codexFailedRoot!;
+          // Verify immutable receipt authority inside the same serial boundary
+          // as the lifecycle CAS. Provider warning content, an ACK projection,
+          // or a caller-selected pending message never grants this association.
+          const rows = yield* sql<{ readonly payloadJson: string }>`
+            SELECT intent.payload_json AS "payloadJson" FROM orchestration_events AS intent
+            JOIN orchestration_events AS attempt ON attempt.command_id = ${`server:runtime-recovery-attempt:${failed.intentSequence}`}
+            JOIN orchestration_events AS receipt ON receipt.command_id = ${codexTransientAcceptanceCommandId(command.threadId, failed.turnId)}
+            WHERE intent.sequence = ${failed.intentSequence} AND intent.aggregate_kind = 'thread'
+              AND intent.stream_id = ${command.threadId} AND intent.actor_kind = 'server'
+              AND intent.event_type = 'thread.turn-start-requested'
+              AND attempt.aggregate_kind = 'thread' AND attempt.stream_id = ${command.threadId}
+              AND attempt.actor_kind = 'server' AND attempt.event_type = 'thread.activity-appended'
+              AND json_extract(attempt.payload_json, '$.activity.kind') = 'runtime.warning'
+              AND json_extract(attempt.payload_json, '$.activity.turnId') = ${failed.previousTurnId}
+              AND json_extract(attempt.payload_json, '$.activity.payload.recovery') = 'codex-transient-continuation-attempted'
+              AND json_extract(attempt.payload_json, '$.activity.payload.sourceEventSequence') = json_extract(intent.payload_json, '$.runtimeRecovery.sourceEventSequence')
+              AND json_type(attempt.payload_json, '$.activity.payload.attemptOwnerId') = 'text'
+              AND receipt.aggregate_kind = 'thread' AND receipt.stream_id = ${command.threadId}
+              AND receipt.actor_kind = 'server' AND receipt.event_type = 'thread.activity-appended'
+              AND json_extract(receipt.payload_json, '$.activity.kind') = 'runtime.warning'
+              AND json_extract(receipt.payload_json, '$.activity.turnId') = ${failed.turnId}
+              AND json_extract(receipt.payload_json, '$.activity.payload.recovery') = 'codex-transient-continuation-accepted'
+              AND json_extract(receipt.payload_json, '$.activity.payload.recoveryIntentSequence') = ${failed.intentSequence}
+              AND json_extract(receipt.payload_json, '$.activity.payload.providerInstanceId') = ${command.session.providerInstanceId ?? null}
+              AND json_extract(receipt.payload_json, '$.activity.payload.subagentRuntimeId') = ${command.session.subagentRuntimeId ?? null}
+              AND json_extract(receipt.payload_json, '$.activity.payload.attemptOwnerId') = json_extract(attempt.payload_json, '$.activity.payload.attemptOwnerId')
+              AND EXISTS (SELECT 1 FROM projection_turns WHERE thread_id = ${command.threadId}
+                AND pending_message_id = ${failed.messageId} AND (turn_id IS NULL OR turn_id = ${failed.turnId}))
+            LIMIT 1
+          `.pipe(Effect.mapError(toPersistenceSqlError("OrchestrationEngine.codexFailedRoot")));
+          const payload = rows[0] === undefined ? null : parseRecordJson(rows[0].payloadJson);
+          if (Schema.is(ThreadTurnStartRequestedPayload)(payload)) {
+            const recovery = payload.runtimeRecovery;
+            const native = recovery?.codexTransientFailure;
+            codexFailedRootVerified =
+              payload.threadId === command.threadId &&
+              payload.messageId === failed.messageId &&
+              payload.createdAt === failed.requestedAt &&
+              recovery?.turnId === failed.previousTurnId &&
+              native !== undefined &&
+              native?.providerInstanceId === command.session.providerInstanceId &&
+              native?.subagentRuntimeId === command.session.subagentRuntimeId &&
+              (yield* readRuntimeRecoveryBarrier({
+                ...recovery!,
+                threadId: command.threadId,
+                recoveryIntentSequence: failed.intentSequence,
+              }));
+          }
+        }
         let codexRootReplacementVerified = false;
         if (
           envelope.command.type === "thread.session.set" &&
@@ -541,6 +600,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             readModel,
             runtimeRecoveryBarrierVerified,
             codexRootReplacementVerified,
+            codexFailedRootVerified,
             scheduledFollowUpVerified,
           });
         // Ordinary commands retain their existing decision boundary. An

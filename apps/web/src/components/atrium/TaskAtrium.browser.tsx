@@ -154,7 +154,7 @@ const atriumHarness = vi.hoisted(() => {
               state: "running",
               requestedAt: new Date(now - 66_000).toISOString(),
               startedAt: new Date(now - 66_000).toISOString(),
-              completedAt: null,
+              completedAt: null as string | null,
               assistantMessageId: null,
             },
             branch: null,
@@ -1657,6 +1657,118 @@ describe("TaskAtriumBoard", () => {
       host.remove();
     }
   });
+
+  it.each(["dark", "light"] as const)(
+    "keeps a failed Codex root terminal while its exact surviving child remains inspectable in %s",
+    async (theme) => {
+      const restore = installExactSubagentActivities([
+        {
+          activityId: "surviving-codex-child",
+          turnId: "turn-1",
+          subagentId: "surviving-codex-child",
+          historyId: "surviving-codex-history",
+          label: "Surviving Codex worker",
+          status: "active",
+        },
+        {
+          activityId: "settled-codex-child",
+          turnId: "turn-1",
+          subagentId: "settled-codex-child",
+          historyId: "settled-codex-history",
+          label: "Settled Codex worker",
+          status: "completed",
+        },
+      ]);
+      const environment = atriumHarness.useStore.getState().environmentStateById["env-1"]!;
+      const summary = environment.sidebarThreadSummaryById["thread-1"]!;
+      const previousSession = summary.session;
+      const previousLatestTurn = summary.latestTurn;
+      const previousRead = atriumHarness.subagentDetailReads.getMockImplementation()!;
+      const failedAt = Date.now() - 13 * 60 * 60 * 1000;
+      const failedTurn = {
+        ...previousLatestTurn,
+        state: "error",
+        requestedAt: new Date(failedAt - 40_000).toISOString(),
+        startedAt: new Date(failedAt - 40_000).toISOString(),
+        completedAt: new Date(failedAt).toISOString(),
+      };
+      const survivingSession = {
+        ...previousSession,
+        provider: "codex",
+        orchestrationStatus: "ready",
+        activeTurnId: null,
+        lastError: "Synthetic failed root request.",
+      };
+      summary.session = survivingSession;
+      summary.latestTurn = failedTurn;
+      atriumHarness.subagentDetailReads.mockClear();
+      atriumHarness.subagentDetailReads.mockImplementation(async () => ({
+        provider: ProviderDriverKind.make("codex"),
+        messages: [{ key: "surviving-report", role: "assistant", text: "Surviving worker report" }],
+        gaps: [],
+        truncated: false,
+      }));
+      const { host, screen } = await renderInTheme(theme);
+      try {
+        const worker = page.getByRole("button", {
+          name: "View Surviving Codex worker activity",
+          exact: true,
+        });
+        await expect.element(worker).toBeVisible();
+        await expect.element(worker).toMatchTextContent("Working");
+        await expect
+          .element(workerView().getByRole("button", { name: "Active (1)", exact: true }))
+          .toBeVisible();
+        const card = taskCard(host, summary.title);
+        const parentStatus = card.querySelector('[data-cafe-atrium-card-status="error"]');
+        expect(parentStatus).not.toBeNull();
+        // The decorative shared indicator also contains a hidden accessible
+        // label. Assert the visible sibling label, not both text copies.
+        expect(parentStatus?.lastChild?.textContent).toBe("Failed");
+        // A late child update cannot restart the failed root's elapsed clock.
+        expect(card.textContent).toContain("40s");
+        await worker.click();
+        await expect
+          .element(page.getByText("Surviving worker report", { exact: true }))
+          .toBeVisible();
+        expect(atriumHarness.subagentDetailReads).toHaveBeenCalledExactlyOnceWith({
+          threadId: "thread-1",
+          turnId: "turn-1",
+          subagentId: "surviving-codex-child",
+          historyId: "surviving-codex-history",
+        });
+        const liveElapsed = document.querySelector('[data-subagent-detail-elapsed="true"]');
+        expect(liveElapsed).not.toBeNull();
+        expect(liveElapsed?.textContent).toMatch(/^Working for /);
+        await page.getByRole("button", { name: "Back to conversation", exact: true }).click();
+        await workerView().getByRole("button", { name: "History (1)", exact: true }).click();
+        await expect
+          .element(
+            page.getByRole("button", { name: "View Settled Codex worker activity", exact: true }),
+          )
+          .toMatchTextContent("Done");
+        expect(summary.latestTurn).toEqual(failedTurn);
+        expect(summary.session).toEqual(survivingSession);
+
+        // Replacement evidence cannot borrow the old generation to keep even
+        // a previously proven worker active or preserve this historical card.
+        summary.session = { ...survivingSession, subagentRuntimeId: "replacement-native-runtime" };
+        await expect.element(workerView()).not.toBeInTheDocument();
+        expect(
+          host.querySelector(`button[aria-label=${JSON.stringify(`Open ${summary.title}`)}]`),
+        ).toBeNull();
+        expect(summary.latestTurn).toEqual(failedTurn);
+      } finally {
+        summary.session = previousSession;
+        summary.latestTurn = previousLatestTurn;
+        restore();
+        atriumHarness.subagentDetailReads.mockImplementation(previousRead);
+        await screen.unmount();
+        host.remove();
+        document.documentElement.classList.remove("dark");
+      }
+    },
+  );
 
   it("shows only active workers by default and pages every retained history status without navigating", async () => {
     const statuses: readonly FixtureSubagentStatus[] = [

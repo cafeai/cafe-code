@@ -2247,7 +2247,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     const input = {
       ...parsed,
       attachments: parsed.attachments ?? [],
-      ...(parsed.codexReview !== undefined ? { allowActiveTurnSteerFallback: false } : {}),
+      ...(parsed.codexReview !== undefined || parsed.expectedFailedRoot !== undefined
+        ? { allowActiveTurnSteerFallback: false }
+        : {}),
     };
     if (input.deliveryPriority !== undefined && input.inputOrigin === "scheduled") {
       return yield* toValidationError(
@@ -2273,7 +2275,13 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       const routed = yield* resolveRoutableSession({
         threadId: input.threadId,
         operation: "ProviderService.sendTurn",
-        allowRecovery: true,
+        // A transient-failure continuation is authorized only for the same
+        // still-owned native context. Missing inventory cannot authorize a
+        // replacement app-server (which could strand surviving children).
+        allowRecovery: input.expectedFailedRoot === undefined,
+        ...(input.expectedFailedRoot !== undefined
+          ? { requiredProvider: ProviderDriverKind.make("codex") }
+          : {}),
       });
       metricProvider = routed.adapter.provider;
       if (input.deliveryPriority !== undefined && routed.adapter.provider !== "claudeAgent") {
@@ -2320,6 +2328,34 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             (session) => session.threadId === input.threadId,
           )
         : undefined;
+      if (input.expectedFailedRoot !== undefined) {
+        const expected = input.expectedFailedRoot;
+        const failure = activeSession?.codexRootTurnFailure;
+        // This check uses only fresh adapter inventory, never the durable
+        // binding. Native admission repeats the complete assertion under its
+        // lifecycle permit after this read: Stop and a newer root still win.
+        if (
+          !routed.isActive ||
+          activeSession?.provider !== "codex" ||
+          activeSession.providerInstanceId !== routed.instanceId ||
+          activeSession.subagentRuntimeId !== expected.subagentRuntimeId ||
+          activeSession.status === "closed" ||
+          activeSession.activeTurnId !== undefined ||
+          failure?.turnId !== expected.turnId ||
+          failure.category === undefined ||
+          failure.providerThreadId !== expected.providerThreadId ||
+          input.codexReview !== undefined ||
+          input.expectedCompletedRootTurnId !== undefined ||
+          input.attachments.length !== 0 ||
+          (input.modelSelection !== undefined &&
+            input.modelSelection.instanceId !== routed.instanceId)
+        ) {
+          return yield* toValidationError(
+            "ProviderService.sendTurn",
+            "The failed Codex root is no longer eligible for this continuation.",
+          );
+        }
+      }
       // Visible subagent work is not a steerable native root. This proof comes
       // from the live adapter inventory, never the durable binding. Pin it
       // through native admission so a later root cannot become the recipient.
@@ -2328,6 +2364,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         routed.adapter.capabilities.liveSteer === "supported" &&
         input.allowActiveTurnSteerFallback !== false &&
         input.expectedCompletedRootTurnId === undefined &&
+        input.expectedFailedRoot === undefined &&
         completedRoot === undefined
       ) {
         // Projection state can lag the provider runtime during long streams or
@@ -2401,28 +2438,100 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       const turn = yield* routed.adapter.sendTurn({
         ...input,
         ...(input.expectedCompletedRootTurnId === undefined &&
+        input.expectedFailedRoot === undefined &&
         input.allowActiveTurnSteerFallback !== false &&
         completedRoot !== undefined
           ? { expectedCompletedRootTurnId: completedRoot.turnId }
           : {}),
       });
-      yield* persistTurnSubagentHistoryRoot({
-        binding: routed.binding,
-        provider: routed.adapter.provider,
-        providerInstanceId: routed.instanceId,
-        threadId: input.threadId,
-        turnId: turn.turnId,
-        ...(turn.resumeCursor !== undefined ? { resumeCursor: turn.resumeCursor } : {}),
-      });
-      yield* upsertRunningTurnBinding({
-        threadId: input.threadId,
-        provider: routed.adapter.provider,
-        providerInstanceId: routed.instanceId,
-        turnId: turn.turnId,
-        ...(turn.resumeCursor !== undefined ? { resumeCursor: turn.resumeCursor } : {}),
-        ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
-        lastRuntimeEvent: "provider.sendTurn",
-      });
+      if (input.expectedFailedRoot === undefined || turn.threadId === input.threadId)
+        yield* persistTurnSubagentHistoryRoot({
+          binding: routed.binding,
+          provider: routed.adapter.provider,
+          providerInstanceId: routed.instanceId,
+          threadId: input.threadId,
+          turnId: turn.turnId,
+          ...(turn.resumeCursor !== undefined ? { resumeCursor: turn.resumeCursor } : {}),
+        });
+      if (input.expectedFailedRoot !== undefined) {
+        const expected = input.expectedFailedRoot;
+        // The exported send boundary already holds the thread lifecycle stripe;
+        // do not reacquire its non-reentrant permit here. Stop and canonical
+        // event persistence use that same stripe. A delayed ACK is acceptance,
+        // not proof that its root still runs: native completion may precede it.
+        // Read the exact retained adapter without recovery/probes, then recheck
+        // both registry identity and durable ownership before any lifecycle write.
+        yield* Effect.gen(function* () {
+          if (turn.threadId !== input.threadId) return;
+          const current = (yield* routed.adapter.listSessions()).find(
+            (session) => session.threadId === input.threadId,
+          );
+          if (
+            current?.provider !== "codex" ||
+            current.providerInstanceId !== routed.instanceId ||
+            current.subagentRuntimeId !== expected.subagentRuntimeId ||
+            (yield* registry.getByInstance(routed.instanceId)) !== routed.adapter
+          )
+            return;
+          const binding = Option.getOrUndefined(yield* directory.getBinding(input.threadId));
+          const payload = isRecord(binding?.runtimePayload) ? binding.runtimePayload : undefined;
+          if (
+            binding?.provider !== "codex" ||
+            binding.providerInstanceId !== routed.instanceId ||
+            binding.status === "stopped" ||
+            payload === undefined ||
+            payload.runtimeOwnerId !== runtimeOwner.runtimeOwnerId ||
+            payload.runtimeOwnerPid !== runtimeOwner.runtimeOwnerPid ||
+            payload.runtimeOwnerStartedAt !== runtimeOwner.runtimeOwnerStartedAt ||
+            (payload.subagentRuntimeId != null &&
+              payload.subagentRuntimeId !== expected.subagentRuntimeId) ||
+            (payload.activeTurnId != null &&
+              payload.activeTurnId !== expected.turnId &&
+              payload.activeTurnId !== turn.turnId)
+          )
+            return;
+          const failed = current.codexRootTurnFailure;
+          const ownsRunningRoot =
+            current.status === "running" &&
+            current.activeTurnId === turn.turnId &&
+            failed === undefined;
+          const ownsFailedRoot =
+            current.status === "ready" &&
+            current.activeTurnId === undefined &&
+            failed?.turnId === turn.turnId &&
+            failed.providerThreadId === expected.providerThreadId;
+          if (!ownsRunningRoot && !ownsFailedRoot) return;
+          // A permanent failure can also arrive before this transient recovery's
+          // ACK. It retains context/children but does not grant another retry;
+          // the fresh proof's optional category is never fabricated here.
+          yield* upsertSessionBinding(current, input.threadId, {
+            lastRuntimeEvent: ownsFailedRoot ? "turn.completed" : "provider.sendTurn",
+            lastRuntimeEventAt:
+              ownsFailedRoot && failed !== undefined ? failed.observedAt : yield* nowIso,
+            ...(turn.resumeCursor !== undefined ? { resumeCursor: turn.resumeCursor } : {}),
+          });
+        }).pipe(
+          Effect.catchCause((cause) =>
+            Cause.hasInterruptsOnly(cause)
+              ? Effect.failCause(cause)
+              : // This supplemental read/write follows a positive ACK. Never turn its
+                // uncertainty into a rejected send that might invite duplicate work,
+                // and never log provider-controlled inventory text or private cursors.
+                Effect.logWarning("provider.failed-root-ack-binding-reconciliation-inconclusive"),
+          ),
+        );
+      } else {
+        // Ordinary sends retain their established ACK persistence semantics.
+        yield* upsertRunningTurnBinding({
+          threadId: input.threadId,
+          provider: routed.adapter.provider,
+          providerInstanceId: routed.instanceId,
+          turnId: turn.turnId,
+          ...(turn.resumeCursor !== undefined ? { resumeCursor: turn.resumeCursor } : {}),
+          ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
+          lastRuntimeEvent: "provider.sendTurn",
+        });
+      }
       // This service-owned discriminator is additive daemon metadata, not a
       // native provider request setting or independent execution confirmation.
       return { ...turn, deliveryKind: "start" as const };

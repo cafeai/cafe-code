@@ -190,7 +190,16 @@ describe("per-chat subagent concurrency editor", () => {
       .element(page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }))
       .toHaveValue(null);
     const dialog = page.getByRole("dialog").element();
-    await vi.waitFor(() => expect(dialog.hasAttribute("data-starting-style")).toBe(false));
+    // Removing the starting attribute begins the mobile dialog's transition;
+    // it does not settle the small tooltip trigger. A hover while it still
+    // moves can leave that trigger and cancel Base UI's rest timer. Wait for
+    // the actual transition, retaining real hover and the exact help assertions.
+    await vi.waitFor(() => {
+      expect(dialog.hasAttribute("data-starting-style")).toBe(false);
+      expect(dialog.getAnimations().every((animation) => animation.playState === "finished")).toBe(
+        true,
+      );
+    });
     await page.getByRole("button", { name: "About subagent limits" }).hover();
     await expect.element(page.getByText("Source: Account default.", { exact: true })).toBeVisible();
     await expect

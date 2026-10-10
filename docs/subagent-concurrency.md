@@ -144,6 +144,15 @@ inspection. A fresh native observation can confirm a worker again. Reconnecting
 to the same surviving daemon preserves its confirmed workers; a new native
 runtime cannot inherit the previous runtime's Working claims. See
 [runtime-bound observation](decisions/subagent-runtime-observation.md).
+An independently failed Codex root may have a freshly verified surviving native
+context. Its children then remain active; the root still shows failed, not
+completed or stopped. A compact notice distinguishes live agents from the root
+outcome and exposes Stop during recovery. Terminal-root Stop closes that owned
+session, including children; starting an intentional new turn supersedes pending
+automatic recovery. Only definitive transient failures retry indefinitely with
+capped jittered backoff, and no ambiguous submission is resent. Atrium failure
+age/dismissal cannot hide confirmed active children. See
+[persistent recovery](decisions/codex-persistent-transient-recovery.md).
 Closed, completed, failed, and stopped workers leave those active rosters.
 Atrium cards start on **Active (N)**, showing confirmed active/waiting workers.
 Choose **History (N)** to inspect completed, failed, stopped, or unverified workers.

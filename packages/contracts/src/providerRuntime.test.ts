@@ -70,6 +70,34 @@ describe("ItemLifecyclePayload source text", () => {
 });
 
 describe("ProviderRuntimeEvent", () => {
+  it("round trips content-free failed-root evidence and rejects permissive availability flags", () => {
+    const input = {
+      type: "turn.completed",
+      eventId: "failed-root-evidence",
+      provider: "codex",
+      providerInstanceId: "exact-account",
+      createdAt: "2026-10-10T11:01:00Z",
+      threadId: "thread-1",
+      turnId: "failed-root",
+      payload: { state: "failed" },
+    };
+    expect(decodeRuntimeEvent(input).payload).toEqual({ state: "failed" });
+    for (const category of ["server", "transport", "rate-limit"]) {
+      const value = {
+        ...input,
+        payload: { state: "failed", codexTransientFailure: category, nativeContextAvailable: true },
+      };
+      const decoded = decodeRuntimeEvent(value);
+      expect(decodeRuntimeEventJson(encodeRuntimeEventJson(decoded))).toEqual(value);
+    }
+    for (const payload of [
+      { state: "failed", codexTransientFailure: "permanent" },
+      { state: "failed", nativeContextAvailable: false },
+      { state: "failed", nativeContextAvailable: "true" },
+      { state: "failed", nativeContextAvailable: 1 },
+    ])
+      expect(() => decodeRuntimeEvent({ ...input, payload })).toThrow();
+  });
   it.each(["codex", "claudeAgent", "grok", "opencode", "ollama"])(
     "preserves lifecycle source detail for %s through runtime event JSON round trips",
     (provider) => {

@@ -148,6 +148,29 @@ describe("ProviderSessionStartInput", () => {
 });
 
 describe("ProviderSendTurnInput", () => {
+  it("binds failed-root continuation to all three private owner fields", () => {
+    const proof = {
+      turnId: "failed-root",
+      providerThreadId: "native-thread",
+      subagentRuntimeId: "79a58c30-cd43-4927-ae4a-d340ba31b613",
+    };
+    expect(
+      decodeProviderSendTurnInput({ threadId: "thread-1", expectedFailedRoot: proof })
+        .expectedFailedRoot,
+    ).toEqual(proof);
+    expect(
+      decodeProviderSendTurnInput({ threadId: "thread-1" }).expectedFailedRoot,
+    ).toBeUndefined();
+    for (const malformed of [
+      { ...proof, turnId: "" },
+      { ...proof, providerThreadId: "" },
+      { ...proof, subagentRuntimeId: "not-a-runtime" },
+      { turnId: proof.turnId, providerThreadId: proof.providerThreadId },
+    ])
+      expect(() =>
+        decodeProviderSendTurnInput({ threadId: "thread-1", expectedFailedRoot: malformed }),
+      ).toThrow();
+  });
   it("accepts codex modelSelection", () => {
     const parsed = decodeProviderSendTurnInput({
       threadId: "thread-1",
@@ -201,6 +224,38 @@ describe("ProviderSendTurnInput", () => {
 });
 
 describe("providerInstanceId routing key (slice-2 invariant)", () => {
+  it("keeps failed-root availability separate from optional transient retry eligibility", () => {
+    const session = {
+      provider: "codex",
+      providerInstanceId: "exact-account",
+      status: "ready",
+      runtimeMode: "full-access",
+      threadId: "thread-1",
+      createdAt: "2026-10-10T11:00:00Z",
+      updatedAt: "2026-10-10T11:01:00Z",
+    };
+    const proof = {
+      turnId: "failed-root",
+      providerThreadId: "native-thread",
+      observedAt: session.updatedAt,
+    };
+    expect(
+      decodeProviderSession({ ...session, codexRootTurnFailure: proof }).codexRootTurnFailure,
+    ).toEqual(proof);
+    expect(
+      decodeProviderSession({ ...session, codexRootTurnFailure: { ...proof, category: "server" } })
+        .codexRootTurnFailure?.category,
+    ).toBe("server");
+    expect(decodeProviderSession(session).codexRootTurnFailure).toBeUndefined();
+    for (const malformed of [
+      { ...proof, category: "permanent" },
+      { ...proof, providerThreadId: "" },
+      { ...proof, observedAt: 1 },
+    ])
+      expect(() =>
+        decodeProviderSession({ ...session, codexRootTurnFailure: malformed }),
+      ).toThrow();
+  });
   it("decodes optional native-root completion proof without requiring it from older daemons", () => {
     const session = {
       provider: "codex",

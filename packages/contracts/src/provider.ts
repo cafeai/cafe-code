@@ -34,6 +34,7 @@ import {
 } from "./providerTaskControls.ts";
 import { ProviderCommandCatalog } from "./providerCommands.ts";
 import { ProviderSessionQuotaReport } from "./providerQuota.ts";
+import { CodexTransientFailureCategory } from "./providerRuntime.ts";
 
 const ProviderSessionStatus = Schema.Literals([
   "connecting",
@@ -87,6 +88,16 @@ export const ProviderSession = Schema.Struct({
       turnId: TurnId,
       providerThreadId: TrimmedNonEmptyString,
       observedAt: IsoDateTime,
+    }),
+  ),
+  // Fresh owner-only evidence for an exact failed root in a still-open native
+  // context. Never persist this as an authorization or infer it from lastError.
+  codexRootTurnFailure: Schema.optional(
+    Schema.Struct({
+      turnId: TurnId,
+      providerThreadId: TrimmedNonEmptyString,
+      observedAt: IsoDateTime,
+      category: Schema.optional(CodexTransientFailureCategory),
     }),
   ),
   createdAt: IsoDateTime,
@@ -218,6 +229,15 @@ export const ProviderSendTurnInput = Schema.Struct({
   // root while its children are still visible. A newer root must reject this
   // request, never silently receive the saved input as a steer.
   expectedCompletedRootTurnId: Schema.optional(TurnId),
+  // Server-only continuation admission. All three coordinates are required;
+  // another process resuming the same transcript cannot inherit this proof.
+  expectedFailedRoot: Schema.optional(
+    Schema.Struct({
+      turnId: TurnId,
+      providerThreadId: TrimmedNonEmptyString,
+      subagentRuntimeId: SubagentRuntimeId,
+    }),
+  ),
   input: Schema.optional(
     TrimmedNonEmptyString.check(Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_INPUT_CHARS)),
   ),
@@ -326,6 +346,9 @@ const ProviderEventKind = Schema.Literals(["session", "notification", "request",
 export const ProviderEvent = Schema.Struct({
   id: EventId,
   subagentRuntimeId: Schema.optional(SubagentRuntimeId),
+  // Reserved owner-authored metadata, outside the untrusted native payload.
+  // Used only on an exact terminal root publication after fresh local checks.
+  nativeContextAvailable: Schema.optional(Schema.Literal(true)),
   kind: ProviderEventKind,
   provider: ProviderDriverKind,
   // See ProviderSession for the migration story.

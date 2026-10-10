@@ -27,6 +27,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderItemId,
+  SubagentRuntimeId,
   type ProviderSession,
   type ProviderUserInputAnswers,
   ThreadId,
@@ -61,6 +62,9 @@ import {
   acknowledgeCodexReasoningEffortRequest,
   acceptsCodexChildNotification,
   admitCodexTurnStartLifecycleBoundary,
+  assertCodexFailedRootContinuationBoundary,
+  commitCodexRootErrorLifecycleBoundary,
+  readCodexRootTurnFailure,
   admitCodexPendingSteerProcessing,
   admitCodexReasoningEffortRequest,
   buildCodexAppServerArgs,
@@ -3189,6 +3193,16 @@ describe("Codex protocol diagnostic redaction", () => {
 });
 
 describe("Codex terminal session state", () => {
+  it("retains failed-turn evidence while the verified owning context stays ready", () => {
+    assert.deepStrictEqual(
+      codexTerminalSessionPatch({
+        turnStatus: "failed",
+        errorMessage: "current turn failed",
+        nativeContextAvailable: true,
+      }),
+      { status: "ready", activeTurnId: undefined, lastError: "current turn failed" },
+    );
+  });
   it("clears a previous runtime error after successful completion", () => {
     assert.deepStrictEqual(codexTerminalSessionPatch({ turnStatus: "completed" }), {
       status: "ready",
@@ -3210,6 +3224,340 @@ describe("Codex terminal session state", () => {
       },
     );
   });
+});
+
+describe("Codex failed-root continuation authority", () => {
+  const failedTurnId = TurnId.make("failed-native-root");
+  const runtimeId = SubagentRuntimeId.make("79a58c30-cd43-4927-ae4a-d340ba31b613");
+  const session: ProviderSession = {
+    provider: ProviderDriverKind.make("codex"),
+    providerInstanceId: ProviderInstanceId.make("exact-account"),
+    status: "ready",
+    runtimeMode: "full-access",
+    threadId: ThreadId.make("cafe-thread"),
+    resumeCursor: { threadId: "native-thread" },
+    subagentRuntimeId: runtimeId,
+    lastError: "Native request failed",
+    createdAt: "2026-10-10T11:00:00.000Z",
+    updatedAt: "2026-10-10T11:01:00.000Z",
+  };
+  const completion: CodexAggregateRootCompletion = {
+    turnId: failedTurnId,
+    providerThreadId: "native-thread",
+    state: "failed",
+    observedAt: "2026-10-10T11:01:00.000Z",
+    codexTransientFailure: "server",
+  };
+  const expectedFailedRoot = {
+    turnId: failedTurnId,
+    providerThreadId: "native-thread",
+    subagentRuntimeId: runtimeId,
+  };
+  const makeBoundary = () =>
+    Effect.gen(function* () {
+      return {
+        semaphore: yield* Semaphore.make(1),
+        completionsRef: yield* Ref.make(new Map([[String(failedTurnId), completion]])),
+        latestRootTurnIdRef: yield* Ref.make<string | undefined>(String(failedTurnId)),
+        rootLifecycleEpochRef: yield* Ref.make(Symbol()),
+        nativeTurnStartPendingRef: yield* Ref.make(false),
+        nativeTurnStartRequestRef: yield* Ref.make<symbol | undefined>(undefined),
+        manualCompactionPendingRef: yield* Ref.make(false),
+        closedRef: yield* Ref.make(false),
+        sessionRef: yield* Ref.make(session),
+        nativeContextAvailable: Effect.succeed(true),
+      };
+    });
+
+  it("requires fresh exact newest transient-root and native-owner evidence", () => {
+    const input = {
+      session,
+      completions: new Map([[String(failedTurnId), completion]]),
+      latestRootTurnId: String(failedTurnId),
+      nativeContextAvailable: true,
+      nativeTurnStartPending: false,
+      manualCompactionPending: false,
+      closed: false,
+    };
+    assert.deepEqual(readCodexRootTurnFailure(input), {
+      turnId: failedTurnId,
+      providerThreadId: "native-thread",
+      observedAt: completion.observedAt,
+      category: "server",
+    });
+    for (const changed of [
+      { closed: true },
+      { nativeContextAvailable: false },
+      { nativeTurnStartPending: true },
+      { manualCompactionPending: true },
+      { latestRootTurnId: "newer-root" },
+      { latestRootTurnId: undefined },
+      { session: { ...session, status: "error" as const } },
+      { session: { ...session, activeTurnId: TurnId.make("newer-root") } },
+      { session: { ...session, resumeCursor: { threadId: "different-thread" } } },
+      { session: { ...session, subagentRuntimeId: undefined } },
+      {
+        completions: new Map([
+          [String(failedTurnId), { ...completion, state: "completed" as const }],
+        ]),
+      },
+    ])
+      assert.equal(readCodexRootTurnFailure({ ...input, ...changed }), undefined);
+    assert.deepEqual(
+      readCodexRootTurnFailure({
+        ...input,
+        completions: new Map([
+          [String(failedTurnId), { ...completion, codexTransientFailure: undefined }],
+        ]),
+      }),
+      {
+        turnId: failedTurnId,
+        providerThreadId: "native-thread",
+        observedAt: completion.observedAt,
+      },
+    );
+  });
+
+  effectIt.effect(
+    "reserves and checks the same owner without changing the failed root or children",
+    () =>
+      Effect.gen(function* () {
+        const boundary = yield* makeBoundary();
+        const before = yield* Ref.get(boundary.sessionRef);
+        const admission = yield* admitCodexTurnStartLifecycleBoundary({
+          ...boundary,
+          expectedFailedRoot,
+          allowActiveTurnSteerFallback: false,
+        });
+        yield* assertCodexFailedRootContinuationBoundary({
+          ...boundary,
+          ...admission,
+          expectedFailedRoot,
+        });
+        assert.deepEqual(yield* Ref.get(boundary.sessionRef), before);
+        assert.deepEqual(
+          yield* Ref.get(boundary.completionsRef),
+          new Map([[String(failedTurnId), completion]]),
+        );
+        assert.equal(yield* Ref.get(boundary.nativeTurnStartPendingRef), true);
+        assert.equal(yield* Ref.get(boundary.nativeTurnStartRequestRef), admission.requestToken);
+      }),
+  );
+
+  effectIt.effect(
+    "refuses old generation, unknown, closed and permanent roots before reservation",
+    () =>
+      Effect.gen(function* () {
+        for (const scenario of [
+          "runtime",
+          "thread",
+          "unknown",
+          "closed",
+          "permanent",
+          "active",
+          "missing-context",
+        ] as const) {
+          const boundary = yield* makeBoundary();
+          if (scenario === "runtime")
+            yield* Ref.update(boundary.sessionRef, (value) => ({
+              ...value,
+              subagentRuntimeId: SubagentRuntimeId.make("acf72c20-f40c-4b9e-acef-e7034279c0dd"),
+            }));
+          if (scenario === "thread")
+            yield* Ref.update(boundary.sessionRef, (value) => ({
+              ...value,
+              resumeCursor: { threadId: "changed-native" },
+            }));
+          if (scenario === "unknown") yield* Ref.set(boundary.latestRootTurnIdRef, undefined);
+          if (scenario === "closed") yield* Ref.set(boundary.closedRef, true);
+          if (scenario === "permanent")
+            yield* Ref.set(
+              boundary.completionsRef,
+              new Map([
+                [String(failedTurnId), { ...completion, codexTransientFailure: undefined }],
+              ]),
+            );
+          if (scenario === "active")
+            yield* Ref.update(boundary.sessionRef, (value) => ({
+              ...value,
+              status: "running" as const,
+              activeTurnId: TurnId.make("new-root"),
+            }));
+          const result = yield* admitCodexTurnStartLifecycleBoundary({
+            ...boundary,
+            expectedFailedRoot,
+            nativeContextAvailable: Effect.succeed(scenario !== "missing-context"),
+          }).pipe(Effect.exit);
+          assert.equal(result._tag, "Failure", scenario);
+          assert.equal(yield* Ref.get(boundary.nativeTurnStartPendingRef), false);
+        }
+      }),
+  );
+
+  effectIt.effect(
+    "Stop, fresh-root and owner changes after preparation suppress all continuation I/O",
+    () =>
+      Effect.gen(function* () {
+        for (const scenario of [
+          "stop",
+          "epoch",
+          "root",
+          "runtime",
+          "request",
+          "compaction",
+          "context",
+        ] as const) {
+          const boundary = yield* makeBoundary();
+          const admission = yield* admitCodexTurnStartLifecycleBoundary({
+            ...boundary,
+            expectedFailedRoot,
+          });
+          if (scenario === "stop") yield* Ref.set(boundary.closedRef, true);
+          if (scenario === "epoch") yield* Ref.set(boundary.rootLifecycleEpochRef, Symbol());
+          if (scenario === "root") yield* Ref.set(boundary.latestRootTurnIdRef, "another-root");
+          if (scenario === "runtime")
+            yield* Ref.update(boundary.sessionRef, (value) => ({
+              ...value,
+              subagentRuntimeId: SubagentRuntimeId.make("acf72c20-f40c-4b9e-acef-e7034279c0dd"),
+            }));
+          if (scenario === "request") yield* Ref.set(boundary.nativeTurnStartRequestRef, Symbol());
+          if (scenario === "compaction") yield* Ref.set(boundary.manualCompactionPendingRef, true);
+          let nativeRequests = 0;
+          const result = yield* assertCodexFailedRootContinuationBoundary({
+            ...boundary,
+            ...admission,
+            expectedFailedRoot,
+            nativeContextAvailable: Effect.succeed(scenario !== "context"),
+          }).pipe(
+            Effect.andThen(
+              Effect.sync(() => {
+                nativeRequests += 1;
+              }),
+            ),
+            Effect.exit,
+          );
+          assert.equal(result._tag, "Failure", scenario);
+          assert.equal(nativeRequests, 0, scenario);
+        }
+      }),
+  );
+
+  effectIt.effect(
+    "late failed-root errors cannot poison a new live root or revive terminal evidence",
+    () =>
+      Effect.gen(function* () {
+        const boundary = yield* makeBoundary();
+        const errorInput = {
+          ...boundary,
+          providerThreadId: "native-thread",
+          turnId: failedTurnId,
+          willRetry: false,
+          errorMessage: "late old error",
+        };
+        assert.equal(yield* commitCodexRootErrorLifecycleBoundary(errorInput), false);
+        assert.deepEqual(yield* Ref.get(boundary.sessionRef), session);
+        const newTurnId = TurnId.make("new-live-root");
+        yield* Ref.set(boundary.latestRootTurnIdRef, String(newTurnId));
+        yield* Ref.update(boundary.sessionRef, (value) => ({
+          ...value,
+          status: "running" as const,
+          activeTurnId: newTurnId,
+          lastError: undefined,
+        }));
+        assert.equal(yield* commitCodexRootErrorLifecycleBoundary(errorInput), false);
+        assert.equal((yield* Ref.get(boundary.sessionRef)).lastError, undefined);
+        assert.equal(
+          yield* commitCodexRootErrorLifecycleBoundary({
+            ...errorInput,
+            turnId: newTurnId,
+            willRetry: true,
+            errorMessage: "current transport retry",
+          }),
+          true,
+        );
+        assert.equal((yield* Ref.get(boundary.sessionRef)).status, "running");
+        assert.equal((yield* Ref.get(boundary.sessionRef)).lastError, "current transport retry");
+      }),
+  );
+
+  effectIt.effect(
+    "terminal-before-ACK binds the new failed root without resurrection, while Stop still progresses",
+    () =>
+      Effect.gen(function* () {
+        for (const stop of [false, true]) {
+          const boundary = yield* makeBoundary();
+          const admission = yield* admitCodexTurnStartLifecycleBoundary({
+            ...boundary,
+            expectedFailedRoot,
+          });
+          yield* assertCodexFailedRootContinuationBoundary({
+            ...boundary,
+            ...admission,
+            expectedFailedRoot,
+          });
+          const ackGate = yield* Deferred.make<void>();
+          const newTurnId = TurnId.make("continued-root-failed-before-ack");
+          const ackFiber = yield* Deferred.await(ackGate).pipe(
+            Effect.andThen(
+              acknowledgeCodexTurnStartLifecycleBoundary({
+                ...boundary,
+                ...admission,
+                latestHistoryRootTurnRef: boundary.latestRootTurnIdRef,
+                turnId: newTurnId,
+                acknowledgedAt: "2026-10-10T11:02:00.000Z",
+              }),
+            ),
+            Effect.forkChild,
+          );
+          // The pending response wait holds no lifecycle permit. A terminal
+          // callback and explicit Stop both enter it before the ACK is released.
+          yield* boundary.semaphore.withPermits(1)(
+            Effect.gen(function* () {
+              yield* Ref.update(boundary.completionsRef, (entries) =>
+                new Map(entries).set(String(newTurnId), {
+                  ...completion,
+                  turnId: newTurnId,
+                  errorMessage: "new request failed",
+                }),
+              );
+              yield* Ref.set(boundary.rootLifecycleEpochRef, Symbol());
+              if (stop) {
+                yield* Ref.set(boundary.closedRef, true);
+                yield* Ref.update(boundary.sessionRef, (value) => ({
+                  ...value,
+                  status: "closed" as const,
+                }));
+              }
+            }),
+          );
+          yield* Deferred.succeed(ackGate, undefined);
+          assert.equal(yield* Fiber.join(ackFiber), false);
+          const after = yield* Ref.get(boundary.sessionRef);
+          assert.equal(after.activeTurnId, undefined);
+          if (stop) {
+            assert.equal(after.status, "closed");
+            assert.equal(yield* Ref.get(boundary.latestRootTurnIdRef), String(failedTurnId));
+          } else {
+            assert.equal(after.status, "ready");
+            assert.equal(after.lastError, "new request failed");
+            assert.equal(yield* Ref.get(boundary.latestRootTurnIdRef), String(newTurnId));
+            assert.equal(yield* Ref.get(boundary.nativeTurnStartPendingRef), false);
+            assert.equal(
+              readCodexRootTurnFailure({
+                session: after,
+                completions: yield* Ref.get(boundary.completionsRef),
+                latestRootTurnId: yield* Ref.get(boundary.latestRootTurnIdRef),
+                nativeContextAvailable: true,
+                nativeTurnStartPending: false,
+                manualCompactionPending: false,
+                closed: false,
+              })?.turnId,
+              newTurnId,
+            );
+          }
+        }
+      }),
+  );
 });
 
 function makeReasoningEffortSnapshot(

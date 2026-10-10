@@ -296,6 +296,98 @@ describe("selectAtriumSnapshot", () => {
     expect(selectAtriumSnapshot(buildState({}), NOW).cards[0]!.turnConfiguration).toBeNull();
   });
 
+  it("keeps exact surviving children discoverable after root failure age or dismissal", () => {
+    const state = buildState({
+      provider: "codex",
+      status: "ready",
+      latestTurnState: "error",
+      activities: [
+        activity("live-child", "task.progress", "Surviving worker update", {
+          taskId: "live-child",
+          subagent: { threadId: "live-child", label: "Surviving worker", status: "active" },
+        }),
+        activity("terminal-child", "task.completed", "Settled worker completed", {
+          taskId: "terminal-child",
+          status: "completed",
+          subagent: { threadId: "terminal-child", label: "Settled worker", status: "completed" },
+        }),
+      ],
+    });
+    const environment = state.environmentStateById[ENV]!;
+    const summary = environment.sidebarThreadSummaryById[THREAD]!;
+    summary.session = {
+      ...summary.session!,
+      activeTurnId: undefined,
+      lastError: "Synthetic failed root request.",
+    };
+    const snapshot = structuredClone(state);
+    const initial = selectAtriumSnapshot(state, NOW);
+    const failure = initial.cards[0]!.errorDismissal;
+    expect(failure).not.toBeNull();
+    if (!failure) throw new Error("Expected the failed root's independent failure identity");
+    const laterNow = NOW + 13 * 60 * 60 * 1000;
+    for (const visible of [
+      selectAtriumSnapshot(state, laterNow),
+      selectAtriumSnapshot(state, NOW, [failure]),
+      selectAtriumSnapshot(state, laterNow, [failure]),
+    ]) {
+      expect(visible.cards).toHaveLength(1);
+      expect(visible.cards[0]).toMatchObject({
+        state: "error",
+        completedAt: NOW - 5_000,
+        subagents: [
+          { id: "live-child", running: true, status: "active", completedAt: null },
+          { id: "terminal-child", running: false, status: "completed" },
+        ],
+      });
+      expect(visible.subagentCount).toBe(1);
+      expect(visible.runningCount).toBe(0);
+      expect(formatAtriumCardElapsed(visible.cards[0]!, laterNow)).toBe("40s");
+    }
+    expect(state).toEqual(snapshot);
+
+    // Settled native children restore the ordinary historical-failure rules.
+    environment.activityIdsByThreadId[THREAD] = ["terminal-child"];
+    expect(selectAtriumSnapshot(state, laterNow).cards).toEqual([]);
+    expect(selectAtriumSnapshot(state, NOW, [failure]).cards).toEqual([]);
+  });
+
+  it.each(["error", "stopped", "replacement", "unknown"] as const)(
+    "does not keep a dismissed or aged root on the board from %s child evidence",
+    (evidence) => {
+      const state = buildState({
+        provider: "codex",
+        status: "ready",
+        latestTurnState: "error",
+        activities: [
+          activity("unverified-child", "task.progress", "Retained worker update", {
+            taskId: "retained-child",
+            subagent: { threadId: "retained-child", label: "Retained worker", status: "active" },
+          }),
+        ],
+      });
+      const summary = state.environmentStateById[ENV]!.sidebarThreadSummaryById[THREAD]!;
+      const initialFailure = selectAtriumSnapshot(state, NOW).cards[0]!.errorDismissal;
+      if (!initialFailure) throw new Error("Expected the failed root's failure identity");
+      summary.session = {
+        ...summary.session!,
+        activeTurnId: undefined,
+        orchestrationStatus: evidence === "error" || evidence === "stopped" ? evidence : "ready",
+        subagentRuntimeId:
+          evidence === "replacement"
+            ? ("replacement-native-runtime" as NonNullable<
+                NonNullable<typeof summary.session>["subagentRuntimeId"]
+              >)
+            : evidence === "unknown"
+              ? null
+              : summary.session!.subagentRuntimeId,
+      };
+      expect(selectAtriumSnapshot(state, NOW).subagentCount).toBe(0);
+      expect(selectAtriumSnapshot(state, NOW + 13 * 60 * 60 * 1000).cards).toEqual([]);
+      expect(selectAtriumSnapshot(state, NOW, [initialFailure]).cards).toEqual([]);
+    },
+  );
+
   it.each(["completed", "error"] as const)(
     "freezes the %s parent duration across late worker/title updates",
     (latestTurnState) => {

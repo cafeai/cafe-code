@@ -1,6 +1,6 @@
 # Provider stream reconciliation
 
-Last updated: 2026-10-08 17:21:53 JST (UTC+0900)
+Last updated: 2026-10-10 21:31:04 JST (UTC+0900)
 
 ## Ownership and exact text
 
@@ -54,6 +54,20 @@ nonterminal workers **Status unavailable**, preserving history without claiming
 completion or continuing their timers. The renderer's own WebSocket connection
 is not the native runtime boundary. See [runtime-bound observation](decisions/subagent-runtime-observation.md)
 for legacy behavior, authority and verification requirements.
+
+A failed Codex root is not necessarily an unavailable native context. Fresh
+owner-authored terminal evidence plus exact live inventory can retain that
+context's ready state and children while the root remains failed with its error.
+Ingestion commits error first, then ready through a second exact lifecycle CAS;
+it never makes the failed root successful or reopens it. Only definitive
+allowlisted transient failures permit a server-fenced short continuation, with
+capped jittered backoff and no fixed retry cutoff. Native warnings do not spawn
+nested retries. Stop and newer input win; uncertain acceptance is never resent.
+If a continuation fails before its started event, retain its exact pending input
+until a matching immutable attempt/ACK receipt and fresh same-owner proof permit
+an internal atomic failed-turn association. Do not invent a running state or
+erase observed execution timestamps; newer controls still veto the association.
+See [the persistent recovery decision](decisions/codex-persistent-transient-recovery.md).
 
 A subagent's restart and a metadata refresh for its previous completed run can
 arrive in the same millisecond. Timestamp plus opaque UUID sorting is not their

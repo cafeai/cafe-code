@@ -139,7 +139,8 @@ import { shouldSurfaceProviderAccountRateLimits } from "../lib/codexRateLimits";
 import { BranchToolbar } from "./BranchToolbar";
 import { resolveShortcutCommand } from "../keybindings";
 import PlanSidebar from "./PlanSidebar";
-import { SessionRail } from "./chat/SessionRail";
+import { CodexRecoveryNotice, SessionRail } from "./chat/SessionRail";
+import { deriveCodexRecoveryPresentation } from "../codexRecovery";
 import { ComposerAsyncQuestionsPanel } from "./chat/ComposerAsyncQuestionsPanel";
 import { persistExactAsyncQuestionAnswer, type AsyncQuestion } from "./chat/asyncQuestions";
 import { ChevronDownIcon, TriangleAlertIcon } from "lucide-react";
@@ -2213,6 +2214,15 @@ export default function ChatView(props: ChatViewProps) {
         { runtimeSession: subagentRuntimeSession },
       ),
     [activeLatestTurn?.state, activeLatestTurn?.turnId, threadActivities, subagentRuntimeSession],
+  );
+  const codexRecovery = useMemo(
+    () =>
+      deriveCodexRecoveryPresentation({
+        thread: activeThread,
+        activities: threadActivities,
+        activeSubagents: activeSubagentEntries,
+      }),
+    [activeThread, threadActivities, activeSubagentEntries],
   );
   const latestTurnHasToolActivity = useMemo(
     () => hasToolActivityForTurn(threadActivities, activeLatestTurn?.turnId),
@@ -6625,21 +6635,52 @@ export default function ChatView(props: ChatViewProps) {
   const onInterrupt = async () => {
     const api = readEnvironmentApi(environmentId);
     if (!api || !activeThread) return;
-    const turnId = activeThread.session?.activeTurnId ?? undefined;
+    // Use canonical state at the actual click boundary, not a stale failed-root
+    // notice. A terminal root has nothing to interrupt: stopping that context
+    // closes its independently running children and durably cancels recovery.
+    // Ordinary active-root Stop retains the existing interrupt command.
+    const currentThread = selectThreadByRef(
+      useStore.getState(),
+      scopeThreadRef(activeThread.environmentId, activeThread.id),
+    );
+    if (!currentThread) return;
+    const stopRecoveryContext =
+      deriveCodexRecoveryPresentation({
+        thread: currentThread,
+        activities: currentThread.activities,
+        activeSubagents: deriveActiveSubagentWorkEntries(currentThread.activities, null, {
+          runtimeSession: currentThread.session
+            ? {
+                subagentRuntimeId: currentThread.session.subagentRuntimeId,
+                orchestrationStatus: currentThread.session.orchestrationStatus,
+              }
+            : null,
+        }),
+      }) !== null;
+    const turnId = currentThread.session?.activeTurnId ?? undefined;
     updateManualStopBarrier(activeThread.id, {
       threadId: activeThread.id,
-      interruptedTurnId: turnId ?? activeThread.latestTurn?.turnId ?? null,
+      interruptedTurnId: turnId ?? currentThread.latestTurn?.turnId ?? null,
       requestedAt: new Date().toISOString(),
     });
-    armPendingSteerInterruptRecovery(activeThread);
+    armPendingSteerInterruptRecovery(currentThread);
     try {
-      await api.orchestration.dispatchCommand({
-        type: "thread.turn.interrupt",
-        commandId: newCommandId(),
-        threadId: activeThread.id,
-        ...(turnId !== undefined ? { turnId } : {}),
-        createdAt: new Date().toISOString(),
-      });
+      await api.orchestration.dispatchCommand(
+        stopRecoveryContext
+          ? {
+              type: "thread.session.stop",
+              commandId: newCommandId(),
+              threadId: activeThread.id,
+              createdAt: new Date().toISOString(),
+            }
+          : {
+              type: "thread.turn.interrupt",
+              commandId: newCommandId(),
+              threadId: activeThread.id,
+              ...(turnId !== undefined ? { turnId } : {}),
+              createdAt: new Date().toISOString(),
+            },
+      );
     } catch (error) {
       updatePendingSteerInterruptRecoveries((current) => {
         if (!(activeThread.id in current)) {
@@ -7899,6 +7940,15 @@ export default function ChatView(props: ChatViewProps) {
               isGitRepo ? "pb-1" : "pb-3 sm:pb-4",
             )}
           >
+            {codexRecovery && !sessionRailVisible ? (
+              <div className="mx-auto mb-2 max-w-208">
+                <CodexRecoveryNotice
+                  presentation={codexRecovery}
+                  onStop={() => void onInterrupt()}
+                  disabled={activeEnvironmentUnavailable || isComposerConnecting}
+                />
+              </div>
+            ) : null}
             {isServerThread && activeThread.session?.provider === "codex" && (
               <ComposerAsyncQuestionsPanel
                 environmentId={activeThread.environmentId}
@@ -8083,6 +8133,9 @@ export default function ChatView(props: ChatViewProps) {
             ) : null}
             {sessionRailVisible ? (
               <SessionRail
+                codexRecovery={codexRecovery}
+                onStopCodexRecovery={() => void onInterrupt()}
+                codexRecoveryStopDisabled={activeEnvironmentUnavailable || isComposerConnecting}
                 scheduledFollowups={scheduledFollowupsContext}
                 providerTasks={providerTasksContext}
                 plan={composerActivePlan}

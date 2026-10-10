@@ -87,6 +87,7 @@ import {
 import { sanitizeProviderToolData } from "@cafecode/shared/activityPayloadSanitizer";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { isSupersededSessionLifecycle, sessionLifecycleSnapshot } from "../sessionLifecycle.ts";
+import { buildCodexTransientFailureMarkerPayload } from "../providerRuntimeRecovery.ts";
 
 const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
 const providerRuntimeEventKey = (event: ProviderRuntimeEvent) =>
@@ -2803,7 +2804,9 @@ const make = Effect.gen(function* () {
       const observedLifecycleTurn =
         terminalTurnRecovery === undefined &&
         eventTurnId !== undefined &&
-        (event.type === "turn.started" || event.type === "turn.completed")
+        (event.type === "turn.started" ||
+          event.type === "turn.completed" ||
+          (event.type === "runtime.error" && event.provider === "codex"))
           ? yield* projectionTurnRepository.getByTurnId({
               threadId: thread.id,
               turnId: eventTurnId,
@@ -2814,6 +2817,38 @@ const make = Effect.gen(function* () {
         (observedLifecycleTurn.value.state === "completed" ||
           observedLifecycleTurn.value.state === "interrupted" ||
           observedLifecycleTurn.value.state === "error");
+
+      // A continuation may fail before its start notification or RPC ACK.
+      // Without a bound native turn, that terminal/error notification cannot
+      // consume the pending input or erase the previous failed-root tuple.
+      // The exact server ACK receipt plus fresh native failed-root proof binds
+      // the new terminal turn separately; no synthetic running turn is needed.
+      const isUnboundCodexTerminalDuringRecoveryCandidate =
+        event.provider === "codex" &&
+        ((event.type === "turn.completed" && completedTurnState === "failed") ||
+          event.type === "runtime.error") &&
+        activeTurnId === null &&
+        eventTurnId !== undefined &&
+        thread.session?.status === "ready" &&
+        (yield* hasPendingTurnStartForThread());
+      const isUnboundCodexTerminalDuringRecovery =
+        isUnboundCodexTerminalDuringRecoveryCandidate &&
+        (yield* sql<{ readonly present: number }>`
+          WITH latest_intent AS (
+            SELECT sequence, thread_id FROM orchestration_codex_transient_recovery_intents
+              INDEXED BY idx_codex_transient_recovery_intents_thread_kind_sequence
+            WHERE thread_id = ${thread.id} AND source_kind = 'intent'
+            ORDER BY sequence DESC LIMIT 1
+          )
+          SELECT 1 AS present FROM latest_intent AS recovery
+          JOIN orchestration_events AS intent ON intent.sequence = recovery.sequence
+          JOIN projection_turns AS pending ON pending.thread_id = recovery.thread_id
+            AND pending.turn_id IS NULL
+            AND pending.pending_message_id = json_extract(intent.payload_json, '$.messageId')
+          WHERE intent.aggregate_kind = 'thread' AND intent.stream_id = ${thread.id}
+            AND intent.actor_kind = 'server' AND intent.event_type = 'thread.turn-start-requested'
+          LIMIT 1
+        `)[0]?.present === 1;
 
       // Only the runtime owner's positively reconciled loss can authorize
       // automatic continuation. A delayed loss from an older turn must never
@@ -2885,6 +2920,7 @@ const make = Effect.gen(function* () {
         }
       })();
       const shouldApplyThreadLifecycle =
+        !isUnboundCodexTerminalDuringRecovery &&
         !shouldSuppressFailedSessionHeartbeat &&
         passesStrictProviderLifecycleGuard &&
         // Resume backfills include turn.started for historical terminal turns.
@@ -3185,6 +3221,134 @@ const make = Effect.gen(function* () {
         }
       }
 
+      // A terminal root and its native context have independent lifetimes.
+      // First let the ordinary error transition above close the root as failed;
+      // setting ready in that transition would incorrectly complete it in the
+      // projection. Only then can exact fresh native inventory establish that
+      // the same context still owns children and may accept a continuation.
+      // The second phase also completes a partially committed journal fanout
+      // after restart, but only for this exact failed turn/time/generation. It
+      // never reopens the turn or borrows liveness from a replacement process.
+      if (
+        event.type === "turn.completed" &&
+        event.provider === "codex" &&
+        completedTurnState === "failed" &&
+        event.payload.nativeContextAvailable === true &&
+        event.providerInstanceId !== undefined &&
+        incomingRuntimeId !== undefined &&
+        sameRuntimeBinding &&
+        incomingRuntimeId === currentRuntimeId &&
+        eventTurnId !== undefined
+      ) {
+        const failedThread = yield* resolveThreadShell(thread.id);
+        const failedSession = failedThread?.session;
+        if (
+          failedThread?.latestTurn?.state === "error" &&
+          sameId(failedThread.latestTurn.turnId, eventTurnId) &&
+          failedSession !== undefined &&
+          failedSession !== null &&
+          (failedSession.status === "error" || failedSession.status === "ready") &&
+          failedSession.providerName === "codex" &&
+          failedSession.providerInstanceId === event.providerInstanceId &&
+          failedSession.subagentRuntimeId === incomingRuntimeId &&
+          failedSession.activeTurnId === null &&
+          failedSession.lastError !== null &&
+          failedSession.updatedAt === now &&
+          Option.isNone(
+            yield* projectionTurnRepository.getPendingTurnStartByThreadId({ threadId: thread.id }),
+          )
+        ) {
+          // Read-only inventory: no process start, credential probe or provider
+          // request. The proof is freshly minted by the current native owner;
+          // missing/closed/uncertain inventory preserves the conservative error
+          // state. Do not log provider-controlled failure text on this path.
+          const nativeFailure = yield* providerService.listSessions().pipe(
+            Effect.map(
+              (sessions) =>
+                sessions.find(
+                  (session) =>
+                    session.threadId === thread.id &&
+                    session.provider === "codex" &&
+                    session.providerInstanceId === event.providerInstanceId &&
+                    session.subagentRuntimeId === incomingRuntimeId &&
+                    session.status === "ready" &&
+                    session.activeTurnId === undefined &&
+                    session.codexRootTurnFailure?.turnId === eventTurnId,
+                )?.codexRootTurnFailure,
+            ),
+            Effect.catchCause((cause) =>
+              Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause) : Effect.succeed(undefined),
+            ),
+          );
+          if (nativeFailure !== undefined) {
+            // A ready replay has already committed this availability phase.
+            // Repeating ready/null would clear a recovery start admitted while
+            // inventory was awaited (such an intent deliberately leaves the
+            // session tuple unchanged). Append its idempotent marker without
+            // another lifecycle write. From error, the serialized CAS is safe:
+            // transient intent admission itself requires ready, while manual
+            // starts/Stop change the captured lifecycle and make this CAS fail.
+            const acceptedAvailability =
+              failedSession.status === "ready" ||
+              (yield* dispatchObservedSession(
+                {
+                  type: "thread.session.set",
+                  commandId: providerCommandId(event, "failed-root-context-available"),
+                  threadId: thread.id,
+                  expectedSubagentRuntimeId: incomingRuntimeId,
+                  session: { ...failedSession, status: "ready", activeTurnId: null },
+                  createdAt: now,
+                },
+                failedSession,
+              )) !== undefined;
+            if (
+              acceptedAvailability &&
+              event.payload.codexTransientFailure !== undefined &&
+              nativeFailure.category === event.payload.codexTransientFailure
+            ) {
+              // Content-free, deterministic and replay-idempotent. Durable
+              // recovery rechecks Stop/newer-input/account/runtime barriers;
+              // a marker is not permission to replay the original request.
+              // This is Cafe's decision after fresh private proof, not an
+              // ordinary provider-authored activity. Its server actor is
+              // required by the append-time authority index and barrier.
+              const markerIdentity = Crypto.createHash("sha256")
+                .update(
+                  JSON.stringify([
+                    "cafe-codex-transient-failure-v1",
+                    thread.id,
+                    event.providerInstanceId,
+                    incomingRuntimeId,
+                    eventTurnId,
+                    now,
+                    event.eventId,
+                  ]),
+                )
+                .digest("hex");
+              yield* orchestrationEngine.dispatch({
+                type: "thread.activity.append",
+                commandId: CommandId.make(`server:codex-transient-root-failed:${markerIdentity}`),
+                threadId: thread.id,
+                activity: {
+                  id: EventId.make(`codex-transient-root-failed:${markerIdentity}`),
+                  kind: "runtime.warning",
+                  tone: "info",
+                  summary: "Reconnecting after a transient provider failure",
+                  turnId: eventTurnId,
+                  payload: buildCodexTransientFailureMarkerPayload({
+                    providerInstanceId: event.providerInstanceId,
+                    subagentRuntimeId: incomingRuntimeId,
+                    sessionUpdatedAt: now,
+                  }),
+                  createdAt: now,
+                },
+                createdAt: now,
+              });
+            }
+          }
+        }
+      }
+
       if (
         !appliedSessionLifecycle &&
         runtimeGenerationVerified &&
@@ -3469,9 +3633,20 @@ const make = Effect.gen(function* () {
       if (event.type === "runtime.error") {
         const runtimeErrorMessage = event.payload.message;
 
-        const shouldApplyRuntimeError = !STRICT_PROVIDER_LIFECYCLE_GUARD
-          ? true
-          : activeTurnId === null || eventTurnId === undefined || sameId(activeTurnId, eventTurnId);
+        // A delayed root-scoped diagnostic is not process-death evidence. The
+        // exact indexed terminal outcome remains immutable when no native root
+        // is active; otherwise this old error could erase ready-context proof
+        // and hide surviving children again. Unscoped runtime failures and an
+        // actually active matching root retain their ordinary error authority.
+        const isLateTerminalCodexError =
+          event.provider === "codex" && activeTurnId === null && observesAlreadyTerminalTurn;
+        const shouldApplyRuntimeError =
+          !isLateTerminalCodexError &&
+          !isUnboundCodexTerminalDuringRecovery &&
+          (!STRICT_PROVIDER_LIFECYCLE_GUARD ||
+            activeTurnId === null ||
+            eventTurnId === undefined ||
+            sameId(activeTurnId, eventTurnId));
 
         if (runtimeGenerationVerified && shouldApplyRuntimeError) {
           yield* dispatchObservedSession(

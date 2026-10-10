@@ -14,6 +14,7 @@ import {
   ProviderSession,
   ProviderDriverKind,
   ProviderInstanceId,
+  SubagentRuntimeId,
   PROVIDER_SESSION_TITLE_MAX_CHARS,
   type ServerSettings,
 } from "@cafecode/contracts";
@@ -49,6 +50,7 @@ import { deriveServerPaths, ServerConfig } from "../../config.ts";
 import { TextGenerationError } from "@cafecode/contracts";
 import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
 import { buildCodexSteerClientCorrelationId } from "../../provider/codexSteerCorrelation.ts";
+import { buildCodexTransientFailureMarkerPayload } from "../providerRuntimeRecovery.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { PersistenceSqlError } from "../../persistence/Errors.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
@@ -249,6 +251,7 @@ describe("ProviderCommandReactor", () => {
     readonly beforeCodexSteerDeliveryAttemptDispatch?: Effect.Effect<void>;
     readonly beforeCodexRootReplacementDispatch?: Effect.Effect<void>;
     readonly beforeRuntimeRecoveryAttemptDispatch?: Effect.Effect<void>;
+    readonly beforeCodexFailedRootDispatch?: Effect.Effect<void>;
     readonly beforeTurnConfigurationDispatch?: Effect.Effect<void>;
     readonly providerDisplayNames?: ReadonlyMap<string, string>;
     readonly testClock?: TestClock.TestClock;
@@ -552,6 +555,7 @@ describe("ProviderCommandReactor", () => {
       input?.beforeCodexSteerDeliveryAttemptDispatch === undefined &&
       input?.beforeCodexRootReplacementDispatch === undefined &&
       input?.beforeRuntimeRecoveryAttemptDispatch === undefined &&
+      input?.beforeCodexFailedRootDispatch === undefined &&
       input?.beforeTurnStartFailureDispatch === undefined &&
       input?.beforeTurnConfigurationDispatch === undefined
         ? orchestrationLayer
@@ -566,36 +570,49 @@ describe("ProviderCommandReactor", () => {
                   ? input.beforeTurnStartFailureDispatch.pipe(
                       Effect.andThen(engine.dispatch(command)),
                     )
-                  : command.type === "thread.activity.append" &&
-                      command.activity.kind === "provider.turn.configuration" &&
-                      input.beforeTurnConfigurationDispatch !== undefined
-                    ? input.beforeTurnConfigurationDispatch.pipe(
+                  : command.type === "thread.session.set" &&
+                      command.codexFailedRoot !== undefined &&
+                      input.beforeCodexFailedRootDispatch !== undefined
+                    ? input.beforeCodexFailedRootDispatch.pipe(
                         Effect.andThen(engine.dispatch(command)),
                       )
                     : command.type === "thread.activity.append" &&
-                        command.activity.kind === "provider.turn.steer.delivery-attempted" &&
-                        input.beforeCodexSteerDeliveryAttemptDispatch !== undefined
-                      ? input.beforeCodexSteerDeliveryAttemptDispatch!.pipe(
+                        command.activity.kind === "provider.turn.configuration" &&
+                        input.beforeTurnConfigurationDispatch !== undefined
+                      ? input.beforeTurnConfigurationDispatch.pipe(
                           Effect.andThen(engine.dispatch(command)),
                         )
                       : command.type === "thread.activity.append" &&
-                          command.activity.kind === "runtime.warning" &&
-                          (
-                            command.activity.payload as
-                              | Readonly<Record<string, unknown>>
-                              | undefined
-                          )?.recovery === "provider-runtime-continuation-attempted" &&
-                          input.beforeRuntimeRecoveryAttemptDispatch !== undefined
-                        ? input.beforeRuntimeRecoveryAttemptDispatch.pipe(
+                          command.activity.kind === "provider.turn.steer.delivery-attempted" &&
+                          input.beforeCodexSteerDeliveryAttemptDispatch !== undefined
+                        ? input.beforeCodexSteerDeliveryAttemptDispatch!.pipe(
                             Effect.andThen(engine.dispatch(command)),
                           )
-                        : command.type === "thread.session.set" &&
-                            command.codexRootReplacement !== undefined &&
-                            input.beforeCodexRootReplacementDispatch !== undefined
-                          ? input.beforeCodexRootReplacementDispatch.pipe(
+                        : command.type === "thread.activity.append" &&
+                            command.activity.kind === "runtime.warning" &&
+                            (
+                              command.activity.payload as
+                                | Readonly<Record<string, unknown>>
+                                | undefined
+                            )?.recovery !== undefined &&
+                            [
+                              "provider-runtime-continuation-attempted",
+                              "codex-transient-continuation-attempted",
+                            ].includes(
+                              (command.activity.payload as Readonly<Record<string, unknown>>)
+                                .recovery as string,
+                            ) &&
+                            input.beforeRuntimeRecoveryAttemptDispatch !== undefined
+                          ? input.beforeRuntimeRecoveryAttemptDispatch.pipe(
                               Effect.andThen(engine.dispatch(command)),
                             )
-                          : engine.dispatch(command),
+                          : command.type === "thread.session.set" &&
+                              command.codexRootReplacement !== undefined &&
+                              input.beforeCodexRootReplacementDispatch !== undefined
+                            ? input.beforeCodexRootReplacementDispatch.pipe(
+                                Effect.andThen(engine.dispatch(command)),
+                              )
+                            : engine.dispatch(command),
             })),
           ).pipe(Layer.provide(orchestrationLayer));
     const baseProjectionSnapshotLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
@@ -2289,6 +2306,900 @@ describe("ProviderCommandReactor", () => {
       else expect(request.cwd).toBe("/tmp/provider-project");
     },
   );
+
+  describe("exact Codex transient-root continuation", () => {
+    const threadId = ThreadId.make("thread-1");
+    const failedRoot = TurnId.make("transient-failed-original");
+    const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000142");
+    const instanceId = ProviderInstanceId.make("codex");
+    const originalText = "Do the authorized work once; never replay this original prompt.";
+
+    async function makeClock(): Promise<TestClock.TestClock> {
+      const scope = await Effect.runPromise(Scope.make());
+      testClockScope = scope;
+      const clock = await Effect.runPromise(TestClock.make().pipe(Scope.provide(scope)));
+      await Effect.runPromise(
+        clock.setTime(Date.parse("2026-01-01T00:00:10.000Z")).pipe(Scope.provide(scope)),
+      );
+      return {
+        ...clock,
+        adjust: (duration) => clock.adjust(duration).pipe(Scope.provide(scope)),
+        setTime: (timestamp) => clock.setTime(timestamp).pipe(Scope.provide(scope)),
+      };
+    }
+
+    async function recordFailure(
+      harness: Awaited<ReturnType<typeof createHarness>>,
+      root = failedRoot,
+      startBeforeMarker = false,
+    ) {
+      const at = new Date(
+        Date.parse("2026-01-01T00:00:04.000Z") + harness.sendTurn.mock.calls.length * 1000,
+      ).toISOString();
+      await harness.setRunningCodexTurn(root, at);
+      for (const status of ["error", "ready"] as const)
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make(`server:failed-${status}-${root}`),
+            threadId,
+            session: {
+              threadId,
+              status,
+              providerName: "codex",
+              providerInstanceId: instanceId,
+              subagentRuntimeId: runtimeId,
+              runtimeMode: "approval-required",
+              activeTurnId: null,
+              lastError: "Temporary provider failure",
+              updatedAt: at,
+            },
+            createdAt: at,
+          }),
+        );
+      harness.runtimeSessions.splice(0, harness.runtimeSessions.length, {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: instanceId,
+        subagentRuntimeId: runtimeId,
+        status: "ready",
+        threadId,
+        runtimeMode: "approval-required",
+        model: "gpt-5-codex",
+        modelSelection: { instanceId, model: "gpt-5-codex" },
+        resumeCursor: { opaque: "existing-native-context" },
+        lastError: "Temporary provider failure",
+        codexRootTurnFailure: {
+          turnId: root,
+          providerThreadId: "private-native-root",
+          observedAt: at,
+          category: "transport",
+        },
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: at,
+      });
+      if (startBeforeMarker) await harness.startReactor();
+      return Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make(`server:transient-failure-${root}`),
+          threadId,
+          activity: {
+            id: EventId.make(`transient-failure-${root}`),
+            kind: "runtime.warning",
+            tone: "info",
+            summary: "Codex will retry temporary failure",
+            turnId: root,
+            payload: buildCodexTransientFailureMarkerPayload({
+              providerInstanceId: instanceId,
+              subagentRuntimeId: runtimeId,
+              sessionUpdatedAt: at,
+            }),
+            createdAt: at,
+          },
+          createdAt: at,
+        }),
+      );
+    }
+
+    async function seed(
+      harness: Awaited<ReturnType<typeof createHarness>>,
+      startBeforeMarker = true,
+    ) {
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-original-before-transient"),
+          threadId,
+          message: {
+            messageId: MessageId.make("original-before-transient"),
+            role: "user",
+            text: originalText,
+            attachments: [],
+          },
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          createdAt: "2026-01-01T00:00:01.000Z",
+        }),
+      );
+      return recordFailure(harness, failedRoot, startBeforeMarker);
+    }
+
+    async function waitForIntent(harness: Awaited<ReturnType<typeof createHarness>>, count = 1) {
+      await waitFor(async () => {
+        const rows = await Effect.runPromise(harness.sql<{ readonly count: number }>`
+          SELECT COUNT(*) AS count FROM orchestration_codex_transient_recovery_intents WHERE source_kind = 'intent'`);
+        return rows[0]?.count === count;
+      });
+      await harness.drain();
+    }
+
+    async function failedCompletedAt(harness: Awaited<ReturnType<typeof createHarness>>) {
+      const rows = await Effect.runPromise(harness.sql<{ readonly completedAt: string | null }>`
+        SELECT completed_at AS "completedAt" FROM projection_turns
+        WHERE thread_id = ${threadId} AND turn_id = ${failedRoot}`);
+      return rows[0]?.completedAt;
+    }
+
+    it("waits then continues the existing context without start, steer, prompt replay or private public metadata", async () => {
+      const clock = await makeClock();
+      const harness = await createHarness({ startReactor: false, testClock: clock });
+      await seed(harness);
+      await waitForIntent(harness);
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      const waiting = (await harness.readModel()).threads.find((thread) => thread.id === threadId);
+      expect(waiting?.session).toMatchObject({
+        status: "ready",
+        activeTurnId: null,
+        updatedAt: "2026-01-01T00:00:04.000Z",
+        subagentRuntimeId: runtimeId,
+        lastError: "Temporary provider failure",
+      });
+      expect(waiting?.latestTurn).toMatchObject({ turnId: failedRoot, state: "error" });
+      const terminalTime = waiting?.latestTurn?.completedAt;
+      expect(terminalTime).toBe("2026-01-01T00:00:04.000Z");
+      await Effect.runPromise(clock.adjust(1000));
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await harness.drain();
+      expect(harness.startSession).not.toHaveBeenCalled();
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      expect(harness.steerTurn).not.toHaveBeenCalled();
+      expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
+        threadId,
+        allowActiveTurnSteerFallback: false,
+        expectedFailedRoot: {
+          turnId: failedRoot,
+          subagentRuntimeId: runtimeId,
+          providerThreadId: "private-native-root",
+        },
+      });
+      const request = harness.sendTurn.mock.calls[0]?.[0];
+      expect(request?.input).not.toContain(originalText);
+      expect(request).not.toHaveProperty("attachments");
+      expect(request).not.toHaveProperty("modelSelection");
+      const detail = await harness.readThreadDetail(threadId);
+      expect(JSON.stringify(detail?.activities)).not.toContain("private-native-root");
+      expect(
+        detail?.activities.some(
+          (activity) =>
+            (activity.payload as Record<string, unknown>)?.recovery ===
+            "codex-transient-continuation-accepted",
+        ),
+      ).toBe(true);
+      // Operational waiting/attempt/ACK notices are not extra execution by
+      // the failed root. Its recorded duration remains immutable.
+      expect(await failedCompletedAt(harness)).toBe(terminalTime);
+    });
+
+    it("preserves the exponential chain across a definitely accepted then failed continuation", async () => {
+      const clock = await makeClock();
+      const harness = await createHarness({ startReactor: false, testClock: clock });
+      await seed(harness);
+      await waitForIntent(harness);
+      await Effect.runPromise(clock.adjust(1000));
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await harness.drain();
+      const nextRoot = TurnId.make("turn-1");
+      await recordFailure(harness, nextRoot);
+      await waitForIntent(harness, 2);
+      await Effect.runPromise(clock.adjust(1000));
+      await harness.drain();
+      expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+      harness.sendTurn.mockImplementationOnce(() =>
+        Effect.succeed({ threadId, turnId: TurnId.make("turn-2") }),
+      );
+      await Effect.runPromise(clock.adjust(1000));
+      await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+      await harness.drain();
+      expect(harness.sendTurn.mock.calls[1]?.[0].expectedFailedRoot?.turnId).toBe(nextRoot);
+      const rows = await Effect.runPromise(harness.sql<{ readonly attempt: number }>`
+        SELECT json_extract(event.payload_json, '$.runtimeRecovery.codexTransientFailure.retryAttempt') AS attempt
+        FROM orchestration_codex_transient_recovery_intents AS intent
+        JOIN orchestration_events AS event ON event.sequence = intent.sequence
+        WHERE intent.source_kind = 'intent' ORDER BY intent.sequence`);
+      expect(rows.map((row) => row.attempt)).toEqual([0, 1]);
+      expect(harness.startSession).not.toHaveBeenCalled();
+    });
+
+    it.each(["failure", "intent"] as const)(
+      "recovers indexed %s authority after more than256 child updates",
+      async (kind) => {
+        const clock = await makeClock();
+        const harness = await createHarness({ startReactor: false, testClock: clock });
+        const marker = await seed(harness, false);
+        if (kind === "intent")
+          await Effect.runPromise(
+            harness.engine.dispatch({
+              type: "thread.turn.start",
+              commandId: CommandId.make("server:seeded-transient-intent"),
+              threadId,
+              message: {
+                messageId: MessageId.make("seeded-transient-intent"),
+                role: "user",
+                text: "Continue existing native work without replaying prior actions.",
+                attachments: [],
+              },
+              modelSelection: { instanceId, model: "gpt-5-codex" },
+              runtimeMode: "approval-required",
+              interactionMode: "default",
+              runtimeRecovery: {
+                sourceEventSequence: marker.sequence,
+                turnId: failedRoot,
+                sessionUpdatedAt: "2026-01-01T00:00:04.000Z",
+                codexTransientFailure: {
+                  providerInstanceId: instanceId,
+                  subagentRuntimeId: runtimeId,
+                  chainSourceEventSequence: marker.sequence,
+                  retryAttempt: 0,
+                },
+              },
+              createdAt: "2026-01-01T00:00:05.000Z",
+            }),
+          );
+        for (let i = 0; i < 300; i += 1)
+          await Effect.runPromise(
+            harness.engine.dispatch({
+              type: "thread.activity.append",
+              commandId: CommandId.make(`server:child-noise-${i}`),
+              threadId,
+              activity: {
+                id: EventId.make(`child-noise-${i}`),
+                kind: "runtime.warning",
+                tone: "info",
+                summary: "Synthetic child progress",
+                turnId: failedRoot,
+                payload: { childProgress: i },
+                createdAt: "2026-01-01T00:00:06.000Z",
+              },
+              createdAt: "2026-01-01T00:00:06.000Z",
+            }),
+          );
+        const starting = harness.startReactor();
+        await waitForIntent(harness);
+        await waitFor(
+          async () =>
+            (await harness.readThreadDetail(threadId))?.activities.some(
+              (activity) =>
+                (activity.payload as Record<string, unknown>)?.recovery ===
+                "codex-transient-recovery-waiting",
+            ) === true,
+        );
+        await Effect.runPromise(clock.adjust(1));
+        await starting;
+        expect(harness.sendTurn).not.toHaveBeenCalled();
+        await Effect.runPromise(clock.adjust(1000));
+        await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+        await harness.drain();
+        expect(harness.startSession).not.toHaveBeenCalled();
+        expect(harness.sendTurn.mock.calls[0]?.[0].expectedFailedRoot?.subagentRuntimeId).toBe(
+          runtimeId,
+        );
+      },
+    );
+
+    it.each([false, true])(
+      "preserves terminal-before-ACK timestamp and receipt with Stop=%s",
+      async (stop) => {
+        const clock = await makeClock();
+        const harness = await createHarness({ startReactor: false, testClock: clock });
+        const reached = Effect.runSync(Deferred.make<void>());
+        const release = Effect.runSync(Deferred.make<void>());
+        const nextRoot = TurnId.make("failed-before-ack");
+        harness.sendTurn.mockImplementationOnce(() =>
+          Effect.gen(function* () {
+            // The native owner can report failure before its acceptance reply.
+            // This queues a marker behind the currently executing serial send.
+            yield* Effect.promise(() => recordFailure(harness, nextRoot));
+            yield* Deferred.succeed(reached, undefined);
+            yield* Deferred.await(release);
+            return { threadId, turnId: nextRoot };
+          }),
+        );
+        await seed(harness);
+        await waitForIntent(harness);
+        await Effect.runPromise(clock.adjust(1000));
+        await Effect.runPromise(Deferred.await(reached));
+        const terminal = await harness.readThreadDetail(threadId);
+        expect(terminal?.latestTurn).toMatchObject({ turnId: nextRoot, state: "error" });
+        expect(terminal?.session?.updatedAt).toBe("2026-01-01T00:00:05.000Z");
+        if (stop)
+          await Effect.runPromise(
+            harness.engine.dispatch({
+              type: "thread.session.stop",
+              commandId: CommandId.make("cmd-stop-before-transient-ack"),
+              threadId,
+              createdAt: "2026-01-01T00:00:06.000Z",
+            }),
+          );
+        await Effect.runPromise(Deferred.succeed(release, undefined));
+        await harness.drain();
+        const settled = await harness.readThreadDetail(threadId);
+        expect(settled?.latestTurn).toMatchObject({ turnId: nextRoot, state: "error" });
+        if (!stop) {
+          await waitForIntent(harness, 2);
+          expect(settled?.session).toMatchObject({
+            status: "ready",
+            updatedAt: "2026-01-01T00:00:05.000Z",
+          });
+          const rows = await Effect.runPromise(harness.sql<{ readonly attempt: number }>`
+          SELECT json_extract(event.payload_json, '$.runtimeRecovery.codexTransientFailure.retryAttempt') AS attempt
+          FROM orchestration_codex_transient_recovery_intents AS intent
+          JOIN orchestration_events AS event ON event.sequence = intent.sequence
+          WHERE source_kind = 'intent' ORDER BY intent.sequence`);
+          expect(rows.map((row) => row.attempt)).toEqual([0, 1]);
+        } else {
+          await Effect.runPromise(clock.adjust(60000));
+          await harness.drain();
+          const rows = await Effect.runPromise(harness.sql<{ readonly count: number }>`
+          SELECT COUNT(*) AS count FROM orchestration_codex_transient_recovery_intents WHERE source_kind = 'intent'`);
+          expect(rows[0]?.count).toBe(1);
+        }
+        expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+        expect(harness.startSession).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(["transient", "permanent", "foreign context", "unknown inventory"] as const)(
+      "associates a no-start failed ACK only from exact fresh proof: %s",
+      async (scenario) => {
+        const clock = await makeClock();
+        const harness = await createHarness({ startReactor: false, testClock: clock });
+        const nextRoot = TurnId.make("failed-without-start");
+        const completedAt = "2026-01-01T00:00:11.000Z";
+        const originalInventory = harness.listSessions.getMockImplementation()!;
+        harness.sendTurn.mockImplementationOnce(() =>
+          Effect.sync(() => {
+            const live = harness.runtimeSessions[0]!;
+            harness.runtimeSessions[0] = {
+              ...live,
+              status: "ready",
+              activeTurnId: undefined,
+              lastError: "Fresh B failure",
+              updatedAt: completedAt,
+              codexRootTurnFailure: {
+                turnId: nextRoot,
+                providerThreadId:
+                  scenario === "foreign context" ? "foreign-native-context" : "private-native-root",
+                observedAt: completedAt,
+                ...(scenario === "permanent" ? {} : { category: "transport" as const }),
+              },
+            };
+            if (scenario === "unknown inventory")
+              harness.listSessions.mockImplementation(() =>
+                Effect.die("synthetic unknown inventory"),
+              );
+            return { threadId, turnId: nextRoot };
+          }),
+        );
+        await seed(harness);
+        await waitForIntent(harness);
+        await Effect.runPromise(clock.adjust(1000));
+        await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+        await harness.drain();
+        const rows = await Effect.runPromise(harness.sql<{
+          state: string;
+          startedAt: string | null;
+          completedAt: string | null;
+          requestedAt: string | null;
+          pendingMessageId: string | null;
+        }>`
+          SELECT state, started_at AS "startedAt", completed_at AS "completedAt", requested_at AS "requestedAt",
+            pending_message_id AS "pendingMessageId" FROM projection_turns
+          WHERE thread_id = ${threadId} AND turn_id = ${nextRoot}`);
+        const detail = await harness.readThreadDetail(threadId);
+        if (scenario === "transient" || scenario === "permanent") {
+          expect(rows).toMatchObject([
+            {
+              state: "error",
+              startedAt: null,
+              completedAt,
+              requestedAt: "2026-01-01T00:00:10.000Z",
+            },
+          ]);
+          expect(rows[0]?.pendingMessageId).toMatch(/^runtime-recovery:/);
+          expect(detail?.latestTurn).toMatchObject({
+            turnId: nextRoot,
+            state: "error",
+            startedAt: null,
+            completedAt,
+          });
+          expect(detail?.session).toMatchObject({
+            status: "ready",
+            activeTurnId: null,
+            updatedAt: completedAt,
+          });
+          expect(await failedCompletedAt(harness)).toBe("2026-01-01T00:00:04.000Z");
+          if (scenario === "transient") {
+            await waitForIntent(harness, 2);
+            const attempts = await Effect.runPromise(harness.sql<{ attempt: number }>`
+              SELECT json_extract(event.payload_json, '$.runtimeRecovery.codexTransientFailure.retryAttempt') AS attempt
+              FROM orchestration_codex_transient_recovery_intents AS intent
+              JOIN orchestration_events AS event ON event.sequence = intent.sequence
+              WHERE source_kind = 'intent' ORDER BY intent.sequence`);
+            expect(attempts.map((row) => row.attempt)).toEqual([0, 1]);
+          } else {
+            await Effect.runPromise(clock.adjust(60000));
+            await harness.drain();
+            expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+          }
+        } else {
+          expect(rows).toEqual([]);
+          expect(detail?.latestTurn?.turnId).toBe(failedRoot);
+          expect(
+            detail?.activities.some(
+              (activity) =>
+                (activity.payload as Record<string, unknown>)?.recovery ===
+                "codex-transient-recovery-uncertain",
+            ),
+          ).toBe(true);
+          harness.listSessions.mockImplementation(originalInventory);
+          await Effect.runPromise(clock.adjust(60000));
+          await harness.drain();
+          expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+        }
+        const events = await Effect.runPromise(
+          harness.engine.readEvents(0).pipe(Stream.runCollect),
+        );
+        expect(
+          events.some(
+            (event) =>
+              event.type === "thread.session-set" &&
+              event.payload.session.activeTurnId === nextRoot &&
+              event.payload.session.status === "running",
+          ),
+        ).toBe(false);
+        expect(harness.startSession).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(["Stop", "newer input"] as const)(
+      "does not associate no-start B after %s wins the final CAS",
+      async (control) => {
+        const clock = await makeClock();
+        const reached = Effect.runSync(Deferred.make<void>());
+        const release = Effect.runSync(Deferred.make<void>());
+        const harness = await createHarness({
+          startReactor: false,
+          testClock: clock,
+          beforeCodexFailedRootDispatch: Deferred.succeed(reached, undefined).pipe(
+            Effect.andThen(Deferred.await(release)),
+          ),
+        });
+        const nextRoot = TurnId.make("failed-at-final-cas");
+        harness.sendTurn.mockImplementationOnce(() =>
+          Effect.sync(() => {
+            harness.runtimeSessions[0] = {
+              ...harness.runtimeSessions[0]!,
+              status: "ready",
+              activeTurnId: undefined,
+              codexRootTurnFailure: {
+                turnId: nextRoot,
+                providerThreadId: "private-native-root",
+                observedAt: "2026-01-01T00:00:11.000Z",
+                category: "transport",
+              },
+              updatedAt: "2026-01-01T00:00:11.000Z",
+            };
+            return { threadId, turnId: nextRoot };
+          }),
+        );
+        await seed(harness);
+        await waitForIntent(harness);
+        await Effect.runPromise(clock.adjust(1000));
+        await Effect.runPromise(Deferred.await(reached));
+        if (control === "Stop")
+          await Effect.runPromise(
+            harness.engine.dispatch({
+              type: "thread.session.stop",
+              commandId: CommandId.make("cmd-stop-final-failed-root-cas"),
+              threadId,
+              createdAt: "2026-01-01T00:00:12.000Z",
+            }),
+          );
+        else
+          await Effect.runPromise(
+            harness.engine.dispatch({
+              type: "thread.turn.start",
+              commandId: CommandId.make("cmd-new-input-final-failed-root-cas"),
+              threadId,
+              message: {
+                messageId: MessageId.make("new-input-final-failed-root-cas"),
+                role: "user",
+                text: "New explicit input",
+                attachments: [],
+              },
+              runtimeMode: "approval-required",
+              interactionMode: "default",
+              createdAt: "2026-01-01T00:00:12.000Z",
+            }),
+          );
+        await Effect.runPromise(Deferred.succeed(release, undefined));
+        await harness.drain();
+        const rows = await Effect.runPromise(harness.sql<{ count: number }>`
+        SELECT COUNT(*) AS count FROM projection_turns WHERE thread_id = ${threadId} AND turn_id = ${nextRoot}`);
+        expect(rows[0]?.count).toBe(0);
+        if (control === "Stop") {
+          await waitFor(() => harness.stopSession.mock.calls.length === 1);
+          await harness.drain();
+        } else {
+          await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+          await harness.drain();
+        }
+        expect((await harness.readThreadDetail(threadId))?.latestTurn?.turnId).not.toBe(nextRoot);
+      },
+    );
+
+    it.each(["thread.turn.interrupt", "thread.session.stop"] as const)(
+      "cancels %s during the backoff",
+      async (type) => {
+        const clock = await makeClock();
+        const harness = await createHarness({ startReactor: false, testClock: clock });
+        await seed(harness);
+        await waitForIntent(harness);
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type,
+            commandId: CommandId.make("cmd-stop-transient"),
+            threadId,
+            createdAt: "2026-01-01T00:00:05.000Z",
+          }),
+        );
+        await harness.drain();
+        await Effect.runPromise(clock.adjust(60000));
+        await harness.drain();
+        expect(harness.sendTurn).not.toHaveBeenCalled();
+        expect(harness.startSession).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(["account", "mode", "archive", "delete"] as const)(
+      "cancels the transient backoff on an explicit %s control",
+      async (control) => {
+        const clock = await makeClock();
+        const harness = await createHarness({ startReactor: false, testClock: clock });
+        await seed(harness);
+        await waitForIntent(harness);
+        const commandId = CommandId.make(`cmd-transient-control-${control}`);
+        if (control === "account")
+          await Effect.runPromise(
+            harness.engine.dispatch({
+              type: "thread.meta.update",
+              commandId,
+              threadId,
+              modelSelection: {
+                instanceId: ProviderInstanceId.make("claudeAgent"),
+                model: "claude-sonnet-5",
+              },
+            }),
+          );
+        else if (control === "mode")
+          await Effect.runPromise(
+            harness.engine.dispatch({
+              type: "thread.runtime-mode.set",
+              commandId,
+              threadId,
+              runtimeMode: "full-access",
+              createdAt: "2026-01-01T00:00:05.000Z",
+            }),
+          );
+        else
+          await Effect.runPromise(
+            harness.engine.dispatch({
+              type: control === "archive" ? "thread.archive" : "thread.delete",
+              commandId,
+              threadId,
+            }),
+          );
+        await harness.drain();
+        await Effect.runPromise(clock.adjust(60000));
+        await harness.drain();
+        expect(harness.sendTurn).not.toHaveBeenCalled();
+        const cancelled = await Effect.runPromise(harness.sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count FROM orchestration_events WHERE stream_id = ${threadId}
+          AND event_type = 'thread.activity-appended'
+          AND json_extract(payload_json, '$.activity.payload.recovery') = 'codex-transient-recovery-cancelled'`);
+        expect(cancelled[0]?.count).toBe(1);
+      },
+    );
+
+    it("rechecks durable Stop after the transient attempt claim is appended", async () => {
+      const clock = await makeClock();
+      const reached = Effect.runSync(Deferred.make<void>());
+      const release = Effect.runSync(Deferred.make<void>());
+      const harness = await createHarness({
+        startReactor: false,
+        testClock: clock,
+        beforeRuntimeRecoveryAttemptDispatch: Deferred.succeed(reached, undefined).pipe(
+          Effect.andThen(Deferred.await(release)),
+        ),
+      });
+      await seed(harness);
+      await waitForIntent(harness);
+      await Effect.runPromise(clock.adjust(1000));
+      await Effect.runPromise(Deferred.await(reached));
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.stop",
+          commandId: CommandId.make("cmd-stop-at-transient-claim"),
+          threadId,
+          createdAt: "2026-01-01T00:00:06.000Z",
+        }),
+      );
+      await Effect.runPromise(Deferred.succeed(release, undefined));
+      await harness.drain();
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      const detail = await harness.readThreadDetail(threadId);
+      expect(
+        detail?.activities.some(
+          (activity) =>
+            (activity.payload as Record<string, unknown>)?.recovery ===
+            "codex-transient-continuation-attempted",
+        ),
+      ).toBe(true);
+      expect(await failedCompletedAt(harness)).toBe("2026-01-01T00:00:04.000Z");
+    });
+
+    it("rejects a competing backend's immutable transient claim", async () => {
+      const clock = await makeClock();
+      const reached = Effect.runSync(Deferred.make<void>());
+      const release = Effect.runSync(Deferred.make<void>());
+      let intercepted = false;
+      const harness = await createHarness({
+        startReactor: false,
+        testClock: clock,
+        beforeRuntimeRecoveryAttemptDispatch: Effect.suspend(() => {
+          if (intercepted) return Effect.void;
+          intercepted = true;
+          return Deferred.succeed(reached, undefined).pipe(Effect.andThen(Deferred.await(release)));
+        }),
+      });
+      const marker = await seed(harness);
+      await waitForIntent(harness);
+      await Effect.runPromise(clock.adjust(1000));
+      await Effect.runPromise(Deferred.await(reached));
+      const events = await Effect.runPromise(
+        harness.engine.readEvents(marker.sequence).pipe(Stream.runCollect),
+      );
+      const intent = events.find(
+        (event) =>
+          event.type === "thread.turn-start-requested" &&
+          event.payload.runtimeRecovery?.sourceEventSequence === marker.sequence,
+      );
+      if (intent?.type !== "thread.turn-start-requested")
+        throw new Error("Missing synthetic transient intent");
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make(`server:runtime-recovery-attempt:${intent.sequence}`),
+          threadId,
+          activity: {
+            id: EventId.make(`runtime-recovery-attempt:${intent.sequence}`),
+            kind: "runtime.warning",
+            tone: "info",
+            summary: "Synthetic winning backend claim",
+            turnId: failedRoot,
+            payload: {
+              recovery: "codex-transient-continuation-attempted",
+              sourceEventSequence: marker.sequence,
+              attemptOwnerId: "00000000-0000-4000-8000-000000000099",
+            },
+            createdAt: "2026-01-01T00:00:10.000Z",
+          },
+          createdAt: "2026-01-01T00:00:10.000Z",
+        }),
+      );
+      await Effect.runPromise(Deferred.succeed(release, undefined));
+      await harness.drain();
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      expect(harness.startSession).not.toHaveBeenCalled();
+    });
+
+    it.each(["same root", "steer", "correlated", "foreign thread"] as const)(
+      "parks a contradictory %s ACK without another paid send",
+      async (kind) => {
+        const clock = await makeClock();
+        const harness = await createHarness({ startReactor: false, testClock: clock });
+        harness.sendTurn.mockImplementationOnce(() =>
+          Effect.succeed({
+            threadId: kind === "foreign thread" ? ThreadId.make("foreign-thread") : threadId,
+            turnId: kind === "same root" ? failedRoot : TurnId.make("contradictory-ack"),
+            ...(kind === "steer" ? { deliveryKind: "steer" as const } : {}),
+            ...(kind === "correlated" ? { clientCorrelationId: "foreign-correlation" } : {}),
+          }),
+        );
+        await seed(harness);
+        await waitForIntent(harness);
+        await Effect.runPromise(clock.adjust(1000));
+        await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+        await harness.drain();
+        await Effect.runPromise(clock.adjust(60000));
+        await harness.drain();
+        expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+        const detail = await harness.readThreadDetail(threadId);
+        expect(
+          detail?.activities.some(
+            (activity) =>
+              (activity.payload as Record<string, unknown>)?.recovery ===
+              "codex-transient-recovery-uncertain",
+          ),
+        ).toBe(true);
+        expect(
+          detail?.activities.some(
+            (activity) =>
+              (activity.payload as Record<string, unknown>)?.recovery ===
+              "codex-transient-continuation-accepted",
+          ),
+        ).toBe(false);
+        expect(await failedCompletedAt(harness)).toBe("2026-01-01T00:00:04.000Z");
+      },
+    );
+
+    it.each(["Stop", "newer input"] as const)(
+      "revokes a hanging recovery ACK promptly for %s",
+      async (control) => {
+        const clock = await makeClock();
+        const harness = await createHarness({ startReactor: false, testClock: clock });
+        const cancelled = Effect.runSync(Deferred.make<void>());
+        const release = Effect.runSync(Deferred.make<void>());
+        harness.sendTurn.mockImplementationOnce(() =>
+          Deferred.await(release).pipe(
+            Effect.as({ threadId, turnId: TurnId.make("late-untrusted-ack") }),
+            Effect.ensuring(Deferred.succeed(cancelled, undefined)),
+          ),
+        );
+        await seed(harness);
+        await waitForIntent(harness);
+        await Effect.runPromise(clock.adjust(1000));
+        await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+        if (control === "Stop")
+          await Effect.runPromise(
+            harness.engine.dispatch({
+              type: "thread.session.stop",
+              commandId: CommandId.make("cmd-stop-hanging-recovery"),
+              threadId,
+              createdAt: "2026-01-01T00:00:06.000Z",
+            }),
+          );
+        else
+          await Effect.runPromise(
+            harness.engine.dispatch({
+              type: "thread.turn.start",
+              commandId: CommandId.make("cmd-new-input-hanging-recovery"),
+              threadId,
+              message: {
+                messageId: MessageId.make("new-input-after-recovery"),
+                role: "user",
+                text: "Use this newly authorized input instead.",
+                attachments: [],
+              },
+              runtimeMode: "approval-required",
+              interactionMode: "default",
+              createdAt: "2026-01-01T00:00:06.000Z",
+            }),
+          );
+        // No clock advancement to the30s ACK deadline: control cancellation
+        // releases the global worker and lets the existing command path run.
+        await Effect.runPromise(Deferred.await(cancelled));
+        await harness.drain();
+        if (control === "Stop") {
+          await waitFor(() => harness.stopSession.mock.calls.length === 1);
+          await harness.drain();
+          expect(harness.stopSession).toHaveBeenCalledTimes(1);
+          expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+        } else {
+          await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+          await harness.drain();
+          expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({
+            input: "Use this newly authorized input instead.",
+          });
+          expect(harness.sendTurn.mock.calls[1]?.[0]).not.toHaveProperty("expectedFailedRoot");
+        }
+        await Effect.runPromise(Deferred.succeed(release, undefined));
+        await harness.drain();
+        const detail = await harness.readThreadDetail(threadId);
+        expect(detail?.latestTurn?.turnId).not.toBe("late-untrusted-ack");
+        expect(
+          detail?.activities.some(
+            (activity) =>
+              (activity.payload as Record<string, unknown>)?.recovery ===
+              "codex-transient-continuation-accepted",
+          ),
+        ).toBe(false);
+      },
+    );
+
+    it.each([
+      "unknown category",
+      "replacement runtime",
+      "new native root",
+      "foreign account",
+    ] as const)("never submits from %s evidence", async (scenario) => {
+      const clock = await makeClock();
+      const harness = await createHarness({ startReactor: false, testClock: clock });
+      await seed(harness);
+      await waitForIntent(harness);
+      const live = harness.runtimeSessions[0]!;
+      harness.runtimeSessions[0] =
+        scenario === "unknown category"
+          ? {
+              ...live,
+              codexRootTurnFailure: { ...live.codexRootTurnFailure!, category: undefined },
+            }
+          : scenario === "replacement runtime"
+            ? {
+                ...live,
+                subagentRuntimeId: SubagentRuntimeId.make("00000000-0000-4000-8000-000000000999"),
+              }
+            : scenario === "foreign account"
+              ? { ...live, providerInstanceId: ProviderInstanceId.make("peer") }
+              : {
+                  ...live,
+                  codexRootTurnFailure: {
+                    ...live.codexRootTurnFailure!,
+                    turnId: TurnId.make("new-native-root"),
+                  },
+                };
+      await Effect.runPromise(clock.adjust(1000));
+      await harness.drain();
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      expect(harness.startSession).not.toHaveBeenCalled();
+      expect(harness.steerTurn).not.toHaveBeenCalled();
+    });
+
+    it("retries preparation beyond native's finite budget but never retries an unknown paid submission", async () => {
+      const clock = await makeClock();
+      const harness = await createHarness({ startReactor: false, testClock: clock });
+      await seed(harness);
+      await waitForIntent(harness);
+      const original = harness.listSessions.getMockImplementation()!;
+      harness.listSessions.mockImplementation(() =>
+        Effect.die(new Error("synthetic inventory failure")),
+      );
+      for (let i = 0; i < 10; i += 1) {
+        await Effect.runPromise(clock.adjust(60000));
+        await harness.drain();
+      }
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      harness.listSessions.mockImplementation(original);
+      harness.sendTurn.mockImplementationOnce(() =>
+        Effect.die(new Error("uncertain synthetic ACK")),
+      );
+      await Effect.runPromise(clock.adjust(60000));
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await harness.drain();
+      await Effect.runPromise(clock.adjust(60000));
+      await harness.drain();
+      expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+      const nextRoot = TurnId.make("unknown-ack-failed-root");
+      await recordFailure(harness, nextRoot);
+      await harness.drain();
+      await Effect.runPromise(clock.adjust(60000));
+      await harness.drain();
+      expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+      const rows = await Effect.runPromise(harness.sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count FROM orchestration_codex_transient_recovery_intents WHERE source_kind = 'intent'`);
+      expect(rows[0]?.count).toBe(1);
+    });
+  });
 
   describe("verified runtime ownership-loss recovery", () => {
     const threadId = ThreadId.make("thread-1");

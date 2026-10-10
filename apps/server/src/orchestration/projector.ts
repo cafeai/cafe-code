@@ -592,24 +592,27 @@ export function projectEvent(
                 : {}),
               runtimeMode: payload.runtimeMode,
               interactionMode: payload.interactionMode,
-              session: {
-                threadId: payload.threadId,
-                status: "starting",
-                providerName: thread.session?.providerName ?? null,
-                ...(thread.session?.providerInstanceId !== undefined
-                  ? { providerInstanceId: thread.session.providerInstanceId }
-                  : {}),
-                ...(thread.session?.maxConcurrentSubagents !== undefined
-                  ? { maxConcurrentSubagents: thread.session.maxConcurrentSubagents }
-                  : {}),
-                runtimeMode: payload.runtimeMode,
-                ...(thread.session?.subagentRuntimeId !== undefined
-                  ? { subagentRuntimeId: thread.session.subagentRuntimeId }
-                  : {}),
-                activeTurnId: null,
-                lastError: null,
-                updatedAt: payload.createdAt,
-              },
+              session:
+                payload.runtimeRecovery?.codexTransientFailure !== undefined
+                  ? thread.session
+                  : {
+                      threadId: payload.threadId,
+                      status: "starting",
+                      providerName: thread.session?.providerName ?? null,
+                      ...(thread.session?.providerInstanceId !== undefined
+                        ? { providerInstanceId: thread.session.providerInstanceId }
+                        : {}),
+                      ...(thread.session?.maxConcurrentSubagents !== undefined
+                        ? { maxConcurrentSubagents: thread.session.maxConcurrentSubagents }
+                        : {}),
+                      runtimeMode: payload.runtimeMode,
+                      ...(thread.session?.subagentRuntimeId !== undefined
+                        ? { subagentRuntimeId: thread.session.subagentRuntimeId }
+                        : {}),
+                      activeTurnId: null,
+                      lastError: null,
+                      updatedAt: payload.createdAt,
+                    },
               updatedAt: event.occurredAt,
             }),
           };
@@ -730,6 +733,38 @@ export function projectEvent(
           event.type,
           "session",
         );
+        if (payload.codexFailedRoot !== undefined) {
+          const failed = payload.codexFailedRoot;
+          // A positive accepted-send receipt plus fresh failed-root proof is
+          // terminal association, never a synthetic start/liveness signal.
+          return {
+            ...nextBase,
+            threads: updateThread(nextBase.threads, payload.threadId, {
+              session,
+              latestTurn: {
+                turnId: failed.turnId,
+                state: "error",
+                requestedAt: failed.requestedAt,
+                startedAt:
+                  thread.latestTurn?.turnId === failed.turnId ? thread.latestTurn.startedAt : null,
+                completedAt:
+                  thread.latestTurn?.turnId === failed.turnId
+                    ? (thread.latestTurn.completedAt ?? failed.completedAt)
+                    : failed.completedAt,
+                assistantMessageId:
+                  thread.latestTurn?.turnId === failed.turnId
+                    ? thread.latestTurn.assistantMessageId
+                    : null,
+              },
+              messages: thread.messages.map((message) =>
+                message.role === "assistant" && message.turnId === failed.turnId
+                  ? { ...message, streaming: false }
+                  : message,
+              ),
+              updatedAt: event.occurredAt,
+            }),
+          };
+        }
         if (
           thread.session !== null &&
           isStaleProvisionalSessionReplay({ current: thread.session, incoming: session })

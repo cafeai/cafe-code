@@ -117,6 +117,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
   readModel,
   runtimeRecoveryBarrierVerified = false,
   codexRootReplacementVerified = false,
+  codexFailedRootVerified = false,
   scheduledFollowUpVerified = false,
 }: {
   readonly command: OrchestrationCommand;
@@ -125,6 +126,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
   readonly runtimeRecoveryBarrierVerified?: boolean;
   /** Only the engine's serialized durable steer/control-barrier read may set this. */
   readonly codexRootReplacementVerified?: boolean;
+  /** Exact internal intent/attempt/ACK and control barrier, checked by the engine. */
+  readonly codexFailedRootVerified?: boolean;
   /** Only an exact occurrence claimed in the event commit transaction may set this. */
   readonly scheduledFollowUpVerified?: boolean;
 }): Effect.fn.Return<DecideOrchestrationCommandResult, OrchestrationCommandInvariantError> {
@@ -733,20 +736,30 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         }
       }
       if (command.runtimeRecovery !== undefined) {
-        // A verified loss is permission to continue precisely one stopped
-        // session, not permission to steer newer work or reopen an archived
-        // thread. Stop has no reliable session-row representation, so this
+        // Recovery applies to precisely one verified terminal root: either a
+        // stopped lost owner or a failed root in the same healthy native
+        // generation. It never grants permission to steer newer work or
+        // reopen an archived thread. Stop has no reliable row representation, so this
         // snapshot comparison supplements (never replaces) the engine's
         // durable, sequence-ordered control barrier.
         const recovery = command.runtimeRecovery;
+        const transient = recovery.codexTransientFailure;
         if (
           !runtimeRecoveryBarrierVerified ||
           !command.commandId.startsWith("server:") ||
           targetThread.archivedAt !== null ||
           targetThread.deletedAt !== null ||
-          targetThread.session?.status !== "stopped" ||
-          targetThread.session.activeTurnId !== null ||
-          targetThread.session.updatedAt !== recovery.sessionUpdatedAt ||
+          (transient === undefined
+            ? targetThread.session?.status !== "stopped"
+            : targetThread.session?.status !== "ready" ||
+              targetThread.session.providerName !== "codex" ||
+              targetThread.session.providerInstanceId !== transient.providerInstanceId ||
+              targetThread.session.subagentRuntimeId !== transient.subagentRuntimeId ||
+              targetThread.modelSelection.instanceId !== transient.providerInstanceId ||
+              targetThread.latestTurn?.state !== "error" ||
+              command.message.attachments.length !== 0) ||
+          targetThread.session?.activeTurnId !== null ||
+          targetThread.session?.updatedAt !== recovery.sessionUpdatedAt ||
           targetThread.latestTurn?.turnId !== recovery.turnId ||
           command.bootstrap !== undefined ||
           command.runtimeMode !== targetThread.runtimeMode ||
@@ -758,7 +771,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         ) {
           return yield* new OrchestrationCommandInvariantError({
             commandType: command.type,
-            detail: "Runtime recovery no longer matches the verified stopped turn.",
+            detail: "Runtime recovery no longer matches the verified terminal turn.",
           });
         }
       }
@@ -1426,6 +1439,42 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           detail: SESSION_LIFECYCLE_SUPERSEDED,
         });
       }
+      const failedRoot = command.codexFailedRoot;
+      if (
+        failedRoot !== undefined &&
+        (!codexFailedRootVerified ||
+          !command.commandId.startsWith("server:") ||
+          command.expectedSessionLifecycle === undefined ||
+          command.expectedSubagentRuntimeId == null ||
+          thread.archivedAt !== null ||
+          thread.deletedAt !== null ||
+          (thread.session?.status !== "ready" && thread.session?.status !== "error") ||
+          thread.session.providerName !== "codex" ||
+          thread.session.activeTurnId !== null ||
+          thread.session.providerInstanceId !== command.session.providerInstanceId ||
+          thread.session.subagentRuntimeId !== command.session.subagentRuntimeId ||
+          thread.modelSelection.instanceId !== command.session.providerInstanceId ||
+          (thread.latestTurn?.turnId !== failedRoot.previousTurnId &&
+            thread.latestTurn?.turnId !== failedRoot.turnId) ||
+          (thread.latestTurn?.turnId === failedRoot.previousTurnId &&
+            thread.latestTurn.state !== "error") ||
+          (thread.latestTurn?.turnId === failedRoot.turnId &&
+            thread.latestTurn.state !== "error" &&
+            thread.latestTurn.state !== "running") ||
+          failedRoot.turnId === failedRoot.previousTurnId ||
+          command.session.threadId !== command.threadId ||
+          command.session.status !== "ready" ||
+          command.session.providerName !== "codex" ||
+          command.session.activeTurnId !== null ||
+          command.session.lastError === null ||
+          command.session.updatedAt !== failedRoot.completedAt ||
+          command.terminalTurnRecovery !== undefined ||
+          command.codexRootReplacement !== undefined)
+      )
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Codex failed-root acceptance is no longer authorized.",
+        });
       const replacement = command.codexRootReplacement;
       if (
         replacement !== undefined &&
@@ -1466,6 +1515,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           session: command.session,
+          ...(failedRoot !== undefined ? { codexFailedRoot: failedRoot } : {}),
           ...(command.terminalTurnRecovery !== undefined
             ? { terminalTurnRecovery: command.terminalTurnRecovery }
             : {}),

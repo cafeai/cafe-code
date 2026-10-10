@@ -4,6 +4,7 @@ Status: Accepted; implemented and regression-tested
 Created: 2026-09-16 13:05:41 JST (UTC+0900)
 Last updated: 2026-09-16 13:23:46 JST (UTC+0900)
 Decision authority: implementation choice within the user's request for automatic reconnect and continuation until explicit Stop.
+Supplemented by: [persistent Codex transient recovery](codex-persistent-transient-recovery.md), a distinct definitive-failed-root path that preserves the Stop and at-most-once constraints here.
 
 ## Context
 

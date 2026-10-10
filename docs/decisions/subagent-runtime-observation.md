@@ -7,6 +7,7 @@ Created: 2026-10-04 03:36:25 JST (UTC+0900)
 Last updated: 2026-10-04 04:14:44 JST (UTC+0900)
 Decision authority: implementation choice within the user's request to fix stale subagents after restart or provider disconnection.
 Supersedes: only the assumption that retained nonterminal lifecycle alone establishes current liveness in [ordered lifecycle retention](subagent-lifecycle-retention.md).
+Partially superseded by: [persistent Codex transient recovery](codex-persistent-transient-recovery.md), which separates a failed root from a freshly verified surviving context. Its exact-generation and unknown/closed-runtime overlay remains governing.
 
 ## Context
 

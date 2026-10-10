@@ -2931,6 +2931,263 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
+  for (const scenario of [
+    "valid",
+    "missing-proof",
+    "permanent",
+    "wrong-turn",
+    "wrong-runtime",
+    "active",
+    "missing-context",
+    "conflicting-completion",
+  ] as const) {
+    it.effect(`failed-root continuation admission is exact: ${scenario}`, () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const threadId = asThreadId(`failed-root-service-${scenario}`);
+        const turnId = asTurnId("original-failed-root");
+        const subagentRuntimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000041");
+        const providerThreadId = "private-native-failed-conversation";
+        yield* provider.startSession(threadId, {
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          threadId,
+          cwd: process.cwd(),
+          runtimeMode: "approval-required",
+        });
+        routing.codex.updateSession(threadId, (current) => ({
+          ...current,
+          status: scenario === "active" ? "running" : "ready",
+          subagentRuntimeId:
+            scenario === "wrong-runtime"
+              ? SubagentRuntimeId.make("00000000-0000-4000-8000-000000000042")
+              : subagentRuntimeId,
+          ...(scenario === "active" ? { activeTurnId: asTurnId("newer-root") } : {}),
+          lastError: "Root failed",
+          ...(scenario === "missing-proof"
+            ? {}
+            : {
+                codexRootTurnFailure: {
+                  turnId: scenario === "wrong-turn" ? asTurnId("different-failed-root") : turnId,
+                  providerThreadId,
+                  observedAt: "2026-01-01T00:00:02.000Z",
+                  ...(scenario === "permanent" ? {} : { category: "transport" as const }),
+                },
+              }),
+        }));
+        if (scenario === "missing-context") yield* routing.codex.adapter.stopSession(threadId);
+        routing.codex.startSession.mockClear();
+        routing.codex.sendTurn.mockClear();
+        routing.codex.steerTurn.mockClear();
+        const input = {
+          threadId,
+          input: "Continue from the current conversation state.",
+          attachments: [],
+          expectedFailedRoot: { turnId, providerThreadId, subagentRuntimeId },
+          ...(scenario === "conflicting-completion" ? { expectedCompletedRootTurnId: turnId } : {}),
+        };
+        const exit = yield* provider.sendTurn(input).pipe(Effect.exit);
+        assert.equal(Exit.isSuccess(exit), scenario === "valid");
+        assert.equal(routing.codex.startSession.mock.calls.length, 0);
+        assert.equal(routing.codex.steerTurn.mock.calls.length, 0);
+        assert.equal(routing.codex.sendTurn.mock.calls.length, scenario === "valid" ? 1 : 0);
+        if (scenario === "valid")
+          assert.deepEqual(routing.codex.sendTurn.mock.calls[0]?.[0], {
+            ...input,
+            allowActiveTurnSteerFallback: false,
+          });
+      }),
+    );
+  }
+
+  for (const scenario of [
+    "running",
+    "terminal-before-ack",
+    "stopped",
+    "replacement-runtime",
+    "replacement-account",
+    "replacement-owner",
+    "newer-root",
+    "unknown-inventory",
+    "foreign-ack-thread",
+  ] as const) {
+    it.effect(`failed-root ACK persistence retains only fresh owning context: ${scenario}`, () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const directory = yield* ProviderSessionDirectory;
+        const threadId = asThreadId(`failed-root-ack-${scenario}`);
+        const failedTurnId = asTurnId("failed-before-continuation");
+        const acceptedTurnId = asTurnId("accepted-continuation");
+        const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000043");
+        const replacementRuntimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000044");
+        const providerThreadId = "private-ack-context";
+        const terminalAt = "2026-01-01T00:00:03.000Z";
+        yield* provider.startSession(threadId, {
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          threadId,
+          runtimeMode: "approval-required",
+          cwd: process.cwd(),
+        });
+        routing.codex.updateSession(threadId, (session) => ({
+          ...session,
+          status: "ready",
+          subagentRuntimeId: runtimeId,
+          lastError: "Original root failed",
+          codexRootTurnFailure: {
+            turnId: failedTurnId,
+            providerThreadId,
+            observedAt: "2026-01-01T00:00:02.000Z",
+            category: "transport",
+          },
+        }));
+        yield* directory.upsert({
+          threadId,
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          status: "error",
+          runtimePayload: {
+            subagentRuntimeId: runtimeId,
+            activeTurnId: null,
+            lastError: "Original root failed",
+          },
+        });
+        const listImplementation = routing.codex.listSessions.getMockImplementation()!;
+        let beforeAckBinding: unknown;
+        routing.codex.sendTurn.mockImplementationOnce(() =>
+          Effect.gen(function* () {
+            routing.codex.updateSession(threadId, (session) => {
+              const { codexRootTurnFailure: _failure, ...ordinary } = session;
+              if (scenario === "terminal-before-ack")
+                return {
+                  ...ordinary,
+                  status: "ready",
+                  updatedAt: terminalAt,
+                  lastError: "Continuation root failed",
+                  codexRootTurnFailure: {
+                    turnId: acceptedTurnId,
+                    providerThreadId,
+                    observedAt: terminalAt,
+                  },
+                };
+              return {
+                ...ordinary,
+                status: "running",
+                activeTurnId: acceptedTurnId,
+                ...(scenario === "replacement-runtime"
+                  ? { subagentRuntimeId: replacementRuntimeId }
+                  : {}),
+              };
+            });
+            if (scenario === "terminal-before-ack")
+              yield* directory.upsert({
+                threadId,
+                provider: CODEX_DRIVER,
+                providerInstanceId: codexInstanceId,
+                status: "error",
+                runtimePayload: {
+                  activeTurnId: null,
+                  lastError: "Continuation root failed",
+                  lastRuntimeEvent: "turn.completed",
+                  lastRuntimeEventAt: terminalAt,
+                },
+              });
+            if (scenario === "stopped") {
+              yield* routing.codex.stopSession(threadId);
+              yield* directory.upsert({
+                threadId,
+                provider: CODEX_DRIVER,
+                providerInstanceId: codexInstanceId,
+                status: "stopped",
+                runtimePayload: { activeTurnId: null },
+              });
+            }
+            if (scenario === "replacement-account")
+              yield* directory.upsert({
+                threadId,
+                provider: CLAUDE_AGENT_DRIVER,
+                providerInstanceId: claudeAgentInstanceId,
+                status: "running",
+                runtimePayload: { activeTurnId: "replacement-root" },
+              });
+            if (scenario === "replacement-runtime")
+              yield* directory.upsert({
+                threadId,
+                provider: CODEX_DRIVER,
+                providerInstanceId: codexInstanceId,
+                status: "running",
+                runtimePayload: {
+                  subagentRuntimeId: replacementRuntimeId,
+                  activeTurnId: "replacement-root",
+                },
+              });
+            if (scenario === "replacement-owner")
+              yield* directory.upsert({
+                threadId,
+                provider: CODEX_DRIVER,
+                providerInstanceId: codexInstanceId,
+                status: "running",
+                runtimePayload: { runtimeOwnerId: "different-owner", activeTurnId: acceptedTurnId },
+              });
+            if (scenario === "newer-root")
+              yield* directory.upsert({
+                threadId,
+                provider: CODEX_DRIVER,
+                providerInstanceId: codexInstanceId,
+                status: "running",
+                runtimePayload: { activeTurnId: "newer-root" },
+              });
+            if (scenario === "unknown-inventory")
+              routing.codex.listSessions.mockImplementation(() =>
+                Effect.die(new Error("private-inventory-diagnostic")),
+              );
+            beforeAckBinding = Option.getOrThrow(yield* directory.getBinding(threadId));
+            return {
+              threadId:
+                scenario === "foreign-ack-thread" ? asThreadId("foreign-ack-thread") : threadId,
+              turnId: acceptedTurnId,
+            };
+          }).pipe(Effect.orDie),
+        );
+        const accepted = yield* provider
+          .sendTurn({
+            threadId,
+            input: "Continue in the current native context.",
+            expectedFailedRoot: {
+              turnId: failedTurnId,
+              providerThreadId,
+              subagentRuntimeId: runtimeId,
+            },
+          })
+          .pipe(
+            Effect.ensuring(
+              Effect.sync(() => routing.codex.listSessions.mockImplementation(listImplementation)),
+            ),
+          );
+        assert.equal(accepted.turnId, acceptedTurnId);
+        const binding = Option.getOrThrow(yield* directory.getBinding(threadId));
+        if (scenario === "running") {
+          assert.equal(binding.status, "running");
+          assert.equal(
+            (binding.runtimePayload as { activeTurnId?: unknown }).activeTurnId,
+            acceptedTurnId,
+          );
+        } else if (scenario === "terminal-before-ack") {
+          assert.equal((binding.runtimePayload as { activeTurnId?: unknown }).activeTurnId, null);
+          assert.equal(
+            (binding.runtimePayload as { lastError?: unknown }).lastError,
+            "Continuation root failed",
+          );
+          assert.equal(
+            (binding.runtimePayload as { lastRuntimeEventAt?: unknown }).lastRuntimeEventAt,
+            terminalAt,
+          );
+        } else assert.deepEqual(binding, beforeAckBinding);
+        assert.equal(routing.codex.sendTurn.mock.calls.length, 1);
+      }),
+    );
+  }
+
   it.effect("never downgrades a native review into an active steer", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;

@@ -85,6 +85,10 @@ import { buildCodexSteerClientCorrelationId } from "../../provider/codexSteerCor
 import { PROVIDER_RUNTIME_OWNERSHIP_LOST_REASON } from "../../provider/providerRuntimeOwnerEvidence.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { PROVIDER_PIPELINE_POLICY } from "@cafecode/shared/providerPipelinePolicy";
+import {
+  codexTransientAcceptanceCommandId,
+  makeCodexTransientRecoveryChainReader,
+} from "../providerRuntimeRecovery.ts";
 
 function makeTestServerSettingsLayer(overrides: Partial<ServerSettings> = {}) {
   return ServerSettingsService.layerTest(overrides);
@@ -361,6 +365,9 @@ describe("ProviderRuntimeIngestion", () => {
       command: OrchestrationCommand,
       dispatch: OrchestrationEngineShape["dispatch"],
     ) => ReturnType<OrchestrationEngineShape["dispatch"]>;
+    listSessionsGate?: (
+      read: ReturnType<ProviderServiceShape["listSessions"]>,
+    ) => ReturnType<ProviderServiceShape["listSessions"]>;
   }) {
     const workspaceRoot = makeTempDir("t3-provider-project-");
     fs.mkdirSync(path.join(workspaceRoot, ".git"));
@@ -415,7 +422,15 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provideMerge(projectionSnapshotLayer),
       Layer.provideMerge(persistenceLayer),
       Layer.provideMerge(RuntimeReceiptBusLive),
-      Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
+      Layer.provideMerge(
+        Layer.succeed(ProviderService, {
+          ...provider.service,
+          listSessions: () =>
+            options?.listSessionsGate
+              ? options.listSessionsGate(provider.service.listSessions())
+              : provider.service.listSessions(),
+        }),
+      ),
       // These projection tests intentionally substitute only the required
       // settlement boundary; ledger correctness has its own real-SQL suite.
       Layer.provideMerge(
@@ -1046,6 +1061,348 @@ describe("ProviderRuntimeIngestion", () => {
       expect(afterCompletion.rejectedCommandCount).toBe(beforeCompletion.rejectedCommandCount);
     },
   );
+
+  it("ready availability replay cannot clear a concurrently admitted recovery intent", async () => {
+    const reached = Effect.runSync(Deferred.make<void>());
+    const release = Effect.runSync(Deferred.make<void>());
+    let gateInventory = false;
+    const harness = await createHarness({
+      listSessionsGate: (read) =>
+        gateInventory
+          ? Deferred.succeed(reached, undefined).pipe(
+              Effect.andThen(Deferred.await(release)),
+              Effect.andThen(read),
+            )
+          : read,
+    });
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("failed-root-ready-replay");
+    const instanceId = ProviderInstanceId.make("codex");
+    const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000061");
+    const failedAt = "2026-01-01T00:00:02.000Z";
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("explicit-user-recovery-consent"),
+        threadId,
+        message: {
+          messageId: MessageId.make("original-human-input"),
+          role: "user",
+          text: "Do the work",
+          attachments: [],
+        },
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        createdAt: "2026-01-01T00:00:01.000Z",
+      }),
+    );
+    harness.setProviderSession({
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: instanceId,
+      subagentRuntimeId: runtimeId,
+      threadId,
+      status: "ready",
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:01.000Z",
+      updatedAt: failedAt,
+      codexRootTurnFailure: {
+        turnId,
+        providerThreadId: "native-context",
+        observedAt: failedAt,
+        category: "server",
+      },
+    });
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("ready-replay-start"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: instanceId,
+      subagentRuntimeId: runtimeId,
+      threadId,
+      turnId,
+      createdAt: "2026-01-01T00:00:01.000Z",
+    });
+    await harness.drain();
+    const completion = {
+      type: "turn.completed" as const,
+      eventId: asEventId("ready-replay-failed"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: instanceId,
+      subagentRuntimeId: runtimeId,
+      threadId,
+      turnId,
+      createdAt: failedAt,
+      payload: {
+        state: "failed" as const,
+        errorMessage: "Root failed",
+        nativeContextAvailable: true as const,
+        codexTransientFailure: "server" as const,
+      },
+    };
+    harness.emit(completion);
+    await harness.drain();
+    const events = await Effect.runPromise(Stream.runCollect(harness.engine.readEvents(0)));
+    const marker = events.find(
+      (event) =>
+        event.type === "thread.activity-appended" &&
+        (event.payload.activity.payload as { recovery?: unknown } | undefined)?.recovery ===
+          "codex-transient-root-failed",
+    )!;
+    expect(marker).toBeDefined();
+    expect(
+      await Effect.runPromise(harness.sql<{ actorKind: string; sourceKind: string }>`
+      SELECT event.actor_kind AS "actorKind", recovery.source_kind AS "sourceKind"
+      FROM orchestration_events AS event
+      JOIN orchestration_codex_transient_recovery_intents AS recovery ON recovery.sequence = event.sequence
+      WHERE event.sequence = ${marker.sequence}
+    `),
+    ).toEqual([{ actorKind: "server", sourceKind: "failure" }]);
+    const currentThread = (await harness.readModel()).threads[0]!;
+    gateInventory = true;
+    harness.emit({ ...completion, eventId: asEventId("ready-replay-confirmation") });
+    await Effect.runPromise(Deferred.await(reached));
+    try {
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("server:ready-replay-recovery-intent"),
+          threadId,
+          message: {
+            messageId: MessageId.make("ready-replay-continuation"),
+            role: "user",
+            text: "Continue current work",
+            attachments: [],
+          },
+          runtimeMode: currentThread.runtimeMode,
+          interactionMode: currentThread.interactionMode,
+          modelSelection: currentThread.modelSelection,
+          subagentLimits: currentThread.subagentLimits ?? {},
+          createdAt: "2026-01-01T00:00:03.000Z",
+          runtimeRecovery: {
+            sourceEventSequence: marker.sequence,
+            turnId,
+            sessionUpdatedAt: failedAt,
+            codexTransientFailure: {
+              providerInstanceId: instanceId,
+              subagentRuntimeId: runtimeId,
+              chainSourceEventSequence: marker.sequence,
+              retryAttempt: 0,
+            },
+          },
+        }),
+      );
+      expect((await harness.readTurnStartBinding(threadId, null))?.messageId).toBe(
+        "ready-replay-continuation",
+      );
+    } finally {
+      await Effect.runPromise(Deferred.succeed(release, undefined));
+    }
+    await harness.drain();
+    expect((await harness.readTurnStartBinding(threadId, null))?.messageId).toBe(
+      "ready-replay-continuation",
+    );
+    expect((await harness.readModel()).threads[0]!.session).toMatchObject({
+      status: "ready",
+      activeTurnId: null,
+      lastError: "Root failed",
+      updatedAt: failedAt,
+    });
+    // No native start or ACK has associated this new root yet. Its early
+    // failure/diagnostic must not consume the exact continuation input or
+    // replace A's verified context tuple with an unbound error lifecycle.
+    gateInventory = false;
+    const earlyTurnId = asTurnId("ready-replay-terminal-before-ack");
+    harness.emit({
+      ...completion,
+      eventId: asEventId("early-unbound-completion"),
+      turnId: earlyTurnId,
+      createdAt: "2026-01-01T00:00:04.000Z",
+      payload: { state: "failed", errorMessage: "Early continuation failure" },
+    });
+    harness.emit({
+      type: "runtime.error",
+      eventId: asEventId("early-unbound-diagnostic"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: instanceId,
+      subagentRuntimeId: runtimeId,
+      threadId,
+      turnId: earlyTurnId,
+      createdAt: "2026-01-01T00:00:04.000Z",
+      payload: { message: "Early continuation failure" },
+    });
+    await harness.drain();
+    expect((await harness.readTurnStartBinding(threadId, null))?.messageId).toBe(
+      "ready-replay-continuation",
+    );
+    expect((await harness.readModel()).threads[0]!.session).toMatchObject({
+      status: "ready",
+      activeTurnId: null,
+      lastError: "Root failed",
+      updatedAt: failedAt,
+    });
+    expect((await harness.readModel()).threads[0]!.latestTurn).toMatchObject({
+      turnId,
+      state: "error",
+      completedAt: failedAt,
+    });
+    const afterIntentEvents = await Effect.runPromise(
+      Stream.runCollect(harness.engine.readEvents(marker.sequence)),
+    );
+    const intent = afterIntentEvents.find((entry) => entry.type === "thread.turn-start-requested")!;
+    const attemptOwnerId = "00000000-0000-4000-8000-000000000081";
+    const acceptedAt = "2026-01-01T00:00:05.000Z";
+    for (const [id, associatedTurn, payload] of [
+      [
+        `server:runtime-recovery-attempt:${intent.sequence}`,
+        turnId,
+        {
+          recovery: "codex-transient-continuation-attempted",
+          sourceEventSequence: marker.sequence,
+          attemptOwnerId,
+        },
+      ],
+      [
+        codexTransientAcceptanceCommandId(threadId, earlyTurnId),
+        earlyTurnId,
+        {
+          recovery: "codex-transient-continuation-accepted",
+          recoveryIntentSequence: intent.sequence,
+          attemptOwnerId,
+          providerInstanceId: instanceId,
+          subagentRuntimeId: runtimeId,
+        },
+      ],
+    ] as const) {
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make(id),
+          threadId,
+          activity: {
+            id: EventId.make(id),
+            kind: "runtime.warning",
+            tone: "info",
+            summary: "Owned recovery fact",
+            turnId: associatedTurn,
+            payload,
+            createdAt: acceptedAt,
+          },
+          createdAt: acceptedAt,
+        }),
+      );
+    }
+    // A real accepted receipt and fresh owner proof let the server bind B
+    // directly as failed, without ever emitting a fictitious native start.
+    const beforeAssociation = (await harness.readModel()).threads[0]!.session!;
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("server:terminal-before-ack-association"),
+        threadId,
+        expectedSubagentRuntimeId: runtimeId,
+        expectedSessionLifecycle: {
+          status: beforeAssociation.status,
+          activeTurnId: beforeAssociation.activeTurnId,
+          providerName: beforeAssociation.providerName,
+          providerInstanceId: instanceId,
+          subagentRuntimeId: runtimeId,
+          updatedAt: failedAt,
+        },
+        session: {
+          ...beforeAssociation,
+          status: "ready",
+          activeTurnId: null,
+          lastError: "Early continuation failure",
+          updatedAt: "2026-01-01T00:00:04.000Z",
+        },
+        codexFailedRoot: {
+          turnId: earlyTurnId,
+          previousTurnId: turnId,
+          messageId: MessageId.make("ready-replay-continuation"),
+          intentSequence: intent.sequence,
+          requestedAt: "2026-01-01T00:00:03.000Z",
+          completedAt: "2026-01-01T00:00:04.000Z",
+        },
+        createdAt: acceptedAt,
+      }),
+    );
+    harness.setProviderSession({
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: instanceId,
+      subagentRuntimeId: runtimeId,
+      threadId,
+      status: "ready",
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:01.000Z",
+      updatedAt: "2026-01-01T00:00:04.000Z",
+      codexRootTurnFailure: {
+        turnId: earlyTurnId,
+        providerThreadId: "native-context",
+        observedAt: "2026-01-01T00:00:04.000Z",
+        category: "server",
+      },
+    });
+    harness.emit({
+      ...completion,
+      eventId: asEventId("terminal-before-ack-owner-confirmation"),
+      turnId: earlyTurnId,
+      createdAt: "2026-01-01T00:00:04.000Z",
+      payload: {
+        state: "failed",
+        errorMessage: "Early continuation failure",
+        nativeContextAvailable: true,
+        codexTransientFailure: "server",
+      },
+    });
+    await harness.drain();
+    const associated = (await harness.readModel()).threads[0]!;
+    expect(associated.latestTurn).toMatchObject({
+      turnId: earlyTurnId,
+      state: "error",
+      requestedAt: "2026-01-01T00:00:03.000Z",
+      startedAt: null,
+      completedAt: "2026-01-01T00:00:04.000Z",
+    });
+    expect(associated.session).toMatchObject({
+      status: "ready",
+      activeTurnId: null,
+      lastError: "Early continuation failure",
+    });
+    expect(await harness.readTurnStartBinding(threadId, null)).toBeNull();
+    expect((await harness.readTurnStartBinding(threadId, earlyTurnId))?.messageId).toBe(
+      "ready-replay-continuation",
+    );
+    const associatedEvents = await Effect.runPromise(
+      Stream.runCollect(harness.engine.readEvents(intent.sequence)),
+    );
+    const nextMarker = associatedEvents.find(
+      (entry) =>
+        entry.type === "thread.activity-appended" &&
+        entry.payload.activity.turnId === earlyTurnId &&
+        (entry.payload.activity.payload as { recovery?: unknown } | undefined)?.recovery ===
+          "codex-transient-root-failed",
+    )!;
+    expect(nextMarker).toBeDefined();
+    const chain = await Effect.runPromise(
+      makeCodexTransientRecoveryChainReader.pipe(
+        Effect.flatMap((read) =>
+          read({
+            threadId,
+            turnId: earlyTurnId,
+            sourceEventSequence: nextMarker.sequence,
+            providerInstanceId: instanceId,
+            subagentRuntimeId: runtimeId,
+          }),
+        ),
+        Effect.provideService(SqlClient.SqlClient, harness.sql),
+      ),
+    );
+    expect(chain).toEqual({
+      status: "accepted",
+      chainSourceEventSequence: marker.sequence,
+      retryAttempt: 1,
+    });
+  });
 
   it.each(["stopped", "new-turn", "new-runtime"] as const)(
     "does not let a completion with absent generation evidence overwrite a %s lifecycle",
@@ -2072,6 +2429,328 @@ describe("ProviderRuntimeIngestion", () => {
     expect(thread.session?.status).toBe("error");
     expect(thread.session?.lastError).toBe("turn failed");
   });
+
+  it.each([
+    "transient",
+    "permanent",
+    "missing-marker",
+    "missing-proof",
+    "replaced-runtime",
+    "active-native-root",
+    "closed-native-context",
+    "partial-fanout",
+    "delayed-error",
+    "category-disagreement",
+    "child-start",
+    "child-progress",
+    "child-completed",
+  ] as const)("keeps root failure separate from native availability: %s", async (scenario) => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("failed-root-availability");
+    const instanceId = ProviderInstanceId.make("codex");
+    const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000021");
+    const completedAt = "2026-01-01T00:00:02.000Z";
+    const transient = scenario !== "permanent";
+    const session: ProviderSession = {
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: instanceId,
+      subagentRuntimeId: runtimeId,
+      threadId,
+      status: "ready",
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:01.000Z",
+      updatedAt: completedAt,
+      lastError: "Root response failed",
+      codexRootTurnFailure: {
+        turnId,
+        providerThreadId: "private-native-conversation",
+        observedAt: completedAt,
+        ...(transient && scenario !== "category-disagreement"
+          ? { category: "server" as const }
+          : {}),
+      },
+    };
+    harness.setProviderSession(session);
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("failed-root-availability-start"),
+      provider: session.provider,
+      providerInstanceId: instanceId,
+      subagentRuntimeId: runtimeId,
+      threadId,
+      turnId,
+      createdAt: session.createdAt,
+    });
+    await harness.drain();
+    if (scenario === "partial-fanout") {
+      // Simulate a crash after the ordinary terminal command but before its
+      // availability fanout. Replayed terminal data must not complete/reopen
+      // the failed root, yet may finish this exact two-phase transition.
+      const current = (await harness.readModel()).threads[0]!.session!;
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("partial-failed-root"),
+          threadId,
+          session: {
+            ...current,
+            status: "error",
+            activeTurnId: null,
+            lastError: "Root response failed",
+            updatedAt: completedAt,
+          },
+          createdAt: completedAt,
+        }),
+      );
+    }
+    if (scenario === "missing-proof") {
+      const { codexRootTurnFailure: _proof, ...withoutProof } = session;
+      harness.setProviderSession(withoutProof);
+    } else if (scenario === "replaced-runtime") {
+      harness.setProviderSession({
+        ...session,
+        subagentRuntimeId: SubagentRuntimeId.make("00000000-0000-4000-8000-000000000022"),
+      });
+    } else if (scenario === "active-native-root") {
+      harness.setProviderSession({
+        ...session,
+        status: "running",
+        activeTurnId: asTurnId("new-root"),
+      });
+    } else if (scenario === "closed-native-context") {
+      harness.setProviderSession({ ...session, status: "closed" });
+    }
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("failed-root-availability-completion"),
+      provider: session.provider,
+      providerInstanceId: instanceId,
+      subagentRuntimeId: runtimeId,
+      threadId,
+      turnId,
+      createdAt: completedAt,
+      payload: {
+        state: "failed",
+        errorMessage: "Root response failed",
+        ...(scenario === "missing-marker" ? {} : { nativeContextAvailable: true as const }),
+        ...(transient ? { codexTransientFailure: "server" as const } : {}),
+      },
+    });
+    await harness.drain();
+    if (
+      scenario === "child-start" ||
+      scenario === "child-progress" ||
+      scenario === "child-completed"
+    ) {
+      const childAt = "2026-01-01T00:00:04.000Z";
+      const identity = {
+        provider: session.provider,
+        providerInstanceId: instanceId,
+        subagentRuntimeId: runtimeId,
+        threadId,
+        turnId,
+        createdAt: childAt,
+      };
+      const subagent = { threadId: "surviving-child", runtimeId, status: "active" as const };
+      harness.emit(
+        scenario === "child-start"
+          ? {
+              ...identity,
+              type: "task.started",
+              eventId: asEventId("surviving-child-start"),
+              payload: { taskId: RuntimeTaskId.make("surviving-child"), subagent },
+            }
+          : scenario === "child-progress"
+            ? {
+                ...identity,
+                type: "task.progress",
+                eventId: asEventId("surviving-child-progress"),
+                payload: {
+                  taskId: RuntimeTaskId.make("surviving-child"),
+                  subagent,
+                  summary: "Still working",
+                },
+              }
+            : {
+                ...identity,
+                type: "task.completed",
+                eventId: asEventId("surviving-child-completed"),
+                payload: {
+                  taskId: RuntimeTaskId.make("surviving-child"),
+                  status: "completed",
+                  subagent: { ...subagent, status: "completed" },
+                },
+              },
+      );
+      await harness.drain();
+      expect(
+        (await harness.readModel()).threads[0]!.activities.find(
+          (entry) => entry.id === `surviving-child-${scenario.slice(6)}`,
+        )?.createdAt,
+      ).toBe(childAt);
+      expect(
+        await Effect.runPromise(harness.sql<{ completedAt: string }>`
+        SELECT completed_at AS "completedAt" FROM projection_turns
+        WHERE thread_id = ${threadId} AND turn_id = ${turnId}
+      `),
+      ).toEqual([{ completedAt }]);
+    }
+    if (scenario === "delayed-error") {
+      harness.emit({
+        type: "runtime.error",
+        eventId: asEventId("failed-root-delayed-error"),
+        provider: session.provider,
+        providerInstanceId: instanceId,
+        subagentRuntimeId: runtimeId,
+        threadId,
+        turnId,
+        createdAt: "2026-01-01T00:00:03.000Z",
+        payload: { message: "Delayed root diagnostic" },
+      });
+      await harness.drain();
+      expect(
+        await Effect.runPromise(harness.sql<{ completedAt: string }>`
+        SELECT completed_at AS "completedAt" FROM projection_turns
+        WHERE thread_id = ${threadId} AND turn_id = ${turnId}
+      `),
+      ).toEqual([{ completedAt }]);
+    }
+    const thread = (await harness.readModel()).threads[0]!;
+    const available =
+      scenario === "transient" ||
+      scenario === "permanent" ||
+      scenario === "partial-fanout" ||
+      scenario === "delayed-error" ||
+      scenario === "category-disagreement" ||
+      scenario === "child-start" ||
+      scenario === "child-progress" ||
+      scenario === "child-completed";
+    expect(thread.session).toMatchObject({
+      status: available ? "ready" : "error",
+      activeTurnId: null,
+      lastError: "Root response failed",
+      subagentRuntimeId: runtimeId,
+    });
+    expect(thread.latestTurn).toMatchObject({ turnId, state: "error", completedAt });
+    const markers = thread.activities.filter(
+      (entry) =>
+        (entry.payload as { recovery?: unknown } | undefined)?.recovery ===
+        "codex-transient-root-failed",
+    );
+    expect(markers).toHaveLength(
+      available && transient && scenario !== "category-disagreement" ? 1 : 0,
+    );
+    if (markers[0]) {
+      expect(markers[0].payload).toEqual({
+        recovery: "codex-transient-root-failed",
+        providerInstanceId: instanceId,
+        subagentRuntimeId: runtimeId,
+        sessionUpdatedAt: completedAt,
+      });
+      expect(JSON.stringify(markers[0].payload)).not.toContain("private-native-conversation");
+    }
+  });
+
+  it.each(["stopped", "new-turn", "new-runtime"] as const)(
+    "failed-root availability CAS cannot overwrite %s",
+    async (replacement) => {
+      const reached = Effect.runSync(Deferred.make<void>());
+      const release = Effect.runSync(Deferred.make<void>());
+      const harness = await createHarness({
+        dispatchGate: (command, dispatch) =>
+          command.type === "thread.session.set" &&
+          String(command.commandId).endsWith(":failed-root-context-available")
+            ? Deferred.succeed(reached, undefined).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.andThen(dispatch(command)),
+              )
+            : dispatch(command),
+      });
+      const threadId = asThreadId("thread-1");
+      const turnId = asTurnId("failed-root-race");
+      const instanceId = ProviderInstanceId.make("codex");
+      const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000031");
+      harness.setProviderSession({
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: instanceId,
+        subagentRuntimeId: runtimeId,
+        threadId,
+        status: "ready",
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:01.000Z",
+        updatedAt: "2026-01-01T00:00:02.000Z",
+        codexRootTurnFailure: {
+          turnId,
+          providerThreadId: "native-root",
+          observedAt: "2026-01-01T00:00:02.000Z",
+          category: "transport",
+        },
+      });
+      harness.emit({
+        type: "turn.started",
+        eventId: asEventId("failed-root-race-start"),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: instanceId,
+        subagentRuntimeId: runtimeId,
+        threadId,
+        turnId,
+        createdAt: "2026-01-01T00:00:01.000Z",
+      });
+      await harness.drain();
+      harness.emit({
+        type: "turn.completed",
+        eventId: asEventId("failed-root-race-completed"),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: instanceId,
+        subagentRuntimeId: runtimeId,
+        threadId,
+        turnId,
+        createdAt: "2026-01-01T00:00:02.000Z",
+        payload: {
+          state: "failed",
+          errorMessage: "Root failed",
+          nativeContextAvailable: true,
+          codexTransientFailure: "transport",
+        },
+      });
+      await Effect.runPromise(Deferred.await(reached));
+      const failed = (await harness.readModel()).threads[0]!.session!;
+      const next = {
+        ...failed,
+        status: replacement === "stopped" ? ("stopped" as const) : ("running" as const),
+        activeTurnId: replacement === "new-turn" ? asTurnId("new-root") : null,
+        subagentRuntimeId:
+          replacement === "new-runtime"
+            ? SubagentRuntimeId.make("00000000-0000-4000-8000-000000000032")
+            : runtimeId,
+        updatedAt: "2026-01-01T00:00:03.000Z",
+      };
+      try {
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("competing-failed-root-lifecycle"),
+            threadId,
+            session: next,
+            createdAt: next.updatedAt,
+          }),
+        );
+      } finally {
+        await Effect.runPromise(Deferred.succeed(release, undefined));
+      }
+      await harness.drain();
+      const thread = (await harness.readModel()).threads[0]!;
+      expect(thread.session).toMatchObject(next);
+      expect(
+        thread.activities.some(
+          (entry) =>
+            (entry.payload as { recovery?: unknown } | undefined)?.recovery ===
+            "codex-transient-root-failed",
+        ),
+      ).toBe(false);
+    },
+  );
 
   it("keeps an active Codex goal non-idle across provider-owned continuation turns", async () => {
     const harness = await createHarness();

@@ -2192,6 +2192,191 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
   });
 
   if (chatViewBrowserPart === "composer") {
+    const createCodexRecoverySnapshot = (uncertain = false): OrchestrationReadModel => {
+      const base = createSnapshotWithActiveSubagent();
+      const failedAt = new Date().toISOString();
+      return {
+        ...base,
+        threads: base.threads.map((thread) =>
+          thread.id !== THREAD_ID
+            ? thread
+            : {
+                ...thread,
+                latestTurn: { ...thread.latestTurn!, state: "error", completedAt: failedAt },
+                session: {
+                  ...thread.session!,
+                  status: "ready",
+                  activeTurnId: null,
+                  providerInstanceId: ProviderInstanceId.make("codex"),
+                  lastError: "Synthetic transient root failure",
+                  updatedAt: failedAt,
+                },
+                activities: [
+                  // Unknown ACK evidence must keep an explicit Stop path even
+                  // without any observed child. It is not a running-task fact
+                  // and cannot authorize an automatic resend or countdown.
+                  ...(uncertain ? [] : thread.activities),
+                  {
+                    id: EventId.make("browser-codex-recovery-waiting"),
+                    kind: "runtime.warning",
+                    tone: "info",
+                    summary: "Recovery waiting",
+                    turnId: thread.latestTurn!.turnId,
+                    createdAt: failedAt,
+                    payload: {
+                      recovery: uncertain
+                        ? "codex-transient-recovery-uncertain"
+                        : "codex-transient-recovery-waiting",
+                      providerInstanceId: "codex",
+                      subagentRuntimeId: SUBAGENT_RUNTIME_ID,
+                      sessionUpdatedAt: failedAt,
+                      ...(uncertain
+                        ? {}
+                        : {
+                            retryAttempt: 3,
+                            stage: "backoff",
+                            retryAt: new Date(Date.parse(failedAt) + 60_000).toISOString(),
+                          }),
+                    },
+                  },
+                ],
+              },
+        ),
+      };
+    };
+    it.each([false, true])(
+      "keeps terminal-root recovery Stop independent from input with rail docked=%s",
+      async (docked) => {
+        const snapshot = createCodexRecoverySnapshot();
+        const mounted = await mountChatView({
+          viewport: WIDE_FOOTER_VIEWPORT,
+          snapshot,
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+              ? { sequence: snapshot.snapshotSequence + 1 }
+              : undefined,
+        });
+        try {
+          await waitForComposerEditor();
+          if (docked) {
+            await page
+              .getByRole("button", { name: /^1 active subagent\. Show task list$/i })
+              .click();
+            await page.getByRole("button", { name: "Show on the side", exact: true }).click();
+          }
+          useComposerDraftStore.getState().setPrompt(THREAD_REF, "Keep this unsent instruction");
+          const stop = page.getByRole("button", {
+            name: "Stop recovery and running agents",
+            exact: true,
+          });
+          await expect.element(stop).toBeVisible();
+          const notice = document.querySelector<HTMLElement>(
+            '[data-codex-recovery-notice="true"]',
+          )!;
+          expect(document.querySelectorAll('[data-codex-recovery-notice="true"]')).toHaveLength(1);
+          expect(notice.textContent).toContain("Root failed");
+          expect(notice.textContent).toContain("1 agent active");
+          expect(notice.textContent).toMatch(/Retry in \d+s/u);
+          if (docked) expect(findSessionRail()?.contains(notice)).toBe(true);
+          await stop.click();
+          await vi.waitFor(() => {
+            const actions = wsRequests.filter(
+              (request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand,
+            );
+            expect(actions.filter((action) => action.type === "thread.session.stop")).toHaveLength(
+              1,
+            );
+            expect(
+              actions.some(
+                (action) =>
+                  action.type === "thread.turn.start" || action.type === "thread.turn.interrupt",
+              ),
+            ).toBe(false);
+          });
+          expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+            "Keep this unsent instruction",
+          );
+          expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.latestTurn).toEqual(
+            snapshot.threads[0]!.latestTurn,
+          );
+        } finally {
+          await mounted.cleanup();
+        }
+      },
+    );
+    it("allows a new manual turn while terminal-root recovery is waiting", async () => {
+      const snapshot = createCodexRecoverySnapshot();
+      const mounted = await mountChatView({
+        viewport: WIDE_FOOTER_VIEWPORT,
+        snapshot,
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+            ? { sequence: snapshot.snapshotSequence + 1 }
+            : undefined,
+      });
+      try {
+        await waitForComposerEditor();
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, "Change direction instead");
+        await expect
+          .element(
+            page.getByRole("button", { name: "Stop recovery and running agents", exact: true }),
+          )
+          .toBeVisible();
+        const send = await waitForSendButton();
+        expect(send.disabled).toBe(false);
+        send.click();
+        await vi.waitFor(() => {
+          const turn = wsRequests.find(
+            (request) =>
+              request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+              request.type === "thread.turn.start",
+          );
+          expect(turn?.message).toMatchObject({ text: "Change direction instead" });
+          expect(wsRequests.some((request) => request.type === "thread.session.stop")).toBe(false);
+        });
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+    it("keeps unknown continuation ACK stoppable without claiming an active task or retry", async () => {
+      const snapshot = createCodexRecoverySnapshot(true);
+      const mounted = await mountChatView({
+        viewport: WIDE_FOOTER_VIEWPORT,
+        snapshot,
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+            ? { sequence: snapshot.snapshotSequence + 1 }
+            : undefined,
+      });
+      try {
+        await waitForComposerEditor();
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, "Keep this unsubmitted prompt");
+        const stop = page.getByRole("button", {
+          name: "Stop recovery and running agents",
+          exact: true,
+        });
+        await expect.element(stop).toBeVisible();
+        const notice = document.querySelector<HTMLElement>('[data-codex-recovery-notice="true"]')!;
+        expect(notice.textContent).toContain("Needs reconciliation");
+        expect(notice.textContent).not.toMatch(/Retry in|agent active|agents active/u);
+        await stop.click();
+        await vi.waitFor(() => {
+          const actions = wsRequests.filter(
+            (request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand,
+          );
+          expect(actions.filter((action) => action.type === "thread.session.stop")).toHaveLength(1);
+          expect(actions.some((action) => action.type === "thread.turn.start")).toBe(false);
+        });
+        expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+          "Keep this unsubmitted prompt",
+        );
+        expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.latestTurn).toEqual(
+          snapshot.threads[0]!.latestTurn,
+        );
+      } finally {
+        await mounted.cleanup();
+      }
+    });
     const responseLimitSelection = createModelSelection(
       ProviderInstanceId.make("claudeAgent"),
       "claude-opus-4-8",

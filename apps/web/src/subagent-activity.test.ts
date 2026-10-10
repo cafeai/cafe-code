@@ -53,6 +53,38 @@ describe("subagent native runtime liveness overlay", () => {
     expect(deriveActiveSubagentWorkEntries(rows, currentTurn, { runtimeSession })).toHaveLength(1);
   });
 
+  it("keeps surviving children live after a failed root without reopening terminal children", () => {
+    // A definitive root failure does not terminate its app-server context. The
+    // backend publishes ready only after independently verifying that exact
+    // native context, while retaining the root's failure separately. Renderer
+    // liveness must follow that publication, not the parent turn's outcome.
+    const survivingSession = {
+      ...runtimeSession,
+      lastError: "Synthetic root request failed.",
+    };
+    const rows = [
+      activity("task.started", 1, "native-runtime-a", "Surviving worker", "live-child"),
+      activity("task.completed", 2, "native-runtime-a", "Settled worker", "terminal-child"),
+      activity("task.progress", 3, "native-runtime-a", "Settled worker", "terminal-child"),
+    ];
+    const snapshot = structuredClone(rows);
+    const children = deriveSubagentActivities(rows, {
+      terminalTurnIds: new Set([oldTurn]),
+      runtimeSession: survivingSession,
+    });
+    expect(children.map((child) => [child.id, child.status])).toEqual([
+      ["live-child", "active"],
+      ["terminal-child", "completed"],
+    ]);
+    // No running parent is required for canonical native child lifecycle.
+    expect(
+      deriveActiveSubagentWorkEntries(rows, null, { runtimeSession: survivingSession }).map(
+        (entry) => entry.subagent?.id,
+      ),
+    ).toEqual(["live-child"]);
+    expect(rows).toEqual(snapshot);
+  });
+
   it.each([
     null,
     { orchestrationStatus: "ready" as const },
